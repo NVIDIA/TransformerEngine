@@ -5,14 +5,16 @@
 """Internal function used by multiple modules."""
 
 import dataclasses
+import functools
 import queue
+import warnings
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
+from .. import distributed as te_distributed
 from ..constants import TE_DType
-from ..distributed import in_fp8_activation_recompute_phase
 from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
 from ..tensor.hybrid_tensor import HybridQuantizer
@@ -24,6 +26,30 @@ def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:
     if tensor.ndim == 1:
         return tensor.clone()
     return tensor.sum(dim=tuple(range(tensor.ndim - 1)))
+
+
+def _is_in_activation_recompute_phase() -> bool:
+    """Whether a forward is running during activation recomputation."""
+    if te_distributed.in_fp8_activation_recompute_phase():
+        return True
+    # Special hidden PyTorch AutoGrad identifier for activation recompute.
+    try:
+        current_graph_task_id = getattr(torch._C, "_current_graph_task_id", None)
+        return current_graph_task_id() != -1
+    except Exception:  # pylint: disable=broad-exception-caught
+        _warn_recompute_phase_detection_unavailable()
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def _warn_recompute_phase_detection_unavailable() -> None:
+    """Warn once when PyTorch activation-recompute detection is unavailable."""
+    warnings.warn(
+        "Unable to determine whether execution is in activation-recompute phase "
+        "from PyTorch (torch._C._current_graph_task_id). Assuming not.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
@@ -340,6 +366,6 @@ def check_fp8_reduce_and_update(restore_first_module: bool = False) -> bool:
     qstate = FP8GlobalStateManager.quantization_state
     first_fp8_module = qstate.is_first_fp8_module
     result = FP8GlobalStateManager.is_first_fp8_module()
-    if restore_first_module or in_fp8_activation_recompute_phase():
+    if restore_first_module or te_distributed.in_fp8_activation_recompute_phase():
         qstate.is_first_fp8_module = first_fp8_module
     return result

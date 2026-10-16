@@ -50,7 +50,9 @@ PyTorch
   :members: reset, get_states, set_states, add, fork
 
 
-.. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
+.. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None, calibration_config=None)
+
+.. autoapiclass:: transformer_engine.pytorch.QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.0)
 
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 

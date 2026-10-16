@@ -8,7 +8,7 @@ from __future__ import annotations
 import abc
 import os
 from enum import Enum
-from typing import Any, Literal, Optional, Union, Callable, NamedTuple
+from typing import Any, Callable, ClassVar, Literal, NamedTuple, Optional, Union
 from dataclasses import field
 from pydantic.dataclasses import dataclass
 
@@ -112,6 +112,8 @@ class Recipe:
     Base recipe class.
     """
 
+    _name: ClassVar[str]
+
     # Cached string representation. Lazily populated by ``__repr__`` in
     # subclasses and invalidated by ``__setattr__`` whenever any attribute
     # changes. This makes repeated ``str(recipe)`` calls much cheaper
@@ -135,6 +137,11 @@ class Recipe:
         if self._cached_repr is None:
             self._cached_repr = self._make_repr()
         return self._cached_repr
+
+    @classmethod
+    def name(cls) -> str:
+        """Get the stable name used to identify this quantization recipe."""
+        return cls._name
 
     @classmethod
     def nvfp4(cls):
@@ -253,6 +260,8 @@ class DelayedScaling(Recipe):
       subject to change in future Transformer Engine releases.
     """
 
+    _name: ClassVar[str] = "fp8_delayed_scaling"
+
     margin: int = 0
     fp8_format: Format = Format.HYBRID
     amax_history_len: int = 1024
@@ -301,6 +310,8 @@ class Float8CurrentScaling(Recipe):
             and `dequantized` dequantizes saved operands to the active high-precision
             compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
+
+    _name: ClassVar[str] = "fp8_current_scaling"
 
     use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
     fp8_format: Format = Format.HYBRID
@@ -373,6 +384,8 @@ class MXFP8BlockScaling(Recipe):
                 If set to `True`, 2D block scaling is used for weight tensors.
     """
 
+    _name: ClassVar[str] = "mxfp8"
+
     margin: int = 0
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
@@ -433,6 +446,8 @@ class Float8BlockScaling(Recipe):
             and `dequantized` dequantizes saved operands to the active high-precision
             compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
+
+    _name: ClassVar[str] = "fp8_block_scaling"
 
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
 
@@ -566,6 +581,8 @@ class NVFP4BlockScaling(Recipe):
             and `dequantized` dequantizes saved operands to the active high-precision
             compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
+
+    _name: ClassVar[str] = "nvfp4"
 
     # Configuration envvars
     disable_rht: bool = os.getenv("NVTE_NVFP4_DISABLE_RHT", "0") == "1"
@@ -701,6 +718,8 @@ class CustomRecipe(Recipe):
         for example, a factory restricted to MXFP8 may use 32.
         Automatic padding reads this value without invoking ``qfactory``.
     """
+
+    _name: ClassVar[str] = "custom"
 
     qfactory: Callable[..., Any]
 

@@ -45,6 +45,9 @@ def _rebuild_quantizer(cls: type, items: Tuple[Tuple[str, Any], ...]) -> Any:
         if name == "dtype":
             value = DType.cast(value)
         object.__setattr__(obj, name, value)
+    # Runtime calibration metadata is intentionally excluded from value semantics,
+    # but rebuilt quantizers still need an initialized state for copy()/quantize().
+    object.__setattr__(obj, "_calibration_state", {})
     # Restore non-value derived state that ``__init__`` would normally build but
     # that cannot live in the value key (e.g. NVFP4's ``rht_matrix`` tensor).
     finalize = getattr(obj, "_rebuild_derived_state", None)

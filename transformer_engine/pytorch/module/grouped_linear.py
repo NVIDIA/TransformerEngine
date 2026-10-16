@@ -4,8 +4,8 @@
 
 """GroupedLinear API"""
 
-from dataclasses import dataclass
-from typing import Any, Union, Optional, Callable, Tuple, List
+from dataclasses import dataclass, replace as dataclass_replace
+from typing import Any, Union, Optional, Callable, Tuple, List, Dict
 from itertools import chain
 import os
 import warnings
@@ -32,9 +32,17 @@ from .base import (
     _clear_high_precision_init_val,
     _get_high_precision_init_val,
 )
-from ._common import can_reconstruct_wgrad_input_from_original, WeightGradStore
+from ._common import (
+    _is_in_activation_recompute_phase,
+    can_reconstruct_wgrad_input_from_original,
+    WeightGradStore,
+)
 from . import _split_quantization
-from ..quantization import FP8GlobalStateManager, QuantizerRole
+from ..quantization import (
+    FP8GlobalStateManager,
+    QuantizationCalibrationConfig,
+    QuantizerRole,
+)
 from ..utils import (
     divide,
     cast_if_needed,
@@ -115,8 +123,8 @@ def is_module_grouped_tensor_path_supported(
       required for FP8 block scaling on Hopper.
     * FP32 is unsupported by the cuBLASLt grouped GEMM.
 
-    Runtime-only restrictions such as debug mode, CPU offloading, calibration,
-    output quantization, and backend selection are checked separately by
+    Runtime-only restrictions such as debug mode, CPU offloading, output
+    quantization, and backend selection are checked separately by
     ``GroupedLinear``.
     """
     if dtype not in (torch.bfloat16, torch.float16):
@@ -154,6 +162,100 @@ def is_module_grouped_tensor_path_supported(
     return False
 
 
+def _update_grouped_calibration_metadata_buffers(
+    calibration_buffers: Dict[str, Optional[torch.Tensor]],
+    input_quantizers: List[Optional[Quantizer]],
+    weight_quantizers: List[Optional[Quantizer]],
+) -> None:
+    """Update GroupedLinear PTQ buffers from per-GEMM calibration state."""
+    for index, quantizer in enumerate(input_quantizers):
+        if quantizer is not None:
+            calibration_buffers.update(
+                quantizer._get_calibration_metadata_buffers(f"input_gemm{index}")
+            )
+    for index, quantizer in enumerate(weight_quantizers):
+        if quantizer is not None:
+            calibration_buffers.update(
+                quantizer._get_calibration_metadata_buffers(f"weight_gemm{index}")
+            )
+
+
+def _reuses_cached_weight_workspaces(
+    prepared_weights: Union[GroupedTensorStorage, List[torch.Tensor]],
+    weight_workspaces: List[Optional[QuantizedTensorStorage]],
+    update_weight_workspace: bool,
+) -> bool:
+    """Return whether all weights are unchanged cache hits on a non-first microbatch."""
+    if update_weight_workspace or not weight_workspaces:
+        return False
+    weights = (
+        [prepared_weights]
+        if isinstance(prepared_weights, GroupedTensorStorage)
+        else prepared_weights
+    )
+    return len(weights) == len(weight_workspaces) and all(
+        workspace is not None and weight is workspace
+        for weight, workspace in zip(weights, weight_workspaces)
+    )
+
+
+def _calibrate_grouped_tensors(
+    input_tensors: Union[
+        GroupedTensorStorage,
+        List[Union[torch.Tensor, QuantizedTensorStorage]],
+    ],
+    weight_tensors: Union[
+        GroupedTensorStorage,
+        List[Union[torch.Tensor, QuantizedTensorStorage]],
+    ],
+    input_quantizers: List[Optional[Quantizer]],
+    weight_quantizers: List[Optional[Quantizer]],
+    calibration_config: QuantizationCalibrationConfig,
+    *,
+    calibrate_weights: bool = True,
+    weight_skip_calibration: Optional[torch.Tensor] = None,
+) -> None:
+    """Calibrate GroupedLinear input and weight quantizers once per GEMM."""
+    if isinstance(input_tensors, GroupedTensorStorage):
+        input_tensors.calibrate(
+            input_quantizers,
+            calibration_config=calibration_config,
+        )
+    else:
+        for tensor, quantizer in zip(input_tensors, input_quantizers):
+            if quantizer is not None:
+                # Mask empty tensors to avoid observing unwritten quantization metadata.
+                # Not CG-safe.
+                skip_calibration = None
+                if tensor.shape.numel() == 0:
+                    skip_calibration = torch.ones((), dtype=torch.bool, device=tensor.device)
+                quantizer.calibrate(
+                    tensor,
+                    calibration_config=calibration_config,
+                    skip_calibration=skip_calibration,
+                )
+
+    weight_calibration_config = dataclass_replace(
+        calibration_config,
+        transformer_engine_calibration_decay=0.0,
+    )
+    if calibrate_weights:
+        if isinstance(weight_tensors, GroupedTensorStorage):
+            weight_tensors.calibrate(
+                weight_quantizers,
+                calibration_config=weight_calibration_config,
+                skip_calibration=weight_skip_calibration,
+            )
+        else:
+            for tensor, quantizer in zip(weight_tensors, weight_quantizers):
+                if quantizer is not None:
+                    quantizer.calibrate(
+                        tensor,
+                        calibration_config=weight_calibration_config,
+                        skip_calibration=weight_skip_calibration,
+                    )
+
+
 @dataclass(slots=True)
 class GroupedLinearFwdArgs:
     """Forward configuration and operands."""
@@ -183,11 +285,12 @@ class GroupedLinearFwdArgs:
 
     activation_dtype: torch.dtype
     fp8: bool
-    fp8_calibration: bool
     save_original_input: bool
     backward_override: Optional[str]
     fp8_recipe: Optional[Recipe]
     debug: bool
+    calibration_buffers: Optional[Dict[str, Optional[torch.Tensor]]]
+    calibration_config: Optional[QuantizationCalibrationConfig]
 
     is_first_microbatch: Optional[bool]
     cache_weight: bool
@@ -341,9 +444,9 @@ def _grouped_linear_forward_impl(
     # Initialize weights
     weights_fp8: list
     new_workspaces = [None] * num_gemms
+    update_ws = args.is_first_microbatch is None or args.is_first_microbatch
     if fp8 or debug:
         weights_fp8 = []
-        update_ws = args.is_first_microbatch is None or args.is_first_microbatch
         for i in range(num_gemms):
             weight_fp8, new_workspaces[i] = quantize_weight(
                 tensor=weights[i],
@@ -389,10 +492,34 @@ def _grouped_linear_forward_impl(
         use_split_accumulator=fprop_use_split_accumulator,
     )
 
-    if args.fp8_calibration:
-        for i in range(num_gemms):
-            input_quantizers[i].calibrate(inputmats[i])
-            weight_quantizers[i].calibrate(weights[i])
+    if args.calibration_buffers is not None and not _is_in_activation_recompute_phase():
+        assert args.calibration_config is not None
+        skip_weight_calibration = (
+            # Not capturing weight calibration in CG.
+            args.skip_fp8_weight_update is None
+            # Valid quantized weight cache hit.
+            # Non-first ubatch (cached) nor quantizing every step.
+            and _reuses_cached_weight_workspaces(
+                weights_fp8,
+                args.weight_workspaces,
+                update_ws,
+            )
+        )
+        _calibrate_grouped_tensors(
+            inputmats,
+            weights_fp8,
+            input_quantizers,
+            weight_quantizers,
+            args.calibration_config,
+            calibrate_weights=not skip_weight_calibration,
+            # Skip conditionally for CG replay.
+            weight_skip_calibration=args.skip_fp8_weight_update,
+        )
+        _update_grouped_calibration_metadata_buffers(
+            args.calibration_buffers,
+            input_quantizers,
+            weight_quantizers,
+        )
 
     if cpu_offloading:
         mark_not_offload(*weights_fp8, *weights)
@@ -917,6 +1044,36 @@ def _grouped_linear_graph_safe_forward(args: GroupedLinearFwdArgs) -> Tuple[Any,
         bias=grouped_bias,
         use_split_accumulator=fprop_use_split_accumulator,
     )
+
+    if args.calibration_buffers is not None and not _is_in_activation_recompute_phase():
+        assert args.calibration_config is not None
+        update_ws = is_first_microbatch is None or is_first_microbatch
+        skip_weight_calibration = (
+            # Not capturing weight calibration in CG.
+            skip_fp8_weight_update is None
+            # Valid quantized weight cache hit.
+            # Non-first ubatch (cached) nor quantizing every step.
+            and _reuses_cached_weight_workspaces(
+                weights_for_gemm,
+                weight_workspaces,
+                update_ws,
+            )
+        )
+        _calibrate_grouped_tensors(
+            grouped_x,
+            weights_for_gemm,
+            input_quantizers,
+            weight_quantizers,
+            args.calibration_config,
+            calibrate_weights=not skip_weight_calibration,
+            # Skip conditionally for CG replay.
+            weight_skip_calibration=skip_fp8_weight_update,
+        )
+        _update_grouped_calibration_metadata_buffers(
+            args.calibration_buffers,
+            input_quantizers,
+            weight_quantizers,
+        )
 
     tensors_to_save = None
     if is_grad_enabled:
@@ -2341,10 +2498,19 @@ class GroupedLinear(TransformerEngineBaseModule):
                     else [None] * num_gemms
                 )
 
+            calibration_config = FP8GlobalStateManager.get_calibration_config()
+            calibration_buffers = None
+            if calibration_config is not None:
+                calibration_buffers = {
+                    name: value
+                    for name, value in self._buffers.items()
+                    if name.endswith("_te_ptq_calibrated")
+                }
+
             weight_requires_grad = weight_tensors[0].requires_grad
-            if self.fp8:
+            if self.fp8 or self.fp8_calibration:
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
-                backward_override = _recipe.backward_override
+                backward_override = _recipe.backward_override if self.fp8 else None
             else:
                 _recipe = None
                 backward_override = None
@@ -2386,10 +2552,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             cpu_offloading = is_cpu_offload_enabled()
             use_grouped_tensor_path = False
             if self.use_grouped_tensor and not (
-                self.fp8_calibration
-                or debug
-                or cpu_offloading
-                or any(q is not None for q in output_quantizers)
+                debug or cpu_offloading or any(q is not None for q in output_quantizers)
             ):
                 if (
                     self.fp8
@@ -2417,6 +2580,15 @@ class GroupedLinear(TransformerEngineBaseModule):
                     " active device, cuBLASLt version, quantization recipe, or GroupedLinear"
                     " feature configuration does not support it. Disable single_grouped_weight and"
                     " single_grouped_bias to allow the split-quantize fallback."
+                )
+            if (
+                calibration_config is not None
+                and FP8GlobalStateManager.fp8_graph_capturing()
+                and not use_grouped_tensor_path
+            ):
+                raise RuntimeError(
+                    "CUDA-graphed GroupedLinear calibration requires the native grouped-tensor "
+                    "path. Set use_grouped_tensor=True and use a supported configuration."
                 )
             if use_grouped_tensor_path:
                 if m_splits.device.type != "cuda":
@@ -2450,11 +2622,12 @@ class GroupedLinear(TransformerEngineBaseModule):
                 # numerical / dtype config
                 activation_dtype=self.activation_dtype,
                 fp8=self.fp8,
-                fp8_calibration=self.fp8_calibration,
                 save_original_input=save_original_input,
                 backward_override=backward_override,
                 fp8_recipe=_recipe,
                 debug=debug,
+                calibration_buffers=calibration_buffers,
+                calibration_config=calibration_config,
                 # weight-workspace caching
                 is_first_microbatch=is_first_microbatch,
                 cache_weight=cache_weight,
@@ -2477,6 +2650,16 @@ class GroupedLinear(TransformerEngineBaseModule):
                 (*weight_tensors, *bias_tensors),
                 is_grad_enabled,
             )
+
+            if calibration_buffers is not None:
+                # Assign scaling-factor calibration buffers to the model.
+                # Materializing a new buffer requires a CUDA graph warmup step.
+                for name, value in calibration_buffers.items():
+                    if value is not None:
+                        if name in self._buffers:
+                            setattr(self, name, value)
+                        else:
+                            self.register_buffer(name, value, persistent=False)
 
             if cache_weight:
                 for i, ws in enumerate(new_workspaces):
@@ -2642,7 +2825,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             [None] * self.num_gemms,
             [None] * self.num_gemms,
         )
-        if self.fp8:
+        # Calibration-only mode needs quantizers to observe non-quantized tensors.
+        if self.fp8 or self.fp8_calibration:
             input_quantizers = [
                 self.quantizers["scaling_fwd"][
                     self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
