@@ -42,6 +42,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
+from .cpp_extensions.misc import jax_dtype_to_te_dtype
 from .quantize import (
     GroupedQuantizer,
     QuantizerSet,
@@ -750,12 +751,12 @@ def _moe_fwd_rule(
     cfg = tex.EpLayerConfig(
         top_k=K,
         dispatch_output_per_expert_alignment=_ALIGN_SIZE,
+        topk_idx_dtype=int(jax_dtype_to_te_dtype(topk_idx_3d.dtype)),
     )
-    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx_3d)
+    recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
+        tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx_3d, x, topk_w_3d, recv_pr)
+    )
     token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
-    recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx_3d, x, topk_w_3d, recv_pr
-    )
     recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))
     recv_topk_weights = jax.lax.with_sharding_constraint(
         recv_topk_weights, NamedSharding(mesh, ep2_spec)

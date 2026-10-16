@@ -31,9 +31,14 @@ try:
         MemberType,
     )
 
-    _opaque_available = True
+    _opaque_available = hasattr(torch._library.opaque_object, "is_opaque_constant_type")
 except ImportError:
     _opaque_available = False
+
+pytestmark = pytest.mark.skipif(
+    not _opaque_available,
+    reason="This PyTorch build lacks the opaque-object API required by Transformer Engine",
+)
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
@@ -1549,7 +1554,7 @@ if _opaque_available:
 
 @pytest.mark.skipif(
     not _opaque_available,
-    reason="torch.compile opaque-object support requires PyTorch >= 2.11",
+    reason="torch opaque object API not available",
 )
 @pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
 def test_quantizer_value_object_fullgraph(factory):
