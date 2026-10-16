@@ -31,16 +31,20 @@ export NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1
 # Iterate over Flash Attention versions
 sm_arch=`python3 -c "import torch; sm = torch.cuda.get_device_capability(0); print(sm[0]*10+sm[1])"`
 export FLASH_ATTN_CUDA_ARCHS=$sm_arch
-# Run one architecture-owned FlashAttention generation. sm90 keeps the mature
-# FA3 path, while sm100+ exercises the FA4 CP support enabled by this change.
+# FA2: routine tests are in L0 and L1; sm90 and sm100+; non-CP and CP
+#      targeted tests are here; e.g. 2.8.4 pinned commit, non-CP
+# FA3: routine tests are here; sm90 only; non-CP and CP
+# FA4: routine tests are here; sm100+ only; non-CP and CP
+FA2_SOURCE_VERSION="2.8.4"
+FA2_SOURCE_COMMIT="1fc0221183e799363001394a12dd9e78e15f5dda"
 CP_FA_VERSION=""
 if [ $sm_arch -gt 90 ]
 then
-  FA_versions=(4.0.0b33)
+  FA_versions=(2.8.4 4.0.0b33)
   CP_FA_VERSION="4.0.0b33"
 elif [ $sm_arch -eq 90 ]
 then
-  FA_versions=(3.0.0b1)
+  FA_versions=(2.8.4 3.0.0b1)
   CP_FA_VERSION="3.0.0b1"
 else
   error_exit "No L3 FlashAttention generation is defined for sm${sm_arch}"
@@ -61,8 +65,21 @@ do
   if [ "${fa_version}" \< "3.0.0" ]
   then
     export NVTE_FLASH_ATTN_V2=1
-    pip3 install flash-attn==${fa_version} --no-build-isolation \
-      || error_exit "Failed to install Flash Attention $fa_version"
+    if [ "${fa_version}" = "$FA2_SOURCE_VERSION" ]
+    then
+      pip3 install --no-build-isolation \
+        "git+https://github.com/Dao-AILab/flash-attention.git@${FA2_SOURCE_COMMIT}" \
+        || error_exit "Failed to install Flash Attention $fa_version from ${FA2_SOURCE_COMMIT}"
+    else
+      pip3 install flash-attn==${fa_version} --no-build-isolation \
+        || error_exit "Failed to install Flash Attention $fa_version"
+    fi
+    installed=$(python3 -c "import flash_attn; print(flash_attn.__version__)") \
+      || error_exit "Failed to import Flash Attention $fa_version"
+    if [ "$installed" != "${fa_version}" ]
+    then
+      error_exit "Flash Attention installed is $installed but this iteration expects ${fa_version}"
+    fi
   elif [[ "${fa_version}" == 4.* ]]
   then
     export NVTE_FLASH_ATTN_V4=1

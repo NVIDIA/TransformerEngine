@@ -480,7 +480,7 @@ class TestEP(unittest.TestCase):
             @jax.jit
             def run(idx, toks, w):
                 _tc, _trt, hm = ep_prepare(self.hk, idx)
-                recv_t, recv_w = ep_dispatch_fwd(
+                recv_t, recv_w, hm = ep_dispatch_fwd(
                     self.hk, hm, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_t = jax.lax.with_sharding_constraint(

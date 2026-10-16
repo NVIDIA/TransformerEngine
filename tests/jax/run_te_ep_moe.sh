@@ -23,6 +23,13 @@ if [ "$NUM_GPUS" -lt 4 ]; then
     exit 0
 fi
 
+# Bitwise fallback/layout comparisons need stable expert-row ordering in the
+# split dispatch path. Bootstrap previously selected this scan mode globally.
+# Keep it local to these tests; the fused dispatch path uses its own ordering.
+if [ "${NVTE_EP_FUSED_PREPARE_DISPATCH:-0}" != "1" ]; then
+    export NCCL_EP_HT_EM_AG_SCAN_MODE="${NCCL_EP_HT_EM_AG_SCAN_MODE:-1}"
+fi
+
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.5}"
 export TE_EP_MOE_COORDINATOR_ADDRESS="${TE_EP_MOE_COORDINATOR_ADDRESS:-127.0.0.1:13457}"

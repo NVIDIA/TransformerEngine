@@ -65,6 +65,39 @@ def test_ep_partitioning_retains_bind_time_resources():
     assert not ep._ep_spec_ok(P(("wrong", "ep"), None, None), 2, resource_axes=captured)
 
 
+def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
+    from types import SimpleNamespace
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    from transformer_engine.jax.cpp_extensions import ep
+
+    captured = {}
+
+    def bind(*args, **kwargs):
+        captured.update(kwargs)
+        return ()
+
+    monkeypatch.setattr(ep.EpPrepareAndDispatchPrimitive.outer_primitive, "bind", bind)
+    cfg = SimpleNamespace(top_k=1, dispatch_output_per_expert_alignment=256, topk_idx_dtype=0)
+    with global_shard_guard(MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")):
+        inspect.unwrap(ep._ep_fused_prepare_and_dispatch_fwd)(cfg, None, None, None, 256)
+
+    mesh = Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1, 1), ("dp", "fsdp", "ep"))
+    sharding = NamedSharding(mesh, P(("dp", "fsdp", "ep"), None, None))
+    args = [SimpleNamespace(sharding=sharding)] * 3
+    _, _, outputs, _ = ep.EpPrepareAndDispatchPrimitive.partition(
+        captured["top_k"],
+        captured["dispatch_output_per_expert_alignment"],
+        captured["topk_idx_dtype"],
+        captured["recv_capacity_per_rank"],
+        captured["is_outer"],
+        captured["resource_axes"],
+        mesh,
+        args,
+        None,
+    )
+    assert all(output.spec[0] == ("dp", "fsdp", "ep") for output in outputs)
+
+
 @pytest.mark.parametrize(
     "resource,quantize,error",
     [
