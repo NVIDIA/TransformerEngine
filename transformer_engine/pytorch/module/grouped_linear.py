@@ -224,9 +224,15 @@ def _calibrate_grouped_tensors(
     else:
         for tensor, quantizer in zip(input_tensors, input_quantizers):
             if quantizer is not None:
+                # Mask empty tensors to avoid observing unwritten quantization metadata.
+                # Not CG-safe.
+                skip_calibration = None
+                if tensor.shape.numel() == 0:
+                    skip_calibration = torch.ones((), dtype=torch.bool, device=tensor.device)
                 quantizer.calibrate(
                     tensor,
                     calibration_config=calibration_config,
+                    skip_calibration=skip_calibration,
                 )
 
     weight_calibration_config = dataclass_replace(
@@ -2574,6 +2580,15 @@ class GroupedLinear(TransformerEngineBaseModule):
                     " active device, cuBLASLt version, quantization recipe, or GroupedLinear"
                     " feature configuration does not support it. Disable single_grouped_weight and"
                     " single_grouped_bias to allow the split-quantize fallback."
+                )
+            if (
+                calibration_config is not None
+                and FP8GlobalStateManager.fp8_graph_capturing()
+                and not use_grouped_tensor_path
+            ):
+                raise RuntimeError(
+                    "CUDA-graphed GroupedLinear calibration requires the native grouped-tensor "
+                    "path. Set use_grouped_tensor=True and use a supported configuration."
                 )
             if use_grouped_tensor_path:
                 if m_splits.device.type != "cuda":

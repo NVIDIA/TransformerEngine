@@ -84,10 +84,9 @@ are dynamic. Weight calibration always buffers the current observed calibration 
 
 .. note::
 
-   Calibration buffers are created during a forward pass. Run a warmup forward pass before
-   CUDA graph capture, then read the buffers only after graph replay has completed.
-
-.. note::
-
-   Backward and activation recomputation passes do not update calibration metadata, so each
-   observation is only updated (and decayed) once per forward step.
+   Calibration buffers are created and updated during a forward pass. If weight caching
+   is utilized, then weight calibration is performed only during weight updates.
+   Backward and activation recomputation passes do not update calibration metadata, so
+   each observation is only updated (and decayed) once per forward step. Run a warmup
+   forward pass before CUDA graph capture, then read the buffers only after graph
+   replay has completed.

@@ -61,9 +61,22 @@ def _make_test_quantizer(quantizer_cls):
     return quantizer
 
 
-def _make_test_quantized_storage(**metadata):
+class _TestQuantizedStorage(QuantizedTensorStorage):
+    """Bare quantized storage with a fixed logical shape."""
+
+    def __init__(self, shape):
+        self._logical_shape = torch.Size(shape)
+
+    def size(self, dim=None):
+        """Return the logical shape, matching ``torch.Tensor.size``."""
+        if dim is None:
+            return self._logical_shape
+        return self._logical_shape[dim]
+
+
+def _make_test_quantized_storage(*, shape=(1,), **metadata):
     """Construct bare quantized storage carrying only the requested metadata."""
-    storage = QuantizedTensorStorage()
+    storage = _TestQuantizedStorage(shape)
     for name, value in metadata.items():
         setattr(storage, name, value)
     return storage
@@ -256,7 +269,8 @@ def test_calibration_config_registers_module_scaling_factor_buffers(
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_grouped_calibration_handles_empty_experts():
+@pytest.mark.parametrize("enabled", (False, True))
+def test_grouped_calibration_handles_empty_experts(enabled):
     module = GroupedLinear(
         2,
         32,
@@ -272,7 +286,7 @@ def test_grouped_calibration_handles_empty_experts():
     buffer_suffix = "_scale_inv_fp8_current_scaling_te_ptq_calibrated"
 
     with torch.no_grad(), autocast(
-        enabled=False,
+        enabled=enabled,
         recipe=recipe,
         calibration_config=calibration_config,
     ):
@@ -283,7 +297,7 @@ def test_grouped_calibration_handles_empty_experts():
     assert module.get_buffer(f"input_gemm1{buffer_suffix}").item() > 0.0
 
     with torch.no_grad(), autocast(
-        enabled=False,
+        enabled=enabled,
         recipe=recipe,
         calibration_config=calibration_config,
     ):
@@ -292,7 +306,7 @@ def test_grouped_calibration_handles_empty_experts():
     assert calibrated_value.item() > 0.0
 
     with torch.no_grad(), autocast(
-        enabled=False,
+        enabled=enabled,
         recipe=recipe,
         calibration_config=calibration_config,
     ):
@@ -437,8 +451,42 @@ def test_native_grouped_linear_registers_calibration_buffers(
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_native_grouped_linear_calibration_is_cuda_graph_safe():
-    recipe = Float8CurrentScaling()
+def test_legacy_grouped_linear_cuda_graph_calibration_is_rejected():
+    module = GroupedLinear(
+        2,
+        32,
+        32,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        bias=False,
+        use_grouped_tensor=False,
+    )
+    inp = torch.randn(
+        (16, 32),
+        dtype=torch.bfloat16,
+        device="cuda",
+        requires_grad=True,
+    )
+    m_splits = torch.tensor([8, 8], dtype=torch.int64, device="cuda")
+
+    with pytest.raises(
+        RuntimeError,
+        match="CUDA-graphed GroupedLinear calibration requires the native grouped-tensor path",
+    ):
+        make_graphed_callables(
+            module,
+            (inp, m_splits),
+            num_warmup_iters=3,
+            enabled=False,
+            recipe=Float8CurrentScaling(),
+            calibration_config=QuantizationCalibrationConfig(),
+        )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("enabled", (False, True))
+def test_native_grouped_linear_calibration_is_cuda_graph_safe(enabled):
+    recipe = Float8CurrentScaling(use_power_2_scales=False)
     if not grouped_linear.is_module_grouped_tensor_path_supported(recipe, torch.bfloat16):
         pytest.skip("Native GroupedLinear does not support current scaling")
 
@@ -451,26 +499,31 @@ def test_native_grouped_linear_calibration_is_cuda_graph_safe():
         bias=False,
         use_grouped_tensor=True,
     )
-    inp = torch.randn(
-        (16, 32),
-        dtype=torch.bfloat16,
-        device="cuda",
-        requires_grad=True,
-    )
-    m_splits = torch.tensor([8, 8], dtype=torch.int64, device="cuda")
+    with torch.no_grad():
+        module.weight0.fill_(3.0)
+        module.weight1.fill_(5.0)
+    inp = torch.cat(
+        (
+            torch.full((8, 32), 2.0, dtype=torch.bfloat16, device="cuda"),
+            torch.full((8, 32), 4.0, dtype=torch.bfloat16, device="cuda"),
+        )
+    ).requires_grad_(True)
+    # Capture while the first expert is empty. The device-side split mask must allow
+    # calibration to start when that expert receives tokens during a later replay.
+    m_splits = torch.tensor([0, 16], dtype=torch.int64, device="cuda")
     calibration_config = QuantizationCalibrationConfig()
     graphed_module = make_graphed_callables(
         module,
         (inp, m_splits),
         num_warmup_iters=3,
-        enabled=True,
+        enabled=enabled,
         recipe=recipe,
         calibration_config=calibration_config,
     )
 
     try:
         with autocast(
-            enabled=True,
+            enabled=enabled,
             recipe=recipe,
             calibration_config=calibration_config,
         ):
@@ -483,21 +536,46 @@ def test_native_grouped_linear_calibration_is_cuda_graph_safe():
         }
         assert len(buffers) == 4
         assert all(torch.isfinite(value).all() for value in buffers.values())
-        assert all(torch.all(value > 0) for value in buffers.values())
+        buffer_suffix = "_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+        input0_buffer = module.get_buffer(f"input_gemm0{buffer_suffix}")
+        input1_buffer = module.get_buffer(f"input_gemm1{buffer_suffix}")
+        weight0_buffer = module.get_buffer(f"weight_gemm0{buffer_suffix}")
+        weight1_buffer = module.get_buffer(f"weight_gemm1{buffer_suffix}")
+        expected_input0 = torch.tensor([2.0 / 448.0], dtype=torch.float32, device="cuda")
+        expected_input1 = torch.tensor([4.0 / 448.0], dtype=torch.float32, device="cuda")
+        expected_weight0 = torch.tensor([3.0 / 448.0], dtype=torch.float32, device="cuda")
+        expected_weight1 = torch.tensor([5.0 / 448.0], dtype=torch.float32, device="cuda")
 
-        input_buffer = module.get_buffer(
-            "input_gemm0_scale_inv_fp8_current_scaling_te_ptq_calibrated"
-        )
-        calibrated_value = input_buffer.clone()
+        torch.testing.assert_close(input0_buffer, torch.zeros_like(input0_buffer))
+        torch.testing.assert_close(input1_buffer, expected_input1)
+        torch.testing.assert_close(weight0_buffer, expected_weight0)
+        torch.testing.assert_close(weight1_buffer, expected_weight1)
+
+        nonempty_expert_splits = torch.tensor([8, 8], dtype=torch.int64, device="cuda")
+        with autocast(
+            enabled=enabled,
+            recipe=recipe,
+            calibration_config=calibration_config,
+        ):
+            graphed_module(inp, nonempty_expert_splits)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(input0_buffer, expected_input0)
+        torch.testing.assert_close(input1_buffer, expected_input1)
+
+        calibrated_value = input0_buffer.clone()
         empty_expert_splits = torch.tensor([0, 16], dtype=torch.int64, device="cuda")
         with autocast(
-            enabled=True,
+            enabled=enabled,
             recipe=recipe,
             calibration_config=calibration_config,
         ):
             graphed_module(inp, empty_expert_splits)
         torch.cuda.synchronize()
-        torch.testing.assert_close(input_buffer, calibrated_value)
+        torch.testing.assert_close(input0_buffer, calibrated_value)
+        torch.testing.assert_close(
+            input1_buffer,
+            expected_input1,
+        )
     finally:
         graphed_module.reset()
 

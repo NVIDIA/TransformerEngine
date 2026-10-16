@@ -698,7 +698,10 @@ class Quantizer(abc.ABC):
         *,
         amax_reduction_group: Optional[dist_group_type] = None,
     ) -> torch.Tensor:
-        """Compute absmax, using NaN to represent an observation with no elements."""
+        """
+        Compute absmax, using NaN to represent an observation with no elements.
+        Not safe for CUDA graphs.
+        """
         tensor_is_empty = tensor.numel() == 0
         if tensor_is_empty:
             amax = torch.zeros(1, dtype=torch.float32, device=tensor.device)
