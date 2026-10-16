@@ -4,7 +4,7 @@
 
 """Linear API"""
 
-from dataclasses import dataclass, field, replace as dataclass_replace
+from dataclasses import dataclass, replace as dataclass_replace
 from typing import Any, Callable, Dict, Optional, Tuple, Union, List
 import warnings
 import weakref
@@ -179,8 +179,8 @@ class LinearFwdArgs:
     # --- Misc ---
     cpu_offloading: bool
     is_grad_enabled: bool
-    weight_list: List[torch.Tensor] = field(default_factory=list)
-    bias_list: List[torch.Tensor] = field(default_factory=list)
+    weight_list: Optional[List[torch.Tensor]] = None
+    bias_list: Optional[List[torch.Tensor]] = None
 
     def compile_unsupported_reason(self) -> Optional[str]:
         """Reason this config can't use the torch.compile custom-op path (else None)."""
@@ -244,8 +244,8 @@ class LinearBwdArgs:
     weight_fp8: Optional[TensorOrQuantized] = None
     saved_weight: Optional[TensorOrQuantized] = None
     bias: Optional[torch.Tensor] = None
-    weight_list: List[torch.Tensor] = field(default_factory=list)
-    bias_list: List[torch.Tensor] = field(default_factory=list)
+    weight_list: Optional[List[torch.Tensor]] = None
+    bias_list: Optional[List[torch.Tensor]] = None
     parameter_list_lengths: Tuple[int, int] = (0, 0)
     weight_fp8_from_list: bool = False
 
@@ -319,14 +319,16 @@ class LinearBwdArgs:
             return
         self.inputmat, self.weight_fp8, self.saved_weight, self.bias = saved[:4]
         weight_count, bias_count = self.parameter_list_lengths
-        self.weight_list = list(saved[4 : 4 + weight_count])
-        self.bias_list = list(saved[4 + weight_count : 4 + weight_count + bias_count])
+        self.weight_list = list(saved[4 : 4 + weight_count]) if weight_count else None
+        self.bias_list = (
+            list(saved[4 + weight_count : 4 + weight_count + bias_count]) if bias_count else None
+        )
 
     def postprocess_gradients(self, grads):
         """Split gradients outside the op so the parts can share storage."""
         wgrad, dgrad, bgrad = grads
-        weight_grads = [None] * len(self.weight_list)
-        bias_grads = [None] * len(self.bias_list)
+        weight_grads = None
+        bias_grads = None
         if self.weight_list and wgrad is not None:
             weight_grads = list(wgrad.split([t.shape[0] for t in self.weight_list]))
         if self.bias_list and bgrad is not None:
@@ -1128,14 +1130,16 @@ def _linear_setup_ctx(
     if not fwd_args.weight_list and not fwd_args.bias_list:
         return saved_inputmat, wt_save, saved_weight, saved_bias
     bwd_args.weight_fp8_from_list = wt_save_alias == "weight" and bool(fwd_args.weight_list)
-    bwd_args.parameter_list_lengths = (len(fwd_args.weight_list), len(fwd_args.bias_list))
+    weight_list = fwd_args.weight_list or ()
+    bias_list = fwd_args.bias_list or ()
+    bwd_args.parameter_list_lengths = (len(weight_list), len(bias_list))
     return (
         saved_inputmat,
         wt_save,
         saved_weight,
         saved_bias,
-        *fwd_args.weight_list,
-        *fwd_args.bias_list,
+        *weight_list,
+        *bias_list,
     )
 
 
@@ -2596,8 +2600,8 @@ class Linear(TransformerEngineBaseModule):
                     )
                     fwd_args.weight = weight
                     fwd_args.bias = linear_bias
-                    fwd_args.weight_list = []
-                    fwd_args.bias_list = []
+                    fwd_args.weight_list = None
+                    fwd_args.bias_list = None
 
             if use_compiled_op:
                 check_gemm_dims(
@@ -2752,7 +2756,7 @@ class Linear(TransformerEngineBaseModule):
         weights = self._get_weight_tensors()
         weight, weight_list = concat_input(weights, defer=defer_concatenation)
         bias = None
-        bias_list = []
+        bias_list = None
         if self.use_bias:
             biases = [getattr(self, name) for name in self.bias_names]
             bias, bias_list = concat_input(

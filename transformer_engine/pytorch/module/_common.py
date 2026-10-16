@@ -243,10 +243,10 @@ def noop_cat(
 
 def concat_input(
     tensors: Sequence[TensorOrQuantized], *, defer: bool = False
-) -> Tuple[Optional[TensorOrQuantized], List[torch.Tensor]]:
+) -> Tuple[Optional[TensorOrQuantized], Optional[List[torch.Tensor]]]:
     """Return a parameter operand or its deferred parts."""
     if len(tensors) == 1:
-        return tensors[0], []
+        return tensors[0], None
     if (
         defer
         and tensors
@@ -258,8 +258,8 @@ def concat_input(
     ):
         return None, list(tensors)
     if torch.compiler.is_compiling():
-        return torch.cat(tensors), []
-    return noop_cat(tensors), []
+        return torch.cat(tensors), None
+    return noop_cat(tensors), None
 
 
 @dataclasses.dataclass

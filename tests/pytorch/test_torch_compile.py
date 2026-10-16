@@ -3271,7 +3271,7 @@ def test_concat_input_single_tensor(defer):
     tensor = torch.nn.Parameter(torch.randn(4, 8, device="cuda"))
     result, parts = concat_input([tensor], defer=defer)
     assert result is tensor
-    assert not parts
+    assert parts is None
 
 
 @pytest.mark.parametrize("disjoint", [False, True])
@@ -3282,7 +3282,7 @@ def test_concat_input_eager_gradients(disjoint):
     if disjoint:
         parts[1] = torch.nn.Parameter(parts[1].detach().clone())
     result, deferred = concat_input(parts)
-    assert not deferred
+    assert deferred is None
     expected = torch.cat(parts)
     grad = torch.randn_like(result)
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
@@ -3352,29 +3352,40 @@ def test_concat_spec(fake, mixed_dtype):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-def test_tensor_list_custom_op():
+@pytest.mark.parametrize(
+    "optional, contents",
+    [(False, "full"), (False, "empty"), (True, "full"), (True, "empty"), (True, "none")],
+)
+def test_tensor_list_custom_op(optional, contents):
     from transformer_engine.pytorch.dynamo import register_custom_op
 
     @dataclasses.dataclass
     class Args:
-        tensors: list[torch.Tensor]
+        inp: torch.Tensor
+        tensors: list[torch.Tensor] | None if optional else list[torch.Tensor]
 
     op = register_custom_op(
-        op_name="test_tensor_list_inputs",
+        op_name=f"test_tensor_list_inputs_{optional}_{contents}",
         arg_type=Args,
-        impl=lambda args: [tensor.square() for tensor in args.tensors],
-        fake_impl=lambda args: args.tensors,
+        impl=lambda args: [args.inp + (args.tensors is not None)]
+        + [tensor.square() for tensor in (args.tensors or ())],
+        fake_impl=lambda args: [args.inp, *(args.tensors or ())],
     )
     assert op is not None
 
-    def fn(tensors):
-        return op(Args(tensors))
+    def fn(inp, tensors):
+        return op(Args(inp, tensors))
 
     tensors = [torch.randn(3), torch.randn(2, 4, dtype=torch.float64)]
-    expected = [tensor.square() for tensor in tensors]
-    torch.testing.assert_close(fn(tensors), expected)
+    if contents == "empty":
+        tensors = []
+    elif contents == "none":
+        tensors = None
+    inp = torch.randn(2)
+    expected = [inp + (contents != "none"), *[tensor.square() for tensor in (tensors or ())]]
+    torch.testing.assert_close(fn(inp, tensors), expected)
     compiled = torch.compile(fn, fullgraph=True, backend="aot_eager")
-    torch.testing.assert_close(compiled(tensors), expected)
+    torch.testing.assert_close(compiled(inp, tensors), expected)
 
 
 @pytest.mark.parametrize("internal", [False, True])
@@ -3392,7 +3403,7 @@ def test_concat_rejects_quantized_parts(internal):
             concatenate([tensor, tensor])
     result, parts = concat_input([tensor], defer=True)
     assert result is tensor
-    assert not parts
+    assert parts is None
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")

@@ -397,7 +397,7 @@ class _FieldKind(Enum):
     """How one dataclass field crosses the custom-op boundary."""
 
     TENSOR = "tensor"  # one ``Tensor`` / ``Tensor?`` slot
-    TENSOR_LIST = "tensor_list"  # one ``Tensor[]`` slot
+    TENSOR_LIST = "tensor_list"  # one ``Tensor[]`` / ``Tensor[]?`` slot
     TENSOR_OR_QUANTIZED = "tensor_or_quantized"  # 3 slots: tensor / inner / meta
     PROCESS_GROUP = "process_group"  # c10d group name inside the shared bundle
     SIMPLE = "simple"  # value carried verbatim inside the shared bundle
@@ -493,9 +493,10 @@ def _parse_field(name: str, annot: Any) -> _FieldPlan:
             _SlotSpec(name + "__meta", _OPAQUE_VALUE_BUNDLE_TYPE_NAME),
         )
         return _FieldPlan(name, _FieldKind.TENSOR_OR_QUANTIZED, slots)
-    if _is_tensor_list_annot(annot):
-        return _FieldPlan(name, _FieldKind.TENSOR_LIST, (_SlotSpec(name, "Tensor[]"),))
     stripped, is_optional = _strip_optional(annot)
+    if _is_tensor_list_annot(stripped):
+        slot = _SlotSpec(name, "Tensor[]?" if is_optional else "Tensor[]")
+        return _FieldPlan(name, _FieldKind.TENSOR_LIST, (slot,))
     if stripped is torch.Tensor:
         slot = _SlotSpec(name, "Tensor?" if is_optional else "Tensor")
         return _FieldPlan(name, _FieldKind.TENSOR, (slot,))
