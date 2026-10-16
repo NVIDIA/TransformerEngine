@@ -87,6 +87,10 @@ def layernorm_mlp(
         ffn1_ckpt_name: Name for checkpointing the first feed-forward network
         ffn2_ckpt_name: Name for checkpointing the second feed-forward network
         activation_type: Activation function(s) to apply after the first dense layer transformation
+        activation_params: Optional parameters for configurable activations. SiTU-GLU uses
+            ``{"beta1": 4.0, "beta2": 25.0}`` with activation type
+            ``("situ", "situ_linear")``. ``situ_linear`` is the soft-capped up branch,
+            not an identity function.
         collective_op_sets: Tuple of two collective gemm config sets for the two dense layer transformations
         quantizer_sets: Tuple of two quantizer sets for the two dense layer transformations
 

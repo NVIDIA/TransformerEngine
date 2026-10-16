@@ -198,6 +198,7 @@ ALL_ACTIVATION_TYPES = [
     ("squared_relu",),
     ("squared_relu", "linear"),
     ("clamped_silu", "clamped_linear"),
+    ("situ", "situ_linear"),
 ]
 
 ACTIVATION_TYPES = {
@@ -207,6 +208,17 @@ ACTIVATION_TYPES = {
     ],
     "L2": ALL_ACTIVATION_TYPES,
 }
+
+
+def make_activation_params(activation_type):
+    """Create non-default parameters for configurable activation tests."""
+    if activation_type == ("clamped_silu", "clamped_linear"):
+        return tex.activation.ActivationParams.create(
+            activation_type, limit=0.75, alpha=1.702, glu_linear_offset=0.5
+        )
+    if activation_type == ("situ", "situ_linear"):
+        return tex.activation.ActivationParams.create(activation_type, beta1=2.0, beta2=8.0)
+    return None
 
 
 class TestActivation:
@@ -227,6 +239,26 @@ class TestActivation:
         )
         return jnp.mean(out)
 
+    @pytest.mark.parametrize("betas", [(4.0, 25.0), (2.0, 8.0)])
+    def test_jax_situglu_reference(self, betas):
+        beta1, beta2 = betas
+        x = jnp.arange(24, dtype=jnp.float32).reshape(4, 2, 3) / 3.0 - 4.0
+        params = tex.activation.ActivationParams.create(
+            ("situ", "situ_linear"), beta1=beta1, beta2=beta2
+        )
+
+        output = _jax_act_lu(x, ("situ", "situ_linear"), act_params=params).data
+        gate, up = x[:, 0, :], x[:, 1, :]
+        expected = (beta1 * jnp.tanh(gate / beta1) * jax.nn.sigmoid(gate)) * (
+            beta2 * jnp.tanh(up / beta2)
+        )
+
+        assert_allclose(output, expected, dtype=x.dtype)
+        assert hash(params) == hash(params)
+        ffi_params = params.to_ffi_lowering_dict()["situglu"]
+        assert float(ffi_params["beta1"]) == pytest.approx(beta1)
+        assert float(ffi_params["beta2"]) == pytest.approx(beta2)
+
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper(
         "activation_type",
@@ -243,16 +275,7 @@ class TestActivation:
         value_n_grad_primitive_func = jit(
             value_and_grad(self.primitive_func, (0,)), static_argnums=(1, 3)
         )
-        act_args = (
-            {"limit": 0.75, "alpha": 1.702, "glu_linear_offset": 0.5}
-            if activation_type == ("clamped_silu", "clamped_linear")
-            else {}
-        )
-        act_params = (
-            tex.activation.ActivationParams.create(activation_type=activation_type, **act_args)
-            if activation_type == ("clamped_silu", "clamped_linear")
-            else None
-        )
+        act_params = make_activation_params(activation_type)
         prim_out, (prim_grad,) = value_n_grad_primitive_func(x, activation_type, None, act_params)
         ref_out, (ref_grad,) = self.value_n_grad_ref_func(x, activation_type, act_params)
         assert_allclose(prim_out, ref_out, dtype=x.dtype)
@@ -283,17 +306,7 @@ class TestActivation:
             q_dtype=output_type,
             q_layout=QuantizeLayout.ROWWISE,
         )
-        act_args = (
-            {"limit": 0.75, "alpha": 1.702}
-            if activation_type == ("clamped_silu", "clamped_linear")
-            else {}
-        )
-
-        act_params = (
-            tex.activation.ActivationParams.create(activation_type=activation_type, **act_args)
-            if activation_type == ("clamped_silu", "clamped_linear")
-            else None
-        )
+        act_params = make_activation_params(activation_type)
         prim_out, (prim_grad,) = value_n_grad_primitive_func(
             x, activation_type, quantizer, act_params
         )
@@ -326,16 +339,7 @@ class TestActivation:
             q_dtype=output_type,
             q_layout=q_layout,
         )
-        act_args = (
-            {"limit": 0.75, "alpha": 1.702}
-            if activation_type == ("clamped_silu", "clamped_linear")
-            else {}
-        )
-        act_params = (
-            tex.activation.ActivationParams.create(activation_type=activation_type, **act_args)
-            if activation_type == ("clamped_silu", "clamped_linear")
-            else None
-        )
+        act_params = make_activation_params(activation_type)
         te_output = tex.act_lu(x, activation_type, te_quantizer, act_params)
         jax_output = _jax_act_lu(x, activation_type, jax_quantizer, act_params)
         assert_bitwise_scaled_tensors(te_output, jax_output)
@@ -357,19 +361,17 @@ class TestActivation:
         quantizer = QuantizerFactory.create(
             scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_layout=q_layout
         )
-        act_args = (
-            {"limit": 0.75, "alpha": 1.702}
-            if activation_type == ("clamped_silu", "clamped_linear")
-            else {}
-        )
-        act_params = (
-            tex.activation.ActivationParams.create(activation_type=activation_type, **act_args)
-            if activation_type == ("clamped_silu", "clamped_linear")
-            else None
-        )
+        act_params = make_activation_params(activation_type)
         output = tex.act_lu(x, activation_type, quantizer, act_params)
         ref_out = self.ref_act(x, activation_type, act_params)
         assert_dequantized_scaled_tensor(output, ref_out)
+
+    @pytest.mark.parametrize("name", ["beta1", "beta2"])
+    @pytest.mark.parametrize("value", [0.0, -1.0, jnp.inf, -jnp.inf, jnp.nan])
+    def test_situglu_invalid_params(self, name, value):
+        kwargs = {name: value}
+        with pytest.raises(ValueError, match=rf"{name} must be finite and positive"):
+            tex.activation.ActivationParams.create(("situ", "situ_linear"), **kwargs)
 
 
 NORM_OUTPUT_DTYPES = {
@@ -1626,7 +1628,9 @@ class TestFusedDense:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize("m,n,k", [(64, 128, 128)])
-    @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear")])
+    @pytest.mark.parametrize(
+        "activation_type", [("gelu",), ("gelu", "linear"), ("situ", "situ_linear")]
+    )
     @pytest_parametrize_wrapper("recipe", supported_recipes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
     @pytest_parametrize_wrapper("use_bias", [True, False])
@@ -1665,6 +1669,10 @@ class TestFusedDense:
                 x=QuantizeMeta(), kernel=QuantizeMeta(), grad=QuantizeMeta()
             ),
         )
+        activation_params = (
+            {"beta1": 2.0, "beta2": 8.0} if activation_type == ("situ", "situ_linear") else None
+        )
+        ref_activation_params = make_activation_params(activation_type)
 
         if norm_type == "layernorm":
             beta = jax.random.normal(subkeys[3], (k,)).astype(jnp.bfloat16)
@@ -1683,6 +1691,7 @@ class TestFusedDense:
                     zero_centered_gamma=zero_centered_gamma,
                     epsilon=eps,
                     activation_type=activation_type,
+                    activation_params=activation_params,
                     quantizer_sets=quantizer_sets,
                 )
             )
@@ -1696,7 +1705,7 @@ class TestFusedDense:
                 bias_1_shape = (1,) * (linear_1_out.ndim - bias_1.ndim) + bias_1.shape
                 linear_1_out += jnp.reshape(bias_1, bias_1_shape)
 
-            x = _jax_act_lu(linear_1_out, activation_type).data
+            x = _jax_act_lu(linear_1_out, activation_type, act_params=ref_activation_params).data
             linear_2_out = jax.lax.dot_general(x, kernel_2, (((1,), (0,)), ((), ())))
             if use_bias:
                 bias_2_shape = (1,) * (linear_2_out.ndim - bias_2.ndim) + bias_2.shape
