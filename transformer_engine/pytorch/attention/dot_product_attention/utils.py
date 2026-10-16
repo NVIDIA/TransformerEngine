@@ -449,7 +449,7 @@ no_op_logger = _NoOpLogger()
 
 @torch.compiler.assume_constant_result
 def _get_fused_attn_backend(**fused_attn_kwargs):
-    """Constant-foldable tex.get_fused_attn_backend: the result depends only on
+    """Constant-foldable cuDNN Python support query: the result depends only on
     the attention config.
 
     Returns a plain int rather than a FusedAttnBackend member: dynamo
@@ -458,7 +458,9 @@ def _get_fused_attn_backend(**fused_attn_kwargs):
     graph break because it is baked into the graph as a literal, while an enum
     member comes out of the reconstruction corrupted (see the cast at the call
     site, which restores the enum)."""
-    fused_attention_backend, reject_message = tex.get_fused_attn_backend(
+    from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import get_fused_attn_backend
+
+    fused_attention_backend, reject_message = get_fused_attn_backend(
         FusedAttentionParams(**fused_attn_kwargs)
     )
     return int(fused_attention_backend), reject_message
@@ -553,6 +555,7 @@ def get_attention_backend(
         if not logger.hasHandlers():
             logger.addHandler(AttentionLogging._stream_handler)
     device_compute_capability = get_device_compute_capability(attention_params.device)
+    is_sm12x = device_compute_capability[0] == 12
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
@@ -802,16 +805,16 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for %s", fp8_recipe.__class__.__name__)
             use_fused_attention = False
 
-        if device_compute_capability == (12, 0):
+        if is_sm12x:
             if use_flash_attention:
                 logger.debug(
                     "Disabling FlashAttention as FP8 is not supported"
-                    " for compute capability = sm120"
+                    " for compute capability = sm12x"
                 )
             if use_fused_attention:
                 logger.debug(
                     "Disabling FusedAttention as FP8 is not supported"
-                    " for compute capability = sm120"
+                    " for compute capability = sm12x"
                 )
             use_flash_attention = False
             use_fused_attention = False
@@ -950,14 +953,14 @@ def get_attention_backend(
     # Flash v4 | FP16/BF16      | TODO            | sm80+        | bshd,sbhd,thd | TODO
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
-        # Temporarily disabling fused attention for kv caching for sm89/sm120 irrespective of
+        # Temporarily disabling fused attention for kv caching for sm89/sm12x irrespective of
         # cuDNN version until the cuDNN bug is resolved.
-        if device_compute_capability in ((8, 9), (12, 0)):
-            logger.debug("Disabling FusedAttention for KV caching for sm89/sm120")
+        if device_compute_capability == (8, 9) or is_sm12x:
+            logger.debug("Disabling FusedAttention for KV caching for sm89/sm12x")
             use_fused_attention = False
-        # Temporarily disable FlashAttention for KV caching on sm120
-        if device_compute_capability == (12, 0):
-            logger.debug("Disabling FlashAttention for KV caching for sm120")
+        # Temporarily disable FlashAttention for KV caching on sm12x
+        if is_sm12x:
+            logger.debug("Disabling FlashAttention for KV caching for sm12x")
             use_flash_attention = False
         if context_parallel:
             logger.debug("Disabling all backends for KV caching with context parallelism")
@@ -1019,15 +1022,11 @@ def get_attention_backend(
                 qkv_layout,
             )
             use_fused_attention = False
-        if (
-            device_compute_capability == (12, 0)
-            and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
-            and is_training
-        ):
+        if is_sm12x and (head_dim_qk > 128 or head_dim_qk % 8 != 0) and is_training:
             if use_fused_attention:
                 logger.debug(
                     "Disabling FusedAttention as MLA for backward pass is not supported for compute"
-                    " capability = sm120 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
+                    " capability = sm12x for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
                     " head_dim_qk = %s",
                     head_dim_qk,
                 )
@@ -1193,19 +1192,19 @@ def get_attention_backend(
             if use_unfused_attention:
                 logger.debug("Disabling UnfusedDotProductAttention for pad_between_seqs = True")
             use_unfused_attention = False
-        if device_compute_capability == (12, 0):
+        if is_sm12x:
             if cudnn_version < (9, 18, 1):
                 if use_fused_attention:
                     logger.debug(
                         "Disabling FusedAttention when Q or KV uses THD because it is"
-                        " not supported for compute capability = sm120 and cuDNN version < 9.18.1"
+                        " not supported for compute capability = sm12x and cuDNN version < 9.18.1"
                     )
                 use_fused_attention = False
             elif qkv_layout in {"t3hd", "th3d"}:
                 if use_fused_attention:
                     logger.debug(
                         "Disabling FusedAttention as qkv_layout = %s is not supported for"
-                        " compute capability = sm120",
+                        " compute capability = sm12x",
                         qkv_layout,
                     )
                 use_fused_attention = False

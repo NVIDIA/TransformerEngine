@@ -238,7 +238,7 @@ backend-selection overview.
 
    :Type: ``int`` (0, 1 or 2), optionally followed by ``:<ranks>``
    :Default: ``0``
-   :Description: Log FusedAttention graph cache activity to stderr, prefixed with ``[FUSED-ATTN-CACHE]``. ``1`` prints an end-of-run summary of the cache counters and the mean time of each cuDNN build stage. ``2`` additionally traces every event as it happens: each graph built, each graph cuDNN accepts and the cache keeps, each lookup and whether it hit or missed, each first execution that compiles kernels, and each execution. When the launcher exports a rank, only rank 0 logs; append ``:<ranks>`` to override, as in ``1:all`` for level 1 on every rank or ``2:0,3`` for level 2 on ranks 0 and 3.
+   :Description: Log FusedAttention graph cache activity to stderr, prefixed with ``[FUSED-ATTN-CACHE]``. ``1`` prints an end-of-run summary of the cache counters and the mean time of each cuDNN build stage. ``2`` additionally traces every event as it happens: each graph built, each graph cuDNN accepts and the cache keeps, each lookup and whether it hit or missed, each plan compilation, and each execution. JAX reports Python graph-cache and build events during tracing; execution events apply to the PyTorch and common C++ paths. When the launcher exports a rank, only rank 0 logs; append ``:<ranks>`` to override, as in ``1:all`` for level 1 on every rank or ``2:0,3`` for level 2 on ranks 0 and 3.
 
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 
@@ -280,7 +280,7 @@ FP8 Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Enable FP8 in the backward pass of DotProductAttention. ``1`` = FP8 forward and backward, ``0`` = FP8 forward and FP16/BF16 backward.
+   :Description: Enable FP8 in the backward pass of DotProductAttention in PyTorch and JAX. ``1`` = FP8 forward and backward, ``0`` = FP8 forward and FP16/BF16 backward. In JAX this applies when attention is configured with ``fp8=True``.
 
 .. envvar:: NVTE_DPA_FP8CS_O_in_F16
 

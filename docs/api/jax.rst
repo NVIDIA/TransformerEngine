@@ -59,3 +59,9 @@ Modules
   :members: __call__
 
 .. autoapifunction:: transformer_engine.jax.flax.extend_logical_axis_rules
+
+Attention functions
+-------------------
+
+.. autoapifunction:: transformer_engine.jax.attention.fused_attn
+.. autoapifunction:: transformer_engine.jax.attention.is_fused_attn_kernel_available

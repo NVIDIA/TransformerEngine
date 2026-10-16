@@ -16,6 +16,42 @@ FlexAttention-style customization. The API also supports different Q/K and V
 head dimensions, as used by the attention operation after the projection
 stages in DeepSeek-style MLA.
 
+cuDNN execution and FP8
+----------------------
+
+JAX fused attention constructs and selects cuDNN execution plans with the
+``nvidia-cudnn-frontend`` Python package. The compiled JAX FFI executor caches
+those plans and its own cuDNN handles per device. Ordinary attention and
+``score_mod`` share this executor; neither calls TE common's attention APIs.
+The Python frontend and the headers used to build the JAX extension must have
+the same version, since execution plans are serialized between the two.
+
+Pass ``fp8=True`` to ``transformer_engine.jax.attention.fused_attn`` or to the
+Flax ``DotProductAttention``, ``MultiHeadAttention`` or ``TransformerLayer``
+module to enable cuDNN FP8 attention. Inputs remain FP16 or BF16. Query, key
+and value are quantized to E4M3 using their current tensor maximum; backward
+quantizes the output gradient to E5M2. Outputs and input gradients retain the
+input dtype, and softmax statistics use FP32. Packed layouts use one scale per
+packed tensor. This option is independent of the GEMM quantization recipe and
+does not maintain delayed-scaling history.
+
+``NVTE_FP8_DPA_BWD=0`` selects FP16/BF16 backward while keeping FP8 forward.
+The backward pass uses dequantized forward operands, so both passes operate on
+the same quantized query, key and value. The default, ``1``, uses FP8 for both.
+
+FP8 availability depends on cuDNN, GPU architecture, layout and the selected
+features. Unsupported combinations produce a diagnostic rather than silently
+using a different precision. For example, cuDNN 9.26 rejects FP8 backward with
+dropout on Blackwell; use ``NVTE_FP8_DPA_BWD=0`` for that combination.
+Tensor-scaled FP8 is supported; MXFP8 attention,
+paged KV-cache APIs and quantized module inputs/outputs require further JAX API
+and frontend-binding work. ``score_mod`` currently supports FP16/BF16 only.
+
+``AttnBiasType.ALIBI`` (``attn_bias_type="alibi"`` in Flax) enables cuDNN's
+ALiBi mask without an explicit bias tensor. Explicit dropout keys have JAX's
+usual replay semantics: using the same key repeats the mask, including when
+recomputing a forward pass for its backward pass.
+
 For long contexts, selected BSHD and THD configurations support context
 parallelism with Ring or AllGather collectives. Exact fused-kernel availability
 depends on the input shape, dtype, GPU architecture, and feature combination;

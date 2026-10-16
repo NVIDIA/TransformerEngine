@@ -17,7 +17,6 @@ from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_QKV_Format
-from transformer_engine_jax import nvte_get_qkv_format
 from transformer_engine_jax import NVTE_Softmax_Type
 
 from . import cpp_extensions as tex
@@ -33,6 +32,7 @@ class AttnBiasType(Enum):
     NO_BIAS = NVTE_Bias_Type.NVTE_NO_BIAS
     PRE_SCALE_BIAS = NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS
     POST_SCALE_BIAS = NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
+    ALIBI = NVTE_Bias_Type.NVTE_ALIBI
 
 
 class AttnMaskType(Enum):
@@ -139,7 +139,7 @@ class QKVLayout(Enum):
         """
         Return the corresponding qkv_format (BSHD, SBHD, THD)
         """
-        return QKVFormat(nvte_get_qkv_format(self.value))
+        return QKVFormat.THD if self.is_thd() else QKVFormat.BSHD
 
     def is_qkvpacked(self):
         """
@@ -348,6 +348,7 @@ def is_fused_attn_kernel_available(
     bias_seqlen_q: Optional[int] = None,
     bias_seqlen_kv: Optional[int] = None,
     max_segments_per_seq: int = 1,
+    fp8: bool = False,
 ):
     """
     To check whether the fused attention kernel is supported.
@@ -384,6 +385,7 @@ def is_fused_attn_kernel_available(
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
             max_segments_per_seq=max_segments_per_seq,
+            fp8=fp8,
         )
 
     helper = make_helper(attn_mask_type)
@@ -1142,6 +1144,7 @@ def _legacy_fused_attn(
     context_parallel_axis: str = "",
     softmax_offset: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
+    fp8: bool = False,
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -1236,6 +1239,7 @@ def _legacy_fused_attn(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         return_max_logit=return_max_logit,
+        fp8=fp8,
     )
 
     return output
@@ -1262,6 +1266,7 @@ def fused_attn_thd(
     context_parallel_axis: str = "",
     softmax_offset: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
+    fp8: bool = False,
 ):
     """
     Deprecated THD fused attn, please use fusd_attn with SequenceDescriptor
@@ -1317,6 +1322,7 @@ def fused_attn_thd(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         return_max_logit=return_max_logit,
+        fp8=fp8,
     )
 
     return output
@@ -1324,7 +1330,7 @@ def fused_attn_thd(
 
 @partial(
     jax.custom_vjp,
-    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20),
 )
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
@@ -1347,6 +1353,7 @@ def _fused_attn(
     context_checkpoint_name: str = "context",
     stripe_size: int | None = None,
     return_max_logit: bool = False,
+    fp8: bool = False,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -1369,6 +1376,7 @@ def _fused_attn(
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        fp8=fp8,
     )
     return output
 
@@ -1394,6 +1402,7 @@ def _fused_attn_fwd_rule(
     context_checkpoint_name,
     stripe_size,
     return_max_logit,
+    fp8,
 ):
     output, softmax_aux, rng_state, max_logit = tex.fused_attn_fwd(
         qkv,
@@ -1415,6 +1424,7 @@ def _fused_attn_fwd_rule(
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        fp8=fp8,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -1448,6 +1458,7 @@ def _fused_attn_bwd_rule(
     context_checkpoint_name,
     stripe_size,
     return_max_logit,
+    fp8,
     ctx,
     dz,
 ):
@@ -1485,8 +1496,9 @@ def _fused_attn_bwd_rule(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
+        fp8=fp8,
     )
-    if attn_bias_type == AttnBiasType.NO_BIAS:
+    if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
         grad_bias = None
     if softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX:
         grad_softmax_offset = None
@@ -1580,6 +1592,7 @@ def fused_attn(
     score_mod_tensors: Optional[Mapping[str, Any]] = None,
     score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
     return_max_logit: bool = False,
+    fp8: bool = False,
 ):
     """
     Perform cuDNN fused attention.
@@ -1636,6 +1649,9 @@ def fused_attn(
             non-differentiable auxiliary inputs.
         score_mod_bprop_tensors (Optional[Mapping[str, Any]]): Additional tensors or
             Python/NumPy scalars made available to `score_mod_bprop`.
+        fp8 (bool): Use tensor-scaled cuDNN FP8 SDPA with E4M3 query/key/value and
+            E5M2 output gradients. Scaling uses the current tensor maximum. Outputs
+            and gradients retain the input FP16/BF16 dtype.
         return_max_logit (bool): If True, also return per-head maximum attention logits
             with shape ``[h]``.
     Returns:
@@ -1686,6 +1702,8 @@ def fused_attn(
         if score_mod_only_args:
             raise ValueError(f"{', '.join(score_mod_only_args)} require score_mod to be provided.")
     else:
+        if fp8:
+            raise ValueError("FP8 is not supported with score_mod fused_attn.")
         if return_max_logit:
             raise ValueError("return_max_logit is not supported with score_mod fused_attn.")
         tex.validate_fused_attn_score_mod(
@@ -1748,6 +1766,7 @@ def fused_attn(
             context_parallel_axis=context_parallel_axis,
             softmax_offset=softmax_offset,
             return_max_logit=return_max_logit,
+            fp8=fp8,
         )
     if max_segments_per_seq > 1 and not qkv_layout.is_thd():
         warnings.warn(
@@ -1779,5 +1798,6 @@ def fused_attn(
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        fp8=fp8,
     )
     return output

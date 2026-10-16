@@ -8,7 +8,6 @@ import math
 from enum import IntEnum
 from typing import Tuple, List, Union, Optional
 import torch
-import transformer_engine_torch as tex
 from transformer_engine_torch import (
     NVTE_QKV_Layout,
     NVTE_QKV_Format,
@@ -363,52 +362,53 @@ def fused_attn_fwd(
     else:
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
-    # execute kernel
-    output_tensors = tex.fused_attn_fwd(
-        max_seqlen_q,
-        max_seqlen_kv,
-        is_training,
-        attn_scale,
-        dropout,
-        fast_zero_fill,
-        QKVLayout[qkv_layout],
-        QKVFormat[o_format],
-        QKVFormat[qkv_scale_inv_format],
-        AttnBiasType[attn_bias_type],
-        AttnMaskType[attn_mask_type],
-        SoftmaxType[softmax_type],
-        window_size,
-        bottom_right_diagonal,
-        cu_seqlens_q,
-        cu_seqlens_kv,
-        q,
-        k,
-        v,
-        fake_dtype,
-        cu_seqlens_q_padded,
-        cu_seqlens_kv_padded,
-        page_table_k,
-        page_table_v,
-        s_quantizer,
-        o_quantizer,
-        attn_bias,
-        softmax_offset,
-        rng_gen,
-        rng_elts_per_thread,
-        return_max_logit,
-        cuda_graph,
+    # Import lazily: the frontend's quantized tensor classes also import this module.
+    from . import cudnn_fused_attn
+
+    out, aux_ctx_tensors, max_tensor = cudnn_fused_attn.fused_attn_fwd(
+        {
+            "is_training": is_training,
+            "max_seqlen_q": max_seqlen_q,
+            "max_seqlen_kv": max_seqlen_kv,
+            "cu_seqlens_q": cu_seqlens_q,
+            "cu_seqlens_kv": cu_seqlens_kv,
+            "q": q,
+            "k": k,
+            "v": v,
+            "fake_dtype": fake_dtype,
+            "fused_attention_backend": fused_attention_backend,
+            "attn_bias": attn_bias,
+            "cu_seqlens_q_padded": cu_seqlens_q_padded,
+            "cu_seqlens_kv_padded": cu_seqlens_kv_padded,
+            "page_table_k": page_table_k,
+            "page_table_v": page_table_v,
+            "s_quantizer": s_quantizer,
+            "o_quantizer": o_quantizer,
+            "attn_scale": attn_scale,
+            "dropout": dropout,
+            "fast_zero_fill": fast_zero_fill,
+            "qkv_layout": qkv_layout,
+            "o_format": o_format,
+            "qkv_scale_inv_format": qkv_scale_inv_format,
+            "attn_bias_type": attn_bias_type,
+            "attn_mask_type": attn_mask_type,
+            "softmax_type": softmax_type,
+            "window_size": window_size,
+            "bottom_right_diagonal": bottom_right_diagonal,
+            "rng_gen": rng_gen,
+            "softmax_offset": softmax_offset,
+            "return_max_logit": return_max_logit,
+            "cuda_graph": cuda_graph,
+            "rng_elts_per_thread": rng_elts_per_thread,
+        }
     )
 
     if return_max_logit:
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
-        # thd (newer cuDNN runtimes, non-sm120): output_tensors: out [tq, h, d],    Stats [tq, h, 1],    Max [tq, h, 1]
+        # thd (newer cuDNN runtimes, non-sm120): out [tq, h, d],    Stats [tq, h, 1],    Max [tq, h, 1]
         # thd (older cuDNN runtimes or sm120):   output_tensors: out [tq, h, d],    Stats [b, h, sq, 1], Max [b, h, sq, 1]
         # bshd:                                  output_tensors: out [b, sq, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]
         # sbhd:                                  output_tensors: out [sq, b, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]
-        aux_ctx_tensors = [output_tensors[1]] + list(
-            output_tensors[3:]
-        )  # Stats + rng_state + optional tensors
-        max_tensor = output_tensors[2]
         amax_dims = (0, 2) if max_tensor.ndim == 3 else (0, 2, 3)
 
         if qkv_format == "thd":
@@ -438,11 +438,11 @@ def fused_attn_fwd(
                     max_tensor = max_tensor.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
 
         # Max -> max_logit [h]
-        max_logit = torch.amax(max_tensor, dim=amax_dims).to(dtype=output_tensors[0].dtype)
-        return output_tensors[0], aux_ctx_tensors, max_logit
+        max_logit = torch.amax(max_tensor, dim=amax_dims).to(dtype=out.dtype)
+        return out, aux_ctx_tensors, max_logit
 
     # out, aux_ctx_tensors
-    return output_tensors[0], output_tensors[1:]
+    return out, aux_ctx_tensors
 
 
 def fused_attn_bwd(
@@ -615,39 +615,44 @@ def fused_attn_bwd(
             f" for backend={fused_attention_backend}."
         )
 
-    output_tensors = tex.fused_attn_bwd(
-        max_seqlen_q,
-        max_seqlen_kv,
-        attn_scale,
-        dropout,
-        fast_zero_fill,
-        QKVLayout[qkv_layout],
-        QKVFormat[o_format],
-        QKVFormat[do_format],
-        QKVLayout[dqkv_layout],
-        QKVFormat[qkv_scale_inv_format],
-        QKVFormat[do_scale_inv_format],
-        AttnBiasType[attn_bias_type],
-        AttnMaskType[attn_mask_type],
-        SoftmaxType[softmax_type],
-        window_size,
-        bottom_right_diagonal,
-        deterministic,
-        cu_seqlens_q,
-        cu_seqlens_kv,
-        q,
-        k,
-        v,
-        o,
-        d_o,
-        fake_dtype,
-        aux_ctx_tensors,
-        cu_seqlens_q_padded,
-        cu_seqlens_kv_padded,
-        s_quantizer,
-        dp_quantizer,
-        dqkv_quantizer,
-        cuda_graph,
+    from . import cudnn_fused_attn
+
+    output_tensors = cudnn_fused_attn.fused_attn_bwd(
+        {
+            "max_seqlen_q": max_seqlen_q,
+            "max_seqlen_kv": max_seqlen_kv,
+            "cu_seqlens_q": cu_seqlens_q,
+            "cu_seqlens_kv": cu_seqlens_kv,
+            "q": q,
+            "k": k,
+            "v": v,
+            "o": o,
+            "d_o": d_o,
+            "fake_dtype": fake_dtype,
+            "aux_ctx_tensors": aux_ctx_tensors,
+            "fused_attention_backend": fused_attention_backend,
+            "cu_seqlens_q_padded": cu_seqlens_q_padded,
+            "cu_seqlens_kv_padded": cu_seqlens_kv_padded,
+            "s_quantizer": s_quantizer,
+            "dp_quantizer": dp_quantizer,
+            "dqkv_quantizer": dqkv_quantizer,
+            "attn_scale": attn_scale,
+            "dropout": dropout,
+            "fast_zero_fill": fast_zero_fill,
+            "qkv_layout": qkv_layout,
+            "o_format": o_format,
+            "do_format": do_format,
+            "dqkv_layout": dqkv_layout,
+            "qkv_scale_inv_format": qkv_scale_inv_format,
+            "do_scale_inv_format": do_scale_inv_format,
+            "attn_bias_type": attn_bias_type,
+            "attn_mask_type": attn_mask_type,
+            "softmax_type": softmax_type,
+            "window_size": window_size,
+            "bottom_right_diagonal": bottom_right_diagonal,
+            "deterministic": deterministic,
+            "cuda_graph": cuda_graph,
+        }
     )
 
     return output_tensors
