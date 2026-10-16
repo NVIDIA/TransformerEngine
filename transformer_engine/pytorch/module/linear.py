@@ -314,6 +314,9 @@ class LinearBwdArgs:
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
         saved = restore_from_func_ctx(ctx)
+        if self.parameter_list_lengths == (0, 0):
+            self.inputmat, self.weight_fp8, self.saved_weight, self.bias = saved
+            return
         self.inputmat, self.weight_fp8, self.saved_weight, self.bias = saved[:4]
         weight_count, bias_count = self.parameter_list_lengths
         self.weight_list = list(saved[4 : 4 + weight_count])
@@ -1122,6 +1125,8 @@ def _linear_setup_ctx(
         saved_weight = weight
     if bias_alias == "bias":
         saved_bias = bias
+    if not fwd_args.weight_list and not fwd_args.bias_list:
+        return saved_inputmat, wt_save, saved_weight, saved_bias
     bwd_args.weight_fp8_from_list = wt_save_alias == "weight" and bool(fwd_args.weight_list)
     bwd_args.parameter_list_lengths = (len(fwd_args.weight_list), len(fwd_args.bias_list))
     return (
@@ -2419,7 +2424,9 @@ class Linear(TransformerEngineBaseModule):
             if get_ub_is_fp8(self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_grad = True
 
-        if torch.compiler.is_compiling() and _linear_op is not None:
+        is_compiling = torch.compiler.is_compiling()
+        use_compiled_op = is_compiling and _linear_op is not None
+        if use_compiled_op:
             reason = self._compile_eager_fallback_reason(
                 inp, is_first_microbatch, fp8_output, fp8_grad, is_grad_enabled, debug
             )
@@ -2432,9 +2439,9 @@ class Linear(TransformerEngineBaseModule):
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
         try:
             weight, bias, weight_list, bias_list = self._get_weight_and_bias_tensors(
-                defer_concatenation=torch.compiler.is_compiling() and _linear_op is not None
+                defer_concatenation=use_compiled_op
             )
-            weight_shape = concat_shape(weight_list) if weight_list else weight.shape
+            weight_shape = concat_shape(weight_list) if weight_list else None
             weight_requires_grad = (
                 any(t.requires_grad for t in weight_list) if weight_list else weight.requires_grad
             )
@@ -2462,8 +2469,7 @@ class Linear(TransformerEngineBaseModule):
                     weight_quantizer, weight, weight_shape=weight_shape
                 )
 
-            use_compiled_op = torch.compiler.is_compiling() and _linear_op is not None
-            if _linear_op is None and torch.compiler.is_compiling():
+            if _linear_op is None and is_compiling:
                 warn_if_compile_disabled()
             if use_compiled_op:
                 # Process groups cross the op boundary separately from quantizers.
@@ -2594,7 +2600,9 @@ class Linear(TransformerEngineBaseModule):
                     fwd_args.bias_list = []
 
             if use_compiled_op:
-                check_gemm_dims(inp.shape, weight_shape, self.fp8)
+                check_gemm_dims(
+                    inp.shape, weight_shape if weight_shape is not None else weight.shape, self.fp8
+                )
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
                 out, new_weight_workspace = _linear_eager(
