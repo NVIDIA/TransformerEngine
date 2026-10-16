@@ -216,6 +216,61 @@ backend-selection overview.
    :Default: ``1``
    :Description: Enable or disable FlashAttention 4 (the ``flash-attn-4`` package) for DotProductAttention, without affecting FlashAttention 2 or 3. When set to ``0``, FlashAttention 4 will not be used even if it is installed.
 
+
+.. envvar:: NVTE_FUSED_ATTN_FROST
+
+   :Default: ``0``
+   :Values: ``0``, ``1``, ``2``
+   :Description: Experimental cuDNN OSS (FROST) backward provider for fused
+                 attention on SM100. ``1`` attempts the OSS provider and retains
+                 the cuDNN backend for unsupported declarations. ``2`` requires
+                 the OSS provider and reports an error instead of falling back;
+                 use it to verify benchmark routing. Forward remains cuDNN.
+                 Requires a TE build with ``NVTE_WITH_CUTEDSL=1``
+                 (CMake: ``-DNVTE_WITH_CUTEDSL=ON``),
+                 ``NVTE_ENABLE_CUTEDSL_BACKEND=1``,
+                 ``CUDNN_FRONTEND_ENABLE_FROST_ENGINES=1``, CuTeDSL 4.8 or newer
+                 with its CUDA 13 compiler flavor (``nvidia-cutlass-dsl[cu13]``),
+                 and a compatible ``nvidia-cudnn-frontend`` Python installation.
+
+   The initial contract covers BF16, separate Q/K/V, D128/D256, nondeterministic
+   backward, no dropout, no bias/sinks, and unmasked or top-left causal attention.
+   BSHD lengths must be multiples of 128. D128 also supports native packed THD
+   with device lengths and physical origins. D256 THD requires the separate
+   uniform-layout promise below. Other layouts, masks and dtypes retain their
+   existing route in mode ``1``. Kernel support does not establish performance
+   for every context-parallel communication type.
+
+   Python builds the cuDNN graph and registers its compiled native function on
+   the first call for a declaration and device. Subsequent C++ calls pass the
+   current pointers, stream and framework-owned workspace directly through
+   TVM-FFI. The complete backward chain retains all required scratch
+   initialization and gradient reductions. Warm up before CUDA graph capture.
+
+   This draft depends on the prepared-plan contract in cuDNN Frontend
+   `PR 1688 <https://github.com/NVIDIA/cudnn-frontend/pull/1688>`_
+   (development dependency revision ``333278627eb2ccffc5f47da26d733f87a2d0a8aa``).
+   That contract is not yet a stable public C++ export API. The adapter checks
+   its operand order and metadata before publishing a native entry; an ABI
+   mismatch reports an error. Install the compatible FE source in the same
+   Python environment as TE. An older wheel is not equivalent to this dependency.
+
+.. envvar:: NVTE_FUSED_ATTN_FROST_UNIFORM
+
+   :Default: ``0``
+   :Values: ``0``, ``1``
+   :Description: For D256 THD only, promise that every actual Q/KV sequence fills
+                 its declared maximum length and that physical token origins
+                 are the corresponding compact cumulative offsets. This allows
+                 an equivalent dense OSS backward declaration. TE checks the
+                 promise on the GPU on every invocation and converts the packed
+                 FP32 Stats into the dense layout on the same stream. A violated
+                 promise raises a device error; it is not an unchecked hint.
+                 Unequal or gapped THD must leave this option disabled.
+
+   D128 uses native THD and does not need this promise. The option does not alter
+   attention precision, masks, communication or the public fused-attention API.
+
 .. envvar:: NVTE_FUSED_ATTN
 
    :Type: ``int`` (0 or 1)
