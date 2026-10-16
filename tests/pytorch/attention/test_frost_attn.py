@@ -38,9 +38,12 @@ def frost_enabled(monkeypatch):
     setter(int(os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0"))
 
 
-def _case(dim, thd, unequal, causal, seed=31, bottom_right=False):
+def _case(dim, thd, unequal, causal, seed=31, bottom_right=False, kv_length=None):
     generator = torch.Generator(device="cpu").manual_seed(seed)
     q_lengths, k_lengths = ((129, 63), (193, 97)) if unequal else ((128, 128), (256, 256))
+    if kv_length is not None:
+        assert not unequal
+        k_lengths = (kv_length, kv_length)
     heads, kv_heads = 4, 1
     inputs, expected = [], []
     for sq, sk in zip(q_lengths, k_lengths):
@@ -71,7 +74,7 @@ def _case(dim, thd, unequal, causal, seed=31, bottom_right=False):
     return q, k, v, do, prefixes, reference, max(q_lengths), max(k_lengths)
 
 
-def _calls(case, dim, thd, causal, bottom_right=False):
+def _calls(case, dim, thd, causal, bottom_right=False, origins=None):
     from transformer_engine.pytorch.cpp_extensions.fused_attn import (
         FusedAttnBackend,
         fused_attn_fwd,
@@ -96,8 +99,8 @@ def _calls(case, dim, thd, causal, bottom_right=False):
         v=v,
         fake_dtype=torch.bfloat16,
         fused_attention_backend=FusedAttnBackend.F16_arbitrary_seqlen,
-        cu_seqlens_q_padded=cu_q,
-        cu_seqlens_kv_padded=cu_kv,
+        cu_seqlens_q_padded=cu_q if origins is None else origins[0],
+        cu_seqlens_kv_padded=cu_kv if origins is None else origins[1],
         attn_scale=dim**-0.5,
         qkv_layout="_".join([fmt] * 3),
         o_format=fmt,
@@ -218,3 +221,89 @@ def test_frost_d128_bottom_right_fallback(frost_enabled, monkeypatch):
     monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", "2")
     with pytest.raises(RuntimeError, match="Requested cuDNN OSS backward unavailable"):
         backward()
+
+
+def _pitched_case(cp, sk, seed=31):
+    """Full THD buffers with the physical origins of a causal AllGather step."""
+    case = _case(256, True, False, True, seed, bottom_right=True, kv_length=sk)
+    q, k, v, do, prefixes, reference, sq, _ = case
+    pq, pk = 2 * sq, 2 * cp * sq
+    origin = sq if sk > pk // 2 else 0
+
+    def expand(value, kv, fill):
+        pitch, length, start = (pk, sk, 0) if kv else (pq, sq, origin)
+        heads, dim = value.shape[1:]
+        full = torch.full((2, pitch, heads, dim), fill, device=value.device, dtype=value.dtype)
+        full[:, start : start + length].copy_(value.view(2, length, heads, dim))
+        return full.view(2 * pitch, heads, dim)
+
+    q, k, v, do = [expand(value, i in (1, 2), 11) for i, value in enumerate((q, k, v, do))]
+    reference = tuple(expand(value, i != 0, 0) for i, value in enumerate(reference))
+    origins = (
+        torch.tensor([origin, pq + origin, 2 * pq], device="cuda", dtype=torch.int32),
+        torch.tensor([0, pk, 2 * pk], device="cuda", dtype=torch.int32),
+    )
+    return (q, k, v, do, prefixes, reference, sq, sk), origins
+
+
+@pytest.mark.parametrize(
+    "cp,chunk", [(cp, chunk) for cp in (2, 4, 8) for chunk in range(1, 2 * cp + 1)]
+)
+def test_frost_d256_pitched_allgather(frost_enabled, monkeypatch, cp, chunk):
+    """Every rank/step geometry, including the zero gradients in physical holes."""
+    del frost_enabled
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST_ALLGATHER", "1")
+    for seed in (31, 47):
+        case, origins = _pitched_case(cp, chunk * 128, seed)
+        backward, reference = _calls(case, 256, True, True, True, origins)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            result = backward()
+        torch.cuda.current_stream().wait_stream(stream)
+        _check(result, reference)
+
+
+def test_frost_d256_pitched_opt_in(frost_enabled, monkeypatch):
+    """The extra layout contract requires its own opt-in and preserves fallback."""
+    del frost_enabled
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST_ALLGATHER", "0")
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", "1")
+    case, origins = _pitched_case(2, 384)
+    backward, reference = _calls(case, 256, True, True, True, origins)
+    _check(backward(), reference)
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", "2")
+    with pytest.raises(RuntimeError, match="Requested cuDNN OSS backward unavailable"):
+        backward()
+
+
+@pytest.mark.parametrize("sk", [128, 384])
+def test_frost_d256_pitched_replay(frost_enabled, monkeypatch, sk):
+    """Graph replay reuses native dispatch, preserving physical origins and zero holes."""
+    del frost_enabled
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST_ALLGATHER", "1")
+    case, origins = _pitched_case(2, sk)
+    backward, reference = _calls(case, 256, True, True, True, origins)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        _ = backward()
+    torch.cuda.current_stream().wait_stream(stream)
+    import tvm_ffi
+
+    def unexpected_python(*args, **kwargs):
+        raise AssertionError("Steady-state backward re-entered Python preparation")
+
+    original = tvm_ffi.get_global_func("get_frost_attention_backward")
+    tvm_ffi.register_global_func("get_frost_attention_backward", unexpected_python, override=True)
+    try:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            result = backward()
+        for _ in range(3):
+            for value in result:
+                value.fill_(float("nan"))
+            graph.replay()
+            _check(result, reference)
+    finally:
+        tvm_ffi.register_global_func("get_frost_attention_backward", original, override=True)

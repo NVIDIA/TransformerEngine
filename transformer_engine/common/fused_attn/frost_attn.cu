@@ -38,6 +38,31 @@ struct Plan {
   std::vector<Operand> operands;
 };
 
+struct UniformLayout {
+  size_t q_pitch;
+  size_t kv_pitch;
+  size_t q_origin;
+};
+
+bool uniform_layout(const FusedAttnConfig &c, UniformLayout *layout) {
+  if (!getenv<bool>("NVTE_FUSED_ATTN_FROST_UNIFORM")) return false;
+  *layout = {c.max_seqlen_q, c.max_seqlen_kv, 0};
+  if (c.num_tokens_q == c.batch_size * c.max_seqlen_q &&
+      c.num_tokens_kv == c.batch_size * c.max_seqlen_kv)
+    return true;
+  if (!getenv<bool>("NVTE_FUSED_ATTN_FROST_ALLGATHER") || !c.is_causal_bottom_right ||
+      c.max_seqlen_q % 128 != 0 || c.num_tokens_kv % c.batch_size != 0)
+    return false;
+  const size_t pq = 2 * c.max_seqlen_q;
+  const size_t pk = c.num_tokens_kv / c.batch_size;
+  const size_t cp = pk / pq;
+  if ((cp != 2 && cp != 4 && cp != 8) || pk % pq != 0 || c.num_tokens_q != c.batch_size * pq ||
+      c.max_seqlen_kv > pk || c.max_seqlen_kv % c.max_seqlen_q != 0)
+    return false;
+  *layout = {pq, pk, c.max_seqlen_kv > pk / 2 ? c.max_seqlen_q : 0};
+  return true;
+}
+
 bool eligible(const FusedAttnConfig &c) {
   const bool causal = c.is_causal || c.is_causal_bottom_right;
   if (cuda::sm_arch(cuda::current_device()) != 100 || c.deterministic || !c.is_training ||
@@ -65,9 +90,8 @@ bool eligible(const FusedAttnConfig &c) {
   if (c.head_dim_qk == 128) return true;
   // D256's current OSS engine declines ragged attention. This separate promise
   // enables an equivalent dense declaration; validate its values on EVERY call.
-  return getenv<bool>("NVTE_FUSED_ATTN_FROST_UNIFORM") &&
-         c.num_tokens_q == c.batch_size * c.max_seqlen_q &&
-         c.num_tokens_kv == c.batch_size * c.max_seqlen_kv;
+  UniformLayout layout;
+  return uniform_layout(c, &layout);
 }
 
 const Plan *get_plan(const FusedAttnConfig &c, cudaStream_t stream) {
@@ -90,6 +114,10 @@ const Plan *get_plan(const FusedAttnConfig &c, cudaStream_t stream) {
   if (!prepare) return nullptr;
   const std::string key = "transformer_engine.frost.backward." + std::to_string(serial++);
   const bool thd = c.is_ragged_q && c.head_dim_qk == 128;
+  UniformLayout layout{0, 0, 0};
+  if (c.is_ragged_q && c.head_dim_qk == 256) {
+    NVTE_CHECK(uniform_layout(c, &layout), "Invalid cuDNN OSS uniform layout");
+  }
   // Never hold a C++ cache lock while entering Python: another Python thread
   // might hold the GIL and be waiting for that lock.
   auto result = (*prepare)(
@@ -98,7 +126,8 @@ const Plan *get_plan(const FusedAttnConfig &c, cudaStream_t stream) {
       static_cast<int64_t>(c.max_seqlen_q), static_cast<int64_t>(c.max_seqlen_kv),
       static_cast<int64_t>(c.head_dim_qk), static_cast<int64_t>(c.num_tokens_q),
       static_cast<int64_t>(c.num_tokens_kv), thd, c.is_causal || c.is_causal_bottom_right,
-      static_cast<double>(c.attn_scale), cuda::current_device(), c.bottom_right_diagonal);
+      static_cast<double>(c.attn_scale), cuda::current_device(), c.bottom_right_diagonal,
+      static_cast<int64_t>(layout.q_pitch), static_cast<int64_t>(layout.kv_pitch));
   // A bounded scalar string keeps the optional bridge free of TVM object-type
   // registration symbols, so loading TE with the DSL backend disabled still works.
   auto encoded = result.try_cast<tvm::ffi::String>();
@@ -146,22 +175,23 @@ bool overlaps(uintptr_t a, size_t a_bytes, uintptr_t b, size_t b_bytes) {
 
 __global__ void validate_uniform(const int32_t *cu_q, const int32_t *cu_kv,
                                  const int32_t *origins_q, const int32_t *origins_kv, int64_t batch,
-                                 int64_t sq, int64_t sk) {
+                                 int64_t sq, int64_t sk, int64_t pq, int64_t pk, int64_t origin) {
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (i <= batch && (cu_q[i] != i * sq || cu_kv[i] != i * sk || origins_q[i] != i * sq ||
-                     origins_kv[i] != i * sk)) {
+  if (i <= batch &&
+      (cu_q[i] != i * sq || cu_kv[i] != i * sk ||
+       origins_q[i] != i * pq + (i < batch ? origin : 0) || origins_kv[i] != i * pk)) {
     printf("NVTE_FUSED_ATTN_FROST_UNIFORM: invalid sequence/offset at %d\n", static_cast<int>(i));
     asm volatile("trap;");
   }
 }
 
 __global__ void unpack_stats(const float *packed, float *dense, int64_t size, int64_t heads,
-                             int64_t sequence) {
+                             int64_t sequence, int64_t pitch, int64_t origin) {
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < size) {
     const int64_t s = i % sequence, h = (i / sequence) % heads;
     const int64_t b = i / (sequence * heads);
-    dense[i] = packed[(b * sequence + s) * heads + h];
+    dense[i] = packed[(b * pitch + origin + s) * heads + h];
   }
 }
 
@@ -185,6 +215,10 @@ bool frost_attention_backward(const FusedAttnConfig &cfg, const FrostPointers &p
   NVTE_CHECK(cache_cfg.device_id == cuda::current_device(),
              "cuDNN OSS plan belongs to another device");
   const bool uniform = cfg.is_ragged_q && cfg.head_dim_qk == 256;
+  UniformLayout layout{0, 0, 0};
+  if (uniform) {
+    NVTE_CHECK(uniform_layout(cfg, &layout), "Invalid cuDNN OSS uniform layout");
+  }
   const size_t stats_bytes =
       uniform ? cfg.batch_size * cfg.num_attn_heads * cfg.max_seqlen_q * 4 : 0;
   NVTE_CHECK(plan->workspace_bytes <= SIZE_MAX - 127 - stats_bytes, "cuDNN OSS workspace overflow");
@@ -198,19 +232,29 @@ bool frost_attention_backward(const FusedAttnConfig &cfg, const FrostPointers &p
   *workspace_size = required;
   NVTE_CHECK(reinterpret_cast<uintptr_t>(workspace) % 128 == 0,
              "cuDNN OSS workspace must be 128-byte aligned");
+  // Validate the full declared physical buffers, including holes, before any
+  // launch or pointer adjustment. Packed Stats is larger than the dense scratch.
+  auto bound_bytes = [&](const Operand &op) -> size_t {
+    if (!uniform || op.role < 0 || op.role > 8) return op.bytes;
+    if (op.role == 5) return cfg.num_tokens_q * cfg.num_attn_heads * sizeof(float);
+    const bool kv = op.role == 1 || op.role == 2 || op.role == 7 || op.role == 8;
+    return (kv ? cfg.num_tokens_kv * cfg.num_gqa_groups : cfg.num_tokens_q * cfg.num_attn_heads) *
+           cfg.head_dim_qk * 2;
+  };
   // Validate caller pointers before any launch or Stats conversion.
   for (const auto &op : plan->operands) {
     if (op.role < 0) continue;
     const auto address = reinterpret_cast<uintptr_t>(pointers[op.role]);
     NVTE_CHECK(address != 0 && address % op.alignment == 0,
                "cuDNN OSS operand is null or misaligned, role=", op.role);
-    NVTE_CHECK(!overlaps(address, op.bytes, reinterpret_cast<uintptr_t>(workspace), required),
-               "cuDNN OSS operand overlaps workspace");
+    NVTE_CHECK(
+        !overlaps(address, bound_bytes(op), reinterpret_cast<uintptr_t>(workspace), required),
+        "cuDNN OSS operand overlaps workspace");
     if (op.role >= 6 && op.role <= 8) {
       for (const auto &other : plan->operands) {
         if (other.role < 0 || other.role == op.role) continue;
-        NVTE_CHECK(!overlaps(address, op.bytes, reinterpret_cast<uintptr_t>(pointers[other.role]),
-                             other.bytes),
+        NVTE_CHECK(!overlaps(address, bound_bytes(op),
+                             reinterpret_cast<uintptr_t>(pointers[other.role]), bound_bytes(other)),
                    "cuDNN OSS gradient aliases an operand");
       }
     }
@@ -228,7 +272,7 @@ bool frost_attention_backward(const FusedAttnConfig &cfg, const FrostPointers &p
       for (const auto &op : plan->operands) {
         if (op.role >= 6 && op.role <= 8) {
           NVTE_CHECK(!overlaps(address, metadata_bytes,
-                               reinterpret_cast<uintptr_t>(pointers[op.role]), op.bytes),
+                               reinterpret_cast<uintptr_t>(pointers[op.role]), bound_bytes(op)),
                      "cuDNN OSS gradient aliases THD metadata");
         }
       }
@@ -236,13 +280,18 @@ bool frost_attention_backward(const FusedAttnConfig &cfg, const FrostPointers &p
     validate_uniform<<<(cfg.batch_size + 256) / 256, 256, 0, stream>>>(
         static_cast<const int32_t *>(pointers[9]), static_cast<const int32_t *>(pointers[10]),
         static_cast<const int32_t *>(pointers[11]), static_cast<const int32_t *>(pointers[12]),
-        cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv);
+        cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, layout.q_pitch, layout.kv_pitch,
+        layout.q_origin);
     NVTE_CHECK_CUDA(cudaGetLastError());
     actual[5] = static_cast<char *>(workspace) + kernel_bytes;
     unpack_stats<<<(stats_bytes / 4 + 255) / 256, 256, 0, stream>>>(
         static_cast<const float *>(pointers[5]), static_cast<float *>(actual[5]), stats_bytes / 4,
-        cfg.num_attn_heads, cfg.max_seqlen_q);
+        cfg.num_attn_heads, cfg.max_seqlen_q, layout.q_pitch, layout.q_origin);
     NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+  if (uniform && layout.q_origin != 0) {
+    const size_t offset = layout.q_origin * cfg.num_attn_heads * cfg.head_dim_qk * 2;
+    for (int role : {0, 3, 4, 6}) actual[role] = static_cast<char *>(actual[role]) + offset;
   }
   std::array<tvm::ffi::AnyView, 64> frame;
   size_t cursor = 0;

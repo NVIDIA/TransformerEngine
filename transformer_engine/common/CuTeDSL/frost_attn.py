@@ -21,7 +21,7 @@ _POINTER_ROLES = _ROLES + ("seq_q", "seq_kv") + tuple("ragged_" + r for r in _OR
 _ENGINES = {128: 20609, 256: 20607}
 
 
-def _declarations(batch, heads, kv_heads, sq, sk, dim, tq, thd):
+def _declarations(batch, heads, kv_heads, sq, sk, dim, tq, thd, q_pitch=0, kv_pitch=0):
     """Logical BHSD declarations over TE's BSHD or packed token-major storage."""
     result = {}
     for role in _ROLES:
@@ -31,7 +31,8 @@ def _declarations(batch, heads, kv_heads, sq, sk, dim, tq, thd):
             shape = (batch, heads, sq, 1)
             stride = (tq * heads, 1, heads, 1) if thd else (heads * sq, sq, 1, 1)
         else:
-            shape, stride = (batch, h, s, dim), (s * h * dim, dim, h * dim, 1)
+            pitch = (kv_pitch if kv else q_pitch) or s
+            shape, stride = (batch, h, s, dim), (pitch * h * dim, dim, h * dim, 1)
         result[role] = (shape, stride)
     return result
 
@@ -79,7 +80,22 @@ def _native_metadata(spec, dim, thd, expected_prefix):
 
 
 def get_frost_attention_backward(
-    key, batch, heads, kv_heads, sq, sk, dim, tq, tk, thd, causal, scale, device, bottom_right=False
+    key,
+    batch,
+    heads,
+    kv_heads,
+    sq,
+    sk,
+    dim,
+    tq,
+    tk,
+    thd,
+    causal,
+    scale,
+    device,
+    bottom_right=False,
+    q_pitch=0,
+    kv_pitch=0,
 ):
     """Compile a graph declaration and register its native chain; allocate no data."""
     try:
@@ -104,6 +120,9 @@ def get_frost_attention_backward(
         return False
     if bottom_right and (dim != 256 or not causal):
         return False
+    if q_pitch or kv_pitch:
+        if thd or dim != 256 or q_pitch < sq or kv_pitch < sk:
+            return False
     from cutlass.base_dsl.version_info import CUDA_VERSION
 
     if CUDA_VERSION.major < 13:
@@ -117,7 +136,7 @@ def get_frost_attention_backward(
         intermediate_data_type=cudnn.data_type.FLOAT,
         compute_data_type=cudnn.data_type.FLOAT,
     )
-    declarations = _declarations(batch, heads, kv_heads, sq, sk, dim, tq, thd)
+    declarations = _declarations(batch, heads, kv_heads, sq, sk, dim, tq, thd, q_pitch, kv_pitch)
     refs = {}
 
     def attach(role, tensor):

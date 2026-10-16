@@ -257,18 +257,37 @@ backend-selection overview.
    mismatch reports an error. Install the compatible FE source in the same
    Python environment as TE. An older wheel is not equivalent to this dependency.
 
+.. envvar:: NVTE_FUSED_ATTN_FROST_ALLGATHER
+
+   :Default: ``0``
+   :Values: ``0``, ``1``
+   :Description: Experimental D256 BF16 THD backward adaptation for causal
+                 AllGather with equal-length sequences and CP sizes 2, 4 or 8.
+                 Requires ``NVTE_FUSED_ATTN_FROST_UNIFORM=1`` and a cuDNN OSS
+                 D256 engine with `FE PR 1690
+                 <https://github.com/NVIDIA/cudnn-frontend/pull/1690>`_. The graph
+                 retains full Q/K/V buffers and their batch pitch; Q/O/dO/dQ
+                 pointers select the current half-sequence, and packed Stats
+                 are read at the corresponding physical origin. Sequence
+                 lengths and origins are validated on the GPU on every call.
+                 This adds no Q/K/V layout-copy kernel. Existing THD gradient
+                 initialization remains necessary for unused physical rows.
+                 Other gapped or unequal THD layouts remain unsupported.
+
 .. envvar:: NVTE_FUSED_ATTN_FROST_UNIFORM
 
    :Default: ``0``
    :Values: ``0``, ``1``
    :Description: For D256 THD only, promise that every actual Q/KV sequence fills
                  its declared maximum length and that physical token origins
-                 are the corresponding compact cumulative offsets. This allows
+                 are the corresponding compact cumulative offsets (or the
+                 supported per-step pitches and origins when
+                 ``NVTE_FUSED_ATTN_FROST_ALLGATHER=1``). This allows
                  an equivalent dense OSS backward declaration. TE checks the
                  promise on the GPU on every invocation and converts the packed
                  FP32 Stats into the dense layout on the same stream. A violated
                  promise raises a device error; it is not an unchecked hint.
-                 Unequal or gapped THD must leave this option disabled.
+                 Unequal THD and other gapped layouts must leave this option disabled.
 
    D128 uses native THD and does not need this promise. The option does not alter
    attention precision, masks, communication or the public fused-attention API.
