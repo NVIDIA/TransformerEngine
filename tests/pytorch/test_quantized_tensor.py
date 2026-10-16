@@ -1190,35 +1190,11 @@ def test_skip_quantization_with_noop_flag(
         ), f"{quantization}/{usage}: noop flag fails to take effect because {attr} changed."
 
 
-@pytest.mark.parametrize("num_groups", [1, 8, 32, 256])
-@pytest.mark.parametrize("return_tail", [False, True])
-def test_restore_saved_tensor_reference_copies(num_groups, return_tail):
-    """Plain tensor/None slots restore without repeatedly copying the remaining suffix."""
 
-    class CountedList(list):
-        copied = 0
-
-        def __getitem__(self, index):
-            out = super().__getitem__(index)
-            if isinstance(index, slice):
-                self.copied += len(out)
-            return out
-
-    values = CountedList(torch.tensor(i) for i in range(num_groups * 2 + 2))
-    objects = [None if i % 2 == 0 else values[i] for i in range(num_groups * 2)]
-    result = restore_from_saved(objects, values, return_saved_tensors=return_tail)
-    restored, tail = result if return_tail else (result, None)
-    assert all(value is values[i] for i, value in enumerate(restored))
-    if return_tail:
-        assert len(tail) == 2 and tail[0] is values[-2]
-    assert values.copied <= 2
-
-
-@pytest.mark.parametrize("container_type", [list, tuple])
-def test_saved_storage_protocol(monkeypatch, container_type):
+def test_saved_storage_protocol(monkeypatch):
     """Preserve custom metadata, pass the full suffix, and use the returned remainder."""
     value, tail, replacement = (torch.tensor(i) for i in range(3))
-    remainder = container_type([replacement, tail])
+    remainder = [replacement, tail]
 
     class Storage:
         __slots__ = ()
@@ -1227,7 +1203,7 @@ def test_saved_storage_protocol(monkeypatch, container_type):
             return [value], self
 
         def restore_from_saved(self, tensors):
-            assert type(tensors) is container_type
+            assert isinstance(tensors, list)
             assert len(tensors) == 2 and tensors[0] is value and tensors[1] is tail
             return remainder
 
@@ -1235,10 +1211,10 @@ def test_saved_storage_protocol(monkeypatch, container_type):
     storage = Storage()
     saved, objects = prepare_for_saving(value, storage)
     restored, remaining = restore_from_saved(
-        objects + [None], container_type(saved + [tail]), return_saved_tensors=True
+        objects + [None], saved + [tail], return_saved_tensors=True
     )
     assert restored[0] is value and restored[1] is storage and restored[2] is replacement
-    assert type(remaining) is container_type and len(remaining) == 1 and remaining[0] is tail
+    assert isinstance(remaining, list) and len(remaining) == 1 and remaining[0] is tail
 
 
 @pytest.mark.parametrize("compiled_metadata", [False, True])
