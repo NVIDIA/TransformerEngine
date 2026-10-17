@@ -2227,13 +2227,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
             saved_grouped_fc2_x = None if recompute_srelu_fc2_x else grouped_fc2_x
 
-            # MXFP8 wgrad only needs columnwise tiles. NVFP4 generic GEMM fallbacks
-            # need the full grouped tensor state, including rowwise data and amax.
-            if not use_nvfp4:
-                for grouped_fc_x in (saved_fc1_x, saved_grouped_fc2_x):
-                    if isinstance(grouped_fc_x, (GroupedTensor, GroupedTensorStorage)):
-                        grouped_fc_x.rowwise_data = None
-                        grouped_fc_x.scale_inv = None
+            # Every wgrad path reads only the columnwise tiles of the saved inputs: the cuDNN
+            # grouped wgrad kernel, the single-group dense GEMM (general_gemm with the NT layout
+            # unwraps both operands columnwise) and the generic grouped-GEMM fallback (NVFP4
+            # forces a TN layout by taking the columnwise data for a non-transposed A and a
+            # transposed B, which is the wgrad case). Drop the rowwise data and scales for MXFP8
+            # and NVFP4 alike; the amax tensors are kept.
+            for grouped_fc_x in (saved_fc1_x, saved_grouped_fc2_x):
+                if isinstance(grouped_fc_x, (GroupedTensor, GroupedTensorStorage)):
+                    grouped_fc_x.rowwise_data = None
+                    grouped_fc_x.scale_inv = None
 
             if cpu_offloading:
                 activation_tensors = [
