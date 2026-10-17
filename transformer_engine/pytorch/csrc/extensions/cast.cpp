@@ -777,12 +777,16 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   // Data tensors are stored as flat 1D buffers; use the quantizer's dtype
   // (e.g. kFloat8E4M3) rather than the raw tensor scalar_type (uint8).
   const NVTEScalingMode scaling_mode = quantizer->get_scaling_mode();
+  const bool is_nvfp4 = (scaling_mode == NVTE_NVFP4_1D_SCALING);
   py::object py_scale_dtype = input.attr("scale_inv_dtype");
   const std::optional<DType> scale_dtype = py_scale_dtype.cast<std::optional<DType>>();
   auto input_cpp = GroupedTensorWrapper(num_tensors, logical_shape, scaling_mode);
+  // FP4 data is stored as packed bytes, two elements per byte.
+  const size_t elems_per_byte = is_nvfp4 ? 2 : 1;
   if (rowwise_data.has_value()) {
-    input_cpp.set_rowwise_data(rowwise_data->data_ptr(), quantizer->dtype,
-                               std::vector<size_t>{static_cast<size_t>(rowwise_data->numel())});
+    input_cpp.set_rowwise_data(
+        rowwise_data->data_ptr(), quantizer->dtype,
+        std::vector<size_t>{static_cast<size_t>(rowwise_data->numel()) * elems_per_byte});
     if (rowwise_scale_inv.has_value()) {
       NVTE_CHECK(scale_dtype, "Could not deduce scale dtype");
       input_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), *scale_dtype,
@@ -792,7 +796,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   if (columnwise_data.has_value()) {
     input_cpp.set_columnwise_data(
         columnwise_data->data_ptr(), quantizer->dtype,
-        std::vector<size_t>{static_cast<size_t>(columnwise_data->numel())});
+        std::vector<size_t>{static_cast<size_t>(columnwise_data->numel()) * elems_per_byte});
     if (columnwise_scale_inv.has_value()) {
       NVTE_CHECK(scale_dtype, "Could not deduce scale dtype");
       input_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), *scale_dtype,
@@ -808,6 +812,22 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   if (tensor_offsets.has_value()) {
     input_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
                                  getTensorShape(*tensor_offsets));
+  }
+  if (is_nvfp4) {
+    // The C++ grouped tensor carries neither the row-scaled flag nor the E4M3
+    // max, so reject those variants here.
+    const auto *nvfp4_quantizer = static_cast<const NVFP4Quantizer *>(quantizer.get());
+    NVTE_CHECK(!nvfp4_quantizer->row_scaled_nvfp4,
+               "group_dequantize: row-scaled NVFP4 is not supported.");
+    // Zero selects the scale dtype's maximum, which is 448 for E4M3.
+    NVTE_CHECK(nvfp4_quantizer->nvfp4_e4m3_max == 0 || nvfp4_quantizer->nvfp4_e4m3_max == 448,
+               "group_dequantize: NVFP4 requires E4M3 max 0 (default) or 448 (got ",
+               nvfp4_quantizer->nvfp4_e4m3_max, ").");
+    auto amax = get_optional_tensor("amax");
+    if (amax.has_value()) {
+      input_cpp.set_amax(amax->data_ptr(), DType::kFloat32, getTensorShape(*amax));
+    }
+    input_cpp.set_with_gemm_swizzled_scales(input.attr("_with_gemm_swizzled_scales").cast<bool>());
   }
 
   // Create output GroupedTensor using NoneQuantizer.
