@@ -4109,7 +4109,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # Keep the existing stream event and final reorder/reduce-scatter path.
         ag_first_dkv = (
             os.getenv("NVTE_CP_EXPERIMENTAL_AG_FIRST_DKV", "0") == "1"
-            and cp_size == 4
+            and cp_size in (4, 8)
             and ctx.qkv_format == "thd"
             and not ctx.fp8
             and ctx.fwd_nominal_dtype == torch.bfloat16

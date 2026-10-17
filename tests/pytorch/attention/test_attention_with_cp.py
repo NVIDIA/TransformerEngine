@@ -844,7 +844,7 @@ first_dkv_model_config = ModelConfig(2, 4096, 32, 256, num_gqa_groups=4, attn_ma
     reason="The D256 AllGather accumulator test requires Blackwell server GPUs.",
 )
 @pytest.mark.parametrize("kernel_backend", ["FusedAttention", "FlashAttention"])
-@pytest.mark.parametrize("qkv_format,world_size", [("thd", 4), ("thd", 2), ("sbhd", 4)])
+@pytest.mark.parametrize("qkv_format,world_size", [("thd", 4), ("thd", 8), ("thd", 2), ("sbhd", 4)])
 @pytest.mark.parametrize("reuse_first_dkv", [False, True])
 def test_cp_allgather_first_dkv(
     cp_pool, monkeypatch, kernel_backend, qkv_format, world_size, reuse_first_dkv
@@ -852,8 +852,9 @@ def test_cp_allgather_first_dkv(
     """Check complete CP gradients, including padded THD and ineligible fallbacks.
 
     The existing worker compares every valid output/gradient with non-CP attention.
-    Its seeded inputs include unequal THD lengths and GQA8. CP2 and SBHD exercise
-    the original allocation path even when the experimental flag is enabled.
+    Its seeded inputs include unequal THD lengths and GQA8. THD CP4 and CP8
+    exercise accumulator reuse; CP2 and SBHD retain the original allocation
+    path even when the experimental flag is enabled.
     Each case uses a fresh worker so an environment toggle cannot reuse a worker
     started with a different value, or leak the opt-in into subsequent cases.
     """
