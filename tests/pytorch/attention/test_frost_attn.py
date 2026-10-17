@@ -43,9 +43,12 @@ def frost_enabled(monkeypatch):
     setter(int(os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0"))
 
 
-def _case(dim, thd, unequal, causal, seed=31, bottom_right=False, kv_length=None):
+def _case(dim, thd, unequal, causal, seed=31, bottom_right=False, kv_length=None, q_length=None):
     generator = torch.Generator(device="cpu").manual_seed(seed)
     q_lengths, k_lengths = ((129, 63), (193, 97)) if unequal else ((128, 128), (256, 256))
+    if q_length is not None:
+        assert not unequal
+        q_lengths = (q_length, q_length)
     if kv_length is not None:
         assert not unequal
         k_lengths = (kv_length, kv_length)
@@ -65,7 +68,10 @@ def _case(dim, thd, unequal, causal, seed=31, bottom_right=False, kv_length=None
                 > torch.arange(sq)[:, None] + (sk - sq if bottom_right else 0),
                 -torch.inf,
             )
-        result = scores.softmax(-1) @ vr.repeat_interleave(heads // kv_heads, 0)
+        # Bottom-right Q > KV has keyless leading rows: their output/gradient is zero.
+        keyless = torch.isneginf(scores).all(dim=-1, keepdim=True)
+        probabilities = scores.masked_fill(keyless, 0).softmax(-1).masked_fill(keyless, 0)
+        result = probabilities @ vr.repeat_interleave(heads // kv_heads, 0)
         grads = torch.autograd.grad(result, (qr, kr, vr), do.transpose(0, 1).double())
         inputs.append((q, k, v, do))
         expected.append(tuple(x.transpose(0, 1).detach() for x in grads))
@@ -214,6 +220,24 @@ def test_frost_d256_bottom_right(frost_enabled, thd):
                 result = backward()
             torch.cuda.current_stream().wait_stream(stream)
             _check(result, reference)
+
+
+def test_frost_d256_bottom_right_q_longer_fallback(frost_enabled, monkeypatch):
+    """Q > KV declines the dense OSS declaration and retains correct THD fallback."""
+    del frost_enabled
+    case = _case(256, True, False, True, bottom_right=True, kv_length=128, q_length=256)
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", "1")
+    backward, reference = _calls(case, 256, True, True, True)
+    for mode in (1, 2, 1):
+        monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", str(mode))
+        if mode == 2:
+            with pytest.raises(RuntimeError, match="Requested cuDNN OSS backward unavailable"):
+                backward()
+        else:
+            result = backward()
+            _check(result, reference)
+            dq = result[0].view(2, 256, 4, 256)
+            assert torch.count_nonzero(dq[:, :128]).item() == 0
 
 
 def test_frost_d128_bottom_right_fallback(frost_enabled, monkeypatch):

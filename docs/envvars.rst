@@ -235,7 +235,10 @@ backend-selection overview.
 
    The initial contract covers BF16, separate Q/K/V, D128/D256, nondeterministic
    backward, no dropout, no bias/sinks, and unmasked or top-left causal attention.
-   D256 also supports bottom-right causal attention, including rectangular calls.
+   D256 also supports bottom-right causal attention when ``max_seqlen_q <=
+   max_seqlen_kv``. Q-longer-than-KV uniform THD declarations use the backend
+   in mode ``1`` and report unsupported OSS backward in mode ``2``. Dense BSHD
+   Q-longer-than-KV calls are rejected by the existing forward path.
    D128 bottom-right declarations retain the backend fallback (or fail in strict mode).
    BSHD lengths must be multiples of 128. D128 also supports native packed THD
    with device lengths and physical origins. D256 THD requires the separate
@@ -256,6 +259,15 @@ backend-selection overview.
    its operand order and metadata before publishing a native entry; an ABI
    mismatch reports an error. Install the compatible FE source in the same
    Python environment as TE. An older wheel is not equivalent to this dependency.
+
+   A dedicated SM100 regression target is available as
+   ``TE_PATH=/path/to/TransformerEngine XML_LOG_DIR=/logs bash
+   qa/L1_pytorch_frost_unittest/test.sh``. Provision the compatible FE source,
+   CUDA 13 CuTeDSL dependencies, pytest, and a TE build with the bridge enabled
+   before invoking it. The target fails for missing capabilities, skipped tests,
+   or missing isolated metadata-guard cases. Qualified L0 lanes can also set
+   ``NVTE_FROST_TEST_REQUIRED=1`` to invoke it from the PyTorch L0 launcher;
+   ordinary L0 lanes do not acquire these experimental dependencies.
 
 .. envvar:: NVTE_FUSED_ATTN_FROST_ALLGATHER
 
