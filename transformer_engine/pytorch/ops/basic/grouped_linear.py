@@ -978,6 +978,7 @@ class GroupedLinear(BasicOperation):
                 if is_quantized_tensor(w):
                     # Honor the op's requirements without disabling existing parameter usages.
                     required_columnwise = True if columnwise_usage else None
+                    w.update_usage(rowwise_usage=True, columnwise_usage=required_columnwise)
                     if w._quantizer is not None:
                         w._quantizer.set_usage(rowwise=True, columnwise=required_columnwise)
                 else:
