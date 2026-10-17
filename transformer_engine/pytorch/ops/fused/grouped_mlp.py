@@ -382,6 +382,31 @@ def _group_quantize_with_amax_for_grouped_mlp(
     )
 
 
+def _quantize_unquantized_weights(
+    weights: Iterable[Any],
+    op: GroupedLinear,
+    *,
+    rowwise: bool,
+    columnwise: bool,
+) -> list:
+    """Quantize plain weights with the op's per-expert weight quantizers.
+
+    Quantized entries (native-quantized params, incl. native GTP shards gathered as quantized
+    tensors) pass through. A distributed (e.g. GTP) BF16 weight gathers as BF16 and must be
+    quantized with the layer's own quantizer, mirroring ``module/linear.py``'s handling of a
+    re-gathered BF16 distributed weight.
+    """
+    out = []
+    for idx, weight in enumerate(weights):
+        if is_quantized_tensor(weight):
+            out.append(weight)
+            continue
+        quantizer = op.get_quantizer("forward", 2 * idx + 1)
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        out.append(quantizer(weight))
+    return out
+
+
 def _nvfp4_amax(
     tensors: GroupedTensor | Iterable[NVFP4TensorStorage],
     *,
@@ -1482,17 +1507,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 )
         else:
             fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
-            quantized_fc1_weights = []
-            for idx, weight in enumerate(fc1_weights):
-                quantizer = fc1_op.get_quantizer("forward", 2 * idx + 1)
-                if not is_quantized_tensor(weight):
-                    quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                    quantized_fc1_weights.append(quantizer(weight))
-                else:
-                    quantized_fc1_weights.append(weight)
-            grouped_fc1_weight = quantized_fc1_weights
-        if fc1_is_dist:
-            grouped_fc1_weight = materialize_weight_for_forward(grouped_fc1_weight)
+            # Distributed weights gather first (native-quantized shards gather quantized, BF16
+            # shards gather as BF16); anything still unquantized is quantized here.
+            grouped_fc1_weight = _quantize_unquantized_weights(
+                materialize_weight_for_forward(fc1_weights) if fc1_is_dist else fc1_weights,
+                fc1_op,
+                rowwise=True,
+                columnwise=input_requires_grad,
+            )
 
         # Prepare FC2 grouped weight tensor for fused kernels.
         if fc2_op.single_grouped_weight:
@@ -1520,15 +1542,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 )
         else:
             fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
-            quantized_fc2_weights = []
-            for idx, weight in enumerate(fc2_weights):
-                quantizer = fc2_op.get_quantizer("forward", 2 * idx + 1)
-                if not is_quantized_tensor(weight):
-                    quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                    quantized_fc2_weights.append(quantizer(weight))
-                else:
-                    quantized_fc2_weights.append(weight)
-            grouped_fc2_weight = quantized_fc2_weights
+            # Distributed weights are gathered (and quantized if needed) after the FC1 kernel so
+            # the gather overlaps FC1 compute.
+            grouped_fc2_weight = (
+                fc2_weights
+                if fc2_is_dist
+                else _quantize_unquantized_weights(
+                    fc2_weights, fc2_op, rowwise=True, columnwise=input_requires_grad
+                )
+            )
 
         # Some wrapper-copy paths may drop grouped storage metadata; enforce defaults.
         if isinstance(grouped_fc1_weight, GroupedTensor) and not hasattr(
@@ -1857,7 +1879,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         activation_in = activation_in.view(in_shape[0], fc1_weight_shape[0])
 
         if fc2_is_dist:
-            grouped_fc2_weight = materialize_weight_for_forward(grouped_fc2_weight)
+            grouped_fc2_weight = _quantize_unquantized_weights(
+                materialize_weight_for_forward(grouped_fc2_weight),
+                fc2_op,
+                rowwise=True,
+                columnwise=input_requires_grad,
+            )
         if isinstance(grouped_fc2_weight, GroupedTensor) and not hasattr(
             grouped_fc2_weight, "_with_gemm_swizzled_scales"
         ):
@@ -2200,13 +2227,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
             saved_grouped_fc2_x = None if recompute_srelu_fc2_x else grouped_fc2_x
 
-            # MXFP8 wgrad only needs columnwise tiles. NVFP4 generic GEMM fallbacks
-            # need the full grouped tensor state, including rowwise data and amax.
-            if not use_nvfp4:
-                for grouped_fc_x in (saved_fc1_x, saved_grouped_fc2_x):
-                    if isinstance(grouped_fc_x, (GroupedTensor, GroupedTensorStorage)):
-                        grouped_fc_x.rowwise_data = None
-                        grouped_fc_x.scale_inv = None
+            # Every wgrad path reads only the columnwise tiles of the saved inputs: the cuDNN
+            # grouped wgrad kernel, the single-group dense GEMM (general_gemm with the NT layout
+            # unwraps both operands columnwise) and the generic grouped-GEMM fallback (NVFP4
+            # forces a TN layout by taking the columnwise data for a non-transposed A and a
+            # transposed B, which is the wgrad case). Drop the rowwise data and scales for MXFP8
+            # and NVFP4 alike; the amax tensors are kept.
+            for grouped_fc_x in (saved_fc1_x, saved_grouped_fc2_x):
+                if isinstance(grouped_fc_x, (GroupedTensor, GroupedTensorStorage)):
+                    grouped_fc_x.rowwise_data = None
+                    grouped_fc_x.scale_inv = None
 
             if cpu_offloading:
                 activation_tensors = [
@@ -2505,6 +2535,18 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             scales_tensor = scales_f32.reshape(-1, 1, 1)
             dscales_tensor = torch.zeros_like(scales_tensor)
 
+        # Distributed weight (e.g. GTP): re-gather before any use (the NVFP4 global scale below
+        # reads the weights). BF16 shards gather as BF16 and are quantized with the layer
+        # quantizer.
+        fc2_leader = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
+        if is_distributed_weight(fc2_leader):
+            grouped_fc2_weight = _quantize_unquantized_weights(
+                materialize_weight_for_backward(fc2_leader),
+                fc2_op,
+                rowwise=False,
+                columnwise=True,
+            )
+
         fc2_d_dtype = torch.bfloat16 if use_nvfp4 else torch.float8_e4m3fn
         if use_nvfp4:
             fc2_dy_global_scale = _nvfp4_global_scale(
@@ -2587,10 +2629,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
         if self._pass_srelu_tanh_params:
             fc2_dactivation_kwargs.update(tanh_clamp_scale=self._cudnn_tanh_clamp_scale)
-
-        fc2_leader = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
-        if is_distributed_weight(fc2_leader):
-            grouped_fc2_weight = materialize_weight_for_backward(fc2_leader)
 
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
@@ -2876,7 +2914,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
             fc1_leader = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
             if is_distributed_weight(fc1_leader):
-                grouped_fc1_weight = materialize_weight_for_backward(fc1_leader)
+                # BF16 GTP shards gather as BF16: quantize with the layer quantizer.
+                grouped_fc1_weight = _quantize_unquantized_weights(
+                    materialize_weight_for_backward(fc1_leader),
+                    fc1_op,
+                    rowwise=False,
+                    columnwise=True,
+                )
 
             fc1_dgrad_sf_override = _nvfp4_sf_dtype_override(fc1_grad_output_quantizer)
 
