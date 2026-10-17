@@ -21,7 +21,15 @@ _ORDER = tuple(
     "n_thd_units seq_q_lens_addr thd_q_lens_ptr thd_kv_lens_ptr thd_lens_form "
     "o_partial_ptr block_table_ptr block_table_v_ptr table_strides n_pages stream".split()
 )
-_POINTERS = dict(q_ptr=0, k_ptr=1, v_ptr=2, o_ptr=3, lse_ptr=4, thd_q_lens_ptr=5, thd_kv_lens_ptr=6)
+_POINTERS = {
+    "q_ptr": 0,
+    "k_ptr": 1,
+    "v_ptr": 2,
+    "o_ptr": 3,
+    "lse_ptr": 4,
+    "thd_q_lens_ptr": 5,
+    "thd_kv_lens_ptr": 6,
+}
 
 
 def get_frost_attention_forward_constant(key, index):
@@ -29,7 +37,9 @@ def get_frost_attention_forward_constant(key, index):
     return _OWNERS[key][1][index]
 
 
-def _export(graph, batch, heads, kv_heads, sq, sk, tq, tk, scale, device):
+def _export(graph, batch, heads, kv_heads, sq, _sk, tq, tk, scale, device):
+    # Keep the fail-closed prepared-contract checks explicit and short-circuiting.
+    # pylint: disable=too-many-boolean-expressions
     import tvm_ffi
 
     spec = graph._compiled_plans[graph._plan_index]._prepared.spec
@@ -83,7 +93,7 @@ def _export(graph, batch, heads, kv_heads, sq, sk, tq, tk, scale, device):
     args["n_thd_units"] = min(args["n_thd_units"], ((tq - 1) // spec.cga_tile_m + batch) * heads)
     workspace = int(graph.get_workspace_size())
     alignment = int(spec.workspace_alignment)
-    if not (0 <= spec.off_o_desc < spec.scratch_bytes <= workspace < 2**63):
+    if not 0 <= spec.off_o_desc < spec.scratch_bytes <= workspace < 2**63:
         raise RuntimeError("Invalid cuDNN OSS forward workspace contract")
     if alignment < 16 or alignment & (alignment - 1):
         raise RuntimeError("Invalid cuDNN OSS forward workspace alignment")
@@ -133,7 +143,7 @@ def get_frost_attention_forward(key, batch, heads, kv_heads, sq, sk, tq, tk, sca
     except (ImportError, PackageNotFoundError) as error:
         _LOG.warning("cuDNN OSS forward dependency unavailable: %s", error)
         return False
-    error, current = runtime.cudaGetDevice()
+    error, current = runtime.cudaGetDevice()  # pylint: disable=c-extension-no-member
     if int(error) != 0 or int(current) != device:
         raise RuntimeError("cuDNN OSS preparation must use the calling CUDA device")
     io = cudnn.data_type.BFLOAT16
