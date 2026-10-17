@@ -3477,7 +3477,16 @@ class TestGroupedMLPDeterminism:
             y.backward(dy)
             return probs.grad.detach().clone()
 
-        runs = [_run()]
+        # FE may accept the keyword while its configured kernel refuses determinism.
+        try:
+            runs = [_run()]
+        except NotImplementedError as exc:
+            if (
+                str(exc)
+                == "deterministic dprob is implemented only for the SM100 kernel without dbias"
+            ):
+                pytest.skip(str(exc))
+            raise
         # Without the fusion there is no cuDNN dprob and the comparison proves nothing.
         forward_ops = module._module_groups[0]._forward_ops
         assert len(forward_ops) == 1
