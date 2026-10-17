@@ -292,6 +292,26 @@ backend-selection overview.
    D128 uses native THD and does not need this promise. The option does not alter
    attention precision, masks, communication or the public fused-attention API.
 
+.. envvar:: NVTE_FUSED_ATTN_FROST_D128_NOZERO
+
+   :Default: ``0``
+   :Values: ``0``, ``1``
+   :Description: Omit the three PyTorch dQ/dK/dV output fills when the D128
+                 FROST backward chain overwrites every physical output row.
+                 Requires strict routing (``NVTE_FUSED_ATTN_FROST=2``), BF16,
+                 separate Q/K/V, grouped-query attention, and square compact
+                 equal-length THD with lengths divisible by 128. Native and
+                 fallback modes, rectangular shapes, and unequal layouts retain
+                 the existing initialization. Internal FROST scratch
+                 initialization and grouped-gradient reductions are unchanged.
+
+   Enabling this option promises that device sequence lengths and physical
+   origins match the compact declaration. TE checks that promise on the GPU
+   on every execution, including CUDA graph replay. Invalid metadata raises a
+   device error before output may be used. D128 retains its native THD graph;
+   this option does not require ``NVTE_FUSED_ATTN_FROST_UNIFORM`` or change
+   attention precision, masks, communication, or output allocation sizes.
+
 .. envvar:: NVTE_FUSED_ATTN
 
    :Type: ``int`` (0 or 1)

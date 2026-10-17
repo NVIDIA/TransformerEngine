@@ -19,6 +19,7 @@
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "frost_attn.h"
+#include "frost_output_policy.h"
 
 namespace transformer_engine {
 namespace fused_attn {
@@ -214,6 +215,10 @@ bool frost_attention_backward(const FusedAttnConfig &cfg, const FrostPointers &p
   }
   NVTE_CHECK(cache_cfg.device_id == cuda::current_device(),
              "cuDNN OSS plan belongs to another device");
+  const bool compact_d128 = frost_d128_compact_outputs(
+      cfg.qkv_layout, cfg.dqkv_layout, cfg.dqkv_dtype, cfg.head_dim_qk, cfg.head_dim_v,
+      cfg.batch_size, cfg.num_tokens_q, cfg.num_tokens_kv, cfg.max_seqlen_q, cfg.max_seqlen_kv,
+      cfg.num_attn_heads, cfg.num_gqa_groups);
   const bool uniform = cfg.is_ragged_q && cfg.head_dim_qk == 256;
   UniformLayout layout{0, 0, 0};
   if (uniform) {
@@ -258,6 +263,16 @@ bool frost_attention_backward(const FusedAttnConfig &cfg, const FrostPointers &p
                    "cuDNN OSS gradient aliases an operand");
       }
     }
+  }
+  // D128 keeps native THD Stats and descriptors. This guard proves that every
+  // physical output row is live; it does not lower THD to a dense engine.
+  if (compact_d128) {
+    validate_uniform<<<(cfg.batch_size + 256) / 256, 256, 0, stream>>>(
+        static_cast<const int32_t *>(pointers[9]), static_cast<const int32_t *>(pointers[10]),
+        static_cast<const int32_t *>(pointers[11]), static_cast<const int32_t *>(pointers[12]),
+        cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.max_seqlen_q, cfg.max_seqlen_kv,
+        0);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
   auto actual = pointers;
   if (uniform) {

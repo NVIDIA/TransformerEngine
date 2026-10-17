@@ -5,7 +5,11 @@
 """cuDNN OSS through the real TE common-library backward dispatcher."""
 
 import ctypes
+import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -34,6 +38,7 @@ def frost_enabled(monkeypatch):
     setter(1)
     monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", "2")
     monkeypatch.setenv("NVTE_FUSED_ATTN_FROST_UNIFORM", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST_D128_NOZERO", "0")
     yield
     setter(int(os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0"))
 
@@ -307,3 +312,164 @@ def test_frost_d256_pitched_replay(frost_enabled, monkeypatch, sk):
             _check(result, reference)
     finally:
         tvm_ffi.register_global_func("get_frost_attention_backward", original, override=True)
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_frost_d128_nozero_changed_inputs(frost_enabled, monkeypatch, causal):
+    """Changed inputs and fresh bindings agree with FP64 with either output policy."""
+    del frost_enabled
+    for seed in (31, 47, 61):
+        case = _case(128, True, False, causal, seed, kv_length=128)
+        backward, reference = _calls(case, 128, True, causal)
+        outputs = []
+        for flag in ("0", "1"):
+            monkeypatch.setenv("NVTE_FUSED_ATTN_FROST_D128_NOZERO", flag)
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                actual = backward()
+            torch.cuda.current_stream().wait_stream(stream)
+            _check(actual, reference)
+            outputs.append(actual)
+        for a, b in zip(*outputs):
+            torch.testing.assert_close(a, b, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_frost_d128_nozero_poisoned_graph(frost_enabled, monkeypatch, causal):
+    """The native chain overwrites every poisoned gradient without output fills."""
+    del frost_enabled
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST_D128_NOZERO", "1")
+    backward, reference = _calls(_case(128, True, False, causal, kv_length=128), 128, True, causal)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        _ = backward()
+    torch.cuda.current_stream().wait_stream(stream)
+    import tvm_ffi
+
+    def unexpected_python(*args, **kwargs):
+        raise AssertionError("Steady-state backward re-entered Python preparation")
+
+    original = tvm_ffi.get_global_func("get_frost_attention_backward")
+    tvm_ffi.register_global_func("get_frost_attention_backward", unexpected_python, override=True)
+    try:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            result = backward()
+        for _ in range(4):
+            for value in result:
+                value.fill_(float("nan"))
+            graph.replay()
+            _check(result, reference)
+    finally:
+        tvm_ffi.register_global_func("get_frost_attention_backward", original, override=True)
+
+
+@pytest.mark.parametrize(
+    "mode,flag,kv_length,unequal,expected",
+    [
+        (2, 0, 128, False, 3),
+        (2, 1, 128, False, 0),
+        (1, 1, 128, False, 3),
+        (0, 1, 128, False, 3),
+        (2, 1, 256, False, 3),
+        (2, 1, None, True, 3),
+    ],
+)
+def test_frost_d128_nozero_fill_calls(
+    frost_enabled, monkeypatch, mode, flag, kv_length, unequal, expected
+):
+    """Only strict compact square THD may omit fully overwritten output fills."""
+    del frost_enabled
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", str(mode))
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST_D128_NOZERO", str(flag))
+    case = _case(128, True, unequal, True, kv_length=kv_length)
+    backward, reference = _calls(case, 128, True, True)
+    _check(backward(), reference)
+    shapes = [list(t.shape) for t in case[:3]]
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU], record_shapes=True
+    ) as prof:
+        result = backward()
+    _check(result, reference)
+    fills = [
+        e.input_shapes
+        for e in prof.events()
+        if e.name == "aten::fill_" and e.input_shapes and e.input_shapes[0] in shapes
+    ]
+    assert len(fills) == expected, (mode, flag, kv_length, fills)
+    print("OUTPUT_FILL_CALLS", mode, flag, kv_length, len(fills), flush=True)
+
+
+def _run_invalid_compact_metadata(kind):
+    """Each intentional device trap runs in its own child process."""
+    from transformer_engine.common import (
+        _get_shared_object_file,
+        _load_tvm_ffi_library,
+        _register_cutedsl_backends,
+    )
+
+    assert _load_tvm_ffi_library() and _register_cutedsl_backends()
+    core = ctypes.CDLL(str(_get_shared_object_file("core")))
+    core.nvte_set_cutedsl_backend.argtypes = [ctypes.c_int]
+    core.nvte_set_cutedsl_backend.restype = None
+    core.nvte_set_cutedsl_backend(1)
+    os.environ["NVTE_FUSED_ATTN_FROST"] = "2"
+    os.environ["NVTE_FUSED_ATTN_FROST_D128_NOZERO"] = "1"
+    case = _case(128, True, False, True, kv_length=128)
+    origins = [x.clone() for x in case[4]]
+    backward, reference = _calls(case, 128, True, True, origins=origins)
+    _check(backward(), reference)
+    if kind == "graph_terminal":
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            _ = backward()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            _ = backward()
+        origins[1][-1] -= 1
+        print("EXPECT_DEVICE_GUARD_TRAP", kind, flush=True)
+        graph.replay()
+    else:
+        target = {
+            "q_length": case[4][0],
+            "kv_length": case[4][1],
+            "q_origin": origins[0],
+            "kv_origin": origins[1],
+        }[kind]
+        target[1] -= 1
+        print("EXPECT_DEVICE_GUARD_TRAP", kind, flush=True)
+        _ = backward()
+    torch.cuda.synchronize()
+    raise AssertionError("Invalid metadata escaped the per-execution GPU guard")
+
+
+@pytest.mark.parametrize(
+    "kind", ["q_length", "kv_length", "q_origin", "kv_origin", "graph_terminal"]
+)
+def test_frost_d128_nozero_metadata_guard(frost_enabled, kind):
+    """Invalid live metadata must fail before uninitialized output can be returned."""
+    del frost_enabled
+    command = [sys.executable]
+    if sys.flags.no_site:
+        command.append("-S")
+    # Retain the test interpreter's import paths, including isolated build roots.
+    # CUDA device traps run in a fresh process so the parent context stays usable.
+    code = (
+        "import json, runpy, sys; sys.path[:] = json.loads(sys.argv[1]); "
+        "runpy.run_path(sys.argv[2])['_run_invalid_compact_metadata'](sys.argv[3])"
+    )
+    result = subprocess.run(
+        command + ["-c", code, json.dumps(sys.path), str(Path(__file__).resolve()), kind],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=240,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "EXPECT_DEVICE_GUARD_TRAP " + kind in output, output
+    assert "NVTE_FUSED_ATTN_FROST_UNIFORM: invalid sequence/offset" in output, output
