@@ -699,6 +699,9 @@ std::vector<std::vector<size_t>> matrix_sizes = {
     {1, 16},
     {16, 48},
     {128, 128},
+    // This case will cover cast_rowwise's last row being partial case, in which
+    // the kernel will reshape the input tensor with last dim being 1024 so the last row
+    // is not a full row due to 993*512 % 1024 != 0
     {993, 512},
     {1024},
     {8, 32, 1024},

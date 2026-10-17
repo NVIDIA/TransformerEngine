@@ -59,7 +59,8 @@ MATRIX_SIZES = [
     (96, 128),
 ]
 # (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
-BLOCK_SIZES = [(1, 32), (32, 1), (32, 32)]
+ROW, COL, BOTH = (1, 32), (32, 1), (32, 32)
+BLOCK_SIZES = [ROW, COL, BOTH]
 
 # Every activation the CuTeDSL backend implements; "desc" is the name it goes by in the
 # config key (Activation in common/util/cutedsl_utils.h). Gated variants are absent because
@@ -250,31 +251,39 @@ def extract_quantized_output(out, rowwise, columnwise, swizzled):
     compared. Swizzled layout: the meaningful scales are scattered by the swizzle, so the
     top-left slice is meaningless; both backends zero the padding (see zero_scales_kernel),
     so compare the whole buffer instead -- which also covers the padding-zeroing itself.
+    FP8 -0.0 (0x80) is folded into +0.0: both backends round to zero there and may differ only
+    in its sign, which training does not depend on.
     """
     parts = {}
     if rowwise:
         d = out._rowwise_data.view(torch.uint8)
         M, N = d.shape
-        parts["rowwise data"] = d.clone()
+        parts["rowwise data"] = d.masked_fill(d == 0x80, 0)
         s = out._rowwise_scale_inv
         parts["rowwise scales"] = (s if swizzled else s[:M, : (N + 31) // 32]).clone()
     if columnwise:
         d = out._columnwise_data.view(torch.uint8)
         M, N = d.shape
-        parts["colwise data"] = d.clone()
+        parts["colwise data"] = d.masked_fill(d == 0x80, 0)
         s = out._columnwise_scale_inv
         parts["colwise scales"] = (s if swizzled else s[: (M + 31) // 32, :N]).clone()
     return parts
 
 
-def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False):
+def run_test_case(
+    method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False, input_offset=0
+):
     """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the
-    same input and config.
+    same input and config. input_offset (in elements) shifts x's data pointer past the
+    start of its allocation, to test misaligned inputs.
     """
     M, N = shape
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
     x, act_input = generate_inputs(M, N, in_dtype)
+    if input_offset:
+        buf = torch.empty(input_offset + M * N, dtype=in_dtype, device="cuda")
+        x = buf[input_offset:].view(M, N).copy_(x)
 
     set_cutedsl_backend(False)
     out_cuda, dbias_cuda = run_quantize(
@@ -370,3 +379,55 @@ def test_sizes(swizzled, method, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
     run_test_case(method, act, (256, 384), (32, 32), in_dtype, fp8_dtype, swizzled)
+
+
+# Cover the specialized kernels' shapes
+
+SPECIALIZED_PATH_CASES = [
+    # G2RRowwise2Lane: the four launch tiers (by output size) on the flat packed-scale view.
+    ("g2r_rowwise2lane_tier0", (1024, 4096), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier1", (4064, 4480), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier2", (8192, 8192), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier3", (16384, 8192), ROW, torch.bfloat16, False, 0),
+    # Swizzled scales use the 2-D grid instead of the flat view.
+    ("g2r_rowwise2lane_swizzled", (4096, 4096), ROW, torch.bfloat16, True, 0),
+    # Partial row and column tiles, and scale padding.
+    ("g2r_rowwise2lane_swizzled_partial", (160, 384), ROW, torch.bfloat16, True, 0),
+    # Row tiles past grid.y's limit spill into grid.z.
+    ("g2r_rowwise2lane_swizzled_grid_z", (524352, 128), ROW, torch.bfloat16, True, 0),
+    # G2RRowwise1Lane: input only 16-byte aligned, or fp16.
+    ("g2r_rowwise1lane_misaligned_bf16", (1024, 4096), ROW, torch.bfloat16, False, 8),
+    ("g2r_rowwise1lane_fp16", (1024, 4096), ROW, torch.float16, False, 0),
+    # G2RBidim: static N == 2048 / 4096, the wide tile with and without the
+    # deep cluster, and the narrow tile (N % 512 != 0).
+    ("g2r_bidim_n2048", (256, 2048), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_n2048_swizzled", (256, 2048), BOTH, torch.bfloat16, True, 0),
+    ("g2r_bidim_n4096_swizzled", (256, 4096), BOTH, torch.bfloat16, True, 0),
+    ("g2r_bidim_wide", (256, 6144), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_wide_cluster", (4096, 16384), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_narrow", (160, 2304), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_narrow_swizzled", (160, 2304), BOTH, torch.bfloat16, True, 0),
+    # M % 128 != 0: swizzled scale padding.
+    ("g2r_bidim_wide_swizzled_pad", (4128, 6144), BOTH, torch.bfloat16, True, 0),
+    # G2SBidim: fp16, or bf16 with N % 256 != 0.
+    ("g2s_bidim_fp16", (256, 1024), BOTH, torch.float16, False, 0),
+    ("g2s_bidim_bf16_n384", (256, 384), BOTH, torch.bfloat16, False, 0),
+]
+
+
+@pytest.mark.parametrize(
+    "shape,block_size,in_dtype,swizzled,input_offset",
+    [case[1:] for case in SPECIALIZED_PATH_CASES],
+    ids=[case[0] for case in SPECIALIZED_PATH_CASES],
+)
+def test_specialized_kernels(shape, block_size, in_dtype, swizzled, input_offset):
+    run_test_case(
+        "CAST_ONLY",
+        IDENTITY,
+        shape,
+        block_size,
+        in_dtype,
+        tex.DType.kFloat8E4M3,
+        swizzled,
+        input_offset,
+    )
