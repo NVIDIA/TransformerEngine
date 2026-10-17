@@ -75,6 +75,14 @@ def _cudnn_frontend_version_at_least(min_version: str) -> bool:
         return False
 
 
+def _cudnn_frontend_install_status() -> str:
+    """Installed cuDNN frontend package version, for diagnostics."""
+    try:
+        return f"nvidia-cudnn-frontend {get_pkg_version('nvidia-cudnn-frontend')} is installed"
+    except PackageNotFoundError:
+        return "cuDNN Frontend is not installed"
+
+
 def _cudnn_frontend_version_supported() -> bool:
     """Check cuDNN frontend is at least 1.23.0.
 
@@ -966,9 +974,13 @@ def _compute_grad_params(
     return w_list + bias_list
 
 
+_GLU_ACTIVATION_OP_TYPES = (ScaledSwiGLU, ScaledSiTUGLU, ScaledClampedQGeGLU)
+_UNARY_ACTIVATION_OP_TYPES = (ScaledSReLU, ScaledTanhSReLU)
+
+
 def is_glu_activation(activation_op) -> bool:
     """Whether an activation consumes a GLU-style doubled input."""
-    return isinstance(activation_op, (ScaledSwiGLU, ScaledSiTUGLU, ScaledClampedQGeGLU))
+    return isinstance(activation_op, _GLU_ACTIVATION_OP_TYPES)
 
 
 def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
@@ -985,7 +997,7 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
         )
     if is_glu_activation(activation_op):
         expected_fc1_out_features = 2 * fc2.in_features
-    elif isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU)):
+    elif isinstance(activation_op, _UNARY_ACTIVATION_OP_TYPES):
         expected_fc1_out_features = fc2.in_features
     else:
         raise TypeError(f"Unsupported grouped MLP activation ({activation_op.__class__.__name__}).")
@@ -1004,32 +1016,93 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
         )
 
 
+@functools.cache
+def _grouped_mlp_fallback_warnings_enabled() -> bool:
+    """Whether to warn when a grouped MLP pattern is left unfused.
+
+    Opt-in via ``NVTE_CUTEDSL_FUSED_GROUPED_MLP_WARN_FALLBACK``.
+    """
+    return int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_WARN_FALLBACK", "0")) > 0
+
+
+@functools.lru_cache(maxsize=None)
+def _warn_grouped_mlp_fallback(fused_op_name: str, activation_name: str, reason: str) -> None:
+    """Warn, once per fused op, activation, and reason, that a grouped MLP is left unfused."""
+    warnings.warn(
+        f"Not fusing GroupedLinear + {activation_name} + GroupedLinear into {fused_op_name}"
+        f" ({reason}). Falling back to unfused ops, which can be significantly slower and"
+        " use more memory.",
+        UserWarning,
+    )
+
+
+def _find_grouped_mlp_activation(
+    ops: Sequence[FusibleOperation],
+    activation_op_types: tuple[type[FusibleOperation], ...],
+) -> Optional[FusibleOperation]:
+    """Activation of the first GroupedLinear + activation + GroupedLinear pattern, if any."""
+    for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:]):
+        if (
+            isinstance(fc1, GroupedLinear)
+            and isinstance(activation, activation_op_types)
+            and isinstance(fc2, GroupedLinear)
+        ):
+            return activation
+    return None
+
+
+def _maybe_warn_grouped_mlp_fallback(
+    ops: Sequence[FusibleOperation],
+    activation_op_types: tuple[type[FusibleOperation], ...],
+    fused_op_cls: type[_GroupedMLP_CuTeGEMMBase],
+    reason: Callable[[], Optional[str]],
+) -> None:
+    """Warn if requested and ``ops`` contain a grouped MLP with one of ``activation_op_types``.
+
+    ``reason`` is only called when a warning is emitted.
+    """
+    # Match the pattern first to keep cached probes out of tracing for unrelated ops
+    activation = _find_grouped_mlp_activation(ops, activation_op_types)
+    if activation is None or not _grouped_mlp_fallback_warnings_enabled():
+        return
+    message = reason()
+    if message is not None:
+        _warn_grouped_mlp_fallback(fused_op_cls.__name__, type(activation).__name__, message)
+
+
+def _grouped_mlp_recipe_unsupported_reason(recipe: Optional[Recipe]) -> Optional[str]:
+    """Why the recipe cannot use fused grouped MLP kernels, or ``None`` if it can."""
+    if recipe is None:
+        return "Unsupported recipe (quantization is disabled)"
+    if recipe.mxfp8():
+        if get_fp8_torch_dtype(recipe, fprop_tensor=True) != torch.float8_e4m3fn:
+            # MXFP8 forward kernels only support E4M3
+            return f"MXFP8 requires E4M3 activations, but the recipe uses {recipe.fp8_format}"
+        if get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
+            # MXFP8 backward kernels only support E4M3
+            return f"MXFP8 requires E4M3 gradients, but the recipe uses {recipe.fp8_format}"
+        return None
+    if recipe.nvfp4():
+        if recipe.disable_rht:
+            # NVFP4 graph-safe grouped quantize currently requires RHT
+            return "NVFP4 requires RHT, but the recipe sets disable_rht=True"
+        return None
+    if recipe.custom():
+        if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
+            return "Custom recipe requires setting enable_cutedsl_fused_grouped_mlp=True"
+        return None
+    return f"Unsupported recipe ({type(recipe).__name__})"
+
+
 def _is_grouped_mlp_fusion_candidate(
     ops: list[FusibleOperation],
     recipe: Optional[Recipe],
     activation_op_types: tuple[type[FusibleOperation]],
 ) -> bool:
     """Check whether the recipe and operation pattern support grouped MLP fusion."""
-    if len(ops) < 3 or recipe is None:
+    if len(ops) < 3 or _grouped_mlp_recipe_unsupported_reason(recipe) is not None:
         return False
-    if recipe.custom():
-        if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
-            return False
-    elif not (recipe.mxfp8() or recipe.nvfp4()):
-        return False
-    # NVFP4 graph-safe grouped quantize currently requires RHT.
-    if recipe.nvfp4() and recipe.disable_rht:
-        return False
-    # The fused MXFP8 backward reinterprets grad-output storage as E4M3. It
-    # cannot consume E5M2 gradients from Format.HYBRID. NVFP4 has separate formats.
-    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
-        return False
-    return any(
-        isinstance(fc1, GroupedLinear)
-        and isinstance(activation, activation_op_types)
-        and isinstance(fc2, GroupedLinear)
-        for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
-    )
+    return _find_grouped_mlp_activation(ops, activation_op_types) is not None
 
 
 def fuse_grouped_mlp_ops(
@@ -1057,6 +1130,9 @@ def fuse_grouped_mlp_ops(
         Updated operations with matched triples replaced by fused ops.
     """
     if not fused_op_cls.is_supported():
+        _maybe_warn_grouped_mlp_fallback(
+            ops, activation_op_types, fused_op_cls, fused_op_cls._unsupported_reason
+        )
         return ops
 
     # Check for unsupported NVFP4 recipe configs
@@ -1066,12 +1142,22 @@ def fuse_grouped_mlp_ops(
             return ops
         if recipe.row_scaled_activation or recipe.nvfp4_4over6 != "none":
             # 4over6 doesn't used fused kernels
+            _maybe_warn_grouped_mlp_fallback(
+                ops,
+                activation_op_types,
+                fused_op_cls,
+                lambda: "NVFP4 row-scaled activations and 4over6 are not supported",
+            )
             return ops
         if recipe.fp8_format == RecipeFormat.UE5M3:
             # cuDNN has no SReLU support for UE5M3 for now
-            activation_op_types = tuple(
-                filter(lambda t: t not in (ScaledSReLU, ScaledTanhSReLU), activation_op_types)
+            srelu_op_types = tuple(
+                t for t in activation_op_types if t in _UNARY_ACTIVATION_OP_TYPES
             )
+            _maybe_warn_grouped_mlp_fallback(
+                ops, srelu_op_types, fused_op_cls, lambda: "not supported with NVFP4 UE5M3 scales"
+            )
+            activation_op_types = tuple(t for t in activation_op_types if t not in srelu_op_types)
             if not activation_op_types:
                 return ops
 
@@ -1097,11 +1183,22 @@ def fuse_grouped_mlp_ops(
             )
         ):
             matches_pattern = False
+            if _grouped_mlp_fallback_warnings_enabled():
+                _warn_grouped_mlp_fallback(
+                    fused_op_cls.__name__,
+                    type(window[1]).__name__,
+                    "non-default parameters require nvidia-cudnn-frontend>=1.24.0,"
+                    f" but {_cudnn_frontend_install_status()}",
+                )
         else:
             try:
                 validate_grouped_mlp_dims(window[0], window[1], window[2])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
                 matches_pattern = False
+                if _grouped_mlp_fallback_warnings_enabled():
+                    _warn_grouped_mlp_fallback(
+                        fused_op_cls.__name__, type(window[1]).__name__, str(e)
+                    )
 
         if matches_pattern and (
             window[0].split_alignment % 256 != 0 or window[2].split_alignment % 256 != 0
@@ -1200,21 +1297,27 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         return None
 
     @classmethod
-    @functools.lru_cache(maxsize=None)
-    def is_supported(cls) -> bool:
-        """Whether this fused operation is supported on the current system."""
-        if get_device_compute_capability()[0] != 10:
-            return False
+    def _unsupported_reason(cls) -> Optional[str]:
+        """Why this fused operation cannot run on the current system, or ``None`` if it can."""
+        device_arch = get_device_compute_capability()
+        if device_arch[0] != 10:
+            return f"requires compute capability 10.x, got {device_arch[0]}.{device_arch[1]}"
         if not _cudnn_frontend_version_supported():
-            return False
+            return f"requires nvidia-cudnn-frontend>=1.23.0, but {_cudnn_frontend_install_status()}"
         try:
             cls.grouped_gemm_activation_kernel()
             cls.grouped_gemm_dactivation_kernel()
             cls.grouped_gemm_quant_kernel()
             cls.grouped_gemm_wgrad_kernel()
-        except ImportError:
-            return False
-        return True
+        except ImportError as e:
+            return f"failed to import cuDNN frontend kernels: {e}"
+        return None
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def is_supported(cls) -> bool:
+        """Whether this fused operation is supported on the current system."""
+        return cls._unsupported_reason() is None
 
     def __init__(
         self,
@@ -3194,10 +3297,11 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
     """Joint fused op for block-scaled GroupedLinear + scaled unary activation + GroupedLinear."""
 
     @classmethod
-    @functools.lru_cache(maxsize=None)
-    def is_supported(cls) -> bool:
-        """Whether the SReLU fused operation is supported on the current system."""
-        return _cudnn_frontend_supports_grouped_gemm_srelu() and super().is_supported()
+    def _unsupported_reason(cls) -> Optional[str]:
+        """SReLU kernels additionally require cuDNN frontend >= 1.24.0."""
+        if not _cudnn_frontend_supports_grouped_gemm_srelu():
+            return f"requires nvidia-cudnn-frontend>=1.24.0, but {_cudnn_frontend_install_status()}"
+        return super()._unsupported_reason()
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -3241,9 +3345,13 @@ def fuse_glu_ops(
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
     # Keep capability probes out of tracing for unrelated operation sequences.
-    if not _is_grouped_mlp_fusion_candidate(
-        ops, recipe, (ScaledSwiGLU, ScaledClampedQGeGLU, ScaledSiTUGLU)
-    ):
+    if not _is_grouped_mlp_fusion_candidate(ops, recipe, _GLU_ACTIVATION_OP_TYPES):
+        _maybe_warn_grouped_mlp_fallback(
+            ops,
+            _GLU_ACTIVATION_OP_TYPES,
+            GroupedMLP_CuTeGEMMGLU,
+            lambda: _grouped_mlp_recipe_unsupported_reason(recipe),
+        )
         return ops
 
     # Determine supported activations
@@ -3259,7 +3367,22 @@ def fuse_glu_ops(
             activation_op_types.append(ScaledClampedQGeGLU)
     else:
         # Unsupported device arch
+        _maybe_warn_grouped_mlp_fallback(
+            ops,
+            _GLU_ACTIVATION_OP_TYPES,
+            GroupedMLP_CuTeGEMMGLU,
+            lambda: f"unsupported compute capability {device_arch[0]}.{device_arch[1]}",
+        )
         return ops
+    _maybe_warn_grouped_mlp_fallback(
+        ops,
+        tuple(t for t in _GLU_ACTIVATION_OP_TYPES if t not in activation_op_types),
+        GroupedMLP_CuTeGEMMGLU,
+        lambda: (
+            f"not supported on compute capability {device_arch[0]}.{device_arch[1]}"
+            f" when {_cudnn_frontend_install_status()}"
+        ),
+    )
 
     return fuse_grouped_mlp_ops(
         ops,
@@ -3278,16 +3401,35 @@ def fuse_unary_activation_ops(
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
 
     # Keep capability probes out of tracing for unrelated operation sequences.
-    if not _is_grouped_mlp_fusion_candidate(ops, recipe, (ScaledSReLU, ScaledTanhSReLU)):
+    if not _is_grouped_mlp_fusion_candidate(ops, recipe, _UNARY_ACTIVATION_OP_TYPES):
+        _maybe_warn_grouped_mlp_fallback(
+            ops,
+            _UNARY_ACTIVATION_OP_TYPES,
+            GroupedMLP_CuTeGEMMUnary,
+            lambda: _grouped_mlp_recipe_unsupported_reason(recipe),
+        )
         return ops
 
     if not GroupedMLP_CuTeGEMMUnary.is_supported():
+        _maybe_warn_grouped_mlp_fallback(
+            ops,
+            _UNARY_ACTIVATION_OP_TYPES,
+            GroupedMLP_CuTeGEMMUnary,
+            GroupedMLP_CuTeGEMMUnary._unsupported_reason,
+        )
         return ops
 
     # Determine supported activations
     activation_op_types = [ScaledSReLU]
     if _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
         activation_op_types.append(ScaledTanhSReLU)
+    else:
+        _maybe_warn_grouped_mlp_fallback(
+            ops,
+            (ScaledTanhSReLU,),
+            GroupedMLP_CuTeGEMMUnary,
+            lambda: f"not supported when {_cudnn_frontend_install_status()}",
+        )
 
     return fuse_grouped_mlp_ops(
         ops,
