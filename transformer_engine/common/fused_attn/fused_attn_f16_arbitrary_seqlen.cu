@@ -1087,13 +1087,26 @@ void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *i
   void *devPtrDropoutOffset =
       reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
 
-  size_t workspace_size = 0;
-
-  fused_attn_arbitrary_seqlen_fwd_impl(
-      cfg, devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO,
-      devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK,
-      devPtrPageTableV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, workspace->data.dptr,
-      &workspace_size, stream, handle);
+  size_t workspace_size = workspace->data.buffer_size_bytes();
+  bool used_frost = false;
+#ifdef NVTE_WITH_CUTEDSL
+  const fused_attn::FrostForwardPointers frost_pointers{
+      devPtrQ,          devPtrK,           devPtrV,           devPtrO,           devPtrS1,
+      devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV};
+  used_frost = fused_attn::frost_attention_forward(cfg, frost_pointers, workspace->data.dptr,
+                                                   &workspace_size, stream);
+#else
+  NVTE_CHECK(transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FROST_FWD") != 2,
+             "cuDNN OSS forward requires a TE build with NVTE_WITH_CUTEDSL=ON");
+#endif
+  if (!used_frost) {
+    workspace_size = 0;
+    fused_attn_arbitrary_seqlen_fwd_impl(
+        cfg, devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1, devPtrS2,
+        devPtrO, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+        devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
+        workspace->data.dptr, &workspace_size, stream, handle);
+  }
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {

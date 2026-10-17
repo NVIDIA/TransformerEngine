@@ -225,7 +225,8 @@ backend-selection overview.
                  attention on SM100. ``1`` attempts the OSS provider and retains
                  the cuDNN backend for unsupported declarations. ``2`` requires
                  the OSS provider and reports an error instead of falling back;
-                 use it to verify benchmark routing. Forward remains cuDNN.
+                 use it to verify benchmark routing. Forward remains cuDNN
+                 unless separately enabled with ``NVTE_FUSED_ATTN_FROST_FWD``.
                  Requires a TE build with ``NVTE_WITH_CUTEDSL=1``
                  (CMake: ``-DNVTE_WITH_CUTEDSL=ON``),
                  ``NVTE_ENABLE_CUTEDSL_BACKEND=1``,
@@ -268,6 +269,49 @@ backend-selection overview.
    or missing isolated metadata-guard cases. Qualified L0 lanes can also set
    ``NVTE_FROST_TEST_REQUIRED=1`` to invoke it from the PyTorch L0 launcher;
    ordinary L0 lanes do not acquire these experimental dependencies.
+
+.. envvar:: NVTE_FUSED_ATTN_FROST_FWD
+
+   :Default: ``0``
+   :Values: ``0``, ``1``, ``2``
+   :Description: Experimental cuDNN OSS forward provider through TE's common
+                 C++ entry. ``1`` attempts the provider and retains the backend
+                 for unsupported declarations; ``2`` requires the provider.
+                 Requires the same build/DSL setup as the backward provider,
+                 plus ``NVTE_FUSED_ATTN_FROST_FWD_COMPACT=1``.
+
+   Initial scope: SM100, BF16 training, separate compact THD Q/K/V and output,
+   D128, top-left causal padding mask, no bias, dropout, paging, sliding window,
+   or maximum-logit output. Stats retain TE's packed FP32 natural-log format.
+   Forward and backward routing are independent; enabling this option does not
+   enable the OSS backward provider.
+
+   Cold preparation uses the ordinary FE graph contract and retains the complete
+   compiled host entry, including metadata/remap and descriptor construction.
+   Hot execution and warmed CUDA graph capture enter native C++/TVM-FFI without
+   Python callbacks. Current operands, workspace and stream are rebound each call;
+   cached tuple arguments contain immutable declaration geometry only.
+
+   This adapter currently targets FE ``ThdLaunchSpec`` at development revision
+   ``2bcdd1bb487a65771d971e6d7380e956cea9ec22``. FE PR 1696 optimizes its THD work
+   lookup but does not change the ABI. The export is experimental: an unfamiliar
+   host signature or optional feature reports an error rather than dropping an
+   argument. Warm up each declaration and device before capture.
+
+.. envvar:: NVTE_FUSED_ATTN_FROST_FWD_COMPACT
+
+   :Default: ``0``
+   :Values: ``0``, ``1``
+   :Description: Promise that THD physical origins equal the zero-based cumulative
+                 lengths. Lengths may be unequal and may change during replay;
+                 this option does not convert THD to a dense declaration.
+
+   Every execution validates the promise on device, including monotonic lengths,
+   declared bounds and physical origins. Live queries require a nonempty KV
+   sequence. Invalid promised metadata traps the CUDA context, so this flag must
+   not be applied to storage with physical holes. Such layouts, including pitched
+   AllGather subcalls, must retain the existing forward route. Passing A2A tests
+   does not establish AllGather support or distributed performance.
 
 .. envvar:: NVTE_FUSED_ATTN_FROST_ALLGATHER
 

@@ -324,5 +324,183 @@ bool frost_attention_backward(const FusedAttnConfig &cfg, const FrostPointers &p
   return true;
 }
 
+namespace {
+
+struct ForwardArgument {
+  int kind;
+  int64_t value;
+  tvm::ffi::Any constant;
+};
+
+struct ForwardPlan {
+  tvm::ffi::Function function;
+  size_t workspace_bytes;
+  size_t workspace_alignment;
+  std::array<Operand, 9> operands;
+  std::vector<ForwardArgument> arguments;
+};
+
+bool forward_eligible(const FusedAttnConfig &c) {
+  // The current FE forward host derives compact physical positions from lengths.
+  // Separate padded origins therefore require an explicit, device-checked promise.
+  return getenv<bool>("NVTE_FUSED_ATTN_FROST_FWD_COMPACT") &&
+         cuda::sm_arch(cuda::current_device()) == 100 && c.is_training && !c.return_max_logit &&
+         c.qkv_dtype == kNVTEBFloat16 && c.o_dtype == kNVTEBFloat16 && c.head_dim_qk == 128 &&
+         c.head_dim_v == 128 && c.bias_type == NVTE_NO_BIAS &&
+         c.softmax_type == NVTE_VANILLA_SOFTMAX && c.dropout == 0 && !c.is_paged_kv &&
+         c.qkv_layout == NVTE_THD_THD_THD && c.o_format == NVTE_THD && c.is_padding &&
+         c.is_ragged_q && c.uses_ragged_stats && c.is_causal && !c.is_causal_bottom_right &&
+         c.window_size_left == -1 && (c.window_size_right == -1 || c.window_size_right == 0) &&
+         std::isfinite(c.attn_scale) && c.attn_scale > 0 && c.batch_size > 0 &&
+         c.batch_size <= 65535 && c.num_gqa_groups > 0 && c.num_attn_heads <= 65535 &&
+         c.num_attn_heads >= c.num_gqa_groups && c.num_attn_heads % c.num_gqa_groups == 0 &&
+         c.max_seqlen_q > 0 && c.max_seqlen_kv > 0 && c.max_seqlen_q <= INT32_MAX - 256 &&
+         c.max_seqlen_kv <= INT32_MAX - 256 && c.num_tokens_q > 0 && c.num_tokens_kv > 0 &&
+         c.num_tokens_q <= INT32_MAX && c.num_tokens_kv <= INT32_MAX;
+}
+
+const ForwardPlan *get_forward_plan(const FusedAttnConfig &c, cudaStream_t stream) {
+  static auto *cache = new std::map<FusedAttnConfig, std::unique_ptr<ForwardPlan>>;
+  static auto *mutex = new std::mutex;
+  static std::atomic<uint64_t> serial{0};
+  {
+    std::lock_guard<std::mutex> lock(*mutex);
+    auto it = cache->find(c);
+    if (it != cache->end()) return it->second.get();
+  }
+  cudaStreamCaptureStatus capture;
+  NVTE_CHECK_CUDA(cudaStreamIsCapturing(stream, &capture));
+  NVTE_CHECK(capture == cudaStreamCaptureStatusNone,
+             "Warm up cuDNN OSS forward before CUDA graph capture");
+  auto &central = tvm_ffi_bridge::TVMFFICentral::getInstance();
+  if (!central.get_cutedsl_backend_enabled() || !central.get_tvm_ffi_available()) return nullptr;
+  auto prepare = tvm::ffi::Function::GetGlobal("get_frost_attention_forward");
+  auto constant = tvm::ffi::Function::GetGlobal("get_frost_attention_forward_constant");
+  if (!prepare || !constant) return nullptr;
+  const std::string key = "transformer_engine.frost.forward." + std::to_string(serial++);
+  // Python is entered only on a cache miss, without holding a C++ cache lock.
+  auto result =
+      (*prepare)(tvm::ffi::String(key), static_cast<int64_t>(c.batch_size),
+                 static_cast<int64_t>(c.num_attn_heads), static_cast<int64_t>(c.num_gqa_groups),
+                 static_cast<int64_t>(c.max_seqlen_q), static_cast<int64_t>(c.max_seqlen_kv),
+                 static_cast<int64_t>(c.num_tokens_q), static_cast<int64_t>(c.num_tokens_kv),
+                 static_cast<double>(c.attn_scale), c.device_id);
+  auto encoded = result.try_cast<tvm::ffi::String>();
+  auto declined = result.try_cast<bool>();
+  NVTE_CHECK(encoded || (declined && !*declined), "Invalid cuDNN OSS forward preparation response");
+  std::unique_ptr<ForwardPlan> plan;
+  if (encoded) {
+    NVTE_CHECK(encoded->size() < 4096, "Oversized cuDNN OSS forward metadata");
+    std::istringstream input{std::string(*encoded)};
+    std::vector<int64_t> v;
+    int64_t value;
+    while (input >> value) v.push_back(value);
+    NVTE_CHECK(input.eof() && v.size() >= 22 && v[0] == 1 && v[1] > 0 && v[2] >= 16 &&
+                   (v[2] & (v[2] - 1)) == 0 && v[3] == 27 && v.size() == 22 + 2 * v[3],
+               "Malformed cuDNN OSS forward metadata");
+    auto function = tvm::ffi::Function::GetGlobal(key);
+    NVTE_CHECK(function.has_value(), "cuDNN OSS did not register its native forward entry");
+    plan = std::make_unique<ForwardPlan>(
+        ForwardPlan{*function, static_cast<size_t>(v[1]), static_cast<size_t>(v[2]), {}, {}});
+    size_t cursor = 4;
+    for (int role = 0; role < 9; ++role) {
+      const auto bytes = v[cursor++], alignment = v[cursor++];
+      NVTE_CHECK(bytes > 0 && alignment > 0 && (alignment & (alignment - 1)) == 0,
+                 "Invalid cuDNN OSS forward operand metadata");
+      plan->operands[role] = {role, static_cast<size_t>(bytes), static_cast<size_t>(alignment)};
+    }
+    for (int64_t i = 0; i < v[3]; ++i) {
+      const auto kind = v[cursor++], index = v[cursor++];
+      NVTE_CHECK((kind == 0 && index == i) || (kind == 1 && index >= 0 && index < 7) ||
+                     (kind == 2 && index >= 0 && index < v[1]) || (kind == 3 && index == 0),
+                 "Invalid cuDNN OSS forward argument metadata");
+      tvm::ffi::Any immutable;
+      if (kind == 0) immutable = (*constant)(tvm::ffi::String(key), index);
+      plan->arguments.push_back({static_cast<int>(kind), index, std::move(immutable)});
+    }
+  }
+  std::lock_guard<std::mutex> lock(*mutex);
+  return cache->emplace(c, std::move(plan)).first->second.get();
+}
+
+__global__ void validate_compact_forward(const int32_t *cu_q, const int32_t *cu_kv,
+                                         const int32_t *origins_q, const int32_t *origins_kv,
+                                         int64_t batch, int64_t sq, int64_t sk, int64_t tq,
+                                         int64_t tk) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i > batch) return;
+  const int64_t q = cu_q[i], k = cu_kv[i];
+  bool valid = q >= 0 && q <= tq && k >= 0 && k <= tk && origins_q[i] == q && origins_kv[i] == k;
+  if (i == 0) valid = valid && q == 0 && k == 0;
+  if (i < batch) {
+    const int64_t lq = static_cast<int64_t>(cu_q[i + 1]) - q;
+    const int64_t lk = static_cast<int64_t>(cu_kv[i + 1]) - k;
+    valid = valid && lq >= 0 && lq <= sq && lk >= 0 && lk <= sk && (lq == 0 || lk > 0);
+  }
+  if (!valid) {
+    printf("NVTE_FUSED_ATTN_FROST_FWD_COMPACT: invalid sequence/offset at %d\n",
+           static_cast<int>(i));
+    asm volatile("trap;");
+  }
+}
+
+}  // namespace
+
+bool frost_attention_forward(const FusedAttnConfig &cfg, const FrostForwardPointers &pointers,
+                             void *workspace, size_t *workspace_size, cudaStream_t stream) {
+  const int mode = getenv<int>("NVTE_FUSED_ATTN_FROST_FWD");
+  if (mode == 0) return false;
+  NVTE_CHECK(mode == 1 || mode == 2, "NVTE_FUSED_ATTN_FROST_FWD must be 0, 1 or 2");
+  cfg.check_derived();
+  FusedAttnConfig cached = cfg;
+  cached.device_id = cuda::current_device();
+  const ForwardPlan *plan = forward_eligible(cfg) ? get_forward_plan(cached, stream) : nullptr;
+  if (!plan) {
+    NVTE_CHECK(mode != 2,
+               "Requested cuDNN OSS forward unavailable; check compact THD D128 causal scope, "
+               "NVTE_FUSED_ATTN_FROST_FWD_COMPACT=1 and compatible FE/CuTeDSL installation");
+    return false;
+  }
+  if (workspace == nullptr) {
+    *workspace_size = plan->workspace_bytes;
+    return true;
+  }
+  NVTE_CHECK(*workspace_size >= plan->workspace_bytes, "cuDNN OSS forward workspace is too small");
+  *workspace_size = plan->workspace_bytes;
+  const auto address = reinterpret_cast<uintptr_t>(workspace);
+  NVTE_CHECK(address % plan->workspace_alignment == 0, "cuDNN OSS forward workspace misaligned");
+  for (const auto &op : plan->operands) {
+    const auto ptr = reinterpret_cast<uintptr_t>(pointers[op.role]);
+    NVTE_CHECK(ptr != 0 && ptr % op.alignment == 0,
+               "cuDNN OSS forward operand is null or misaligned, role=", op.role);
+    NVTE_CHECK(!overlaps(ptr, op.bytes, address, plan->workspace_bytes),
+               "cuDNN OSS forward operand overlaps workspace");
+    if (op.role == 3 || op.role == 4) {
+      for (const auto &other : plan->operands) {
+        if (other.role == op.role) continue;
+        NVTE_CHECK(!overlaps(ptr, op.bytes, reinterpret_cast<uintptr_t>(pointers[other.role]),
+                             other.bytes),
+                   "cuDNN OSS forward output aliases an operand");
+      }
+    }
+  }
+  validate_compact_forward<<<(cfg.batch_size + 256) / 256, 256, 0, stream>>>(
+      static_cast<const int32_t *>(pointers[5]), static_cast<const int32_t *>(pointers[6]),
+      static_cast<const int32_t *>(pointers[7]), static_cast<const int32_t *>(pointers[8]),
+      cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.num_tokens_q, cfg.num_tokens_kv);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+  std::array<tvm::ffi::AnyView, 27> frame;
+  for (size_t i = 0; i < plan->arguments.size(); ++i) {
+    const auto &arg = plan->arguments[i];
+    if (arg.kind == 0) frame[i] = static_cast<tvm::ffi::AnyView>(arg.constant);
+    if (arg.kind == 1) frame[i] = reinterpret_cast<int64_t>(pointers[arg.value]);
+    if (arg.kind == 2) frame[i] = static_cast<int64_t>(address + arg.value);
+    if (arg.kind == 3) frame[i] = reinterpret_cast<void *>(stream);
+  }
+  tvm::ffi::Any result;
+  plan->function.CallPacked(frame.data(), static_cast<int32_t>(frame.size()), &result);
+  return true;
+}
+
 }  // namespace fused_attn
 }  // namespace transformer_engine

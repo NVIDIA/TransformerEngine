@@ -28,3 +28,15 @@ def register_cutedsl_backends():
     tvm_ffi.register_global_func(
         "get_frost_attention_backward", get_frost_attention_backward, override=True
     )
+
+    from transformer_engine.common.CuTeDSL.frost_attn_fwd import (
+        get_frost_attention_forward,
+        get_frost_attention_forward_constant,
+    )
+
+    tvm_ffi.register_global_func(
+        "get_frost_attention_forward", get_frost_attention_forward, override=True
+    )
+    tvm_ffi.register_global_func(
+        "get_frost_attention_forward_constant", get_frost_attention_forward_constant, override=True
+    )
