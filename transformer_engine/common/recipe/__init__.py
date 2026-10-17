@@ -432,6 +432,10 @@ class Float8BlockScaling(Recipe):
             `high_precision` keeps original high-precision operands for backward,
             and `dequantized` dequantizes saved operands to the active high-precision
             compute dtype (e.g. BF16/FP16/FP32) for backward.
+
+    The backward gradient quantizer uses an ``amax_epsilon`` of ``1e-12`` so
+    all-zero gradient blocks have a finite scale. Forward quantizers keep their
+    existing zero-epsilon behavior.
     """
 
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
@@ -472,7 +476,7 @@ class Float8BlockScaling(Recipe):
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
         self.fp8_quant_fwd_inp = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
         self.fp8_quant_fwd_weight = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
-        self.fp8_quant_bwd_grad = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+        self.fp8_quant_bwd_grad = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=1e-12)
 
     def __setstate__(self, state) -> None:
         self.__dict__.update(state)
