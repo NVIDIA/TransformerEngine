@@ -108,7 +108,7 @@ struct TypeInfo {
     struct Helper {
         constexpr static DType getType() {
             constexpr int i = static_cast<int>(current);
-            if (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
+            if constexpr (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
                 return current;
             } else {
                 return Helper<U, static_cast<DType>(i + 1)>::getType();
