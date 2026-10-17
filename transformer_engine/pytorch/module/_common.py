@@ -6,17 +6,30 @@
 
 import dataclasses
 import queue
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..distributed import in_fp8_activation_recompute_phase
+from ..dynamo import TensorSpec, is_value_opaque_quantizer
 from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
+from ..quantized_tensor import Quantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
+
+
+def compile_unsupported_quantizer_reason(
+    quantizers: Sequence[Optional[Quantizer]],
+) -> Optional[str]:
+    """Return a fallback reason if a quantizer cannot cross the custom-op boundary."""
+    for quantizer in quantizers:
+        # Delayed-scaling and unregistered custom-recipe quantizers are not value-opaque.
+        if quantizer is not None and not is_value_opaque_quantizer(quantizer):
+            return "a quantizer not registered as a torch.compile value-opaque type"
+    return None
 
 
 def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:
@@ -343,3 +356,45 @@ def check_fp8_reduce_and_update(restore_first_module: bool = False) -> bool:
     if restore_first_module or in_fp8_activation_recompute_phase():
         qstate.is_first_fp8_module = first_fp8_module
     return result
+
+
+def get_output_first_dim_size(input_first_dim_size: int, args: Any) -> int:
+    """Compute the output's first dimension size from the input's.
+
+    Sequence parallelism gathers this dimension in column-parallel mode and
+    scatters it in row-parallel mode. ``args`` provides ``sequence_parallel``,
+    ``parallel_mode``, and ``tp_size``.
+    """
+    if not args.sequence_parallel:
+        return input_first_dim_size
+    if args.parallel_mode == "column":
+        return input_first_dim_size * args.tp_size
+    if args.parallel_mode == "row":
+        return input_first_dim_size // args.tp_size
+    return input_first_dim_size
+
+
+def get_input_first_dim_size(output_first_dim_size: int, args: Any) -> int:
+    """Recover the input's first dimension size from the output's.
+
+    Inverts the sequence-parallel gather/scatter in
+    :func:`get_output_first_dim_size`, including when called with a gradient's shape.
+    """
+    if not args.sequence_parallel:
+        return output_first_dim_size
+    if args.parallel_mode == "column":
+        return output_first_dim_size // args.tp_size
+    if args.parallel_mode == "row":
+        return output_first_dim_size * args.tp_size
+    return output_first_dim_size
+
+
+def fake_workspace_valid(workspace: TensorSpec, quantizer: Optional[Quantizer]) -> bool:
+    """Spec-level mirror of ``_is_weight_workspace_valid``: the cached workspace
+    must already hold every inner buffer the quantizer's current usage needs."""
+    if quantizer is None:
+        return True
+    required = TensorSpec(
+        shape=workspace.shape, dtype=workspace.dtype, quantizer=quantizer, device=workspace.device
+    ).inner_names()
+    return set(required) <= set(workspace.inner_names())
