@@ -529,6 +529,22 @@ def _make_graphed_callables(
     # Filter the TE modules that cudagraph can access.
     visited_te_modules = {}
     need_bwd_dw_graph = {}
+    per_callable_static_wgrads = [()] * len(flatten_sample_args)
+
+    def _capture_backward_dw(func_idx, bwd_dw_graph):
+        """Capture deferred contributions without retaining ordinary-allocator grad targets."""
+        modules = tuple(
+            module
+            for module in visited_te_modules[func_idx]
+            if hasattr(module, "need_backward_dw") and module.need_backward_dw()
+        )
+        params = tuple(dict.fromkeys(param for module in modules for param in module.parameters()))
+        # Warmup grads belong to the ordinary allocator. Capture fresh results
+        # in the graph pool so zero_grad() cannot free an accumulation target.
+        with _none_grad_context_wrapper(params), _graph_context_wrapper(bwd_dw_graph, pool=mempool):
+            for module in modules:
+                module.backward_dw()
+            return tuple((param, param.grad) for param in params if param.grad is not None)
 
     def _run_warmup_forward(func_idx, func, callable_idx):
         """Run forward for one callable during warmup; returns flattened outputs."""
@@ -806,13 +822,9 @@ def _make_graphed_callables(
                                 "No module needs wgrad computation but get float in order"
                             )
                         bwd_dw_graph = bwd_dw_graphs[per_callable_bwd_idx]
-                        with _graph_context_wrapper(bwd_dw_graph, pool=mempool):
-                            for module in visited_te_modules[per_callable_bwd_idx]:
-                                if (
-                                    hasattr(module, "need_backward_dw")
-                                    and module.need_backward_dw()
-                                ):
-                                    module.backward_dw()
+                        per_callable_static_wgrads[per_callable_bwd_idx] = _capture_backward_dw(
+                            per_callable_bwd_idx, bwd_dw_graph
+                        )
                         continue
 
                     static_input_surface = per_callable_static_input_surfaces[per_callable_bwd_idx]
@@ -1005,10 +1017,9 @@ def _make_graphed_callables(
                 )
 
                 if need_bwd_dw_graph[bwd_idx]:
-                    with _graph_context_wrapper(bwd_dw_graph, pool=mempool):
-                        for module in visited_te_modules[bwd_idx]:
-                            if hasattr(module, "need_backward_dw") and module.need_backward_dw():
-                                module.backward_dw()
+                    per_callable_static_wgrads[bwd_idx] = _capture_backward_dw(
+                        bwd_idx, bwd_dw_graph
+                    )
             # Constructs a tuple suitable for returning from Graphed.backward:
             # Pads out the actually-needed grads with Nones in gradient slots for inputs that
             # don't require grad. I couldn't think of a slick one-liner for this pattern.
@@ -1237,12 +1248,22 @@ def _make_graphed_callables(
         bwd_dw_graph = bwd_dw_graphs[graph_idx]
         need_bwd_dw = need_bwd_dw_graph.get(graph_idx, False)
         te_modules = visited_te_modules.get(graph_idx, set())
+        static_wgrads = per_callable_static_wgrads[graph_idx]
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
             helpers.ensure_not_reset()
             if need_bwd_dw:
                 bwd_dw_graph.replay()
+
+                # Python assignments made during capture are not replayed. Give
+                # callers owned grads and accumulate tied/microbatch contributions
+                # before running their delayed-grad hooks.
+                for param, grad in static_wgrads:
+                    if param.grad is None:
+                        param.grad = grad.detach().clone()
+                    else:
+                        param.grad.add_(grad)
 
                 # Trigger the grad accumulation hook for wgrad graphs.
                 for module in te_modules:
@@ -1254,7 +1275,7 @@ def _make_graphed_callables(
 
         # Attach reset as an attribute to the graphed callable.
         def reset():
-            nonlocal fwd_graph, bwd_graph, bwd_dw_graph, te_modules
+            nonlocal fwd_graph, bwd_graph, bwd_dw_graph, te_modules, static_wgrads
 
             for graph in (fwd_graph, bwd_graph, bwd_dw_graph):
                 if graph is not None:
@@ -1264,6 +1285,7 @@ def _make_graphed_callables(
             bwd_graph = None
             bwd_dw_graph = None
             te_modules = ()
+            static_wgrads = ()
             helpers.release_static_state()
 
         return backward_dw, reset

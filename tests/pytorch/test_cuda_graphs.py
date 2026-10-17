@@ -753,6 +753,180 @@ def test_make_graphed_callables_with_kwargs(
     assert_all_equal(outputs, graph_outputs)
 
 
+@pytest.mark.parametrize("with_order", (False, True))
+@pytest.mark.parametrize("set_to_none", (False, True))
+@pytest.mark.parametrize("bias", (False, True))
+@pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
+def test_make_graphed_callables_with_delayed_wgrad(with_order, set_to_none, bias, dtype):
+    """Delayed replay survives zero_grad and matches independent optimizer steps."""
+    reset_rng_states()
+    hidden_size, batch_size = 16, 8
+    module = Linear(
+        hidden_size,
+        hidden_size,
+        bias=bias,
+        params_dtype=dtype,
+        delay_wgrad_compute=True,
+        fuse_wgrad_accumulation=False,
+    )
+    reference = torch.nn.Linear(hidden_size, hidden_size, bias=bias, device="cuda", dtype=dtype)
+    with torch.no_grad():
+        module.weight.fill_(0.25)
+        reference.weight.copy_(module.weight)
+        if bias:
+            module.bias.fill_(0.125)
+            reference.bias.copy_(module.bias)
+    graph_options = {}
+    if with_order:
+        graph_options = {"_order": [1, -1, -1.5], "_num_layers_per_chunk": [1]}
+    graphed = make_graphed_callables(
+        module,
+        (torch.ones(batch_size, hidden_size, device="cuda", dtype=dtype, requires_grad=True),),
+        **graph_options,
+    )
+    optimizers = [torch.optim.SGD(model.parameters(), lr=1 / 64) for model in (module, reference)]
+    saved_grads = []
+    try:
+        for _ in range(3):
+            for optimizer in optimizers:
+                optimizer.zero_grad(set_to_none=set_to_none)
+            # Bound the ordinary-allocator reuse pressure and check every buffer.
+            guards = [torch.full_like(module.weight, 17 + index) for index in range(32)]
+            input_ = torch.randint(-2, 3, (batch_size, hidden_size), device="cuda").to(dtype) / 4
+            graph_input = input_.detach().requires_grad_(True)
+            reference_input = input_.detach().clone().requires_grad_(True)
+            grad_output = (
+                torch.randint(-2, 3, (batch_size, hidden_size), device="cuda").to(dtype) / 8
+            )
+            output, expected = graphed(graph_input), reference(reference_input)
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+            output.backward(grad_output)
+            expected.backward(grad_output)
+            graphed.backward_dw()
+            for index, guard in enumerate(guards):
+                torch.testing.assert_close(
+                    guard, torch.full_like(guard, 17 + index), rtol=0, atol=0
+                )
+            torch.testing.assert_close(graph_input.grad, reference_input.grad, rtol=0, atol=0)
+            for param, reference_param in zip(module.parameters(), reference.parameters()):
+                assert param.grad is not None
+                torch.testing.assert_close(param.grad, reference_param.grad, rtol=0, atol=0)
+            if set_to_none:
+                for grad, snapshot in saved_grads:
+                    torch.testing.assert_close(grad, snapshot, rtol=0, atol=0)
+                saved_grads.extend(
+                    (param.grad, param.grad.clone()) for param in module.parameters()
+                )
+            for optimizer in optimizers:
+                optimizer.step()
+            for param, reference_param in zip(module.parameters(), reference.parameters()):
+                torch.testing.assert_close(param, reference_param, rtol=0, atol=0)
+    finally:
+        graphed.reset()
+
+
+@pytest.mark.parametrize("with_order", (False, True))
+@pytest.mark.parametrize("set_to_none", (False, True))
+@pytest.mark.parametrize("tied", (False, True))
+def test_graphed_delayed_wgrad_accumulates_microbatches(with_order, set_to_none, tied):
+    """Separate delayed graphs contribute to shared weights across microbatches."""
+    reset_rng_states()
+    modules = tuple(
+        Linear(16, 16, bias=False, params_dtype=torch.float32, delay_wgrad_compute=True)
+        for _ in range(2)
+    )
+    reference = torch.nn.Sequential(
+        torch.nn.Linear(16, 16, bias=False, device="cuda"),
+        torch.nn.Linear(16, 16, bias=False, device="cuda"),
+    )
+    if tied:
+        modules[1].weight = modules[0].weight
+        reference[1].weight = reference[0].weight
+    with torch.no_grad():
+        for module, reference_module in zip(modules, reference):
+            module.weight.fill_(0.25)
+            reference_module.weight.copy_(module.weight)
+    graph_options = {}
+    if with_order:
+        graph_options = {"_order": [1, 2, -2, -2.5, -1, -1.5], "_num_layers_per_chunk": [1, 1]}
+    graphed = make_graphed_callables(
+        modules,
+        tuple((torch.ones(8, 16, device="cuda", requires_grad=True),) for _ in modules),
+        **graph_options,
+    )
+    optimizer = torch.optim.SGD(reference.parameters(), lr=1 / 64)
+    parameters = tuple(dict.fromkeys(param for module in modules for param in module.parameters()))
+    graph_optimizer = torch.optim.SGD(parameters, lr=1 / 64)
+    try:
+        for _ in range(3):
+            optimizer.zero_grad(set_to_none=set_to_none)
+            graph_optimizer.zero_grad(set_to_none=set_to_none)
+            for _ in range(2):
+                input_ = torch.randint(-2, 3, (8, 16), device="cuda").float() / 4
+                graph_input = input_.detach().requires_grad_(True)
+                reference_input = input_.detach().clone().requires_grad_(True)
+                output = graphed[1](graphed[0](graph_input))
+                expected = reference(reference_input)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                output.sum().backward()
+                expected.sum().backward()
+                for callable_ in reversed(graphed):
+                    callable_.backward_dw()
+                torch.testing.assert_close(graph_input.grad, reference_input.grad, rtol=0, atol=0)
+            for module, reference_module in zip(modules, reference):
+                assert module.weight.grad is not None
+                torch.testing.assert_close(
+                    module.weight.grad, reference_module.weight.grad, rtol=0, atol=0
+                )
+            graph_optimizer.step()
+            optimizer.step()
+            for module, reference_module in zip(modules, reference):
+                torch.testing.assert_close(module.weight, reference_module.weight, rtol=0, atol=0)
+    finally:
+        reset_graphs(graphed)
+
+
+@pytest.mark.parametrize("with_order", (False, True))
+def test_graphed_delayed_wgrad_preserves_main_grad(with_order):
+    """Fused accumulation continues to write main_grad across optimizer boundaries."""
+    reset_rng_states()
+    module = Linear(
+        16,
+        16,
+        bias=False,
+        params_dtype=torch.float32,
+        delay_wgrad_compute=True,
+        fuse_wgrad_accumulation=True,
+    )
+    module.weight.main_grad = torch.zeros_like(module.weight)
+    reference = torch.nn.Linear(16, 16, bias=False, device="cuda")
+    with torch.no_grad():
+        module.weight.fill_(0.25)
+        reference.weight.copy_(module.weight)
+    graph_options = {}
+    if with_order:
+        graph_options = {"_order": [1, -1, -1.5], "_num_layers_per_chunk": [1]}
+    graphed = make_graphed_callables(
+        module, (torch.ones(8, 16, device="cuda", requires_grad=True),), **graph_options
+    )
+    try:
+        for _ in range(2):
+            module.zero_grad()
+            module.weight.main_grad.zero_()
+            reference.zero_grad()
+            for _ in range(2):
+                input_ = torch.randint(-2, 3, (8, 16), device="cuda").float() / 4
+                graphed(input_.detach().requires_grad_(True)).sum().backward()
+                reference(input_.detach().clone().requires_grad_(True)).sum().backward()
+                graphed.backward_dw()
+            assert module.weight.grad is None
+            torch.testing.assert_close(
+                module.weight.main_grad, reference.weight.grad, rtol=0, atol=0
+            )
+    finally:
+        graphed.reset()
+
+
 def test_make_graphed_callables_returns_owned_parameter_grads() -> None:
     """Parameter grads returned from graph replay must not alias static graph buffers."""
     reset_rng_states()
