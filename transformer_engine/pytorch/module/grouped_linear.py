@@ -241,6 +241,11 @@ class GroupedLinearBwdArgs:
     origin_weight_refs: Optional[Any] = None
     origin_weights_overwrite_main_grad: bool = False
     main_grad_funcs: Optional[Any] = None
+    # DistributedWeight objects kept as Python references. They are also passed through
+    # save_for_backward (as saved_weights), but when saved-tensor hooks are active (e.g.
+    # activation offloading) autograd unpacks saved leaves as fresh plain tensors, dropping
+    # the subclass and its ``is_distributed_weight`` marker.
+    dist_weights: Optional[List[Any]] = None
 
     reduce_and_update_bwd_fp8_tensors: bool = False
 
@@ -466,6 +471,7 @@ def _grouped_linear_setup_ctx(
     bwd_args.wgrad_store = fwd_args.wgrad_store
     bwd_args.cpu_offloading = fwd_args.cpu_offloading
     bwd_args.dgrad_out = fwd_args.dgrad_out
+    bwd_args.dist_weights = list(weights) if is_distributed_weight(weights[0]) else None
 
     if fwd_args.fuse_wgrad_accumulation and fwd_args.weights_requires_grad:
         # Keep weakrefs to weights to preserve attributes like main_grad
@@ -520,6 +526,9 @@ def _grouped_linear_backward_impl(
     inputmats = args.inputmats
     weights = args.weights_fp8
     saved_weights = args.saved_weights
+    if args.dist_weights is not None:
+        # Prefer the objects kept in forward; see GroupedLinearBwdArgs.dist_weights.
+        saved_weights = args.dist_weights
     biases = args.biases
     device = grad_output.device
     in_features = args.weights_shape_1
@@ -755,6 +764,9 @@ class GroupedLinearGraphSafeBwdArgs:
     weight_quantizers: List[Quantizer] = None
     grad_output_quantizers: List[Quantizer] = None
     is_dist_weight: bool = False
+    # See GroupedLinearBwdArgs.dist_weights: the saved shards may be unpacked as plain
+    # tensors under saved-tensor hooks, so keep the DistributedWeight objects here.
+    dist_weights: Optional[List[Any]] = None
     num_gemms: int = 0
     in_features: int = 0
     out_features: int = 0
@@ -964,6 +976,7 @@ def _grouped_linear_graph_safe_setup(
     bwd_args.input_quantizers = fwd_args.input_quantizers
     bwd_args.weight_quantizers = fwd_args.weight_quantizers
     bwd_args.is_dist_weight = is_distributed_weight(fwd_args.weights[0])
+    bwd_args.dist_weights = list(fwd_args.weights) if bwd_args.is_dist_weight else None
     bwd_args.grad_output_quantizers = fwd_args.grad_output_quantizers
     bwd_args.m_splits_tensor = fwd_args.m_splits_tensor
     bwd_args.num_gemms = fwd_args.num_gemms
@@ -1038,6 +1051,10 @@ def _grouped_linear_graph_safe_backward(
     main_grads = [None] * num_weight_args
     is_dist_weight = args.is_dist_weight
     if is_dist_weight:
+        # Forward saved the shards, not the gathered copies. Prefer the originals kept
+        # on args: saved-tensor hooks may have unpacked the shards as plain tensors.
+        if args.dist_weights is not None:
+            weight_tensors = args.dist_weights
         origin_weights = list(weight_tensors)
         if args.fuse_wgrad_accumulation and args.weights_requires_grad:
             main_grads = [main_grad_func() for main_grad_func in args.main_grad_funcs]
