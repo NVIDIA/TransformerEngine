@@ -17,6 +17,9 @@
 #include "../util/system.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"
 #include "graph_cache.h"
+#ifdef NVTE_WITH_CUTEDSL
+#include "frost_attn.h"
+#endif
 #include "graph_cache_debug.h"
 #include "utils.h"
 
@@ -1155,13 +1158,44 @@ void fused_attn_arbitrary_seqlen_bwd(const FusedAttnConfig &cfg, const Tensor *i
   void *devPtrDropoutOffset =
       reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
 
-  size_t workspace_size = 0;
-
-  fused_attn_arbitrary_seqlen_bwd_impl(
-      cfg, devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias, devPtrSoftmaxOffset,
-      devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias, devPtrdSoftmaxOffset, devPtrDropoutSeed,
-      devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrSeqOffsetsQ,
-      devPtrSeqOffsetsKV, workspace->data.dptr, &workspace_size, stream, handle);
+  size_t workspace_size = workspace->data.buffer_size_bytes();
+  bool used_frost = false;
+#ifdef NVTE_WITH_CUTEDSL
+  const fused_attn::FrostPointers frost_pointers{devPtrQ,
+                                                 devPtrK,
+                                                 devPtrV,
+                                                 devPtrO,
+                                                 devPtrdO,
+                                                 devPtrSoftmaxStats,
+                                                 devPtrdQ,
+                                                 devPtrdK,
+                                                 devPtrdV,
+                                                 devPtrCuSeqlensQ,
+                                                 devPtrCuSeqlensKV,
+                                                 devPtrSeqOffsetsQ,
+                                                 devPtrSeqOffsetsKV,
+                                                 devPtrSeqOffsetsKV,
+                                                 devPtrSeqOffsetsQ,
+                                                 devPtrSeqOffsetsQ,
+                                                 devPtrSeqOffsetsQ,
+                                                 devPtrSeqOffsetsKV,
+                                                 devPtrSeqOffsetsKV,
+                                                 devPtrSeqOffsetsQ};
+  used_frost = fused_attn::frost_attention_backward(cfg, frost_pointers, workspace->data.dptr,
+                                                    &workspace_size, stream);
+#else
+  NVTE_CHECK(transformer_engine::getenv<int>("NVTE_FUSED_ATTN_FROST") != 2,
+             "cuDNN OSS attention requires a TE build with NVTE_WITH_CUTEDSL=ON");
+#endif
+  if (!used_frost) {
+    workspace_size = 0;
+    fused_attn_arbitrary_seqlen_bwd_impl(
+        cfg, devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias,
+        devPtrSoftmaxOffset, devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias,
+        devPtrdSoftmaxOffset, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
+        devPtrCuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, workspace->data.dptr,
+        &workspace_size, stream, handle);
+  }
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {

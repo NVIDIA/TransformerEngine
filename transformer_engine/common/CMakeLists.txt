@@ -168,7 +168,7 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
 option(NVTE_WITH_CUTEDSL
-       "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" OFF)
+       "Build the CuTeDSL kernel bridge (requires the apache-tvm-ffi Python package)" OFF)
 if(NVTE_WITH_CUTEDSL)
   # Building libtransformer_engine.so with CuTeDSL support requires the TVM-FFI headers.
   if(NOT EXISTS "${TVM_FFI_INCLUDE_DIR}/tvm/ffi/any.h")
@@ -283,6 +283,7 @@ list(APPEND transformer_engine_cpp_sources
 
 if(NVTE_WITH_CUTEDSL)
   list(APPEND transformer_engine_cpp_sources init_python.cpp)
+  list(APPEND transformer_engine_cuda_sources fused_attn/frost_attn.cu)
 endif()
 
 list(APPEND transformer_engine_cuda_sources
