@@ -77,6 +77,8 @@ void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx);
  *  \param[in]     transb        Whether B matrix is transposed.
  *  \param[in]     grad          Whether this operation is part of gradient computation.
  *  \param[in]     accumulate    Whether to accumulate the result into the D matrix.
+ *  \param[in]     use_split_accumulator Whether to use split accumulator in FP8 GEMMs. Otherwise
+ *                                       they use fast accumulation (cuBLASMp 0.12.0+).
  *  \param[in]     comm_sm_count Number of GPU SMs to use for communication (default=0: use heuristics)
  *  \param[in]     main_stream   CUDA stream used for computation.
  *  \param[in]     algo          Algorithm to use.
@@ -84,8 +86,8 @@ void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx);
 void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          NVTECommGemmAlgoType algo);
+                          bool accumulate, bool use_split_accumulator, int comm_sm_count,
+                          cudaStream_t main_stream, NVTECommGemmAlgoType algo);
 
 /*! \brief Perform GEMM followed by ReduceScatter communication
  *
@@ -104,6 +106,8 @@ void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
  *  \param[in]     transb        Whether B matrix is transposed.
  *  \param[in]     grad          Whether this operation is part of gradient computation.
  *  \param[in]     accumulate    Whether to accumulate the result into the D matrix.
+ *  \param[in]     use_split_accumulator Whether to use split accumulator in FP8 GEMMs. Otherwise
+ *                                       they use fast accumulation (cuBLASMp 0.12.0+).
  *  \param[in]     comm_sm_count Number of GPU SMs to use for communication (default=0: use heuristics)
  *  \param[in]     main_stream   CUDA stream used for computation.
  *  \param[in]     algo          Algorithm to use.
@@ -111,8 +115,9 @@ void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
 void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
                               const NVTETensor a, const NVTETensor b, const NVTETensor d,
                               const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
-                              bool transb, bool grad, bool accumulate, int comm_sm_count,
-                              cudaStream_t main_stream, NVTECommGemmAlgoType algo);
+                              bool transb, bool grad, bool accumulate, bool use_split_accumulator,
+                              int comm_sm_count, cudaStream_t main_stream,
+                              NVTECommGemmAlgoType algo);
 
 /*! \brief Perform GEMM followed by AllReduce communication
  *
@@ -131,6 +136,8 @@ void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_
  *  \param[in]     transb        Whether B matrix is transposed.
  *  \param[in]     grad          Whether this operation is part of gradient computation.
  *  \param[in]     accumulate    Whether to accumulate the result into the D matrix.
+ *  \param[in]     use_split_accumulator Whether to use split accumulator in FP8 GEMMs. Otherwise
+ *                                       they use fast accumulation (cuBLASMp 0.12.0+).
  *  \param[in]     comm_sm_count Number of GPU SMs to use for communication (default=0: use heuristics)
  *  \param[in]     main_stream   CUDA stream used for computation.
  *  \param[in]     algo          Algorithm to use.
@@ -138,8 +145,8 @@ void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_
 void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          NVTECommGemmAlgoType algo);
+                          bool accumulate, bool use_split_accumulator, int comm_sm_count,
+                          cudaStream_t main_stream, NVTECommGemmAlgoType algo);
 
 /*! \brief Get local number of rows or columns.
  *

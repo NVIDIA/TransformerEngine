@@ -258,7 +258,8 @@ cublasMpMatmulAlgoType_t cublasmp_algo(NVTECommGemmAlgoType algo) {
 void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECommGemmAlgoType algo,
                    int64_t m, int64_t n, int64_t k, const Tensor* a, const Tensor* b,
                    const Tensor* d, const Tensor* bias, const Tensor* pre_act_out, bool transa,
-                   bool transb, bool grad, bool accumulate, int comm_sm_count,
+                   bool transb, bool grad, bool accumulate,
+                   [[maybe_unused]] bool use_split_accumulator, int comm_sm_count,
                    cudaStream_t main_stream) {
   const bool tensor_scaling =
       is_tensor_scaling(a->scaling_mode) && is_tensor_scaling(b->scaling_mode);
@@ -379,6 +380,18 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_POINTER,
         &b_used.scale_inv.dptr, sizeof(void*)));
   }
+#if CUBLASMP_VERSION >= 1200
+  // Like cublaslt_gemm.cu, FP8 GEMMs use fast accumulation unless split accumulation is requested.
+  // cuBLASMp accepts the attribute from 0.12.0 on and only for FP8 A and B; with an older library
+  // the GEMMs keep split accumulation.
+  if (!use_split_accumulator && is_fp8_dtype(a_used.dtype()) && is_fp8_dtype(b_used.dtype()) &&
+      nvte_cublasmp_version() >= 1200) {
+    const int8_t fast_accum = 1;
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_FAST_ACCUM, &fast_accum,
+        sizeof fast_accum));
+  }
+#endif  // CUBLASMP_VERSION >= 1200
   if (is_fp8_dtype(d->dtype())) {
     NVTE_CHECK(d->scale.dptr, "Scaling must be set for FP8 dtype");
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
@@ -564,37 +577,38 @@ void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
 void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          NVTECommGemmAlgoType algo) {
+                          bool accumulate, bool use_split_accumulator, int comm_sm_count,
+                          cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
   NVTE_API_CALL(nvte_all_gather_gemm);
   cublasmp_gemm(AgGemmInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
                 convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),
                 convertNVTETensorCheck(pre_act_out), transa, transb, grad, accumulate,
-                comm_sm_count, main_stream);
+                use_split_accumulator, comm_sm_count, main_stream);
 }
 
 void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
                               const NVTETensor a, const NVTETensor b, const NVTETensor d,
                               const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
-                              bool transb, bool grad, bool accumulate, int comm_sm_count,
-                              cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
+                              bool transb, bool grad, bool accumulate, bool use_split_accumulator,
+                              int comm_sm_count, cudaStream_t main_stream,
+                              NVTECommGemmAlgoType algo) {
   NVTE_API_CALL(nvte_gemm_reduce_scatter);
   cublasmp_gemm(GemmRsInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
                 convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),
                 convertNVTETensorCheck(pre_act_out), transa, transb, grad, accumulate,
-                comm_sm_count, main_stream);
+                use_split_accumulator, comm_sm_count, main_stream);
 }
 
 void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          NVTECommGemmAlgoType algo) {
+                          bool accumulate, bool use_split_accumulator, int comm_sm_count,
+                          cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
   NVTE_API_CALL(nvte_gemm_all_reduce);
   cublasmp_gemm(GemmArInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
                 convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),
                 convertNVTETensorCheck(pre_act_out), transa, transb, grad, accumulate,
-                comm_sm_count, main_stream);
+                use_split_accumulator, comm_sm_count, main_stream);
 }
 
 int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
@@ -637,24 +651,25 @@ void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
 void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          NVTECommGemmAlgoType algo) {
+                          bool accumulate, bool use_split_accumulator, int comm_sm_count,
+                          cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
 void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
                               const NVTETensor a, const NVTETensor b, const NVTETensor d,
                               const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
-                              bool transb, bool grad, bool accumulate, int comm_sm_count,
-                              cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
+                              bool transb, bool grad, bool accumulate, bool use_split_accumulator,
+                              int comm_sm_count, cudaStream_t main_stream,
+                              NVTECommGemmAlgoType algo) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
 void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
-                          NVTECommGemmAlgoType algo) {
+                          bool accumulate, bool use_split_accumulator, int comm_sm_count,
+                          cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
