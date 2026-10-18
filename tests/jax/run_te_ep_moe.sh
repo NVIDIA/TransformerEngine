@@ -23,6 +23,13 @@ if [ "$NUM_GPUS" -lt 4 ]; then
     exit 0
 fi
 
+# Bitwise fallback/layout comparisons need stable expert-row ordering in the
+# split dispatch path. Bootstrap previously selected this scan mode globally.
+# Keep it local to these tests; the fused dispatch path uses its own ordering.
+if [ "${NVTE_EP_FUSED_PREPARE_DISPATCH:-0}" != "1" ]; then
+    export NCCL_EP_HT_EM_AG_SCAN_MODE="${NCCL_EP_HT_EM_AG_SCAN_MODE:-1}"
+fi
+
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.5}"
 export TE_EP_MOE_COORDINATOR_ADDRESS="${TE_EP_MOE_COORDINATOR_ADDRESS:-127.0.0.1:13457}"
@@ -33,6 +40,9 @@ echo "  test file          : $TEST_FILE"
 echo "  coordinator        : $TE_EP_MOE_COORDINATOR_ADDRESS"
 echo "  XLA_PYTHON_CLIENT_PREALLOCATE: $XLA_PYTHON_CLIENT_PREALLOCATE"
 echo "  XLA_PYTHON_CLIENT_MEM_FRACTION: $XLA_PYTHON_CLIENT_MEM_FRACTION"
+if [ "$#" -gt 0 ]; then
+    echo "  extra pytest args  : $*"
+fi
 echo "============================================================"
 
 if [ -n "${TE_EP_MOE_MP_LOG_DIR:-}" ]; then
@@ -44,6 +54,8 @@ fi
 echo "Per-process logs: $LOG_DIR"
 
 PIDS=()
+EXITS=()
+FAILED=0
 
 cleanup() {
     for pid in "${PIDS[@]:-}"; do
@@ -61,25 +73,25 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 for i in $(seq 0 $((NUM_GPUS - 1))); do
-    LOG_FILE="$LOG_DIR/proc_${i}.log"
-    PYTEST_CMD=(
+    log_file="$LOG_DIR/proc_${i}.log"
+    pytest_cmd=(
         python3 -m pytest -c "$PYTEST_INI"
         "$TEST_FILE"
         -p no:typeguard
         -v -s
         --num-process="$NUM_GPUS"
         --process-id="$i"
+        "$@"
     )
     if [ "$i" -eq 0 ]; then
         echo "=== Live output from process 0 ==="
-        "${PYTEST_CMD[@]}" 2>&1 | tee "$LOG_FILE" &
+        "${pytest_cmd[@]}" 2>&1 | tee "$log_file" &
     else
-        "${PYTEST_CMD[@]}" > "$LOG_FILE" 2>&1 &
+        "${pytest_cmd[@]}" > "$log_file" 2>&1 &
     fi
     PIDS+=("$!")
 done
 
-EXITS=()
 for pid in "${PIDS[@]}"; do
     if wait "$pid"; then
         EXITS+=("0")
@@ -89,16 +101,11 @@ for pid in "${PIDS[@]}"; do
 done
 
 echo
-echo "============================================================"
 echo "Per-process exit codes:"
 for i in "${!EXITS[@]}"; do
     echo "  proc $i -> ${EXITS[$i]}"
 done
 
-# Treat exit 0 (pass) and exit 5 (pytest "no tests collected", which the
-# file emits via pytest.skip(allow_module_level=True) on pre-Blackwell
-# GPUs) as success.
-FAILED=0
 for e in "${EXITS[@]}"; do
     if [ "$e" != "0" ] && [ "$e" != "5" ]; then
         FAILED=1
@@ -117,6 +124,4 @@ fi
 
 echo "[run_te_ep_moe.sh] at least one process FAILED"
 echo "  retaining logs at $LOG_DIR for diagnosis"
-echo "  process 0 tail:"
-tail -20 "$LOG_DIR/proc_0.log" 2>/dev/null || true
 exit 1

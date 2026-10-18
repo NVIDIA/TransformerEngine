@@ -11,6 +11,7 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
+from ..dynamo.tensor_spec import TensorSpec
 from ..ep import (
     EpBuffer,
     EpConfig,
@@ -156,8 +157,10 @@ def validate_or_alloc_output(
     return buffer
 
 
-def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
-    """Check if tensor is a quantized tensor"""
+def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage | TensorSpec) -> bool:
+    """Check whether a tensor or tensor spec represents quantized data."""
+    if isinstance(tensor, TensorSpec):
+        return tensor.is_quantized
     return isinstance(tensor, QuantizedTensorStorage)
 
 
@@ -282,7 +285,8 @@ def get_dummy_wgrads_for_params(
 
     For each parameter that exposes ``grad_added_to_main_grad``, set the flag
     to ``True`` and return a dummy wgrad tensor (zeroed if
-    ``zero_out_wgrad`` is also set on the parameter). For parameters without
+    ``zero_out_wgrad`` is also set on the parameter, otherwise a ZeroTensor if
+    ``zero_tensor_dummy_wgrad`` is set). For parameters without
     the flag, the corresponding entry is ``None``.
 
     The returned list has the same length and order as ``weight_params``.
@@ -298,6 +302,7 @@ def get_dummy_wgrads_for_params(
                     list(wp.size()),
                     wp.dtype,
                     zero=getattr(wp, "zero_out_wgrad", False),
+                    zero_tensor=getattr(wp, "zero_tensor_dummy_wgrad", False),
                 )
             )
         else:
