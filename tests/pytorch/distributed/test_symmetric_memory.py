@@ -60,5 +60,9 @@ def _check_cache(rank, init_file):
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires two peer-accessible GPUs")
 def test_symmetric_cache_capacity_and_graph_replay():
     """Exercise cache growth and graph replay in fresh distributed processes."""
+    if not te_dist.HAS_TORCH_SYMMETRIC:
+        pytest.skip("Requires PyTorch symmetric memory support")
+    if not (torch.cuda.can_device_access_peer(0, 1) and torch.cuda.can_device_access_peer(1, 0)):
+        pytest.skip("Requires peer access between GPUs 0 and 1")
     with tempfile.TemporaryDirectory() as directory:
         mp.spawn(_check_cache, args=(os.path.join(directory, "rendezvous"),), nprocs=2, join=True)
