@@ -2089,8 +2089,11 @@ def symmetric_all_reduce(
             group_name,
         )
     else:
-        # Get symmetric memory tensor. Build or retrieve from cache.
-        msg = get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group)
+        # Geometric capacities bound retained scratch space by the largest request.
+        # Keep older capacities alive because captured graphs still reference them.
+        capacity = 1 << (max(1, tensor_numel) - 1).bit_length()
+        msg = get_symmetric_memory_tensor(capacity, tensor_dtype, tensor_device, tp_group)
+        msg = msg[:tensor_numel]
 
         msg.copy_(inp.reshape(-1))
 
