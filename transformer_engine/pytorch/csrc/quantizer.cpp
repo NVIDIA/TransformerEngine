@@ -1949,7 +1949,7 @@ NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::rht_cast_fusion_alignment(
 }
 
 NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::get_2d_swizzle_fusion_alignment(int sm_arch) {
-  if (sm_arch < 100 || sm_arch > 110) {
+  if ((sm_arch < 100 || sm_arch > 110) && sm_arch != 120 && sm_arch != 121) {
     return std::nullopt;
   }
   return std::pair<size_t, size_t>{128, 128};
@@ -1970,15 +1970,29 @@ NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::gemm_swizzled_scales_alignment(
   if (!optimize_for_gemm) {
     return std::nullopt;
   }
-  if (with_rht) {
-    // The SM12x no-TMEM RHT path reuses the compact-scale 1D TMA quantizer.
-    if (sm_arch == 120 || sm_arch == 121) {
-      return std::nullopt;
-    }
-    return rht_cast_fusion_alignment(sm_arch, disable_rht_cast_fusion);
+  // Row-scaled and 4over6 outputs keep compact scales on every path (the in-kernel swizzled
+  // stores are instantiated for neither).
+  if (row_scaled_nvfp4 || nvfp4_use_4over6) {
+    return std::nullopt;
   }
-  if (with_2d_quantization && !row_scaled_nvfp4 && !nvfp4_use_4over6) {
+  const bool sm12x = sm_arch == 120 || sm_arch == 121;
+  if (with_rht) {
+    const auto alignment = rht_cast_fusion_alignment(sm_arch, disable_rht_cast_fusion);
+    // The SM12x no-TMEM RHT path reuses the 1D TMA quantizers (the columnwise-RHT kernel, or
+    // the tuned 1D kernel for rowwise-only output), which write GEMM-swizzled scales in-kernel
+    // for 128-aligned shapes.
+    if (alignment && sm12x) {
+      return std::pair<size_t, size_t>{128, 128};
+    }
+    return alignment;
+  }
+  if (with_2d_quantization) {
     return get_2d_swizzle_fusion_alignment(sm_arch);
+  }
+  // Plain 1D: the tuned (BF16) and generic 1D kernels write GEMM-swizzled scales in-kernel for
+  // 128-aligned shapes. Enabled where validated (SM120/SM121).
+  if (sm12x) {
+    return std::pair<size_t, size_t>{128, 128};
   }
   return std::nullopt;
 }

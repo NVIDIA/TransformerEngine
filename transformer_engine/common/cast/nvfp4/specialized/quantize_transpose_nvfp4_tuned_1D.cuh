@@ -23,6 +23,7 @@
 #include "../../../util/ptx_arch_spec.cuh"
 #include "../../../utils.cuh"
 #include "../core_nvfp4.cuh"
+#include "../swizzle.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -372,7 +373,7 @@ __device__ __forceinline__ void rowwise_scaling(
 }
 
 template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
-          bool RETURN_TRANSPOSE, bool ROW_SCALED_NVFP4>
+          bool RETURN_TRANSPOSE, bool ROW_SCALED_NVFP4, bool WITH_GEMM_SWIZZLED_SCALES = false>
 __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const __grid_constant__ CUtensorMap tensor_map_output,
@@ -381,6 +382,8 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
     const float *const amax_colwise_ptr, const size_t rows, const size_t cols,
     const size_t scale_stride, const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  static_assert(!(WITH_GEMM_SWIZZLED_SCALES && ROW_SCALED_NVFP4),
+                "Row-scaled NVFP4 does not support GEMM-swizzled scales.");
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -650,10 +653,18 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
         for (size_t row = threadIdx.x; row < TunableConfig::CHUNK_DIM_Y; row += THREADS_NUM) {
           const size_t row_global = scales_block_offset_Y_rowwise + row;
           if (row_global < rows) {
-            ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFrowwise[row]);
-            const size_t scale_idx_global =
-                row_global * scale_stride + scales_block_offset_X_rowwise;
-            scales_vec.store_to_elts(&scales_ptr[scale_idx_global], 0, count);
+            if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+              // Emit each group of four scales at its cuBLAS GEMM-swizzled offset (same
+              // scheme as the 2D kernel), so no separate swizzle pass is needed before the GEMM.
+              const size_t col_length = cols / SCALE_DIM;
+              swizzle::store_gemm_swizzled_scales(scales_ptr, sSFrowwise[row], row_global,
+                                                  scales_block_offset_X_rowwise, col_length, count);
+            } else {
+              ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFrowwise[row]);
+              const size_t scale_idx_global =
+                  row_global * scale_stride + scales_block_offset_X_rowwise;
+              scales_vec.store_to_elts(&scales_ptr[scale_idx_global], 0, count);
+            }
           }
         }
       }
@@ -668,10 +679,17 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
              row_tr += THREADS_NUM) {
           const size_t row_tr_global = scales_block_offset_Y_tr + row_tr;
           if (row_tr_global < cols) {
-            ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);
-            const size_t scale_idx_global =
-                row_tr_global * scale_stride_t + scales_block_offset_X_tr;
-            scales_vec.store_to_elts(&scales_t_ptr[scale_idx_global], 0, count);
+            if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+              // The transposed scale matrix has rows / SCALE_DIM columns.
+              const size_t col_length_t = rows / SCALE_DIM;
+              swizzle::store_gemm_swizzled_scales(scales_t_ptr, sSFcolwise[row_tr], row_tr_global,
+                                                  scales_block_offset_X_tr, col_length_t, count);
+            } else {
+              ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);
+              const size_t scale_idx_global =
+                  row_tr_global * scale_stride_t + scales_block_offset_X_tr;
+              scales_vec.store_to_elts(&scales_t_ptr[scale_idx_global], 0, count);
+            }
           }
         }
       }
@@ -746,6 +764,13 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
              "Number of tensor rows must be a multiple of 32");  // 16B alignment for TMA
   NVTE_CHECK(cols % 32 == 0,
              "Number of tensor cols must be a multiple of 32");  // 16B alignment for TMA
+  // In-kernel GEMM-swizzled scales: the swizzled layout is tiled 128x4, so only 128-aligned
+  // dims avoid padded (unwritten) scale tiles.
+  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
+  NVTE_CHECK(!with_gemm_swizzled_scales || !row_scaled_nvfp4,
+             "Row-scaled NVFP4 quantization does not support GEMM-swizzled scales.");
+  NVTE_CHECK(!with_gemm_swizzled_scales || (rows % 128 == 0 && cols % 128 == 0),
+             "In-kernel GEMM-swizzled NVFP4 scales require rows and cols to be multiples of 128.");
 
   const int blocks_Y = DIVUP(rows, static_cast<size_t>(TunableConfig::CHUNK_DIM_Y));
   const int blocks_X = DIVUP(cols, static_cast<size_t>(TunableConfig::CHUNK_DIM_X));
@@ -827,6 +852,13 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
                     quantize_transpose_nvfp4_tuned_1D_kernel<ScaleType, USE_STOCHASTIC_ROUNDING,
                                                              USE_FAST_MATH, RETURN_TRANSPOSE,
                                                              ROW_SCALED_NVFP4>;
+                if constexpr (!ROW_SCALED_NVFP4) {
+                  if (with_gemm_swizzled_scales) {
+                    kernel = quantize_transpose_nvfp4_tuned_1D_kernel<
+                        ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE,
+                        ROW_SCALED_NVFP4, /*WITH_GEMM_SWIZZLED_SCALES=*/true>;
+                  }
+                }
 
                 cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                      dshmem_size);

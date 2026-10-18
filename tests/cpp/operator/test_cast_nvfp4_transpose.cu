@@ -1681,14 +1681,15 @@ TEST(NVFP4UE5M3ReferenceTest, Grouped) {
 }
 #endif
 
-TEST(CastNVFP4RHTTest, RejectsSwizzledScalesOnSM12x) {
+TEST(CastNVFP4RHTTest, RejectsUnalignedSwizzledScalesOnSM12x) {
     const int sm_arch = getDeviceComputeCapability();
     if (sm_arch != 120 && sm_arch != 121) {
         GTEST_SKIP();
     }
 
-    Tensor input("input", std::vector<size_t>{128, 128}, DType::kBFloat16);
-    Tensor output("output", std::vector<size_t>{128, 128}, DType::kFloat4E2M1,
+    // In-kernel GEMM-swizzled scales require 128-aligned rows and cols.
+    Tensor input("input", std::vector<size_t>{64, 128}, DType::kBFloat16);
+    Tensor output("output", std::vector<size_t>{64, 128}, DType::kFloat4E2M1,
                   false, true, NVTE_NVFP4_1D_SCALING);
     Tensor hadamard("hadamard", std::vector<size_t>{16, 16}, DType::kBFloat16);
     output.set_with_gemm_swizzled_scales(true);
@@ -1696,9 +1697,106 @@ TEST(CastNVFP4RHTTest, RejectsSwizzledScalesOnSM12x) {
     try {
         nvte_quantize_with_hadamard_transform(input.data(), output.data(), hadamard.data(),
                                               nullptr, nullptr);
-        FAIL() << "Expected the SM12x RHT path to reject swizzled scales";
+        FAIL() << "Expected the SM12x RHT path to reject swizzled scales for 64 rows";
     } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("does not support GEMM-swizzled scales"),
-                  std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("require rows and cols to be multiples of 128"),
+                  std::string::npos) << e.what();
+    }
+}
+
+TEST(CastNVFP4RHTTest, SwizzledScalesMatchCompactOnSM12x) {
+    const int sm_arch = getDeviceComputeCapability();
+    if (sm_arch != 120 && sm_arch != 121) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t rows = 256;
+    constexpr size_t cols = 384;
+    const std::vector<size_t> shape{rows, cols};
+
+    Tensor input("input", shape, DType::kBFloat16);
+    fillUniform(&input);
+    const bf16 *input_data = input.rowwise_cpu_dptr<bf16>();
+    float amax = 0.0f;
+    for (size_t i = 0; i < rows * cols; ++i) {
+        amax = fmaxf(amax, fabsf(static_cast<float>(input_data[i])));
+    }
+
+    // Orthonormal 16-point Sylvester Hadamard matrix: H[i][j] = (-1)^popcount(i & j) / 4.
+    Tensor hadamard("hadamard", std::vector<size_t>{16, 16}, DType::kBFloat16);
+    bf16 *hadamard_data = hadamard.rowwise_cpu_dptr<bf16>();
+    for (unsigned i = 0; i < 16; ++i) {
+        for (unsigned j = 0; j < 16; ++j) {
+            hadamard_data[i * 16 + j] =
+                static_cast<bf16>(__builtin_popcount(i & j) % 2 ? -0.25f : 0.25f);
+        }
+    }
+    hadamard.from_cpu();
+
+    // Rowwise scales form a [rows, cols/16] matrix; columnwise scales belong to the transposed
+    // data and form a [cols, rows/16] matrix. With 128-aligned dims neither buffer is padded.
+    const auto dims = get_scale_tensor_dims(rows, cols, 1, 16);
+    const auto dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
+    for (const auto &d : {dims, dims_t}) {
+        ASSERT_EQ(d[0], d[2]);
+        ASSERT_EQ(d[1], d[3]);
+    }
+
+    // Permutes a compact [M, K] scale matrix into cuBLAS's block-scaling layout (128x4 tiles
+    // stored as 32 rows of 16 bytes), as compute_ref_swizzle<128, 4, true> in test_swizzle.cu.
+    const auto swizzle_ref = [](const uint8_t *scales, const size_t M, const size_t K) {
+        std::vector<uint8_t> out(M * K);
+        for (size_t m = 0; m < M; ++m) {
+            for (size_t k = 0; k < K; ++k) {
+                const size_t tile_offset = (m / 128) * 128 * K + (k / 4) * 512;
+                out[tile_offset + (m % 32) * 16 + (m % 128) / 32 * 4 + k % 4] = scales[m * K + k];
+            }
+        }
+        return out;
+    };
+    const auto check_direction = [&](const std::string &name, const fp4e2m1 *data,
+                                     const fp4e2m1 *swizzled_data, const uint8_t *scales,
+                                     const uint8_t *swizzled_scales, const size_t M,
+                                     const size_t K) {
+        compareResults(name + "_data", reinterpret_cast<const uint8_t *>(swizzled_data),
+                       reinterpret_cast<const uint8_t *>(data), rows * cols / 2);
+        // Buffers start zeroed, so a block skipped by both kernels would otherwise go unnoticed.
+        ASSERT_TRUE(std::none_of(scales, scales + M * K, [](uint8_t s) { return s == 0; }))
+            << name << " compact scales contain unwritten (zero) entries";
+        compareResults(name + "_scales", swizzled_scales, swizzle_ref(scales, M, K).data(),
+                       M * K);
+    };
+
+    for (const bool rowwise : {false, true}) {
+        SCOPED_TRACE(rowwise ? "rowwise+columnwise" : "columnwise-only");
+        Tensor compact("compact", shape, DType::kFloat4E2M1, rowwise, true,
+                       NVTE_NVFP4_1D_SCALING);
+        Tensor swizzled("swizzled", shape, DType::kFloat4E2M1, rowwise, true,
+                        NVTE_NVFP4_1D_SCALING);
+        swizzled.set_with_gemm_swizzled_scales(true);
+        for (Tensor *output : {&compact, &swizzled}) {
+            if (rowwise) {
+                output->set_amax(amax);
+            }
+            // Each RHT output sums 16 terms of +-x/4, so 4 * amax bounds the columnwise amax.
+            output->set_tensor_amax_columnwise(4.0f * amax);
+            nvte_quantize_with_hadamard_transform(input.data(), output->data(), hadamard.data(),
+                                                  nullptr, nullptr);
+        }
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+        compact.to_cpu();
+        swizzled.to_cpu();
+
+        check_direction("columnwise", compact.columnwise_cpu_dptr<fp4e2m1>(),
+                        swizzled.columnwise_cpu_dptr<fp4e2m1>(),
+                        compact.columnwise_cpu_scale_inv_ptr<uint8_t>(),
+                        swizzled.columnwise_cpu_scale_inv_ptr<uint8_t>(), dims_t[0], dims_t[1]);
+        if (rowwise) {
+            check_direction("rowwise", compact.rowwise_cpu_dptr<fp4e2m1>(),
+                            swizzled.rowwise_cpu_dptr<fp4e2m1>(),
+                            compact.rowwise_cpu_scale_inv_ptr<uint8_t>(),
+                            swizzled.rowwise_cpu_scale_inv_ptr<uint8_t>(), dims[0], dims[1]);
+        }
     }
 }
