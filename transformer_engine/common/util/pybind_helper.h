@@ -161,6 +161,7 @@
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
         py::call_guard<py::gil_scoped_release>());                                                 \
   m.def("nvte_built_with_cublasmp", &nvte_built_with_cublasmp,                                     \
-        py::call_guard<py::gil_scoped_release>());
+        py::call_guard<py::gil_scoped_release>());                                                 \
+  m.def("nvte_cublasmp_version", &nvte_cublasmp_version, py::call_guard<py::gil_scoped_release>());
 
 #endif

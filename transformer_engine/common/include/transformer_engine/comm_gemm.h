@@ -165,6 +165,13 @@ int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size);
  */
 void* nvte_comm_gemm_workspace(NVTECommGemmCtx* ctx, size_t* size);
 
+/*! \brief Get the version of the cuBLASMp library loaded at run time.
+ *
+ *  \return MAJOR * 10000 + MINOR * 100 + PATCH (for example, 1100 for 0.11.0), or 0 if
+ *          Transformer Engine has not been built with cuBLASMp support.
+ */
+int nvte_cublasmp_version(void);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

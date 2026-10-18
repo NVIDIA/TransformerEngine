@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Base modules and utilities for TransformerEngine PyTorch API"""
+import functools
 import io
 import math
 import os
@@ -799,6 +800,16 @@ def fill_userbuffers_buffer_for_all_gather(
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
 
 
+@functools.lru_cache(maxsize=None)
+def _cublasmp_keeps_gathered_input() -> bool:
+    """Whether the loaded cuBLASMp leaves the gathered all-gather GEMM input at the start of its workspace
+
+    cuBLASMp 0.11.0 and newer do; earlier versions keep it elsewhere.
+
+    """
+    return tex.nvte_cublasmp_version() >= 1100
+
+
 def get_cublasmp_all_gather_output(
     comm,
     local_tensor: torch.Tensor | QuantizedTensorStorage,
@@ -820,6 +831,8 @@ def get_cublasmp_all_gather_output(
     elsewhere; callers all-gather those separately.
 
     """
+    if not _cublasmp_keeps_gathered_input():
+        return None
     if isinstance(local_tensor, Float8TensorStorage):
         local_data = local_tensor._data
     elif isinstance(local_tensor, QuantizedTensorStorage):
@@ -830,12 +843,7 @@ def get_cublasmp_all_gather_output(
         return None
     global_shape = list(local_data.size())
     global_shape[0] *= torch.distributed.get_world_size(process_group)
-    try:
-        global_data = comm.get_buffer(shape=global_shape)
-    except RuntimeError as e:
-        if "No gathered input in the cuBLASMp workspace" not in str(e):
-            raise
-        return None
+    global_data = comm.get_buffer(shape=global_shape)
     if global_data.dtype != local_data.dtype:
         return None
     if not isinstance(local_tensor, Float8TensorStorage):
