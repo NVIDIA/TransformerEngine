@@ -595,6 +595,7 @@ def _support_reason(config, attn, version, capability):
             and attn.ragged_stats
             and p["softmax_type"] == "learnable"
             and version < 92600
+            and attn.dv not in (64, 128, 256)
         ):
             return (
                 "Known cuDNN < 9.26.0 issue with THD learnable softmax backward. Please upgrade"

@@ -238,18 +238,20 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
     version = cudnn_version()
     if ragged and capabilities[0] < 90:
         raise ValueError("F16/BF16 fused attention with THD format requires sm90 or later.")
-    if (
-        backward
-        and ragged_stats
-        and config.softmax_type.name == "LEARNABLE_SOFTMAX"
-        and version < 92600
-    ):
-        raise ValueError("THD learnable softmax backward requires cuDNN 9.26.0 or later.")
+    if backward and not fp8 and ragged_stats:
+        if (
+            config.softmax_type.name == "LEARNABLE_SOFTMAX"
+            and version < 92600
+            and dv not in (64, 128, 256)
+        ):
+            raise ValueError("THD learnable softmax backward requires cuDNN 9.26.0 or later.")
     if fp8 and ragged:
         if version < 92300:
             raise ValueError("FP8 THD attention requires cuDNN 9.23.0 or later.")
         if backward and capabilities[0] < 100:
             raise ValueError("FP8 THD backward requires sm100 or later.")
+        if backward and config.softmax_type.name != "VANILLA_SOFTMAX" and version < 92600:
+            raise ValueError("FP8 THD backward with a sink token requires cuDNN 9.26.0 or later.")
     if fp8 and backward and config.attn_bias_type.name != "NO_BIAS":
         raise ValueError("cuDNN FP8 backward does not support attention bias or ALiBi.")
     io_dtype = _dtype(avals[0].dtype)
@@ -520,13 +522,22 @@ def execute(direction, args, config, result_avals):
         output_indices=np.asarray(plan.output_indices, np.int64),
         output_offsets=np.asarray(plan.output_offsets, np.int64),
     )
-    if not backward and config.qkv_layout.is_thd():
-        # Match the neutral finite statistics value for empty ragged ring blocks.
-        # Filling FP32 bytes with 0xF0 gives a large negative number without NaNs
-        # when the ring correction subtracts statistics for two empty blocks.
-        fills = np.zeros(len(specs) - 1, np.int64)
-        fills[1:3] = 0xF0
-        attributes["output_fill_values"] = fills
+    # Fully written outputs need no initialization. Unbound optional results
+    # (including unsupported bias gradients) must still return zeros.
+    fills = np.full(len(specs) - 1, -1, np.int64)
+    for slot in set(range(len(fills))) - set(plan.output_indices):
+        fills[slot] = 0
+    if config.qkv_layout.is_thd():
+        if backward:
+            # Packed gradients share result slots: clear each backing buffer once.
+            fills[:3] = 0
+        else:
+            fills[0] = 0
+            # Match the neutral finite statistics value for empty ragged ring blocks.
+            # Filling FP32 bytes with 0xF0 gives a large negative number without NaNs
+            # when the ring correction subtracts statistics for two empty blocks.
+            fills[1:3] = 0xF0
+    attributes["output_fill_values"] = fills
     results = ffi.ffi_call(
         "te_cudnn_graph_ffi", tuple(jax.ShapeDtypeStruct(spec.shape, spec.dtype) for spec in specs)
     )(*(values[name] for name in plan.names), **attributes)

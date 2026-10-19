@@ -133,9 +133,9 @@ ffi::Error ExecuteGraph(cudaStream_t stream, ffi::RemainingArgs args, ffi::Remai
     for (size_t i = 0; i < rets.size() - 1; ++i) {
       auto buf = rets.get<ffi::AnyBuffer>(i);
       if (buf.has_error()) throw std::runtime_error("Invalid cuDNN output buffer binding.");
-      // Initialize ragged slots and optional gradient outputs.
-      if (buf.value()->size_bytes()) {
-        const int fill = output_fill_values.has_value() ? output_fill_values.value()[i] : 0;
+      // Negative or absent fill values leave fully written outputs uninitialized.
+      const int64_t fill = output_fill_values.has_value() ? output_fill_values.value()[i] : -1;
+      if (fill >= 0 && buf.value()->size_bytes()) {
         CheckCuda(
             cudaMemsetAsync(buf.value()->untyped_data(), fill, buf.value()->size_bytes(), stream));
       }

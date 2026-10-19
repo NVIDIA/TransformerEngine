@@ -39,6 +39,14 @@ does not maintain delayed-scaling history.
 The backward pass uses dequantized forward operands, so both passes operate on
 the same quantized query, key and value. The default, ``1``, uses FP8 for both.
 
+FP8 THD attention requires cuDNN 9.23 or later. FP8 THD backward with off-by-one
+or learnable softmax requires cuDNN 9.26 or later; select
+``NVTE_FP8_DPA_BWD=0`` to use FP16/BF16 backward instead. For FP16/BF16 THD
+learnable-softmax backward with packed statistics, cuDNN versions before 9.26
+remain eligible for value-head dimensions 64, 128, and 256. Other value-head
+dimensions require cuDNN 9.26 or later. Execution-plan support still depends on
+the complete attention configuration.
+
 FP8 availability depends on cuDNN, GPU architecture, layout and the selected
 features. Unsupported combinations produce a diagnostic rather than silently
 using a different precision. For example, cuDNN 9.26 rejects FP8 backward with

@@ -53,6 +53,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     fused_attn_bwd,
     fused_attn_fwd,
+    SoftmaxType,
 )
 from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import get_fused_attn_backend
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
@@ -553,6 +554,7 @@ def test_fused_attn_query_propagates_setup_errors(error, monkeypatch):
                 "qkv_layout": QKVLayout["thd_thd_thd"],
                 "attn_mask_type": AttnMaskType["padding"],
                 "softmax_type": tex.NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
+                "head_dim_v": 192,
                 "num_tokens_q": 256,
                 "num_tokens_kv": 256,
             },
@@ -615,6 +617,81 @@ def test_fused_attn_python_capability_exclusions(monkeypatch, changes, version, 
     backend, message = get_fused_attn_backend(replace(baseline, **changes))
     assert backend == FusedAttnBackend.No_Backend
     assert message.startswith(reason)
+
+
+@pytest.mark.parametrize("dtype", (DType.kFloat16, DType.kBFloat16))
+@pytest.mark.parametrize("head_dim_v", (64, 128, 192, 256))
+@pytest.mark.parametrize("version", (92500, 92600))
+@pytest.mark.parametrize("is_training", (False, True))
+def test_fused_attn_python_thd_learnable_support(
+    dtype, head_dim_v, version, is_training, monkeypatch
+):
+    """Only generic THD learnable-softmax backward kernels need cuDNN 9.26."""
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import _AttentionGraph
+
+    monkeypatch.setattr(cudnn, "backend_version", lambda: version)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (10, 0))
+    monkeypatch.setattr(_AttentionGraph, "entry", lambda _self: None)
+    config = FusedAttentionParams(
+        is_training=is_training,
+        qkv_dtype=dtype,
+        qkv_layout=QKVLayout["thd_thd_thd"],
+        attn_mask_type=AttnMaskType["padding"],
+        softmax_type=SoftmaxType["learnable"],
+        batch_size=2,
+        num_attn_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=64,
+        head_dim_v=head_dim_v,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        num_tokens_q=256,
+        num_tokens_kv=256,
+    )
+    backend, message = get_fused_attn_backend(config)
+    if is_training and version < 92600 and head_dim_v == 192:
+        assert backend == FusedAttnBackend.No_Backend
+        assert "THD learnable softmax backward" in message
+    else:
+        assert backend == FusedAttnBackend.F16_arbitrary_seqlen
+        assert message == ""
+
+
+@pytest.mark.parametrize("softmax", ("vanilla", "off-by-one", "learnable"))
+@pytest.mark.parametrize("version", (92300, 92500, 92600))
+@pytest.mark.parametrize("is_training", (False, True))
+def test_fused_attn_python_fp8_thd_sink_support(softmax, version, is_training, monkeypatch):
+    """Every FP8 THD sink-token backward kernel needs cuDNN 9.26, even at D=64."""
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import _AttentionGraph
+
+    monkeypatch.setattr(cudnn, "backend_version", lambda: version)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (10, 0))
+    monkeypatch.setattr(_AttentionGraph, "entry", lambda _self: None)
+    config = FusedAttentionParams(
+        is_training=is_training,
+        qkv_dtype=DType.kFloat8E4M3,
+        qkv_layout=QKVLayout["thd_thd_thd"],
+        attn_mask_type=AttnMaskType["padding"],
+        softmax_type=SoftmaxType[softmax],
+        batch_size=2,
+        num_attn_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=64,
+        head_dim_v=64,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        num_tokens_q=256,
+        num_tokens_kv=256,
+    )
+    backend, message = get_fused_attn_backend(config)
+    if is_training and version < 92600 and softmax != "vanilla":
+        assert backend == FusedAttnBackend.No_Backend
+        assert "sink token requires cuDNN 9.26" in message
+    else:
+        assert backend == FusedAttnBackend.FP8
+        assert message == ""
 
 
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
