@@ -1705,6 +1705,9 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 wgrad = get_dummy_wgrad(
                     wgrad_shape,
                     origin_weight_python_object.dtype,
+                    zero_tensor=getattr(
+                        origin_weight_python_object, "zero_tensor_dummy_wgrad", False
+                    ),
                 )
         elif bwd_args.fuse_wgrad_accumulation:
             wgrad = None

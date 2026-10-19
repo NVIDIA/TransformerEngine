@@ -11,6 +11,7 @@ from .linear_attention import (
     GatedDeltaNetAttention,
     GatedDeltaNet2Attention,
     GatedDeltaProductAttention,
+    KimiDeltaAttention,
 )
 from .fused_mla_q_uproj import FusedMLAQUpProjFunction, FusedMLAQUpProjRopeQuant
 from .multi_head_attention import MultiheadAttention
@@ -26,6 +27,7 @@ __all__ = [
     "GatedDeltaNetAttention",
     "GatedDeltaNet2Attention",
     "GatedDeltaProductAttention",
+    "KimiDeltaAttention",
     "FusedMLAQUpProjFunction",
     "FusedMLAQUpProjRopeQuant",
     "MultiheadAttention",
