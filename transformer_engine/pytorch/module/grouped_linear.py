@@ -120,6 +120,9 @@ def is_module_grouped_tensor_path_supported(
     output quantization, and backend selection are checked separately by
     ``GroupedLinear``.
     """
+    if tex.get_cublasLt_build_version() < 130300:
+        return False
+
     if dtype not in (torch.bfloat16, torch.float16):
         return False
 
