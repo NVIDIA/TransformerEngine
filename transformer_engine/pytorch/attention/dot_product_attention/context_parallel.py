@@ -276,8 +276,6 @@ def get_seq_chunk_ids_for_reordering_after_attn(cp_size, device):
 def _get_thd_partition_cu_seqlens(cu_seqlens_padded, device=None):
     """Return physical boundaries used by the THD partition CUDA kernels."""
     target_device = torch.device(device if device is not None else cu_seqlens_padded.device)
-    # These boundaries feed CUDA kernels that require int32, so the cast is gated on CUDA
-    # rather than on the configured device type.
     target_dtype = torch.int32 if target_device.type == "cuda" else cu_seqlens_padded.dtype
     return cu_seqlens_padded.to(device=target_device, dtype=target_dtype)
 
@@ -302,8 +300,6 @@ def get_thd_partitioned_indices(
             cp_size,
         )
         target_device = torch.device(device if device is not None else cu_seqlens_padded.device)
-        # This branch builds indices with plain tensor ops rather than a CUDA kernel, so the
-        # configured device gets the same int32 normalization that CUDA does.
         target_dtype = (
             torch.int32 if target_device.type == te_device_type() else cu_seqlens_padded.dtype
         )
@@ -5962,10 +5958,6 @@ def get_batch_on_this_cp_rank(
                 slice_sizes = (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]) // total_slices
 
                 def build_rank_indices(device):
-                    # Per-document partitioning runs a CUDA kernel
-                    # (``tex.thd_get_partitioned_indices``), so it is gated on CUDA rather
-                    # than on the configured device type. Other devices, including CPU and
-                    # non-CUDA plugin devices, use the fallback below.
                     if device.type == "cuda":
                         return get_thd_partitioned_indices(
                             cu_seqlens_padded,
