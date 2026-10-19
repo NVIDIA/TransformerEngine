@@ -57,7 +57,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                           e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
                           const float *noop, float *const dbias_workspace, float *const amax_ptr,
                           const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
-                          const size_t scale_stride_colwise) {
+                          const size_t scale_stride_colwise, const size_t scale_rows_rowwise,
+                          const size_t scale_rows_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
@@ -311,7 +312,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       } else {
         scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
       }
-      scales_colwise[scale_idx] = biased_exponent;
+      // The chunk can extend past the tensor, and unswizzled scales may be compact,
+      // so only store scales that fall inside the scale tensor.
+      if (global_scales_offset_Y < scale_rows_colwise &&
+          global_scales_offset_X < scale_stride_colwise) {
+        scales_colwise[scale_idx] = biased_exponent;
+      }
 
       const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
@@ -515,7 +521,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       } else {
         scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
       }
-      if (rowwise_scale_is_within_bounds) {
+      if (rowwise_scale_is_within_bounds &&
+          static_cast<size_t>(stage_scales_offset_Y) < scale_rows_rowwise) {
         scales_rowwise[scale_idx] = biased_exponent;
       }
 
@@ -708,9 +715,30 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
 
+  // Unswizzled scales need only one entry per MXFP8 block, so callers may pass compact, i.e.
+  // unpadded, scale tensors. Quantization stores no scale outside the scale tensor's shape.
+  if (!with_gemm_swizzled_scales) {
+    if (use_rowwise_scaling) {
+      const auto &shape = output->scale_inv.shape;
+      const size_t min_cols = DIVUP(cols, SCALE_DIM_X);
+      NVTE_CHECK(shape.size() == 2 && shape[0] >= rows && shape[1] >= min_cols,
+                 "MXFP8 rowwise scale_inv must have at least shape (", rows, ", ", min_cols,
+                 "), got ", shape, ".");
+    }
+    if (use_colwise_scaling) {
+      const auto &shape = output->columnwise_scale_inv.shape;
+      const size_t min_rows = DIVUP(rows, SCALE_DIM_Y);
+      NVTE_CHECK(shape.size() == 2 && shape[0] >= min_rows && shape[1] >= cols,
+                 "MXFP8 columnwise scale_inv must have at least shape (", min_rows, ", ", cols,
+                 "), got ", shape, ".");
+    }
+  }
+
   const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
   const size_t scale_stride_colwise =
       use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
+  const size_t scale_rows_rowwise = use_rowwise_scaling ? output->scale_inv.shape[0] : 1;
+  const size_t scale_rows_colwise = use_colwise_scaling ? output->columnwise_scale_inv.shape[0] : 1;
 
   e8m0_t *const scales_rowwise_ptr =
       use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
@@ -785,6 +813,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               // otherwise the last chunk reads/writes past the logical end of the row.
               using rowwise_traits = specialized::CastTraits<IType, OType, true, false>;
               using bidimensional_traits = specialized::CastTraits<IType, OType, true, true>;
+              using bidimensional_staged_traits =
+                  specialized::CastTraitsSwizzle<IType, OType,
+                                                 /*NumStages=*/2, /*IterM=*/1, /*IterN=*/4,
+                                                 /*kCacheColwise=*/WITH_GEMM_SWIZZLED_SCALES,
+                                                 /*kSwizzled=*/WITH_GEMM_SWIZZLED_SCALES>;
               constexpr size_t max_grid_dim_y = 65535;
               const bool rowwise_specialized_grid_fits =
                   ((rows + rowwise_traits::blockDimM - 1) / rowwise_traits::blockDimM) <=
@@ -805,6 +838,18 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   (scaling_type == ScalingType::BIDIMENSIONAL && has_full_bidimensional_chunks &&
                    bidimensional_specialized_grid_fits);
 
+              // The specialized kernels store scales with 32- to 128-bit vector stores and,
+              // in the staged bidimensional kernel, colwise scales for whole iterations, which
+              // TE's padded scale tensors always accommodate. Compact scales that do not, such
+              // as rows that are not a multiple of four scales long or a view that is not
+              // 16-byte aligned, use the generic kernel.
+              const bool scales_fit_specialized =
+                  is_aligned_ptr(scales_rowwise_ptr, 16) &&
+                  is_aligned_ptr(scales_colwise_ptr, 16) && scale_stride_rowwise % 4 == 0 &&
+                  (scaling_type != ScalingType::BIDIMENSIONAL ||
+                   scale_stride_colwise >=
+                       DIVUP_TO_MULTIPLE(cols, bidimensional_staged_traits::blockIterDim::N));
+
               // The register-resident kernels issue 256-bit loads, which need sm_100
               // or later and a 32-byte aligned base pointer.  Everything that fails
               // either test falls through to the staged kernels below.
@@ -816,7 +861,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               // Preserve cached outputs by keeping noop-aware calls on the generic path.
               if (noop_ptr == nullptr &&
                   specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>() &&
-                  !use_2d_quantization && scaling_type_has_specialized_support) {
+                  !use_2d_quantization && scaling_type_has_specialized_support &&
+                  scales_fit_specialized) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
                     // The register-resident kernel supersedes the staged one below
@@ -887,11 +933,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                       }
                     }
 
-                    using traits =
-                        specialized::CastTraitsSwizzle<IType, OType,
-                                                       /*NumStages=*/2, /*IterM=*/1, /*IterN=*/4,
-                                                       /*kCacheColwise=*/WITH_GEMM_SWIZZLED_SCALES,
-                                                       /*kSwizzled=*/WITH_GEMM_SWIZZLED_SCALES>;
+                    using traits = bidimensional_staged_traits;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
                     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -995,7 +1037,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                         tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                         tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
                         workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                        scale_stride_colwise);
+                        scale_stride_colwise, scale_rows_rowwise, scale_rows_colwise);
                   });
                   break;
                 }
@@ -1012,7 +1054,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                         tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                         tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
                         workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                        scale_stride_colwise);
+                        scale_stride_colwise, scale_rows_rowwise, scale_rows_colwise);
                   });
                   break;
                 }
@@ -1029,7 +1071,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                         tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                         tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
                         workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                        scale_stride_colwise);
+                        scale_stride_colwise, scale_rows_rowwise, scale_rows_colwise);
                   });
                   break;
                 }
