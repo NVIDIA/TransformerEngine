@@ -2938,7 +2938,7 @@ def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
         if i < len(shapes) and i % 2 == 1:
             assert len(graphs) == previous_graph_count
 
-    shape = (2, 32, 128)
+    shape = (64, 1, 128)
     inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
     _, expected_dx = tex.bgrad_quantize(inp, quantizer)
     _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
