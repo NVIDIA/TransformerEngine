@@ -953,6 +953,13 @@ def canonicalize_process_group(
     return group
 
 
+def torch_is_autocast_gpu_enabled() -> bool:
+    """Check whether PyTorch autocast is enabled for the GPU device."""
+    if torch_version() >= (2, 4, 0):
+        return torch.is_autocast_enabled(te_device_type())
+    return torch.is_autocast_enabled()
+
+
 def torch_get_autocast_gpu_dtype() -> torch.dtype:
     """Get PyTorch autocast GPU dtype."""
     if torch_version() >= (2, 4, 0):

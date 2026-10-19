@@ -63,6 +63,7 @@ from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
+    torch_is_autocast_gpu_enabled,
     get_device_compute_capability,
     get_nvtx_range_context,
     nvtx_range_push,
@@ -1541,7 +1542,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
-        if torch.is_autocast_enabled():
+        if torch_is_autocast_gpu_enabled():
             self.fast_setattr("activation_dtype", torch_get_autocast_gpu_dtype())
             return
         dtype = inp.dtype

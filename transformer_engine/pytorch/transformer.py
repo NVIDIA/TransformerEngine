@@ -27,6 +27,7 @@ from transformer_engine.pytorch.utils import (
     cast_if_needed,
     get_default_init_method,
     torch_get_autocast_gpu_dtype,
+    torch_is_autocast_gpu_enabled,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -909,7 +910,7 @@ class TransformerLayer(torch.nn.Module):
                 )
 
         # For AMP
-        if torch.is_autocast_enabled():
+        if torch_is_autocast_gpu_enabled():
             hidden_states = cast_if_needed(hidden_states, torch_get_autocast_gpu_dtype())
 
         # Self attention.

@@ -17,7 +17,6 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe, Format as RecipeFormat
-from transformer_engine import te_device_type
 from ...constants import DType, TE_DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
@@ -50,6 +49,7 @@ from .._common import (
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
+    maybe_autocast_dtype,
     maybe_dequantize,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
@@ -1049,10 +1049,7 @@ class GroupedLinear(BasicOperation):
                 weight_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx + 1)
 
         # Get autocast dtype if needed
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype(te_device_type())
-        else:
-            dtype = weight_param.dtype
+        dtype = maybe_autocast_dtype(default_dtype=weight_param.dtype)
 
         # Extract split sizes from extra input. Keep on GPU for graph safety.
         split_sizes = basic_op_extra_inputs[0][0]
@@ -1203,10 +1200,7 @@ class GroupedLinear(BasicOperation):
         # ``split_sizes``, offset metadata, and related tensors are routed
         # through ``save_for_backward`` (see ``_fuser_forward_split_quantize``
         # and ``_fuser_forward_grouped_tensor`` for the saved-tensor layout).
-        if torch.is_autocast_enabled():
-            ctx.dtype = torch.get_autocast_dtype(te_device_type())
-        else:
-            ctx.dtype = weight_param.dtype
+        ctx.dtype = maybe_autocast_dtype(default_dtype=weight_param.dtype)
         ctx.input_requires_grad = requires_grad[0]
         ctx.weight_requires_grad = requires_grad[0] and weight_param.requires_grad
         # Caller-provided backward grad-input buffer.

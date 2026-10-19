@@ -24,7 +24,7 @@ from ...module.base import (
 from ...quantized_tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
-from .._common import maybe_dequantize, is_quantized_tensor
+from .._common import maybe_autocast_dtype, maybe_dequantize, is_quantized_tensor
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
     FusedOperation,
@@ -322,10 +322,7 @@ class UserbuffersForwardLinear(FusedOperation):
                 )
 
         # Get autocast dtype if needed
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype(te_device_type())
-        else:
-            dtype = linear_op.weight.dtype
+        dtype = maybe_autocast_dtype(default_dtype=linear_op.weight.dtype)
 
         # Userbuffers options
         if linear_op._userbuffers_options is None:

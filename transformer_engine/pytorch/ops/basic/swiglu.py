@@ -12,13 +12,12 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine import te_device_type
 from ...constants import DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize
+from .._common import maybe_autocast_dtype, maybe_dequantize
 
 __all__ = [
     "SwiGLU",
@@ -115,11 +114,7 @@ class SwiGLU(BasicOperation):
     ) -> torch.Tensor:
 
         # Compute dtype
-        dtype: torch.dtype
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype(te_device_type())
-        else:
-            dtype = input_.dtype
+        dtype: torch.dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise RuntimeError(f"Unsupported dtype ({dtype})")
 
@@ -362,11 +357,7 @@ class ClampedSwiGLU(BasicOperation):
     ) -> torch.Tensor:
 
         # Compute dtype
-        dtype: torch.dtype
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype(te_device_type())
-        else:
-            dtype = input_.dtype
+        dtype: torch.dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise RuntimeError(f"Unsupported dtype ({dtype})")
 
@@ -529,12 +520,8 @@ class _ScaledGLU(BasicOperation):
 
         extra_input = basic_op_extra_inputs[0][0]
         # Determine compute dtype
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype(te_device_type())
-            extra_input_dtype = dtype
-        else:
-            dtype = input_.dtype
-            extra_input_dtype = extra_input.dtype
+        dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
+        extra_input_dtype = maybe_autocast_dtype(default_dtype=extra_input.dtype)
 
         # Prepare the activation input in the compute dtype.
         input_ = maybe_dequantize(input_, dtype)

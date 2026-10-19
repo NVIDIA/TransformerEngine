@@ -10,10 +10,10 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine import te_device_type
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
+from .._common import maybe_autocast_dtype
 from ..basic import AddExtraInput, BasicLinear, ConstantScale
 from ..op import (
     FusedOperation,
@@ -75,10 +75,7 @@ class ForwardLinearScaleAdd(FusedOperation):
         extra_input = basic_op_extra_inputs[2][0]
 
         # Get autocast dtype if needed
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype(te_device_type())
-        else:
-            dtype = linear_op.weight.dtype
+        dtype = maybe_autocast_dtype(default_dtype=linear_op.weight.dtype)
 
         # Linear forward
         output, x_local, w = BasicLinear._functional_forward(
