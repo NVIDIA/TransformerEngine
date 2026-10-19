@@ -381,6 +381,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   // of elements. Take advantage of this if possible to avoid 2 extra kernel calls.
   const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
 
+  const bool pad_direct_inputs = use_cu_seqlens_directly && actual_b < b;
+  NVTE_CHECK(!use_cu_seqlens_directly || actual_b <= b, "Direct input batch exceeds graph batch");
+
   try {
     auto cache_entry = get_graph<Backend::F16, Pass::Fwd, create_graph_f16_fwd>(cfg, handle);
     auto [mha_graph, Q, K, V, attn_scale, O, S1, S2, bias, softmax_offset, seq_q, seq_kv,
@@ -393,14 +396,16 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     // Exit to request upper level API to allocate memory if needed
     // n.b. Care should be taken to align each of the added worksapce tensors to their type.
     // We do this by adding padding at the end of each separate allocation.
-    // When passing cu_seqlens* directly to cuDNN SDPA, no conversion workspace is
-    // needed: cuDNN consumes the user's cu_seqlens buffers as-is.
+    // Bucketed direct inputs need B+1 cumulative lengths and physical offsets.
+    // Keep them in per-call workspace, not in the shared graph cache.
     auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
     const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
     const size_t num_bytes_per_ragged_offset =
         alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
     size_t actual_seqlen_workspace_size = 0;
     size_t seqlen_offsets_workspace_size = 0;
+    const size_t padded_array_bytes = alignTo<16>((b + 1) * sizeof(int32_t));
+    const size_t padded_direct_workspace_size = pad_direct_inputs ? 4 * padded_array_bytes : 0;
     if (!use_cu_seqlens_directly) {
       if (is_padding) {
         actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
@@ -413,13 +418,38 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       }
     }
     if (workspace == nullptr) {
-      *workspace_size =
-          plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
+      *workspace_size = plan_workspace_size + actual_seqlen_workspace_size +
+                        seqlen_offsets_workspace_size + padded_direct_workspace_size;
       return;
     }
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+
+    if (pad_direct_inputs) {
+      NVTE_CHECK(devPtrCuSeqlensQ && devPtrCuSeqlensKV && devPtrSeqOffsetsQ &&
+                     (offset_mults.kv_from_q || devPtrSeqOffsetsKV),
+                 "Padded direct inputs require valid logical and physical offsets");
+      auto *metadata = static_cast<int8_t *>(workspace) + plan_workspace_size;
+      auto *padded_cu_q = reinterpret_cast<int32_t *>(metadata);
+      auto *padded_cu_kv = reinterpret_cast<int32_t *>(metadata + padded_array_bytes);
+      auto *padded_physical_q = reinterpret_cast<int32_t *>(metadata + 2 * padded_array_bytes);
+      auto *padded_physical_kv = reinterpret_cast<int32_t *>(metadata + 3 * padded_array_bytes);
+      constexpr size_t nthreads_per_block = 128;
+      const size_t grid = (b + 1 + nthreads_per_block - 1) / nthreads_per_block;
+      pad_cu_seqlens_to_batch_bucket<<<grid, nthreads_per_block, 0, stream>>>(
+          actual_b, b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+          static_cast<const int32_t *>(devPtrCuSeqlensKV),
+          static_cast<const int32_t *>(devPtrSeqOffsetsQ),
+          static_cast<const int32_t *>(offset_mults.kv_from_q ? devPtrSeqOffsetsQ
+                                                              : devPtrSeqOffsetsKV),
+          padded_cu_q, padded_cu_kv, padded_physical_q, padded_physical_kv);
+      NVTE_CHECK_CUDA(cudaGetLastError());
+      devPtrCuSeqlensQ = padded_cu_q;
+      devPtrCuSeqlensKV = padded_cu_kv;
+      devPtrSeqOffsetsQ = padded_physical_q;
+      devPtrSeqOffsetsKV = padded_physical_kv;
+    }
 
     // Build variant pack
     std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void *> variant_pack = {

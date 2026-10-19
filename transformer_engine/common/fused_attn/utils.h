@@ -257,6 +257,12 @@ __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,
                                              int32_t *kv_seqlens);
 
+__global__ void pad_cu_seqlens_to_batch_bucket(int64_t actual_b, int64_t max_b, const int32_t *cu_q,
+                                               const int32_t *cu_kv, const int32_t *physical_q,
+                                               const int32_t *physical_kv, int32_t *out_cu_q,
+                                               int32_t *out_cu_kv, int32_t *out_physical_q,
+                                               int32_t *out_physical_kv);
+
 __global__ void cu_seqlens_padded_to_offsets(RaggedOffsetMultipliers mults, int64_t actual_b,
                                              int64_t max_b, const int32_t *cu_seqlens_q_padded,
                                              const int32_t *cu_seqlens_kv_padded,
