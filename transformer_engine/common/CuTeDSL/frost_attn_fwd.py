@@ -21,6 +21,28 @@ _ORDER = tuple(
     "n_thd_units seq_q_lens_addr thd_q_lens_ptr thd_kv_lens_ptr thd_lens_form "
     "o_partial_ptr block_table_ptr block_table_v_ptr table_strides n_pages stream".split()
 )
+# Known optional, dense-only host slots. THD must keep every one disabled.
+_SCORE_DEFAULTS = {
+    "score_max_ptr": None,
+    "score_sum_exp_ptr": None,
+    "score_max_strides": (0, 0, 0),
+    "score_sum_exp_strides": (0, 0, 0),
+}
+_BIAS_DEFAULTS = {
+    "bias_ptr": None,
+    "bias_strides": (0, 0, 0),
+    "bias_extents": (1, 1),
+    "kv_mask_ptr": None,
+    "kv_mask_batch_stride": 0,
+    "inv_scale_softmax": 1.0,
+}
+_ORDERS = (
+    _ORDER,
+    _ORDER[:-1] + tuple(_SCORE_DEFAULTS) + _ORDER[-1:],
+    _ORDER[:-1] + tuple(_SCORE_DEFAULTS) + tuple(_BIAS_DEFAULTS) + _ORDER[-1:],
+)
+
+
 _POINTERS = {
     "q_ptr": 0,
     "k_ptr": 1,
@@ -43,8 +65,10 @@ def _export(graph, batch, heads, kv_heads, sq, _sk, tq, tk, scale, device):
     import tvm_ffi
 
     spec = graph._compiled_plans[graph._plan_index]._prepared.spec
+    order = tuple(spec.order)
     if (
-        tuple(spec.order) != _ORDER
+        order not in _ORDERS
+        or len(spec.template) != len(order)
         or not isinstance(spec.fn, tvm_ffi.Function)
         or spec.quant is not None
         or spec.paged
@@ -66,7 +90,10 @@ def _export(graph, batch, heads, kv_heads, sq, _sk, tq, tk, scale, device):
         or spec.s_q_max != sq
     ):
         raise RuntimeError("Unsupported cuDNN OSS prepared forward contract")
-    args = dict(zip(spec.order, spec.template))
+    args = dict(zip(order, spec.template))
+    for name, expected in {**_SCORE_DEFAULTS, **_BIAS_DEFAULTS}.items():
+        if name in args and args[name] != expected:
+            raise RuntimeError("Unsupported cuDNN OSS forward optional argument: " + name)
     for role, h in (("q", heads), ("k", kv_heads), ("v", kv_heads), ("o", heads)):
         if spec.expect[role] not in ("bf16", "bfloat16"):
             raise RuntimeError("cuDNN OSS forward requires BF16 operands")
@@ -107,11 +134,11 @@ def _export(graph, batch, heads, kv_heads, sq, _sk, tq, tk, scale, device):
     )
     if any(n <= 0 or n >= 2**63 for n in spans):
         raise RuntimeError("cuDNN OSS forward operand span is not representable")
-    metadata = [1, workspace, alignment, len(_ORDER)]
+    metadata = [1, workspace, alignment, len(order)]
     for i, span in enumerate(spans):
         metadata.extend((span, 16 if i < 4 else 4))
     constants = []
-    for i, name in enumerate(_ORDER):
+    for i, name in enumerate(order):
         # kind 0 = immutable value; 1 = current operand; 2 = workspace offset;
         # kind 3 = current stream. The C++ bridge never constructs FFI arrays.
         kind, value = 0, i
@@ -186,7 +213,7 @@ def get_frost_attention_forward(key, batch, heads, kv_heads, sq, sk, tq, tk, sca
         cu_seq_len_q=lengths[0],
         cu_seq_len_kv=lengths[1],
         max_total_seq_len_q=tq,
-        max_total_seq_len_kv=tk
+        max_total_seq_len_kv=tk,
     )
     o.set_output(True).set_dim([batch, heads, sq, 128]).set_stride(
         [sq * heads * 128, 128, heads * 128, 1]

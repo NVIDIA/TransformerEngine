@@ -33,7 +33,8 @@ PREFLIGHT
 python3 -m pytest -v --tb=auto \
     --junitxml="$XML_LOG_DIR/pytest_test_frost_attn.xml" \
     "$TE_PATH/tests/pytorch/attention/test_frost_attn.py" \
-    "$TE_PATH/tests/pytorch/attention/test_frost_attn_fwd.py"
+    "$TE_PATH/tests/pytorch/attention/test_frost_attn_fwd.py" \
+    "$TE_PATH/tests/pytorch/attention/test_frost_attn_fwd_contract.py"
 
 # Reject a green all-skipped run or selection that omitted native-route guards.
 python3 - "$XML_LOG_DIR/pytest_test_frost_attn.xml" <<'RESULTS'
@@ -41,7 +42,7 @@ import sys
 import xml.etree.ElementTree as ET
 root = ET.parse(sys.argv[1]).getroot()
 cases = list(root.iter("testcase"))
-assert len(cases) >= 79, "FROST QA did not execute the complete regression suite"
+assert len(cases) >= 104, "FROST QA did not execute the complete regression suite"
 assert not any(child.tag in ("failure", "error", "skipped") for case in cases for child in case), "FROST QA requires zero failures, errors or skips"
 names = [case.get("name", "") for case in cases]
 for kind in ("q_length", "kv_length", "q_origin", "kv_origin", "graph_terminal"):
@@ -50,5 +51,10 @@ assert "test_frost_d256_bottom_right_q_longer_fallback" in names
 for kind in ("q_origin", "kv_origin", "q_limit", "kv_limit", "q_decrease", "q_base", "graph_origin"):
     assert f"test_frost_forward_metadata_guard[{kind}]" in names, "Missing isolated forward guard: " + kind
 assert "test_frost_forward_compact_decline" in names
+for prefix, count in (("test_frost_forward_known_contract", 3),
+                      ("test_frost_forward_declines_optional_features", 10),
+                      ("test_frost_forward_declines_unknown_contract", 5),
+                      ("test_frost_forward_retains_feature_guards", 7)):
+    assert sum(name.startswith(prefix + "[") for name in names) == count, "Missing forward contract tests: " + prefix
 print("FROST QA passed:", len(cases), "tests, zero skips, all twelve isolated guards")
 RESULTS

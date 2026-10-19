@@ -87,6 +87,15 @@ but steady-state dispatch should use the cached C++/TVM FFI function.
 Framework-specific tensor handling, autograd or transformation semantics, state,
 and user-facing composition belong in the corresponding frontend.
 
+Adapters to a private prepared/FFI host ABI must allowlist exact argument orders
+and validate neutral values for unsupported optional features. When FE adds host
+slots, update both the Python exporter and the bounded native argument frame;
+pass the actual argument count to FFI. Do not accept unknown slots merely because
+they fit the frame. For the FROST forward bridge, run
+`tests/pytorch/attention/test_frost_attn_fwd_contract.py` for legacy/current ABI and
+rejection coverage, then the actual common-library forward/replay tests. CPU
+contract checks alone do not validate a compiled GPU entry.
+
 ### Working architecture rules
 
 These rules describe the intended architecture. Check them against the

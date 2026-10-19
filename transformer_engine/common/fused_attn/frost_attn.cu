@@ -396,7 +396,8 @@ const ForwardPlan *get_forward_plan(const FusedAttnConfig &c, cudaStream_t strea
     int64_t value;
     while (input >> value) v.push_back(value);
     NVTE_CHECK(input.eof() && v.size() >= 22 && v[0] == 1 && v[1] > 0 && v[2] >= 16 &&
-                   (v[2] & (v[2] - 1)) == 0 && v[3] == 27 && v.size() == 22 + 2 * v[3],
+                   (v[2] & (v[2] - 1)) == 0 && (v[3] == 27 || v[3] == 31 || v[3] == 37) &&
+                   v.size() == 22 + 2 * v[3],
                "Malformed cuDNN OSS forward metadata");
     auto function = tvm::ffi::Function::GetGlobal(key);
     NVTE_CHECK(function.has_value(), "cuDNN OSS did not register its native forward entry");
@@ -489,7 +490,8 @@ bool frost_attention_forward(const FusedAttnConfig &cfg, const FrostForwardPoint
       static_cast<const int32_t *>(pointers[7]), static_cast<const int32_t *>(pointers[8]),
       cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.num_tokens_q, cfg.num_tokens_kv);
   NVTE_CHECK_CUDA(cudaGetLastError());
-  std::array<tvm::ffi::AnyView, 27> frame;
+  // Largest explicitly supported host ABI; retain stack storage on every call.
+  std::array<tvm::ffi::AnyView, 37> frame;
   for (size_t i = 0; i < plan->arguments.size(); ++i) {
     const auto &arg = plan->arguments[i];
     if (arg.kind == 0) frame[i] = static_cast<tvm::ffi::AnyView>(arg.constant);
@@ -498,7 +500,7 @@ bool frost_attention_forward(const FusedAttnConfig &cfg, const FrostForwardPoint
     if (arg.kind == 3) frame[i] = reinterpret_cast<void *>(stream);
   }
   tvm::ffi::Any result;
-  plan->function.CallPacked(frame.data(), static_cast<int32_t>(frame.size()), &result);
+  plan->function.CallPacked(frame.data(), static_cast<int32_t>(plan->arguments.size()), &result);
   return true;
 }
 
