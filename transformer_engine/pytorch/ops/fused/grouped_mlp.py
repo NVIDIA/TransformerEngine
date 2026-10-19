@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable, Sequence
 import functools
 import inspect
 import os
+import warnings
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Any, Literal, Optional
 
@@ -539,8 +540,6 @@ def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[to
 @functools.lru_cache(maxsize=1)
 def _grouped_gemm_dsrelu_backward_supported() -> bool:
     """Whether the cuDNN FE grouped GEMM dSReLU backward wrapper is available."""
-    if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-        return False
     if get_device_compute_capability()[0] != 10:
         return False
     if not _cudnn_frontend_supports_grouped_gemm_srelu():
@@ -1006,6 +1005,34 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
         )
 
 
+def _is_grouped_mlp_fusion_candidate(
+    ops: list[FusibleOperation],
+    recipe: Optional[Recipe],
+    activation_op_types: tuple[type[FusibleOperation]],
+) -> bool:
+    """Check whether the recipe and operation pattern support grouped MLP fusion."""
+    if len(ops) < 3 or recipe is None:
+        return False
+    if recipe.custom():
+        if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
+            return False
+    elif not (recipe.mxfp8() or recipe.nvfp4()):
+        return False
+    # NVFP4 graph-safe grouped quantize currently requires RHT.
+    if recipe.nvfp4() and recipe.disable_rht:
+        return False
+    # The fused MXFP8 backward reinterprets grad-output storage as E4M3. It
+    # cannot consume E5M2 gradients from Format.HYBRID. NVFP4 has separate formats.
+    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
+        return False
+    return any(
+        isinstance(fc1, GroupedLinear)
+        and isinstance(activation, activation_op_types)
+        and isinstance(fc2, GroupedLinear)
+        for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
+    )
+
+
 def fuse_grouped_mlp_ops(
     ops: list[FusibleOperation],
     *,
@@ -1031,20 +1058,6 @@ def fuse_grouped_mlp_ops(
         Updated operations with matched triples replaced by fused ops.
     """
     if not fused_op_cls.is_supported():
-        return ops
-
-    # Fused kernels are only supported for MXFP8 and NVFP4
-    if recipe is None:
-        return ops
-    if recipe.custom():
-        # Check if custom recipe explicitly enables fusion
-        if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
-            return ops
-    elif not (recipe.mxfp8() or recipe.nvfp4()):
-        return ops
-
-    # MXFP8 kernel assumes E4M3 data, so reject hybrid E4M3/E5M2 data
-    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
         return ops
 
     # Check for unsupported NVFP4 recipe configs
@@ -1090,6 +1103,17 @@ def fuse_grouped_mlp_ops(
                 validate_grouped_mlp_dims(window[0], window[1], window[2])
             except (TypeError, ValueError):
                 matches_pattern = False
+
+        if matches_pattern and (
+            window[0].split_alignment % 256 != 0 or window[2].split_alignment % 256 != 0
+        ):
+            warnings.warn(
+                "Grouped MLP fusion was skipped because both GroupedLinear operations "
+                "require split_alignment to be divisible by 256 "
+                f"(got {window[0].split_alignment} and {window[2].split_alignment}).",
+                stacklevel=2,
+            )
+            matches_pattern = False
 
         if matches_pattern:
             op = fused_op_cls(
@@ -1180,8 +1204,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
         """Whether this fused operation is supported on the current system."""
-        if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-            return False
         if get_device_compute_capability()[0] != 10:
             return False
         if not _cudnn_frontend_version_supported():
@@ -1796,7 +1818,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_w_scales = fc1_w_scales.view(
                     1,
                     ceil_div(fc1_weight_shape[0], 128),
-                    ceil_div(fc1_weight_shape[1], k_sf_divisor),
+                    ceil_div(fc1_weight_k, k_sf_divisor),
                     32,
                     4,
                     4,
@@ -1934,10 +1956,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc2_bias_scale = fc2_bias_scale.to(dtype=torch.float32)
 
             fc2_out_buf = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
-            if (
-                use_dense_single_group
-                and grouped_fc2_x.columnwise_data is not None
-                and grouped_fc2_x.columnwise_scale_inv is not None
+            if use_dense_single_group and (
+                not weight_requires_grad
+                or (
+                    grouped_fc2_x.columnwise_data is not None
+                    and grouped_fc2_x.columnwise_scale_inv is not None
+                )
             ):
                 fc2_out_buf = _single_group_fc2_gemm(
                     grouped_fc2_x,
@@ -2614,29 +2638,36 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_weight_single._columnwise_scale_inv = original_columnwise_scale
                 fc2_weight_single._with_gemm_swizzled_scales = original_swizzled
 
-                fc2_w_data = fc2_weight_single._columnwise_data.view(dtype=data_dtype)
-                fc2_w_data = fc2_w_data.view(
-                    1,
-                    fc2_weight_shape[0],
-                    fc2_weight_k,
-                )
-                fc2_w_data = (
-                    fc2_w_data.permute(1, 2, 0) if use_nvfp4 else fc2_w_data.permute(2, 1, 0)
-                )
-                fc2_w_scales = swizzled_columnwise_scale.view(dtype=scale_view_dtype)
-                fc2_w_scales = fc2_w_scales.view(
-                    1,
-                    ceil_div(fc2_weight_shape[1], k_sf_divisor),
-                    ceil_div(fc2_weight_shape[0], 128),
-                    32,
-                    4,
-                    4,
-                )
-                fc2_w_scales = (
-                    fc2_w_scales.permute(3, 4, 2, 5, 1, 0)
-                    if use_nvfp4
-                    else fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
-                )
+                if use_nvfp4:
+                    # NVFP4 column-wise data is physically transposed, so it is already
+                    # (in_features, out_features) and stays K-major.
+                    fc2_w_data, fc2_w_scales = _convert_to_cudnn_grouped_gemm_tensor_format(
+                        fc2_weight_single._columnwise_data,
+                        swizzled_columnwise_scale,
+                        data_dtype=data_dtype,
+                        scale_dtype=scale_view_dtype,
+                        valid_M_or_N=fc2_weight_shape[1],
+                        k_logical=fc2_weight_shape[0],
+                        sf_swizzled=True,
+                    )
+                else:
+                    fc2_w_data = fc2_weight_single._columnwise_data.view(dtype=data_dtype)
+                    fc2_w_data = fc2_w_data.view(
+                        1,
+                        fc2_weight_shape[0],
+                        fc2_weight_k,
+                    )
+                    fc2_w_data = fc2_w_data.permute(2, 1, 0)
+                    fc2_w_scales = swizzled_columnwise_scale.view(dtype=scale_view_dtype)
+                    fc2_w_scales = fc2_w_scales.view(
+                        1,
+                        ceil_div(fc2_weight_shape[1], k_sf_divisor),
+                        ceil_div(fc2_weight_shape[0], 128),
+                        32,
+                        4,
+                        4,
+                    )
+                    fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
                 fc2_dactivation_kwargs["b_tensor"] = fc2_w_data
                 fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
             else:
@@ -3210,6 +3241,12 @@ def fuse_glu_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
+    # Keep capability probes out of tracing for unrelated operation sequences.
+    if not _is_grouped_mlp_fusion_candidate(
+        ops, recipe, (ScaledSwiGLU, ScaledClampedQGeGLU, ScaledSiTUGLU)
+    ):
+        return ops
+
     # Determine supported activations
     activation_op_types = []
     device_arch = get_device_compute_capability()
@@ -3241,6 +3278,13 @@ def fuse_unary_activation_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
 
+    # Keep capability probes out of tracing for unrelated operation sequences.
+    if not _is_grouped_mlp_fusion_candidate(ops, recipe, (ScaledSReLU, ScaledTanhSReLU)):
+        return ops
+
+    if not GroupedMLP_CuTeGEMMUnary.is_supported():
+        return ops
+
     # Determine supported activations
     activation_op_types = [ScaledSReLU]
     if _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
@@ -3254,8 +3298,5 @@ def fuse_unary_activation_ops(
     )
 
 
-# Register joint fusions if available.
-if GroupedMLP_CuTeGEMMGLU.is_supported():
-    register_forward_backward_fusion(fuse_glu_ops, prepend=True)
-if GroupedMLP_CuTeGEMMUnary.is_supported():
-    register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)
+register_forward_backward_fusion(fuse_glu_ops, prepend=True)
+register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)
