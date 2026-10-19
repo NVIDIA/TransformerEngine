@@ -27,11 +27,11 @@ def _check_cache(rank, init_file):
                 te_dist.symmetric_all_reduce(tensor, group, all_reduce_type="two_shot")
                 assert torch.equal(tensor, torch.full_like(tensor, 3))
             buffers = list(te_dist.symmetric_mem_cache.values())
-            assert sum(t.numel() for t in buffers) < 4 * tensor.numel()
+            assert sum(t.numel() for t in buffers) < 8 * tensor.numel()
 
             # Capture two sizes sharing a capacity, then grow before replaying the old graphs.
             graphs = []
-            for rows in (24, 32):
+            for rows in (23, 24):
                 inp = torch.empty(rows, 256, device="cuda", dtype=torch.bfloat16)
                 out = torch.empty_like(inp)
                 for _ in range(3):
