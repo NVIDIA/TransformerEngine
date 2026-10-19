@@ -28,6 +28,8 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch import Fp8Padding, Fp8Unpadding
 import copy
 
+from utils import assert_close
+
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
@@ -1759,10 +1761,12 @@ def test_permutation_mask_map(
 
 
 @pytest.mark.parametrize("torch_dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_permutation_mask_map_capacity_drop(torch_dtype):
+# 4096 tokens span several 1024-token blocks of the row-map kernels
+@pytest.mark.parametrize("num_tokens", [64, 4096])
+def test_permutation_mask_map_capacity_drop(torch_dtype, num_tokens):
     """num_out_tokens smaller than routing_map.sum(): over-capacity entries must be
     dropped (as the CUDA index-map path does), not written past the output buffer."""
-    num_tokens, num_expert, hidden_size = 64, 8, 128
+    num_expert, hidden_size = 8, 128
     torch.manual_seed(1234)
 
     routing_map = (torch.rand(num_tokens, num_expert) > 0.5).bool().cuda()
@@ -1792,7 +1796,7 @@ def test_permutation_mask_map_capacity_drop(torch_dtype):
     kept_flat[routed_flat_idx[:capacity]] = True
     kept_map = kept_flat.view(num_expert, num_tokens).T.contiguous()
     ref_unperm = (inp.float().unsqueeze(1) * kept_map.unsqueeze(-1).float()).sum(1)
-    torch.testing.assert_close(unperm.float(), ref_unperm, atol=1e-2, rtol=1e-2)
+    assert_close(unperm, ref_unperm)
 
 
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
