@@ -137,10 +137,11 @@ def run(args, impl):
     # Helper kernels such as scale-padding zeroing or the dbias reduction are not timed.
     prefix = "quantize" if impl == "CUDA" else "kernel_cutlass"
 
-    def make_inputs(m, n, input_dtype):
+    def make_inputs(m, n, input_dtype, fusion):
         """The input (or incoming gradient) and, for dact, the forward activation input."""
         dtype = getattr(torch, common.INPUTS[input_dtype][0])
-        return [torch.randn((m, n), dtype=dtype, device="cuda") for _ in range(2)]
+        act_input = torch.randn((m, n), dtype=dtype, device="cuda") if "dact" in fusion else None
+        return torch.randn((m, n), dtype=dtype, device="cuda"), act_input
 
     configs = [
         (m, n, d, f, sw, inp)
@@ -151,7 +152,12 @@ def run(args, impl):
         for sw in args.swizzles
     ]
     factories = (
-        functools.partial(lambda *c: setup(*make_inputs(*c[:3]), *c[3:]), m, n, inp, d, f, sw)
+        (
+            common.mxfp8_bytes(m * n, inp, d, 2 if "dact" in f else 1),
+            functools.partial(
+                lambda *c: setup(*make_inputs(*c[:3], c[4]), *c[3:]), m, n, inp, d, f, sw
+            ),
+        )
         for m, n, d, f, sw, inp in configs
     )
     timed = common.time_kernels(factories, args.runs, args.warmup, lambda k: k.startswith(prefix))

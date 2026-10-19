@@ -252,16 +252,19 @@ def run(args, impl):
     if not configs:
         sys.exit("No config to run: check --shapes/--experts/--layout/--fusion")
     factories = (
-        functools.partial(
-            lambda grp, lay, d, f, sw, inp: setup(
-                make_input(logical_shape(grp, lay), inp), grp, lay, d, f, sw
+        (
+            common.mxfp8_bytes(sum(a * b for a, b in grp), inp, d),
+            functools.partial(
+                lambda grp, lay, d, f, sw, inp: setup(
+                    make_input(logical_shape(grp, lay), inp), grp, lay, d, f, sw
+                ),
+                grp,
+                lay,
+                d,
+                f,
+                sw,
+                inp,
             ),
-            grp,
-            lay,
-            d,
-            f,
-            sw,
-            inp,
         )
         for _, _, _, lay, d, f, sw, inp, grp in configs
     )

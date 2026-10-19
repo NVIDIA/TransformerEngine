@@ -39,8 +39,8 @@ INPUTS = {
     "fp16": ("float16", "Float16", 2),
     "fp32": ("float32", "Float32", 4),
 }
-# Data touched between two uses of a buffer set, in multiples of the L2 size: enough that a set's
-# input is certainly out of L2 by the time it is reused.
+# Data the other buffer sets touch before a set is reused, in multiples of the L2 size. 1x
+# would do with strict LRU eviction; the margin covers L2's hashed, non-LRU replacement.
 L2_ROTATION = 3
 # Columns every results table ends with; a benchmark's own config columns come first.
 RESULT_COLUMNS = ["time_us", "min_us", "rel_std_pct", "GB/s", "kernel"]
@@ -120,12 +120,13 @@ def _cuda_kernels(prof):
 def time_kernels(factories, runs, warmup, keep):
     """Times each config's kernels with CUPTI kernel timestamps (via torch.profiler).
 
-    `factories` yields one zero-argument factory per config (consumed lazily, so buffers are
-    created and freed per config); each call builds an independent set of input and output
-    buffers and returns launch() on them. Launches rotate over enough sets that more than
-    L2_ROTATION x the L2 size is touched before a set comes back, so every launch reads its
-    input from DRAM, and run back to back, so each pays (amortized) for writing back the
-    dirty outputs earlier launches left in L2, as in a real pipeline. A launch may run
+    `factories` yields one (nbytes, factory) pair per config (consumed lazily, so buffers are
+    created and freed per config); each factory call builds an independent set of input and
+    output buffers and returns launch() on them, and nbytes is the data one launch reads and
+    writes. Launches rotate over just enough sets that the others touch L2_ROTATION x the L2
+    size before a set comes back, so every launch reads its input from DRAM, and run back to
+    back, so each pays (amortized) for writing back the dirty outputs earlier launches left in
+    L2, as in a real pipeline. A launch may run
     several kernels: the ones whose base name `keep` accepts are summed, the rest ignored.
     Returns, per config, (list of per-run microseconds, kernel names, number of sets).
     """
@@ -145,7 +146,7 @@ def time_kernels(factories, runs, warmup, keep):
     # Per config: [setup, warmups] M run M run ... M run M | next config's setup.
     num_sets = []
     with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        for factory in factories:
+        for nbytes, factory in factories:
             outputs = []  # each set keeps its last output alive, so new ones get fresh memory
 
             def keep_output(launch, slot):
@@ -154,18 +155,19 @@ def time_kernels(factories, runs, warmup, keep):
 
                 return run
 
-            before = torch.cuda.memory_allocated()
             outputs.append(None)
             sets = [keep_output(factory(), 0)]
             sets[0]()  # JIT compile; also materializes outputs allocated per call
             torch.cuda.synchronize()
-            footprint = max(torch.cuda.memory_allocated() - before, 1)
-            count = max(2, -(-L2_ROTATION * l2_cache_bytes() // footprint) + 1)
+            count = max(2, -(-L2_ROTATION * l2_cache_bytes() // nbytes) + 1)
             for slot in range(1, count):
                 outputs.append(None)
                 sets.append(keep_output(factory(), slot))
             num_sets.append(count)
-            for k in range(max(warmup, count)):  # every set touched once before timing
+            # Every set touched before timing; timed launches continue the same rotation, so
+            # each set always comes back after the other count - 1.
+            start = -(-max(warmup, count) // count) * count
+            for k in range(start):
                 sets[k % count]()
             for k in range(runs):
                 marker()
@@ -735,7 +737,7 @@ def _write_config(bench, out_dir, args, repo, commit, labels, files):
         f"runs:       {args.runs} timed + {args.warmup} warm-up launches per config",
         (
             "timing:     CUPTI kernel timestamps (torch.profiler); back-to-back launches rotate"
-            f" over buffer sets touching >{L2_ROTATION}x L2 between reuses (cold inputs, output"
+            f" over buffer sets touching {L2_ROTATION}x L2 between reuses (cold inputs, output"
             " write-backs included); clocks as set by the user"
         ),
         f"files:      {', '.join(files)}",
