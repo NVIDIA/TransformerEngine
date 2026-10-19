@@ -19,7 +19,8 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+# Prepend so installed packages with a top-level utils module cannot shadow the test helpers.
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig
 
 model_configs = {

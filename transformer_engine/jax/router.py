@@ -10,7 +10,7 @@ transformer_engine/common/fused_router/.
 
 Functions:
     fused_topk_with_score_function:
-        Fused score_function + top-k selection. Supports softmax/sigmoid,
+        Fused score_function + top-k selection. Supports softmax/sigmoid/sqrtsoftplus,
         grouped top-k, expert bias, and scaling factor. When compute_aux_scores=True,
         switches to the clean score-for-aux-loss kernel (no bias/groups/scaling,
         dense output).
@@ -27,6 +27,7 @@ import jax.numpy as jnp
 
 from transformer_engine.jax.cpp_extensions.router import (
     ScoreFunction,
+    RoutingMapFormat,
     fused_topk_with_score_function_fwd,
     fused_topk_with_score_function_bwd,
     fused_moe_aux_loss_fwd,
@@ -35,9 +36,33 @@ from transformer_engine.jax.cpp_extensions.router import (
 
 __all__ = [
     "ScoreFunction",
+    "RoutingMapFormat",
     "fused_topk_with_score_function",
     "fused_moe_aux_loss",
 ]
+
+
+def _validate_routing_map_format(
+    routing_map_format: Union[str, RoutingMapFormat, int],
+) -> RoutingMapFormat:
+    """Validate and convert routing_map_format to a RoutingMapFormat enum."""
+    if isinstance(routing_map_format, RoutingMapFormat):
+        return routing_map_format
+    if isinstance(routing_map_format, int):
+        try:
+            return RoutingMapFormat(routing_map_format)
+        except ValueError:
+            raise ValueError(
+                "routing_map_format int must match a RoutingMapFormat value; "
+                f"got {routing_map_format!r}"
+            ) from None
+    try:
+        return RoutingMapFormat[routing_map_format.upper()]
+    except (KeyError, AttributeError):
+        raise ValueError(
+            "routing_map_format must be 'bytemap', 'bitmap_u8', a RoutingMapFormat enum, "
+            f"or the matching int; got {routing_map_format!r}"
+        ) from None
 
 
 def _validate_score_function(score_function: Union[str, ScoreFunction]) -> ScoreFunction:
@@ -48,7 +73,8 @@ def _validate_score_function(score_function: Union[str, ScoreFunction]) -> Score
         return ScoreFunction[score_function.upper()]
     except (KeyError, AttributeError):
         raise ValueError(
-            "score_function must be 'softmax', 'sigmoid', or a ScoreFunction enum, "
+            "score_function must be 'softmax', 'sigmoid', 'sqrtsoftplus', "
+            "or a ScoreFunction enum, "
             f"got {score_function!r}"
         ) from None
 
@@ -68,6 +94,7 @@ def fused_topk_with_score_function(
     score_function: Union[str, ScoreFunction] = ScoreFunction.SOFTMAX,
     expert_bias: Optional[jnp.ndarray] = None,
     compute_aux_scores: bool = False,
+    routing_map_format: Union[str, RoutingMapFormat, int] = RoutingMapFormat.BYTEMAP,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Fused top-k with score function router.
@@ -101,13 +128,19 @@ def fused_topk_with_score_function(
         Scaling factor applied to output probs.
         Ignored when compute_aux_scores=True.
     score_function : Union[str, ScoreFunction]
-        Score function: "softmax" / "sigmoid" or ScoreFunction.SOFTMAX / ScoreFunction.SIGMOID.
+        Score function: "softmax", "sigmoid", or "sqrtsoftplus", or the corresponding
+        ScoreFunction enum member.
     expert_bias : Optional[jnp.ndarray]
-        Expert bias, shape [num_experts]. Only used with sigmoid.
+        Expert bias, shape [num_experts]. Only used with sigmoid or sqrtsoftplus.
         Ignored when compute_aux_scores=True.
     compute_aux_scores : bool
         If True, use the clean score-for-aux-loss kernel. Returns dense scores
         over all experts instead of sparse probs.
+    routing_map_format : Union[str, RoutingMapFormat, int]
+        Output layout for routing_map. "bytemap" / RoutingMapFormat.BYTEMAP (default)
+        returns a bool[T, E] tensor; "bitmap_u8" / RoutingMapFormat.BITMAP_U8 returns a
+        uint8[T, ceil(E/8)] tensor with bit (e % 8) of byte (e / 8) set when token t
+        routes to expert e (LSB-first along the expert axis).
 
     Returns
     -------
@@ -117,8 +150,10 @@ def fused_topk_with_score_function(
         When compute_aux_scores=True: Dense score tensor, shape [num_tokens, num_experts].
             All expert positions contain scores.
     routing_map : jnp.ndarray
-        Boolean mask, shape [num_tokens, num_experts].
-        True at selected expert positions.
+        Shape/dtype depend on routing_map_format:
+        - BYTEMAP: bool[num_tokens, num_experts]; True at selected expert positions.
+        - BITMAP_U8: uint8[num_tokens, ceil(num_experts/8)]; LSB-first bit-packed
+          along the expert axis.
     """
     if not isinstance(scaling_factor, (int, float)):
         raise TypeError(
@@ -127,6 +162,7 @@ def fused_topk_with_score_function(
         )
 
     score_function = _validate_score_function(score_function)
+    routing_map_format = _validate_routing_map_format(routing_map_format)
 
     if compute_aux_scores:
         expert_bias = jnp.empty((0,), dtype=logits.dtype)
@@ -135,9 +171,13 @@ def fused_topk_with_score_function(
         group_topk = -1
         scaling_factor = 1.0
     else:
-        if expert_bias is not None and score_function != ScoreFunction.SIGMOID:
+        if expert_bias is not None and score_function not in (
+            ScoreFunction.SIGMOID,
+            ScoreFunction.SQRTSOFTPLUS,
+        ):
             raise ValueError(
-                "expert_bias is only supported with score_function='sigmoid'. "
+                "expert_bias is only supported with score_function='sigmoid' or "
+                "'sqrtsoftplus'. "
                 f"Got score_function='{score_function.name}'."
             )
         if expert_bias is None:
@@ -153,12 +193,13 @@ def fused_topk_with_score_function(
         scaling_factor,
         score_function,
         compute_aux_scores,
+        routing_map_format,
     )
 
     return probs_or_scores, routing_map
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5, 6, 7, 8))
+@partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5, 6, 7, 8, 9))
 def _fused_topk_with_score_function(
     logits: jnp.ndarray,
     expert_bias: jnp.ndarray,
@@ -169,6 +210,7 @@ def _fused_topk_with_score_function(
     scaling_factor: float,
     score_function: ScoreFunction,
     compute_aux_scores: bool,
+    routing_map_format: RoutingMapFormat,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     (probs, routing_map), _ = _fused_topk_with_score_function_fwd(
         logits,
@@ -180,6 +222,7 @@ def _fused_topk_with_score_function(
         scaling_factor,
         score_function,
         compute_aux_scores,
+        routing_map_format,
     )
     return probs, routing_map
 
@@ -194,6 +237,7 @@ def _fused_topk_with_score_function_fwd(
     scaling_factor,
     score_function,
     compute_aux_scores,
+    routing_map_format,
 ):
     probs, routing_map, saved_scores = fused_topk_with_score_function_fwd(
         logits,
@@ -205,6 +249,7 @@ def _fused_topk_with_score_function_fwd(
         score_function,
         expert_bias,
         compute_aux_scores,
+        routing_map_format,
     )
     residuals = (routing_map, saved_scores)
     return (probs, routing_map), residuals
@@ -218,6 +263,7 @@ def _fused_topk_with_score_function_bwd(
     scaling_factor,
     score_function,
     compute_aux_scores,
+    routing_map_format,
     residuals,
     g,
 ):
@@ -234,6 +280,7 @@ def _fused_topk_with_score_function_bwd(
         scaling_factor,
         score_function,
         compute_aux_scores,
+        routing_map_format,
     )
     return grad_logits, None
 
@@ -301,12 +348,11 @@ def _fused_moe_aux_loss_fwd(probs, tokens_per_expert, topk, coeff):
 def _fused_moe_aux_loss_bwd(topk, coeff, residuals, g):
     del topk, coeff
     const_buf, tokens_per_expert, num_tokens = residuals
-    grad_aux_loss = g.reshape(1)
 
     grad_probs = fused_moe_aux_loss_bwd(
         const_buf,
         tokens_per_expert,
-        grad_aux_loss,
+        g,
         num_tokens,
     )
     return grad_probs, None

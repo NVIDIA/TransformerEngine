@@ -24,11 +24,48 @@ using uint8_t = unsigned char;
 using uint16_t = unsigned short int;  // NOLINT(*)
 using uint32_t = unsigned int;
 using uint64_t = unsigned long long int;  // NOLINT(*)
+using int16_t = short int;                // NOLINT(*)
+using int32_t = int;
+using int64_t = long long int;  // NOLINT(*)
 static_assert(sizeof(uint8_t) == 1);
 static_assert(sizeof(uint16_t) == 2);
 static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
+static_assert(sizeof(int16_t) == 2);
+static_assert(sizeof(int32_t) == 4);
+static_assert(sizeof(int64_t) == 8);
 #endif
+
+// Minimal subset of <type_traits> used by RTC kernel headers. Keep these in a
+// project-owned namespace because adding primary templates to std is undefined.
+namespace transformer_engine {
+namespace detail {
+
+template <class T, class U>
+struct is_same {
+  static constexpr bool value = false;
+};
+template <class T>
+struct is_same<T, T> {
+  static constexpr bool value = true;
+};
+
+template <class T, class U>
+inline constexpr bool is_same_v = is_same<T, U>::value;
+
+template <bool B, class T, class F>
+struct conditional {
+  using type = T;
+};
+template <class T, class F>
+struct conditional<false, T, F> {
+  using type = F;
+};
+template <bool B, class T, class F>
+using conditional_t = typename conditional<B, T, F>::type;
+
+}  // namespace detail
+}  // namespace transformer_engine
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -920,13 +957,79 @@ __device__ __forceinline__ void reciprocal<float>(float *value_inv, const float 
   *value_inv = __frcp_rn(value);
 }
 
+// Convert float to an unsigned integer that preserves descending sort order.
+// After conversion, a numerically larger float maps to a larger uint32.
+__device__ __forceinline__ unsigned int float_to_ordered_uint(float f) {
+  unsigned int u = __float_as_uint(f);
+  // If sign bit is set (negative), flip all bits.
+  // If sign bit is clear (positive or +0), flip only the sign bit.
+  unsigned int mask = (u & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
+  return u ^ mask;
+}
+
+// Convert back from ordered uint to float.
+__device__ __forceinline__ float ordered_uint_to_float(unsigned int u) {
+  // Reverse the transformation: if MSB is set (was positive), flip sign bit.
+  // If MSB is clear (was negative), flip all bits.
+  unsigned int mask = (u & 0x80000000u) ? 0x80000000u : 0xFFFFFFFFu;
+  return __uint_as_float(u ^ mask);
+}
+
+template <typename T>
+__device__ __forceinline__ T abs_val(T val) {
+  if constexpr (detail::is_same_v<T, __nv_bfloat16>) {
+#if __CUDA_ARCH__ >= 800
+    return __habs(val);
+#else
+    return static_cast<__nv_bfloat16>(fabsf(static_cast<float>(val)));
+#endif
+  } else if constexpr (detail::is_same_v<T, __half>) {
+    return __habs(val);
+  } else {
+    return fabsf(val);
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ T max_val(T a, T b) {
+  if constexpr (detail::is_same_v<T, __nv_bfloat16>) {
+#if __CUDA_ARCH__ >= 800
+    return __hmax(a, b);
+#else
+    return static_cast<__nv_bfloat16>(fmaxf(static_cast<float>(a), static_cast<float>(b)));
+#endif
+  } else if constexpr (detail::is_same_v<T, __half>) {
+    return __hmax(a, b);
+  } else {
+    return fmaxf(a, b);
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ T warp_allreduce_sum(T x) {
+  // Butterfly reduction
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) x += warp_shuffle_xor(x, offset);
+  return x;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 using e8m0_t = uint8_t;
+#if CUDA_VERSION >= 13040
+using fp8ue5m3 = __nv_fp8_ue5m3;
+#endif
 
 enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENSIONAL = 2 };
+
+enum ShapeRepresentation {
+  SAME_BOTH_DIMS = 0,
+  VARYING_FIRST_DIM = 1,
+  VARYING_LAST_DIM = 2,
+  VARYING_BOTH_DIMS = 3
+};
 
 template <typename T>
 struct Numeric_Traits;

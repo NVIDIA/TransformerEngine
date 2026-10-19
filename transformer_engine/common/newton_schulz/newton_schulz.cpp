@@ -1,0 +1,376 @@
+/*************************************************************************
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+#include "transformer_engine/newton_schulz.h"
+
+#include <cuda_runtime.h>
+
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <vector>
+
+#include "../common.h"
+#include "../util/logging.h"
+
+#ifdef NVTE_WITH_CUSOLVERMP
+
+#include <cusolverMp.h>
+
+using namespace transformer_engine;
+
+namespace {
+
+struct CudaStreamDeleter {
+  void operator()(std::remove_pointer_t<cudaStream_t>* stream) const { cudaStreamDestroy(stream); }
+};
+using CudaStream = std::unique_ptr<std::remove_pointer_t<cudaStream_t>, CudaStreamDeleter>;
+
+struct CudaEventDeleter {
+  void operator()(std::remove_pointer_t<cudaEvent_t>* event) const { cudaEventDestroy(event); }
+};
+using CudaEvent = std::unique_ptr<std::remove_pointer_t<cudaEvent_t>, CudaEventDeleter>;
+
+struct CusolverMpHandleDeleter {
+  void operator()(cusolverMpHandle_t handle) const { cusolverMpDestroy(handle); }
+};
+using CusolverMpHandle =
+    std::unique_ptr<std::remove_pointer_t<cusolverMpHandle_t>, CusolverMpHandleDeleter>;
+
+struct CusolverMpGridDeleter {
+  void operator()(cusolverMpGrid_t grid) const { cusolverMpDestroyGrid(grid); }
+};
+using CusolverMpGrid =
+    std::unique_ptr<std::remove_pointer_t<cusolverMpGrid_t>, CusolverMpGridDeleter>;
+
+struct CusolverMpMatrixDescDeleter {
+  void operator()(cusolverMpMatrixDescriptor_t desc) const { cusolverMpDestroyMatrixDesc(desc); }
+};
+using CusolverMpMatrixDesc = std::unique_ptr<std::remove_pointer_t<cusolverMpMatrixDescriptor_t>,
+                                             CusolverMpMatrixDescDeleter>;
+
+struct CusolverMpNSDescDeleter {
+  void operator()(cusolverMpNewtonSchulzDescriptor_t desc) const {
+    cusolverMpNewtonSchulzDescriptorDestroy(desc);
+  }
+};
+using CusolverMpNSDesc = std::unique_ptr<std::remove_pointer_t<cusolverMpNewtonSchulzDescriptor_t>,
+                                         CusolverMpNSDescDeleter>;
+
+CusolverMpHandle MakeCusolverMpHandle(int device_id, cudaStream_t stream) {
+  cusolverMpHandle_t raw{};
+  NVTE_CHECK_CUSOLVERMP(cusolverMpCreate(&raw, device_id, stream));
+  return CusolverMpHandle(raw);
+}
+
+CusolverMpGrid MakeCusolverMpGrid(cusolverMpHandle_t handle, ncclComm_t comm, int32_t nprow,
+                                  int32_t npcol, cusolverMpGridMapping_t mapping) {
+  cusolverMpGrid_t raw{};
+  NVTE_CHECK_CUSOLVERMP(cusolverMpCreateDeviceGrid(handle, &raw, comm, nprow, npcol, mapping));
+  return CusolverMpGrid(raw);
+}
+
+CusolverMpMatrixDesc MakeCusolverMpMatrixDesc(cusolverMpGrid_t grid, cudaDataType_t dtype,
+                                              int64_t m, int64_t n, int64_t mb, int64_t nb,
+                                              uint32_t rsrc, uint32_t csrc, int64_t lld) {
+  cusolverMpMatrixDescriptor_t raw{};
+  NVTE_CHECK_CUSOLVERMP(
+      cusolverMpCreateMatrixDesc(&raw, grid, dtype, m, n, mb, nb, rsrc, csrc, lld));
+  return CusolverMpMatrixDesc(raw);
+}
+
+CusolverMpNSDesc MakeCusolverMpNSDesc() {
+  cusolverMpNewtonSchulzDescriptor_t raw{};
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulzDescriptorCreate(&raw));
+  return CusolverMpNSDesc(raw);
+}
+
+CudaStream MakeCudaStream() {
+  cudaStream_t raw{};
+  NVTE_CHECK_CUDA(cudaStreamCreate(&raw));
+  return CudaStream(raw);
+}
+
+CudaEvent MakeCudaEvent() {
+  cudaEvent_t raw{};
+  NVTE_CHECK_CUDA(cudaEventCreate(&raw));
+  return CudaEvent(raw);
+}
+
+}  // namespace
+
+struct WorkspaceConfig {
+  int64_t m;
+  int64_t n;
+  cudaDataType_t dtype;
+  int64_t num_iterations;
+  std::vector<float> coefficients;
+};
+
+struct NVTECusolverMpCtx {
+  int64_t nranks;
+  int64_t rank;
+  ncclComm_t comm;
+  CudaStream stream;
+  CudaEvent in_ready;
+  CudaEvent out_ready;
+  CusolverMpHandle handle;
+  CusolverMpGrid grid;
+  void* workspace;
+  size_t workspace_size;
+  bool workspace_registered;
+  std::vector<uint8_t> workspace_host;
+  uint64_t* workspace_size_reduction;
+  std::vector<WorkspaceConfig> workspace_configs;
+};
+
+namespace {
+
+void FreeWorkspace(NVTECusolverMpCtx* ctx) {
+  // Buffer deregistration and grid destruction require all grid work to be complete.
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
+  if (ctx->workspace == nullptr) {
+    return;
+  }
+  if (ctx->workspace_registered) {
+    NVTE_CHECK_CUSOLVERMP(cusolverMpBufferDeregister(ctx->grid.get(), ctx->workspace));
+    NVTE_CHECK_NCCL(ncclMemFree(ctx->workspace));
+  } else {
+    NVTE_CHECK_CUDA(cudaFree(ctx->workspace));
+  }
+  ctx->workspace = nullptr;
+  ctx->workspace_size = 0;
+  ctx->workspace_registered = false;
+}
+
+size_t GridMaxWorkspaceSize(NVTECusolverMpCtx* ctx, size_t local_size) {
+  if (ctx->nranks == 1) {
+    return local_size;
+  }
+
+  uint64_t size = local_size;
+  if (ctx->workspace_size_reduction == nullptr) {
+    NVTE_CHECK_CUDA(cudaMalloc(&ctx->workspace_size_reduction, sizeof(size)));
+  }
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(ctx->workspace_size_reduction, &size, sizeof(size),
+                                  cudaMemcpyHostToDevice, ctx->stream.get()));
+  NVTE_CHECK_NCCL(ncclAllReduce(ctx->workspace_size_reduction, ctx->workspace_size_reduction, 1,
+                                ncclUint64, ncclMax, ctx->comm, ctx->stream.get()));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&size, ctx->workspace_size_reduction, sizeof(size),
+                                  cudaMemcpyDeviceToHost, ctx->stream.get()));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
+  return static_cast<size_t>(size);
+}
+
+bool IsWorkspaceConfigCached(const NVTECusolverMpCtx* ctx, int64_t m, int64_t n,
+                             cudaDataType_t dtype, int64_t num_iterations,
+                             const float* coefficients, int64_t num_coefficients) {
+  const size_t coefficients_size = static_cast<size_t>(num_coefficients) * sizeof(float);
+  for (const auto& config : ctx->workspace_configs) {
+    if (config.m == m && config.n == n && config.dtype == dtype &&
+        config.num_iterations == num_iterations &&
+        config.coefficients.size() == static_cast<size_t>(num_coefficients) &&
+        (coefficients_size == 0 ||
+         std::memcmp(config.coefficients.data(), coefficients, coefficients_size) == 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void CacheWorkspaceConfig(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, cudaDataType_t dtype,
+                          int64_t num_iterations, const float* coefficients,
+                          int64_t num_coefficients) {
+  std::vector<float> cached_coefficients;
+  if (num_coefficients > 0) {
+    cached_coefficients.assign(coefficients, coefficients + num_coefficients);
+  }
+  ctx->workspace_configs.emplace_back(WorkspaceConfig{
+      m,
+      n,
+      dtype,
+      num_iterations,
+      std::move(cached_coefficients),
+  });
+}
+
+}  // namespace
+
+NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank) {
+  NVTE_API_CALL(nvte_cusolvermp_ctx_create);
+  NVTE_CHECK(comm != nullptr, "NCCL communicator must be non-null");
+  NVTE_CHECK(nranks > 0, "Number of ranks must be positive, got ", nranks);
+  NVTE_CHECK(rank >= 0 && rank < nranks, "Rank ", rank, " is outside [0, ", nranks, ")");
+
+  int comm_nranks{};
+  int comm_rank{};
+  NVTE_CHECK_NCCL(ncclCommCount(comm, &comm_nranks));
+  NVTE_CHECK_NCCL(ncclCommUserRank(comm, &comm_rank));
+  NVTE_CHECK(comm_nranks == nranks, "NCCL communicator has ", comm_nranks,
+             " ranks, but the process group reports ", nranks);
+  NVTE_CHECK(comm_rank == rank, "NCCL communicator rank is ", comm_rank,
+             ", but the process group reports ", rank);
+
+  int device_id{};
+  NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+
+  auto stream = MakeCudaStream();
+  auto in_ready = MakeCudaEvent();
+  auto out_ready = MakeCudaEvent();
+
+  auto handle = MakeCusolverMpHandle(device_id, stream.get());
+  auto grid = MakeCusolverMpGrid(handle.get(), comm, nranks, 1, CUSOLVERMP_GRID_MAPPING_COL_MAJOR);
+
+  return new NVTECusolverMpCtx{
+      nranks,
+      rank,
+      comm,
+      std::move(stream),
+      std::move(in_ready),
+      std::move(out_ready),
+      std::move(handle),
+      std::move(grid),
+      nullptr,
+      0,
+      false,
+      {},
+      nullptr,
+      {},
+  };
+}
+
+void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
+  NVTE_API_CALL(nvte_cusolvermp_ctx_destroy);
+  FreeWorkspace(ctx);
+  if (ctx->workspace_size_reduction != nullptr) {
+    NVTE_CHECK_CUDA(cudaFree(ctx->workspace_size_reduction));
+  }
+  // Destroy handle and grid before the stream they depend on
+  ctx->grid.reset();
+  ctx->handle.reset();
+  delete ctx;
+}
+
+void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor x,
+                        int64_t num_iterations, const float* coefficients, int64_t num_coefficients,
+                        cudaStream_t caller_stream) {
+  NVTE_API_CALL(nvte_newton_schulz);
+  NVTE_CHECK(num_iterations >= 0, "Number of iterations must be non-negative, got ",
+             num_iterations);
+  NVTE_CHECK(num_coefficients == num_iterations * 3, num_iterations, " iterations require ",
+             num_iterations * 3, " coefficients, but ", num_coefficients, " are passed");
+  const auto* t = convertNVTETensorCheck(x);
+  NVTE_CHECK(m <= n, "Column-sharded Newton-Schulz requires rows <= columns, got ", m, " > ", n);
+
+  // Make the internal stream wait for the caller's stream so that
+  // the input tensor is ready before cuSolverMp reads it.
+  NVTE_CHECK_CUDA(cudaEventRecord(ctx->in_ready.get(), caller_stream));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream.get(), ctx->in_ready.get()));
+
+  // Block size for ScaLAPACK-style distribution
+  const int64_t mb = m;
+  const int64_t nb = (n + ctx->nranks - 1) / ctx->nranks;
+
+  // Compute local leading dimension
+  const int64_t local_cols = cusolverMpNUMROC(n, nb, ctx->rank, 0, ctx->nranks);
+  NVTE_CHECK(t->shape().size() == 2, "Shape size:", t->shape().size());
+  NVTE_CHECK(t->shape()[0] == m, "Tensor rows:", t->shape()[0], "Expected rows:", m);
+  NVTE_CHECK(t->shape()[1] == local_cols, "Tensor cols:", t->shape()[1], "Local cols:", local_cols);
+  const int64_t lld = std::max(local_cols, static_cast<int64_t>(1));
+
+  const cudaDataType_t cuda_dtype = get_cuda_dtype(t->dtype());
+
+  // Create matrix descriptor
+  auto mat_desc = MakeCusolverMpMatrixDesc(ctx->grid.get(), cuda_dtype, n, m, nb, mb, 0, 0, lld);
+
+  // Create Newton-Schulz descriptor
+  auto ns_desc = MakeCusolverMpNSDesc();
+  const int enabled = 1;
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulzDescriptorSetAttribute(
+      ns_desc.get(), CUSOLVERMP_NEWTON_SCHULZ_DESCRIPTOR_ATTRIBUTE_NORMALIZE, &enabled,
+      sizeof(enabled)));
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulzDescriptorSetAttribute(
+      ns_desc.get(), CUSOLVERMP_NEWTON_SCHULZ_DESCRIPTOR_ATTRIBUTE_REDUCE_VIA_COMPUTE_TYPE,
+      &enabled, sizeof(enabled)));
+
+  // Workspace requirements are stable for a given operation configuration. Cache configurations
+  // so repeated optimizer steps avoid a device allocation, collective, and stream synchronization.
+  const bool workspace_config_cached = IsWorkspaceConfigCached(
+      ctx, m, n, cuda_dtype, num_iterations, coefficients, num_coefficients);
+  if (!workspace_config_cached) {
+    size_t wrksp_size_device = 0;
+    size_t wrksp_size_host = 0;
+    NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz_bufferSize(
+        ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
+        coefficients, CUDA_R_32F, &wrksp_size_device, &wrksp_size_host));
+    wrksp_size_device = GridMaxWorkspaceSize(ctx, wrksp_size_device);
+
+    // Allocate/grow device workspace
+    if (ctx->workspace_size < wrksp_size_device) {
+      FreeWorkspace(ctx);
+
+      void* workspace = nullptr;
+      bool workspace_registered = false;
+
+      if (ncclMemAlloc(&workspace, wrksp_size_device) == ncclSuccess) {
+        if (cusolverMpBufferRegister(ctx->grid.get(), workspace, wrksp_size_device) ==
+            CUSOLVER_STATUS_SUCCESS) {
+          workspace_registered = true;
+        } else {
+          NVTE_CHECK_NCCL(ncclMemFree(workspace));
+          workspace = nullptr;
+        }
+      }
+
+      if (workspace == nullptr) {
+        NVTE_CHECK_CUDA(cudaMalloc(&workspace, wrksp_size_device));
+      }
+
+      ctx->workspace = workspace;
+      ctx->workspace_size = wrksp_size_device;
+      ctx->workspace_registered = workspace_registered;
+    }
+
+    // Keep host workspace alive until all work on the internal stream is complete.
+    if (ctx->workspace_host.size() < wrksp_size_host) {
+      NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
+      ctx->workspace_host.resize(wrksp_size_host);
+    }
+
+    CacheWorkspaceConfig(ctx, m, n, cuda_dtype, num_iterations, coefficients, num_coefficients);
+  }
+
+  // Execute Newton-Schulz
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz(
+      ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
+      coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, ctx->workspace_host.data(),
+      ctx->workspace_host.size(), nullptr));
+
+  // Make the caller's stream wait for the internal stream so that
+  // the output tensor is ready before the caller uses it.
+  NVTE_CHECK_CUDA(cudaEventRecord(ctx->out_ready.get(), ctx->stream.get()));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(caller_stream, ctx->out_ready.get()));
+}
+
+#else  // NVTE_WITH_CUSOLVERMP
+
+struct NVTECusolverMpCtx {};
+
+NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank) {
+  NVTE_ERROR("Transformer Engine has not been built with cuSolverMp support.");
+}
+
+void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
+  NVTE_ERROR("Transformer Engine has not been built with cuSolverMp support.");
+}
+
+void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor x,
+                        int64_t num_iterations, const float* coefficients, int64_t num_coefficients,
+                        cudaStream_t caller_stream) {
+  NVTE_ERROR("Transformer Engine has not been built with cuSolverMp support.");
+}
+
+#endif  // NVTE_WITH_CUSOLVERMP

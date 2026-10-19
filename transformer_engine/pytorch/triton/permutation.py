@@ -151,7 +151,7 @@ def permute_with_mask_map(
     num_experts : int
         Number of experts in the input tensor.
     num_out_tokens : int
-        Number of tokens in the permuted tensor.
+        Number of rows allocated for the permuted tensor (must be a positive integer).
     hidden_size : int
         Hidden size of the input tensor.
     scale_hidden_dim : int

@@ -15,7 +15,6 @@ import torch
 import nvdlfw_inspect.api as debug_api
 import transformer_engine.debug
 import transformer_engine.pytorch as tepytorch
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.pytorch.quantization import _default_sf_compute
 from transformer_engine.pytorch import (
@@ -57,7 +56,7 @@ def _cast_to_fp8(tensor, scale, dtype):
 
 
 def _get_current_scale(tensor, fp8_dtype):
-    if fp8_dtype == tex.DType.kFloat8E4M3:
+    if fp8_dtype == tepytorch.DType.kFloat8E4M3:
         fp8_max = Format.E4M3.value.max_fwd
     else:
         fp8_max = Format.E5M2.value.max_fwd
@@ -93,19 +92,19 @@ def _emulate_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     fprop_fp8: bool = False,
-    fprop_input_fake_quant: tex.DType = None,
+    fprop_input_fake_quant: tepytorch.DType = None,
     fprop_input_scale: torch.Tensor = None,
-    fprop_weight_fake_quant: tex.DType = None,
+    fprop_weight_fake_quant: tepytorch.DType = None,
     fprop_weight_scale: torch.Tensor = None,
     dgrad_fp8: bool = False,
-    dgrad_gradient_fake_quant: tex.DType = None,
+    dgrad_gradient_fake_quant: tepytorch.DType = None,
     dgrad_gradient_scale: torch.Tensor = None,
-    dgrad_weight_fake_quant: tex.DType = None,
+    dgrad_weight_fake_quant: tepytorch.DType = None,
     dgrad_weight_scale: torch.Tensor = None,
     wgrad_fp8: bool = False,
-    wgrad_gradient_fake_quant: tex.DType = None,
+    wgrad_gradient_fake_quant: tepytorch.DType = None,
     wgrad_gradient_scale: torch.Tensor = None,
-    wgrad_input_fake_quant: tex.DType = None,
+    wgrad_input_fake_quant: tepytorch.DType = None,
     wgrad_input_scale: torch.Tensor = None,
     loss_multiplier: float = 1.0,
     activation_sync=None,
@@ -116,10 +115,10 @@ def _emulate_linear(
         activation = _fp8_gemm_kernel(
             input,
             _scalar(fprop_input_scale or 1.0),
-            tex.DType.kFloat8E4M3,
+            tepytorch.DType.kFloat8E4M3,
             weight,
             _scalar(fprop_weight_scale or 1.0),
-            tex.DType.kFloat8E4M3,
+            tepytorch.DType.kFloat8E4M3,
             _2X_ACC_FPROP,
         )
         activation = activation.clone().detach().contiguous().requires_grad_(True)
@@ -152,10 +151,10 @@ def _emulate_linear(
         dgrad = _fp8_gemm_kernel(
             weight.T,
             _scalar(dgrad_weight_scale or 1.0),
-            tex.DType.kFloat8E4M3,
+            tepytorch.DType.kFloat8E4M3,
             gradient,
             _scalar(dgrad_gradient_scale or 1.0),
-            tex.DType.kFloat8E5M2,
+            tepytorch.DType.kFloat8E5M2,
             _2X_ACC_DGRAD,
         ).T
     else:
@@ -176,10 +175,10 @@ def _emulate_linear(
         wgrad = _fp8_gemm_kernel(
             input.T,
             _scalar(wgrad_input_scale or 1.0),
-            tex.DType.kFloat8E4M3,
+            tepytorch.DType.kFloat8E4M3,
             gradient.T,
             _scalar(wgrad_gradient_scale or 1.0),
-            tex.DType.kFloat8E5M2,
+            tepytorch.DType.kFloat8E5M2,
             _2X_ACC_WGRAD,
         ).T
     else:
@@ -470,17 +469,17 @@ def set_scaling_factors(model, input_kwargs, fp8_kwargs):
 def set_current_scaling_factors(x, weight, y, input_kwargs, fp8_kwargs):
     # Compute per tensor scaling factor if respective flag in input_kwargs is set.
     if input_kwargs["fprop_inp"]:
-        fp8_kwargs["fprop_input_scale"] = tex.DType.kFloat8E4M3
+        fp8_kwargs["fprop_input_scale"] = tepytorch.DType.kFloat8E4M3
     if input_kwargs["fprop_weight"]:
-        fp8_kwargs["fprop_weight_scale"] = tex.DType.kFloat8E4M3
+        fp8_kwargs["fprop_weight_scale"] = tepytorch.DType.kFloat8E4M3
     if input_kwargs["dgrad_grad"]:
-        fp8_kwargs["dgrad_gradient_scale"] = tex.DType.kFloat8E5M2
+        fp8_kwargs["dgrad_gradient_scale"] = tepytorch.DType.kFloat8E5M2
     if input_kwargs["dgrad_weight"]:
-        fp8_kwargs["dgrad_weight_scale"] = tex.DType.kFloat8E4M3
+        fp8_kwargs["dgrad_weight_scale"] = tepytorch.DType.kFloat8E4M3
     if input_kwargs["wgrad_grad"]:
-        fp8_kwargs["wgrad_gradient_scale"] = tex.DType.kFloat8E5M2
+        fp8_kwargs["wgrad_gradient_scale"] = tepytorch.DType.kFloat8E5M2
     if input_kwargs["wgrad_input"]:
-        fp8_kwargs["wgrad_input_scale"] = tex.DType.kFloat8E4M3
+        fp8_kwargs["wgrad_input_scale"] = tepytorch.DType.kFloat8E4M3
 
 
 @create_config_file
@@ -651,7 +650,7 @@ def test_microbatching_per_tensor_scaling(
 
 
 all_combinations = list(
-    itertools.product([tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2, None], repeat=6)
+    itertools.product([tepytorch.DType.kFloat8E4M3, tepytorch.DType.kFloat8E5M2, None], repeat=6)
 )
 subset_combinations = random.sample(all_combinations, 10)
 
@@ -687,7 +686,7 @@ $gemms
 def fake_quant_fp8_create_config(
     fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad, config_file
 ):
-    format_to_str = {tex.DType.kFloat8E4M3: "FP8E4M3", tex.DType.kFloat8E5M2: "FP8E5M2"}
+    format_to_str = {tepytorch.DType.kFloat8E4M3: "FP8E4M3", tepytorch.DType.kFloat8E5M2: "FP8E5M2"}
     gemms = ""
 
     def _add_tensor(quant_format, tensor):

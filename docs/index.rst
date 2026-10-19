@@ -4,7 +4,7 @@
     See LICENSE for license information.
 
 Transformer Engine documentation
-=================================
+=================================================
 
 .. ifconfig:: "dev" in release
 
@@ -12,8 +12,8 @@ Transformer Engine documentation
       You are currently viewing unstable developer preview of the documentation.
       To see the documentation for the latest stable release, refer to:
 
-      * `Release Notes <https://docs.nvidia.com/deeplearning/transformer-engine/release-notes/index.html>`_
-      * `Developer Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ (stable version of this page)
+      * `Release Notes <https://docs.nvidia.com/deeplearning/transformer-engine/release_notes.html>`_
+      * `Developer Guide <https://docs.nvidia.com/deeplearning/transformer-engine/index.html>`_ (stable version of this page)
 
 .. include:: ../README.rst
    :start-after: overview-begin-marker-do-not-remove
@@ -30,7 +30,17 @@ Transformer Engine documentation
 
    installation
    getting_started/index
+   support_matrix
    faq
+   release_notes.md
+
+.. toctree::
+   :hidden:
+   :caption: Project
+
+   project_updates
+   ecosystem
+   resources
 
 .. toctree::
    :hidden:
@@ -56,9 +66,11 @@ Transformer Engine documentation
    examples/advanced_optimizations.ipynb
    examples/te_llama/tutorial_accelerate_hf_llama_with_te.ipynb
    examples/te_gemma/tutorial_generation_gemma_with_te.ipynb
+   examples/te_mixtral/tutorial_accelerate_hf_mixtral_with_te.ipynb
    examples/onnx/onnx_export.ipynb
-   examples/te_jax_integration.ipynb
+   examples/te_jax_integration.rst
    examples/op_fuser/op_fuser.rst
+   examples/gemm_profiling/gemm_profiling.rst
 
 .. toctree::
    :hidden:

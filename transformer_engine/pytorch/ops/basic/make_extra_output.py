@@ -5,7 +5,7 @@
 """Make extra tensor output in operation fuser."""
 
 from __future__ import annotations
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
 import torch
@@ -49,7 +49,7 @@ class MakeExtraOutput(BasicOperation):
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
-            "{self.__class__.__name__} operation has "
+            f"{self.__class__.__name__} operation has "
             f"{self.num_extra_inputs} extra tensor inputs "
             f"and {self.num_extra_outputs} extra tensor outputs. "
             "It overrides `fuser_forward` instead of `op_forward`."
@@ -57,7 +57,7 @@ class MakeExtraOutput(BasicOperation):
 
     def op_backward(self, *args, **kwargs) -> None:
         raise RuntimeError(
-            "{self.__class__.__name__} operation has "
+            f"{self.__class__.__name__} operation has "
             f"{self.num_extra_inputs} extra tensor inputs "
             f"and {self.num_extra_outputs} extra tensor outputs. "
             "It overrides `fuser_backward` instead of `op_backward`."
@@ -72,7 +72,7 @@ class MakeExtraOutput(BasicOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
         return input_, [(input_,)]
 
     def fuser_backward(
@@ -80,14 +80,17 @@ class MakeExtraOutput(BasicOperation):
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
         *,
-        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+        basic_op_grad_extra_outputs: list[tuple[Optional[torch.Tensor], ...]],
     ) -> tuple[
         torch.Tensor,
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
         grad_extra_output = basic_op_grad_extra_outputs[0][0]
-        if self._in_place:
+        if grad_extra_output is None:
+            # Extra output is not consumed, so its gradient is zero
+            grad_input = grad_output
+        elif self._in_place:
             grad_extra_output += grad_output
             grad_input = grad_extra_output
         else:

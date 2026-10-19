@@ -7,6 +7,7 @@ from typing import Optional, List
 import torch
 import pytest
 import os
+import copy
 
 import transformer_engine
 import transformer_engine.pytorch as te
@@ -34,15 +35,22 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.common import recipe
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from utils import ModelConfig
+from transformer_engine.pytorch.module import (
+    _common as module_common,
+    is_module_grouped_tensor_path_supported,
+    layernorm_linear,
+    layernorm_mlp,
+    linear,
+)
+from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 fp8_block_scaling_available, _ = te.is_fp8_block_scaling_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, _ = te.is_nvfp4_available(return_reason=True)
 
 # Record initial RNG state from script run.
 seed = 1234
@@ -85,9 +93,35 @@ model_configs = {
 
 
 def nvfp4_vanilla():
-    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    return recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+    )
+
+
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override="dequantized",
+    )
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        nvfp4_4over6="all",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=True)
     nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
     return nvfp4_recipe
 
@@ -95,7 +129,9 @@ def nvfp4_vanilla():
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
-    fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
+if nvfp4_available:
+    fp8_recipes.append(nvfp4_vanilla())
+    fp8_recipes.append(nvfp4_4over6())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -152,6 +188,18 @@ def check_grouped_weight(
     assert tuple(weight.shape) == (num_gemms, out_features, in_features), (
         "Grouped weight has unexpected shape. "
         f"Expected {(num_gemms, out_features, in_features)}, got {tuple(weight.shape)}"
+    )
+
+
+def check_grouped_bias(module: GroupedLinear, num_gemms: int, out_features: int):
+    """Verify GroupedLinear exposes one grouped bias parameter with shape [num_gemms, out_features]."""
+    bias_params = [(name, p) for name, p in module.named_parameters() if name == "bias"]
+    assert len(bias_params) == 1, f"Expected 1 grouped bias parameter, got {len(bias_params)}"
+    name, bias = bias_params[0]
+    assert name == "bias", f"Expected grouped parameter name 'bias', got {name}"
+    assert tuple(bias.shape) == (num_gemms, out_features), (
+        "Grouped bias has unexpected shape. "
+        f"Expected {(num_gemms, out_features)}, got {tuple(bias.shape)}"
     )
 
 
@@ -212,6 +260,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
             continue
         elif "weight" in name and p.requires_grad:
             p.main_grad = torch.zeros_like(p)
+            p.grad_added_to_main_grad = False  # Should be set to True after backward
 
     use_fp8 = fp8_recipe is not None
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
@@ -221,13 +270,19 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
     torch.cuda.synchronize()
 
     failed_grads = []
+    failed_grad_added_flags = []
     for name, p in block.named_parameters():
         if "layer_norm_weight" in name:
             continue
         elif "weight" in name and p.requires_grad:
             if not torch.count_nonzero(p.main_grad) > 0:
                 failed_grads.append(name)
+            if not getattr(p, "grad_added_to_main_grad", False):
+                failed_grad_added_flags.append(name)
     assert len(failed_grads) == 0, f"Gradient not accumulated for {failed_grads}."
+    assert (
+        len(failed_grad_added_flags) == 0
+    ), f"grad_added_to_main_grad not set to True for {failed_grad_added_flags}."
 
 
 def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
@@ -382,7 +437,12 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
@@ -392,6 +452,7 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 def test_sanity_layernorm_linear(
     dtype,
     fp8_recipe,
+    backward_override,
     model,
     skip_wgrad,
     zero_centered_gamma,
@@ -400,6 +461,11 @@ def test_sanity_layernorm_linear(
     microbatching,
 ):
     config = model_configs[model]
+
+    skip_unsupported_backward_override("layernorm_linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -423,13 +489,25 @@ def test_sanity_layernorm_linear(
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
 @pytest.mark.parametrize("microbatching", all_boolean)
-def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microbatching):
+def test_sanity_linear(
+    dtype, fp8_recipe, backward_override, model, skip_wgrad, skip_dgrad, microbatching
+):
     config = model_configs[model]
+
+    skip_unsupported_backward_override("linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -453,13 +531,25 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
-def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias):
+def test_sanity_linear_with_zero_tokens(
+    dtype, bs, model, fp8_recipe, backward_override, fp8_model_params, use_bias
+):
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.max_seqlen_q
+
+    skip_unsupported_backward_override("linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -480,13 +570,19 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
         out = te_linear(inp_hidden_states)
     loss = out.sum()
     loss.backward()
+    torch.cuda.synchronize()
     assert out.shape == (num_tokens, ffn_hidden_size)
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
 @pytest.mark.parametrize("single_param", all_boolean)
@@ -497,6 +593,7 @@ def test_sanity_grouped_linear(
     bs,
     model,
     fp8_recipe,
+    backward_override,
     fp8_model_params,
     use_bias,
     single_param,
@@ -508,12 +605,38 @@ def test_sanity_grouped_linear(
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
+    skip_unsupported_backward_override("grouped_linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
+    if single_param and not is_module_grouped_tensor_path_supported(
+        fp8_recipe,
+        dtype,
+    ):
+        pytest.skip("Single grouped parameters require the native grouped-tensor path")
+    if single_param:
+        # Single grouped parameters intentionally have no split-quantize fallback, so this
+        # test must satisfy the native grouped kernels' shape contract. MCore pads each
+        # expert's token count to 256; TE requires at least 128-row alignment. Weight K must
+        # be 64-aligned.
+        tokens_per_nonempty_expert = bs * config.max_seqlen_q
+        if tokens_per_nonempty_expert % 128 != 0:
+            pytest.skip("Single grouped parameters require each nonempty m_split to be 128-aligned")
+        k_alignment = 64
+        if config.hidden_size % k_alignment != 0:
+            pytest.skip(f"Single grouped parameters require GEMM K to be {k_alignment}-aligned")
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4():
-            pytest.skip("NVFP4 not supported for grouped linear")
+            if dtype != torch.bfloat16:
+                pytest.skip("NVFP4 GroupedLinear requires BF16")
+            if single_param and not fp8_model_params:
+                pytest.skip(
+                    "NVFP4 single grouped BF16 primary weights require unsupported non-RHT "
+                    "grouped weight quantization; enable quantized model initialization"
+                )
 
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
@@ -523,13 +646,17 @@ def test_sanity_grouped_linear(
             ffn_hidden_size,
             bias=use_bias,
             params_dtype=dtype,
-            single_grouped_parameter=single_param,
+            single_grouped_weight=single_param,
+            single_grouped_bias=single_param,
+            use_grouped_tensor=single_param,
         ).cuda()
 
-    # Verify grouped linear exposes a single grouped weight parameter.
+    # Verify grouped linear exposes a single grouped weight parameter(and bias when applicable).
     if fp8_recipe is None or not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
         if single_param:
             check_grouped_weight(te_grouped_linear, num_gemms, ffn_hidden_size, config.hidden_size)
+            if use_bias:
+                check_grouped_bias(te_grouped_linear, num_gemms, ffn_hidden_size)
 
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
@@ -541,16 +668,30 @@ def test_sanity_grouped_linear(
         m_splits[-1] = 0
     elif empty_split == "middle":
         m_splits[num_gemms // 2] = 0
+    if single_param:
+        m_splits = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+
+    if NVTE_TEST_NVINSPECT_ENABLED and single_param:
+        # DebugQuantizer operates on per-GEMM tensors, while single grouped parameters
+        # intentionally have no split-quantize fallback.
+        with pytest.raises(
+            RuntimeError,
+            match="TE debug features do not support single grouped parameters",
+        ):
+            with autocast(enabled=use_fp8, recipe=fp8_recipe):
+                te_grouped_linear(inp_hidden_states, m_splits)
+        return
 
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
         out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
+    torch.cuda.synchronize()
     assert out.shape == (num_tokens, ffn_hidden_size)
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
@@ -599,8 +740,126 @@ def test_sanity_layernorm_mlp(
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
 
 
+@pytest.mark.parametrize(
+    "kind",
+    ["linear", "lnlinear", "rmslinear", "mlp_gelu", "rmsmlp_swiglu"],
+)
+@pytest.mark.parametrize(
+    "shape,noncontiguous",
+    [
+        ((128,), False),
+        ((2, 4, 4, 128), False),
+        ((2, 4, 4, 128), True),
+    ],
+)
+def test_sanity_logical_activation_shapes(kind, shape, noncontiguous, monkeypatch):
+    """Modules preserve unusual logical shapes without restoration views."""
+    kwargs = dict(device="cuda", params_dtype=torch.bfloat16, bias=True)
+    if kind == "linear":
+        module = Linear(128, 256, **kwargs)
+        reference_module = Linear(128, 256, **kwargs)
+        module_impl = linear
+        output_bias = module.bias
+    elif kind.endswith("linear"):
+        module_kwargs = dict(
+            normalization="RMSNorm" if kind == "rmslinear" else "LayerNorm",
+            return_layernorm_output=True,
+        )
+        module = LayerNormLinear(128, 256, **module_kwargs, **kwargs)
+        reference_module = LayerNormLinear(128, 256, **module_kwargs, **kwargs)
+        module_impl = layernorm_linear
+        output_bias = module.bias
+    else:
+        module_kwargs = dict(
+            normalization="RMSNorm" if kind.startswith("rms") else "LayerNorm",
+            activation="gelu" if kind == "mlp_gelu" else "swiglu",
+            return_layernorm_output=True,
+        )
+        module = LayerNormMLP(128, 256, **module_kwargs, **kwargs)
+        reference_module = LayerNormMLP(128, 256, **module_kwargs, **kwargs)
+        module_impl = layernorm_mlp
+        output_bias = module.fc2_bias
+    reference_module.load_state_dict(module.state_dict())
+
+    storage_shape = (*shape[:-1], shape[-1] * 2) if noncontiguous else shape
+    x = torch.randn(storage_shape, device="cuda", dtype=torch.bfloat16)
+    if noncontiguous:
+        x = x[..., ::2]
+        assert not x.is_contiguous()
+    x = x.detach().requires_grad_()
+    reference_x = x.detach().reshape(-1, x.shape[-1]).clone().requires_grad_()
+
+    seen_gemm_layouts = []
+    general_gemm_ = module_impl.general_gemm
+    check_logical_shapes = True
+
+    def checked_gemm(a, b, *args, **kwargs):
+        # Fprop and dgrad retain activation rank; wgrad contracts token dimensions.
+        out = general_gemm_(a, b, *args, **kwargs)
+        if check_logical_shapes:
+            assert b.ndim == len(shape)
+            if kwargs.get("layout", "TN") != "NT":
+                assert out[0].ndim == len(shape)
+            seen_gemm_layouts.append(kwargs.get("layout", "TN"))
+        return out
+
+    monkeypatch.setattr(module_impl, "general_gemm", checked_gemm)
+
+    seen_norm_stages = []
+    if kind != "linear":
+        norm = "rmsnorm" if kind.startswith("rms") else "layernorm"
+        for suffix in ("fwd", "bwd"):
+            tex = module_common.tex if suffix == "fwd" else module_impl.tex
+            norm_ = getattr(tex, f"{norm}_{suffix}")
+
+            def checked_norm(*args, _norm=norm_, _suffix=suffix, **kwargs):
+                if check_logical_shapes:
+                    assert args[0].ndim == len(shape)
+                    seen_norm_stages.append(_suffix)
+                return _norm(*args, **kwargs)
+
+            monkeypatch.setattr(tex, f"{norm}_{suffix}", checked_norm)
+
+    outputs = module(x)
+    outputs = outputs if isinstance(outputs, tuple) else (outputs,)
+    for output in outputs:
+        assert output.shape[:-1] == shape[:-1]
+        assert output._base is None
+    sum(output.sum() for output in outputs).backward()
+
+    check_logical_shapes = False
+    reference_outputs = reference_module(reference_x)
+    reference_outputs = (
+        reference_outputs if isinstance(reference_outputs, tuple) else (reference_outputs,)
+    )
+    sum(output.sum() for output in reference_outputs).backward()
+
+    assert x.grad is not None and x.grad.shape == x.shape
+    assert len(outputs) == len(reference_outputs)
+    for output, reference_output in zip(outputs, reference_outputs):
+        reference_output = reference_output.reshape(*shape[:-1], reference_output.shape[-1])
+        torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
+    torch.testing.assert_close(x.grad, reference_x.grad.reshape(shape), rtol=0, atol=0)
+    for (name, parameter), (reference_name, reference_parameter) in zip(
+        module.named_parameters(), reference_module.named_parameters()
+    ):
+        assert name == reference_name
+        assert parameter.grad is not None and parameter.grad.shape == parameter.shape
+        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=0, atol=0)
+    num_tokens = x.numel() // x.shape[-1]
+    torch.testing.assert_close(
+        output_bias.grad,
+        torch.full_like(output_bias, num_tokens),
+        rtol=0,
+        atol=0,
+    )
+    assert {"TN", "NN", "NT"}.issubset(seen_gemm_layouts)
+    if kind != "linear":
+        assert set(seen_norm_stages) == {"fwd", "bwd"}
+
+
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
@@ -673,7 +932,7 @@ def test_sanity_gpt_126m():
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
@@ -729,7 +988,7 @@ def test_sanity_bert_126m():
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
@@ -785,7 +1044,7 @@ def test_sanity_T5_126m():
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
@@ -818,7 +1077,7 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 def test_sanity_drop_path(dtype, fp8_recipe, model):
     config = model_configs[model]
@@ -853,7 +1112,7 @@ def test_sanity_drop_path(dtype, fp8_recipe, model):
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
@@ -889,7 +1148,7 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgrad):
@@ -925,6 +1184,96 @@ def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgra
     _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_recipe, skip_wgrad)
 
 
+def _wgrad_fusion_module(module: str, hidden: int, dtype: torch.dtype):
+    """A module that accumulates its weight gradients into ``main_grad``, and its forward."""
+    kwargs = dict(params_dtype=dtype, device="cuda", fuse_wgrad_accumulation=True)
+    if module == "Linear":
+        block = Linear(hidden, hidden, bias=False, **kwargs)
+    elif module == "LayerNormLinear":
+        block = LayerNormLinear(hidden, hidden, bias=False, **kwargs)
+    elif module == "LayerNormMLP":
+        block = LayerNormMLP(hidden, 2 * hidden, bias=False, **kwargs)
+    elif module == "GroupedLinear":
+        block = GroupedLinear(2, hidden, hidden, bias=False, **kwargs)
+        return block, lambda x: block(x, [x.shape[0] // 2, x.shape[0] - x.shape[0] // 2])
+    else:
+        block = te.ops.Linear(
+            hidden, hidden, bias=False, device="cuda", dtype=dtype, accumulate_into_main_grad=True
+        )
+    return block, block
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Needs two GPUs.")
+# GroupedLinear is left out: its multi-stream cuBLAS GEMM keeps the streams of the first device
+# it runs on, so its forward pass fails on a second device before any weight gradient.
+@pytest.mark.parametrize("module", ["Linear", "LayerNormLinear", "LayerNormMLP", "ops.Linear"])
+@pytest.mark.parametrize("zero_out_wgrad", all_boolean)
+def test_sanity_dummy_wgrad_device(module, zero_out_wgrad):
+    """The cached dummy weight gradient is on the weight's device when the same module shape
+    runs backward on one GPU and then on another."""
+    dtype, hidden, tokens = torch.bfloat16, 128, 64
+    for device in (0, 1):
+        with torch.cuda.device(device):
+            block, forward = _wgrad_fusion_module(module, hidden, dtype)
+            weights = [
+                p
+                for name, p in block.named_parameters()
+                if "weight" in name and "layer_norm" not in name
+            ]
+            for p in weights:
+                p.main_grad = torch.zeros(p.shape, dtype=torch.float32, device="cuda")
+                p.grad_added_to_main_grad = False
+                p.zero_out_wgrad = zero_out_wgrad
+            x = torch.randn(tokens, hidden, dtype=dtype, device="cuda")
+            forward(x).backward(torch.randn(tokens, hidden, dtype=dtype, device="cuda"))
+            for p in weights:
+                assert p.grad is not None and p.grad.device == p.device
+
+
+@pytest.mark.parametrize(
+    "module", ["Linear", "LayerNormLinear", "LayerNormMLP", "GroupedLinear", "ops.Linear"]
+)
+@pytest.mark.parametrize("zero_out_wgrad", all_boolean)
+def test_sanity_zero_tensor_dummy_wgrad(module, zero_out_wgrad):
+    """``zero_tensor_dummy_wgrad`` makes the dummy weight gradient a ZeroTensor.
+
+    The module runs twice before one backward pass, as an LM head shared by the main and MTP
+    heads does, so autograd adds the two dummy weight gradients. ``main_grad`` must not
+    change, and ``zero_out_wgrad`` keeps its zero-filled dummy.
+    """
+    dtype, hidden, tokens = torch.bfloat16, 128, 64
+    torch.manual_seed(seed)
+    block, forward = _wgrad_fusion_module(module, hidden, dtype)
+    weights = [
+        p for name, p in block.named_parameters() if "weight" in name and "layer_norm" not in name
+    ]
+    inputs = [torch.randn(tokens, hidden, dtype=dtype, device="cuda") for _ in range(2)]
+    grad_outputs = [torch.randn(tokens, hidden, dtype=dtype, device="cuda") for _ in range(2)]
+
+    main_grads = {}
+    for zero_tensor_dummy_wgrad in (False, True):
+        for p in weights:
+            p.main_grad = torch.zeros(p.shape, dtype=torch.float32, device="cuda")
+            p.grad_added_to_main_grad = False
+            p.zero_out_wgrad = zero_out_wgrad
+            p.zero_tensor_dummy_wgrad = zero_tensor_dummy_wgrad
+            p.grad = None
+        outputs = [forward(x) for x in inputs]
+        torch.autograd.backward(outputs, grad_outputs)
+        main_grads[zero_tensor_dummy_wgrad] = [p.main_grad for p in weights]
+        for p in weights:
+            assert p.grad_added_to_main_grad
+            assert p.grad is not None
+            if zero_tensor_dummy_wgrad and not zero_out_wgrad:
+                assert p.grad._is_zerotensor()
+            elif zero_out_wgrad:
+                assert not p.grad._is_zerotensor()
+                assert torch.count_nonzero(p.grad) == 0
+    for reference, main_grad in zip(main_grads[False], main_grads[True]):
+        assert torch.count_nonzero(reference) > 0
+        torch.testing.assert_close(main_grad, reference, rtol=0, atol=0)
+
+
 def test_model_multiple_cast():
     a = torch.zeros((16, 16), device="cuda")
     m = Linear(16, 32)
@@ -951,6 +1300,16 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
     torch.cuda.synchronize()
 
 
+def test_sanity_general_gemm_non_fp8_bias_dtype_must_match_out():
+    """BF16 bias + FP32 out must raise on the non-FP8/FP4 path (issue 3562)."""
+    E, H, T = 128, 256, 64
+    weight = torch.randn(E, H, dtype=torch.bfloat16, device="cuda")
+    inp = torch.randn(T, H, dtype=torch.bfloat16, device="cuda")
+    bias = torch.randn(E, dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(RuntimeError, match="bias dtype must match output dtype"):
+        general_gemm(weight, inp, torch.float32, layout="TN", bias=bias)
+
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
@@ -960,7 +1319,7 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
 
     scales = torch.ones(1).cuda().squeeze()
     amaxes = torch.ones(1).cuda().squeeze()
-    dtype = tex.DType.kFloat8E4M3
+    dtype = te.DType.kFloat8E4M3
     fp8_quantizer = Float8Quantizer(scales, amaxes, dtype)
 
     outp_type = datatype
@@ -984,7 +1343,7 @@ def test_replace_raw_data_for_float8tensor():
     torch.manual_seed(12345)
     torch.cuda.manual_seed(12345)
 
-    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
+    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=te.DType.kFloat8E4M3, device="cuda")
     fp8_tensor = fp8_quantizer.make_empty([128, 128], dtype=torch.bfloat16, device="cuda")
     random_bf16_data = torch.randn(fp8_tensor.shape, dtype=torch.bfloat16, device="cuda")
     fp8_quantizer.update_quantized(random_bf16_data, fp8_tensor)
@@ -1049,6 +1408,118 @@ def test_quantized_model_init_high_precision_init_val():
     assert not hasattr(
         weight, "._high_precision_init_val"
     ), "clear_high_precision_init_val() not work"
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("move", ["cuda", "cpu", "half"])
+def test_quantized_param_attrs_survive_apply(move):
+    """Attributes attached to a quantized parameter survive nn.Module._apply.
+
+    Quantized parameters implement the flatten protocol, so ``_apply`` moves them
+    with ``swap_tensors``, which exchanges the parameter's whole ``__dict__``.
+    Anything attached from the outside rides out on the discarded tensor unless
+    the module re-attaches it.
+    """
+    with quantized_model_init(preserve_high_precision_init_val=True):
+        model = Linear(64, 64)
+
+    weight = model.weight
+    expected = weight.get_high_precision_init_val()
+    weight.probe_attr = "attached-from-outside"
+
+    if move == "cuda":
+        model = model.cuda()
+    elif move == "cpu":
+        model = model.cpu()
+    else:
+        model = model.half()
+
+    weight = model.weight
+    assert hasattr(weight, "get_high_precision_init_val"), f"accessor lost by .{move}()"
+    assert hasattr(weight, "clear_high_precision_init_val"), f"accessor lost by .{move}()"
+    torch.testing.assert_close(weight.get_high_precision_init_val(), expected, rtol=0, atol=0)
+    assert weight.probe_attr == "attached-from-outside", f"custom attr lost by .{move}()"
+
+    # The accessor must read the surviving parameter, not the discarded one.
+    weight.clear_high_precision_init_val()
+    assert weight.get_high_precision_init_val() is None
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+def test_grouped_linear_single_param_preserves_high_precision_init():
+    """Grouped MXFP8 and discrete weights produce identical FP32 master initialization."""
+    num_gemms = 3
+
+    def make_module(single_grouped_weight):
+        torch.manual_seed(1234)
+        torch.cuda.manual_seed(1234)
+        with quantized_model_init(
+            enabled=True,
+            recipe=recipe.MXFP8BlockScaling(),
+            preserve_high_precision_init_val=True,
+        ):
+            return GroupedLinear(
+                num_gemms=num_gemms,
+                in_features=32,
+                out_features=64,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                single_grouped_weight=single_grouped_weight,
+            ).cuda()
+
+    discrete_module = make_module(False)
+    grouped_module = make_module(True)
+    discrete_init_vals = [
+        getattr(discrete_module, f"weight{i}").get_high_precision_init_val()
+        for i in range(num_gemms)
+    ]
+    expected_grouped_init = torch.stack(discrete_init_vals, dim=0)
+
+    grouped_weight = grouped_module.weight
+    assert hasattr(grouped_weight, "get_high_precision_init_val")
+    assert hasattr(grouped_weight, "clear_high_precision_init_val")
+    grouped_init = grouped_weight.get_high_precision_init_val()
+    assert grouped_init.device.type == "cpu"
+    assert grouped_init.shape == grouped_weight.shape
+    torch.testing.assert_close(
+        grouped_init,
+        expected_grouped_init,
+        rtol=0,
+        atol=0,
+    )
+
+    # This is the exact layout consumed when constructing the FP32 optimizer master.
+    discrete_master = expected_grouped_init.float()
+    grouped_master = grouped_init.float()
+    torch.testing.assert_close(grouped_master, discrete_master, rtol=0, atol=0)
+
+    grouped_weight.clear_high_precision_init_val()
+    assert grouped_weight.get_high_precision_init_val() is None
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+def test_grouped_linear_rejects_partial_high_precision_init():
+    """Packing fails rather than mixing preserved and dequantized initialization."""
+    with quantized_model_init(
+        enabled=True,
+        recipe=recipe.MXFP8BlockScaling(),
+        preserve_high_precision_init_val=True,
+    ):
+        module = GroupedLinear(
+            num_gemms=2,
+            in_features=32,
+            out_features=64,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            single_grouped_weight=False,
+        ).cuda()
+
+    module.weight0.clear_high_precision_init_val()
+    with pytest.raises(
+        RuntimeError,
+        match="inconsistent high-precision initialization state",
+    ):
+        module.make_grouped_weights()
 
 
 def test_sanity_checkpointing_on_callables():

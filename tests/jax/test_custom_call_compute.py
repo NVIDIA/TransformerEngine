@@ -2,7 +2,13 @@
 #
 # See LICENSE for license information.
 
+import importlib
+import inspect
+import warnings
+from types import SimpleNamespace
+
 import jax
+import numpy as np
 import jax.numpy as jnp
 import pytest
 from jax import jit, value_and_grad
@@ -27,8 +33,8 @@ from transformer_engine.jax.cpp_extensions.normalization import (
 from transformer_engine.jax.cpp_extensions.quantization import (
     _jax_quantize,
     _jax_quantize_dbias,
+    GroupedQuantizePrimitive,
 )
-from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
     NoScaleTensor,
@@ -36,6 +42,7 @@ from transformer_engine.jax.quantize import (
     ScaledTensor1x,
     ScaledTensor2x,
     GroupedScaledTensor1x,
+    GroupedNoScaleTensor,
     ScalingMode,
     QuantizerFactory,
     QuantizeLayout,
@@ -47,6 +54,11 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
+from transformer_engine.jax.cpp_extensions.topk import topk
+import transformer_engine_jax
+
+_glu_adapter = importlib.import_module("transformer_engine.jax.cpp_extensions.grouped_gemm_glu")
+_moe_module = importlib.import_module("transformer_engine.jax.moe")
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -150,8 +162,13 @@ def assert_dequantized_grouped_scaled_tensor(
     a: Union[GroupedScaledTensor1x, ScaledTensor2x], b: jnp.ndarray
 ):
     if isinstance(a, GroupedScaledTensor1x):
-        assert a.group_sizes.sum() == b.shape[0]
-        b = jnp.split(b, jnp.cumulative_sum(a.group_sizes)[:-1], axis=0)
+        group_sizes = (
+            a.first_dims
+            if a.first_dims is not None
+            else jnp.ones(a.original_shape[0], dtype=jnp.int32)
+        )
+        assert group_sizes.sum() == b.shape[0]
+        b = jnp.split(b, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         dq_a = a.dequantize()
         for dq_a_i, b_i in zip(dq_a, b):
             if len(dq_a_i) == 0:
@@ -237,7 +254,7 @@ class TestActivation:
             value_and_grad(self.primitive_func, (0,)), static_argnums=(1, 3)
         )
         act_args = (
-            {"limit": 0.75, "alpha": 1.702}
+            {"limit": 0.75, "alpha": 1.702, "glu_linear_offset": 0.5}
             if activation_type == ("clamped_silu", "clamped_linear")
             else {}
         )
@@ -549,11 +566,7 @@ class TestNorm:
 
         precise_comparison = True
 
-        if get_cudnn_version() < (9, 10, 0) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
-            # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
-            precise_comparison = False
-        elif is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode):
+        if is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode):
             # Larger tolerances as our JAX implementation _jax_*norm uses the compute dtype float32
             # for zero-centered gamma always
             precise_comparison = False
@@ -1062,7 +1075,24 @@ class TestRandomizedHadamardTransform:
 
 @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
-@pytest_parametrize_wrapper("input_shape", [(8, 16, 32)])
+@pytest_parametrize_wrapper(
+    "input_shape",
+    [
+        (8, 16, 32),  # V1 MXFP8: K=32 not 128-aligned
+        (
+            4,
+            8,
+            128,
+        ),  # V2 MXFP8 eligible: K=128, M*32=256 both 128-aligned. Alignment is required due to V2 grouped quantize and grouped GEMM kernel requirements.
+    ],
+)
+@pytest_parametrize_wrapper(
+    "group_size_multiplier",
+    [
+        32,  # V1 MXFP8: group size must be multiple of 32
+        128,  # V2 MXFP8 eligible: group size must be multiple of 128. Alignment is required due to V2 grouped quantize and grouped GEMM kernel requirements.
+    ],
+)
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
 @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
 @pytest_parametrize_wrapper("flatten_axis", [-1])
@@ -1072,14 +1102,21 @@ class TestRandomizedHadamardTransform:
 )
 class TestGroupedQuantize:
     def test_grouped_qdq(
-        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
+        self,
+        in_dtype,
+        input_shape,
+        group_size_multiplier,
+        q_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        with_group_sizes,
     ):
         n_groups, m, n = input_shape
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
-        # *32 so that the input shapes works for MXFP8
-        input_shape = (m * 32, n)
+        input_shape = (m * group_size_multiplier, n)
 
         if with_group_sizes:
             group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
@@ -1087,13 +1124,30 @@ class TestGroupedQuantize:
             group_sizes = jnp.diff(group_sizes)
             assert group_sizes.sum() == m
             assert jnp.any(group_sizes == 0)  # make sure that at least one group has 0 row
-            group_sizes = group_sizes * 32
+            group_sizes = group_sizes * group_size_multiplier
         else:
             group_sizes = None
             input_shape = (n_groups, input_shape[0] // n_groups, input_shape[1])
 
         if flatten_axis == -2:
             input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
+
+        # V2 MXFP8 quantize kernel requires every individual group size to be a multiple of 128.
+        # for padding and alignment constraints in the kernel and in the V2 grouped GEMM kernel.
+        # group_size_multiplier=32 can produce groups of 32 or 64 rows which violate this.
+        # This cannot be checked at runtime (group sizes live on device), so we skip the
+        # test configuration rather than weaken the kernel-selection logic.
+        if (
+            scaling_mode == ScalingMode.MXFP8_1D_SCALING
+            and group_size_multiplier % 128 != 0
+            and GroupedQuantizePrimitive._use_v2_kernel(
+                scaling_mode.value, input_shape, flatten_axis
+            )
+        ):
+            pytest.skip(
+                "MXFP8 V2 quantize requires each group to be 128-aligned; "
+                f"group_size_multiplier={group_size_multiplier} may produce smaller groups"
+            )
 
         x = jax.random.uniform(subkeys[1], input_shape, in_dtype)
 
@@ -1707,10 +1761,21 @@ fwd_bwd_dtypes = [
 ]
 
 GROUPED_DENSE_INPUT_SHAPES = [
-    # (n_groups, m, n, k), the actual m will be multiplied by 32
-    (5, 32, 128, 64),  # Test the case where n_groups is not a multiple of 4
-    (8, 64, 32, 128),
-    (8, 64, 128, 256),
+    # (n_groups, m, n, k), the actual m will be multiplied by group_size_multiplier
+    (5, 32, 128, 64),  # V1 MXFP8: K=64 not 128-aligned; also tests n_groups not a multiple of 4
+    (8, 64, 32, 128),  # V1 MXFP8 GEMM: N=32 not 128-aligned
+    (
+        8,
+        64,
+        128,
+        256,
+    ),  # V2 MXFP8 eligible: K=256, N=128 both 128-aligned. Alignment is required due to V2 grouped quantize and grouped GEMM kernel requirements.
+    (
+        4,
+        4,
+        128,
+        128,
+    ),  # V2 MXFP8 eligible: K=128, N=128 both 128-aligned (smaller shape). Alignment is required due to V2 grouped quantize and grouped GEMM kernel requirements.
 ]
 
 
@@ -1736,7 +1801,9 @@ class TestGroupedDense:
             ref_out.append(jnp.squeeze(out_i))
         return ref_out
 
-    def _generate_grouped_dense_input(self, dtype, input_shape, data_layout="NN", with_bias=False):
+    def _generate_grouped_dense_input(
+        self, dtype, input_shape, data_layout="NN", with_bias=False, group_size_multiplier=32
+    ):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 4)
         n_groups, m, n, k = input_shape
@@ -1749,9 +1816,9 @@ class TestGroupedDense:
         group_sizes = group_sizes.at[1].set(0)
         assert group_sizes.sum() == m
 
-        # *32 to make sure that input shape works for MXFP8
-        group_sizes = group_sizes * 32
-        m = m * 32
+        # Scale group sizes by the multiplier for alignment requirements.
+        group_sizes = group_sizes * group_size_multiplier
+        m = m * group_size_multiplier
 
         lhs_shape = (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m)
         rhs_shape = (n_groups, k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k)
@@ -1787,13 +1854,18 @@ class TestGroupedDense:
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         # jitting grouped_gemm
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
         prim_out = jax.jit(
             tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
         )(
-            lhs,
-            rhs,
-            group_sizes,
-            contracting_dims,
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
             use_async_d2h_group_sizes=True,
         )
 
@@ -1820,13 +1892,24 @@ class TestGroupedDense:
             quantizer.q_dtype = bwd_dtype
 
         out_dtype = jnp.bfloat16
+        # MXFP8 V2 kernel requires each group's row count to be divisible by due to V2 grouped quantize and grouped GEMM kernel requirements.
+        is_mxfp8 = scaling_mode == ScalingMode.MXFP8_1D_SCALING
         lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
-            out_dtype, input_shape, layout
+            out_dtype, input_shape, layout, group_size_multiplier=128 if is_mxfp8 else 32
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
         prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-            lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
+            quantizer_set=quantizer_set,
         )
 
         allclose_dtype = jnp.float8_e4m3fn
@@ -1836,11 +1919,24 @@ class TestGroupedDense:
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, allclose_dtype)
 
     def _ref_sum_grouped_dense(self, x, kernel, bias, group_sizes, contracting_dims):
-        out_list = self._ref_grouped_dense(x, kernel, bias, group_sizes, contracting_dims)
         # Note: we use jnp.sum instead of jnp.mean to make the gradient larger
         # and prevent them from being clamp to zero in FP8. / sqrt(x.size) is used to
         # normalize the output and prevent the gradient from being too large for FP8.
-        out_sum_list = [jnp.sum(out) for out in out_list]
+        #
+        # We pass bias=None here and add bias externally in fp32 so the autodiff
+        # bias-grad (sum over the m axis of the cotangent) accumulates in fp32.
+        # If bias is added inside _ref_grouped_dense in bf16, JAX lowers the bias
+        # backward as a bf16 sum-over-m and loses precision on the largest group,
+        # producing a >bf16-rtol mismatch against the primitive's grouped_dbias
+        # (which casts the cotangent to fp32 before segment_sum). Bias is required
+        # for this helper since it is only used by the grad tests below, which all
+        # set with_bias=True.
+        assert bias is not None, "_ref_sum_grouped_dense requires a non-None bias"
+        out_list = self._ref_grouped_dense(x, kernel, None, group_sizes, contracting_dims)
+        out_sum_list = []
+        for out_i, bias_i in zip(out_list, bias):
+            out_with_bias_fp32 = out_i.astype(jnp.float32) + bias_i.astype(jnp.float32)
+            out_sum_list.append(jnp.sum(out_with_bias_fp32))
         return jnp.sum(jnp.asarray(out_sum_list)) / jnp.sqrt(x.size)
 
     def _primitive_sum_grouped_dense(
@@ -1849,7 +1945,9 @@ class TestGroupedDense:
         out = grouped_dense(
             x, kernel, group_sizes, contracting_dims, bias=bias, quantizer_set=quantizer_set
         )
-        return jnp.sum(jnp.asarray(out)) / jnp.sqrt(x.size)
+        # Match the fp32 accumulation in _ref_sum_grouped_dense so loss values are
+        # comparable and the cotangent dtype on `out` is unambiguous.
+        return jnp.sum(out.astype(jnp.float32)) / jnp.sqrt(x.size)
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     def test_grouped_dense_grad_fp16(self, dtype, input_shape):
@@ -1886,10 +1984,13 @@ class TestGroupedDense:
     def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         dtype = jnp.bfloat16
+        # MXFP8 V2 kernel requires each group's row count to be divisible by 128 due to V2 grouped quantize and grouped GEMM kernel requirements.
+        is_mxfp8 = scaling_mode == ScalingMode.MXFP8_1D_SCALING
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
             dtype,
             input_shape,
             with_bias=True,
+            group_size_multiplier=128 if is_mxfp8 else 32,
         )
 
         quantizer_set = QuantizerFactory.create_set(
@@ -1937,8 +2038,10 @@ class TestDebugInspectFFI:
         ]
         + ([jnp.float8_e4m3fn, jnp.float8_e5m2] if is_fp8_supported else []),
     )
-    def test_debug_inspect_ffi(self, shape, dtype):
+    def test_debug_inspect_ffi(self, shape, dtype, tmp_path, monkeypatch):
         from transformer_engine.jax.debug.experimental import inspect_array, load_array_dump
+
+        monkeypatch.chdir(tmp_path)
 
         def f(x):
             x = x + 1
@@ -1952,6 +2055,487 @@ class TestDebugInspectFFI:
         _ = jax.jit(f)(x)
 
         expected = x + 1
-        actual = load_array_dump("my_tensor_gpu0.bin", shape, dtype)
+        actual = load_array_dump("my_tensor_gpu0_my_array.bin", shape, dtype)
 
         assert_allclose(actual, expected, dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float32])
+@pytest.mark.parametrize(
+    "problem_size",
+    [
+        (1, 10000, 100),
+        (1, 50000, 200),
+        (4, 16384, 256),
+        (8, 65536, 512),
+        (1, 1000000, 1000),
+    ],
+)
+class TestTopK:
+    """Correctness tests for the TopK JAX primitive.
+
+    Each test generates an input whose top-k entries lie in a known value range
+    so that correctness can be verified without a full sort, then cross-checks
+    against jax.lax.top_k as a reference.
+    """
+
+    def test_topk_1d(self, dtype, problem_size):
+        """1-D input: single row."""
+        _bs, n, k = problem_size
+
+        prng_key = jax.random.PRNGKey(0)
+        keys = jax.random.split(prng_key, 3)
+        topk_vals = jax.random.uniform(keys[0], shape=(k,), dtype=dtype, minval=1.5, maxval=2.5)
+        bottom_vals = jax.random.uniform(
+            keys[1], shape=(n - k,), dtype=dtype, minval=0.0, maxval=1.0
+        )
+        x = jax.random.permutation(keys[2], jnp.concatenate([topk_vals, bottom_vals]))
+
+        ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
+        prim_vals, prim_idx = jax.jit(topk, static_argnums=(1,))(x, k)
+
+        # AIR TopK output is unordered; sort before comparing.
+        ref_vals, ref_idx = jax.lax.sort_key_val(ref_vals, ref_idx)
+        prim_vals, prim_idx = jax.lax.sort_key_val(prim_vals, prim_idx)
+
+        assert_allclose(prim_vals, ref_vals, dtype=dtype)
+
+        sorted_x = jax.lax.sort(x)
+        assert prim_vals[0] >= sorted_x[-(k + 1)]
+
+        # Values at returned indices must match reference.
+        assert_allclose(x[prim_idx], x[ref_idx], dtype=dtype)
+
+    def test_topk_2d(self, dtype, problem_size):
+        """2-D input: each row is an independent top-k problem."""
+        bs, n, k = problem_size
+
+        prng_key = jax.random.PRNGKey(42)
+        keys = jax.random.split(prng_key, 3)
+        topk_vals = jax.random.uniform(keys[0], shape=(bs, k), dtype=dtype, minval=1.5, maxval=2.5)
+        bottom_vals = jax.random.uniform(
+            keys[1], shape=(bs, n - k), dtype=dtype, minval=0.0, maxval=1.0
+        )
+        x_unsorted = jnp.concatenate([topk_vals, bottom_vals], axis=1)
+        # Shuffle columns independently per row.
+        col_perm = jax.random.permutation(keys[2], n)
+        x = x_unsorted[:, col_perm]
+
+        ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
+        prim_vals, prim_idx = jax.jit(topk, static_argnums=(1,))(x, k)
+
+        # Sort each row independently for comparison.
+        ref_vals, ref_idx = jax.vmap(jax.lax.sort_key_val)(ref_vals, ref_idx)
+        prim_vals, prim_idx = jax.vmap(jax.lax.sort_key_val)(prim_vals, prim_idx)
+
+        assert_allclose(prim_vals, ref_vals, dtype=dtype)
+
+        # For each row, the smallest selected value must be >= the (k+1)-th largest in that row.
+        sorted_x = jnp.sort(x, axis=1)
+        assert jnp.all(prim_vals[:, 0] >= sorted_x[:, -(k + 1)])
+
+        # Values at returned indices must match reference values.
+        prim_gathered = jnp.take_along_axis(x, prim_idx, axis=1)
+        ref_gathered = jnp.take_along_axis(x, ref_idx, axis=1)
+        assert_allclose(prim_gathered, ref_gathered, dtype=dtype)
+
+
+class TestGroupedGemmGluFallback:
+    """MoE API compatibility and dispatch with mocked kernels on one JAX device."""
+
+    @staticmethod
+    def _api(arguments, change=None):
+        def function(**kwargs):
+            raise AssertionError("Probes must not execute kernels")
+
+        parameters = [
+            inspect.Parameter(
+                name,
+                (
+                    inspect.Parameter.POSITIONAL_ONLY
+                    if change == "positional" and name == "a_tensor"
+                    else inspect.Parameter.POSITIONAL_OR_KEYWORD
+                ),
+            )
+            for name in arguments
+            if not (change == "renamed" and name == "discrete_col_sfd")
+        ]
+        if change in ("optional", "mandatory"):
+            parameters.append(
+                inspect.Parameter(
+                    "new_arg",
+                    inspect.Parameter.KEYWORD_ONLY,
+                    default=None if change == "optional" else inspect.Parameter.empty,
+                )
+            )
+        function.__signature__ = inspect.Signature(parameters)
+        return function
+
+    @pytest.fixture
+    def frontend(self, monkeypatch):
+        module = SimpleNamespace(
+            __name__="cudnn",
+            __version__="1.32.0",
+            grouped_gemm_glu_wrapper_sm100=self._api(_glu_adapter._FORWARD_ARGS),
+            grouped_gemm_dglu_wrapper_sm100=self._api(_glu_adapter._BACKWARD_ARGS),
+            grouped_gemm_glu_jax_sm100=self._api(_glu_adapter._JAX_FORWARD_ARGS),
+            grouped_gemm_dglu_jax_sm100=self._api(_glu_adapter._JAX_BACKWARD_ARGS),
+        )
+        original = importlib.import_module
+
+        def import_module(name, package=None):
+            if name == "cudnn":
+                return module
+            if name == "cutlass.jax":
+                return SimpleNamespace(is_available=lambda: True)
+            return original(name, package)
+
+        monkeypatch.setattr(_glu_adapter.importlib, "import_module", import_module)
+        return module
+
+    @pytest.mark.parametrize(
+        "version,expected",
+        [
+            ("1.31.0", False),
+            ("1.32.0.dev1", False),
+            ("1.32.0", True),
+            ("1.33.0", True),
+            ("invalid", False),
+            (None, False),
+        ],
+    )
+    def test_frontend_version(self, frontend, monkeypatch, version, expected):
+        # Matching signatures alone are insufficient for older/debug frontends.
+        if version is None:
+            del frontend.__version__
+        else:
+            frontend.__version__ = version
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
+        assert available is expected
+        assert bool(reason) is not expected
+        if not expected:
+            monkeypatch.setattr(
+                transformer_engine_jax, "get_device_compute_capability", lambda _: 100
+            )
+            with pytest.warns(UserWarning, match="falling back"):
+                assert _moe_module._select_cudnn_jax_fusion([]) is False
+
+    @pytest.mark.parametrize("fc1_dgrad", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest.mark.parametrize("fc2_dgrad", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    def test_fused_dgrad_dtypes(self, monkeypatch, fc1_dgrad, fc2_dgrad):
+        monkeypatch.setattr(_moe_module, "_get_mesh", lambda: None)
+        quantizers = tuple(
+            QuantizerFactory.create_set(
+                scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+                fwd_dtype=jnp.float8_e4m3fn,
+                bwd_dtype=dtype,
+                is_2x2x=True,
+                n_groups=2,
+            )
+            for dtype in (fc1_dgrad, fc2_dgrad)
+        )
+        errors = _moe_module._cudnn_jax_fusion_rejection_reasons(
+            jnp.ones((1, 128), jnp.bfloat16),
+            jnp.ones((2, 128, 256), jnp.bfloat16),
+            None,
+            None,
+            quantizers,
+            num_experts=2,
+            activation_type="silu",
+            ep_axis="ep",
+        )
+        assert any("FC1 dgrad" in error for error in errors) == (fc1_dgrad == jnp.float8_e5m2)
+        assert any("FC2 dgrad" in error for error in errors) == (fc2_dgrad == jnp.float8_e5m2)
+        assert bool(errors) == (jnp.float8_e5m2 in (fc1_dgrad, fc2_dgrad))
+
+    @pytest.mark.parametrize(
+        "name,args",
+        [
+            ("grouped_gemm_glu_wrapper_sm100", _glu_adapter._FORWARD_ARGS),
+            ("grouped_gemm_dglu_wrapper_sm100", _glu_adapter._BACKWARD_ARGS),
+            ("grouped_gemm_glu_jax_sm100", _glu_adapter._JAX_FORWARD_ARGS),
+            ("grouped_gemm_dglu_jax_sm100", _glu_adapter._JAX_BACKWARD_ARGS),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "change",
+        [
+            "missing",
+            "not_callable",
+            "renamed",
+            "mandatory",
+            "optional",
+            "positional",
+            "opaque",
+        ],
+    )
+    def test_api_signature(self, frontend, name, args, change):
+        if change == "missing":
+            delattr(frontend, name)
+        elif change == "not_callable":
+            setattr(frontend, name, 42)
+        elif change == "opaque":
+            setattr(frontend, name, lambda **kwargs: None)
+        else:
+            setattr(frontend, name, self._api(args, change))
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
+        assert available == (change == "optional")
+        assert bool(reason) == (change != "optional")
+
+    @pytest.mark.parametrize("name", ["grouped_gemm_glu_jax_sm100", "grouped_gemm_dglu_jax_sm100"])
+    def test_bf16_only_jax_api_falls_back(self, frontend, monkeypatch, name):
+        # Frontend 1.29 exposes JAX entry points for BF16 discrete weights, but
+        # its shared MXFP8 wrapper cannot dispatch traced arrays to them.
+        arguments = ("a_tensor", "padded_offsets", "alpha_tensor", "b_ptrs", "n", "prob_tensor")
+        if "dglu" in name:
+            arguments += ("c_tensor", "beta_tensor")
+        setattr(frontend, name, self._api(arguments))
+        monkeypatch.setattr(transformer_engine_jax, "get_device_compute_capability", lambda _: 100)
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
+        assert not available
+        assert name in reason
+        for argument in ("b_tensor", "sfa_tensor", "sfb_tensor"):
+            assert argument in reason
+        with pytest.warns(UserWarning, match="falling back"):
+            assert _moe_module._select_cudnn_jax_fusion([]) is False
+
+    @pytest.mark.parametrize(
+        "capability,missing,expected",
+        [
+            (90, None, False),
+            (100, None, True),
+            (103, None, True),
+            (107, None, True),
+            (120, None, True),
+            (100, "grouped_gemm_glu_wrapper_sm100", False),
+            (100, "grouped_gemm_dglu_wrapper_sm100", False),
+            (100, "grouped_gemm_glu_jax_sm100", False),
+            (100, "grouped_gemm_dglu_jax_sm100", False),
+        ],
+    )
+    def test_fused_or_unfused_selection(self, frontend, monkeypatch, capability, missing, expected):
+        if missing:
+            delattr(frontend, missing)
+        monkeypatch.setattr(
+            transformer_engine_jax, "get_device_compute_capability", lambda _: capability
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert _moe_module._select_cudnn_jax_fusion([]) == expected
+        if expected:
+            assert not caught
+        else:
+            assert len(caught) == 1
+            message = str(caught[0].message)
+            assert (
+                "falling back" in message
+                and "shared grouped_gemm_glu/grouped_gemm_dglu JAX APIs" in message
+            )
+            assert "unfused TE" in message
+
+    @pytest.mark.parametrize("name", ["cudnn", "cutlass.jax"])
+    def test_missing_dependency(self, monkeypatch, name):
+        original = importlib.import_module
+
+        def import_module(module, package=None):
+            if module == name:
+                raise ModuleNotFoundError(f"No module named {module}")
+            return original(module, package)
+
+        monkeypatch.setattr(_glu_adapter.importlib, "import_module", import_module)
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
+        assert not available and name in reason
+
+    def test_ineligible_call_and_device_query_failure(self, frontend, monkeypatch):
+        monkeypatch.setattr(transformer_engine_jax, "get_device_compute_capability", lambda _: 107)
+        with pytest.warns(UserWarning, match="bias unsupported"):
+            assert _moe_module._select_cudnn_jax_fusion(["bias unsupported"]) is False
+
+        def fail(_):
+            raise RuntimeError("device query failed")
+
+        monkeypatch.setattr(transformer_engine_jax, "get_device_compute_capability", fail)
+        with pytest.warns(UserWarning, match="device query failed"):
+            assert _moe_module._select_cudnn_jax_fusion([]) is False
+
+    @pytest.mark.parametrize(
+        "request_fusion,missing,native_layout,square,expected",
+        [
+            (None, None, False, False, True),
+            (True, None, False, False, True),
+            (False, None, False, False, False),
+            (True, "grouped_gemm_glu_wrapper_sm100", False, False, False),
+            (True, "grouped_gemm_dglu_wrapper_sm100", False, False, False),
+            (False, "grouped_gemm_glu_wrapper_sm100", False, False, False),
+            (False, "grouped_gemm_dglu_wrapper_sm100", False, False, False),
+            (True, None, True, False, True),
+            (True, None, False, True, True),
+            (True, None, True, True, True),
+        ],
+    )
+    def test_public_moe_passes_fusion_bool(
+        self, frontend, monkeypatch, native_layout, square, missing, expected, request_fusion
+    ):
+        from jax.sharding import Mesh
+        from transformer_engine.jax.sharding import MeshResource
+
+        if missing:
+            delattr(frontend, missing)
+        monkeypatch.setattr(transformer_engine_jax, "get_device_compute_capability", lambda _: 107)
+        monkeypatch.setattr(
+            _moe_module, "_cudnn_jax_fusion_rejection_reasons", lambda *args, **kwargs: []
+        )
+        mesh = Mesh(np.asarray(jax.devices()[:1]), ("ep",))
+        monkeypatch.setattr(_moe_module, "_get_mesh", lambda: mesh)
+        monkeypatch.setattr(_moe_module, "_with_sharding_constraint_cast_bwd", lambda x, _: x)
+        received = []
+        signature = inspect.signature(_moe_module._moe)
+
+        def execute(*args):
+            bound = signature.bind(*args).arguments
+            assert bound["use_cudnn_fusion"] is (request_fusion is not False)
+            assert bound["cudnn_native_weight_layout"] is native_layout
+            received.append(bound["use_cudnn_jax_fusion"])
+            return args[0], None, jnp.asarray(0)
+
+        monkeypatch.setattr(_moe_module, "_moe", execute)
+        x = jnp.ones((1, 1, 128), jnp.bfloat16)
+        wi = jnp.ones((2, 256, 128) if native_layout else (2, 128, 256), jnp.bfloat16)
+        kwargs = {} if request_fusion is None else {"use_cudnn_fusion": request_fusion}
+        if square:
+            wi = jnp.ones((2, 128, 128), jnp.bfloat16)
+            kwargs["cudnn_native_weight_layout"] = native_layout
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            output, _, _ = _moe_module.moe(
+                x,
+                jnp.ones((128, 2)),
+                wi,
+                jnp.ones((2, 128, 128)),
+                num_experts=2,
+                num_experts_per_tok=1,
+                mesh_resource=MeshResource(ep_resource="ep"),
+                **kwargs,
+            )
+        assert received == [expected]
+        assert output is x
+        assert len(caught) == (0 if request_fusion is False or expected else 1)
+
+    @pytest.mark.parametrize("native_layout", [False, True])
+    @pytest.mark.parametrize("gather_gated_dimension", [False, True])
+    def test_fused_forward_uses_shared_glu(
+        self, monkeypatch, native_layout, gather_gated_dimension
+    ):
+
+        class SelectedKernel(Exception):
+            pass
+
+        def selected(*args, **kwargs):
+            assert args[1].shape == (1, 256, 128)
+            raise SelectedKernel
+
+        monkeypatch.setattr(_moe_module.tex, "grouped_gemm_glu", selected)
+
+        def quantize(data, *args, **kwargs):
+            return SimpleNamespace(
+                get_tensor=lambda **kwargs: SimpleNamespace(
+                    data=data, scale_inv=jnp.ones((1,), dtype=jnp.uint8)
+                )
+            )
+
+        monkeypatch.setattr(_moe_module.tex, "grouped_quantize", quantize)
+
+        def gather(tensor, fsdp_axis, fsdp_size, sharded_axis):
+            data = tensor.get_tensor().data
+            assert sharded_axis == (1 if native_layout else 2)
+            return quantize(jnp.concatenate([data, data], axis=sharded_axis))
+
+        monkeypatch.setattr(_moe_module, "_gather_quantized_weight", gather)
+
+        def reorder(tensor, *, interleave):
+            assert interleave and gather_gated_dimension and not native_layout
+            gate, up = jnp.split(tensor.get_tensor().data, 2, axis=-1)
+            return quantize(_moe_module.tex.pack_gated_activation_pair(gate, up))
+
+        monkeypatch.setattr(_moe_module, "_reorder_quantized_swiglu_weight", reorder)
+        quantizers = SimpleNamespace(x=SimpleNamespace(q_dtype=jnp.float8_e4m3fn), kernel=None)
+        kwargs = dict.fromkeys(inspect.signature(_moe_module._ffn_fwd_per_shard).parameters)
+        combined = 128 if gather_gated_dimension else 256
+        kwargs.update(
+            recv_tokens_local=jnp.ones((1, 256, 128), jnp.bfloat16),
+            recv_topk_weights_local=jnp.ones((1, 256)),
+            token_counts_local=jnp.asarray([256]),
+            wi=jnp.ones((1, combined, 128) if native_layout else (1, 128, combined), jnp.bfloat16),
+            wo=jnp.ones((1, 128, 128), jnp.bfloat16),
+            quantizer_sets=(quantizers, quantizers),
+            num_local_experts=1,
+            use_cudnn_jax_fusion=True,
+            cudnn_native_weight_layout=native_layout,
+            quant_before_fsdp_ag=gather_gated_dimension,
+            wi_fsdp_axis=(1 if native_layout else 2),
+            fsdp_axis="fsdp",
+            fsdp_size=2,
+        )
+        with pytest.raises(SelectedKernel):
+            _moe_module._ffn_fwd_per_shard(**kwargs)
+
+    @pytest.mark.parametrize("request_fusion", [None, True, False])
+    def test_flax_forwards_fusion_bool(self, monkeypatch, request_fusion):
+        from transformer_engine.jax.flax import _MoEBlock
+        from transformer_engine.jax.sharding import MeshResource
+
+        flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
+        received = []
+
+        def execute(inputs, *args, **kwargs):
+            received.append(kwargs["use_cudnn_fusion"])
+            return inputs, None, jnp.asarray(0)
+
+        monkeypatch.setattr(flax_moe, "moe", execute)
+        kwargs = {} if request_fusion is None else {"use_cudnn_fusion": request_fusion}
+        block = _MoEBlock(
+            num_experts=2,
+            intermediate_size=32,
+            mesh_resource=MeshResource(ep_resource="ep"),
+            **kwargs,
+        )
+        block.init(jax.random.PRNGKey(0), jnp.ones((1, 1, 32)))
+        assert received == [request_fusion is not False]
+
+    @pytest.mark.parametrize("request_fusion", [True, False])
+    def test_capacity_follows_explicit_fusion_bool(self, request_fusion):
+        kwargs = dict(num_experts=8, num_experts_per_tok=2, max_tokens_per_rank=64, ep_size=2)
+        alignment = _moe_module._CUDNN_JAX_ALIGN_SIZE if request_fusion else _moe_module._ALIGN_SIZE
+        expected = _moe_module.get_moe_recv_capacity_per_rank(**kwargs, alignment=alignment)
+        assert (
+            _moe_module.get_moe_recv_capacity_per_rank(**kwargs, use_cudnn_fusion=request_fusion)
+            == expected
+        )
+        if request_fusion:
+            assert _moe_module.get_moe_recv_capacity_per_rank(**kwargs) == expected
+
+    @pytest.mark.parametrize("invalid", [0, 1, None, "true"])
+    def test_fusion_argument_requires_bool(self, invalid):
+        with pytest.raises(TypeError, match="use_cudnn_fusion must be a bool"):
+            _moe_module.moe(
+                None,
+                None,
+                None,
+                None,
+                num_experts=2,
+                num_experts_per_tok=1,
+                use_cudnn_fusion=invalid,
+            )
+        with pytest.raises(TypeError, match="use_cudnn_fusion must be a bool"):
+            _moe_module.get_moe_recv_capacity_per_rank(
+                num_experts=2,
+                num_experts_per_tok=1,
+                max_tokens_per_rank=16,
+                ep_size=1,
+                use_cudnn_fusion=invalid,
+            )
+
+    def test_vjp_bool_is_static_and_defaults_to_true(self):
+        assert inspect.signature(_moe_module._moe).parameters["use_cudnn_fusion"].default is True
+        assert inspect.signature(_moe_module.moe).parameters["use_cudnn_fusion"].default is True
+        assert 32 in _moe_module._moe.nondiff_argnums

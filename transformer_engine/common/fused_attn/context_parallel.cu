@@ -42,6 +42,12 @@ struct CopyFunctor {
   }
 };
 
+struct ZeroFunctor {
+  __forceinline__ __device__ static void run(void *token, void *token_per_step, int idx) {
+    reinterpret_cast<float4 *>(token)[idx] = make_float4(0.f, 0.f, 0.f, 0.f);
+  }
+};
+
 template <typename dtype>
 struct AddFunctor {
   __forceinline__ __device__ static void run(dtype *token, dtype *token_per_step, int idx) {
@@ -77,6 +83,18 @@ __forceinline__ __device__ int binary_search(int target, int *array, int len) {
   return left - 1;
 }
 
+// Dual-chunk source index for THD CP partitioning. cu_seqlens_s must already be divided by
+// world_size. Single source of truth shared by thd_partition_indices_kernel and
+// thd_reorder_between_sequence_and_cp_rank_order_kernel so the two never diverge.
+__forceinline__ __device__ int thd_partition_src_index(int token_id, int *cu_seqlens_s, int batch,
+                                                       int world_size, int rank) {
+  int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
+  int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
+  int index = token_id - cu_seqlens_s[seq_id];
+  int offset = index < seq_len / 2 ? rank : (world_size - 1) * 2 - rank;
+  return index + cu_seqlens_s[seq_id] * world_size + seq_len / 2 * offset;
+}
+
 /***************************************************************************************************
  * Support THD format for Context Parallel: Generate partitioned indices for input tokens
  **************************************************************************************************/
@@ -96,12 +114,78 @@ __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int b
   int num_threads = blockDim.x * gridDim.x;
 
   for (int token_id = tid; token_id < total_tokens / world_size; token_id += num_threads) {
-    int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
-    int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
-    int index = token_id - cu_seqlens_s[seq_id];
-    int offset = index < seq_len / 2 ? rank : (world_size - 1) * 2 - rank;
-    index += cu_seqlens_s[seq_id] * world_size + seq_len / 2 * offset;
-    output[token_id] = index;
+    output[token_id] = thd_partition_src_index(token_id, cu_seqlens_s, batch, world_size, rank);
+  }
+}
+
+/***************************************************************************************************
+ * Fused dual-chunk THD reorder. Computes src inline and copies one leading-dimension
+ * token entry per warp.
+ * cp_rank_to_sequence_order=false: out[gi]=inp[src(gi)].
+ * cp_rank_to_sequence_order=true: out[src(gi)]=inp[gi].
+ **************************************************************************************************/
+__global__ void thd_reorder_between_sequence_and_cp_rank_order_kernel(
+    void *out, void *inp, int *cu_seqlens, int batch, int total_tokens, int world_size,
+    int hidden_size_in_bytes, bool cp_rank_to_sequence_order) {
+  extern __shared__ int cu_seqlens_s[];
+  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
+    cu_seqlens_s[i] = cu_seqlens[i] / world_size;
+  }
+  __syncthreads();
+
+  int warpid = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+  int laneid = threadIdx.x % 32;
+  int num_warps = (blockDim.x * gridDim.x) / 32;
+  int tpr = total_tokens / world_size;
+  int num_float4s_per_token = hidden_size_in_bytes / sizeof(float4);
+
+  for (int gi = warpid; gi < total_tokens; gi += num_warps) {
+    int rank = gi / tpr;
+    int token_id = gi % tpr;
+    int src = thd_partition_src_index(token_id, cu_seqlens_s, batch, world_size, rank);
+    int rd = cp_rank_to_sequence_order ? gi : src;
+    int wr = cp_rank_to_sequence_order ? src : gi;
+    float4 *src_tok = reinterpret_cast<float4 *>(reinterpret_cast<char *>(inp) +
+                                                 static_cast<size_t>(rd) * hidden_size_in_bytes);
+    float4 *dst_tok = reinterpret_cast<float4 *>(reinterpret_cast<char *>(out) +
+                                                 static_cast<size_t>(wr) * hidden_size_in_bytes);
+    for (int idx = laneid; idx < num_float4s_per_token; idx += 32) dst_tok[idx] = src_tok[idx];
+  }
+}
+
+/***************************************************************************************************
+ * Copy valid token entries from a per-split THD tensor into a rank-local accumulator.
+ * cu_seqlens_padded gives padded THD token offsets; cu_seqlens gives valid lengths.
+ **************************************************************************************************/
+__global__ void thd_copy_valid_tokens_from_per_split_to_rank_local_kernel(
+    void *out, void *inp, int *cu_seqlens_padded, int *cu_seqlens, int batch, int total_tokens,
+    int hidden_size_in_bytes) {
+  extern __shared__ int padded_s[];       // [0..batch] padded boundaries
+  int *valid_s = padded_s + (batch + 1);  // [0..batch] valid boundaries
+  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
+    padded_s[i] = cu_seqlens_padded[i];
+    valid_s[i] = cu_seqlens[i];
+  }
+  __syncthreads();
+
+  int warpid = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+  int laneid = threadIdx.x % 32;
+  int num_warps = (blockDim.x * gridDim.x) / 32;
+  int num_float4s_per_token = hidden_size_in_bytes / sizeof(float4);
+
+  for (int token_id = warpid; token_id < total_tokens; token_id += num_warps) {
+    int seq_id = binary_search(token_id, padded_s, batch + 1);
+    if (seq_id < 0 || seq_id >= batch) continue;
+    int local = token_id - padded_s[seq_id];
+    int valid_len = valid_s[seq_id + 1] - valid_s[seq_id];
+    // Later split offsets can shift a sequence start past earlier tokens; skip those entries.
+    if (local >= 0 && local < valid_len) {
+      float4 *src_tok = reinterpret_cast<float4 *>(
+          reinterpret_cast<char *>(inp) + static_cast<size_t>(token_id) * hidden_size_in_bytes);
+      float4 *dst_tok = reinterpret_cast<float4 *>(
+          reinterpret_cast<char *>(out) + static_cast<size_t>(token_id) * hidden_size_in_bytes);
+      for (int idx = laneid; idx < num_float4s_per_token; idx += 32) dst_tok[idx] = src_tok[idx];
+    }
   }
 }
 
@@ -189,10 +273,10 @@ __global__ void thd_lse_kernel(float *lse, float *half_lse, int *cu_seqlens, int
  **************************************************************************************************/
 
 template <typename dtype, int only_second_half, int tile_size, bool lse_packed>
-__global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *lse,
-                                          float *lse_per_step, int *cu_seqlens, int batch,
-                                          int num_heads, int dim_per_head, int lse_seqlen,
-                                          int lse_per_step_seqlen) {
+__global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *old_lse,
+                                          float *lse, float *lse_per_step, int *cu_seqlens,
+                                          int batch, int num_heads, int dim_per_head,
+                                          int lse_seqlen, int lse_per_step_seqlen) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     cu_seqlens_s[i] = cu_seqlens[i] / (only_second_half + 1);
@@ -220,6 +304,7 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
         idx = row * lse_seqlen + col + seq_len * only_second_half;
         idx_per_step = row * lse_per_step_seqlen + col;
       }
+      float old_lse_corrected_exp = expf(old_lse[idx] - lse[idx]);
       float lse_corrected_exp = expf(lse_per_step[idx_per_step] - lse[idx]);
 
       idx = token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
@@ -234,10 +319,13 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
         dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
         dtype *p = reinterpret_cast<dtype *>(&data);
         for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
-          p[k] = p[k] +
-                 (p_per_step[k] == static_cast<dtype>(0.f)
-                      ? static_cast<dtype>(0.f)
-                      : static_cast<dtype>(static_cast<float>(p_per_step[k]) * lse_corrected_exp));
+          float old_out = p[k] == static_cast<dtype>(0.f)
+                              ? 0.f
+                              : static_cast<float>(p[k]) * old_lse_corrected_exp;
+          float out_per_step = p_per_step[k] == static_cast<dtype>(0.f)
+                                   ? 0.f
+                                   : static_cast<float>(p_per_step[k]) * lse_corrected_exp;
+          p[k] = static_cast<dtype>(old_out + out_per_step);
         }
         reinterpret_cast<float4 *>(cur_out)[j] = data;
       }
@@ -279,24 +367,27 @@ __global__ void thd_grad_correction_kernel(dtype *grad, dtype *grad_per_step, in
   for (int token_id = group_id; token_id < num_total_tokens; token_id += num_groups) {
     int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
 
-    int token_offset;
-    bool is_first_half;
     if constexpr (functor_idx < 2) {
-      token_offset = cu_seqlens_s[seq_id + functor_idx];
-      is_first_half = (functor_idx == 0);
+      dtype *first_half_token =
+          &grad[(token_id + cu_seqlens_s[seq_id]) * static_cast<size_t>(hidden_size)];
+      dtype *second_half_token =
+          &grad[(token_id + cu_seqlens_s[seq_id + 1]) * static_cast<size_t>(hidden_size)];
+      dtype *token_per_step = &grad_per_step[token_id * static_cast<size_t>(hidden_size)];
+      for (int idx = lane_id; idx < num_inner_loops; idx += group_size) {
+        Functor_0::run(first_half_token, token_per_step, idx);
+        Functor_1::run(second_half_token, token_per_step, idx);
+      }
     } else {
-      token_offset = 0;
       int len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
-      is_first_half = (token_id - cu_seqlens_s[seq_id]) < (len / 2);
-    }
-
-    dtype *token = &grad[(token_id + token_offset) * static_cast<size_t>(hidden_size)];
-    dtype *token_per_step = &grad_per_step[token_id * static_cast<size_t>(hidden_size)];
-    for (int idx = lane_id; idx < num_inner_loops; idx += group_size) {
-      if (is_first_half) {
-        Functor_0::run(token, token_per_step, idx);
-      } else {
-        Functor_1::run(token, token_per_step, idx);
+      bool is_first_half = (token_id - cu_seqlens_s[seq_id]) < (len / 2);
+      dtype *token = &grad[token_id * static_cast<size_t>(hidden_size)];
+      dtype *token_per_step = &grad_per_step[token_id * static_cast<size_t>(hidden_size)];
+      for (int idx = lane_id; idx < num_inner_loops; idx += group_size) {
+        if (is_first_half) {
+          Functor_0::run(token, token_per_step, idx);
+        } else {
+          Functor_1::run(token, token_per_step, idx);
+        }
       }
     }
   }
@@ -464,20 +555,25 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
  **************************************************************************************************/
 
 template <typename dtype, int only_second_half>
-static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, const Tensor &lse,
-                                      const Tensor &lse_per_step, const Tensor &cu_seqlens,
-                                      bool lse_packed, cudaStream_t stream) {
+static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, const Tensor &old_lse,
+                                      const Tensor &lse, const Tensor &lse_per_step,
+                                      const Tensor &cu_seqlens, bool lse_packed,
+                                      cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(out.dtype() == out_per_step.dtype());
+  NVTE_CHECK(old_lse.dtype() == DType::kFloat32);
   NVTE_CHECK(lse.dtype() == DType::kFloat32);
   NVTE_CHECK(lse_per_step.dtype() == DType::kFloat32);
   NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
 
   auto out_shape = out.shape();
+  auto old_lse_shape = old_lse.shape();
   auto lse_shape = lse.shape();
   auto out_per_step_shape = out_per_step.shape();
   auto lse_per_step_shape = lse_per_step.shape();
   auto cu_seqlens_shape = cu_seqlens.shape();
+
+  NVTE_CHECK(old_lse_shape == lse_shape);
 
   int total_tokens = out_shape[0];
   int num_heads = out_shape[1];
@@ -520,7 +616,7 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
         <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
             reinterpret_cast<dtype *>(out.data.dptr),
             reinterpret_cast<dtype *>(out_per_step.data.dptr),
-            reinterpret_cast<float *>(lse.data.dptr),
+            reinterpret_cast<float *>(old_lse.data.dptr), reinterpret_cast<float *>(lse.data.dptr),
             reinterpret_cast<float *>(lse_per_step.data.dptr),
             reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
             lse_seqlen, lse_per_step_seqlen);
@@ -530,7 +626,7 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
         <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
             reinterpret_cast<dtype *>(out.data.dptr),
             reinterpret_cast<dtype *>(out_per_step.data.dptr),
-            reinterpret_cast<float *>(lse.data.dptr),
+            reinterpret_cast<float *>(old_lse.data.dptr), reinterpret_cast<float *>(lse.data.dptr),
             reinterpret_cast<float *>(lse_per_step.data.dptr),
             reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
             lse_seqlen, lse_per_step_seqlen);
@@ -538,20 +634,20 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
   }
 }
 
-void thd_out_correction(Tensor out, const Tensor &out_per_step, const Tensor &lse,
-                        const Tensor &lse_per_step, const Tensor &cu_seqlens, bool only_second_half,
-                        bool lse_packed, cudaStream_t stream) {
+void thd_out_correction(Tensor out, const Tensor &out_per_step, const Tensor &old_lse,
+                        const Tensor &lse, const Tensor &lse_per_step, const Tensor &cu_seqlens,
+                        bool only_second_half, bool lse_packed, cudaStream_t stream) {
   using namespace transformer_engine;
   if (only_second_half) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         out.dtype(), dtype,
-        thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens,
-                                            lse_packed, stream););
+        thd_out_correction_helper<dtype, 1>(out, out_per_step, old_lse, lse, lse_per_step,
+                                            cu_seqlens, lse_packed, stream););
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         out.dtype(), dtype,
-        thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens,
-                                            lse_packed, stream););
+        thd_out_correction_helper<dtype, 0>(out, out_per_step, old_lse, lse, lse_per_step,
+                                            cu_seqlens, lse_packed, stream););
   }
 }
 
@@ -629,6 +725,12 @@ static void thd_grad_dispatcher(Tensor grad, const Tensor &grad_per_step, const 
   } else if (first_half == "none" && second_half == "copy") {
     thd_grad_correction_helper<dtype, EmptyFunctor, CopyFunctor, 1>(grad, grad_per_step, cu_seqlens,
                                                                     stream);
+  } else if (first_half == "copy" && second_half == "zero") {
+    thd_grad_correction_helper<dtype, CopyFunctor, ZeroFunctor, 0>(grad, grad_per_step, cu_seqlens,
+                                                                   stream);
+  } else if (first_half == "zero" && second_half == "copy") {
+    thd_grad_correction_helper<dtype, ZeroFunctor, CopyFunctor, 1>(grad, grad_per_step, cu_seqlens,
+                                                                   stream);
   } else if (first_half == "add" && second_half == "copy") {
     thd_grad_correction_helper<dtype, AddFunctor<dtype>, CopyFunctor, 2>(grad, grad_per_step,
                                                                          cu_seqlens, stream);
@@ -644,6 +746,19 @@ void thd_grad_correction(Tensor grad, const Tensor &grad_per_step, const Tensor 
                          const std::string &first_half, const std::string &second_half,
                          cudaStream_t stream) {
   using namespace transformer_engine;
+  if (grad.dtype() == DType::kByte) {
+    if (first_half == "copy" && second_half == "zero") {
+      thd_grad_correction_helper<byte, CopyFunctor, ZeroFunctor, 0>(grad, grad_per_step, cu_seqlens,
+                                                                    stream);
+    } else if (first_half == "zero" && second_half == "copy") {
+      thd_grad_correction_helper<byte, ZeroFunctor, CopyFunctor, 1>(grad, grad_per_step, cu_seqlens,
+                                                                    stream);
+    } else {
+      NVTE_ERROR(
+          "FP8 gradients stored as raw encoded bytes require copy/zero or zero/copy correction\n");
+    }
+    return;
+  }
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       grad.dtype(), dtype,
       thd_grad_dispatcher<dtype>(grad, grad_per_step, cu_seqlens, first_half, second_half,
@@ -675,6 +790,63 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
   thd_partition_indices_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
       reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
       batch, total_tokens, world_size, rank);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void thd_reorder_between_sequence_and_cp_rank_order(const Tensor &inp, const Tensor &cu_seqlens,
+                                                    Tensor &out, int world_size,
+                                                    bool cp_rank_to_sequence_order,
+                                                    int total_tokens, cudaStream_t stream) {
+  using namespace transformer_engine;
+  NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens.dim() == 1);
+  auto cu_seqlens_shape = cu_seqlens.shape();
+  NVTE_CHECK(cu_seqlens_shape[0] >= 2);
+  NVTE_CHECK(world_size > 0);
+  NVTE_CHECK(total_tokens > 0 && total_tokens % (world_size * 2) == 0);
+
+  auto inp_shape = inp.shape();
+  size_t row_elems = 1;
+  for (int i = 1; i < inp.dim(); i++) row_elems *= inp_shape[i];
+  int hidden_size_in_bytes = (row_elems * typeToNumBits(inp.dtype())) / 8;
+  NVTE_CHECK(hidden_size_in_bytes % 16 == 0);  // 128-bit load/store
+
+  int batch = cu_seqlens_shape[0] - 1;
+  constexpr unsigned int block = 256;
+  unsigned int grid = (static_cast<unsigned int>(total_tokens) * 32 + block - 1) / block;
+  thd_reorder_between_sequence_and_cp_rank_order_kernel<<<grid, block, sizeof(int) * (batch + 1),
+                                                          stream>>>(
+      out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
+      total_tokens, world_size, hidden_size_in_bytes, cp_rank_to_sequence_order);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void thd_copy_valid_tokens_from_per_split_to_rank_local(const Tensor &inp,
+                                                        const Tensor &cu_seqlens_padded,
+                                                        const Tensor &cu_seqlens, Tensor &out,
+                                                        int total_tokens, cudaStream_t stream) {
+  using namespace transformer_engine;
+  NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens_padded.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens.dim() == 1 && cu_seqlens_padded.dim() == 1);
+  auto cu_seqlens_shape = cu_seqlens.shape();
+  NVTE_CHECK(cu_seqlens_shape[0] >= 2);
+  NVTE_CHECK(cu_seqlens_padded.shape()[0] == cu_seqlens_shape[0]);
+  NVTE_CHECK(total_tokens > 0);
+
+  auto inp_shape = inp.shape();
+  size_t row_elems = 1;
+  for (int i = 1; i < inp.dim(); i++) row_elems *= inp_shape[i];
+  int hidden_size_in_bytes = (row_elems * typeToNumBits(inp.dtype())) / 8;
+  NVTE_CHECK(hidden_size_in_bytes % 16 == 0);  // 128-bit load/store
+
+  int batch = cu_seqlens_shape[0] - 1;
+  constexpr unsigned int block = 256;
+  unsigned int grid = (static_cast<unsigned int>(total_tokens) * 32 + block - 1) / block;
+  thd_copy_valid_tokens_from_per_split_to_rank_local_kernel<<<
+      grid, block, sizeof(int) * 2 * (batch + 1), stream>>>(
+      out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens_padded.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, total_tokens, hidden_size_in_bytes);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -714,16 +886,17 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
 }
 
 void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
-                                const NVTETensor &lse, const NVTETensor &lse_per_step,
-                                const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
-                                cudaStream_t stream) {
+                                const NVTETensor &old_lse, const NVTETensor &lse,
+                                const NVTETensor &lse_per_step, const NVTETensor &cu_seqlens,
+                                int only_second_half, int lse_packed, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_out_correction);
   using namespace transformer_engine;
 
   context_parallel::thd_out_correction(
       *convertNVTETensorCheck(out), *convertNVTETensorCheck(out_per_step),
-      *convertNVTETensorCheck(lse), *convertNVTETensorCheck(lse_per_step),
-      *convertNVTETensorCheck(cu_seqlens), only_second_half, lse_packed, stream);
+      *convertNVTETensorCheck(old_lse), *convertNVTETensorCheck(lse),
+      *convertNVTETensorCheck(lse_per_step), *convertNVTETensorCheck(cu_seqlens), only_second_half,
+      lse_packed, stream);
 }
 
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
@@ -749,4 +922,39 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
   context_parallel::thd_get_partitioned_indices(*convertNVTETensorCheck(cu_seqlens),
                                                 *convertNVTETensorCheck(output), total_tokens,
                                                 world_size, rank, stream);
+}
+
+void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
+                                              cudaStream_t stream) {
+  NVTE_API_CALL(nvte_thd_sequence_order_to_cp_rank_order);
+  using namespace transformer_engine;
+
+  context_parallel::thd_reorder_between_sequence_and_cp_rank_order(
+      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(cu_seqlens),
+      *convertNVTETensorCheck(out), world_size, false, total_tokens, stream);
+}
+
+void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
+                                              cudaStream_t stream) {
+  NVTE_API_CALL(nvte_thd_cp_rank_order_to_sequence_order);
+  using namespace transformer_engine;
+
+  context_parallel::thd_reorder_between_sequence_and_cp_rank_order(
+      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(cu_seqlens),
+      *convertNVTETensorCheck(out), world_size, true, total_tokens, stream);
+}
+
+void nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(const NVTETensor &inp,
+                                                             const NVTETensor &cu_seqlens_padded,
+                                                             const NVTETensor &cu_seqlens,
+                                                             NVTETensor out, int total_tokens,
+                                                             cudaStream_t stream) {
+  NVTE_API_CALL(nvte_thd_copy_valid_tokens_from_per_split_to_rank_local);
+  using namespace transformer_engine;
+
+  context_parallel::thd_copy_valid_tokens_from_per_split_to_rank_local(
+      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(cu_seqlens_padded),
+      *convertNVTETensorCheck(cu_seqlens), *convertNVTETensorCheck(out), total_tokens, stream);
 }

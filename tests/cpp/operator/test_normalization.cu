@@ -46,6 +46,10 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     GTEST_SKIP() << "cuDNN normalizations not supported on pre-Hopper GPUs yet!";
   }
 
+  if (fused_bwd_add && use_cudnn && (cudnnGetVersion() < 92100)) {
+    GTEST_SKIP() << "cuDNN < 9.21 does not support fused RMSNorm backward+add";
+  }
+
   using WeightType = InputType;
   DType itype = TypeInfo<InputType>::dtype;
   DType wtype = TypeInfo<WeightType>::dtype;
@@ -204,7 +208,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
   if (isFp8Type(otype)) {
     compareResults("amax", z.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / z.scale();
+    float ref_scale_inv = 1.f / ref_scale;
     compareResults("scale_inv", z.rowwise_scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
 
@@ -257,9 +261,9 @@ TEST_P(NormTestSuite, TestNorm) {
   const bool cudnn_zero_centered_gamma_in_weight_dtype = std::get<6>(GetParam());
   const bool fused_bwd_add = std::get<7>(GetParam());
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-      performTest<InputType, OutputType>(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
+    if (output_type == DType::kFloat8E4M3) {
+      performTest<InputType, fp8e4m3>(
         size.first,
         size.second,
         zero_centered_gamma,
@@ -268,7 +272,20 @@ TEST_P(NormTestSuite, TestNorm) {
         cudnn_zero_centered_gamma_in_weight_dtype,
         fused_bwd_add
       );
-    );
+    } else {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(
+        output_type, OutputType,
+        performTest<InputType, OutputType>(
+          size.first,
+          size.second,
+          zero_centered_gamma,
+          norm_type,
+          use_cudnn,
+          cudnn_zero_centered_gamma_in_weight_dtype,
+          fused_bwd_add
+        );
+      );
+    }
   );
 }
 

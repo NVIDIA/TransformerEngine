@@ -38,6 +38,30 @@ int sm_arch(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+/* \brief Maximum shared memory per block available with opt-in
+ *
+ * This is the upper bound for the static plus dynamic shared memory
+ * of a single thread block, after raising the kernel's
+ * cudaFuncAttributeMaxDynamicSharedMemorySize attribute.
+ *
+ * \param[in] device_id CUDA device (default is current device)
+ *
+ * \return Shared memory size in bytes
+ */
+size_t max_shared_memory_per_block_optin(int device_id = -1);
+
+/* \brief Static shared memory used by a compiled kernel on the current device
+ *
+ * Size of the kernel's fixed-size __shared__ arrays, including those
+ * declared in device functions it calls, as reported by
+ * cudaFuncGetAttributes. The result is cached per kernel and device.
+ *
+ * \param[in] kernel Pointer to the __global__ function
+ *
+ * \return Shared memory size in bytes
+ */
+size_t static_shared_memory_size(const void *kernel);
+
 /* \brief Minimum and maximum stream priorities supported on device
  *
  * \param[in] device_id CUDA device (default is current device)
@@ -66,6 +90,21 @@ bool supports_multicast(int device_id = -1);
  * \return Path to include directory, or an empty string if not found
  */
 const std::string &include_directory(bool required = false);
+
+/* \brief Version number of CUDA Toolkit headers
+ *
+ * The headers are accessed at run-time and its CUDA version may
+ * differ from compile-time and from the CUDA Runtime. The header path
+ * can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
+ * environment (default is to search in common install paths).
+ *
+ * \param[in] required Whether to throw exception if headers are not
+ *                     found or if version cannot be determined.
+ *
+ * \return CUDA version encoded as major * 1000 + minor * 10, or -1 if
+ *         it could not be determined.
+ */
+int include_directory_version(bool required = false);
 
 /* \brief CUDA Runtime version number at run-time
  *

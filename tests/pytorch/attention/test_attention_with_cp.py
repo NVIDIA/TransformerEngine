@@ -2,12 +2,18 @@
 #
 # See LICENSE for license information.
 
+import json
 import os
+import select
+import signal
 import subprocess
 import sys
+import threading
 import pathlib
 import logging
 import copy
+from collections.abc import Callable
+from collections import deque
 import pytest
 import torch
 from transformer_engine.pytorch import (
@@ -17,21 +23,33 @@ from transformer_engine.pytorch import (
 from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
+    MXFP8BlockScaling,
+    Format,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
 
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, get_available_attention_backends
 
 pytest_logging_level = logging.getLevelName(logging.root.level)
+
+# Get determinism
+_deterministic = (
+    not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    or torch.are_deterministic_algorithms_enabled()
+)
 
 # Initialize RNG state
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
-test_essential = True
+test_essential = bool(int(os.getenv("NVTE_TEST_ESSENTIAL", "1")))
+# An installed FA4 package must not select tests when the backend is explicitly disabled.
+fa4_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
+)
 
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -39,13 +57,12 @@ model_configs_flash_attn = {
     "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
     "cp_1_2": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
     "cp_1_3": ModelConfig(2, 4096, 12, 128, window_size=(512, 512)),  # MHA
-    "cp_2_0": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal"),  # GQA
+    "cp_2_0": ModelConfig(2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
-    "cp_2_2": ModelConfig(
-        2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 0)
-    ),  # GQA
+    "cp_2_2": ModelConfig(2, 4096, 32, 128, attn_mask_type="causal", window_size=(128, 0)),  # GQA
     "cp_2_3": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, window_size=(512, 512)),  # GQA
-    "cp_3_0": ModelConfig(2, 4096, 12, 192, attn_mask_type="causal", head_dim_v=128),  # MLA
+    "cp_2_4": ModelConfig(2, 4096, 32, 256, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
+    "cp_3_0": ModelConfig(2, 4096, 128, 192, attn_mask_type="causal", head_dim_v=128),  # MLA
     "cp_3_1": ModelConfig(2, 4096, 12, 192, head_dim_v=128),  # MLA
     "cp_3_2": ModelConfig(
         2, 4096, 12, 192, attn_mask_type="causal", window_size=(512, 0), head_dim_v=128
@@ -54,65 +71,340 @@ model_configs_flash_attn = {
 }
 
 
-def get_bash_arguments(num_gpus_per_node, **kwargs):
-    args = [
-        "python3",
-        "-m",
-        "torch.distributed.launch",
-        "--nproc-per-node=" + str(num_gpus_per_node),
-    ]
-    te_path = os.getenv("TE_PATH", "/opt/transformerengine")
-    script_path = os.path.join(te_path, "tests/pytorch/attention/run_attention_with_cp.py")
-    args.append(script_path)
-    for k, v in kwargs.items():
-        args.append(f"{k}={v}")
-    return args
+# --- Persistent pool runner -----------------------------------------------
+#
+# Each (world_size) is served by one long-lived torchrun running
+# run_attention_with_cp_pool.py. We submit one work item per pytest case over
+# rank-0 stdin and read one JSON response from rank-0 stdout. Replaces
+# the per-case torchrun launch path; init/destroy NCCL once per pool, not
+# once per case.
+#
+# Why two pool sizes: cp_comm_type="a2a+p2p" needs world_size=4; everything
+# else uses world_size=2. We can't resize an active PG, so we keep one pool
+# per world_size and route each case to the right one. Pools are spawned
+# lazily on first use so a session that only exercises 2-GPU cases never
+# pays the 4-GPU init cost.
+
+# Per-case wall is ~5 s p50 / ~15 s max on H100 (test_essential=True).
+# 90 s gives ~6× headroom over the slowest observed case while still detecting
+# a genuine hang within ~1.5 min instead of ~10 min. Override with the env var
+# if a slower machine or expanded test matrix needs more room.
+POOL_SUBMIT_TIMEOUT_SEC = float(os.getenv("NVTE_CP_POOL_TIMEOUT_SEC", "90"))
+
+# Non-infrastructure retries stay FP8+THD-only; fresh-worker evidence is required.
+RETRYABLE_ERROR_ALLOWLIST = (
+    "has nan values",  # Seen 2026-08-14; narrow retry committed 2026-08-20.
+    "rmse nan",  # Seen 2026-08-14; fresh-pool passes confirmed 2026-08-31.
+)
+
+
+class PoolWorker:
+    # Crash-path AssertionErrors include the tail of the worker's stderr so CI
+    # JUnit XML shows the actual failure cause (NCCL/CUDA messages, Python
+    # traceback) inline with the failing test, not just "pool worker died".
+    # Equivalent in spirit to PR #2965's run_distributed() stderr capture.
+    _STDERR_BUFFER_LINES = 200  # ring cap (~40 KB ceiling)
+    _STDERR_TAIL_CHARS = 4000  # how much to attach to the AssertionError
+
+    def __init__(self, world_size: int, reset_all_pools: Callable[[], None]):
+        self.world_size = world_size
+        self._reset_all_pools = reset_all_pools
+        self.proc: subprocess.Popen | None = None
+        self._stderr_buf: deque[str] = deque(maxlen=self._STDERR_BUFFER_LINES)
+
+    def _spawn(self) -> None:
+        te_path = os.getenv("TE_PATH", "/opt/transformerengine")
+        worker = os.path.join(te_path, "tests/pytorch/attention/run_attention_with_cp_pool.py")
+        cmd = [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            f"--nproc-per-node={self.world_size}",
+            "--standalone",  # picks a free rendezvous port
+            worker,
+        ]
+        # stderr=PIPE so we can capture the tail for crash-path AssertionErrors;
+        # a daemon drainer thread also echoes each line to sys.stderr so pytest's
+        # per-test stderr capture still works. The thread is daemon, so it
+        # self-terminates when the pipe closes — no tracking needed.
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            # Own process group so _kill can killpg all ranks in one shot;
+            # without this, terminating the launcher PID leaves rank workers
+            # as orphans holding CUDA/NCCL state.
+            start_new_session=True,
+        )
+        self._stderr_buf.clear()
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
+
+    def _drain_stderr(self) -> None:
+        proc = self.proc
+        if proc is None or proc.stderr is None:
+            return
+        for line in iter(proc.stderr.readline, ""):
+            self._stderr_buf.append(line)
+            sys.stderr.write(line)
+            sys.stderr.flush()
+
+    def _diag(self, msg: str) -> str:
+        tail = "".join(self._stderr_buf)[-self._STDERR_TAIL_CHARS :]
+        if not tail.strip():
+            return msg
+        return f"{msg}\n\n--- pool worker stderr (tail) ---\n{tail}"
+
+    def _ensure_alive(self) -> None:
+        if self.proc is None or self.proc.poll() is not None:
+            self._spawn()
+
+    def _killpg(self, sig: int) -> None:
+        try:
+            os.killpg(self.proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    def _kill(self) -> None:
+        # Kill the whole process group so rank workers don't survive as orphans.
+        if self.proc and self.proc.poll() is None:
+            self._killpg(signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._killpg(signal.SIGKILL)
+                self.proc.wait()
+        self.proc = None
+
+    # One retry on pool-infrastructure failures (worker died / timed out / broken
+    # pipe). Test-assertion failures from the worker carry the full per-rank
+    # traceback in resp["error"] and normally propagate without retry. Every retry
+    # leaves a [POOL-RETRY] line in stderr so pytest's <system-err> capture surfaces
+    # flake patterns in JUnit XML for offline analysis.
+    _MAX_RETRIES = 1
+
+    def submit(self, kwargs: dict, timeout: float = POOL_SUBMIT_TIMEOUT_SEC) -> None:
+        # Attribute retries without changing test signatures or the worker protocol.
+        test_id = os.environ.get("PYTEST_CURRENT_TEST", "<unknown>").removesuffix(" (call)")
+        first_err = None
+        for attempt in range(self._MAX_RETRIES + 1):
+            try:
+                self._submit_once(kwargs, timeout)
+                if attempt:
+                    sys.stderr.write(
+                        f"[POOL-RETRY-PASS] status=recovered test={test_id!r} "
+                        f"world_size={self.world_size}\n"
+                    )
+                    sys.stderr.flush()
+                return
+            except AssertionError as e:
+                msg = str(e)
+                msg_head = msg.splitlines()[0]
+                infrastructure_flake = (
+                    "pool worker died" in msg_head
+                    or "timed out" in msg_head
+                    or "before request could be sent" in msg_head
+                )
+                retryable = infrastructure_flake or (
+                    kwargs.get("dtype") == "fp8"
+                    and kwargs.get("qkv_format") == "thd"
+                    and any(signature in msg.lower() for signature in RETRYABLE_ERROR_ALLOWLIST)
+                )
+                if not retryable or attempt == self._MAX_RETRIES:
+                    if first_err is not None:
+                        sys.stderr.write(
+                            f"[POOL-RETRY-FAIL] status=failed test={test_id!r} "
+                            f"world_size={self.world_size}: "
+                            "both attempts failed; first error was: "
+                            f"{str(first_err).splitlines()[0]!r}\n"
+                        )
+                        sys.stderr.flush()
+                    raise
+                first_err = e
+                # Pools with different world sizes can occupy the same GPUs. Reset
+                # all pools so the retry starts without leftover CUDA/NCCL state.
+                self._reset_all_pools()
+                sys.stderr.write(
+                    f"[POOL-RETRY] status=retrying test={test_id!r} "
+                    f"world_size={self.world_size} attempt={attempt + 1} "
+                    f"error={msg_head!r}; reset all pools and retrying\n"
+                )
+                sys.stderr.flush()
+        raise first_err  # unreachable; loop either returns or raises
+
+    def _submit_once(self, kwargs: dict, timeout: float) -> None:
+        self._ensure_alive()
+        req = json.dumps({"op": "run", "kwargs": kwargs}) + "\n"
+        try:
+            self.proc.stdin.write(req)
+            self.proc.stdin.flush()
+        except BrokenPipeError:
+            msg = self._diag("pool worker died before request could be sent")
+            self._kill()
+            raise AssertionError(msg)
+
+        # The worker reserves rank-0's stdout fd for this JSON channel and sends
+        # every other rank's stdout (and rank 0's own library/Python writes) to
+        # /dev/null or stderr, so the only thing on this pipe is the response
+        # line. select() on a pipe fd is Linux/macOS only — fine for the GPU
+        # hosts these tests run on.
+        ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
+        if not ready:
+            msg = self._diag(
+                f"pool worker (world_size={self.world_size}) timed out after "
+                f"{timeout}s; pool killed and will be respawned for the next case"
+            )
+            self._kill()
+            raise AssertionError(msg)
+
+        line = self.proc.stdout.readline()
+        if not line:
+            msg = self._diag("pool worker died mid-request")
+            self._kill()
+            raise AssertionError(msg)
+
+        # A non-JSON line means stdout isolation failed somewhere; surface it
+        # clearly rather than as a raw JSONDecodeError.
+        try:
+            resp = json.loads(line)
+        except json.JSONDecodeError as e:
+            self._kill()
+            raise AssertionError(
+                self._diag(f"pool worker JSON protocol broke: {e!r}; line={line!r}")
+            )
+
+        if not resp["ok"]:
+            # Discard the pool so half-aborted CUDA/NCCL/FP8 state from the
+            # failed case doesn't leak into the next. resp["error"] already
+            # carries the per-rank traceback via gather_object.
+            self._kill()
+            raise AssertionError(resp["error"])
+
+    def shutdown(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.write(json.dumps({"op": "shutdown"}) + "\n")
+                self.proc.stdin.flush()
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            try:
+                self.proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self._kill()
+        self.proc = None
+
+
+@pytest.fixture(scope="session")
+def cp_pool():
+    """Returns a callable: cp_pool(world_size) -> PoolWorker."""
+    pools: dict[int, PoolWorker] = {}
+
+    def _reset_all_pools() -> None:
+        for pool in pools.values():
+            pool.shutdown()
+
+    def _get(world_size: int) -> PoolWorker:
+        if world_size > torch.cuda.device_count():
+            pytest.skip(f"Test requires {world_size} GPUs, but found {torch.cuda.device_count()}")
+        if world_size not in pools:
+            pools[world_size] = PoolWorker(world_size, _reset_all_pools)
+        return pools[world_size]
+
+    yield _get
+    for p in pools.values():
+        p.shutdown()
+
+
+def _submit(pool: PoolWorker, **kwargs) -> None:
+    # run_dpa_with_cp expects all kwargs as strings (it does e.g.
+    # `fp8_bwd == "True"`), matching the old argv-based path. Serialize
+    # everything as strings so we don't accidentally change semantics.
+    pool.submit({k: str(v) for k, v in kwargs.items()})
 
 
 dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+essential_model_configs_flash_attn = model_configs_flash_attn
 if test_essential:
-    configs = ["cp_1_0", "cp_1_2", "cp_2_1", "cp_3_2", "cp_3_3"]
-    model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
+    configs = ["cp_2_0", "cp_2_2", "cp_3_0", "cp_3_3"]
+    essential_model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
 
 
-@pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(
+    not (
+        FlashAttentionUtils.v2_plus
+        or FlashAttentionUtils.v3_is_installed
+        or (fa4_enabled and FlashAttentionUtils.v4_is_installed)
+    ),
+    reason="Flash-attn v2, v3, or v4 is required.",
+)
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model", model_configs_flash_attn.keys())
+@pytest.mark.parametrize("model", essential_model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
-def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
+@pytest.mark.parametrize("pad_between_seqs", [False, True])
+def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type, pad_between_seqs):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
-    if num_gpus > torch.cuda.device_count():
-        pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
+    pool = cp_pool(num_gpus)
+
+    if pad_between_seqs:
+        if qkv_format != "thd":
+            pytest.skip("pad_between_seqs only applies to THD format!")
+        has_fa3 = FlashAttentionUtils.v3_is_installed and get_device_compute_capability() == (9, 0)
+        has_fa4 = fa4_enabled and FlashAttentionUtils.v4_is_installed
+        if not (has_fa3 or has_fa4):
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper or v4!")
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
     config = model_configs_flash_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
 
-    if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-        pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
-    if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
-        pytest.skip("CP implementation with KV all-gather does not support bias yet!")
-    if qkv_format == "thd":
-        if cp_comm_type == "all_gather":
-            pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
-        if cp_comm_type == "a2a+p2p":
-            pytest.skip(
-                "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
-                " yet!"
-            )
-    if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
-        pytest.skip("CP implementation with QKVO A2A does not support bias yet!")
-    if "a2a" in cp_comm_type and (config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0):
+    if config.attn_bias_type != "no_bias" and qkv_format == "thd":
+        pytest.skip("No support for bias with THD format!")
+    if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
+        pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
+
+    if (
+        qkv_format == "thd"
+        and cp_comm_type == "all_gather"
+        and not FlashAttentionUtils.v3_is_installed
+        and not (fa4_enabled and FlashAttentionUtils.v4_is_installed)
+    ):
         pytest.skip(
-            f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
-            f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
+            "THD + all_gather requires FA3 or FA4 (seqused_k) to separate tensor offsets from"
+            " visibility limits in the gathered KV buffer."
         )
+
+    if (
+        config.window_size != (-1, 0)
+        and config.window_size != (-1, -1)
+        and cp_comm_type
+        in [
+            "p2p",
+            "a2a+p2p",
+        ]
+    ):
+        pytest.skip("No support for SWA with cp_comm_type={p2p, a2a+p2p}!")
+
+    if cp_comm_type in ["a2a", "a2a+p2p"] and (
+        config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0
+    ):
+        pytest.skip(
+            f"cp_comm_type=a2a requires num_heads ({config.num_heads}) and"
+            f" num_gqa_groups ({config.num_gqa_groups}) divisible by 2!"
+        )
+
+    # FlashAttention / CP implementation specific: MLA only with KV P2P
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
@@ -120,22 +412,61 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         config,
         qkv_dtype=dtypes[dtype],
         qkv_layout="_".join([qkv_format] * 3),
+        cp_size=num_gpus,
+        cp_size_a2a=2 if cp_comm_type == "a2a+p2p" else 1,
     )
     flash_attn_supported, *_ = available_backends
     if not flash_attn_supported:
         pytest.skip("No attention backend available.")
 
-    subprocess.run(
-        get_bash_arguments(
-            num_gpus_per_node=num_gpus,
-            dtype=dtype,
-            model=model,
-            qkv_format=qkv_format,
-            kernel_backend="FlashAttention",
-            cp_comm_type=cp_comm_type,
-            log_level=pytest_logging_level,
-        ),
-        check=True,
+    _submit(
+        pool,
+        dtype=dtype,
+        model=model,
+        qkv_format=qkv_format,
+        kernel_backend="FlashAttention",
+        cp_comm_type=cp_comm_type,
+        fa_pad_between_seqs=pad_between_seqs,
+        log_level=pytest_logging_level,
+    )
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v2_6_0_plus, reason="CP softcap requires flash-attn 2.6.0+."
+)
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
+def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
+    """Check softcap forward and dgrad against the non-CP reference.
+
+    One case per CP autograd function, since P2P, all-gather and A2A each thread softcap
+    through their own forward inputs and gradient slots.
+    """
+    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
+    # The runner's clamped-randn inputs put the scaled logits at O(1), so this cap sits in
+    # tanh's nonlinear region and a path that dropped it would diverge from the reference.
+    config.softcap = 0.5
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="bshd_bshd_bshd",
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="bshd",
+        kernel_backend="FlashAttention",
+        cp_comm_type=cp_comm_type,
+        softcap=config.softcap,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
     )
 
 
@@ -151,8 +482,22 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"
     ),  # MHA
     "cp_1_5": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 512)),  # MHA
-    "cp_2_0": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal"),  # GQA
-    "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
+    "cp_2_0": ModelConfig(
+        2,
+        4096,
+        32,
+        128,
+        num_gqa_groups=4,
+        attn_mask_type="causal",
+    ),  # GQA
+    "cp_2_1": ModelConfig(
+        2,
+        4096,
+        32,
+        128,
+        attn_mask_type="causal",
+        window_size=(128, 0),
+    ),  # GQA
     "cp_2_2": ModelConfig(
         2,
         4096,
@@ -190,7 +535,7 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 512)
     ),  # GQA
     "cp_3_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", head_dim_v=64),  # MLA
-    "cp_3_1": ModelConfig(2, 4096, 12, 128, head_dim_v=64),  # MLA
+    "cp_3_1": ModelConfig(2, 4096, 128, 192, head_dim_v=128, attn_mask_type="causal"),  # MLA
     "cp_3_2": ModelConfig(
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias", head_dim_v=64
     ),  # MLA
@@ -207,130 +552,143 @@ model_configs_fused_attn = {
     "cp_4_2": ModelConfig(
         2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
     ),  # GQA
+    "cp_4_3": ModelConfig(
+        2, 4096, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
+    ),  # GQA
+    "cp_5_0": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
+    "cp_5_1": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)),
 }
 
 
 dtypes = ["bf16", "fp16", "fp8"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+essential_model_configs_fused_attn = model_configs_fused_attn
 if test_essential:
     configs = [
         "cp_1_0",
-        "cp_1_1",
-        "cp_1_4",
-        "cp_1_5",
         "cp_2_0",
+        "cp_2_1",
         "cp_2_2",
-        "cp_2_3",
         "cp_2_4",
+        "cp_3_1",
         "cp_3_2",
         "cp_3_4",
         "cp_4_2",
+        "cp_4_3",
+        "cp_5_0",
+        "cp_5_1",
     ]
-    model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
+    essential_model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model", model_configs_fused_attn.keys())
+@pytest.mark.parametrize("model", essential_model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("fp8_bwd", [True, False])
 @pytest.mark.parametrize("fp8_mha", [True, False])
 @pytest.mark.parametrize("fp8_dpa", [True, False])
-@pytest.mark.parametrize("scaling_mode", [None, "delayed", "current"])
+@pytest.mark.parametrize("scaling_mode", [None, "delayed", "current", "mxfp8"])
 @pytest.mark.parametrize("f16_O", [True, False])
 def test_cp_with_fused_attention(
-    dtype, model, qkv_format, cp_comm_type, fp8_bwd, fp8_mha, fp8_dpa, scaling_mode, f16_O
+    cp_pool,
+    dtype,
+    model,
+    qkv_format,
+    cp_comm_type,
+    fp8_bwd,
+    fp8_mha,
+    fp8_dpa,
+    scaling_mode,
+    f16_O,
 ):
-    num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
-    if num_gpus > torch.cuda.device_count():
-        pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
-
-    if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
-        pytest.skip("THD format is only supported on sm90+!")
-    if cp_comm_type == "all_gather" and get_cudnn_version() < (9, 3, 0):
-        pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
-    if dtype == "fp8" and get_device_compute_capability() < (9, 0):
-        pytest.skip("FP8 attention is only supported on sm90+!")
-    if dtype == "fp8" and not fp8_dpa and fp8_mha:
-        pytest.skip("Duplicate tests to fp8_dpa=True and fp8_mha=True!")
-    if dtype != "fp8" and fp8_bwd:
-        pytest.skip("Only fp8 works with fp8_bwd=True!")
-
     config = model_configs_fused_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
 
-    if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
-        pytest.skip("THD format does not support post_scale_bias yet!")
-    if qkv_format == "thd":
-        if cp_comm_type == "all_gather":
-            pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
-        if cp_comm_type == "a2a+p2p":
+    if config.head_dim_qk == 256 and config.head_dim_v == 256:
+        # D=256 uses this generic CP runner, but only a subset of its axes is supported.
+        if get_device_compute_capability() not in ((10, 0), (10, 3)):
+            pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
+        if dtype == "fp8":
+            pytest.skip("D=256 CP fused attention is covered for BF16/FP16 only.")
+        if cp_comm_type not in ["p2p", "all_gather"]:
+            pytest.skip("D=256 CP fused attention is covered for p2p and all_gather only.")
+
+        required_cudnn_version = (9, 25, 0) if qkv_format == "thd" else (9, 23, 0)
+        required_cudnn_version_label = "9.25" if qkv_format == "thd" else "9.23"
+        if get_cudnn_version() < required_cudnn_version:
             pytest.skip(
-                "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
-                " yet!"
+                f"D=256 CP fused attention with {qkv_format.upper()} requires cuDNN"
+                f" {required_cudnn_version_label} or newer."
             )
-    if dtype == "fp8" and cp_comm_type == "all_gather":
-        pytest.skip(
-            "CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
-        )
-    if dtype == "fp8" and qkv_format == "thd":
-        pytest.skip("FP8 attention cannot work with THD format yet!")
-    if dtype == "fp8" and config.attn_bias_type != "no_bias":
-        pytest.skip("FP8 attention cannot work with bias yet!")
-    if dtype == "fp8" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-        pytest.skip("FP8 attention cannot work with sliding window yet!")
-    if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-        pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
-    if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
-        pytest.skip("CP implementation with KV all-gather does not support bias yet!")
-    if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
-        pytest.skip("CP implementation with QKVO A2A does not support bias yet!")
-    if "a2a" in cp_comm_type and (config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0):
-        pytest.skip(
-            f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
-            f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
-        )
-    if dtype != "fp8" and (fp8_mha or fp8_dpa):
-        pytest.skip("Only fp8 works with fp8_dpa=True or fp8_mha=True!")
+
+    num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
+    pool = cp_pool(num_gpus)
+
+    if get_device_compute_capability() < (9, 0) and qkv_format == "thd":
+        pytest.skip("Only sm90+ architectures support THD format!")
+    if get_device_compute_capability() < (9, 0) and dtype == "fp8":
+        pytest.skip("Only sm90+ architectures support FP8 attention!")
+
     if dtype == "fp8" and not (fp8_mha or fp8_dpa):
-        pytest.skip("fp8 only works with fp8_dpa=True or fp8_mha=True!")
-    if dtype != "fp8" and scaling_mode is not None:
-        pytest.skip("Only fp8 works with scaling_mode != None!")
-    if dtype == "fp8" and scaling_mode is None:
-        pytest.skip("fp8 only works with scaling_mode != None!")
-    if (
-        dtype == "fp8"
-        and scaling_mode == "current"
-        and cp_comm_type not in ["p2p", "a2a+p2p", "a2a"]
+        pytest.skip("dtype=fp8 requires fp8_dpa=True or fp8_mha=True!")
+    if dtype == "fp8" and not fp8_dpa and fp8_mha:
+        pytest.skip("Duplicate tests to fp8_dpa=True and fp8_mha=True!")
+    if dtype != "fp8" and fp8_bwd:
+        pytest.skip("fp8_bwd=True requires dtype=fp8!")
+    if dtype != "fp8" and (fp8_mha or fp8_dpa):
+        pytest.skip("dtype!=fp8 requires fp8_dpa=False and fp8_mha=False!")
+
+    if dtype == "fp8" and config.attn_bias_type != "no_bias":
+        pytest.skip("No support for FP8 attention with bias!")
+
+    if config.attn_bias_type != "no_bias" and qkv_format == "thd":
+        pytest.skip("No support for bias with THD format!")
+    if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
+        pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
+
+    if (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0]) and cp_comm_type in [
+        "p2p",
+        "a2a+p2p",
+    ]:
+        pytest.skip("No support for SWA with cp_comm_type={p2p, a2a+p2p}!")
+
+    if cp_comm_type in ["a2a", "a2a+p2p"] and (
+        config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0
     ):
-        pytest.skip("fp8 only works with P2P, A2A and A2A+P2P for scaling_mode = current!")
-    if f16_O and (dtype != "fp8" or scaling_mode != "current"):
-        pytest.skip("f16_O only needs to be tested for dtype = fp8 and scaling_mode = current!")
-    if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
-        pytest.skip("MLA CP currently only support KV P2P!")
-    if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
-        pytest.skip("MLA CP currently does not support FP8 attention!")
-    if dtype == "fp8" and config.softmax_type != "vanilla":
-        pytest.skip("CP implementation does not support non-vanilla softmax types in FP8!")
+        pytest.skip(
+            f"cp_comm_type=a2a requires num_heads ({config.num_heads}) and"
+            f" num_gqa_groups ({config.num_gqa_groups}) divisible by 2!"
+        )
+
     if config.softmax_type != "vanilla" and cp_comm_type != "a2a":
-        pytest.skip(
-            "CP implementation only supports cp_comm_type=a2a for non-vanilla softmax types!"
-        )
+        pytest.skip(f"No support for non-vanilla softmax with cp_comm_type={cp_comm_type}!")
     if (
-        get_cudnn_version() < (9, 18, 0)
-        and config.softmax_type != "vanilla"
+        config.softmax_type != "vanilla"
         and qkv_format == "thd"
+        and get_cudnn_version() < (9, 18, 0)
     ):
-        pytest.skip(
-            "Unless cudnn version >= 9.18.0, CP implementation does not support qkv_format=thd for"
-            " non-vanilla softmax types!"
-        )
+        pytest.skip("No support for non-vanilla softmax with THD format and cuDNN < 9.18.0!")
+
+    if dtype == "fp8" and scaling_mode is None:
+        pytest.skip("dtype=fp8 requires scaling_mode != None!")
+    if dtype != "fp8" and scaling_mode is not None:
+        pytest.skip("dtype!=fp8 requires scaling_mode = None!")
+    if dtype != "fp8" and not f16_O:
+        pytest.skip("dtype!=fp8 requires f16_O=True!")
+    if scaling_mode == "delayed" and f16_O:
+        pytest.skip("scaling_mode=delayed requires f16_O=False!")
+    if scaling_mode == "mxfp8" and not f16_O:
+        pytest.skip("scaling_mode=mxfp8 requires f16_O=True!")
+    if scaling_mode == "mxfp8" and qkv_format == "thd":
+        pytest.skip("MXFP8 quantization does not support THD format!")
+    if scaling_mode == "mxfp8" and fp8_mha:
+        pytest.skip("No support for scaling_mode=mxfp8 with fp8_mha=True!")
 
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -354,35 +712,123 @@ def test_cp_with_fused_attention(
             Float8CurrentScaling(fp8_dpa=True),
             DelayedScaling(fp8_dpa=True),
         ]
+    if fp8 and scaling_mode == "mxfp8":
+        fp8_meta["recipe"] = MXFP8BlockScaling(fp8_format=Format.E4M3, fp8_dpa=True)
+        fp8_meta["local_recipes"] = [
+            MXFP8BlockScaling(fp8_format=Format.E4M3, fp8_dpa=True),
+        ]
+
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
     is_training = False if config.bias_shape == "111s" else True
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    available_backends, *_ = get_available_attention_backends(
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
         qkv_layout="_".join([qkv_format] * 3),
         fp8=fp8,
         fp8_meta=fp8_meta,
         is_training=is_training,
+        deterministic=_deterministic,
+        cp_size=num_gpus,
+        cp_size_a2a=2 if cp_comm_type == "a2a+p2p" else 1,
     )
+
     _, fused_attn_supported, _ = available_backends
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 
-    subprocess.run(
-        get_bash_arguments(
-            num_gpus_per_node=num_gpus,
-            dtype=dtype,
-            model=model,
-            qkv_format=qkv_format,
-            kernel_backend="FusedAttention",
-            cp_comm_type=cp_comm_type,
-            fp8_bwd=fp8_bwd,
-            fp8_dpa=fp8_dpa,
-            fp8_mha=fp8_mha,
-            scaling_mode=scaling_mode,
-            f16_O=f16_O,
-            is_training=is_training,
-            log_level=pytest_logging_level,
-        ),
-        check=True,
+    if _deterministic and config.softmax_type != "vanilla":
+        pytest.skip("Deterministic mode does not support non-vanilla softmax with FusedAttention")
+    if _deterministic and config.attn_bias_type == "post_scale_bias" and is_training:
+        pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
+
+    _submit(
+        pool,
+        dtype=dtype,
+        model=model,
+        qkv_format=qkv_format,
+        kernel_backend="FusedAttention",
+        cp_comm_type=cp_comm_type,
+        fp8_bwd=fp8_bwd,
+        fp8_dpa=fp8_dpa,
+        fp8_mha=fp8_mha,
+        scaling_mode=scaling_mode,
+        f16_O=f16_O,
+        is_training=is_training,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
+@pytest.mark.skipif(
+    get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
+)
+def test_cp_with_fused_attention_no_load_balance(cp_pool):
+    """Check experimental single-chunk forward/backward."""
+    config = copy.deepcopy(model_configs_fused_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    config.attn_mask_type = "padding_causal"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=True,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[1]:
+        pytest.skip("No attention backend available.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="thd",
+        kernel_backend="FusedAttention",
+        cp_comm_type="all_gather",
+        load_balancing_strategy="NO_LOAD_BALANCE",
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
+@pytest.mark.parametrize("model", ("cp_2_0", "cp_2_4"))
+def test_cp_with_flash_attention_no_load_balance(cp_pool, model):
+    """Check the supported unpadded FlashAttention path."""
+    config = copy.deepcopy(model_configs_flash_attn[model])
+    fa4_expected = (
+        config.head_dim_qk == 256
+        and (10, 0) <= get_device_compute_capability() < (12, 0)
+        and fa4_enabled
+        and FlashAttentionUtils.v4_is_installed
+        and FlashAttentionUtils.fa4_version >= FlashAttentionUtils.v4_0_0_beta33
+        and not _deterministic
+    )
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    config.attn_mask_type = "padding_causal"
+    available_backends, flash_backend, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=False,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if fa4_expected:
+        assert available_backends[0] and flash_backend is not None and flash_backend.major == 4
+    elif config.head_dim_qk == 256:
+        pytest.skip("D=256 THD all-gather requires SM100/SM110 FA4 b33+ non-deterministic.")
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model=model,
+        qkv_format="thd",
+        kernel_backend="FlashAttention",
+        cp_comm_type="all_gather",
+        fa_pad_between_seqs=False,
+        load_balancing_strategy="NO_LOAD_BALANCE",
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
     )

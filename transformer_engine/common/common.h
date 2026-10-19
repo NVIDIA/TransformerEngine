@@ -16,6 +16,7 @@
 static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
               "NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer.");
 
+#include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -26,13 +27,16 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
-#include <functional>
-#include <stdexcept>
+#include <initializer_list>
+#include <limits>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "./nvtx.h"
@@ -41,7 +45,36 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 
 namespace transformer_engine {
 
-std::string to_string(const DType type);
+inline std::string to_string(const DType type) {
+  switch (type) {
+    case DType::kByte:
+      return "Byte";
+    case DType::kBFloat16:
+      return "BFloat16";
+    case DType::kFloat16:
+      return "Float16";
+    case DType::kFloat32:
+      return "Float32";
+    case DType::kFloat8E4M3:
+      return "Float8E4M3";
+    case DType::kFloat8E5M2:
+      return "Float8E5M2";
+    case DType::kFloat8E8M0:
+      return "Float8E8M0";
+    case DType::kFloat8UE5M3:
+      return "Float8UE5M3";
+    case DType::kFloat4E2M1:
+      return "Float4E2M1";
+    case DType::kInt16:
+      return "Int16";
+    case DType::kInt32:
+      return "Int32";
+    case DType::kInt64:
+      return "Int64";
+    default:
+      return std::string("Invalid type ") + std::to_string(static_cast<int>(type));
+  }
+}
 std::string to_string(const NVTEScalingMode &mode);
 
 inline std::string to_string_like(const DType &val) { return to_string(val); }
@@ -64,6 +97,10 @@ inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_M
 
 inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
+inline bool is_fp8_block_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_BLOCK_SCALING_1D || mode == NVTE_BLOCK_SCALING_2D;
+}
+
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
              end, " in a vector with ", shape.size(), " entries");
@@ -74,7 +111,9 @@ inline size_t product(const std::vector<size_t> &shape, const size_t begin, cons
   return ret;
 }
 
-inline size_t product(const std::vector<size_t> &shape) {
+template <typename Container,
+          typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
+inline size_t product(const Container &shape) {
   size_t ret = 1;
   for (const auto &elem : shape) {
     ret *= elem;
@@ -86,24 +125,138 @@ size_t get_buffer_size_bytes(const size_t N, const DType buffer_dtype);
 size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
                              const DType buffer_dtype);
 
+/*! \brief Tensor shape
+ *
+ *  Wraps NVTEShape with an interface similar to std::vector<size_t>.
+ */
+class Shape {
+ public:
+  using value_type = size_t;
+  using size_type = size_t;
+  using iterator = size_t *;
+  using const_iterator = const size_t *;
+
+  /*! Maximum number of dimensions this shape can hold. */
+  static constexpr size_type max_ndim = std::extent_v<decltype(NVTEShape::data)>;
+
+  constexpr Shape() noexcept = default;
+
+  explicit constexpr Shape(const NVTEShape &shape) noexcept : data_{shape} {}
+
+  Shape(std::initializer_list<size_t> shape) {
+    NVTE_CHECK(shape.size() <= max_ndim, "Too many dimensions (requested ", shape.size(),
+               ", max is ", max_ndim, ").");
+    data_.ndim = shape.size();
+    std::copy(shape.begin(), shape.end(), data_.data);
+  }
+
+  // Construct from any container of integers
+  template <typename Container,
+            typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
+  explicit Shape(const Container &shape) {
+    NVTE_CHECK(shape.size() <= max_ndim, "Too many dimensions (requested ", shape.size(),
+               ", max is ", max_ndim, ").");
+    data_.ndim = shape.size();
+    std::copy(shape.begin(), shape.end(), data_.data);
+  }
+
+  constexpr operator NVTEShape() const noexcept { return data_; }
+
+  /*! Cast to std::vector */
+  explicit operator std::vector<size_t>() const {
+    return std::vector<size_t>(data_.data, data_.data + data_.ndim);
+  }
+
+  constexpr size_type size() const noexcept { return data_.ndim; }
+  constexpr bool empty() const noexcept { return data_.ndim == 0; }
+  static constexpr size_type capacity() noexcept { return max_ndim; }
+
+  value_type *data() noexcept { return data_.data; }
+  constexpr const value_type *data() const noexcept { return data_.data; }
+
+  iterator begin() noexcept { return data_.data; }
+  constexpr const_iterator begin() const noexcept { return data_.data; }
+  constexpr const_iterator cbegin() const noexcept { return data_.data; }
+  iterator end() noexcept { return data_.data + data_.ndim; }
+  constexpr const_iterator end() const noexcept { return data_.data + data_.ndim; }
+  constexpr const_iterator cend() const noexcept { return data_.data + data_.ndim; }
+
+  const value_type &at(size_type i) const {
+    NVTE_CHECK(i < data_.ndim, "Attempted to access out-of-bounds entry (requested ", i,
+               ", size is ", data_.ndim, ").");
+    return data_.data[i];
+  }
+  value_type &at(size_type i) { return const_cast<value_type &>(std::as_const(*this).at(i)); }
+
+  value_type &operator[](size_type i) noexcept { return data_.data[i]; }
+  constexpr const value_type &operator[](size_type i) const noexcept { return data_.data[i]; }
+
+  value_type &front() noexcept { return data_.data[0]; }
+  constexpr const value_type &front() const noexcept { return data_.data[0]; }
+
+  value_type &back() noexcept { return data_.data[data_.ndim - 1]; }
+  constexpr const value_type &back() const noexcept { return data_.data[data_.ndim - 1]; }
+
+  void push_back(size_type value) {
+    NVTE_CHECK(data_.ndim < max_ndim, "Cannot add dimension: shape is at maximum capacity (",
+               max_ndim, ").");
+    data_.data[data_.ndim++] = value;
+  }
+
+  void resize(size_type count) {
+    NVTE_CHECK(count <= max_ndim, "Too many dimensions (requested ", count, ", max is ", max_ndim,
+               ").");
+    if (count > data_.ndim) {
+      std::fill(&data_.data[data_.ndim], &data_.data[count], 0);
+    }
+    data_.ndim = count;
+  }
+
+  void clear() noexcept { data_.ndim = 0; }
+
+  friend bool operator==(const Shape &lhs, const Shape &rhs) noexcept {
+    return lhs.data_.ndim == rhs.data_.ndim &&
+           std::equal(lhs.data_.data, lhs.data_.data + lhs.data_.ndim, rhs.data_.data);
+  }
+  friend bool operator!=(const Shape &lhs, const Shape &rhs) noexcept { return !(lhs == rhs); }
+
+  template <typename Container,
+            typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
+  friend bool operator==(const Shape &lhs, const Container &rhs) {
+    return lhs == Shape(rhs);
+  }
+  template <typename T>
+  friend bool operator==(const T &lhs, const Shape &rhs) {
+    return rhs == lhs;
+  }
+  template <typename T>
+  friend bool operator!=(const Shape &lhs, const T &rhs) {
+    return !(lhs == rhs);
+  }
+  template <typename T>
+  friend bool operator!=(const T &lhs, const Shape &rhs) {
+    return !(rhs == lhs);
+  }
+
+ private:
+  NVTEShape data_{};
+};
+
 struct SimpleTensor {
   void *dptr;
-  std::vector<size_t> shape;
+  Shape shape;
   DType dtype;
 
   SimpleTensor(void *dptr, std::vector<size_t> shape, DType dtype)
-      : dptr{dptr}, shape{std::move(shape)}, dtype{dtype} {}
+      : dptr{dptr}, shape(shape), dtype{dtype} {}
+
+  SimpleTensor() : SimpleTensor(nullptr, {0}, DType::kFloat32) {}
 
   SimpleTensor(const NVTEBasicTensor &tensor)  // NOLINT
-      : dptr(tensor.data_ptr),
-        shape(tensor.shape.data, tensor.shape.data + tensor.shape.ndim),
-        dtype(static_cast<DType>(tensor.dtype)) {}
-
-  SimpleTensor() : SimpleTensor(nullptr, std::vector<size_t>{0}, DType::kFloat32) {}
+      : dptr(tensor.data_ptr), shape(tensor.shape), dtype(static_cast<DType>(tensor.dtype)) {}
 
   operator NVTEBasicTensor() const {
-    return {dptr, static_cast<NVTEDType>(dtype),
-            nvte_make_shape(this->shape.data(), this->shape.size())};
+    return {dptr, static_cast<NVTEDType>(dtype), static_cast<NVTEShape>(shape)};
   }
 
   /*! Number of tensor elements. */
@@ -146,6 +299,20 @@ struct Tensor {
    *  Only meaningful for MXFP8 and NVFP4.
    */
   bool with_gemm_swizzled_scales = false;
+  /*! \brief Whether NVFP4 rowwise amax metadata is row-scaled.
+   *
+   *  Only meaningful for NVFP4 tensors.
+   */
+  bool row_scaled_nvfp4 = false;
+  /*! \brief Global scale bound used by NVFP4.
+   *
+   *  When zero, use the maximum value of the scale-inverse dtype.
+   *  Some 4over6 tensors use 256 (instead of the E4M3 max of 448) in
+   *  order to leave room for map-to-4 local scale expansion.
+   *
+   *  TODO: Change to a dtype-agnostic name.
+   */
+  int nvfp4_e4m3_max = 0;
 
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -156,7 +323,9 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
-      sizeof(uint8_t)           // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t),          // kNVTERowScaledNVFP4
+      sizeof(int)               // kNVTENVFP4E4M3Max
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -172,17 +341,14 @@ struct Tensor {
     columnwise_scale_inv.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
+    row_scaled_nvfp4 = false;
+    nvfp4_e4m3_max = 0;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
 
   /*! Number of tensor elements. */
-  size_t numel() const {
-    if (!has_data() && has_columnwise_data()) {
-      return product(columnwise_data.shape);
-    }
-    return product(data.shape);
-  }
+  size_t numel() const { return product(shape()); }
 
   /*! Whether the tensor data buffer is not uninitialized.
    *
@@ -222,7 +388,7 @@ struct Tensor {
    *  different shape, e.g. the column-wise data for some tensor
    *  formats are transposed.
    */
-  std::vector<size_t> shape() const {
+  Shape shape() const {
     // Each tensor format interprets its data differently
     switch (scaling_mode) {
       case NVTE_DELAYED_TENSOR_SCALING:
@@ -232,9 +398,8 @@ struct Tensor {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
-          std::vector<size_t> ret;
+          Shape ret;
           if (!columnwise_data.shape.empty()) {
-            ret.reserve(columnwise_data.shape.size());
             for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
               ret.push_back(columnwise_data.shape[i]);
             }
@@ -257,33 +422,64 @@ struct Tensor {
     }
   }
 
+  /*! Matrix dimensions after flattening tensor to 2D.
+   *
+   * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
+   * as a (D1*D2*...*D(n-1), Dn) matrix.
+   */
+  std::array<size_t, 2> flat_2d_dims() const {
+    const auto s = shape();
+    if (s.empty()) {
+      return {1, 1};
+    }
+    size_t first_dim = 1;
+    for (size_t i = 0; i + 1 < s.size(); ++i) {
+      first_dim *= s[i];
+    }
+    return {first_dim, s.back()};
+  }
+
   /*! Matrix height after tensor is flattened to 2D
    *
    * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
-  size_t flat_first_dim() const {
-    const auto &full_shape = shape();
-    size_t ret = 1;
-    if (!full_shape.empty()) {
-      for (size_t i = 0; i < full_shape.size() - 1; i++) {
-        ret *= full_shape[i];
-      }
-    }
-    return ret;
-  }
+  size_t flat_first_dim() const { return flat_2d_dims()[0]; }
 
   /*! Matrix width after tensor is flattened to 2D
    *
    * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
-  size_t flat_last_dim() const {
-    const auto &full_shape = shape();
-    if (full_shape.empty()) {
-      return 1;
+  size_t flat_last_dim() const { return flat_2d_dims()[1]; }
+
+  /*! \brief Global scale bound used by NVFP4. */
+  int get_nvfp4_scale_max() const {
+    if (scaling_mode != NVTE_NVFP4_1D_SCALING) {
+      return 0;
+    }
+
+    // Return non-default scale max
+    if (nvfp4_e4m3_max != 0) {
+      return nvfp4_e4m3_max;
+    }
+
+    // Deduce scale max based on scale-inverse dtype
+    DType dtype;
+    if (scale_inv.has_data()) {
+      dtype = scale_inv.dtype;
+    } else if (columnwise_scale_inv.has_data()) {
+      dtype = columnwise_scale_inv.dtype;
     } else {
-      return full_shape.back();
+      dtype = DType::kFloat8E4M3;
+    }
+    switch (dtype) {
+      case DType::kFloat8E4M3:
+        return 448;
+      case DType::kFloat8UE5M3:
+        return 114688;
+      default:
+        NVTE_ERROR("Unsupported scale dtype for NVFP4 tensor (", to_string(dtype), ")");
     }
   }
 };
@@ -378,7 +574,8 @@ struct GroupedTensor {
         last_dims(nullptr, std::vector<size_t>{0}, DType::kInt64),
         tensor_offsets(nullptr, std::vector<size_t>{0}, DType::kInt64),
         logical_shape(nvte_make_shape(nullptr, 1)),
-        nvte_tensor(0) {}
+        nvte_tensor(0),
+        with_gemm_swizzled_scales(false) {}
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
 
@@ -442,6 +639,9 @@ struct QuantizationConfig {
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
+  NVTENVFP44Over6Mode nvfp4_4over6_mode = kNVTENVFP44Over6Disabled;
+  bool nvfp4_4over6_err_use_fast_math = false;
+  bool mxfp8_2d_quantization = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -451,7 +651,10 @@ struct QuantizationConfig {
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
-      sizeof(uint8_t)                        // use_fast_math
+      sizeof(uint8_t),                       // use_fast_math
+      sizeof(uint8_t),                       // nvfp4_4over6_mode
+      sizeof(uint8_t),                       // nvfp4_4over6_err_use_fast_math
+      sizeof(uint8_t)                        // mxfp8_2d_quantization
   };
 };
 
@@ -481,12 +684,13 @@ using fp8e5m2 = __nv_fp8_e5m2;
 #if CUDA_VERSION >= 12080
 using fp8e8m0 = __nv_fp8_e8m0;
 #endif
-#if FP4_TYPE_SUPPORTED
-using fp4e2m1 = __nv_fp4_e2m1;
-using fp4e2m1x2 = __nv_fp4x2_e2m1;
-using fp4e2m1x4 = __nv_fp4x4_e2m1;
+#if CUDA_VERSION >= 13040
+using fp8ue5m3 = __nv_fp8_ue5m3;
 #endif
 using e8m0_t = uint8_t;
+
+// FP4 aliases + device-safe TypeExtrema specializations (also used by NVRTC).
+#include "./util/type_extrema.h"
 
 namespace detail {
 
@@ -509,50 +713,13 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
 #if CUDA_VERSION >= 12080
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
 #endif
+#if CUDA_VERSION >= 13040
+TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_ue5m3)
+#endif
 #if FP4_TYPE_SUPPORTED
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp4_e2m1)
 #endif
 #undef TRANSFORMER_ENGINE_TYPE_NAME
-
-template <typename T>
-struct TypeExtrema;
-
-#if FP4_TYPE_SUPPORTED
-template <>
-struct TypeExtrema<fp4e2m1> {
-  static constexpr float max = 6.0f;
-  static constexpr float max_inverse = 1.0 / max;
-};
-#endif
-
-template <>
-struct TypeExtrema<fp8e4m3> {
-  static constexpr float max = 448.0f;
-  static constexpr float max_inverse = 1.0 / max;
-};
-
-template <>
-struct TypeExtrema<fp8e5m2> {
-  static constexpr float max = 57344.0f;
-  static constexpr float max_inverse = 1.0 / max;
-};
-
-template <>
-struct TypeExtrema<bf16> {
-  // Hex float format of 1.(7 bits of 1) * 2 ^ 127
-  static constexpr float max = 0x1.FEp127;
-};
-
-template <>
-struct TypeExtrema<fp16> {
-  // Hex float format of 1.(10 bits of 1) * 2 ^ 15
-  static constexpr float max = 0x1.FFCp15;
-};
-
-template <typename T>
-struct TypeExtrema {
-  static constexpr float max = std::numeric_limits<T>::max();
-};
 
 }  // namespace detail
 
@@ -579,12 +746,20 @@ struct TypeInfo {
                            ,
                            fp8e8m0
 #endif
+#if CUDA_VERSION >= 13040
+                           ,
+                           fp8ue5m3
+#endif
                            >;
 #else
   using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2
 #if CUDA_VERSION >= 12080
                            ,
                            fp8e8m0
+#endif
+#if CUDA_VERSION >= 13040
+                           ,
+                           fp8ue5m3
 #endif
                            >;
 #endif
@@ -625,6 +800,15 @@ struct TypeInfo {
   } break;
 #else
 #define SWITCH_FP4_TYPE_HANDLE(type, ...)  // do nothing
+#endif
+#if CUDA_VERSION >= 13040
+#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...) \
+  case DType::kFloat8UE5M3: {                  \
+    using type = fp8ue5m3;                     \
+    { __VA_ARGS__ }                            \
+  } break;
+#else
+#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...)  // do nothing
 #endif
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...)                 \
@@ -671,11 +855,12 @@ struct TypeInfo {
       { __VA_ARGS__ }                                                        \
     } break;                                                                 \
       SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)                              \
+      SWITCH_FP8UE5M3_TYPE_HANDLE(type, __VA_ARGS__)                         \
     default:                                                                 \
       NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
                  ". Expected one of: Byte, Int16, Int32, Int64, Float32, "   \
                  "Float16, BFloat16, Float8E4M3, Float8E5M2, "               \
-                 "Float8E8M0, Float4E2M1.");                                 \
+                 "Float8E8M0.");                                             \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...)               \
@@ -876,6 +1061,68 @@ struct TypeInfo {
     { __VA_ARGS__ }                                               \
   }
 
+#define TRANSFORMER_ENGINE_SCALING_TYPE_SWITCH(SCALING_TYPE, SCALING_T, ...) \
+  switch (SCALING_TYPE) {                                                    \
+    case ScalingType::ROWWISE: {                                             \
+      constexpr ScalingType SCALING_T = ScalingType::ROWWISE;                \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case ScalingType::COLWISE: {                                             \
+      constexpr ScalingType SCALING_T = ScalingType::COLWISE;                \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case ScalingType::BIDIMENSIONAL: {                                       \
+      constexpr ScalingType SCALING_T = ScalingType::BIDIMENSIONAL;          \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    default: {                                                               \
+      NVTE_ERROR("Unsupported scaling type.");                               \
+    }                                                                        \
+  }
+
+#define TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(SHAPE_REP, SHAPE, ...) \
+  switch (SHAPE_REP) {                                                                     \
+    case ShapeRepresentation::SAME_BOTH_DIMS: {                                            \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::SAME_BOTH_DIMS;           \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    case ShapeRepresentation::VARYING_FIRST_DIM: {                                         \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_FIRST_DIM;        \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    case ShapeRepresentation::VARYING_LAST_DIM: {                                          \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_LAST_DIM;         \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    case ShapeRepresentation::VARYING_BOTH_DIMS: {                                         \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_BOTH_DIMS;        \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    default: {                                                                             \
+      NVTE_ERROR("Unsupported grouped tensor shape representation.");                      \
+    }                                                                                      \
+  }
+
+#define TRANSFORMER_ENGINE_VECTORIZED_LOAD_INTEGER_TYPE_SWITCH(INTEGER_ELTS_NUM, type, ...) \
+  switch (INTEGER_ELTS_NUM) {                                                               \
+    case 1: {                                                                               \
+      using type = int;                                                                     \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    case 2: {                                                                               \
+      using type = int2;                                                                    \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    case 4: {                                                                               \
+      using type = int4;                                                                    \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    default: {                                                                              \
+      NVTE_ERROR("Unsupported number of integer elements ", INTEGER_ELTS_NUM,               \
+                 ". Expected one of: 1, 2, or 4.");                                         \
+    }                                                                                       \
+  }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int log2_ceil(int value) {
@@ -915,6 +1162,8 @@ constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
+constexpr size_t SCALING_FACTORS_SWIZZLE_ALIGNMENT = 128;
+
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
 constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment
 constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
@@ -923,16 +1172,37 @@ inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
   return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
 }
 
+/*! \brief Align a shared-memory base pointer up to `align` bytes.
+ *
+ * The result is derived from `p` by pointer arithmetic on purpose, without losing its
+ * identity as a pointer in between, so the address is never rounded through an integer
+ * -- in which case the compiler would lose the link back to the `extern __shared__`
+ * object, and ptxas could no longer prove the address lives in the shared window and
+ * would fall back to generic address-space accesses (`LD.E`/`ST.E`) instead of
+ * `LDS`/`STS`.
+ *
+ * `align` must be a power of two.
+ */
+__device__ __forceinline__ char *align_up(char *p, uintptr_t align) {
+  const uintptr_t misalign = reinterpret_cast<uintptr_t>(p) & (align - 1);
+  // If p is not aligned, (align - misalign) & (align - 1) is the number of bytes to fill the gap between p and
+  // the next aligned address.
+  // If p is aligned, misalign is 0 and (align - misalign) is align itself, so we use & (align - 1)
+  // to make it 0 and return p itself.
+  return p + ((align - misalign) & (align - 1));
+}
+
 inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
   return is_aligned_ptr(static_cast<const void *>(t.data.dptr), alignment);
 }
 
 size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
+float typeToMax(const DType type);
 
-void CheckNoopTensor(const Tensor &t, const std::string &name);
-void CheckInputTensor(const Tensor &t, const std::string &name);
-void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
+void CheckNoopTensor(const Tensor &t, std::string_view name);
+void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_inv_shapes = true);
+void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty = false);
 
 /*! \brief Update a tensor's FP8 scale-inverse
  *
@@ -967,9 +1237,9 @@ GroupedTensor *convertNVTEGroupedTensor(const NVTEGroupedTensor tensor);
 GroupedTensor *convertNVTEGroupedTensorCheck(const NVTEGroupedTensor tensor);
 
 // Helper functions for GroupedTensor validation
-void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name);
-void CheckInputGroupedTensor(const GroupedTensor &t, const std::string &name);
-void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name,
+void CheckGroupedTensorShapeArrays(const GroupedTensor &t, std::string_view name);
+void CheckInputGroupedTensor(const GroupedTensor &t, std::string_view name);
+void CheckOutputGroupedTensor(const GroupedTensor &t, std::string_view name,
                               bool allow_empty = false);
 
 }  // namespace transformer_engine

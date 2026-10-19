@@ -6,7 +6,6 @@
 
 #include "transformer_engine/comm_gemm.h"
 
-#include <cublasmp.h>
 #include <cuda_runtime.h>
 
 #include <map>
@@ -20,6 +19,10 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+
+#ifdef NVTE_WITH_CUBLASMP
+
+#include <cublasmp.h>
 
 using namespace transformer_engine;
 
@@ -127,12 +130,9 @@ int64_t block_size(NVTECommGemmCtx* ctx, int64_t global_size) {
 void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
-  const auto a0 = a->flat_first_dim();
-  const auto a1 = a->flat_last_dim();
-  const auto b0 = b->flat_first_dim();
-  const auto b1 = b->flat_last_dim();
-  const auto d0 = d->flat_first_dim();
-  const auto d1 = d->flat_last_dim();
+  const auto [a0, a1] = a->flat_2d_dims();
+  const auto [b0, b1] = b->flat_2d_dims();
+  const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
     NVTE_CHECK(a1 == k, "Unsupported tensor dimension in A: expected ", k, ", got ", a1);
@@ -166,12 +166,9 @@ void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
 void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
-  const auto a0 = a->flat_first_dim();
-  const auto a1 = a->flat_last_dim();
-  const auto b0 = b->flat_first_dim();
-  const auto b1 = b->flat_last_dim();
-  const auto d0 = d->flat_first_dim();
-  const auto d1 = d->flat_last_dim();
+  const auto [a0, a1] = a->flat_2d_dims();
+  const auto [b0, b1] = b->flat_2d_dims();
+  const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
     NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);
@@ -184,11 +181,12 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   }
+  // B is (K/P, N) local -- K is distributed across ranks, N is fully replicated.
   if (transb) {
     NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
-        n, k, block_size(ctx, n), block_size(ctx, k), 0, 0, block_size(ctx, n),
-        get_cuda_dtype(b->dtype()), ctx->grid_row_major.get(), ctx->b_desc.get()));
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, block_size(ctx, n), block_size(ctx, k),
+                                                     0, 0, n, get_cuda_dtype(b->dtype()),
+                                                     ctx->grid_row_major.get(), ctx->b_desc.get()));
   } else {
     NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
@@ -200,17 +198,19 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, m, block_size(ctx, n), 0, 0, *ldd,
                                                    get_cuda_dtype(d->dtype()),
                                                    ctx->grid_row_major.get(), ctx->d_desc.get()));
+
+  const cudaDataType_t comm_type = get_cuda_dtype(d->dtype());
+  NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
+      ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_COMMUNICATION_TYPE, &comm_type,
+      sizeof comm_type));
 }
 
 void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
-  const auto a0 = a->flat_first_dim();
-  const auto a1 = a->flat_last_dim();
-  const auto b0 = b->flat_first_dim();
-  const auto b1 = b->flat_last_dim();
-  const auto d0 = d->flat_first_dim();
-  const auto d1 = d->flat_last_dim();
+  const auto [a0, a1] = a->flat_2d_dims();
+  const auto [b0, b1] = b->flat_2d_dims();
+  const auto [d0, d1] = d->flat_2d_dims();
 
   if (transa) {
     NVTE_CHECK(a0 == m, "Unsupported tensor dimension in A: expected ", m, ", got ", a0);
@@ -260,15 +260,82 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
                    const Tensor* d, const Tensor* bias, const Tensor* pre_act_out, bool transa,
                    bool transb, bool grad, bool accumulate, int comm_sm_count,
                    cudaStream_t main_stream) {
-  for (auto t : {a, b, d}) {
-    NVTE_CHECK(is_tensor_scaling(t->scaling_mode),
-               "Unsupported scaling mode: " + std::to_string(t->scaling_mode));
+  const bool tensor_scaling =
+      is_tensor_scaling(a->scaling_mode) && is_tensor_scaling(b->scaling_mode);
+  const bool mxfp8 = is_mxfp_scaling(a->scaling_mode) && is_mxfp_scaling(b->scaling_mode);
+
+  NVTE_CHECK(tensor_scaling || mxfp8, "Unsupported scaling modes: A=", to_string(a->scaling_mode),
+             ", B=", to_string(b->scaling_mode));
+  NVTE_CHECK(is_tensor_scaling(d->scaling_mode),
+             "Unsupported scaling mode for D: ", to_string(d->scaling_mode));
+
+  if (mxfp8) {
+#if CUBLASMP_VERSION < 801
+    NVTE_ERROR("MXFP8 GEMM requires cuBLASMp 0.8.1+.");
+#else
+    NVTE_CHECK(a->with_gemm_swizzled_scales,
+               "MXFP8 scales for A are not in format expected by GEMM");
+    NVTE_CHECK(b->with_gemm_swizzled_scales,
+               "MXFP8 scales for B are not in format expected by GEMM");
+#endif
   }
+
+  // Mirror cublaslt_gemm.cu's input canonicalization. Tensor FP8 columnwise data is a
+  // transposed view, while MXFP8 columnwise data keeps the logical shape.
+  const bool fp8_needs_tn = !nvte_is_non_tn_fp8_gemm_supported();
+  auto canonicalize_input = [fp8_needs_tn](const Tensor* t, bool current_trans, bool is_a,
+                                           const char* side) -> std::pair<Tensor, bool> {
+    auto use_columnwise = [t](bool new_trans) -> std::pair<Tensor, bool> {
+      Tensor view = *t;
+      view.data = t->columnwise_data;
+      view.scale_inv = t->columnwise_scale_inv;
+      view.amax = t->columnwise_amax;
+      return {view, new_trans};
+    };
+
+    if (is_mxfp_scaling(t->scaling_mode)) {
+      if (is_a) {
+        if (current_trans) {
+          NVTE_CHECK(t->has_data(), "MXFP8 transposed input A is missing row-wise data");
+          return {*t, current_trans};
+        }
+        NVTE_CHECK(t->has_columnwise_data(),
+                   "MXFP8 non-transposed input A is missing column-wise data");
+        return use_columnwise(current_trans);
+      }
+      if (current_trans) {
+        NVTE_CHECK(t->has_columnwise_data(),
+                   "MXFP8 transposed input B is missing column-wise data");
+        return use_columnwise(current_trans);
+      }
+      NVTE_CHECK(t->has_data(), "MXFP8 non-transposed input B is missing row-wise data");
+      return {*t, current_trans};
+    }
+
+    if (!is_fp8_dtype(t->dtype())) {
+      return {*t, current_trans};
+    }
+
+    const bool want_trans = is_a;
+    const bool hopper_tn_swap = fp8_needs_tn && current_trans != want_trans;
+    const bool blackwell_missing_rowwise = !fp8_needs_tn && !t->has_data();
+    if (!hopper_tn_swap && !blackwell_missing_rowwise) {
+      return {*t, current_trans};
+    }
+    NVTE_CHECK(t->has_columnwise_data() && is_fp8_dtype(t->columnwise_data.dtype),
+               "cuBLASMp FP8 GEMM input ", side, " is missing column-wise usage");
+    return use_columnwise(!current_trans);
+  };
+
+  auto [a_used, transa_eff] = canonicalize_input(a, transa, /*is_a=*/true, "A");
+  auto [b_used, transb_eff] = canonicalize_input(b, transb, /*is_a=*/false, "B");
+  transa = transa_eff;
+  transb = transb_eff;
 
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorInit(ctx->matmul_desc.get(), CUBLAS_COMPUTE_32F));
 
   int64_t ldd{};
-  init_matrices_fn(ctx, &ldd, m, n, k, a, b, d, transa, transb);
+  init_matrices_fn(ctx, &ldd, m, n, k, &a_used, &b_used, d, transa, transb);
 
   const cublasOperation_t trans_a = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
   const cublasOperation_t trans_b = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -284,23 +351,33 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
       sizeof algo_attr));
 
   const cublasMpMatmulMatrixScale_t scale_mode = CUBLASMP_MATMUL_MATRIX_SCALE_SCALAR_FP32;
-  if (is_fp8_dtype(a->dtype())) {
-    NVTE_CHECK(a->scale_inv.dptr, "Scaling must be set for FP8 dtype");
+  auto get_input_scale_mode = [&](const Tensor& t) {
+#if CUBLASMP_VERSION >= 801
+    if (is_mxfp_scaling(t.scaling_mode)) {
+      return CUBLASMP_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+    }
+#endif
+    return scale_mode;
+  };
+  if (is_fp8_dtype(a_used.dtype()) || is_mxfp_scaling(a_used.scaling_mode)) {
+    const cublasMpMatmulMatrixScale_t input_scale_mode = get_input_scale_mode(a_used);
+    NVTE_CHECK(a_used.scale_inv.dptr, "Scaling must be set for input A");
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
-        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_MODE, &scale_mode,
-        sizeof scale_mode));
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_MODE,
+        &input_scale_mode, sizeof input_scale_mode));
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_POINTER,
-        &a->scale_inv.dptr, sizeof(void*)));
+        &a_used.scale_inv.dptr, sizeof(void*)));
   }
-  if (is_fp8_dtype(b->dtype())) {
-    NVTE_CHECK(b->scale_inv.dptr, "Scaling must be set for FP8 dtype");
+  if (is_fp8_dtype(b_used.dtype()) || is_mxfp_scaling(b_used.scaling_mode)) {
+    const cublasMpMatmulMatrixScale_t input_scale_mode = get_input_scale_mode(b_used);
+    NVTE_CHECK(b_used.scale_inv.dptr, "Scaling must be set for input B");
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
-        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_MODE, &scale_mode,
-        sizeof scale_mode));
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_MODE,
+        &input_scale_mode, sizeof input_scale_mode));
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_POINTER,
-        &b->scale_inv.dptr, sizeof(void*)));
+        &b_used.scale_inv.dptr, sizeof(void*)));
   }
   if (is_fp8_dtype(d->dtype())) {
     NVTE_CHECK(d->scale.dptr, "Scaling must be set for FP8 dtype");
@@ -399,11 +476,11 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
                   n,
                   k,
                   &alpha,
-                  a->data.dptr,
+                  a_used.data.dptr,
                   1,
                   1,
                   ctx->a_desc.get(),
-                  b->data.dptr,
+                  b_used.data.dptr,
                   1,
                   1,
                   ctx->b_desc.get(),
@@ -437,9 +514,6 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
       std::apply(cublasMpMatmul,
                  std::tuple_cat(args, std::tuple{ctx->workspace, ctx->workspace_size,
                                                  workspace_host.data(), workspace_host.size()})));
-
-  NVTE_CHECK_CUDA(cudaEventRecord(ctx->event.get(), main_stream));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream.get(), ctx->event.get(), 0));
 }
 
 }  // namespace
@@ -473,6 +547,8 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
       .b_desc = std::move(b_desc),
       .d_desc = std::move(d_desc),
       .matmul_desc = std::move(matmul_desc),
+      .workspace = nullptr,
+      .workspace_size = 0,
   };
 }
 
@@ -525,3 +601,45 @@ int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
   NVTE_API_CALL(nvte_comm_gemm_numroc);
   return cublasMpNumroc(global_size, block_size(ctx, global_size), ctx->rank, 0, ctx->nranks);
 }
+
+#else  // NVTE_WITH_CUBLASMP
+
+struct NVTECommGemmCtx {};
+
+NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
+                          const NVTETensor b, const NVTETensor d, const NVTETensor bias,
+                          const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
+                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+                          NVTECommGemmAlgoType algo) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
+                              const NVTETensor a, const NVTETensor b, const NVTETensor d,
+                              const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
+                              bool transb, bool grad, bool accumulate, int comm_sm_count,
+                              cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
+                          const NVTETensor b, const NVTETensor d, const NVTETensor bias,
+                          const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
+                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+                          NVTECommGemmAlgoType algo) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+#endif  // NVTE_WITH_CUBLASMP

@@ -25,6 +25,84 @@ def jax_version_meet_requirement(version: str):
 # Minimum JAX version required for Triton kernel dispatch (jaxlib < 0.8.0 segfaults).
 TRITON_EXTENSION_MIN_JAX_VERSION = "0.8.0"
 
+# Minimum JAX version for non-legacy Triton kernel FFI (supports CUDA graph capture).
+TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION = "0.10.1"
+
+# Nightly and stable floors for safe input_output_aliases in TritonAutotunedKernelCall.
+# jaxlib/gpu/triton_kernels.cc had a bug in the autotuning save/restore loop:
+# it iterated over all declared aliases unconditionally, but input_copies only
+# contains entries for aliases where XLA actually shared buffers at runtime.
+# Accessing a missing entry produced a null vector → CUDA_ERROR_INVALID_VALUE.
+# Fixed by: https://github.com/jax-ml/jax/pull/35218 (committed 2026-03-10 on jax-ml/jax main;
+# first published nightly container: jax-2026-03-17). Ships in JAX 0.9.3 (stable).
+#
+# Two separate floors are required because packaging.version always ranks a stable
+# release above any pre-release of the same series: PkgVersion("0.9.2") >
+# PkgVersion("0.9.2.dev20260317"), so a single ">= 0.9.2.dev20260317" check would
+# incorrectly accept 0.9.2 stable, which does NOT contain the fix.
+#
+#   nightly build  (v.dev is not None): safe if >= 0.9.2.dev20260317
+#   stable release (v.dev is None):     safe if >= 0.9.3
+_TRITON_AUTOTUNED_ALIAS_NIGHTLY_FLOOR = "0.9.2.dev20260317"
+_TRITON_AUTOTUNED_ALIAS_STABLE_FLOOR = "0.9.3"
+
+# Legacy single-constant kept for external callers; reflects the stable floor.
+TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION = _TRITON_AUTOTUNED_ALIAS_STABLE_FLOOR
+
+
+@lru_cache(maxsize=None)
+def is_triton_autotuned_alias_safe() -> bool:
+    """Return True if the installed JAX safely supports input_output_aliases on autotuned calls.
+
+    Uses two separate floors (jax-ml/jax#35218):
+    - nightly builds: >= 0.9.2.dev20260317 (first container with the fix)
+    - stable releases: >= 0.9.3 (0.9.2 stable does not contain the fix)
+    """
+    v = PkgVersion(get_pkg_version("jax"))
+    if v.dev is not None:
+        return v >= PkgVersion(_TRITON_AUTOTUNED_ALIAS_NIGHTLY_FLOOR)
+    return v >= PkgVersion(_TRITON_AUTOTUNED_ALIAS_STABLE_FLOOR)
+
+
+# XLA gained the ``gpu_stream:collective`` stream annotation in openxla/xla#39604,
+# first shipping in JAX 0.10.1. Older XLA fatally fails on it.
+# However, JAX 0.10.1 renamed this API to compute_on2 and slightly changed the
+# signature, then 0.11.1 renamed it back to compute_on. For simplicity,
+# we will support 0.11.1+
+_COLLECTIVE_STREAM_MIN_JAX_VERSION = "0.11.1"
+
+
+@lru_cache(maxsize=None)
+def is_collective_stream_supported() -> bool:
+    """Return True if the installed JAX supports the gpu_stream:collective annotation."""
+    if not jax_version_meet_requirement(_COLLECTIVE_STREAM_MIN_JAX_VERSION):
+        return False
+    try:
+        from jax.experimental.compute_on import compute_on  # pylint: disable=unused-import
+    except ImportError:
+        return False
+    return True
+
+
+# Minimum JAX version whose XLA ships the FFI collectives extension (lets an FFI
+# handler fetch XLA's own communicator). Conservative floor: the first version
+# this was verified on.
+_XLA_FFI_COLLECTIVES_NIGHTLY_FLOOR = "0.11.2.dev20260828"
+_XLA_FFI_COLLECTIVES_STABLE_FLOOR = "0.11.2"
+
+
+@lru_cache(maxsize=None)
+def is_xla_ffi_collectives_supported() -> bool:
+    """Return True if the installed JAX exposes the XLA FFI collectives extension.
+
+    Not EP-specific; gates auto-selection of the EP borrowed-comm path (see
+    cpp_extensions.ep.use_nccl_comm_from_xla).
+    """
+    v = PkgVersion(get_pkg_version("jax"))
+    if v.dev is not None:
+        return v >= PkgVersion(_XLA_FFI_COLLECTIVES_NIGHTLY_FLOOR)
+    return v >= PkgVersion(_XLA_FFI_COLLECTIVES_STABLE_FLOOR)
+
 
 def is_triton_extension_supported() -> bool:
     """Return True if the current JAX version supports Triton kernel dispatch.
@@ -38,6 +116,11 @@ def is_triton_extension_supported() -> bool:
 
 __all__ = [
     "jax_version_meet_requirement",
+    "is_triton_autotuned_alias_safe",
+    "is_collective_stream_supported",
+    "is_xla_ffi_collectives_supported",
     "is_triton_extension_supported",
     "TRITON_EXTENSION_MIN_JAX_VERSION",
+    "TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION",
+    "TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION",
 ]

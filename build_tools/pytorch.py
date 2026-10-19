@@ -3,18 +3,37 @@
 # See LICENSE for license information.
 
 """PyTorch related extensions."""
+
 import os
 from pathlib import Path
+from importlib import metadata
 
 import setuptools
 
-from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
+from .utils import (
+    all_files_in_dir,
+    cuda_version,
+    get_cuda_include_dirs,
+    debug_build_enabled,
+    get_bolt_build_flags,
+    nccl_ep_enabled,
+    setup_mpi_flags,
+)
 from typing import List
 
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
-    return ["torch>=2.1", "einops", "onnxscript", "onnx", "packaging", "pydantic", "nvdlfw-inspect"]
+    return [
+        "torch>=2.1",
+        "einops",
+        "onnxscript",
+        "onnx",
+        "packaging",
+        "pydantic",
+        "nvdlfw-inspect",
+        "nvidia-cudnn-frontend>=1.29.0",
+    ]
 
 
 def test_requirements() -> List[str]:
@@ -58,6 +77,9 @@ def setup_pytorch_extension(
     else:
         cxx_flags.append("-g0")
 
+    bolt_cxx_flags, linker_flags = get_bolt_build_flags()
+    cxx_flags.extend(bolt_cxx_flags)
+
     # Version-dependent CUDA options
     try:
         version = cuda_version()
@@ -67,13 +89,22 @@ def setup_pytorch_extension(
         if version < (12, 0):
             raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
 
-    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
-        mpi_path = Path(os.getenv("MPI_HOME"))
-        include_dirs.append(mpi_path / "include")
-        cxx_flags.append("-DNVTE_UB_WITH_MPI")
+    setup_mpi_flags(include_dirs, cxx_flags)
+
+    # ProcessGroupNCCL class declarations are gated on USE_C10D_NCCL. get_nccl_comm_ptr
+    # borrows the raw ncclComm_t from that backend and is used by both NCCL EP and the
+    # cuSolverMp path, so the macro is needed regardless of the NCCL EP gate below.
+    cxx_flags.append("-DUSE_C10D_NCCL")
+
+    # Mirror the NCCL EP gate from setup.py / common CMake. When disabled, the
+    # ep.cpp source no-ops at the #ifdef boundary; without the define it would
+    # produce undefined references to nvte_ep_*.
+    if nccl_ep_enabled():
+        cxx_flags.append("-DNVTE_WITH_NCCL_EP")
+        # PyTorch's symm-mem headers gate the NCCL_HAS_SYMMEM_* feature macros on
+        # USE_NCCL. The EP extension shares the symm-mem NCCL comm with torch, so
+        # it needs those macros visible.
+        cxx_flags.append("-DUSE_NCCL")
 
     library_dirs = []
     libraries = []
@@ -87,6 +118,9 @@ def setup_pytorch_extension(
         libraries.append("nvshmem_host")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
+    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
+        cxx_flags.append("-DNVTE_WITH_CUBLASMP")
+
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]
@@ -97,6 +131,7 @@ def setup_pytorch_extension(
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
         extra_compile_args={"cxx": cxx_flags},
+        extra_link_args=linker_flags,
         libraries=[str(lib) for lib in libraries],
         library_dirs=[str(lib_dir) for lib_dir in library_dirs],
     )

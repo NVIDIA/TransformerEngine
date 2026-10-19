@@ -13,10 +13,9 @@
 #include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>
-#include <cute/algorithm/gemm.hpp>
-#include <cute/arch/cluster_sm90.hpp>
 #include <cute/tensor.hpp>
 
+#include "common/cast/nvfp4/core_nvfp4.cuh"
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
@@ -38,18 +37,9 @@ namespace detail {
 namespace {
 
 using namespace cute;
-using cute::Tensor;  // Ensure unqualified Tensor refers to cute::Tensor, not transformer_engine::Tensor
 
-// calculate the global encode scale factor for a given global amax.
-__device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
-  constexpr float kFP8E4M3Max = 448.0f;
-  constexpr float kFP4E2M1Max = 6.0f;
-  // If scale is infinity, return max value of float32
-  float global_encode_scale = cutlass::minimum_with_nan_propagation<float>{}(
-    kFP8E4M3Max * kFP4E2M1Max / global_amax, cutlass::platform::numeric_limits<float>::max());
-  // If global amax is 0 or infinity, return 1
-  return (global_amax == 0.f || global_encode_scale == 0.f) ? 1.f : global_encode_scale;
-}
+using cute::Tensor;  // Avoid conflict with transformer_engine::Tensor
+using cute::Shape;  // Avoid conflict with transformer_engine::Shape
 
 template <class ElementA,
           class ElementB,
@@ -142,6 +132,11 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
             const size_t* rng_state)
 {
   using namespace cute;
+  constexpr bool is_blackwell_arch = ARCH_BLACKWELL_FAMILY;
+  if constexpr (!is_blackwell_arch) {
+    NVTE_DEVICE_ERROR("RHT fusion is only supported on Blackwell.");
+    return;
+  } else {
   using X = Underscore;
   // static constexpr bool kApplyStochasticRounding = true;
   using ElementAccumulator = float;
@@ -271,7 +266,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
   bool is_dma_warp = (warp_idx == 1);
   bool is_epilogue_warp = (warp_idx >= 4 && warp_idx <= 7);
 
-  if (is_epilogue_warp && elect_one_sync()) {
+  if (is_epilogue_warp && elect_one_sync() && global_amax != nullptr) {
     cute::prefetch(raw_pointer_cast(global_amax));
   }
 
@@ -321,6 +316,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
 
   if (warp_idx == 2 && elect_one_sync()) {
     cute::initialize_barrier(shared_storage.tma_barrier[0], /* num_threads */ 1);
+    // Publish this separately initialized barrier before TMA can complete against it.
+    cutlass::arch::fence_barrier_init();
   }
   __syncthreads();
   using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b64x;
@@ -362,7 +359,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
   } else if (is_mma_warp) {
     mma.accumulate_ = UMMA::ScaleOut::Zero;
 
-    tmem_allocator.allocate(TmemAllocator::Sm100TmemCapacityColumns, &shared_storage.tmem_base_ptr);
+    tmem_allocator.allocate(cute::TMEM::Sm100TmemCapacityColumns, &shared_storage.tmem_base_ptr);
     __syncwarp();
     tmem_allocation_result_barrier.arrive();
     uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
@@ -405,9 +402,11 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     } while (tile_idx_m < tiles_in_m && tile_idx_n < tiles_in_n);
     tmem_allocator.release_allocation_lock();
     accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
-    tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
+    tmem_allocator.free(tmem_base_ptr, cute::TMEM::Sm100TmemCapacityColumns);
   } else if (is_epilogue_warp) {
-    const float global_amax_val = *global_amax;
+    constexpr float kUnitGlobalScaleAmax = TypeExtrema<TSFC>::max * TypeExtrema<fp4e2m1>::max;
+    const float global_amax_val =
+        global_amax == nullptr ? kUnitGlobalScaleAmax : *global_amax;
     static constexpr int FragmentSize = 256 / sizeof_bits_v<TC>;
 
     tmem_allocation_result_barrier.arrive_and_wait();
@@ -422,17 +421,16 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     auto thr_r2g = tiled_r2g.get_slice(thread_idx);
 
     // NVFP4 non-E8 recipe constants and global scales
-    static constexpr float fp4_max = 6.0f;
+    static constexpr float fp4_max =
+        transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
 
-    const float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+    const float global_encode_scale =
+        dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<TSFC>(global_amax_val);
     const float global_decode_scale = 1.0f / global_encode_scale;
 
     // Scaling factor for fast math path
-    float global_encode_scale_multiplier = 1.0f;
-    if constexpr (kUseFastMath) {
-      static constexpr float fp4_max_inv = 1.0f / fp4_max;
-      global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-    }
+    static constexpr float fp4_max_inv = 1.0f / fp4_max;
+    float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
 
     do {
       for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n; ++k_tile) {
@@ -490,14 +488,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
           vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
         }
 
-        if constexpr (kUseFastMath) {
-          // Fast math: multiply with precomputed reciprocal
-          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, global_encode_scale_multiplier);
-        } else {
-          // Accurate math: perform division
-          pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
-          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(pvscales, global_encode_scale);
-        }
+        pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, global_encode_scale_multiplier);
         auto pvscales_cvted = cutlass::NumericArrayConverter<TSFC, ElementAccumulator, NumVecs>{}(pvscales);
 
         tC_rRowSFD_frg(_0{}) = pvscales_cvted;
@@ -547,6 +538,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
       tile_idx_m = linear_tile_idx % tiles_in_m;
       tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
     } while (tile_idx_m < tiles_in_m && tile_idx_n < tiles_in_n);
+  }
   }
 }
 
@@ -753,7 +745,7 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
     Tensor &rng_state_tensor = *convertNVTETensor(quant_config.rng_state);
     NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
                "RNG state should contain 2 64-bit values.");
-    NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
+    NVTE_CHECK(rng_state_tensor.data.shape == Shape{2},
                "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t *>(rng_state_tensor.data.dptr);
   }
@@ -762,7 +754,6 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
   using TA = cute::bfloat16_t;
   using TB = cute::bfloat16_t;
   using TC = cutlass::float_e2m1_t;
-  using TSFC = cutlass::float_ue4m3_t;
 
   checkCuDriverContext(stream);
 
@@ -775,11 +766,9 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
              "Hadamard matrix must be BF16 tensor, but dtype is ",
              to_string(hadamard_matrix_.dtype()), ".");
   const SimpleTensor &hadamard_matrix = hadamard_matrix_.data;
-  NVTE_CHECK(
-      (hadamard_matrix_.shape() == std::vector<size_t>{kHadamardDimension, kHadamardDimension}),
-      "Hadamard matrix must have shape=",
-      std::vector<size_t>{kHadamardDimension, kHadamardDimension},
-      ", but got shape=", hadamard_matrix_.shape(), ".");
+  NVTE_CHECK((hadamard_matrix_.shape() == Shape{kHadamardDimension, kHadamardDimension}),
+             "Hadamard matrix must have shape=", Shape{kHadamardDimension, kHadamardDimension},
+             ", but got shape=", hadamard_matrix_.shape(), ".");
   const size_t hadamard_dimension = hadamard_matrix.shape[0];
 
   const size_t ndim = input.shape.size();
@@ -825,22 +814,24 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
     k_tile_size = 512;
   }
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_stochastic_rounding, kUseStochasticRounding,
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_inv_t.dtype, TSFC,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          quant_config.use_fast_math, kUseFastMath,
-          detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding, kUseFastMath>(
-              /*m=*/m,
-              /*n=*/n,
-              /*A=*/reinterpret_cast<TA const *>(input.dptr),
-              /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-              /*C=*/reinterpret_cast<TC *>(output_t.dptr),
-              /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
-              /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
-              /*rng_state=*/rng_state,
-              /*sm_count=*/sm_count,
-              /*stream=*/stream,
-              /*k_tile_size=*/k_tile_size);););
+          use_stochastic_rounding, kUseStochasticRounding,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              quant_config.use_fast_math, kUseFastMath,
+              detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding, kUseFastMath>(
+                  /*m=*/m,
+                  /*n=*/n,
+                  /*A=*/reinterpret_cast<TA const *>(input.dptr),
+                  /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+                  /*C=*/reinterpret_cast<TC *>(output_t.dptr),
+                  /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
+                  /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
+                  /*rng_state=*/rng_state,
+                  /*sm_count=*/sm_count,
+                  /*stream=*/stream,
+                  /*k_tile_size=*/k_tile_size);););)
 }
 
 }  // namespace transformer_engine

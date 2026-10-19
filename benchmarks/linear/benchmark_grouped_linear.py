@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import argparse
+import os
 import torch
 import torch.utils.benchmark as benchmark
 import pandas as pd
@@ -185,6 +186,8 @@ def run_benchmark_linear(
         x = torch.randn((m, k), dtype=torch.bfloat16, device=device, requires_grad=True)
         ws = [torch.randn((n, k), dtype=torch.bfloat16, device=device) for _ in range(num_gemms)]
         m_splits = [m // num_gemms] * num_gemms if m_splits_provided is None else m_splits_provided
+        if bool(int(os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM", "0"))):
+            m_splits = torch.tensor(m_splits, dtype=torch.int64, device=device)
         # Bias is not supported for GroupedLinear benchmark
         bias = None
 

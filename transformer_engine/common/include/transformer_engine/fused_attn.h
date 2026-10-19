@@ -8,8 +8,8 @@
  *  \brief Enums and functions for fused attention.
  */
 
-#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
-#define TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
+#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_H_
+#define TRANSFORMER_ENGINE_FUSED_ATTN_H_
 
 #include "stdint.h"
 #include "transformer_engine.h"
@@ -52,6 +52,8 @@ enum NVTE_QKV_Layout {
   NVTE_Paged_KV_SBHD_SBHD_SBHD = 22, /*!< Paged_KV_SBHD_SBHD_SBHD layout */
   NVTE_Paged_KV_THD_BSHD_BSHD = 23,  /*!< Paged_KV_THD_BSHD_BSHD layout */
   NVTE_Paged_KV_THD_SBHD_SBHD = 24,  /*!< Paged_KV_THD_SBHD_SBHD layout */
+  NVTE_BHSD_BHSD_BHSD = 25,          /*!< BHSD_BHSD_BHSD layout */
+  NVTE_QKV_Layout_NOT_SET,           /*!< Not set */
 };
 
 /*! \enum NVTE_QKV_Layout_Group
@@ -70,6 +72,8 @@ enum NVTE_QKV_Layout_Group {
   NVTE_HD_HD_HD = 4,
   /*! Paged_KV_HD_HD_HD QKV layouts, e.g. Paged_KV_BSHD_BSHD_BSHD, Paged_KV_THD_SBHD_SBHD */
   NVTE_Paged_KV_HD_HD_HD = 5,
+  /*! SD_SD_SD QKV layouts, e.g. BHSD_BHSD_BHSD */
+  NVTE_SD_SD_SD = 6,
 };
 
 /*! \enum NVTE_QKV_Format
@@ -90,6 +94,10 @@ enum NVTE_QKV_Format {
   NVTE_THD_2BSHD = 5,
   /*! THD format for Q and SBHD format for KV, i.e. THD_SBHD_SBHD, Paged_KV_THD_SBHD_SBHD */
   NVTE_THD_2SBHD = 6,
+  /*! BHSD QKV format, e.g. BHSD_BHSD_BHSD */
+  NVTE_BHSD = 7,
+  /*! Not set */
+  NVTE_QKV_Format_NOT_SET,
 };
 
 /*! \enum NVTE_Bias_Type
@@ -148,11 +156,9 @@ enum NVTE_Softmax_Type {
 enum NVTE_Fused_Attn_Backend {
   /*! No supported backend */
   NVTE_No_Backend = -1,
-  /*! cuDNN-based FP16/BF16 fused attention for <= 512 sequence length */
-  NVTE_F16_max512_seqlen = 0,
   /*! cuDNN-based FP16/BF16 fused attention for any sequence length */
   NVTE_F16_arbitrary_seqlen = 1,
-  /*! cuDNN-based FP8 fused attention for <= 512 sequence length */
+  /*! cuDNN-based FP8 fused attention */
   NVTE_FP8 = 2,
 };
 
@@ -188,6 +194,239 @@ NVTE_QKV_Format nvte_get_q_format(NVTE_QKV_Layout qkv_layout);
  */
 NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
+/*! \brief Opaque fused-attention configuration handle. */
+typedef void *NVTEFusedAttnConfig;
+
+/*! \enum NVTEFusedAttnConfigAttribute
+ *  \brief Attributes for `NVTEFusedAttnConfig`.
+ *
+ *  This enum is used to index the `FusedAttnConfig` struct. The order of its fields matches
+ *  that of the declaration fields and the `attr_sizes` array of `FusedAttnConfig`. New fields
+ *  may be appended at the end, and existing fields are never reordered, removed, or resized.
+ */
+enum NVTEFusedAttnConfigAttribute {
+  // Basic attention settings
+  kNVTEFusedAttnConfigIsTraining = 0,
+  kNVTEFusedAttnConfigDeterministic,
+  kNVTEFusedAttnConfigCudaGraph,
+  kNVTEFusedAttnConfigReturnMaxLogit,
+  kNVTEFusedAttnConfigAttnMaskType,
+  kNVTEFusedAttnConfigBiasType,
+  kNVTEFusedAttnConfigWindowSizeLeft,
+  kNVTEFusedAttnConfigWindowSizeRight,
+  kNVTEFusedAttnConfigBottomRightDiagonal,
+  kNVTEFusedAttnConfigSoftmaxType,
+  kNVTEFusedAttnConfigScalingMode,
+  kNVTEFusedAttnConfigDropout,
+  kNVTEFusedAttnConfigAttnScale,
+  // Tensor types
+  kNVTEFusedAttnConfigQKVDtype,
+  kNVTEFusedAttnConfigODtype,
+  kNVTEFusedAttnConfigDODtype,
+  kNVTEFusedAttnConfigDQKVDtype,
+  // Tensor layouts
+  kNVTEFusedAttnConfigQKVLayout,
+  kNVTEFusedAttnConfigOFormat,
+  kNVTEFusedAttnConfigDOFormat,
+  kNVTEFusedAttnConfigDQKVLayout,
+  kNVTEFusedAttnConfigQKVScaleInvFormat,
+  kNVTEFusedAttnConfigDOScaleInvFormat,
+  // Tensor dimensions
+  kNVTEFusedAttnConfigBatchSize,
+  kNVTEFusedAttnConfigNumAttnHeads,
+  kNVTEFusedAttnConfigNumGQAGroups,
+  kNVTEFusedAttnConfigHeadDimQK,
+  kNVTEFusedAttnConfigHeadDimV,
+  kNVTEFusedAttnConfigMaxSeqlenQ,
+  kNVTEFusedAttnConfigMaxSeqlenKV,
+  kNVTEFusedAttnConfigNumTokensQ,
+  kNVTEFusedAttnConfigNumTokensKV,
+  // Paged KV dimensions
+  kNVTEFusedAttnConfigNumPagesK,
+  kNVTEFusedAttnConfigNumPagesV,
+  kNVTEFusedAttnConfigPageSizeK,
+  kNVTEFusedAttnConfigPageSizeV,
+  kNVTEFusedAttnConfigMaxPagesPerSeqK,
+  kNVTEFusedAttnConfigMaxPagesPerSeqV,
+  // Bias dimensions
+  kNVTEFusedAttnConfigBiasBatchSize,
+  kNVTEFusedAttnConfigBiasNumHeads,
+  kNVTEFusedAttnConfigBiasSeqlenQ,
+  kNVTEFusedAttnConfigBiasSeqlenKV,
+  // Number of attributes
+  kNVTEFusedAttnConfigNumAttributes
+};
+
+/*! \brief Create a fused-attention configuration. */
+NVTEFusedAttnConfig nvte_create_fused_attn_config(void);
+
+/*! \brief Destroy a fused-attention configuration. */
+void nvte_destroy_fused_attn_config(NVTEFusedAttnConfig config);
+
+/*! \brief Query an attribute in a fused-attention configuration. */
+void nvte_get_fused_attn_config_attribute(NVTEFusedAttnConfig config,
+                                          NVTEFusedAttnConfigAttribute attr, void *buf,
+                                          size_t size_in_bytes, size_t *size_written);
+
+/*! \brief Set an attribute in a fused-attention configuration. */
+void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
+                                          NVTEFusedAttnConfigAttribute attr, const void *buf,
+                                          size_t size_in_bytes);
+
+/*! \brief Opaque fused-attention forward-parameter handle. */
+typedef void *NVTEFusedAttnFwdParams;
+
+/*! \enum NVTEFusedAttnFwdParamsAttribute
+ *  \brief Attributes for `NVTEFusedAttnFwdParams`.
+ *
+ *  This enum is used to index the `FusedAttnFwdParams` struct. The order of its fields matches
+ *  that of the declaration fields and the `attr_sizes` array of `FusedAttnFwdParams`. New fields
+ *  may be appended at the end, and existing fields are never reordered, removed, or resized.
+ */
+enum NVTEFusedAttnFwdParamsAttribute {
+  // Tensor handles
+  kNVTEFusedAttnFwdParamsQ = 0,
+  kNVTEFusedAttnFwdParamsK,
+  kNVTEFusedAttnFwdParamsV,
+  kNVTEFusedAttnFwdParamsBias,
+  kNVTEFusedAttnFwdParamsSoftmaxOffset,
+  kNVTEFusedAttnFwdParamsS,
+  kNVTEFusedAttnFwdParamsO,
+  kNVTEFusedAttnFwdParamsAuxCtxTensors,
+  kNVTEFusedAttnFwdParamsCuSeqlensQ,
+  kNVTEFusedAttnFwdParamsCuSeqlensKV,
+  kNVTEFusedAttnFwdParamsCuSeqlensQPadded,
+  kNVTEFusedAttnFwdParamsCuSeqlensKVPadded,
+  kNVTEFusedAttnFwdParamsPageTableK,
+  kNVTEFusedAttnFwdParamsPageTableV,
+  kNVTEFusedAttnFwdParamsRngState,
+  // Configuration knobs
+  kNVTEFusedAttnFwdParamsIsTraining,
+  kNVTEFusedAttnFwdParamsCudaGraph,
+  kNVTEFusedAttnFwdParamsReturnMaxLogit,
+  kNVTEFusedAttnFwdParamsAttnMaskType,
+  kNVTEFusedAttnFwdParamsBiasType,
+  kNVTEFusedAttnFwdParamsWindowSizeLeft,
+  kNVTEFusedAttnFwdParamsWindowSizeRight,
+  kNVTEFusedAttnFwdParamsBottomRightDiagonal,
+  kNVTEFusedAttnFwdParamsSoftmaxType,
+  kNVTEFusedAttnFwdParamsDropout,
+  kNVTEFusedAttnFwdParamsAttnScale,
+  kNVTEFusedAttnFwdParamsQKVLayout,
+  kNVTEFusedAttnFwdParamsOFormat,
+  kNVTEFusedAttnFwdParamsQKVScaleInvFormat,
+  kNVTEFusedAttnFwdParamsMaxSeqlenQ,
+  kNVTEFusedAttnFwdParamsMaxSeqlenKV,
+  // Workspace and stream
+  kNVTEFusedAttnFwdParamsWorkspace,
+  kNVTEFusedAttnFwdParamsStream,
+  // Number of attributes
+  kNVTEFusedAttnFwdParamsNumAttributes
+};
+
+/*! \brief Create a fused-attention forward-parameter object. */
+NVTEFusedAttnFwdParams nvte_create_fused_attn_fwd_params(void);
+
+/*! \brief Destroy a fused-attention forward-parameter object. */
+void nvte_destroy_fused_attn_fwd_params(NVTEFusedAttnFwdParams params);
+
+/*! \brief Query an attribute in a fused-attention forward-parameter object. */
+void nvte_get_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
+                                              NVTEFusedAttnFwdParamsAttribute attr, void *buf,
+                                              size_t size_in_bytes, size_t *size_written);
+
+/*! \brief Set an attribute in a fused-attention forward-parameter object. */
+void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
+                                              NVTEFusedAttnFwdParamsAttribute attr, const void *buf,
+                                              size_t size_in_bytes);
+
+/*! \brief Opaque fused-attention backward-parameter handle. */
+typedef void *NVTEFusedAttnBwdParams;
+
+/*! \enum NVTEFusedAttnBwdParamsAttribute
+ *  \brief Attributes for `NVTEFusedAttnBwdParams`.
+ *
+ *  This enum is used to index the `FusedAttnBwdParams` struct. The order of its fields matches
+ *  that of the declaration fields and the `attr_sizes` array of `FusedAttnBwdParams`. New fields
+ *  may be appended at the end, and existing fields are never reordered, removed, or resized.
+ */
+enum NVTEFusedAttnBwdParamsAttribute {
+  // Tensor handles
+  kNVTEFusedAttnBwdParamsQ = 0,
+  kNVTEFusedAttnBwdParamsK,
+  kNVTEFusedAttnBwdParamsV,
+  kNVTEFusedAttnBwdParamsO,
+  kNVTEFusedAttnBwdParamsDO,
+  kNVTEFusedAttnBwdParamsS,
+  kNVTEFusedAttnBwdParamsDP,
+  kNVTEFusedAttnBwdParamsAuxCtxTensors,
+  kNVTEFusedAttnBwdParamsDQ,
+  kNVTEFusedAttnBwdParamsDK,
+  kNVTEFusedAttnBwdParamsDV,
+  kNVTEFusedAttnBwdParamsDBias,
+  kNVTEFusedAttnBwdParamsDSoftmaxOffset,
+  kNVTEFusedAttnBwdParamsCuSeqlensQ,
+  kNVTEFusedAttnBwdParamsCuSeqlensKV,
+  kNVTEFusedAttnBwdParamsCuSeqlensQPadded,
+  kNVTEFusedAttnBwdParamsCuSeqlensKVPadded,
+  // Configuration knobs
+  kNVTEFusedAttnBwdParamsDeterministic,
+  kNVTEFusedAttnBwdParamsCudaGraph,
+  kNVTEFusedAttnBwdParamsAttnMaskType,
+  kNVTEFusedAttnBwdParamsBiasType,
+  kNVTEFusedAttnBwdParamsWindowSizeLeft,
+  kNVTEFusedAttnBwdParamsWindowSizeRight,
+  kNVTEFusedAttnBwdParamsBottomRightDiagonal,
+  kNVTEFusedAttnBwdParamsSoftmaxType,
+  kNVTEFusedAttnBwdParamsDropout,
+  kNVTEFusedAttnBwdParamsAttnScale,
+  kNVTEFusedAttnBwdParamsQKVLayout,
+  kNVTEFusedAttnBwdParamsOFormat,
+  kNVTEFusedAttnBwdParamsDOFormat,
+  kNVTEFusedAttnBwdParamsDQKVLayout,
+  kNVTEFusedAttnBwdParamsQKVScaleInvFormat,
+  kNVTEFusedAttnBwdParamsDOScaleInvFormat,
+  kNVTEFusedAttnBwdParamsMaxSeqlenQ,
+  kNVTEFusedAttnBwdParamsMaxSeqlenKV,
+  // Workspace and stream
+  kNVTEFusedAttnBwdParamsWorkspace,
+  kNVTEFusedAttnBwdParamsStream,
+  // Number of attributes
+  kNVTEFusedAttnBwdParamsNumAttributes
+};
+
+/*! \brief Create a fused-attention backward-parameter object. */
+NVTEFusedAttnBwdParams nvte_create_fused_attn_bwd_params(void);
+
+/*! \brief Destroy a fused-attention backward-parameter object. */
+void nvte_destroy_fused_attn_bwd_params(NVTEFusedAttnBwdParams params);
+
+/*! \brief Query an attribute in a fused-attention backward-parameter object. */
+void nvte_get_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
+                                              NVTEFusedAttnBwdParamsAttribute attr, void *buf,
+                                              size_t size_in_bytes, size_t *size_written);
+
+/*! \brief Set an attribute in a fused-attention backward-parameter object. */
+void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
+                                              NVTEFusedAttnBwdParamsAttribute attr, const void *buf,
+                                              size_t size_in_bytes);
+
+/*! \brief Get fused-attention backend based on the user configuration.
+ *
+ *  \param[in]     cfg     Fused-attention configuration created by
+ *                         `nvte_create_fused_attn_config()`.
+ *  \param[out]    message If the configuration is supported, an empty string. If not supported,
+ *                         a diagnostic message explaining why the configuration is rejected. Pass
+ *                         `NULL` to skip the diagnostics. The library maintains a per-thread buffer,
+ *                         and callers do not need to allocate memory for the message. The buffer
+ *                         content stays valid until the next call of `nvte_get_fused_attn_backend_v2`.
+ *
+ *  \return Fused-attention backend, `NVTE_F16_arbitrary_seqlen` or `NVTE_FP8`,
+ *          if the configuration is supported; otherwise, `NVTE_No_Backend`.
+ */
+NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig cfg,
+                                                       const char **message);
+
 /*! \brief Get fused attention backend based on input parameters.
  *
  *  \param[in]     is_training         Whether the model is in training mode.
@@ -206,9 +445,19 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     head_dim_v          The head dimension of V.
  *  \param[in]     window_size_left    Sliding window size (the left half).
  *  \param[in]     window_size_right   Sliding window size (the right half).
- *  \param[in]     return_max_logit    Whether to produce Max and Sum_Exp, or Stats.
+ *  \param[in]     return_max_logit    Whether to produce Max along with Stats.
  *  \param[in]     cuda_graph          Whether cuda graph capture is enabled or not.
  *  \param[in]     deterministic       Whether determinism is required or not.
+ *
+ *  \deprecated This function has been deprecated in favor of `nvte_get_fused_attn_backend_v2`.
+ *
+ *  \note `nvte_get_fused_attn_backend` has a narrower input signature compared to
+ *        `nvte_get_fused_attn_backend_v2`. For the fields it cannot express, it fills them with
+ *        the default values of `nvte_get_fused_attn_backend_v2`. This includes setting
+ *        `batch_size` = 1, deriving output/gradient formats from `qkv_layout`, assuming a standard
+ *        bias shape [b, h, sq, skv] for `NVTE_POST_SCALE_BIAS`, using delayed scaling for all FP8,
+ *        and not supporting paged-KV attention checks. Users who need more precise control should
+ *        use `nvte_get_fused_attn_backend_v2` instead.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
@@ -217,6 +466,17 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
     int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic);
 
+/*! \brief Compute dot product attention with Q, K, and V.
+ *
+ *  All inputs and outputs are carried by the opaque \p params handle. Create it with
+ *  `nvte_create_fused_attn_fwd_params()`, populate it with
+ *  `nvte_set_fused_attn_fwd_params_attribute()` or `FusedAttnFwdParamsWrapper` setters, and
+ *  destroy it with `nvte_destroy_fused_attn_fwd_params()`.
+ *
+ *  \param[in,out] params                Fused-attention forward-parameter handle.
+ */
+void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params);
+
 /*! \brief Compute dot product attention with separate Q, K and V.
  *
  * Computes:
@@ -224,16 +484,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  - S = ScaleMaskSoftmax(P)
  *  - D = Dropout(S)
  *  - O = D * Transpose(V)
- *
- * Support Matrix:
-   \verbatim
-   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
-   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
-   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
-   \endverbatim
  *
  * Notes:
  *
@@ -256,7 +506,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in,out] S                         The S tensor.
  *  \param[out]    O                         The output O tensor.
  *  \param[out]    Aux_CTX_Tensors           Auxiliary output tensors when training,
- *                                           e.g. M, ZInv, rng_state.
+ *                                           e.g. softmax stats, optional Max, rng_state.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
@@ -269,11 +519,15 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     max_seqlen_kv             Max sequence length used for computing for K and V.
  *                                           it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
  *  \param[in]     is_training               Whether this is in training mode or inference.
- *  \param[in]     return_max_logit          Whether to produce Max and Sum_Exp, or Stats.
+ *  \param[in]     return_max_logit          Whether to produce Max along with Stats.
  *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensors' layout.
+ *  \param[in]     o_format                  Output format.
+ *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV;
+ *                                           if `NVTE_QKV_Format_NOT_SET`, inferred from
+ *                                           `qkv_layout`.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     softmax_type              Attention softmax type.
@@ -282,6 +536,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
+ *
+ *  \deprecated This function has been deprecated in favor of `nvte_fused_attn_fwd_v2`.
  */
 void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
@@ -292,22 +548,24 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor page_table_v, const NVTETensor rng_state,
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                          bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
-/*! \brief Compute the backward of the dot product attention with separate Q, K and V.
+/*! \brief Compute the backward of the dot product attention with Q, K and V.
  *
- * Support Matrix:
-   \verbatim
-   | backend | precision |                qkv layout                   |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |     BS3HD,SB3HD,BSHD_BS2HD,SBHD_SB2HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 |          BS3HD,SB3HD,BSH3D,SBH3D            | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   |         |           | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D |                          |                                       |         |                   |                  |
-   |         |           |       BSHD_BSHD_BSHD,SBHD_SBHD_SBHD         |                          |                                       |         |                   |                  |
-   |   2     |   FP8     |                 T3HD                        |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
-   \endverbatim
+ *  All inputs and outputs are carried by the opaque \p params handle. Create it with
+ *  `nvte_create_fused_attn_bwd_params()`, populate it with
+ *  `nvte_set_fused_attn_bwd_params_attribute()` or `FusedAttnBwdParamsWrapper` setters, and
+ *  destroy it with `nvte_destroy_fused_attn_bwd_params()`.
+ *
+ *  \param[in,out] params                Fused-attention backward-parameter handle.
+ */
+void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params);
+
+/*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
  * Notes:
  *
@@ -330,7 +588,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     S                         The S tensor.
  *  \param[in,out] dP                        The gradient of the P tensor.
  *  \param[in]     Aux_CTX_Tensors           Auxiliary tensors from context when in training mode,
- *                                           e.g. M, ZInv, rng_state.
+ *                                           e.g. softmax stats, optional Max, rng_state.
  *  \param[out]    dQ                        The gradient of the Q tensor.
  *  \param[out]    dK                        The gradient of the K tensor.
  *  \param[out]    dV                        The gradient of the V tensor.
@@ -347,6 +605,15 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensors' layout.
+ *  \param[in]     o_format                  Output format.
+ *  \param[in]     do_format                 Output gradient's format.
+ *  \param[in]     dqkv_layout               QKV gradient tensors' layout.
+ *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV;
+ *                                           if `NVTE_QKV_Format_NOT_SET`, inferred from
+ *                                           `qkv_layout`.
+ *  \param[in]     do_scale_inv_format       Format of scale-inverse tensors for dO;
+ *                                           if `NVTE_QKV_Format_NOT_SET`, inferred from the
+ *                                           output layout.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     softmax_type              Attention softmax type.
@@ -357,6 +624,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
+ *
+ *  \deprecated This function has been deprecated in favor of `nvte_fused_attn_bwd_v2`.
  */
 void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
@@ -366,11 +635,13 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
                          size_t max_seqlen_kv, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                         int64_t window_size_left, int64_t window_size_right,
-                         bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
-                         NVTETensor workspace, cudaStream_t stream);
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+                         NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                         NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+                         int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
+                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream);
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
@@ -389,7 +660,7 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
                                    size_t q_max_seqlen, size_t kv_max_seqlen,
                                    NVTE_Fused_Attn_Backend backend, cudaStream_t stream);
 
-/*!  \brief Get KV format for a given QKV layout.
+/*!  \brief Count the non-empty segments in a batch of cumulative sequence lengths.
  *
  * \warning   This API is **experimental** and subject to change.
  *
@@ -397,6 +668,10 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     len                      batch_size x sequence_length.
  *  \param[in]     stream                   CUDA stream used for this operation.
+ *
+ *  \deprecated Transformer Engine no longer calls this function. It worked around cuDNN versions
+ *              before 9.3, which could not handle an actual sequence length of 0, and is
+ *              scheduled for removal in a future release.
  */
 uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlens, NVTETensor workspace, size_t len,
                                        cudaStream_t stream);
@@ -491,7 +766,8 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
  *
  *  \param[out]    out                   Output tensor.
  *  \param[in]     out_per_step          THD format output of context parallelism in forward pass.
- *  \param[in]     lse                   Softmax LSE.
+ *  \param[in]     old_lse               Softmax LSE before adding this step.
+ *  \param[in]     lse                   Softmax LSE after adding this step.
  *  \param[in]     lse_per_step          Softmax LSE per step.
  *  \param[in]     cu_seqlens            Cumulative sequence lengths, [batch_size + 1].
  *  \param[in]     only_second_half      Whether or not to correct only second half.
@@ -499,20 +775,26 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
  *  \param[in]     stream                CUDA stream used for this operation.
  */
 void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
-                                const NVTETensor &lse, const NVTETensor &lse_per_step,
-                                const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
-                                cudaStream_t stream);
+                                const NVTETensor &old_lse, const NVTETensor &lse,
+                                const NVTETensor &lse_per_step, const NVTETensor &cu_seqlens,
+                                int only_second_half, int lse_packed, cudaStream_t stream);
 
-/*!  \brief Correct the THD format output of context parallelism in forward pass.
+/*!  \brief Update the two halves of each packed THD sequence during context-parallel backward.
  *
  * \warning   This API is **experimental** and subject to change.
  *
- *  \param[out]    grad                Output tensor.
- *  \param[in]     grad_per_step       THD format gradient of context parallelism.
- *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     first_half          One of ("add", "copy", "none") correction op for first half.
- *  \param[in]     second_half         One of ("add", "copy", "none") correction op for second half.
-                                       Must be different from first_half.
+ * first_half and second_half control how grad is updated from grad_per_step: "add" accumulates,
+ * "copy" replaces, "none" preserves, and "zero" clears. FP16, BF16, and FP32 gradients support
+ * (add, none), (none, add), (copy, none), (none, copy), (copy, zero), (zero, copy), (add, copy),
+ * and (copy, add). FP8 gradients are stored as raw encoded bytes, which this kernel cannot add
+ * numerically. They support only (copy, zero) and (zero, copy): copy preserves the FP8 values and
+ * zero clears the inactive sequence half.
+ *
+ *  \param[in,out] grad                Packed THD gradient to update.
+ *  \param[in]     grad_per_step       Gradient from the current context-parallel step.
+ *  \param[in]     cu_seqlens          Packed-sequence boundaries, [batch_size + 1].
+ *  \param[in]     first_half          Operation for each sequence's first half.
+ *  \param[in]     second_half         Operation for each sequence's second half.
  *  \param[in]     stream              CUDA stream used for this operation.
  */
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
@@ -533,6 +815,56 @@ void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_ste
 void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
                                          int total_tokens, int world_size, int rank,
                                          cudaStream_t stream);
+
+/*!  \brief Reorder THD tensor from sequence order to dual-chunk CP rank order.
+ *
+ * Uses the padded THD sequence lengths to place each sequence's two CP chunks
+ * in the order consumed by each CP rank.
+ *
+ *  \param[in]     inp           Input THD tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens    Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[out]    out           Output tensor, same shape/dtype as inp.
+ *  \param[in]     world_size    Context-parallel size.
+ *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream        CUDA stream used for this operation.
+ */
+void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
+                                              cudaStream_t stream);
+
+/*!  \brief Reorder THD tensor from dual-chunk CP rank order to sequence order.
+ *
+ * Uses the padded THD sequence lengths to restore each sequence's dual-chunk
+ * CP entries to sequence order.
+ *
+ *  \param[in]     inp           Input THD tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens    Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[out]    out           Output tensor, same shape/dtype as inp.
+ *  \param[in]     world_size    Context-parallel size.
+ *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream        CUDA stream used for this operation.
+ */
+void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
+                                              NVTETensor out, int world_size, int total_tokens,
+                                              cudaStream_t stream);
+
+/*!  \brief Copy valid token entries from a per-split THD tensor to a rank-local accumulator.
+ *
+ * For each dual-chunk CP step/split, copies each sequence's valid range at
+ * its padded THD token offsets and leaves padded entries untouched.
+ *
+ *  \param[in]     inp                 Per-split THD source tensor [total_tokens, ...].
+ *  \param[in]     cu_seqlens_padded   Padded cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[in]     cu_seqlens          Valid cumulative sequence lengths, [batch_size + 1], int32.
+ *  \param[in,out] out                 Rank-local accumulator, same shape/dtype as inp.
+ *  \param[in]     total_tokens        Total padded tokens (= inp.shape[0]).
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
+void nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(const NVTETensor &inp,
+                                                             const NVTETensor &cu_seqlens_padded,
+                                                             const NVTETensor &cu_seqlens,
+                                                             NVTETensor out, int total_tokens,
+                                                             cudaStream_t stream);
 
 /*!  \brief Convert tensor from THD to BSHD format.
  *
@@ -584,8 +916,563 @@ void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t s
 void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
                                  cudaStream_t stream);
 
+/*!  \brief Transpose multiple tensors from BSHD/SBHD to BHSD.
+ *
+ *  Each input tensor is 4D in BSHD or SBHD layout, and the corresponding output tensor
+ *  is 4D in BHSD layout. Output tensors are pre-allocated and may have a larger last dimension.
+ *
+ *  \param[in]     inputs           List of input tensors.
+ *  \param[in,out] outputs          List of output tensors.
+ *  \param[in]     num_tensors      Number of tensors in the list.
+ *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
+ *  \param[in]     stream           CUDA stream.
+ */
+void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs,
+                                         size_t num_tensors, NVTE_QKV_Format original_format,
+                                         cudaStream_t stream);
+
+/*!  \brief Pad the last dimension of multiple 2D tensors with zeros in one kernel launch.
+ *
+ *  Each tensor copies a row-major (rows, in_cols) input to a (rows, out_cols) output,
+ *  zero-filling the region [in_cols, out_cols) in every row.
+ *  Outputs must be pre-allocated with out_cols >= in_cols and matching dtype.
+ *
+ *  \param[in]     inputs       List of input tensors.
+ *  \param[in,out] outputs      List of output tensors.
+ *  \param[in]     num_tensors  Number of tensors in the list.
+ *  \param[in]     stream       CUDA stream.
+ */
+void nvte_multi_tensor_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,
+                                    cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
-#endif
+
+#include <array>
+#include <cstddef>
+#include <utility>
+
+/*! \brief Parses a QKV tensor shape into canonical (b, h, s, d, t) dimensions
+ *         and converts between QKV formats.
+ */
+class AttentionShape {
+ public:
+  inline AttentionShape(NVTE_QKV_Format fmt, const size_t *shape) : canonical_{} {
+    auto [ndim, order] = dim_order(fmt);
+    for (size_t i = 0; i < ndim; ++i) canonical_[order[i]] = shape[i];
+  }
+
+  size_t b() const { return canonical_[0]; }
+  size_t h() const { return canonical_[1]; }
+  size_t s() const { return canonical_[2]; }
+  size_t d() const { return canonical_[3]; }
+  size_t t() const { return canonical_[4]; }
+
+  inline void to_format(NVTE_QKV_Format dst_fmt, size_t *dst_shape) const {
+    auto [ndim, order] = dim_order(dst_fmt);
+    for (size_t i = 0; i < ndim; ++i) dst_shape[i] = canonical_[order[i]];
+  }
+
+ private:
+  static inline std::pair<size_t, std::array<int, 4>> dim_order(NVTE_QKV_Format fmt) {
+    switch (fmt) {
+      case NVTE_QKV_Format::NVTE_BSHD:
+        return {4, {0, 2, 1, 3}};  // b s h d
+      case NVTE_QKV_Format::NVTE_SBHD:
+        return {4, {2, 0, 1, 3}};  // s b h d
+      case NVTE_QKV_Format::NVTE_BHSD:
+        return {4, {0, 1, 2, 3}};  // b h s d
+      case NVTE_QKV_Format::NVTE_THD:
+        return {3, {4, 1, 3, -1}};  // t h d
+      default:
+        return {0, {}};
+    }
+  }
+  size_t canonical_[5] = {};
+};
+
+/*! \class FusedAttnConfigWrapper
+ *  \brief C++ helper for constructing an `NVTEFusedAttnConfig`.
+ *
+ *  It owns an opaque `NVTEFusedAttnConfig` handle created by
+ *  `nvte_create_fused_attn_config()`, and provides a convenient,
+ *  chainable interface for setting every field in `FusedAttnConfig`.
+ */
+class FusedAttnConfigWrapper {
+ public:
+  FusedAttnConfigWrapper() : cfg_{nvte_create_fused_attn_config()} {}
+
+  FusedAttnConfigWrapper(const FusedAttnConfigWrapper &) = delete;
+  FusedAttnConfigWrapper &operator=(const FusedAttnConfigWrapper &) = delete;
+
+  FusedAttnConfigWrapper(FusedAttnConfigWrapper &&other) noexcept : cfg_{other.cfg_} {
+    other.cfg_ = nullptr;
+  }
+
+  FusedAttnConfigWrapper &operator=(FusedAttnConfigWrapper &&other) noexcept {
+    if (this != &other) {
+      if (cfg_ != nullptr) {
+        nvte_destroy_fused_attn_config(cfg_);
+      }
+      cfg_ = other.cfg_;
+      other.cfg_ = nullptr;
+    }
+    return *this;
+  }
+
+  ~FusedAttnConfigWrapper() {
+    if (cfg_ != nullptr) {
+      nvte_destroy_fused_attn_config(cfg_);
+    }
+  }
+
+  operator NVTEFusedAttnConfig() const noexcept { return cfg_; }
+  NVTEFusedAttnConfig get() const noexcept { return cfg_; }
+
+  FusedAttnConfigWrapper &set_is_training(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigIsTraining, static_cast<uint8_t>(val));
+  }
+  FusedAttnConfigWrapper &set_deterministic(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigDeterministic, static_cast<uint8_t>(val));
+  }
+  FusedAttnConfigWrapper &set_cuda_graph(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigCudaGraph, static_cast<uint8_t>(val));
+  }
+  FusedAttnConfigWrapper &set_return_max_logit(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigReturnMaxLogit, static_cast<uint8_t>(val));
+  }
+  FusedAttnConfigWrapper &set_attn_mask_type(NVTE_Mask_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigAttnMaskType, val);
+  }
+  FusedAttnConfigWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigBiasType, val);
+  }
+  FusedAttnConfigWrapper &set_window_size_left(int64_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigWindowSizeLeft, val);
+  }
+  FusedAttnConfigWrapper &set_window_size_right(int64_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigWindowSizeRight, val);
+  }
+  FusedAttnConfigWrapper &set_bottom_right_diagonal(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigBottomRightDiagonal, static_cast<uint8_t>(val));
+  }
+  FusedAttnConfigWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigSoftmaxType, val);
+  }
+  FusedAttnConfigWrapper &set_scaling_mode(NVTEScalingMode val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigScalingMode, val);
+  }
+  FusedAttnConfigWrapper &set_dropout(float val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigDropout, val);
+  }
+  FusedAttnConfigWrapper &set_attn_scale(float val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigAttnScale, val);
+  }
+  FusedAttnConfigWrapper &set_qkv_dtype(NVTEDType val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigQKVDtype, val);
+  }
+  FusedAttnConfigWrapper &set_o_dtype(NVTEDType val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigODtype, val);
+  }
+  FusedAttnConfigWrapper &set_do_dtype(NVTEDType val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigDODtype, val);
+  }
+  FusedAttnConfigWrapper &set_dqkv_dtype(NVTEDType val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigDQKVDtype, val);
+  }
+  FusedAttnConfigWrapper &set_qkv_layout(NVTE_QKV_Layout val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigQKVLayout, val);
+  }
+  FusedAttnConfigWrapper &set_o_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigOFormat, val);
+  }
+  FusedAttnConfigWrapper &set_do_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigDOFormat, val);
+  }
+  FusedAttnConfigWrapper &set_dqkv_layout(NVTE_QKV_Layout val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigDQKVLayout, val);
+  }
+  FusedAttnConfigWrapper &set_qkv_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigQKVScaleInvFormat, val);
+  }
+  FusedAttnConfigWrapper &set_do_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigDOScaleInvFormat, val);
+  }
+  FusedAttnConfigWrapper &set_batch_size(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigBatchSize, val);
+  }
+  FusedAttnConfigWrapper &set_num_attn_heads(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigNumAttnHeads, val);
+  }
+  FusedAttnConfigWrapper &set_num_gqa_groups(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigNumGQAGroups, val);
+  }
+  FusedAttnConfigWrapper &set_head_dim_qk(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigHeadDimQK, val);
+  }
+  FusedAttnConfigWrapper &set_head_dim_v(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigHeadDimV, val);
+  }
+  FusedAttnConfigWrapper &set_max_seqlen_q(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigMaxSeqlenQ, val);
+  }
+  FusedAttnConfigWrapper &set_max_seqlen_kv(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigMaxSeqlenKV, val);
+  }
+  FusedAttnConfigWrapper &set_num_tokens_q(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigNumTokensQ, val);
+  }
+  FusedAttnConfigWrapper &set_num_tokens_kv(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigNumTokensKV, val);
+  }
+  FusedAttnConfigWrapper &set_num_pages_k(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigNumPagesK, val);
+  }
+  FusedAttnConfigWrapper &set_num_pages_v(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigNumPagesV, val);
+  }
+  FusedAttnConfigWrapper &set_page_size_k(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigPageSizeK, val);
+  }
+  FusedAttnConfigWrapper &set_page_size_v(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigPageSizeV, val);
+  }
+  FusedAttnConfigWrapper &set_max_pages_per_seq_k(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigMaxPagesPerSeqK, val);
+  }
+  FusedAttnConfigWrapper &set_max_pages_per_seq_v(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigMaxPagesPerSeqV, val);
+  }
+  FusedAttnConfigWrapper &set_bias_batch_size(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigBiasBatchSize, val);
+  }
+  FusedAttnConfigWrapper &set_bias_num_heads(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigBiasNumHeads, val);
+  }
+  FusedAttnConfigWrapper &set_bias_seqlen_q(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigBiasSeqlenQ, val);
+  }
+  FusedAttnConfigWrapper &set_bias_seqlen_kv(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnConfigBiasSeqlenKV, val);
+  }
+
+ private:
+  template <typename T>
+  FusedAttnConfigWrapper &set_attr(NVTEFusedAttnConfigAttribute attr, T val) noexcept {
+    nvte_set_fused_attn_config_attribute(cfg_, attr, &val, sizeof(val));
+    return *this;
+  }
+
+  NVTEFusedAttnConfig cfg_ = nullptr;
+};
+
+/*! \class FusedAttnFwdParamsWrapper
+ *  \brief C++ helper for constructing an `NVTEFusedAttnFwdParams`.
+ *
+ *  It owns an opaque `NVTEFusedAttnFwdParams` handle created by
+ *  `nvte_create_fused_attn_fwd_params()`, and provides a convenient,
+ *  chainable interface for setting every field in `FusedAttnFwdParams`.
+ */
+class FusedAttnFwdParamsWrapper {
+ public:
+  FusedAttnFwdParamsWrapper() : params_{nvte_create_fused_attn_fwd_params()} {}
+
+  FusedAttnFwdParamsWrapper(const FusedAttnFwdParamsWrapper &) = delete;
+  FusedAttnFwdParamsWrapper &operator=(const FusedAttnFwdParamsWrapper &) = delete;
+
+  FusedAttnFwdParamsWrapper(FusedAttnFwdParamsWrapper &&other) noexcept : params_{other.params_} {
+    other.params_ = nullptr;
+  }
+
+  FusedAttnFwdParamsWrapper &operator=(FusedAttnFwdParamsWrapper &&other) noexcept {
+    if (this != &other) {
+      if (params_ != nullptr) {
+        nvte_destroy_fused_attn_fwd_params(params_);
+      }
+      params_ = other.params_;
+      other.params_ = nullptr;
+    }
+    return *this;
+  }
+
+  ~FusedAttnFwdParamsWrapper() {
+    if (params_ != nullptr) {
+      nvte_destroy_fused_attn_fwd_params(params_);
+    }
+  }
+
+  operator NVTEFusedAttnFwdParams() const noexcept { return params_; }
+  NVTEFusedAttnFwdParams get() const noexcept { return params_; }
+
+  FusedAttnFwdParamsWrapper &set_Q(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsQ, val);
+  }
+  FusedAttnFwdParamsWrapper &set_K(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsK, val);
+  }
+  FusedAttnFwdParamsWrapper &set_V(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsV, val);
+  }
+  FusedAttnFwdParamsWrapper &set_Bias(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsBias, val);
+  }
+  FusedAttnFwdParamsWrapper &set_SoftmaxOffset(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsSoftmaxOffset, val);
+  }
+  FusedAttnFwdParamsWrapper &set_S(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsS, val);
+  }
+  FusedAttnFwdParamsWrapper &set_O(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsO, val);
+  }
+  FusedAttnFwdParamsWrapper &set_Aux_CTX_Tensors(NVTETensorPack *val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsAuxCtxTensors, val);
+  }
+  FusedAttnFwdParamsWrapper &set_cu_seqlens_q(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsCuSeqlensQ, val);
+  }
+  FusedAttnFwdParamsWrapper &set_cu_seqlens_kv(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsCuSeqlensKV, val);
+  }
+  FusedAttnFwdParamsWrapper &set_cu_seqlens_q_padded(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsCuSeqlensQPadded, val);
+  }
+  FusedAttnFwdParamsWrapper &set_cu_seqlens_kv_padded(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsCuSeqlensKVPadded, val);
+  }
+  FusedAttnFwdParamsWrapper &set_page_table_k(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsPageTableK, val);
+  }
+  FusedAttnFwdParamsWrapper &set_page_table_v(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsPageTableV, val);
+  }
+  FusedAttnFwdParamsWrapper &set_rng_state(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsRngState, val);
+  }
+  FusedAttnFwdParamsWrapper &set_is_training(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsIsTraining, static_cast<uint8_t>(val));
+  }
+  FusedAttnFwdParamsWrapper &set_cuda_graph(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsCudaGraph, static_cast<uint8_t>(val));
+  }
+  FusedAttnFwdParamsWrapper &set_return_max_logit(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsReturnMaxLogit, static_cast<uint8_t>(val));
+  }
+  FusedAttnFwdParamsWrapper &set_attn_mask_type(NVTE_Mask_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsAttnMaskType, val);
+  }
+  FusedAttnFwdParamsWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsBiasType, val);
+  }
+  FusedAttnFwdParamsWrapper &set_window_size_left(int64_t val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsWindowSizeLeft, val);
+  }
+  FusedAttnFwdParamsWrapper &set_window_size_right(int64_t val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsWindowSizeRight, val);
+  }
+  FusedAttnFwdParamsWrapper &set_bottom_right_diagonal(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsBottomRightDiagonal, static_cast<uint8_t>(val));
+  }
+  FusedAttnFwdParamsWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsSoftmaxType, val);
+  }
+  FusedAttnFwdParamsWrapper &set_dropout(float val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsDropout, val);
+  }
+  FusedAttnFwdParamsWrapper &set_attn_scale(float val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsAttnScale, val);
+  }
+  FusedAttnFwdParamsWrapper &set_qkv_layout(NVTE_QKV_Layout val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsQKVLayout, val);
+  }
+  FusedAttnFwdParamsWrapper &set_o_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsOFormat, val);
+  }
+  FusedAttnFwdParamsWrapper &set_qkv_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsQKVScaleInvFormat, val);
+  }
+  FusedAttnFwdParamsWrapper &set_max_seqlen_q(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsMaxSeqlenQ, val);
+  }
+  FusedAttnFwdParamsWrapper &set_max_seqlen_kv(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsMaxSeqlenKV, val);
+  }
+  FusedAttnFwdParamsWrapper &set_workspace(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsWorkspace, val);
+  }
+  FusedAttnFwdParamsWrapper &set_stream(cudaStream_t val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsStream, val);
+  }
+
+ private:
+  template <typename T>
+  FusedAttnFwdParamsWrapper &set_attr(NVTEFusedAttnFwdParamsAttribute attr, T val) noexcept {
+    nvte_set_fused_attn_fwd_params_attribute(params_, attr, &val, sizeof(val));
+    return *this;
+  }
+
+  NVTEFusedAttnFwdParams params_ = nullptr;
+};
+
+/*! \class FusedAttnBwdParamsWrapper
+ *  \brief C++ helper for constructing an `NVTEFusedAttnBwdParams`.
+ *
+ *  It owns an opaque `NVTEFusedAttnBwdParams` handle created by
+ *  `nvte_create_fused_attn_bwd_params()`, and provides a convenient,
+ *  chainable interface for setting every field in `FusedAttnBwdParams`.
+ */
+class FusedAttnBwdParamsWrapper {
+ public:
+  FusedAttnBwdParamsWrapper() : params_{nvte_create_fused_attn_bwd_params()} {}
+
+  FusedAttnBwdParamsWrapper(const FusedAttnBwdParamsWrapper &) = delete;
+  FusedAttnBwdParamsWrapper &operator=(const FusedAttnBwdParamsWrapper &) = delete;
+
+  FusedAttnBwdParamsWrapper(FusedAttnBwdParamsWrapper &&other) noexcept : params_{other.params_} {
+    other.params_ = nullptr;
+  }
+
+  FusedAttnBwdParamsWrapper &operator=(FusedAttnBwdParamsWrapper &&other) noexcept {
+    if (this != &other) {
+      if (params_ != nullptr) {
+        nvte_destroy_fused_attn_bwd_params(params_);
+      }
+      params_ = other.params_;
+      other.params_ = nullptr;
+    }
+    return *this;
+  }
+
+  ~FusedAttnBwdParamsWrapper() {
+    if (params_ != nullptr) {
+      nvte_destroy_fused_attn_bwd_params(params_);
+    }
+  }
+
+  operator NVTEFusedAttnBwdParams() const noexcept { return params_; }
+  NVTEFusedAttnBwdParams get() const noexcept { return params_; }
+
+  FusedAttnBwdParamsWrapper &set_Q(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsQ, val);
+  }
+  FusedAttnBwdParamsWrapper &set_K(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsK, val);
+  }
+  FusedAttnBwdParamsWrapper &set_V(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsV, val);
+  }
+  FusedAttnBwdParamsWrapper &set_O(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsO, val);
+  }
+  FusedAttnBwdParamsWrapper &set_dO(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDO, val);
+  }
+  FusedAttnBwdParamsWrapper &set_S(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsS, val);
+  }
+  FusedAttnBwdParamsWrapper &set_dP(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDP, val);
+  }
+  FusedAttnBwdParamsWrapper &set_Aux_CTX_Tensors(const NVTETensorPack *val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsAuxCtxTensors, val);
+  }
+  FusedAttnBwdParamsWrapper &set_dQ(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDQ, val);
+  }
+  FusedAttnBwdParamsWrapper &set_dK(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDK, val);
+  }
+  FusedAttnBwdParamsWrapper &set_dV(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDV, val);
+  }
+  FusedAttnBwdParamsWrapper &set_dBias(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDBias, val);
+  }
+  FusedAttnBwdParamsWrapper &set_dSoftmaxOffset(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDSoftmaxOffset, val);
+  }
+  FusedAttnBwdParamsWrapper &set_cu_seqlens_q(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsCuSeqlensQ, val);
+  }
+  FusedAttnBwdParamsWrapper &set_cu_seqlens_kv(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsCuSeqlensKV, val);
+  }
+  FusedAttnBwdParamsWrapper &set_cu_seqlens_q_padded(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsCuSeqlensQPadded, val);
+  }
+  FusedAttnBwdParamsWrapper &set_cu_seqlens_kv_padded(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsCuSeqlensKVPadded, val);
+  }
+  FusedAttnBwdParamsWrapper &set_deterministic(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDeterministic, static_cast<uint8_t>(val));
+  }
+  FusedAttnBwdParamsWrapper &set_cuda_graph(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsCudaGraph, static_cast<uint8_t>(val));
+  }
+  FusedAttnBwdParamsWrapper &set_attn_mask_type(NVTE_Mask_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsAttnMaskType, val);
+  }
+  FusedAttnBwdParamsWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsBiasType, val);
+  }
+  FusedAttnBwdParamsWrapper &set_window_size_left(int64_t val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsWindowSizeLeft, val);
+  }
+  FusedAttnBwdParamsWrapper &set_window_size_right(int64_t val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsWindowSizeRight, val);
+  }
+  FusedAttnBwdParamsWrapper &set_bottom_right_diagonal(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsBottomRightDiagonal, static_cast<uint8_t>(val));
+  }
+  FusedAttnBwdParamsWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsSoftmaxType, val);
+  }
+  FusedAttnBwdParamsWrapper &set_dropout(float val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDropout, val);
+  }
+  FusedAttnBwdParamsWrapper &set_attn_scale(float val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsAttnScale, val);
+  }
+  FusedAttnBwdParamsWrapper &set_qkv_layout(NVTE_QKV_Layout val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsQKVLayout, val);
+  }
+  FusedAttnBwdParamsWrapper &set_o_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsOFormat, val);
+  }
+  FusedAttnBwdParamsWrapper &set_do_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDOFormat, val);
+  }
+  FusedAttnBwdParamsWrapper &set_dqkv_layout(NVTE_QKV_Layout val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDQKVLayout, val);
+  }
+  FusedAttnBwdParamsWrapper &set_qkv_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsQKVScaleInvFormat, val);
+  }
+  FusedAttnBwdParamsWrapper &set_do_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDOScaleInvFormat, val);
+  }
+  FusedAttnBwdParamsWrapper &set_max_seqlen_q(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsMaxSeqlenQ, val);
+  }
+  FusedAttnBwdParamsWrapper &set_max_seqlen_kv(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsMaxSeqlenKV, val);
+  }
+  FusedAttnBwdParamsWrapper &set_workspace(NVTETensor val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsWorkspace, val);
+  }
+  FusedAttnBwdParamsWrapper &set_stream(cudaStream_t val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsStream, val);
+  }
+
+ private:
+  template <typename T>
+  FusedAttnBwdParamsWrapper &set_attr(NVTEFusedAttnBwdParamsAttribute attr, T val) noexcept {
+    nvte_set_fused_attn_bwd_params_attribute(params_, attr, &val, sizeof(val));
+    return *this;
+  }
+
+  NVTEFusedAttnBwdParams params_ = nullptr;
+};
+#endif  // __cplusplus
 
 #endif

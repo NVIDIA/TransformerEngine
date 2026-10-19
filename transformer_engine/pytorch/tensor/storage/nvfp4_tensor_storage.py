@@ -8,17 +8,17 @@ from __future__ import annotations
 from collections.abc import Iterable
 import functools
 import math
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, Optional, Tuple, Union
 import warnings
 
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
-from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 from ...utils import _empty_tensor
 
 
@@ -42,14 +42,23 @@ class _FromNVFP4Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
+        if tensor._rowwise_data is not None and tensor._rowwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+        if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
 
-        # Dequantize row-wise data
-        if tensor._rowwise_data is not None:
-            return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
-
-        if tensor._columnwise_data is not None:
+        if tensor._rowwise_data is None and tensor._columnwise_data is None:
+            raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
+        if tensor._rowwise_data is None and tensor._columnwise_data is not None:
             raise NotImplementedError("Dequantizing column-wise NVFP4 data is not implemented yet!")
-        raise ValueError("Attempted to dequantize NVFP4 tensor with no data")
+
+        # ``tex.dequantize`` requires CUDA-resident buffers. If the tensor has
+        src_device = tensor.device
+        if src_device.type != "cuda":
+            cuda_tensor = tensor.to(device=torch.device("cuda"))
+            result = tex.dequantize(cuda_tensor, torch_to_transformer_engine_dtype[dtype])
+            return result.to(device=src_device)
+        return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
 
     @staticmethod
     def backward(
@@ -71,28 +80,31 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
     """
 
-    # Row-scaled FP4 data
-    _rowwise_data: Optional[torch.Tensor]
-    # Column-scaled FP4 data
-    _columnwise_data: Optional[torch.Tensor]
-    # Block scaling factors for row-scaled FP4 data
-    _rowwise_scale_inv: torch.Tensor
-    # Block scaling factors for column-scaled FP4 data
-    _columnwise_scale_inv: torch.Tensor
-    # Input absolute maximum value (used to compute tensor scale for
-    # row-scaled FP4 data)
-    _amax_rowwise: torch.Tensor
-    # Input absolute maximum value (used to compute tensor scale for
-    # column-scaled FP4 data)
-    _amax_columnwise: torch.Tensor
+    # Row-scaled FP4 data and its block scaling factors
+    _rowwise_data: Annotated[Optional[torch.Tensor], InnerTensor("rowwise_data")]
+    _rowwise_scale_inv: Annotated[torch.Tensor, InnerTensor("rowwise_scale_inv")]
+    # Column-scaled FP4 data and its block scaling factors
+    _columnwise_data: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_data")]
+    _columnwise_scale_inv: Annotated[torch.Tensor, InnerTensor("columnwise_scale_inv")]
+    # Input absolute maximum values, used to compute the tensor scale
+    _amax_rowwise: Annotated[Optional[torch.Tensor], InnerTensor("amax_rowwise")]
+    _amax_columnwise: Annotated[Optional[torch.Tensor], InnerTensor("amax_columnwise")]
 
     # Builder class for casting to MXFP8
     _quantizer: Optional[Quantizer]
     # FP4 data type
-    _fp4_dtype: TE_DType
+    _fp4_dtype: DType
+    # Data type for block scaling factors
+    _scale_dtype: DType
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
+    # Whether this NVFP4 tensor uses row-scaled amax metadata
+    _row_scaled_nvfp4: bool
+    # Whether this NVFP4 tensor uses 4over6 map-to-4/map-to-6 block selection
+    _nvfp4_use_4over6: bool
+    # Global E4M3 scale bound used by this NVFP4 tensor
+    _nvfp4_e4m3_max: int
 
     def __new__(
         cls,
@@ -102,11 +114,15 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         columnwise_scale_inv: torch.Tensor,
         amax_rowwise: torch.Tensor,
         amax_columnwise: torch.Tensor,
-        fp4_dtype: TE_DType,
+        fp4_dtype: Union[DType, tex.DType],
+        scale_dtype: Union[DType, tex.DType],
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
         fake_dtype: Optional[torch.dtype] = None,
+        row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 0,
         **kwargs,
     ):
         if cls is NVFP4TensorStorage:
@@ -117,13 +133,17 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
-        instance._fp4_dtype = fp4_dtype
+        instance._fp4_dtype = DType.cast(fp4_dtype)
+        instance._scale_dtype = DType.cast(scale_dtype)
         instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._amax_rowwise = amax_rowwise
         instance._amax_columnwise = amax_columnwise
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
+        instance._row_scaled_nvfp4 = row_scaled_nvfp4
+        instance._nvfp4_use_4over6 = nvfp4_use_4over6
+        instance._nvfp4_e4m3_max = nvfp4_e4m3_max
 
         return instance
 
@@ -146,8 +166,16 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             raise TypeError("copy_from_storage expects NVFP4TensorStorage")
         if self._fp4_dtype != src._fp4_dtype:
             raise RuntimeError("FP4 dtype mismatch in copy_from_storage")
+        if self._scale_dtype != src._scale_dtype:
+            raise RuntimeError("Scale dtype mismatch in copy_from_storage")
         if self._with_gemm_swizzled_scales != src._with_gemm_swizzled_scales:
             raise RuntimeError("Scale layout mismatch in copy_from_storage")
+        if self._row_scaled_nvfp4 != src._row_scaled_nvfp4:
+            raise RuntimeError("Rowwise amax scaling mode mismatch in copy_from_storage")
+        if self._nvfp4_use_4over6 != src._nvfp4_use_4over6:
+            raise RuntimeError("NVFP4 4over6 mode mismatch in copy_from_storage")
+        if self._nvfp4_e4m3_max != src._nvfp4_e4m3_max:
+            raise RuntimeError("NVFP4 4over6 E4M3 scale bound mismatch in copy_from_storage")
 
         def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
             if dst is not None and src_tensor is not None:
@@ -170,8 +198,12 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "amax_rowwise": self._amax_rowwise,
             "amax_columnwise": self._amax_columnwise,
             "fp4_dtype": self._fp4_dtype,
+            "scale_dtype": self._scale_dtype,
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
+            "row_scaled_nvfp4": self._row_scaled_nvfp4,
+            "nvfp4_use_4over6": self._nvfp4_use_4over6,
+            "nvfp4_e4m3_max": self._nvfp4_e4m3_max,
             "fake_dtype": self._dtype,
         }
 
@@ -213,6 +245,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         """Dequantize to a higher precision."""
         if dtype is None:
             dtype = self._dtype
+        if self._rowwise_data is not None and self._rowwise_data.numel() == 0:
+            return torch.empty(self.size(), dtype=dtype, device=self.device)
         return _FromNVFP4Func.forward(None, self, dtype)
 
     def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:
@@ -301,21 +335,28 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             amax_columnwise=self._amax_columnwise,
             quantizer=self._quantizer,
             fp4_dtype=self._fp4_dtype,
+            scale_dtype=self._scale_dtype,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
+            row_scaled_nvfp4=self._row_scaled_nvfp4,
+            nvfp4_use_4over6=self._nvfp4_use_4over6,
+            nvfp4_e4m3_max=self._nvfp4_e4m3_max,
             fake_dtype=self._dtype,
         )
 
     def __repr__(self):
-        data_rowwise = self.dequantize()
+        try:
+            data_rowwise = self.dequantize()
 
-        return (
-            "NVFP4TensorStorage("
-            f"rowwise_scaled_data={data_rowwise},"
-            f"rowwise_scale_inv={self._rowwise_scale_inv},"
-            f"amax_rowwise={self._amax_rowwise},"
-            f"amax_columnwise={self._amax_columnwise},"
-            ")"
-        )
+            return (
+                "NVFP4TensorStorage("
+                f"rowwise_scaled_data={data_rowwise},"
+                f"rowwise_scale_inv={self._rowwise_scale_inv},"
+                f"amax_rowwise={self._amax_rowwise},"
+                f"amax_columnwise={self._amax_columnwise},"
+                ")"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "NVFP4TensorStorage", error=exc)
 
     def update_usage(
         self,
@@ -332,13 +373,16 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             rowwise_usage = self._rowwise_data is not None
         if columnwise_usage is None:
             columnwise_usage = self._columnwise_data is not None
+        requires_amax = not (
+            self._quantizer is not None and self._quantizer.disable_second_level_scale
+        )
 
         # If both rowwise and columnwise are requested, create columnwise from rowwise if needed
         if rowwise_usage and columnwise_usage:
             if (
                 self._rowwise_data is None
                 or self._rowwise_scale_inv is None
-                or self._amax_rowwise is None
+                or (requires_amax and self._amax_rowwise is None)
             ):
                 raise RuntimeError(
                     "Cannot update to rowwise and columnwise usage because rowwise data is None."
@@ -357,7 +401,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
                 raise RuntimeError(
                     "Requested row-wise usage, but NVFP4Tensor is missing row-scaled scale-inverses"
                 )
-            if self._amax_rowwise is None:
+            if requires_amax and self._amax_rowwise is None:
                 raise RuntimeError(
                     "Requested row-wise usage, but NVFP4Tensor is missing per tensor"
                     " row-scaled scale-inverse"
@@ -378,7 +422,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
                     "Requested column-wise usage, "
                     "but NVFP4Tensor is missing column-scaled scale-inverses"
                 )
-            if self._amax_columnwise is None:
+            if requires_amax and self._amax_columnwise is None:
                 raise RuntimeError(
                     "Requested column-wise usage, "
                     "but NVFP4Tensor is missing per tensor column-scaled scale-inverse"
@@ -441,7 +485,9 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             K_tiles,
         )
 
-        # Also set columnwise amax (same as rowwise since it's just transposed data)
-        if self._amax_columnwise is None:
-            self._amax_columnwise = torch.empty_like(self._amax_rowwise)
-        self._amax_columnwise.copy_(self._amax_rowwise)
+        # Also set columnwise amax (same as rowwise since it's just transposed data).
+        # A missing amax represents unit global scaling.
+        if not self._quantizer.disable_second_level_scale:
+            if self._amax_columnwise is None:
+                self._amax_columnwise = torch.empty_like(self._amax_rowwise)
+            self._amax_columnwise.copy_(self._amax_rowwise)

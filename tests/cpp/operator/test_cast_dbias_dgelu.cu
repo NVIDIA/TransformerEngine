@@ -84,6 +84,7 @@ void performTest(const std::vector<size_t>& shape) {
   fillUniform(&input);
   fillUniform(&grad);
   setRandomScale(&output_c);
+  const float ref_scale = isFp8Type(otype) ? output_c.scale() : 1.0f;
 
   std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(N*H);
   std::unique_ptr<IType[]> ref_output_dbias = std::make_unique<IType[]>(H);
@@ -91,7 +92,7 @@ void performTest(const std::vector<size_t>& shape) {
   CType ref_amax;
   compute_ref_cast_dbias_dgelu(input.rowwise_cpu_dptr<IType>(),
                                grad.rowwise_cpu_dptr<IType>(),
-                               output_c.scale(),
+                               ref_scale,
                                ref_output_c.get(),
                                &ref_amax,
                                ref_output_dbias.get(),
@@ -123,7 +124,7 @@ void performTest(const std::vector<size_t>& shape) {
   if (isFp8Type(otype)) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
     compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / output_c.scale();
+    float ref_scale_inv = 1.f / ref_scale;
     compareResults("scale_inv", output_c.rowwise_scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
 

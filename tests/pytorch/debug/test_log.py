@@ -18,6 +18,7 @@ from transformer_engine.pytorch import (
     is_nvfp4_available,
 )
 from transformer_engine.pytorch.quantization import RecipeState
+from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.debug.features.utils.stats_computation import (
     compute_max_blockwise_dynamic_range,
@@ -445,9 +446,6 @@ def test_nvfp4_numeric(feature_dirs):
     log_nvfp4_config = LOG_NVFP4_CONFIG_BASE.format(stats="underflows%, mse")
 
     with debug_session(log_nvfp4_config, feature_dirs) as log_dir:
-        from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-        from transformer_engine.pytorch.quantization import RecipeState
-
         recipe_state = RecipeState.create(
             recipe.NVFP4BlockScaling(),
             mode="forward",
@@ -644,3 +642,82 @@ def test_compute_max_blockwise_dynamic_range_direct():
     )
 
     print("All direct tests for compute_max_blockwise_dynamic_range passed!")
+
+
+# DumpTensors tests
+DUMP_TENSORS_CONFIG = """
+dump:
+  layers:
+    layer_name_regex_pattern: .*
+  enabled: True
+  transformer_engine:
+    DumpTensors:
+      enabled: True
+      tensors: [activation]
+      high_precision_tensor: True
+      quantized_tensor: True
+      freq: 1
+"""
+
+
+def test_dump_tensors_sanity(feature_dirs):
+    """Sanity test for DumpTensors feature - verify files are created with correct structure."""
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    with debug_session(DUMP_TENSORS_CONFIG, feature_dirs) as log_dir:
+        recipe_state = RecipeState.create(
+            recipe.DelayedScaling(),
+            mode="forward",
+            num_quantizers=3,
+        )
+
+        tensor = torch.randn(128, 128, dtype=torch.bfloat16).cuda()
+        quantizer = recipe_state.make_quantizers()[0]
+        quantized_tensor = quantizer(tensor)
+
+        debug_api.transformer_engine.inspect_tensor(
+            layer_name="test_layer",
+            tensor_name="activation",
+            iteration=0,
+            tp_group=None,
+            tensor=tensor,
+            quantizer=quantizer,
+            rowwise_quantized_tensor=quantized_tensor,
+            columnwise_quantized_tensor=quantized_tensor,
+        )
+        debug_api.step()
+
+        # Check that dump file was created
+        dump_dir = os.path.join(log_dir, "tensor_dumps", "rank_0")
+        assert os.path.exists(dump_dir), f"Dump directory not created: {dump_dir}"
+
+        iter_dir = os.path.join(dump_dir, "iter_000000")
+        assert os.path.exists(iter_dir), f"Iteration directory not created: {iter_dir}"
+
+        dump_files = os.listdir(iter_dir)
+        assert len(dump_files) == 1, f"Expected 1 dump file, got {len(dump_files)}"
+        assert (
+            dump_files[0] == "test_layer_activation.pt"
+        ), f"Unexpected dump filename: {dump_files[0]}"
+
+        # Load and verify structure
+        dump_file = os.path.join(iter_dir, dump_files[0])
+        # weights_only=False is required because the dump may contain QuantizedTensor objects,
+        # which are custom Python classes incompatible with the safe weights_only=True path.
+        data = torch.load(dump_file, weights_only=False)
+
+        assert isinstance(data, dict), "Dump should be a dictionary"
+        assert "high_precision" in data, "Missing high_precision tensor"
+        assert "quantized" in data, "Missing quantized tensor"
+        assert isinstance(
+            data["quantized"], QuantizedTensor
+        ), f"Expected QuantizedTensor, got {type(data['quantized'])}"
+
+        # Verify tensor shapes and values match
+        assert data["high_precision"].shape == tensor.shape, "high_precision shape mismatch"
+        assert torch.equal(
+            data["high_precision"], tensor
+        ), "high_precision tensor values do not match original tensor"
+
+    print("DumpTensors sanity test passed!")

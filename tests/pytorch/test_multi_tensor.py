@@ -141,6 +141,117 @@ def test_multi_tensor_scale(input_size_pair, applier, repeat, in_type, out_type,
 @pytest.mark.parametrize("applier", appliers)
 @pytest.mark.parametrize("repeat", [1, 55])
 @pytest.mark.parametrize("in_type", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("out_type", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("inplace", [False, True])
+def test_multi_tensor_scale_tensor(input_size_pair, applier, repeat, in_type, out_type, inplace):
+    if inplace is True and (out_type is not in_type):
+        pytest.skip("inplace=True and out_type != in_type is not supported.")
+    elif (in_type == torch.float16 and out_type == torch.bfloat16) or (
+        in_type == torch.bfloat16 and out_type == torch.float16
+    ):
+        pytest.skip("float16 to bfloat16 is not necessary and vice versa.")
+
+    device = torch.device("cuda")
+    scale = 4.0
+    inv_scale_cuda = torch.tensor([1.0 / scale], dtype=torch.float32, device=device)
+    overflow_buf = torch.zeros(1, dtype=torch.int32, device=device)
+    ref = torch.tensor([1.0], dtype=torch.float32, device=device)
+    sizea, sizeb = input_size_pair
+
+    def downscale(sizea, sizeb, applier, repeat, in_type, out_type, inplace=False):
+        overflow_buf.zero_()
+        a = torch.full([sizea], scale, dtype=torch.float32, device=device)
+        b = torch.full([sizeb], scale, dtype=torch.float32, device=device)
+
+        out_list = []
+        for _ in range(repeat):
+            out_list += [a.clone().to(out_type), b.clone().to(out_type)]
+
+        if inplace:
+            in_list = out_list
+        else:
+            in_list = [out.clone().to(in_type) for out in out_list]
+
+        applier(tex.multi_tensor_scale_tensor, overflow_buf, [in_list, out_list], inv_scale_cuda)
+
+        assert all([torch.allclose(out, ref.to(out_type)) for out in out_list])
+        assert overflow_buf.item() == 0
+
+    def find_inf(
+        sizea,
+        sizeb,
+        applier,
+        repeat,
+        in_type,
+        out_type,
+        t,
+        ind,
+        val,
+        inplace=False,
+    ):
+        overflow_buf.zero_()
+        a = torch.full([sizea], scale, dtype=torch.float32, device=device)
+        b = torch.full([sizeb], scale, dtype=torch.float32, device=device)
+
+        out_list = []
+        for _ in range(repeat):
+            out_list += [a.clone().to(out_type), b.clone().to(out_type)]
+
+        if inplace:
+            in_list = out_list
+        else:
+            in_list = [out.clone().to(in_type) for out in out_list]
+
+        applier(tex.multi_tensor_scale_tensor, overflow_buf, [in_list, out_list], inv_scale_cuda)
+
+        overflow_buf.zero_()
+        in_list[t][ind] = val
+        applier(tex.multi_tensor_scale_tensor, overflow_buf, [in_list, out_list], inv_scale_cuda)
+        assert overflow_buf.item() > 0
+
+    downscale(sizea, sizeb, applier, repeat, in_type, out_type, inplace=inplace)
+    find_inf(
+        sizea,
+        sizeb,
+        applier,
+        repeat,
+        in_type,
+        out_type,
+        0,
+        0,
+        float("nan"),
+        inplace=inplace,
+    )
+    find_inf(
+        sizea,
+        sizeb,
+        applier,
+        repeat,
+        in_type,
+        out_type,
+        2 * repeat - 1,
+        sizeb - 1,
+        float("inf"),
+        inplace=inplace,
+    )
+    find_inf(
+        sizea,
+        sizeb,
+        applier,
+        repeat,
+        in_type,
+        out_type,
+        2 * (repeat // 2),
+        sizea // 2,
+        float("inf"),
+        inplace=inplace,
+    )
+
+
+@pytest.mark.parametrize("input_size_pair", input_size_pairs)
+@pytest.mark.parametrize("applier", appliers)
+@pytest.mark.parametrize("repeat", [1, 55])
+@pytest.mark.parametrize("in_type", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("per_tensor", [False, True])
 def test_multi_tensor_l2norm(input_size_pair, applier, repeat, in_type, per_tensor):
     sizea, sizeb = input_size_pair

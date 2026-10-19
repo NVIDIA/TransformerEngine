@@ -65,12 +65,13 @@ void performTestQ(const size_t N) {
 
   fillUniform(&input);
   setRandomScale(&output);
+  const float ref_scale = output.scale();
 
   nvte_quantize(input.data(), output.data(), 0);
 
   float ref_amax;
   compute_ref_q<InputType, OutputType>(input.rowwise_cpu_dptr<InputType>(), ref_output.get(),
-                                       N, &ref_amax, output.scale());
+                                       N, &ref_amax, ref_scale);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();

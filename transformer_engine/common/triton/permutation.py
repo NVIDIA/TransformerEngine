@@ -12,6 +12,16 @@ from triton.language.standard import _log2
 from packaging import version
 
 
+_PERMUTATION_AUTOTUNE_BLOCK_SIZES = (64, 128, 256, 512, 1024, 2048, 4096)
+
+
+def _permutation_autotune_configs():
+    """Autotune ``configs`` list shared by every permutation Triton
+    kernel below.
+    """
+    return [triton.Config({"BLOCK_SIZE": bs}) for bs in _PERMUTATION_AUTOTUNE_BLOCK_SIZES]
+
+
 # The following three argsort related kernels are adapted from
 # the issue https://github.com/triton-lang/triton/issues/3698
 
@@ -295,15 +305,7 @@ def _permute_kernel(
 
 try:
     _permute_kernel = triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_SIZE": 64}),
-            triton.Config({"BLOCK_SIZE": 128}),
-            triton.Config({"BLOCK_SIZE": 256}),
-            triton.Config({"BLOCK_SIZE": 512}),
-            triton.Config({"BLOCK_SIZE": 1024}),
-            triton.Config({"BLOCK_SIZE": 2048}),
-            triton.Config({"BLOCK_SIZE": 4096}),
-        ],
+        configs=_permutation_autotune_configs(),
         key=["hidden_size"],
     )(_permute_kernel)
 except RuntimeError:
@@ -365,6 +367,9 @@ def _unpermute_kernel(
             tl.store(
                 unpermuted_probs_ptr + unpermuted_prob_off, 0.0, mask=map_load_off < num_experts
             )
+            # Zeroing and routed stores are distributed across warps.
+            # Synchronize before any warp enters the routed-write loop.
+            tl.debug_barrier()
     accumulator = tl.zeros((BLOCK_SIZE,), dtype=compute_type)
     n_routed = tl.load(
         row_id_map_ptr
@@ -416,15 +421,7 @@ def _unpermute_kernel(
 
 try:
     _unpermute_kernel = triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_SIZE": 64}),
-            triton.Config({"BLOCK_SIZE": 128}),
-            triton.Config({"BLOCK_SIZE": 256}),
-            triton.Config({"BLOCK_SIZE": 512}),
-            triton.Config({"BLOCK_SIZE": 1024}),
-            triton.Config({"BLOCK_SIZE": 2048}),
-            triton.Config({"BLOCK_SIZE": 4096}),
-        ],
+        configs=_permutation_autotune_configs(),
         key=["hidden_size"],
     )(_unpermute_kernel)
 except RuntimeError:
@@ -471,6 +468,9 @@ def _unpermute_bwd_with_merging_probs_kernel(
         pid * stride_merging_probs_grad_token + stride_merging_probs_grad_expert * map_load_off
     )
     tl.store(merging_probs_grad_ptr + token_probs_grad_off, 0.0, mask=map_load_off < num_experts)
+    # Zeroing and routed stores are distributed across warps.
+    # Synchronize before any warp enters the routed-write loop.
+    tl.debug_barrier()
     n_routed = tl.load(
         row_id_map_ptr + pid * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert
     )
@@ -525,15 +525,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
 
 try:
     _unpermute_bwd_with_merging_probs_kernel = triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_SIZE": 64}),
-            triton.Config({"BLOCK_SIZE": 128}),
-            triton.Config({"BLOCK_SIZE": 256}),
-            triton.Config({"BLOCK_SIZE": 512}),
-            triton.Config({"BLOCK_SIZE": 1024}),
-            triton.Config({"BLOCK_SIZE": 2048}),
-            triton.Config({"BLOCK_SIZE": 4096}),
-        ],
+        configs=_permutation_autotune_configs(),
         key=["hidden_size"],
     )(_unpermute_bwd_with_merging_probs_kernel)
 except RuntimeError:
@@ -643,15 +635,7 @@ def _sort_chunks_by_map_kernel(
 
 try:
     _sort_chunks_by_map_kernel = triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_SIZE": 64}),
-            triton.Config({"BLOCK_SIZE": 128}),
-            triton.Config({"BLOCK_SIZE": 256}),
-            triton.Config({"BLOCK_SIZE": 512}),
-            triton.Config({"BLOCK_SIZE": 1024}),
-            triton.Config({"BLOCK_SIZE": 2048}),
-            triton.Config({"BLOCK_SIZE": 4096}),
-        ],
+        configs=_permutation_autotune_configs(),
         key=["hidden_size"],
     )(_sort_chunks_by_map_kernel)
 except RuntimeError:

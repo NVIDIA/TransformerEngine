@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -32,6 +33,28 @@ namespace rtc {
  * the environment.
  */
 bool is_enabled();
+
+/*! \brief Header made available to an NVRTC program */
+struct Header {
+  const char *content;
+  const char *include_name;
+};
+
+/*! \brief Architecture specificity required by an RTC kernel */
+enum class ArchSpecificity {
+  /*! Compile for a generic architecture, preserving PTX forward compatibility */
+  Generic,
+  /*! Compile for the exact architecture-specific target (e.g. sm_100a) */
+  ArchitectureSpecific,
+};
+
+/*! \brief Architecture requirements for an RTC kernel */
+struct ArchRequirement {
+  /*! Minimum compute capability, encoded as major * 10 + minor */
+  int min_sm_arch = 0;
+  /*! Target-specificity policy for the kernel */
+  ArchSpecificity specificity = ArchSpecificity::Generic;
+};
 
 /*! \brief Wrapper class for a runtime-compiled CUDA kernel */
 class Kernel {
@@ -79,6 +102,29 @@ class Kernel {
    */
   void set_function_cache_config(int device_id, CUfunc_cache cache_config);
 
+  /*! \brief Set a kernel function attribute (driver-API wrapper of
+   *  cuFuncSetAttribute, e.g. for dynamic shared memory size).
+   */
+  void set_function_attribute(int device_id, CUfunction_attribute attr, int value);
+
+  /*! \brief Wrapper of cuOccupancyMaxActiveBlocksPerMultiprocessor for a
+   *  runtime-compiled function.
+   */
+  int occupancy_max_active_blocks_per_sm(int device_id, int block_size,
+                                         std::size_t dynamic_smem_bytes);
+
+  /*! \brief Cooperative launch of an RTC kernel via cuLaunchCooperativeKernel.
+   */
+  template <typename... ArgTs>
+  void launch_cooperative(int device_id, const dim3 grid_dim, const dim3 block_dim,
+                          unsigned int shared_mem_bytes, cudaStream_t stream, ArgTs &&...args) {
+    cuda_driver::ensure_context_exists();
+    void *arg_ptrs[] = {const_cast<void *>(static_cast<const void *>(&args))...};
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuLaunchCooperativeKernel, get_function(device_id), grid_dim.x,
+                                grid_dim.y, grid_dim.z, block_dim.x, block_dim.y, block_dim.z,
+                                shared_mem_bytes, static_cast<CUstream>(stream), arg_ptrs);
+  }
+
  private:
   /*! \brief Mangled function name */
   std::string mangled_name_;
@@ -113,9 +159,16 @@ class KernelManager {
    * \param[in] code         Kernel source code
    * \param[in] filename     Path to associate with source code,
    *                         primarily for debugging
+   * \param[in] extra_options Additional NVRTC compiler options
+   * \param[in] extra_headers Additional in-memory headers available to the program
+   * \param[in] arch_requirement Minimum and specificity requirements for the
+   *                            compilation target
    */
   void compile(const std::string &kernel_label, const std::string &kernel_name,
-               const std::string &code, const std::string &filename);
+               const std::string &code, const std::string &filename,
+               const std::vector<std::string> &extra_options = {},
+               const std::vector<Header> &extra_headers = {},
+               ArchRequirement arch_requirement = {});
 
   /*! \brief Whether CUDA kernel has been compiled for CUDA device
    *
@@ -143,9 +196,12 @@ class KernelManager {
               unsigned int shared_mem_bytes, cudaStream_t stream, ArgTs &&...args) {
     const int device_id = cuda::current_device();
     const auto key = get_kernel_cache_key(kernel_label, device_id);
-    NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");
-    kernel_cache_.at(key).launch(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
-                                 std::forward<ArgTs>(args)...);
+    std::shared_lock<std::shared_mutex> lock_guard_(lock_);
+    const auto kernel_it = kernel_cache_.find(key);
+    NVTE_CHECK(kernel_it != kernel_cache_.end(),
+               "Attempted to launch RTC kernel before compilation");
+    kernel_it->second.launch(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
+                             std::forward<ArgTs>(args)...);
   }
 
   /*! \brief Sets the preferred cache configuration for a function in the context
@@ -157,11 +213,34 @@ class KernelManager {
    */
   void set_cache_config(const std::string &kernel_label, CUfunc_cache cache_config);
 
+  /*! \brief Set a function attribute (e.g. cuFuncAttributeMaxDynamicSharedMemorySize). */
+  void set_function_attribute(const std::string &kernel_label, CUfunction_attribute attr,
+                              int value);
+
+  /*! \brief Query cuOccupancyMaxActiveBlocksPerMultiprocessor for a compiled kernel. */
+  int occupancy_max_active_blocks_per_sm(const std::string &kernel_label, int block_size,
+                                         std::size_t dynamic_smem_bytes);
+
+  /*! \brief Cooperative launch wrapper (cuLaunchCooperativeKernel). */
+  template <typename... ArgTs>
+  void launch_cooperative(const std::string &kernel_label, const dim3 grid_dim,
+                          const dim3 block_dim, unsigned int shared_mem_bytes, cudaStream_t stream,
+                          ArgTs &&...args) {
+    const int device_id = cuda::current_device();
+    const auto key = get_kernel_cache_key(kernel_label, device_id);
+    std::shared_lock<std::shared_mutex> lock_guard_(lock_);
+    const auto kernel_it = kernel_cache_.find(key);
+    NVTE_CHECK(kernel_it != kernel_cache_.end(),
+               "Attempted to launch RTC kernel before compilation");
+    kernel_it->second.launch_cooperative(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
+                                         std::forward<ArgTs>(args)...);
+  }
+
  private:
   /*! \brief Compiled kernels */
   std::unordered_map<std::string, Kernel> kernel_cache_;
-  /*! \brief Mutex for thread-safe compilation */
-  std::mutex lock_;
+  /*! \brief Mutex for thread-safe cache access */
+  mutable std::shared_mutex lock_;
 
   KernelManager() = default;
   ~KernelManager() = default;

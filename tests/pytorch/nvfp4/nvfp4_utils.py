@@ -115,7 +115,7 @@ def reference_group_quantize(
     x: torch.Tensor,
     quantizers: list[NVFP4Quantizer],
     split_sections: list[int],
-    return_identity: bool,
+    return_rowwise: bool,
     return_transpose: bool,
 ) -> torch.Tensor:
     x_view = x.reshape(-1, x.size(-1))
@@ -133,7 +133,7 @@ def reference_group_quantize(
     for i in range(len(x_chunks)):
         x_chunk = x_chunks[i]
         x_nvfp4_res = quantizers[i](x_chunk)
-        if return_identity:
+        if return_rowwise:
             x_qx.append(x_nvfp4_res._rowwise_data.view(dtype=torch.uint8))
             x_sx.append(x_nvfp4_res._rowwise_scale_inv)
             x_amax_rowwise.append(x_nvfp4_res._amax_rowwise)

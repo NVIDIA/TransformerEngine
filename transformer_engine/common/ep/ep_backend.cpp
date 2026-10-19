@@ -1,0 +1,788 @@
+/*************************************************************************
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+/*! \file ep_backend.cpp
+ *  \brief EPBackend implementation. See ep_backend.h for the op flow.
+ */
+
+#include "ep_backend.h"
+
+#include <nccl_ep.h>
+
+#include <algorithm>
+#include <climits>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <mutex>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include "../common.h"
+#include "../util/cuda_runtime.h"
+#include "../util/logging.h"
+#include "nccl_ep_provider.h"
+
+namespace transformer_engine {
+namespace ep {
+
+namespace {
+
+ncclDataType_t te_dtype_to_nccl_dtype(NVTEDType dtype) {
+  switch (dtype) {
+    case kNVTEFloat32:
+      return ncclFloat32;
+    case kNVTEFloat16:
+      return ncclFloat16;
+    case kNVTEBFloat16:
+      return ncclBfloat16;
+    case kNVTEInt32:
+      return ncclInt32;
+    case kNVTEInt64:
+      return ncclInt64;
+    case kNVTEByte:
+      return ncclUint8;
+    case kNVTEFloat8E4M3:
+      return ncclFloat8e4m3;
+    case kNVTEFloat8E5M2:
+      return ncclFloat8e5m2;
+    case kNVTEFloat8E8M0:
+      return ncclUint8;
+    default:
+      NVTE_ERROR("Unsupported NVTEDType for NCCL dtype conversion: ", static_cast<int>(dtype));
+  }
+  return ncclFloat32;  // unreachable
+}
+
+// Which part of a TE tensor an NCCL descriptor points at: the data payload, or
+// (for block-scaled tensors) the rowwise scale-inverse that rides alongside it.
+enum class DescSource { kData, kScaleInv };
+
+// Build an NCCL descriptor for a TE tensor's data (kData) or its rowwise
+// scale-inverse (kScaleInv). shape_out is caller-owned; desc.sizes aliases
+// shape_out.data and must outlive the NCCL EP call. Uses the matching window
+// field (win.window / win.scale_window) when set, else the raw pointer.
+inline ncclEpTensor_t make_nccl_ep_tensor(const NVTETensor t, NVTEShape& shape_out,
+                                          const NVTECommWindow& win = {},
+                                          DescSource source = DescSource::kData) {
+  ncclEpTensor_t desc = NCCL_EP_TENSOR_INIT;
+  void* raw_ptr = nullptr;
+  ncclWindow_t win_hdl = nullptr;
+  uint64_t win_offset = 0;
+  if (source == DescSource::kData) {
+    shape_out = nvte_tensor_shape(t);
+    desc.datatype = te_dtype_to_nccl_dtype(nvte_tensor_type(t));
+    raw_ptr = nvte_tensor_data(t);
+    win_hdl = win.window;
+    win_offset = win.offset;
+  } else {
+    const SimpleTensor& si = convertNVTETensorCheck(t)->scale_inv;
+    shape_out = nvte_make_shape(si.shape.data(), si.shape.size());
+    desc.datatype = te_dtype_to_nccl_dtype(static_cast<NVTEDType>(si.dtype));
+    raw_ptr = si.dptr;
+    win_hdl = win.scale_window;
+    win_offset = win.scale_offset;
+  }
+  desc.ndim = shape_out.ndim;
+  desc.sizes = shape_out.data;
+  if (win_hdl != nullptr) {
+    desc.win_hdl = win_hdl;
+    desc.win_offset = win_offset;
+  } else {
+    desc.data = raw_ptr;
+    NVTE_CHECK(desc.data != nullptr || nvte_tensor_numel(t) == 0,
+               "non-empty tensor data must not be null");
+  }
+  return desc;
+}
+
+int current_device() {
+  int device = 0;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
+  return device;
+}
+
+inline void* handle_mem_ptr(NVTETensor handle_mem) {
+  NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
+  NVTE_CHECK(nvte_tensor_type(handle_mem) == kNVTEByte, "handle_mem must have byte dtype");
+  void* p = nvte_tensor_data(handle_mem);
+  NVTE_CHECK(p != nullptr, "handle_mem tensor data must not be null");
+  return p;
+}
+
+// Destroys an owned handle on scope exit. No-op for cache-owned handles (owned=false).
+class ScopedHandle {
+ public:
+  ScopedHandle(ncclEpHandle_t handle, bool owned) : handle_(handle), owned_(owned) {}
+  ~ScopedHandle() {
+    if (owned_ && handle_ != nullptr) nccl_ep::handle_destroy(handle_);
+  }
+  ScopedHandle(const ScopedHandle&) = delete;
+  ScopedHandle& operator=(const ScopedHandle&) = delete;
+  ncclEpHandle_t get() const { return handle_; }
+
+ private:
+  ncclEpHandle_t handle_;
+  bool owned_;
+};
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Per-device instances + bootstrap
+// ---------------------------------------------------------------------------
+
+std::mutex EPBackend::devices_mutex_;
+std::unordered_map<int, std::unique_ptr<EPBackend>> EPBackend::devices_;
+
+EPBackend& EPBackend::instance(int device) {
+  std::lock_guard<std::mutex> lock(devices_mutex_);
+  auto it = devices_.find(device);
+  if (it == devices_.end()) {
+    it = devices_.emplace(device, std::unique_ptr<EPBackend>(new EPBackend())).first;
+  }
+  return *it->second;
+}
+
+EPBackend& EPBackend::get() {
+  const int device = current_device();
+  EPBackend& inst = instance(device);
+  NVTE_CHECK(inst.initialized_, "EPBackend not initialized on device ", device,
+             ". Call nvte_ep_initialize() first.");
+  return inst;
+}
+
+void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
+  NVTE_CHECK(config.ep_size > 0, "ep_size must be positive, got ", config.ep_size);
+  NVTE_CHECK(config.num_experts > 0, "num_experts must be positive, got ", config.num_experts);
+  NVTE_CHECK(config.max_tokens_per_rank > 0, "max_tokens_per_rank must be positive, got ",
+             config.max_tokens_per_rank);
+  // 0 selects eager mode (NCCL_EP_AUTO); any explicit budget must be positive.
+  NVTE_CHECK(config.max_recv_tokens_per_rank >= 0,
+             "max_recv_tokens_per_rank must be non-negative, got ",
+             config.max_recv_tokens_per_rank);
+  NVTE_CHECK(!(config.zero_copy && config.max_recv_tokens_per_rank == 0),
+             "zero-copy and eager (max_recv_tokens_per_rank = 0) modes are mutually exclusive");
+  NVTE_CHECK(!(config.drop_on_overflow && config.max_recv_tokens_per_rank == 0),
+             "drop_on_overflow (overflow drop) is not supported in eager mode "
+             "(max_recv_tokens_per_rank = 0)");
+  NVTE_CHECK(config.hidden_dim > 0, "hidden_dim must be positive, got ", config.hidden_dim);
+  NVTE_CHECK(config.max_token_dtype >= 0 && config.max_token_dtype < kNVTENumTypes,
+             "max_token_dtype out of range, got ", static_cast<int>(config.max_token_dtype));
+  const size_t elem_bytes = typeToSize(static_cast<DType>(config.max_token_dtype));
+  const size_t row_bytes = static_cast<size_t>(config.hidden_dim) * elem_bytes;
+  NVTE_CHECK(row_bytes >= 16,
+             "hidden_dim * sizeof(max_token_dtype) must be >= 16 (NCCL EP 16B row alignment); "
+             "got hidden_dim=",
+             config.hidden_dim, ", element_bytes=", elem_bytes);
+  // NCCL EP packs row size into ncclEpGroupConfig::max_token_bytes (unsigned int).
+  NVTE_CHECK(row_bytes <= static_cast<size_t>(UINT_MAX),
+             "hidden_dim * sizeof(max_token_dtype) exceeds 4 GiB; got ", row_bytes, " bytes");
+  NVTE_CHECK(config.num_experts % config.ep_size == 0, "num_experts (", config.num_experts,
+             ") must be divisible by ep_size (", config.ep_size, ")");
+  NVTE_CHECK(config.num_comm_sms >= 0, "num_comm_sms must be >= 0 (0 = auto), got ",
+             config.num_comm_sms);
+
+  const int sm = cuda::sm_arch();
+  NVTE_CHECK(sm >= 90, "NCCL EP requires SM_90+ (Hopper or later), but current device is SM_", sm);
+}
+
+void EPBackend::initialize(ncclComm_t ep_comm, NVTEEpGroupConfig config) {
+  const int device = current_device();
+  EPBackend& inst = instance(device);
+  std::lock_guard<std::mutex> lock(inst.mutex_);
+  NVTE_CHECK(!inst.initialized_, "EP already initialized on device ", device,
+             ". Call initialize only once per device per process.");
+  NVTE_CHECK(ep_comm != nullptr, "ep_comm must not be null");
+
+  // Runtime gate: NCCL >= 2.30.4 (matches the submodule pin).
+  constexpr int kMinNcclVersion = 23004;
+  int nccl_version = 0;
+  NVTE_CHECK_NCCL(ncclGetVersion(&nccl_version));
+  NVTE_CHECK(nccl_version >= kMinNcclVersion, "NCCL EP requires NCCL >= 2.30.4, found ",
+             nccl_version / 10000, ".", (nccl_version / 100) % 100, ".", nccl_version % 100,
+             " at runtime.");
+
+  // Load libnccl_ep only after the runtime NCCL version has been validated.
+  nccl_ep::initialize();
+
+  validate_config(config);
+
+  int comm_size = 0;
+  NVTE_CHECK_NCCL(ncclCommCount(ep_comm, &comm_size));
+  NVTE_CHECK(comm_size == config.ep_size, "ep_comm size (", comm_size, ") must equal ep_size (",
+             config.ep_size, "). Pass the EP sub-communicator, not the world comm.");
+
+  inst.init(ep_comm, config);
+}
+
+void EPBackend::shutdown() {
+  // Release the device map lock before NCCL/CUDA teardown.
+  std::vector<std::pair<int, EPBackend*>> entries;
+  {
+    std::lock_guard<std::mutex> lock(devices_mutex_);
+    entries.reserve(devices_.size());
+    for (auto& kv : devices_) entries.emplace_back(kv.first, kv.second.get());
+  }
+  if (entries.empty()) return;
+  // Tear down local peers concurrently without changing the caller's current device.
+  std::vector<std::thread> workers;
+  std::vector<std::exception_ptr> errors(entries.size());
+  workers.reserve(entries.size());
+  for (size_t i = 0; i < entries.size(); ++i) {
+    const int device = entries[i].first;
+    EPBackend* inst = entries[i].second;
+    workers.emplace_back([device, inst, &errors, i]() {
+      try {
+        NVTE_CHECK_CUDA(cudaSetDevice(device));
+        std::lock_guard<std::mutex> lock(inst->mutex_);
+        inst->shutdown_locked();
+      } catch (...) {
+        errors[i] = std::current_exception();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (auto& e : errors) {
+    if (e) std::rethrow_exception(e);
+  }
+}
+
+void EPBackend::shutdown_locked() {
+  if (!initialized_) return;
+  for (auto& e : handles_) {
+    if (e.handle != nullptr) nccl_ep::handle_destroy(e.handle);
+  }
+  handles_.clear();
+  index_.clear();
+  // ncclEpGroupDestroy reads from ep_comm_; destroy group while comm is still alive.
+  if (ep_group_ != nullptr) {
+    nccl_ep::group_destroy(ep_group_);
+    ep_group_ = nullptr;
+  }
+  ep_comm_ = nullptr;  // borrowed; caller destroys
+  initialized_ = false;
+}
+
+ncclEpHandle_t EPBackend::open_handle(void* handle_mem, size_t handle_mem_size, int num_topk,
+                                      size_t dispatch_output_per_expert_alignment) {
+  size_t hm_sizes[1] = {handle_mem_size};
+  ncclEpTensor_t routing_desc = NCCL_EP_TENSOR_INIT;
+  routing_desc.ndim = 1;
+  routing_desc.datatype = ncclUint8;
+  routing_desc.data = handle_mem;
+  routing_desc.sizes = hm_sizes;
+  ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
+  hcfg.dispatch_output_per_expert_alignment = dispatch_output_per_expert_alignment;
+  size_t required = 0;
+  NVTE_CHECK_NCCL(
+      nccl_ep::handle_mem_size(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &required, num_topk));
+  NVTE_CHECK(handle_mem_size >= required, "handle_mem buffer is too small: ", handle_mem_size,
+             " bytes, requires ", required);
+  ncclEpHandle_t handle;
+  NVTE_CHECK_NCCL(nccl_ep::init_handle(&handle, ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
+                                       num_topk, &routing_desc));
+  return handle;
+}
+
+ncclEpHandle_t EPBackend::import_handle_locked(void* handle_mem, size_t handle_mem_size,
+                                               int num_tokens, NVTEEpLayerConfig layer_cfg) {
+  size_t hm_sizes[1] = {handle_mem_size};
+  ncclEpTensor_t routing_desc = NCCL_EP_TENSOR_INIT;
+  routing_desc.ndim = 1;
+  routing_desc.datatype = ncclUint8;
+  routing_desc.data = handle_mem;
+  routing_desc.sizes = hm_sizes;
+  ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
+  hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
+  ncclEpHandleState_t state = NCCL_EP_HANDLE_STATE_INIT;
+  state.num_tokens = num_tokens;
+  state.num_topk = layer_cfg.top_k;
+  state.topk_idx_datatype = te_dtype_to_nccl_dtype(layer_cfg.topk_idx_dtype);
+  ncclEpHandle_t handle;
+  NVTE_CHECK_NCCL(nccl_ep::import_handle(&handle, ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
+                                         &state, &routing_desc));
+  return handle;
+}
+
+ncclEpHandle_t EPBackend::acquire_step_handle_locked(void* handle_mem, size_t handle_mem_size,
+                                                     int num_tokens,
+                                                     const NVTEEpLayerConfig* layer_cfg,
+                                                     bool* owned) {
+  if (layer_cfg != nullptr) {
+    *owned = true;
+    return import_handle_locked(handle_mem, handle_mem_size, num_tokens, *layer_cfg);
+  }
+  NVTE_CHECK(cache_cap_locked() > 0,
+             "EP op without layer_cfg requires the handle cache; use the *_v2 ops when "
+             "NVTE_EP_HANDLE_CACHE_SIZE=0");
+  *owned = false;
+  return lookup_handle_locked(handle_mem, handle_mem_size);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+// Static-dtor teardown: skip NCCL calls (CUDA context / borrowed ep_comm_ may
+// already be gone) and release in-memory state only.
+EPBackend::~EPBackend() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_) return;
+  handles_.clear();
+  index_.clear();
+  ep_group_ = nullptr;
+  ep_comm_ = nullptr;
+  initialized_ = false;
+}
+
+void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
+  NVTE_CHECK(!initialized_, "EPBackend already initialized");
+
+  group_config_ = group_config;
+  handle_cache_cap_set_ = false;
+
+  ncclEpGroupConfig_t cfg = NCCL_EP_GROUP_CONFIG_INIT;
+  cfg.algorithm = NCCL_EP_ALGO_HIGH_THROUGHPUT;
+  cfg.num_experts = static_cast<unsigned int>(group_config.num_experts);
+  cfg.max_dispatch_tokens_per_rank = static_cast<unsigned int>(group_config.max_tokens_per_rank);
+  const size_t elem_bytes = typeToSize(static_cast<DType>(group_config.max_token_dtype));
+  cfg.max_token_bytes = static_cast<unsigned int>(group_config.hidden_dim * elem_bytes);
+  cfg.rdma_buffer_size = NCCL_EP_AUTO;
+  cfg.num_qp_per_rank = NCCL_EP_AUTO;
+  cfg.num_channels = NCCL_EP_AUTO;
+  // Default the dispatch/combine (comm) kernels to 32 SMs, clamped to the device SM count.
+  constexpr int kDefaultCommSms = 32;
+  const int device_sms = cuda::sm_count();
+  cfg.max_num_sms = group_config.num_comm_sms > 0
+                        ? static_cast<unsigned int>(group_config.num_comm_sms)
+                        : static_cast<unsigned int>(std::min(kDefaultCommSms, device_sms));
+  // 0 = NCCL_EP_AUTO, which enables eager mode (recv buffers sized per routing).
+  cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
+  cfg.zero_copy = group_config.zero_copy ? NCCL_EP_ZERO_COPY_ON : NCCL_EP_ZERO_COPY_OFF;
+  // Per-token top-k; NCCL EP sizes internal buffers from it in eager mode.
+  cfg.num_topk = static_cast<unsigned int>(group_config.num_topk);
+  cfg.overflow_policy =
+      group_config.drop_on_overflow ? NCCL_EP_OVERFLOW_DROP : NCCL_EP_OVERFLOW_AUTO;
+
+  // Keep the local shuffle/preprocess kernels on all SMs by default (their cost scales inversely
+  // with SM count) so the comm-SM cap above does not throttle them. overwrite=0 respects a
+  // user-set value and only fills in the default when unset.
+  // Set process-wide defaults once before concurrent NCCL EP group creation.
+  static std::once_flag sm_env_once;
+  std::call_once(sm_env_once, [device_sms]() {
+    char sm_buf[16];
+    std::snprintf(sm_buf, sizeof(sm_buf), "%d", device_sms);
+    setenv("NCCL_EP_SHUFFLE_SMS", sm_buf, /*overwrite=*/0);
+    setenv("NCCL_EP_PREPROCESS_NUM_SMS", sm_buf, /*overwrite=*/0);
+  });
+
+  NVTE_CHECK_NCCL(nccl_ep::create_group(&ep_group_, ep_comm, &cfg));
+
+  ep_comm_ = ep_comm;
+
+  initialized_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Pointer-keyed handle cache
+// ---------------------------------------------------------------------------
+
+size_t EPBackend::cache_cap_locked() {
+  if (!handle_cache_cap_set_) {
+    handle_cache_cap_set_ = true;
+    const char* cap_env = std::getenv("NVTE_EP_HANDLE_CACHE_SIZE");
+    if (cap_env != nullptr) {
+      const int64_t v = static_cast<int64_t>(std::atol(cap_env));
+      if (v < 0) {
+        handle_cache_cap_ = SIZE_MAX;
+      } else {
+        handle_cache_cap_ = static_cast<size_t>(v);
+      }
+    } else {
+      handle_cache_cap_ = 4096;
+    }
+  }
+  return handle_cache_cap_;
+}
+
+ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, size_t handle_mem_size,
+                                                NVTEEpLayerConfig layer_cfg) {
+  auto it = index_.find(handle_mem);
+  if (it != index_.end()) {
+    const NVTEEpLayerConfig& cached = it->second->layer_cfg;
+    const bool same_cfg =
+        cached.top_k == layer_cfg.top_k && cached.dispatch_output_per_expert_alignment ==
+                                               layer_cfg.dispatch_output_per_expert_alignment;
+    if (same_cfg) {
+      NVTE_CHECK(handle_mem_size >= it->second->handle_mem_size,
+                 "handle_mem buffer is too small: ", handle_mem_size, " bytes, requires ",
+                 it->second->handle_mem_size);
+      return it->second->handle;
+    }
+    // Same address with a new config: replace the stale handle.
+    if (it->second->handle != nullptr) nccl_ep::handle_destroy(it->second->handle);
+    handles_.erase(it->second);
+    index_.erase(it);
+  }
+  NVTE_CHECK(handles_.size() < cache_cap_locked(), "EP: live handle limit (", cache_cap_locked(),
+             ") reached; raise NVTE_EP_HANDLE_CACHE_SIZE");
+  ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
+  hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
+  size_t hm_size = 0;
+  NVTE_CHECK_NCCL(nccl_ep::handle_mem_size(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
+                                           layer_cfg.top_k));
+  ncclEpHandle_t h = open_handle(handle_mem, handle_mem_size, layer_cfg.top_k,
+                                 layer_cfg.dispatch_output_per_expert_alignment);
+  handles_.push_front(HandleEntry{handle_mem, h, layer_cfg, hm_size});
+  index_.emplace(handle_mem, handles_.begin());
+  return h;
+}
+
+ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem, size_t handle_mem_size) {
+  auto it = index_.find(handle_mem);
+  if (it != index_.end()) {
+    NVTE_CHECK(handle_mem_size >= it->second->handle_mem_size,
+               "handle_mem buffer is too small: ", handle_mem_size, " bytes, requires ",
+               it->second->handle_mem_size);
+    return it->second->handle;
+  }
+  // Callers with unstable handle_mem addresses must use the *_v2 ops with the cache disabled.
+  const uintptr_t hm_addr = reinterpret_cast<uintptr_t>(handle_mem);
+  NVTE_ERROR("ep op on handle_mem=0x", hm_addr,
+             " with no cached entry; call nvte_ep_prepare first.");
+  return nullptr;  // unreachable
+}
+
+// ---------------------------------------------------------------------------
+// Per-step operations
+// ---------------------------------------------------------------------------
+
+size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
+  NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
+  std::vector<EPBackend*> targets;
+  {
+    std::lock_guard<std::mutex> lock(devices_mutex_);
+    for (auto& kv : devices_) {
+      targets.push_back(kv.second.get());
+    }
+  }
+  ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
+  hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
+  size_t max_size = 0;
+  bool initialized = false;
+  for (EPBackend* target : targets) {
+    // Keep the group alive while querying its required buffer size.
+    std::lock_guard<std::mutex> lock(target->mutex_);
+    if (!target->initialized_) continue;
+    size_t hm_size = 0;
+    NVTE_CHECK_NCCL(nccl_ep::handle_mem_size(target->ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
+                                             &hm_size, layer_cfg.top_k));
+    max_size = std::max(max_size, hm_size);
+    initialized = true;
+  }
+  NVTE_CHECK(initialized, "EPBackend not initialized on any device");
+  return max_size;
+}
+
+void EPBackend::prepare(NVTETensor handle_mem, const NVTETensor topk_idx,
+                        NVTETensor recv_tokens_per_expert, NVTETensor total_recv_tokens_per_rank,
+                        NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
+  void* hm_ptr = handle_mem_ptr(handle_mem);
+  NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
+  NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
+
+  NVTEShape topk_idx_shape;
+  ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx, topk_idx_shape);
+
+  // ncclEpUpdateHandle writes per-expert counts via expert_counters and, when
+  // provided, the scalar padded recv-slot total via recv_total_counter.
+  NVTEShape recv_tokens_per_expert_shape;
+  ncclEpTensor_t recv_tokens_per_expert_desc;
+  if (recv_tokens_per_expert != nullptr) {
+    recv_tokens_per_expert_desc =
+        make_nccl_ep_tensor(recv_tokens_per_expert, recv_tokens_per_expert_shape);
+  }
+  NVTEShape total_recv_shape;
+  ncclEpTensor_t total_recv_desc;
+  if (total_recv_tokens_per_rank != nullptr) {
+    total_recv_desc = make_nccl_ep_tensor(total_recv_tokens_per_rank, total_recv_shape);
+  }
+  ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
+  layout_info.expert_counters =
+      (recv_tokens_per_expert != nullptr) ? &recv_tokens_per_expert_desc : nullptr;
+  layout_info.recv_total_counter =
+      (total_recv_tokens_per_rank != nullptr) ? &total_recv_desc : nullptr;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
+  if (cache_cap_locked() == 0) {
+    // Cache disabled: later ops rebind via ncclEpImportHandle.
+    ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
+                                   layer_cfg.dispatch_output_per_expert_alignment),
+                       /*owned=*/true);
+    NVTE_CHECK_NCCL(nccl_ep::update_handle(guard.get(), &nccl_topk_idx, &layout_info, stream));
+    return;
+  }
+  ncclEpHandle_t h = prepare_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg);
+  NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, &layout_info, stream));
+}
+
+void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor topk_idx,
+                                      const NVTETensor tokens, const NVTECommWindow& tokens_win,
+                                      const NVTETensor topk_weights,
+                                      const NVTECommWindow& topk_weights_win,
+                                      NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
+                                      NVTETensor recv_topk_weights,
+                                      const NVTECommWindow& recv_topk_weights_win,
+                                      NVTETensor recv_tokens_per_expert,
+                                      NVTETensor total_recv_tokens_per_rank, cudaStream_t stream) {
+  NVTE_CHECK(nvte_tensor_shape(tokens).ndim == 2, "tokens must be 2D [T, hidden_dim]");
+  NVTE_CHECK(nvte_tensor_shape(recv_tokens).ndim == 2,
+             "recv_tokens must be 2D [recv_T, hidden_dim]");
+
+  NVTEDType tok_dtype = nvte_tensor_type(tokens);
+  NVTE_CHECK(typeToSize(static_cast<DType>(tok_dtype)) <=
+                 typeToSize(static_cast<DType>(group_config_.max_token_dtype)),
+             "tokens dtype (", static_cast<int>(tok_dtype), ") wider than group max_token_dtype (",
+             static_cast<int>(group_config_.max_token_dtype), ")");
+  NVTEDType recv_dtype = nvte_tensor_type(recv_tokens);
+  NVTE_CHECK(typeToSize(static_cast<DType>(recv_dtype)) <=
+                 typeToSize(static_cast<DType>(group_config_.max_token_dtype)),
+             "recv_tokens dtype (", static_cast<int>(recv_dtype),
+             ") wider than group max_token_dtype (",
+             static_cast<int>(group_config_.max_token_dtype), ")");
+
+  NVTEShape tokens_shape, recv_tokens_shape;
+  ncclEpTensor_t nccl_tokens_in = make_nccl_ep_tensor(tokens, tokens_shape, tokens_win);
+  ncclEpTensor_t nccl_tokens_out =
+      make_nccl_ep_tensor(recv_tokens, recv_tokens_shape, recv_tokens_win);
+
+  // Routing is cached in handle_mem by ep_prepare; dispatch only needs
+  // topk_weights to reconstruct the sparse-to-dense prob map.
+  const bool is_forward = (topk_weights != nullptr);
+  NVTEShape topk_weights_shape, recv_topk_weights_shape;
+  ncclEpTensor_t nccl_topk_weights_in;
+  ncclEpTensor_t nccl_topk_weights_out;
+  if (is_forward) {
+    NVTE_CHECK(topk_idx != nullptr, "topk_idx required in forward dispatch");
+    NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
+    NVTE_CHECK(nvte_tensor_shape(topk_weights).ndim == 2, "topk_weights must be 2D [T, top_k]");
+    NVTE_CHECK(recv_topk_weights != nullptr,
+               "recv_topk_weights must not be null in forward dispatch");
+    NVTE_CHECK(nvte_tensor_shape(recv_topk_weights).ndim == 1,
+               "recv_topk_weights must be 1D [recv_capacity]");
+    nccl_topk_weights_in = make_nccl_ep_tensor(topk_weights, topk_weights_shape, topk_weights_win);
+    nccl_topk_weights_out =
+        make_nccl_ep_tensor(recv_topk_weights, recv_topk_weights_shape, recv_topk_weights_win);
+  }
+
+  // Block-scaled (e.g. MXFP8): route the per-token scale-inverse alongside the
+  // data. High-precision (bf16/fp16/fp32) and per-tensor FP8 payloads carry the
+  // default delayed scaling mode and skip this. Keys on is_block_scaling so
+  // NVFP4 can reuse this path later.
+  const NVTEScalingMode tokens_scaling_mode = nvte_tensor_scaling_mode(tokens);
+  const bool is_scaled = is_block_scaling(tokens_scaling_mode);
+  NVTEShape scales_in_shape, scales_out_shape;
+  ncclEpTensor_t nccl_scales_in = NCCL_EP_TENSOR_INIT, nccl_scales_out = NCCL_EP_TENSOR_INIT;
+  if (is_scaled) {
+    NVTE_CHECK(is_mxfp8_scaling(tokens_scaling_mode),
+               "EP dispatch supports MXFP8 block scaling only; got scaling mode ",
+               static_cast<int>(tokens_scaling_mode));
+    NVTE_CHECK(nvte_tensor_scaling_mode(recv_tokens) == tokens_scaling_mode,
+               "recv_tokens scaling mode must match tokens scaling mode");
+    nccl_scales_in =
+        make_nccl_ep_tensor(tokens, scales_in_shape, tokens_win, DescSource::kScaleInv);
+    nccl_scales_out =
+        make_nccl_ep_tensor(recv_tokens, scales_out_shape, recv_tokens_win, DescSource::kScaleInv);
+  } else {
+    NVTE_CHECK(!is_fp8_dtype(static_cast<DType>(tok_dtype)),
+               "EP dispatch of FP8 tokens requires a block scaling mode (e.g. MXFP8); "
+               "per-tensor (delayed) FP8 scaling is not supported");
+  }
+
+  ncclEpDispatchInputs_t in_struct = NCCL_EP_DISPATCH_INPUTS_INIT;
+  in_struct.tokens = &nccl_tokens_in;
+  in_struct.topk_weights = is_forward ? &nccl_topk_weights_in : nullptr;
+  in_struct.scales = is_scaled ? &nccl_scales_in : nullptr;
+
+  ncclEpDispatchOutputs_t out_struct = NCCL_EP_DISPATCH_OUTPUTS_INIT;
+  out_struct.tokens = &nccl_tokens_out;
+  out_struct.topk_weights = is_forward ? &nccl_topk_weights_out : nullptr;
+  out_struct.scales = is_scaled ? &nccl_scales_out : nullptr;
+
+  ncclEpDispatchConfig_t dispatch_cfg = NCCL_EP_DISPATCH_CONFIG_INIT;
+  dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
+  // Block-scaled payloads forward the per-token scale-inverse; select the matching recipe.
+  dispatch_cfg.quant_recipe = is_scaled ? NCCL_EP_DISP_QUANT_FWD : NCCL_EP_DISP_QUANT_NONE;
+
+  // Count mode: wire the caller's per-expert counts and the scalar pre-drop recv total so the
+  // fused dispatch writes them (the count scan is fused into the dispatch). NULL leaves
+  // layout_info unset (non-count callers).
+  ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
+  NVTEShape recv_counts_shape, total_recv_shape;
+  ncclEpTensor_t recv_counts_desc, total_recv_desc;
+  const ncclEpLayoutInfo_t* layout_info_ptr = nullptr;
+  if (recv_tokens_per_expert != nullptr) {
+    recv_counts_desc = make_nccl_ep_tensor(recv_tokens_per_expert, recv_counts_shape);
+    layout_info.expert_counters = &recv_counts_desc;
+    layout_info_ptr = &layout_info;
+  }
+  if (total_recv_tokens_per_rank != nullptr) {
+    total_recv_desc = make_nccl_ep_tensor(total_recv_tokens_per_rank, total_recv_shape);
+    layout_info.recv_total_counter = &total_recv_desc;
+    layout_info_ptr = &layout_info;
+  }
+
+  NVTE_CHECK_NCCL(
+      nccl_ep::dispatch(handle, &in_struct, &out_struct, layout_info_ptr, &dispatch_cfg, stream));
+}
+
+void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
+                         const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
+                         const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
+                         const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
+                         const NVTECommWindow& recv_topk_weights_win,
+                         const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+  void* hm_ptr = handle_mem_ptr(handle_mem);
+  const int num_tokens = static_cast<int>(nvte_tensor_shape(tokens).data[0]);
+  std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
+  bool owned = false;
+  ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
+                                                num_tokens, layer_cfg, &owned);
+  ScopedHandle guard(h, owned);
+  issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
+                        recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
+                        /*recv_tokens_per_expert=*/nullptr,
+                        /*total_recv_tokens_per_rank=*/nullptr, stream);
+}
+
+void EPBackend::prepare_and_dispatch(
+    NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
+    const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
+    const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
+    const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
+    const NVTECommWindow& recv_topk_weights_win, NVTETensor recv_tokens_per_expert,
+    NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
+  void* hm_ptr = handle_mem_ptr(handle_mem);
+  NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
+  NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
+
+  NVTEShape topk_idx_shape;
+  ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx, topk_idx_shape);
+
+  // The per-expert recv counts and the scalar pre-drop per-rank recv total are produced by the
+  // dispatch, which fuses the count scan into itself. Leave UpdateHandle's layout_info NULL so the
+  // fused path stays active, then wire both tensors into the dispatch below.
+  std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
+  if (cache_cap_locked() == 0) {
+    // Cache disabled: use a fresh uncached handle for both steps.
+    ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
+                                   layer_cfg.dispatch_output_per_expert_alignment),
+                       /*owned=*/true);
+    NVTE_CHECK_NCCL(
+        nccl_ep::update_handle(guard.get(), &nccl_topk_idx, /*layout_info=*/nullptr, stream));
+    issue_dispatch_locked(guard.get(), topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
+                          recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
+                          recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
+    return;
+  }
+  ncclEpHandle_t h = prepare_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg);
+  NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, /*layout_info=*/nullptr, stream));
+  issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
+                        recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
+                        recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
+}
+
+void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
+                        const NVTECommWindow& expert_out_win, NVTETensor result,
+                        const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+  void* hm_ptr = handle_mem_ptr(handle_mem);
+  NVTE_CHECK(nvte_tensor_shape(expert_out).ndim == 2, "expert_out must be 2D [recv_T, hidden_dim]");
+  NVTE_CHECK(nvte_tensor_shape(result).ndim == 2, "result must be 2D [T, hidden_dim]");
+  const int num_tokens = static_cast<int>(nvte_tensor_shape(result).data[0]);
+
+  NVTEShape expert_out_shape, result_shape;
+  ncclEpTensor_t nccl_expert_in = make_nccl_ep_tensor(expert_out, expert_out_shape, expert_out_win);
+  ncclEpTensor_t nccl_result_out = make_nccl_ep_tensor(result, result_shape);
+
+  ncclEpCombineInputs_t in_struct = NCCL_EP_COMBINE_INPUTS_INIT;
+  in_struct.tokens = &nccl_expert_in;
+
+  ncclEpCombineOutputs_t out_struct = NCCL_EP_COMBINE_OUTPUTS_INIT;
+  out_struct.tokens = &nccl_result_out;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
+  bool owned = false;
+  ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
+                                                num_tokens, layer_cfg, &owned);
+  ScopedHandle guard(h, owned);
+  NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
+}
+
+void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
+                             const NVTECommWindow& grad_win, const NVTETensor g_recv_topk_weights,
+                             const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
+                             NVTETensor grad_topk_weights, const NVTEEpLayerConfig* layer_cfg,
+                             cudaStream_t stream) {
+  void* hm_ptr = handle_mem_ptr(handle_mem);
+  const int num_tokens = static_cast<int>(nvte_tensor_shape(grad_tokens).data[0]);
+  NVTE_CHECK(nvte_tensor_shape(grad).ndim == 2, "grad must be 2D [recv_capacity, hidden_dim]");
+  NVTE_CHECK(nvte_tensor_shape(grad_tokens).ndim == 2, "grad_tokens must be 2D [T, hidden_dim]");
+
+  // g_recv_topk_weights must be 1D [recv_capacity]; caller flattens.
+  NVTE_CHECK(nvte_tensor_shape(g_recv_topk_weights).ndim == 1,
+             "g_recv_topk_weights must be 1D [recv_capacity]; caller must flatten leading dims");
+  NVTE_CHECK(nvte_tensor_shape(grad_topk_weights).ndim == 2,
+             "grad_topk_weights must be 2D [T, top_k]");
+
+  NVTEShape grad_shape, g_recv_w_shape, grad_tokens_shape, grad_w_shape;
+  ncclEpTensor_t nccl_tok_in = make_nccl_ep_tensor(grad, grad_shape, grad_win);
+  ncclEpTensor_t nccl_w_in =
+      make_nccl_ep_tensor(g_recv_topk_weights, g_recv_w_shape, g_recv_topk_weights_win);
+  ncclEpTensor_t nccl_tok_out = make_nccl_ep_tensor(grad_tokens, grad_tokens_shape);
+  ncclEpTensor_t nccl_w_out = make_nccl_ep_tensor(grad_topk_weights, grad_w_shape);
+
+  ncclEpCombineInputs_t in_struct = NCCL_EP_COMBINE_INPUTS_INIT;
+  in_struct.tokens = &nccl_tok_in;
+  in_struct.topk_weights = &nccl_w_in;
+
+  ncclEpCombineOutputs_t out_struct = NCCL_EP_COMBINE_OUTPUTS_INIT;
+  out_struct.tokens = &nccl_tok_out;
+  out_struct.topk_weights = &nccl_w_out;
+
+  ncclEpCombineConfig_t cfg = NCCL_EP_COMBINE_CONFIG_INIT;
+  cfg.pass_direction = NCCL_EP_BWD_PASS;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
+  bool owned = false;
+  ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
+                                                num_tokens, layer_cfg, &owned);
+  ScopedHandle guard(h, owned);
+  NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, &cfg, stream));
+}
+
+void EPBackend::combine_bwd(NVTETensor handle_mem, const NVTETensor grad,
+                            const NVTECommWindow& grad_win, NVTETensor grad_expert_out,
+                            const NVTECommWindow& grad_expert_out_win,
+                            const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+  // Backward of combine = reverse-direction dispatch.
+  dispatch(handle_mem, /*topk_idx=*/nullptr, grad, grad_win,
+           /*topk_weights=*/nullptr, /*topk_weights_win=*/NVTECommWindow{}, grad_expert_out,
+           grad_expert_out_win,
+           /*recv_topk_weights=*/nullptr, /*recv_topk_weights_win=*/NVTECommWindow{}, layer_cfg,
+           stream);
+}
+
+}  // namespace ep
+}  // namespace transformer_engine

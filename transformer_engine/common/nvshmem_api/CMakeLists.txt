@@ -16,7 +16,8 @@ set(NVSHMEMAPI_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" PARENT_SCOPE)
 target_link_directories(nvshmemapi PUBLIC ${NVSHMEM_HOME}/lib)
 target_link_libraries(nvshmemapi PUBLIC -static-libstdc++ nvshmem_device nvshmem_host CUDA::nvml CUDA::cublas CUDA::cuda_driver)
 target_include_directories(nvshmemapi PRIVATE
-                           ${NVSHMEM_HOME}/include/)
+                           ${NVSHMEM_HOME}/include/
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_include_directories(nvshmemapi PUBLIC
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
                            "${CMAKE_CURRENT_SOURCE_DIR}")

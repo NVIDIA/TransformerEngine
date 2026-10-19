@@ -1,0 +1,1491 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+"""JAX/TE custom ops for Expert Parallelism (EP).
+
+Sharding model:
+  - EpPrepare / EpDispatch outputs carry a single leading ``num_procs`` dim.
+    Sharded compound ``(dp_resource, ep_resource)`` when DP is set, else
+    ``ep_resource`` alone.
+  - EpDispatch inputs are 2D ``[T, H]`` or 3D ``[B, S, H]``; only the first
+    dim may be sharded, with axis in {ep, (dp, ep), dp, None}. Trailing dims
+    must be replicated. ``dp`` alone gets ``ep`` folded in locally.
+  - EpCombine output sharding comes from ``out_sharding`` or defaults to the
+    compound ``(dp, ep)`` axis on the leading dim.
+"""
+
+import functools
+import os
+import warnings
+from dataclasses import dataclass
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jax import dtypes, ffi
+from jax.sharding import NamedSharding, PartitionSpec
+
+import transformer_engine_jax
+from .base import BasePrimitive, register_primitive
+from .misc import TEDType, jax_dtype_to_te_dtype
+from ..sharding import global_mesh_resource, get_mesh_axis_size
+from ..version_utils import is_collective_stream_supported, is_xla_ffi_collectives_supported
+
+
+def _on_collective_stream(func):
+    """Pin ``func``'s ops to XLA's collective stream so the scheduler serializes
+    them with native collectives. No-op on JAX that lacks the annotation."""
+    if not is_collective_stream_supported():
+        return func
+    from jax.experimental.compute_on import compute_on
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # compute_on traces its callee and abstract-evals every argument, so it
+        # cannot take the static EpLayerConfig/PartitionSpec args directly. Wrap
+        # a nullary thunk that closes over them; the array operands are captured
+        # as consts and lifted to real operands, outputs stay on device. XLA
+        # async-wraps the resulting call onto the collective stream.
+        annotated = compute_on(  # pylint: disable=not-callable
+            compute_type="gpu_stream:collective",
+            out_memory_spaces=jax.memory.Space.Device,
+        )(lambda: func(*args, **kwargs))
+        return annotated()
+
+    return wrapper
+
+
+__all__ = [
+    "EpConfig",
+    "EpLayerConfig",
+    "set_ep_config",
+    "get_ep_config",
+    "reset_ep_config",
+    "ep_handle_mem_size",
+    "ep_prepare",
+    "ep_dispatch_fwd",
+    "ep_prepare_and_dispatch_fwd",
+    "ep_combine_fwd",
+    "ep_dispatch_bwd",
+    "ep_combine_bwd",
+]
+
+
+# ── Module-level EP config ──────────────────────────────────────────────────
+
+
+@functools.lru_cache(maxsize=None)
+def is_ep_borrowed_comm_built() -> bool:
+    """Return True if transformer_engine_jax was compiled with the borrowed-comm FFI."""
+    try:
+        return "te_ep_bootstrap_borrowed_comm_ffi" in transformer_engine_jax.registrations()
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
+def use_nccl_comm_from_xla() -> bool:
+    """Return True when EP should borrow XLA's NCCL comm instead of self-hosting NCCL.
+
+    Auto-selected when both the build and the installed JAX support the XLA
+    collectives FFI extension. NVTE_JAX_EP_NCCL_COMM_FROM_XLA=1/0 is an internal
+    override for tests, not a supported user knob.
+    """
+    env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
+    if env is not None:
+        forced_on = env not in ("0", "", "false", "False")
+        if forced_on and not is_ep_borrowed_comm_built():
+            raise RuntimeError(
+                "NVTE_JAX_EP_NCCL_COMM_FROM_XLA is set but transformer_engine_jax was built "
+                "without the EP borrowed-comm path (XLA collectives FFI headers were "
+                "unavailable at build time). Unset it to use the self-hosted NCCL comm."
+            )
+        return forced_on
+    return is_ep_borrowed_comm_built() and is_xla_ffi_collectives_supported()
+
+
+@dataclass(frozen=True)
+class EpConfig:
+    """Snapshot of the EP bootstrap config (see ep_bootstrap).
+
+    num_ep_groups is the size of the outer dp/fsdp mesh axis (1 if neither
+    is set), captured at bootstrap so abstract-eval never reads the mesh.
+    """
+
+    world_size: int
+    rank: int
+    ep_size: int
+    num_ep_groups: int
+    num_experts: int
+    num_local_experts: int
+    max_tokens_per_rank: int
+    recv_capacity_per_rank: int
+    hidden_dim: int
+
+
+_ep_config: EpConfig = None
+
+
+# Fixed sentinel keeps EP on its own private comm so it never aliases an XLA
+# collective over the same devices. Must stay in [0, 2**63 - 1].
+# 0x54454550 spells "TEEP".
+EP_COMMUNICATION_ID = 0x54454550
+
+
+def run_borrowed_comm_bootstrap(
+    mesh, replica_groups_flat, group_size, communication_id=EP_COMMUNICATION_ID
+):
+    """Initialize EPBackend on the borrowed XLA comm (one-shot, all devices)."""
+    try:
+        from jax import shard_map  # top-level since v0.8.0
+    except ImportError:  # older JAX
+        from jax.experimental.shard_map import shard_map
+
+    all_axes = tuple(mesh.axis_names)
+    spec = PartitionSpec(all_axes)
+    world = int(np.prod([mesh.shape[a] for a in all_axes]))
+    rg = np.asarray(replica_groups_flat, np.int64)
+    gs = np.int64(group_size)
+    cid = np.int64(communication_id)
+
+    def _body(x):
+        out_type = jax.ShapeDtypeStruct(x.shape, x.dtype)
+        return ffi.ffi_call("te_ep_bootstrap_borrowed_comm_ffi", out_type, has_side_effect=True)(
+            x, replica_groups=rg, group_size=gs, communication_id=cid
+        )
+
+    dummy = jnp.zeros((world,), dtype=jnp.uint8)
+    fn = jax.jit(shard_map(_body, mesh=mesh, in_specs=spec, out_specs=spec))
+    jax.block_until_ready(fn(dummy))
+
+
+def set_ep_config(config: EpConfig) -> None:
+    """Cache the EP config for abstract-eval / sharding helpers. Call once."""
+    global _ep_config
+    _ep_config = config
+
+
+def get_ep_config() -> EpConfig:
+    """Return the process-wide EpConfig set by ep_bootstrap."""
+    if _ep_config is None:
+        raise RuntimeError("EpConfig has not been set. Did you call ep_bootstrap()?")
+    return _ep_config
+
+
+def reset_ep_config() -> None:
+    """Clear the cached EpConfig so a later ep_bootstrap starts fresh (see ep_finalize)."""
+    global _ep_config
+    _ep_config = None
+
+
+@dataclass(frozen=True)
+class EpLayerConfig:
+    """Per-layer EP config; mirrors C ``NVTEEpLayerConfig``.
+
+    Threaded through every per-step op so each can rebind its handle from
+    handle_mem, which XLA may relocate between calls. topk_idx_dtype must match
+    the dtype of topk_idx passed to ep_prepare.
+    Reserved for future per-call fields (fp8 scale, overflow policy, ...).
+    """
+
+    top_k: int
+    dispatch_output_per_expert_alignment: int = 0
+    topk_idx_dtype: int = int(TEDType.kInt32)
+
+
+def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
+    """Return the handle_mem byte size for ``cfg``. Host-only; cheap."""
+    return int(
+        transformer_engine_jax.ep_handle_mem_size(
+            int(cfg.top_k), int(cfg.dispatch_output_per_expert_alignment)
+        )
+    )
+
+
+def _capture_ep_resource_axes():
+    """Capture physical axes at bind time for asynchronous SPMD partitioning."""
+    resource = global_mesh_resource()
+    outer_axes = tuple(
+        dict.fromkeys(
+            axis for axis in (resource.dp_resource, resource.fsdp_resource) if axis is not None
+        )
+    )
+    return resource.ep_resource, outer_axes
+
+
+def _leading_axis_ok(spec, resource_axes=None):
+    """Validate replicated trailing dimensions and EP plus optional outer axes."""
+    ep_axis, outer_axes = (
+        resource_axes if resource_axes is not None else _capture_ep_resource_axes()
+    )
+    if len(spec) < 2 or ep_axis is None:
+        return False, ep_axis, outer_axes
+    if any(ax is not None for ax in spec[1:]):
+        return False, ep_axis, outer_axes
+    leading = spec[0]
+    elts = leading if isinstance(leading, tuple) else (leading,)
+    if ep_axis not in elts:
+        return False, ep_axis, outer_axes
+    allowed = set(outer_axes) | {ep_axis}
+    return all(a in allowed for a in elts), ep_axis, outer_axes
+
+
+def _ep_outer_axis():
+    """Legacy single outer axis used by the standalone EP custom VJP wrapper."""
+    resource = global_mesh_resource()
+    if resource.dp_resource is not None and get_mesh_axis_size(resource.dp_resource) > 1:
+        return resource.dp_resource
+    if resource.fsdp_resource is not None and get_mesh_axis_size(resource.fsdp_resource) > 1:
+        return resource.fsdp_resource
+    return resource.dp_resource or resource.fsdp_resource
+
+
+def _ep_leading_dims(is_outer):
+    """Leading dim of an EP-output tensor: num_ep_groups*ep_size globally,
+    1 per shard. Read from EpConfig so abstract-eval needs no active mesh."""
+    cfg = get_ep_config()
+    if not is_outer:
+        return (1,)
+    return (cfg.num_ep_groups * cfg.ep_size,)
+
+
+def _ep_output_spec(*trailing, resource_axes=None):
+    """Output sharding uses every DP/FSDP outer axis, with EP innermost."""
+    ep_axis, outer_axes = (
+        resource_axes if resource_axes is not None else _capture_ep_resource_axes()
+    )
+    leading = (*outer_axes, ep_axis) if outer_axes else ep_axis
+    return PartitionSpec(leading, *trailing)
+
+
+def _ep_spec_ok(spec, trailing_count, resource_axes=None):
+    """Validate EP-output axes, allowing JAX to drop size-one mesh axes."""
+    ep_axis, outer_axes = (
+        resource_axes if resource_axes is not None else _capture_ep_resource_axes()
+    )
+    if len(spec) != 1 + trailing_count:
+        return False
+    if any(ax is not None for ax in spec[1:]):
+        return False
+    leading = spec[0]
+    elts = leading if isinstance(leading, tuple) else (leading,)
+    actual = frozenset(a for a in elts if a is not None)
+    return actual <= set((*outer_axes, ep_axis))
+
+
+# ── ep_prepare ──────────────────────────────────────────────────────────────
+
+
+class EpPreparePrimitive(BasePrimitive):
+    """FFI primitive for nvte_ep_prepare: routing setup and per-expert token counts."""
+
+    name = "te_ep_prepare_ffi"
+    multiple_results = True
+    impl_static_args = (1, 2, 3, 4, 5)  # top_k, dispatch_output_per_expert_alignment,
+    #                                      topk_idx_dtype, is_outer, resource_axes
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        topk_idx_aval,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        is_outer,
+        resource_axes,
+    ):
+        # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
+        # False: per-shard = (1,).
+        del topk_idx_dtype, resource_axes
+        cfg = get_ep_config()
+        num_local_experts = cfg.num_local_experts
+        assert (
+            len(topk_idx_aval.shape) >= 2
+        ), f"topk_idx must be at least 2D [..., top_k], got shape {topk_idx_aval.shape}"
+        handle_mem_size = int(
+            transformer_engine_jax.ep_handle_mem_size(
+                int(top_k), int(dispatch_output_per_expert_alignment)
+            )
+        )
+        leading = _ep_leading_dims(is_outer)
+        token_counts_aval = jax.core.ShapedArray(leading + (num_local_experts,), jnp.int32)
+        # Per-rank pre-drop recv-slot total (includes tokens dropped on overflow).
+        total_recv_tokens_aval = jax.core.ShapedArray(leading + (1,), jnp.int32)
+        handle_mem_aval = jax.core.ShapedArray(leading + (handle_mem_size,), jnp.uint8)
+        return token_counts_aval, total_recv_tokens_aval, handle_mem_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        kwargs["is_outer"] = True
+        return EpPreparePrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
+
+    @staticmethod
+    def lowering(
+        ctx,
+        topk_idx,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        is_outer,
+        resource_axes,
+    ):
+        del resource_axes
+        del is_outer
+        return ffi.ffi_lowering(EpPreparePrimitive.name)(
+            ctx,
+            topk_idx,
+            top_k=int(top_k),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            topk_idx_dtype=int(topk_idx_dtype),
+        )
+
+    @staticmethod
+    def impl(
+        topk_idx,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        is_outer,
+        resource_axes,
+    ):
+        assert EpPreparePrimitive.inner_primitive is not None
+        token_counts, total_recv_tokens, handle_mem = EpPreparePrimitive.inner_primitive.bind(
+            topk_idx,
+            top_k=top_k,
+            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
+            topk_idx_dtype=topk_idx_dtype,
+            is_outer=is_outer,
+            resource_axes=resource_axes,
+        )
+        return token_counts, total_recv_tokens, handle_mem
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        is_outer,
+        resource_axes,
+    ):
+        raise NotImplementedError("EpPreparePrimitive does not support vmap")
+
+    @staticmethod
+    def partition(
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        is_outer,
+        resource_axes,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del is_outer, result_infos
+        idx_spec = arg_infos[0].sharding.spec
+        ok, ep_axis, outer_axes = _leading_axis_ok(idx_spec, resource_axes)
+        if not ok:
+            raise NotImplementedError(
+                "EpPrepare: topk_idx leading dim must include ep_resource"
+                f" ('{ep_axis}'), optionally tupled with {outer_axes},"
+                f" with the topk dim replicated; got spec={idx_spec}."
+            )
+        arg_shardings = tuple(a.sharding for a in arg_infos)
+        # token_counts / total_recv_tokens / handle_mem inherit the input's leading
+        # axis (trailing dims auto-pad to None).
+        leading_spec = PartitionSpec(idx_spec[0])
+        tc_sharding = NamedSharding(mesh, leading_spec)
+        trt_sharding = NamedSharding(mesh, leading_spec)
+        hm_sharding = NamedSharding(mesh, leading_spec)
+
+        def sharded_impl(topk_idx):
+            return EpPreparePrimitive.impl(
+                topk_idx,
+                top_k,
+                dispatch_output_per_expert_alignment,
+                topk_idx_dtype,
+                False,
+                resource_axes=resource_axes,
+            )
+
+        return mesh, sharded_impl, (tc_sharding, trt_sharding, hm_sharding), arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        # Signature: (*static_args, mesh, value_types, result_types). Static args
+        # for this primitive are (top_k, dispatch_alignment, topk_idx_dtype, is_outer).
+        value_types = args[-2]
+        topk_idx_rank = len(value_types[0].shape)
+        in_axes = " ".join(f"L{i}" for i in range(topk_idx_rank - 1)) + " topk"
+        return f"{in_axes} -> EPL nle, EPL trt, EPL hm"
+
+
+register_primitive(EpPreparePrimitive)
+
+
+# ── ep_dispatch ─────────────────────────────────────────────────────────────
+
+
+class EpDispatchPrimitive(BasePrimitive):
+    """FFI primitive for nvte_ep_dispatch (forward)."""
+
+    name = "te_ep_dispatch_ffi"
+    multiple_results = True
+    impl_static_args = (4, 5, 6, 7, 8, 9)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer, resource_axes
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        handle_mem_aval,
+        topk_idx_aval,
+        tokens_aval,
+        topk_weights_aval,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
+        # False: per-shard = (1,).
+        del resource_axes
+        del topk_idx_aval, topk_weights_aval, top_k, dispatch_output_per_expert_alignment
+        del topk_idx_dtype
+        assert (
+            len(tokens_aval.shape) >= 2
+        ), f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
+        recv_pr = recv_capacity_per_rank
+        tok_dtype = dtypes.canonicalize_dtype(tokens_aval.dtype)
+        hidden_dim = tokens_aval.shape[-1]
+        leading = _ep_leading_dims(is_outer)
+        recv_tokens_aval = jax.core.ShapedArray(leading + (recv_pr, hidden_dim), tok_dtype)
+        recv_topk_weights_aval = jax.core.ShapedArray(leading + (recv_pr,), jnp.float32)
+        return (recv_tokens_aval, recv_topk_weights_aval, handle_mem_aval)
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        kwargs["is_outer"] = True
+        return EpDispatchPrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
+
+    @staticmethod
+    def lowering(
+        ctx,
+        handle_mem,
+        topk_idx,
+        tokens,
+        topk_weights,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        del resource_axes
+        del recv_capacity_per_rank, is_outer
+        return ffi.ffi_lowering(
+            EpDispatchPrimitive.name,
+            operand_output_aliases={0: 2},  # handle_mem aliased to out_handle_mem
+        )(
+            ctx,
+            handle_mem,
+            topk_idx,
+            tokens,
+            topk_weights,
+            top_k=int(top_k),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            topk_idx_dtype=int(topk_idx_dtype),
+        )
+
+    @staticmethod
+    def impl(
+        handle_mem,
+        topk_idx,
+        tokens,
+        topk_weights,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        assert EpDispatchPrimitive.inner_primitive is not None
+        recv_tokens, recv_topk_weights, handle_mem_out = EpDispatchPrimitive.inner_primitive.bind(
+            handle_mem,
+            topk_idx,
+            tokens,
+            topk_weights,
+            top_k=top_k,
+            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
+            topk_idx_dtype=topk_idx_dtype,
+            recv_capacity_per_rank=recv_capacity_per_rank,
+            is_outer=is_outer,
+            resource_axes=resource_axes,
+        )
+        return recv_tokens, recv_topk_weights, handle_mem_out
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        raise NotImplementedError("EpDispatchPrimitive does not support vmap")
+
+    @staticmethod
+    def partition(
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del is_outer, result_infos
+        tokens_spec = arg_infos[2].sharding.spec
+        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, resource_axes)
+        if not ok:
+            raise NotImplementedError(
+                "EpDispatch: tokens leading dim must include ep_resource"
+                f" ('{ep_axis}'), optionally tupled with {outer_axes},"
+                f" hidden dim replicated; got spec={tokens_spec}."
+            )
+        idx_spec = arg_infos[1].sharding.spec
+        tw_spec = arg_infos[3].sharding.spec
+        if idx_spec[0] != tokens_spec[0] or tw_spec[0] != tokens_spec[0]:
+            raise NotImplementedError(
+                "EpDispatch: topk_idx, tokens, topk_weights must share the leading"
+                f" axis; got topk_idx={idx_spec}, tokens={tokens_spec}, topk_weights={tw_spec}."
+            )
+        # Recv outputs share the tokens leading-only spec (trailing dims auto-pad to None).
+        leading_spec = PartitionSpec(tokens_spec[0])
+        arg_shardings = tuple(a.sharding for a in arg_infos)
+        out_shardings = (
+            NamedSharding(mesh, leading_spec),
+            NamedSharding(mesh, leading_spec),
+            arg_infos[0].sharding,  # out_handle_mem: same sharding as input handle_mem
+        )
+
+        def sharded_impl(handle_mem, topk_idx, tokens, topk_weights):
+            return EpDispatchPrimitive.impl(
+                handle_mem,
+                topk_idx,
+                tokens,
+                topk_weights,
+                top_k,
+                dispatch_output_per_expert_alignment,
+                topk_idx_dtype,
+                recv_capacity_per_rank,
+                False,
+                resource_axes=resource_axes,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        # Signature: (*static_args, mesh, value_types, result_types). Static args
+        # for this primitive are (top_k, dispatch_alignment, topk_idx_dtype,
+        # recv_capacity_per_rank, is_outer).
+        value_types = args[-2]
+        # Inputs: handle_mem, topk_idx, tokens, topk_weights.
+        idx_rank = len(value_types[1].shape)
+        tok_rank = len(value_types[2].shape)
+        tw_rank = len(value_types[3].shape)
+        idx_axes = " ".join(f"I{i}" for i in range(idx_rank - 1)) + " topk_in"
+        tok_axes = " ".join(f"T{i}" for i in range(tok_rank - 1)) + " H"
+        tw_axes = " ".join(f"W{i}" for i in range(tw_rank - 1)) + " topk"
+        return f"EPL hm, {idx_axes}, {tok_axes}, {tw_axes} -> EPL recv_pr H, EPL recv_pr, EPL hm"
+
+
+register_primitive(EpDispatchPrimitive)
+
+
+# ── ep_prepare_and_dispatch ─────────────────────────────────────────────────
+
+
+class EpPrepareAndDispatchPrimitive(BasePrimitive):
+    """FFI primitive for nvte_ep_prepare_and_dispatch: fused prepare + dispatch (forward)."""
+
+    name = "te_ep_prepare_and_dispatch_ffi"
+    multiple_results = True
+    impl_static_args = (3, 4, 5, 6, 7, 8)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer,
+    #                                     resource_axes
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        topk_idx_aval,
+        tokens_aval,
+        topk_weights_aval,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        del resource_axes
+        del topk_idx_aval, topk_weights_aval, topk_idx_dtype
+        assert (
+            len(tokens_aval.shape) >= 2
+        ), f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
+        cfg = get_ep_config()
+        handle_mem_size = int(
+            transformer_engine_jax.ep_handle_mem_size(
+                int(top_k), int(dispatch_output_per_expert_alignment)
+            )
+        )
+        leading = _ep_leading_dims(is_outer)
+        tok_dtype = dtypes.canonicalize_dtype(tokens_aval.dtype)
+        recv_tokens_aval = jax.core.ShapedArray(
+            leading + (recv_capacity_per_rank, tokens_aval.shape[-1]), tok_dtype
+        )
+        recv_topk_weights_aval = jax.core.ShapedArray(
+            leading + (recv_capacity_per_rank,), jnp.float32
+        )
+        token_counts_aval = jax.core.ShapedArray(leading + (cfg.num_local_experts,), jnp.int32)
+        total_recv_tokens_aval = jax.core.ShapedArray(leading + (1,), jnp.int32)
+        handle_mem_aval = jax.core.ShapedArray(leading + (handle_mem_size,), jnp.uint8)
+        return (
+            recv_tokens_aval,
+            recv_topk_weights_aval,
+            token_counts_aval,
+            total_recv_tokens_aval,
+            handle_mem_aval,
+        )
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        kwargs["is_outer"] = True
+        return EpPrepareAndDispatchPrimitive.abstract(
+            *args, **kwargs
+        )  # pylint: disable=missing-kwoa
+
+    @staticmethod
+    def lowering(
+        ctx,
+        topk_idx,
+        tokens,
+        topk_weights,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        del resource_axes
+        del recv_capacity_per_rank, is_outer
+        return ffi.ffi_lowering(EpPrepareAndDispatchPrimitive.name)(
+            ctx,
+            topk_idx,
+            tokens,
+            topk_weights,
+            top_k=int(top_k),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            topk_idx_dtype=int(topk_idx_dtype),
+        )
+
+    @staticmethod
+    def impl(
+        topk_idx,
+        tokens,
+        topk_weights,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        assert EpPrepareAndDispatchPrimitive.inner_primitive is not None
+        return tuple(
+            EpPrepareAndDispatchPrimitive.inner_primitive.bind(
+                topk_idx,
+                tokens,
+                topk_weights,
+                top_k=top_k,
+                dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
+                topk_idx_dtype=topk_idx_dtype,
+                recv_capacity_per_rank=recv_capacity_per_rank,
+                is_outer=is_outer,
+                resource_axes=resource_axes,
+            )
+        )
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        raise NotImplementedError("EpPrepareAndDispatchPrimitive does not support vmap")
+
+    @staticmethod
+    def partition(
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del is_outer, result_infos
+        tokens_spec = arg_infos[1].sharding.spec
+        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, resource_axes)
+        if not ok:
+            raise NotImplementedError(
+                "EpPrepareAndDispatch: tokens leading dim must include ep_resource"
+                f" ('{ep_axis}'), optionally tupled with {outer_axes},"
+                f" hidden dim replicated; got spec={tokens_spec}."
+            )
+        idx_spec = arg_infos[0].sharding.spec
+        tw_spec = arg_infos[2].sharding.spec
+        if idx_spec[0] != tokens_spec[0] or tw_spec[0] != tokens_spec[0]:
+            raise NotImplementedError(
+                "EpPrepareAndDispatch: topk_idx, tokens, topk_weights must share the leading"
+                f" axis; got topk_idx={idx_spec}, tokens={tokens_spec}, topk_weights={tw_spec}."
+            )
+        leading_sharding = NamedSharding(mesh, PartitionSpec(tokens_spec[0]))
+        arg_shardings = tuple(a.sharding for a in arg_infos)
+        out_shardings = (leading_sharding,) * 5
+
+        def sharded_impl(topk_idx, tokens, topk_weights):
+            return EpPrepareAndDispatchPrimitive.impl(
+                topk_idx,
+                tokens,
+                topk_weights,
+                top_k,
+                dispatch_output_per_expert_alignment,
+                topk_idx_dtype,
+                recv_capacity_per_rank,
+                False,
+                resource_axes=resource_axes,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        # Static args: (top_k, dispatch_alignment, topk_idx_dtype, recv_capacity_per_rank,
+        # is_outer, resource_axes).
+        value_types = args[-2]
+        idx_rank = len(value_types[0].shape)
+        tok_rank = len(value_types[1].shape)
+        tw_rank = len(value_types[2].shape)
+        idx_axes = " ".join(f"I{i}" for i in range(idx_rank - 1)) + " topk_in"
+        tok_axes = " ".join(f"T{i}" for i in range(tok_rank - 1)) + " H"
+        tw_axes = " ".join(f"W{i}" for i in range(tw_rank - 1)) + " topk"
+        return (
+            f"{idx_axes}, {tok_axes}, {tw_axes} -> EPL recv_pr H, EPL recv_pr, EPL nle, EPL trt,"
+            " EPL hm"
+        )
+
+
+register_primitive(EpPrepareAndDispatchPrimitive)
+
+
+# ── ep_combine ──────────────────────────────────────────────────────────────
+# `expert_out` here is the post-weight buffer; ep.ep_combine applies the
+# hadamard before calling.
+
+
+def _normalize_leading_shape(s):
+    return s if isinstance(s, tuple) else (int(s),)
+
+
+def _prod(seq):
+    p = 1
+    for x in seq:
+        p *= int(x)
+    return p
+
+
+def _leading_per_shard(out_leading_shape, leading_axis, mesh):
+    """Per-shard leading shape: divide ``out_leading_shape[0]`` by the mesh factor on ``leading_axis``."""
+    axes = leading_axis if isinstance(leading_axis, tuple) else (leading_axis,)
+    factor = 1
+    for a in axes:
+        factor *= mesh.shape[a]
+    assert (
+        out_leading_shape[0] % factor == 0
+    ), f"leading dim {out_leading_shape[0]} not divisible by shard factor {factor} on axes {axes}"
+    return (out_leading_shape[0] // factor,) + tuple(out_leading_shape[1:])
+
+
+class EpCombinePrimitive(BasePrimitive):
+    """FFI primitive for nvte_ep_combine (forward)."""
+
+    name = "te_ep_combine_ffi"
+    multiple_results = False
+    impl_static_args = (2, 3, 4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, out_leading_shape, out_partition_spec, resource_axes
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        handle_mem_aval,
+        expert_out_aval,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+    ):
+        del resource_axes
+        del top_k, dispatch_output_per_expert_alignment, topk_idx_dtype
+        del out_partition_spec, handle_mem_aval
+        assert (
+            len(expert_out_aval.shape) == 3
+        ), f"expert_out must be 3D [num_procs, recv_pr, H], got shape {expert_out_aval.shape}"
+        eo_dtype = dtypes.canonicalize_dtype(expert_out_aval.dtype)
+        hidden_dim = expert_out_aval.shape[-1]
+        out_shape = tuple(out_leading_shape) + (hidden_dim,)
+        return jax.core.ShapedArray(out_shape, eo_dtype)
+
+    @staticmethod
+    def lowering(
+        ctx,
+        handle_mem,
+        expert_out,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+    ):
+        del resource_axes
+        del out_leading_shape, out_partition_spec
+        return ffi.ffi_lowering(EpCombinePrimitive.name)(
+            ctx,
+            handle_mem,
+            expert_out,
+            top_k=int(top_k),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            topk_idx_dtype=int(topk_idx_dtype),
+        )
+
+    @staticmethod
+    def impl(
+        handle_mem,
+        expert_out,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+    ):
+        assert EpCombinePrimitive.inner_primitive is not None
+        return EpCombinePrimitive.inner_primitive.bind(
+            handle_mem,
+            expert_out,
+            top_k=top_k,
+            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
+            topk_idx_dtype=topk_idx_dtype,
+            out_leading_shape=out_leading_shape,
+            out_partition_spec=out_partition_spec,
+            resource_axes=resource_axes,
+        )
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+    ):
+        raise NotImplementedError("EpCombinePrimitive does not support vmap")
+
+    @staticmethod
+    def partition(
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del result_infos
+        eo_spec = arg_infos[1].sharding.spec
+        if not _ep_spec_ok(eo_spec, trailing_count=2, resource_axes=resource_axes):
+            raise NotImplementedError(
+                "EpCombine: expert_out must be sharded as PartitionSpec(ep_resource,"
+                " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
+                f" over [num_procs, recv_pr, H]; got spec={eo_spec}."
+            )
+        if out_partition_spec is not None:
+            per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
+            out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
+        else:
+            per_shard_leading = out_leading_shape
+            out_sharding = NamedSharding(mesh, PartitionSpec())
+        arg_shardings = tuple(a.sharding for a in arg_infos)
+
+        def sharded_impl(handle_mem, expert_out):
+            return EpCombinePrimitive.impl(
+                handle_mem,
+                expert_out,
+                top_k,
+                dispatch_output_per_expert_alignment,
+                topk_idx_dtype,
+                per_shard_leading,
+                out_partition_spec,
+                resource_axes=resource_axes,
+            )
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        # Signature: (*static_args, mesh, value_types, result_types). Static args:
+        # (top_k, dispatch_alignment, topk_idx_dtype, out_leading_shape, out_partition_spec).
+        result_types = args[-1]
+        out_rank = len(result_types[0].shape)
+        out_axes = " ".join(f"O{i}" for i in range(out_rank - 1)) + " H"
+        return f"EPL hm, EPL recv_pr H -> {out_axes}"
+
+
+register_primitive(EpCombinePrimitive)
+
+
+# ── ep_dispatch_bwd ─────────────────────────────────────────────────────────
+
+
+class EpDispatchBwdPrimitive(BasePrimitive):
+    """FFI primitive for the backward of nvte_ep_dispatch."""
+
+    name = "te_ep_dispatch_bwd_ffi"
+    multiple_results = True
+    impl_static_args = (3, 4, 5, 6, 7, 8)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, out_leading_shape, out_partition_spec, resource_axes
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        handle_mem_aval,
+        grad_aval,
+        g_recv_topk_weights_aval,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+    ):
+        del resource_axes
+        del dispatch_output_per_expert_alignment, topk_idx_dtype
+        del g_recv_topk_weights_aval, out_partition_spec, handle_mem_aval
+        assert (
+            len(grad_aval.shape) == 3
+        ), f"grad must be 3D [num_procs, recv_pr, H], got shape {grad_aval.shape}"
+        g_dtype = dtypes.canonicalize_dtype(grad_aval.dtype)
+        hidden_dim = grad_aval.shape[-1]
+        result_aval = jax.core.ShapedArray(tuple(out_leading_shape) + (hidden_dim,), g_dtype)
+        grad_topk_weights_aval = jax.core.ShapedArray(
+            tuple(out_leading_shape) + (top_k,), jnp.float32
+        )
+        return result_aval, grad_topk_weights_aval
+
+    @staticmethod
+    def lowering(
+        ctx,
+        handle_mem,
+        grad,
+        g_recv_topk_weights,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+    ):
+        del resource_axes
+        del out_leading_shape, out_partition_spec
+        return ffi.ffi_lowering(EpDispatchBwdPrimitive.name)(
+            ctx,
+            handle_mem,
+            grad,
+            g_recv_topk_weights,
+            top_k=int(top_k),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            topk_idx_dtype=int(topk_idx_dtype),
+        )
+
+    @staticmethod
+    def impl(
+        handle_mem,
+        grad,
+        g_recv_topk_weights,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+    ):
+        assert EpDispatchBwdPrimitive.inner_primitive is not None
+        return EpDispatchBwdPrimitive.inner_primitive.bind(
+            handle_mem,
+            grad,
+            g_recv_topk_weights,
+            top_k=top_k,
+            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
+            topk_idx_dtype=topk_idx_dtype,
+            out_leading_shape=out_leading_shape,
+            out_partition_spec=out_partition_spec,
+            resource_axes=resource_axes,
+        )
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+    ):
+        raise NotImplementedError("EpDispatchBwdPrimitive does not support vmap")
+
+    @staticmethod
+    def partition(
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        out_leading_shape,
+        out_partition_spec,
+        resource_axes,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del result_infos
+        g_spec = arg_infos[1].sharding.spec
+        if not _ep_spec_ok(g_spec, trailing_count=2, resource_axes=resource_axes):
+            raise NotImplementedError(
+                "EpDispatchBwd: grad must be sharded as PartitionSpec(ep_resource,"
+                " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
+                f" over [num_procs, recv_pr, H]; got spec={g_spec}."
+            )
+        gw_spec = arg_infos[2].sharding.spec
+        if not _ep_spec_ok(gw_spec, trailing_count=1, resource_axes=resource_axes):
+            raise NotImplementedError(
+                "EpDispatchBwd: g_recv_topk_weights must be sharded as"
+                " PartitionSpec(ep_resource, None) (or ((dp, ep), None) when dp/fsdp is set)"
+                f" over [num_procs, recv_pr]; got spec={gw_spec}."
+            )
+        if gw_spec[0] != g_spec[0]:
+            raise NotImplementedError(
+                "EpDispatchBwd: grad and g_recv_topk_weights must share the leading"
+                f" axis; got grad={g_spec}, g_recv_topk_weights={gw_spec}."
+            )
+        if out_partition_spec is not None:
+            per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
+            out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
+        else:
+            per_shard_leading = out_leading_shape
+            out_sharding = NamedSharding(mesh, PartitionSpec())
+        arg_shardings = tuple(a.sharding for a in arg_infos)
+        out_shardings = [out_sharding, out_sharding]
+
+        def sharded_impl(handle_mem, grad, g_recv_topk_weights):
+            return EpDispatchBwdPrimitive.impl(
+                handle_mem,
+                grad,
+                g_recv_topk_weights,
+                top_k,
+                dispatch_output_per_expert_alignment,
+                topk_idx_dtype,
+                per_shard_leading,
+                out_partition_spec,
+                resource_axes=resource_axes,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        # Signature: (*static_args, mesh, value_types, result_types). Result rank
+        # follows out_leading_shape (static arg #2): rank = len(out_leading) + 1.
+        result_types = args[-1]
+        out_rank = len(result_types[0].shape)
+        out_axes = " ".join(f"O{i}" for i in range(out_rank - 1))
+        return f"EPL hm, EPL recv_pr H, EPL recv_pr -> {out_axes} H, {out_axes} k"
+
+
+register_primitive(EpDispatchBwdPrimitive)
+
+
+# ── ep_combine_bwd ──────────────────────────────────────────────────────────
+
+
+class EpCombineBwdPrimitive(BasePrimitive):
+    """FFI primitive for the backward of nvte_ep_combine."""
+
+    name = "te_ep_combine_bwd_ffi"
+    multiple_results = False
+    impl_static_args = (2, 3, 4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer, resource_axes
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        handle_mem_aval,
+        grad_aval,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
+        # False: per-shard = (1,).
+        del resource_axes
+        del top_k, dispatch_output_per_expert_alignment, topk_idx_dtype, handle_mem_aval
+        assert (
+            len(grad_aval.shape) >= 2
+        ), f"grad must be at least 2D [..., H], got shape {grad_aval.shape}"
+        g_dtype = dtypes.canonicalize_dtype(grad_aval.dtype)
+        hidden_dim = grad_aval.shape[-1]
+        leading = _ep_leading_dims(is_outer)
+        return jax.core.ShapedArray(leading + (recv_capacity_per_rank, hidden_dim), g_dtype)
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        kwargs["is_outer"] = True
+        return EpCombineBwdPrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
+
+    @staticmethod
+    def lowering(
+        ctx,
+        handle_mem,
+        grad,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        del resource_axes
+        del recv_capacity_per_rank, is_outer
+        return ffi.ffi_lowering(EpCombineBwdPrimitive.name)(
+            ctx,
+            handle_mem,
+            grad,
+            top_k=int(top_k),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            topk_idx_dtype=int(topk_idx_dtype),
+        )
+
+    @staticmethod
+    def impl(
+        handle_mem,
+        grad,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        assert EpCombineBwdPrimitive.inner_primitive is not None
+        return EpCombineBwdPrimitive.inner_primitive.bind(
+            handle_mem,
+            grad,
+            top_k=top_k,
+            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
+            topk_idx_dtype=topk_idx_dtype,
+            recv_capacity_per_rank=recv_capacity_per_rank,
+            is_outer=is_outer,
+            resource_axes=resource_axes,
+        )
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+    ):
+        raise NotImplementedError("EpCombineBwdPrimitive does not support vmap")
+
+    @staticmethod
+    def partition(
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        recv_capacity_per_rank,
+        is_outer,
+        resource_axes,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del is_outer, result_infos
+        arg_shardings = tuple(a.sharding for a in arg_infos)
+        # EP-output leading (trailing dims auto-pad to None).
+        out_sharding = NamedSharding(mesh, _ep_output_spec(resource_axes=resource_axes))
+
+        def sharded_impl(handle_mem, grad):
+            return EpCombineBwdPrimitive.impl(
+                handle_mem,
+                grad,
+                top_k,
+                dispatch_output_per_expert_alignment,
+                topk_idx_dtype,
+                recv_capacity_per_rank,
+                False,
+                resource_axes=resource_axes,
+            )
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        # T axes are dynamic-rank based on the actual cotangent shape.
+        value_types = args[-2]
+        g_rank = len(value_types[1].shape)
+        g_axes = " ".join(f"T{i}" for i in range(g_rank - 1)) + " H"
+        return f"EPL hm, {g_axes} -> EPL recv_pr H"
+
+
+register_primitive(EpCombineBwdPrimitive)
+
+
+# ── Public-ish helpers (used by jax/ep.py) ──────────────────────────────────
+
+
+@_on_collective_stream
+def _ep_prepare(cfg: EpLayerConfig, topk_idx):
+    """Exchange routing metadata for ``cfg``; return
+    ``(token_counts, total_recv_tokens, handle_mem)``. ``total_recv_tokens`` is
+    the per-rank pre-drop recv-slot total (includes tokens dropped on overflow)."""
+    if int(jax_dtype_to_te_dtype(topk_idx.dtype)) != int(cfg.topk_idx_dtype):
+        raise ValueError(
+            f"topk_idx dtype {topk_idx.dtype} does not match EpLayerConfig.topk_idx_dtype"
+        )
+    return EpPreparePrimitive.outer_primitive.bind(
+        topk_idx,
+        top_k=int(cfg.top_k),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
+        topk_idx_dtype=int(cfg.topk_idx_dtype),
+        is_outer=True,
+        resource_axes=_capture_ep_resource_axes(),
+    )
+
+
+@_on_collective_stream
+def _ep_dispatch_fwd(
+    cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+):
+    """Scatter tokens and weights to expert ranks; returns
+    ``(recv_tokens, recv_topk_weights, handle_mem)``."""
+    return EpDispatchPrimitive.outer_primitive.bind(
+        handle_mem,
+        topk_idx,
+        tokens,
+        topk_weights,
+        top_k=int(cfg.top_k),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
+        topk_idx_dtype=int(cfg.topk_idx_dtype),
+        recv_capacity_per_rank=recv_capacity_per_rank,
+        is_outer=True,
+        resource_axes=_capture_ep_resource_axes(),
+    )
+
+
+def ep_prepare(cfg: EpLayerConfig, topk_idx):
+    """Deprecated: use ``ep_prepare_and_dispatch_fwd``. Planned for removal in January 2027."""
+    warnings.warn(
+        "ep_prepare is deprecated and planned to be removed in January 2027. Use"
+        " ep_prepare_and_dispatch_fwd instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _ep_prepare(cfg, topk_idx)
+
+
+def ep_dispatch_fwd(
+    cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+):
+    """Deprecated: use ``ep_prepare_and_dispatch_fwd``. Planned for removal in January 2027."""
+    warnings.warn(
+        "ep_dispatch_fwd is deprecated and planned to be removed in January 2027. Use"
+        " ep_prepare_and_dispatch_fwd instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _ep_dispatch_fwd(cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
+
+
+_fused_prepare_dispatch = None
+
+
+def _fused_prepare_dispatch_enabled():
+    """True when NVTE_EP_FUSED_PREPARE_DISPATCH=1 selects the fused prepare + dispatch path.
+
+    Latched on first use. Only supports EP within a single NVLink domain;
+    received row order within an expert block may differ from the unfused path.
+    """
+    global _fused_prepare_dispatch
+    if _fused_prepare_dispatch is None:
+        _fused_prepare_dispatch = os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
+    return _fused_prepare_dispatch
+
+
+@_on_collective_stream
+def _ep_fused_prepare_and_dispatch_fwd(
+    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+):
+    """Fused prepare + dispatch; returns
+    ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``."""
+    return EpPrepareAndDispatchPrimitive.outer_primitive.bind(
+        topk_idx,
+        tokens,
+        topk_weights,
+        top_k=int(cfg.top_k),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
+        topk_idx_dtype=int(cfg.topk_idx_dtype),
+        recv_capacity_per_rank=recv_capacity_per_rank,
+        is_outer=True,
+        resource_axes=_capture_ep_resource_axes(),
+    )
+
+
+def ep_prepare_and_dispatch_fwd(
+    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+):
+    """Prepare + dispatch; returns
+    ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``.
+
+    Fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH.
+    """
+    if _fused_prepare_dispatch_enabled():
+        return _ep_fused_prepare_and_dispatch_fwd(
+            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+        )
+    token_counts, total_recv_tokens, handle_mem = _ep_prepare(cfg, topk_idx)
+    recv_tokens, recv_topk_weights, handle_mem = _ep_dispatch_fwd(
+        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    )
+    return recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem
+
+
+@_on_collective_stream
+def ep_combine_fwd(
+    cfg: EpLayerConfig, handle_mem, expert_out, num_local_tokens, out_partition_spec=None
+):
+    """Gather expert outputs back to home ranks. expert_out is pre-weighted."""
+    out_leading = _normalize_leading_shape(num_local_tokens)
+    return EpCombinePrimitive.outer_primitive.bind(
+        handle_mem,
+        expert_out,
+        top_k=int(cfg.top_k),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
+        topk_idx_dtype=int(cfg.topk_idx_dtype),
+        out_leading_shape=out_leading,
+        out_partition_spec=out_partition_spec,
+        resource_axes=_capture_ep_resource_axes(),
+    )
+
+
+@_on_collective_stream
+def ep_dispatch_bwd(
+    cfg: EpLayerConfig,
+    handle_mem,
+    grad,
+    g_recv_topk_weights,
+    num_local_tokens,
+    out_partition_spec=None,
+):
+    """Backward of dispatch; returns (grad_tokens, grad_topk_weights)."""
+    out_leading = _normalize_leading_shape(num_local_tokens)
+    return EpDispatchBwdPrimitive.outer_primitive.bind(
+        handle_mem,
+        grad,
+        g_recv_topk_weights,
+        top_k=int(cfg.top_k),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
+        topk_idx_dtype=int(cfg.topk_idx_dtype),
+        out_leading_shape=out_leading,
+        out_partition_spec=out_partition_spec,
+        resource_axes=_capture_ep_resource_axes(),
+    )
+
+
+@_on_collective_stream
+def ep_combine_bwd(cfg: EpLayerConfig, handle_mem, grad, recv_capacity_per_rank):
+    """Backward of combine; returns grad_expert_out [num_procs, recv_capacity_per_rank, H]."""
+    return EpCombineBwdPrimitive.outer_primitive.bind(
+        handle_mem,
+        grad,
+        top_k=int(cfg.top_k),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
+        topk_idx_dtype=int(cfg.topk_idx_dtype),
+        recv_capacity_per_rank=recv_capacity_per_rank,
+        is_outer=True,
+        resource_axes=_capture_ep_resource_axes(),
+    )

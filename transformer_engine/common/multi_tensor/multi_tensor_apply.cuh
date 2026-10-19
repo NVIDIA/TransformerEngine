@@ -21,7 +21,7 @@ constexpr int depth_to_max_blocks[6] = {320, 320, 320, 320, 320, 320};
 template <int n, bool USE_FP8 = false>
 struct TensorListMetadataBase {
   void *addresses[n][depth_to_max_tensors[n - 1]];
-  int sizes[depth_to_max_tensors[n - 1]];
+  int64_t sizes[depth_to_max_tensors[n - 1]];
   unsigned char block_to_tensor[depth_to_max_blocks[n - 1]];
   int block_to_chunk[depth_to_max_blocks[n - 1]];
   int start_tensor_this_launch;
@@ -75,6 +75,9 @@ void multi_tensor_apply(int64_t block_size, int64_t chunk_size,
     loc_tensor_info++;
 
     auto chunks_this_tensor = (tensor_lists[0][t]->numel() + chunk_size - 1) / chunk_size;
+    NVTE_CHECK(chunks_this_tensor > 0,
+               "multi_tensor_apply expects tensors with at least one chunk; zero-sized tensors "
+               "must be filtered before launch because they skip the chunk loop");
 
     for (auto chunk = 0; chunk < chunks_this_tensor; chunk++) {
       tl.block_to_tensor[loc_block_info] = loc_tensor_info - 1;

@@ -12,12 +12,73 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
 endif()
 
-# Hide non-necessary symbols in shared object.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-
 # Transformer Engine library
 project(transformer_engine LANGUAGES CUDA CXX)
+
+# Enable BOLT-compatible builds. ARM64 targets require additional compiler flags.
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _nvte_system_processor)
+set(NVTE_TARGET_IS_ARM64 OFF)
+if(_nvte_system_processor MATCHES "^(aarch64|arm64)$")
+  set(NVTE_TARGET_IS_ARM64 ON)
+endif()
+unset(_nvte_system_processor)
+
+include(CheckCXXCompilerFlag)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  check_cxx_compiler_flag("-fno-reorder-blocks-and-partition"
+                          NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
+endif()
+check_cxx_compiler_flag("-fno-jump-tables"
+                        NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES)
+if(NVTE_TARGET_IS_ARM64)
+  check_cxx_compiler_flag("-mno-fix-cortex-a53-835769"
+                          NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_835769)
+  check_cxx_compiler_flag("-mno-fix-cortex-a53-843419"
+                          NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_843419)
+endif()
+if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+    AND NOT NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
+    OR NOT NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES
+    OR (NVTE_TARGET_IS_ARM64
+        AND (NOT NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_835769
+            OR NOT NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_843419)))
+  message(FATAL_ERROR
+          "The host C++ compiler does not support the flags required for "
+          "BOLT-compatible builds")
+endif()
+
+# BOLT consumes the regular symbol table and emitted relocations. Shadow the
+# cached strip tool for this configure without changing it for later builds.
+set(CMAKE_STRIP "")
+
+function(nvte_enable_bolt_compatible_compile_options TARGET_NAME)
+  target_compile_options(
+    ${TARGET_NAME}
+    PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-jump-tables>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-jump-tables>
+  )
+
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+      ${TARGET_NAME}
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-fno-reorder-blocks-and-partition>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-reorder-blocks-and-partition>
+    )
+  endif()
+
+  if(NVTE_TARGET_IS_ARM64)
+    target_compile_options(
+      ${TARGET_NAME}
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-mno-fix-cortex-a53-835769>
+      $<$<COMPILE_LANGUAGE:CXX>:-mno-fix-cortex-a53-843419>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-mno-fix-cortex-a53-835769>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-mno-fix-cortex-a53-843419>
+    )
+  endif()
+endfunction()
 
 # CUDA Toolkit
 find_package(CUDAToolkit REQUIRED)
@@ -36,7 +97,11 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   endif()
 endif()
 
-# Process CMAKE_CUDA_ARCHITECTURES to separate generic and specific architectures
+# Process CMAKE_CUDA_ARCHITECTURES to separate standard, generic, and specific architectures.
+# - NVTE_STANDARD_ARCHS: pre-Blackwell archs (e.g. 75, 80, 89, 90). Applied to all CUDA sources.
+# - NVTE_GENERIC_ARCHS: Blackwell family heads (e.g. 100, 120). Applied to non-arch-specific sources only.
+# - NVTE_SPECIFIC_ARCHS: Blackwell specific targets (e.g. 100a, 120f). Applied to arch-specific sources only.
+set(NVTE_STANDARD_ARCHS)
 set(NVTE_GENERIC_ARCHS)
 set(NVTE_SPECIFIC_ARCHS)
 
@@ -48,6 +113,9 @@ if(NOT arch_100_index EQUAL -1)
   list(APPEND NVTE_SPECIFIC_ARCHS "100a")
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
     list(APPEND NVTE_SPECIFIC_ARCHS "103a")
+  endif()
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.4)
+    list(APPEND NVTE_SPECIFIC_ARCHS "107a")
   endif()
 endif()
 
@@ -79,16 +147,17 @@ if(NOT arch_120_index EQUAL -1)
   endif()
 endif()
 
+# Move remaining standard (pre-Blackwell) architectures into NVTE_STANDARD_ARCHS.
+# These are applied to all CUDA sources (both generic and arch-specific).
+set(NVTE_STANDARD_ARCHS ${CMAKE_CUDA_ARCHITECTURES})
+
 # cuDNN frontend API
-set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h")
     message(FATAL_ERROR
-            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
+            "Could not find cudnn_frontend.h in ${CUDNN_FRONTEND_INCLUDE_DIR}. "
+            "Install nvidia-cudnn-frontend or set CUDNN_FRONTEND_INCLUDE_DIR.")
 endif()
-include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cuDNN.cmake)
 
 set(CUTLASS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
@@ -97,6 +166,90 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+
+option(NVTE_WITH_CUTEDSL
+       "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" OFF)
+if(NVTE_WITH_CUTEDSL)
+  # Building libtransformer_engine.so with CuTeDSL support requires the TVM-FFI headers.
+  if(NOT EXISTS "${TVM_FFI_INCLUDE_DIR}/tvm/ffi/any.h")
+    message(FATAL_ERROR
+            "Could not find the TVM-FFI headers in '${TVM_FFI_INCLUDE_DIR}'. "
+            "Install apache-tvm-ffi and set TVM_FFI_INCLUDE_DIR to its include directory, "
+            "or configure with "
+            "-DNVTE_WITH_CUTEDSL=OFF to build the C++ library without the backend.")
+  endif()
+endif()
+
+find_path(NCCL_INCLUDE_DIR
+            NAMES nccl.h
+          HINTS "${Python_SITEARCH}/nvidia/nccl"
+                "/opt/nvidia/nccl"
+                "/usr/local/nccl"
+            PATH_SUFFIXES include
+            REQUIRED)
+
+function(get_nccl_version OUT_VERSION INCLUDE_DIR)
+  file(STRINGS "${INCLUDE_DIR}/nccl.h" _nvte_nccl_major_line
+       REGEX "^#define NCCL_MAJOR[ \t]+[0-9]+$")
+  file(STRINGS "${INCLUDE_DIR}/nccl.h" _nvte_nccl_minor_line
+       REGEX "^#define NCCL_MINOR[ \t]+[0-9]+$")
+  file(STRINGS "${INCLUDE_DIR}/nccl.h" _nvte_nccl_patch_line
+       REGEX "^#define NCCL_PATCH[ \t]+[0-9]+$")
+
+  string(REGEX REPLACE "^#define NCCL_MAJOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_major "${_nvte_nccl_major_line}")
+  string(REGEX REPLACE "^#define NCCL_MINOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_minor "${_nvte_nccl_minor_line}")
+  string(REGEX REPLACE "^#define NCCL_PATCH[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_patch "${_nvte_nccl_patch_line}")
+
+  if ("${_nvte_nccl_major}" STREQUAL ""
+      OR "${_nvte_nccl_minor}" STREQUAL ""
+      OR "${_nvte_nccl_patch}" STREQUAL "")
+    message(FATAL_ERROR
+            "Failed to parse NCCL version from ${INCLUDE_DIR}/nccl.h")
+  endif()
+
+  set(${OUT_VERSION}
+      "${_nvte_nccl_major}.${_nvte_nccl_minor}.${_nvte_nccl_patch}"
+      PARENT_SCOPE)
+endfunction()
+
+get_nccl_version(NCCL_VERSION "${NCCL_INCLUDE_DIR}")
+
+function(find_cublasmp_version OUT_VERSION OUT_INCLUDE_DIR SEARCH_DIR)
+  find_path(_nvte_cublasmp_include_dir
+            NAMES cublasmp.h
+            HINTS "${SEARCH_DIR}/include"
+            PATH_SUFFIXES include
+            REQUIRED)
+
+  file(STRINGS "${_nvte_cublasmp_include_dir}/cublasmp.h" _nvte_cublasmp_major_line
+       REGEX "^#define CUBLASMP_VER_MAJOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_cublasmp_include_dir}/cublasmp.h" _nvte_cublasmp_minor_line
+       REGEX "^#define CUBLASMP_VER_MINOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_cublasmp_include_dir}/cublasmp.h" _nvte_cublasmp_patch_line
+       REGEX "^#define CUBLASMP_VER_PATCH[ \t]+[0-9]+$")
+
+  string(REGEX REPLACE "^#define CUBLASMP_VER_MAJOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_cublasmp_major "${_nvte_cublasmp_major_line}")
+  string(REGEX REPLACE "^#define CUBLASMP_VER_MINOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_cublasmp_minor "${_nvte_cublasmp_minor_line}")
+  string(REGEX REPLACE "^#define CUBLASMP_VER_PATCH[ \t]+([0-9]+)$" "\\1"
+         _nvte_cublasmp_patch "${_nvte_cublasmp_patch_line}")
+
+  if ("${_nvte_cublasmp_major}" STREQUAL ""
+      OR "${_nvte_cublasmp_minor}" STREQUAL ""
+      OR "${_nvte_cublasmp_patch}" STREQUAL "")
+    message(FATAL_ERROR
+            "Failed to parse cuBLASMp version from ${_nvte_cublasmp_include_dir}/cublasmp.h")
+  endif()
+
+  set(${OUT_VERSION}
+      "${_nvte_cublasmp_major}.${_nvte_cublasmp_minor}.${_nvte_cublasmp_patch}"
+      PARENT_SCOPE)
+  set(${OUT_INCLUDE_DIR} "${_nvte_cublasmp_include_dir}" PARENT_SCOPE)
+endfunction()
 
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
@@ -109,8 +262,11 @@ list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
      fused_attn/fused_attn.cpp
+     cast/nvfp4/rtc_dispatch.cpp
+     fused_attn/config_and_params.cpp
      gemm/config.cpp
      normalization/common.cpp
+     normalization/rtc_dispatch.cpp
      normalization/layernorm/ln_api.cpp
      normalization/rmsnorm/rmsnorm_api.cpp
      util/cuda_driver.cpp
@@ -118,9 +274,16 @@ list(APPEND transformer_engine_cpp_sources
      util/cuda_runtime.cpp
      util/multi_stream.cpp
      util/rtc.cpp
+     comm_gemm/comm_gemm.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+     comm_gemm_overlap/comm_gemm_overlap.cpp
+     newton_schulz/newton_schulz.cpp
+     )
+
+if(NVTE_WITH_CUTEDSL)
+  list(APPEND transformer_engine_cpp_sources init_python.cpp)
+endif()
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -136,10 +299,8 @@ list(APPEND transformer_engine_cuda_sources
      transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
      dropout/dropout.cu
-     fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
-     fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
@@ -150,7 +311,10 @@ list(APPEND transformer_engine_cuda_sources
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
+     util/utils.cu
      util/padding.cu
+     util/splits_to_offsets.cu
+     util/topk.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
@@ -166,20 +330,51 @@ list(APPEND transformer_engine_cuda_sources
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
+     fused_attn/flash_attn.cu
      activation/gelu.cu
+     activation/gelu_dbias.cu
+     activation/gelu_grouped.cu
+     activation/gelu_grouped_bwd.cu
+     activation/gelu_grouped_dbias.cu
+     activation/qgelu_grouped.cu
+     activation/qgelu_grouped_bwd.cu
+     activation/qgelu_grouped_dbias.cu
      activation/glu.cu
      activation/relu.cu
+     activation/relu_dbias.cu
+     activation/relu_grouped.cu
+     activation/relu_grouped_bwd.cu
+     activation/relu_grouped_dbias.cu
+     activation/srelu_grouped.cu
+     activation/srelu_grouped_bwd.cu
+     activation/srelu_grouped_dbias.cu
+     activation/scaled_activation.cu
+     activation/scaled_clamped_swiglu_grouped.cu
+     activation/scaled_srelu.cu
+     activation/scaled_swiglu.cu
+     activation/scaled_swiglu_grouped.cu
      activation/swiglu.cu
+     activation/swiglu_dbias.cu
+     activation/swiglu_grouped.cu
+     activation/swiglu_grouped_bwd.cu
+     activation/swiglu_grouped_dbias.cu
      cast/cast.cu
+     cast/cast_dbias.cu
+     cast/cast_grouped.cu
+     cast/cast_grouped_dbias.cu
+     cast/fused_group_requantize.cu
+     fused_rope/fused_mla_kv_rope_mxfp8.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu
      hadamard_transform/hadamard_transform.cu
      hadamard_transform/hadamard_transform_cast_fusion.cu
+     hadamard_transform/row_cast_col_hadamard_transform_cast_fusion.cu
      hadamard_transform/group_hadamard_transform_cast_fusion.cu
      hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
      hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
      multi_tensor/compute_scale.cu
+     normalization/rmsnorm/rmsnorm_fwd_mxfp8.cu
      recipe/mxfp8_scaling.cu
      recipe/nvfp4.cu
      transpose/quantize_transpose_square_blockwise.cu
@@ -191,9 +386,13 @@ list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_s
                                        ${transformer_engine_cuda_sources}
                                        ${transformer_engine_cpp_sources})
 
-# Set compile options for CUDA sources with generic architectures
+# Set compile options for CUDA sources with generic architectures.
+# These get standard archs (pre-Blackwell) + generic Blackwell family heads.
 foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
   set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_STANDARD_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
   foreach(arch IN LISTS NVTE_GENERIC_ARCHS)
     list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
   endforeach()
@@ -208,9 +407,14 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
   endif()
 endforeach()
 
-# Set compile options for CUDA sources with specific architectures
+# Set compile options for CUDA sources with arch-specific features.
+# These get standard archs (pre-Blackwell) + Blackwell specific targets (a/f suffix).
+# They must NOT get generic Blackwell archs, as they use family/arch-specific PTX features.
 foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
   set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_STANDARD_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
   foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS)
     list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
   endforeach()
@@ -225,12 +429,34 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
   endif()
 endforeach()
 
-if (NVTE_WITH_CUBLASMP)
-list(APPEND transformer_engine_SOURCES
-     comm_gemm/comm_gemm.cpp)
+add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+nvte_enable_bolt_compatible_compile_options(transformer_engine)
+
+# This is TE-specific and should not apply to all targets
+target_link_options(
+  transformer_engine
+  PRIVATE
+  "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
+)
+target_link_options(
+  transformer_engine
+  PRIVATE
+  "LINKER:--emit-relocs"
+  "LINKER:-z,now"
+)
+if(NVTE_TARGET_IS_ARM64)
+  # The Cortex-A53 843419 workaround is applied by the linker.
+  target_link_options(
+    transformer_engine
+    PRIVATE
+    "-mno-fix-cortex-a53-843419"
+  )
 endif()
 
-add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+# Disable CMake's automatic architecture flag injection.
+# All architectures are handled explicitly via per-source COMPILE_OPTIONS
+# using NVTE_STANDARD_ARCHS, NVTE_GENERIC_ARCHS, and NVTE_SPECIFIC_ARCHS above.
+set_target_properties(transformer_engine PROPERTIES CUDA_ARCHITECTURES OFF)
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -258,9 +484,20 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+target_link_libraries(transformer_engine PRIVATE ${CMAKE_DL_LIBS})
+
+if(NVTE_WITH_CUTEDSL)
+  target_include_directories(transformer_engine PRIVATE ${TVM_FFI_INCLUDE_DIR})
+  target_compile_definitions(
+    transformer_engine PRIVATE
+    NVTE_WITH_CUTEDSL
+    Py_LIMITED_API=0x030A0000)
+  target_link_libraries(transformer_engine PRIVATE Python::Module)
+endif()
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine PRIVATE ${NCCL_INCLUDE_DIR})
 target_include_directories(transformer_engine SYSTEM PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -280,25 +517,121 @@ endif()
 option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
 if (NVTE_ENABLE_NVSHMEM)
     add_subdirectory(nvshmem_api)
+    nvte_enable_bolt_compatible_compile_options(nvshmemapi)
     target_link_libraries(transformer_engine PUBLIC nvshmemapi)
     target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
 endif()
 
 option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
+
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
+    find_cublasmp_version(CUBLASMP_VERSION CUBLASMP_INCLUDE_DIR ${CUBLASMP_DIR})
     find_library(CUBLASMP_LIB
-                 NAMES cublasmp libcublasmp
+                 NAMES cublasmp libcublasmp.so libcublasmp.so.0
                  PATHS ${CUBLASMP_DIR}
+                 PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu lib/sbsa-linux-gnu lib/x86_64-linux-gnu
+                 REQUIRED)
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    # cuBLASMp 0.8.1 adds MXFP8 support to the CUDA-graph-safe overlap algos,
+    # and NCCL 2.30 is the first release with graph-safe one-sided RMA
+    # primitives (ncclPutSignal/ncclWaitSignal) that those algos use.
+    if (CUBLASMP_VERSION VERSION_LESS 0.8.1)
+      message(FATAL_ERROR
+              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.1, but found cuBLASMp "
+              "${CUBLASMP_VERSION} in ${CUBLASMP_INCLUDE_DIR}/cublasmp.h")
+    endif()
+    if (NCCL_VERSION VERSION_LESS 2.30.0)
+      message(FATAL_ERROR
+              "NVTE_WITH_CUBLASMP requires NCCL >= 2.30.0 (for graph-capture-safe "
+              "one-sided RMA primitives used by cuBLASMp's overlap algorithms), but "
+              "found NCCL ${NCCL_VERSION} in ${NCCL_INCLUDE_DIR}/nccl.h")
+    endif()
+    target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
+    message(STATUS "Using cuBLASMp ${CUBLASMP_VERSION} at: ${CUBLASMP_DIR}")
+    message(STATUS "Using NCCL ${NCCL_VERSION} at: ${NCCL_LIB}")
+endif()
+
+option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
+if (NVTE_WITH_CUSOLVERMP)
+    target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
+    target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
+    find_library(CUSOLVERMP_LIB
+                 NAMES cusolverMp libcusolverMp
+                 PATHS ${CUSOLVERMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
     find_library(NCCL_LIB
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-  target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
-  message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+    target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB})
+    message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
+endif()
+
+# -- NCCL EP (on by default, HT mode only) ---------------------------------
+# Set -DNVTE_WITH_NCCL_EP=OFF (or NVTE_WITH_NCCL_EP=0 in setup.py) to
+# skip NCCL EP entirely - useful on older images whose system NCCL is below
+# the 2.30.4 EP minimum.
+option(NVTE_WITH_NCCL_EP "Build and package the runtime-loaded NCCL EP library" ON)
+if(NVTE_WITH_NCCL_EP)
+# SM>=90 and NCCL>=2.30.4 are gated at runtime in EPBackend::initialize.
+# -- NCCL EP headers --------------------------------------------------------
+# Headers + libs are produced by the in-tree 3rdparty/nccl-extensions submodule build
+# (auto-built by setup.py via build_nccl_ep_submodule).
+set(NCCL_EP_SUBMODULE_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl-extensions")
+set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/include")
+if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
+  message(FATAL_ERROR
+    "NCCL EP header not found at ${NCCL_EP_INCLUDE_DIR}/nccl_ep.h. "
+    "Run `git submodule update --init --recursive` and rebuild TE.")
+endif()
+message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
+
+# -- libnccl_ep.so ----------------------------------------------------------
+# Loaded on demand by EPBackend only after it verifies NCCL >= 2.30.4. Keeping
+# NCCL EP out of libtransformer_engine.so allows non-EP users to run with older
+# NCCL versions even when the core library uses eager symbol binding.
+set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
+find_file(NCCL_EP_SHARED_LINK
+    NAMES libnccl_ep.so
+    HINTS ${NCCL_EP_LIB_DIR}
+    NO_DEFAULT_PATH
+    REQUIRED)
+file(REAL_PATH "${NCCL_EP_SHARED_LINK}" NCCL_EP_SHARED_LIB)
+
+# -- NCCL core library -------------------------------------------------------
+if(NOT NCCL_LIB)
+  find_library(NCCL_LIB
+      NAMES nccl libnccl
+      PATH_SUFFIXES lib lib64
+      REQUIRED)
+endif()
+
+target_include_directories(transformer_engine PRIVATE
+    ${NCCL_EP_INCLUDE_DIR})
+
+# libtransformer_engine.so uses only the baseline NCCL API directly. NCCL EP's
+# newer symbols remain isolated in libnccl_ep.so until EP is initialized.
+target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB})
+
+target_sources(transformer_engine PRIVATE
+    ep/ep_backend.cpp
+    ep/ep_api.cpp
+    ep/nccl_ep_provider.cpp)
+target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_NCCL_EP)
+
+message(STATUS "NCCL EP enabled (runtime-loaded library): ${NCCL_EP_SHARED_LIB}")
+message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
+else()
+  # NCCL EP off: ep_api.cpp's #else branch exports throwing nvte_ep_* stubs.
+  target_sources(transformer_engine PRIVATE ep/ep_api.cpp)
+  message(STATUS "NCCL EP disabled (NVTE_WITH_NCCL_EP=OFF) - using nvte_ep_* stubs")
 endif()
 
 # Number of philox4x32 rounds for stochastic rounding (build-time constant).
@@ -345,12 +678,82 @@ make_string_header_from_file(transpose/rtc/transpose.cu
                              string_code_transpose_rtc_transpose_cu)
 make_string_header_from_file(transpose/rtc/swap_first_dims.cu
                              string_code_transpose_rtc_swap_first_dims_cu)
+make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
+                             string_code_fused_softmax_scaled_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
+                             string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                             string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
+
+# NVFP4 4over6 quantize: NVRTC bundled headers + RTC source file
+make_string_header_from_file(include/transformer_engine/nvfp4/4over6.h
+                             string_code_transformer_engine_nvfp4_4over6_h)
+make_string_header_from_file(util/type_extrema.h
+                             string_code_util_type_extrema_h)
+make_string_header_from_file(util/ptx.cuh
+                             string_code_util_ptx_cuh)
+make_string_header_from_file(cast/nvfp4/core_nvfp4.cuh
+                             string_code_cast_nvfp4_core_nvfp4_cuh)
+make_string_header_from_file(cast/nvfp4/quantize_4over6_kernel.cuh
+                             string_code_cast_nvfp4_quantize_4over6_kernel_cuh)
+make_string_header_from_file(cast/nvfp4/rtc/quantize_4over6.cu
+                             string_code_cast_nvfp4_rtc_quantize_4over6_cu)
+
+# Norm NVRTC bundled headers + RTC source files
+make_string_header_from_file(normalization/kernel_params.h
+                             string_code_normalization_kernel_params_h)
+make_string_header_from_file(normalization/kernel_traits.h
+                             string_code_normalization_kernel_traits_h)
+make_string_header_from_file(normalization/layernorm/ln_fwd_kernels.cuh
+                             string_code_normalization_layernorm_ln_fwd_kernels_cuh)
+make_string_header_from_file(normalization/layernorm/ln_bwd_kernels.cuh
+                             string_code_normalization_layernorm_ln_bwd_kernels_cuh)
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_fwd_kernels.cuh
+                             string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh)
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_bwd_kernels.cuh
+                             string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh)
+make_string_header_from_file(normalization/layernorm/rtc/ln_fwd_kernel.cu
+                             string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu)
+make_string_header_from_file(normalization/layernorm/rtc/ln_bwd_kernel.cu
+                             string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu)
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu
+                             string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu)
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
+                             string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu)
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
+
+# Default OFF: the NVFP4 4over6 quantize kernel (384-way fanout) is compiled via
+# NVRTC at runtime. Set ON to additionally statically instantiate it as the
+# fallback selected when NVTE_DISABLE_NVRTC=1.
+option(NVTE_BUILD_LEGACY_STATIC_NVFP4
+       "Also compile the static NVFP4 4over6 quantize kernel for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_NVFP4=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NVFP4}>)
+
+option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
+       "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX}>)
+
+# Default OFF: LayerNorm/RMSNorm require NVRTC. Set ON to additionally compile
+# the legacy static template instantiations, which are selected only when
+# NVTE_DISABLE_NVRTC=1 at runtime. This compiles all 556
+# REGISTER_NORM_LAUNCHER variants up front.
+option(NVTE_BUILD_LEGACY_STATIC_NORM
+       "Also compile static norm kernels for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_NORM=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NORM}>)
 
 # Compiler options
 set(nvte_sources_with_fast_math)
@@ -369,9 +772,32 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/gelu_dbias.cu
+                                          activation/gelu_grouped.cu
+                                          activation/gelu_grouped_bwd.cu
+                                          activation/gelu_grouped_dbias.cu
+                                          activation/qgelu_grouped.cu
+                                          activation/qgelu_grouped_bwd.cu
+                                          activation/qgelu_grouped_dbias.cu
                                           activation/glu.cu
                                           activation/relu.cu
-                                          activation/swiglu.cu)
+                                          activation/relu_dbias.cu
+                                          activation/relu_grouped.cu
+                                          activation/relu_grouped_bwd.cu
+                                          activation/relu_grouped_dbias.cu
+                                          activation/srelu_grouped.cu
+                                          activation/srelu_grouped_bwd.cu
+                                          activation/srelu_grouped_dbias.cu
+                                          activation/scaled_activation.cu
+                                          activation/scaled_clamped_swiglu_grouped.cu
+                                          activation/scaled_srelu.cu
+                                          activation/scaled_swiglu.cu
+                                          activation/scaled_swiglu_grouped.cu
+                                          activation/swiglu.cu
+                                          activation/swiglu_dbias.cu
+                                          activation/swiglu_grouped.cu
+                                          activation/swiglu_grouped_bwd.cu
+                                          activation/swiglu_grouped_dbias.cu)
 endif()
 
 foreach(cuda_source IN LISTS nvte_sources_with_fast_math)
@@ -384,6 +810,14 @@ endforeach()
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+
+# Compress every embedded cubin. CUDA 13 supports size-optimized compression
+# without imposing an additional driver requirement. Keep CUDA 12 on its
+# legacy/default compression mode to preserve compatibility with pre-12.4 drivers.
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all")
+if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compress-mode=size")
+endif()
 
 # Number of parallel build jobs
 if($ENV{MAX_JOBS})
@@ -405,3 +839,16 @@ message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
+if(NVTE_WITH_NCCL_EP)
+  # Install a real file rather than the build-tree symlink so wheel packaging
+  # does not need to preserve the versioned symlink chain.
+  install(FILES "${NCCL_EP_SHARED_LIB}"
+          DESTINATION .
+          RENAME libnccl_ep.so)
+  # NCCL EP JIT compilation requires both the public header root and staged
+  # device headers under NCCL_EP_HOME/include/nccl_ep.
+  install(FILES "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h"
+          DESTINATION nccl_ep/include)
+  install(DIRECTORY "${NCCL_EP_INCLUDE_DIR}/nccl_ep"
+          DESTINATION nccl_ep/include)
+endif()

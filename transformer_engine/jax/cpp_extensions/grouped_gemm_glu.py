@@ -1,0 +1,272 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+"""cuDNN Frontend JAX API adapters for shared grouped GEMM + GLU/dGLU."""
+
+from __future__ import annotations
+
+import importlib
+import inspect
+
+import jax
+import jax.numpy as jnp
+from packaging.version import Version
+
+__all__ = [
+    "grouped_gemm_dglu",
+    "grouped_gemm_glu",
+    "grouped_gemm_glu_dependencies_available",
+    "pack_gated_activation_pair",
+    "unpack_gated_activation_pair",
+]
+
+
+def pack_gated_activation_pair(gate: jax.Array, up: jax.Array) -> jax.Array:
+    """Interleave 32-column gate/up blocks as required by the cuDNN kernel."""
+    if gate.shape != up.shape:
+        raise ValueError(f"gate shape {gate.shape} must match up shape {up.shape}")
+    if gate.shape[-1] % 32:
+        raise ValueError(
+            f"Gated activation intermediate dimension {gate.shape[-1]} must be divisible by 32"
+        )
+    blocks = gate.shape[-1] // 32
+    return jnp.stack(
+        (
+            gate.reshape(*gate.shape[:-1], blocks, 32),
+            up.reshape(*up.shape[:-1], blocks, 32),
+        ),
+        axis=-2,
+    ).reshape(*gate.shape[:-1], 2 * gate.shape[-1])
+
+
+def unpack_gated_activation_pair(interleaved: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Undo :func:`pack_gated_activation_pair`."""
+    if interleaved.shape[-1] % 64:
+        raise ValueError(
+            f"Interleaved gated activation dimension {interleaved.shape[-1]} must be divisible"
+            " by 64"
+        )
+    intermediate = interleaved.shape[-1] // 2
+    blocks = intermediate // 32
+    paired = interleaved.reshape(*interleaved.shape[:-1], blocks, 2, 32)
+    return (
+        paired[..., 0, :].reshape(*interleaved.shape[:-1], intermediate),
+        paired[..., 1, :].reshape(*interleaved.shape[:-1], intermediate),
+    )
+
+
+def _ceil_div(value: int, divisor: int) -> int:
+    return (value + divisor - 1) // divisor
+
+
+def _sf_atom_shape(groups: int, rows: int, cols: int) -> tuple[int, ...]:
+    """Return the physical row-major scale-factor shape used by cudnn.jax.call."""
+    return (groups, _ceil_div(rows, 128), _ceil_div(_ceil_div(cols, 32), 4), 32, 4, 4)
+
+
+def _compact_sf(scale: jax.Array, shape: tuple[int, ...], name: str) -> jax.Array:
+    """Trim TE's conservative grouped-scale allocation to cudnn's dense atom view."""
+    size = 1
+    for extent in shape:
+        size *= extent
+    if scale.size < size:
+        raise ValueError(f"{name} has {scale.size} elements, but cuDNN requires {size}")
+    return scale.reshape(-1)[:size].reshape(shape)
+
+
+# These contracts use cuDNN Frontend's shared GLU API with JAX dispatch.
+# Require both the release containing MXFP8 JAX support and compatible APIs:
+# newer optional parameters are compatible, but TE must supply every required one.
+_FORWARD_ARGS = (
+    "a_tensor",
+    "b_tensor",
+    "sfa_tensor",
+    "sfb_tensor",
+    "padded_offsets",
+    "alpha_tensor",
+    "prob_tensor",
+    "norm_const_tensor",
+    "c_dtype",
+    "d_dtype",
+    "discrete_col_sfd",
+)
+_BACKWARD_ARGS = tuple(arg for arg in _FORWARD_ARGS if arg != "c_dtype") + (
+    "c_tensor",
+    "beta_tensor",
+    "dprob_tensor",
+    "sf_vec_size",
+    "act_func",
+)
+_FORWARD_ARGS += ("sf_vec_size", "act_func", "generate_c")
+# The shared wrappers predate MXFP8 JAX dispatch and have compatible signatures
+# even in frontends that only support eager execution of block-scaled inputs.
+# The JAX entry points also existed for BF16 discrete weights, so require their
+# dense-weight and scale arguments rather than checking only their names.
+_JAX_FORWARD_ARGS = tuple(arg for arg in _FORWARD_ARGS if arg != "sf_vec_size")
+_JAX_BACKWARD_ARGS = tuple(
+    arg for arg in _BACKWARD_ARGS if arg not in ("sf_vec_size", "dprob_tensor")
+)
+
+
+def grouped_gemm_glu_dependencies_available() -> tuple[bool, str]:
+    """Require Frontend >= 1.32.0 and shared JAX APIs supporting dense MXFP8."""
+    try:
+        cutlass_jax = importlib.import_module("cutlass.jax")
+        if not cutlass_jax.is_available():
+            return False, "CuTeDSL JAX support is unavailable"
+        cudnn = importlib.import_module("cudnn")
+        if Version(cudnn.__version__) < Version("1.32.0"):
+            return False, f"cuDNN Frontend >= 1.32.0 is required, got {cudnn.__version__}"
+        for module, name, arguments in (
+            (cudnn, "grouped_gemm_glu_wrapper_sm100", _FORWARD_ARGS),
+            (cudnn, "grouped_gemm_dglu_wrapper_sm100", _BACKWARD_ARGS),
+            (cudnn, "grouped_gemm_glu_jax_sm100", _JAX_FORWARD_ARGS),
+            (cudnn, "grouped_gemm_dglu_jax_sm100", _JAX_BACKWARD_ARGS),
+        ):
+            api = getattr(module, name, None)
+            if not callable(api):
+                return False, f"{module.__name__}.{name} is unavailable"
+            signature = inspect.signature(api)
+            missing = set(arguments) - signature.parameters.keys()
+            if missing:
+                return (
+                    False,
+                    f"{module.__name__}.{name} is missing parameters: {', '.join(sorted(missing))}",
+                )
+            # Binding detects missing/renamed keywords, positional-only arguments,
+            # and new mandatory arguments, while allowing new optional arguments.
+            signature.bind(**dict.fromkeys(arguments))
+    except (ImportError, RuntimeError, AttributeError, TypeError, ValueError) as exc:
+        return False, str(exc)
+    return True, ""
+
+
+def grouped_gemm_glu(
+    a: jax.Array,
+    b: jax.Array,
+    sfa: jax.Array,
+    sfb: jax.Array,
+    padded_offsets: jax.Array,
+    prob: jax.Array,
+    *,
+    compute_dtype,
+    output_dtype,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Run cuDNN's shared grouped MXFP8 GLU API in SwiGLU mode."""
+    cudnn_grouped_gemm_glu = getattr(
+        importlib.import_module("cudnn"), "grouped_gemm_glu_wrapper_sm100"
+    )
+
+    return _grouped_gemm_forward(
+        cudnn_grouped_gemm_glu,
+        a,
+        b,
+        sfa,
+        sfb,
+        padded_offsets,
+        prob,
+        compute_dtype=compute_dtype,
+        output_dtype=output_dtype,
+    )
+
+
+def _grouped_gemm_forward(
+    cudnn_forward,
+    a,
+    b,
+    sfa,
+    sfb,
+    padded_offsets,
+    prob,
+    *,
+    compute_dtype,
+    output_dtype,
+):
+    rows, hidden, _ = a.shape
+    experts, combined, b_hidden = b.shape
+    if hidden != b_hidden:
+        raise ValueError(f"A K={hidden} does not match B K={b_hidden}")
+    alpha = jnp.ones((experts,), dtype=jnp.float32)
+    norm_const = jnp.ones((1,), dtype=jnp.float32)
+    result = cudnn_forward(
+        a_tensor=a.reshape(rows, hidden),
+        b_tensor=b,
+        sfa_tensor=_compact_sf(sfa, _sf_atom_shape(1, rows, hidden), "sfa"),
+        sfb_tensor=_compact_sf(sfb, _sf_atom_shape(experts, combined, hidden), "sfb"),
+        padded_offsets=padded_offsets.astype(jnp.int32),
+        alpha_tensor=alpha,
+        prob_tensor=prob.reshape(rows).astype(jnp.float32),
+        norm_const_tensor=norm_const,
+        c_dtype=jnp.dtype(compute_dtype),
+        d_dtype=jnp.dtype(output_dtype),
+        discrete_col_sfd=True,
+        sf_vec_size=32,
+        act_func="swiglu",
+        generate_c=True,
+    )
+    return (
+        result["c_tensor"].reshape(rows, combined),
+        result["d_tensor"].reshape(rows, combined // 2),
+        result["d_col_tensor"].reshape(rows, combined // 2),
+        result["sfd_row_tensor"].reshape(-1),
+        result["sfd_col_tensor"].reshape(-1),
+    )
+
+
+def grouped_gemm_dglu(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    sfa: jax.Array,
+    sfb: jax.Array,
+    padded_offsets: jax.Array,
+    prob: jax.Array,
+    *,
+    output_dtype,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Run cuDNN's shared grouped MXFP8 dGLU API in dSwiGLU mode."""
+    if a.ndim != 2:
+        raise ValueError(f"Expected A[M,K], got {a.shape}")
+    if b.ndim != 3:
+        raise ValueError(f"Expected physical B[E,N,K], got {b.shape}")
+    if c.ndim != 2:
+        raise ValueError(f"Expected C[M,2N], got {c.shape}")
+
+    cudnn_grouped_gemm_dglu = getattr(
+        importlib.import_module("cudnn"), "grouped_gemm_dglu_wrapper_sm100"
+    )
+
+    rows, hidden = a.shape
+    experts, intermediate, b_hidden = b.shape
+    if hidden != b_hidden:
+        raise ValueError(f"A K={hidden} does not match B K={b_hidden}")
+    if c.shape != (rows, 2 * intermediate):
+        raise ValueError(f"Expected C shape {(rows, 2 * intermediate)}, got {c.shape}")
+
+    alpha = jnp.ones((experts,), dtype=jnp.float32)
+    beta = jnp.ones((experts,), dtype=jnp.float32)
+    norm_const = jnp.ones((1,), dtype=jnp.float32)
+    result = cudnn_grouped_gemm_dglu(
+        a_tensor=a,
+        b_tensor=b,
+        c_tensor=c,
+        sfa_tensor=_compact_sf(sfa, _sf_atom_shape(1, rows, hidden), "sfa"),
+        sfb_tensor=_compact_sf(sfb, _sf_atom_shape(experts, intermediate, hidden), "sfb"),
+        padded_offsets=padded_offsets.astype(jnp.int32),
+        alpha_tensor=alpha,
+        beta_tensor=beta,
+        prob_tensor=prob.reshape(rows).astype(jnp.float32),
+        norm_const_tensor=norm_const,
+        d_dtype=jnp.dtype(output_dtype),
+        discrete_col_sfd=True,
+        dprob_tensor=None,
+        sf_vec_size=32,
+        act_func="dswiglu",
+    )
+    return (
+        result["d_row_tensor"],
+        result["d_col_tensor"],
+        result["dprob_tensor"],
+        result["sfd_row_tensor"].reshape(-1),
+        result["sfd_col_tensor"].reshape(-1),
+    )

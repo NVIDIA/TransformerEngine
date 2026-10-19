@@ -18,7 +18,7 @@ namespace detail {
 // by producer_commit. Use case, accumulator generation as
 // the result of MMA instructions.
 template <int Stages_, class ClusterShape = Shape<int, int, _1>,
-          class AtomThrShape_MNK_ = Shape<_1, _1, _1> >
+          class AtomThrShape_MNK_ = Shape<_1, _1, _1>>
 class CustomizedPipelineTmaUmmaAsync {
  public:
   static constexpr uint32_t Stages = Stages_;

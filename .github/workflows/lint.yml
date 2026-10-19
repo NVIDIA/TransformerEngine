@@ -11,6 +11,8 @@ concurrency:
   # Group by workflow name + PR number (for PRs) or ref (for branch/tag pushes)
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+permissions:
+  contents: read
 jobs:
   pytorch_cpplint:
     name: 'PyTorch C++'

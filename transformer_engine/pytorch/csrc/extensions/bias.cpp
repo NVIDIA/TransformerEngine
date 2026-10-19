@@ -7,6 +7,7 @@
 #include <ATen/ATen.h>
 #include <pybind11/pybind11.h>
 
+#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,21 @@
 
 namespace transformer_engine {
 namespace pytorch {
+
+namespace {
+
+// Sum token dimensions directly; no ATen reshape/view is needed for N-D input.
+void sum_bias_grad(at::Tensor &bias, const at::Tensor &input) {
+  if (input.dim() == 1) {
+    bias.copy_(input);
+  } else {
+    std::vector<int64_t> dims(input.dim() - 1);
+    std::iota(dims.begin(), dims.end(), 0);
+    at::sum_out(bias, input, dims);
+  }
+}
+
+}  // namespace
 
 std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle quantizer) {
   using namespace transformer_engine::pytorch::detail;
@@ -39,7 +55,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
     if (product(shape) == 0) {
       grad_bias_torch.zero_();
     } else {
-      at::sum_out(grad_bias_torch, grad_output_torch.reshape({-1, bias_size}), {0});
+      sum_bias_grad(grad_bias_torch, grad_output_torch);
     }
     return {py::cast(std::move(grad_bias_torch)), py::cast(std::move(grad_output_torch))};
   }
@@ -73,7 +89,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
 
   // Apply unfused impl if fused kernel is not supported
   if (!with_fused_kernel) {
-    at::sum_out(grad_bias_torch, grad_output_torch.reshape({-1, bias_size}), {0});
+    sum_bias_grad(grad_bias_torch, grad_output_torch);
     quantizer_cpp->quantize(grad_output_nvte, grad_input_nvte);
     return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
   }
@@ -152,8 +168,12 @@ std::vector<py::object> dact_dbias(
   } else if (detail::IsNVFP4Quantizers(quantizer_py.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
+    if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
+        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
+      // Amax is handled within NVFP4 quantizer
+      impl = Impl::UNFUSED;
+    } else if (nvfp4_quantizer_cpp->disable_second_level_scale) {
+      // No need for amax
       impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_DACT_AMAX_NVFP4;
@@ -172,7 +192,7 @@ std::vector<py::object> dact_dbias(
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
         const auto temp_torch = temp_py.cast<at::Tensor>();
-        at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
+        sum_bias_grad(grad_bias_torch, temp_torch);
         quantizer_cpp->quantize(temp_nvte, grad_input_nvte);
         break;
       }
@@ -208,14 +228,14 @@ std::vector<py::object> dact_dbias(
             dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr,
                    "Invalid quantizer for fused dact-amax kernel impl");
-        auto [temp_nvte, temp_py] =
+        auto [temp_nvte, temp_py, amax_buf] =
             fp8_quantizer_cpp->create_unquantized_tensor_with_amax(input_shape, grad_output_dtype);
         NVTE_SCOPED_GIL_RELEASE({
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
         const auto temp_torch = temp_py.cast<at::Tensor>();
-        at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
+        sum_bias_grad(grad_bias_torch, temp_torch);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte, amax_buf);
         break;
       }
     case Impl::FUSED_DACT_AMAX_NVFP4:
@@ -231,7 +251,7 @@ std::vector<py::object> dact_dbias(
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
         const auto temp_torch = temp_py.cast<at::Tensor>();
-        at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
+        sum_bias_grad(grad_bias_torch, temp_torch);
         nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
         break;
       }

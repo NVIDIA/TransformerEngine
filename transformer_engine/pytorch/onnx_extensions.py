@@ -26,11 +26,10 @@ import torch
 import onnxscript
 from onnxscript import opset18 as op
 from onnx import defs
-import transformer_engine_torch as tex
 
 from .tensor.float8_tensor import Float8Quantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
-from .constants import MXFP8_BLOCK_SCALING_SIZE
+from .constants import MXFP8_BLOCK_SCALING_SIZE, DType
 from .utils import round_up_to_nearest_multiple
 from .export import is_in_onnx_export_mode
 
@@ -85,7 +84,7 @@ def onnx_quantize_fp8_op(tensor: torch.Tensor, scale: float) -> torch.Tensor:
     """Quantize to Float8Tensor used for inference."""
     scale_tensor = torch.tensor(scale, dtype=torch.float32, device=tensor.device)
     amax_tensor = torch.tensor([1], dtype=torch.float32, device=tensor.device)
-    quantizer = Float8Quantizer(scale_tensor, amax_tensor, tex.DType.kFloat8E4M3)
+    quantizer = Float8Quantizer(scale_tensor, amax_tensor, DType.kFloat8E4M3)
     return quantizer.quantize(tensor)._data
 
 
@@ -130,9 +129,7 @@ TRT_FP8QuantizeLinear = onnxscript.values.Op(
 @torch.library.custom_op("tex::fp8_dequantize", mutates_args=[])
 def onnx_dequantize_fp8_op(tensor: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
     """Dequantize from Float8Tensor used for inference."""
-    quantizer = Float8Quantizer(
-        1 / scale_inv, torch.zeros(1).to(tensor.device), tex.DType.kFloat8E4M3
-    )
+    quantizer = Float8Quantizer(1 / scale_inv, torch.zeros(1).to(tensor.device), DType.kFloat8E4M3)
     quantizer_tensor = quantizer.create_tensor_from_data(tensor, fake_dtype=torch.float32)
     return quantizer_tensor.dequantize()
 
@@ -189,7 +186,7 @@ def onnx_cs_quantize_fp8_op(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.T
 @onnx_cs_quantize_fp8_op.register_fake
 def _(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return torch.empty(tensor.shape, dtype=torch.uint8, device=tensor.device), torch.ones(
-        1, dtype=torch.float32, device=tensor.device
+        (), dtype=torch.float32, device=tensor.device
     )
 
 
@@ -212,7 +209,7 @@ def onnx_quantize_fp8_cs_symbolic(
 @torch.library.custom_op("tex::mxfp8_quantize", mutates_args=[])
 def onnx_quantize_mxfp8_op(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize to MXFP8Tensor used for inference."""
-    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    quantizer = MXFP8Quantizer(DType.kFloat8E4M3)
     quantized_tensor = quantizer(tensor)
     return quantized_tensor._rowwise_data, quantized_tensor._rowwise_scale_inv
 
@@ -233,7 +230,9 @@ def onnx_quantize_mxfp8_symbolic(
     tensor: onnxscript.onnx_types.TensorType,
 ) -> Tuple[onnxscript.onnx_types.TensorType, onnxscript.onnx_types.TensorType]:
     """Symbolic quantize to MXFP8Tensor used for inference."""
-    tensor_out, scale_inv_out = TRT_MXFP8DynamicQuantize(tensor)
+    tensor_out, scale_inv_out = TRT_MXFP8DynamicQuantize(
+        tensor, axis=-1, block_size=MXFP8_BLOCK_SCALING_SIZE
+    )
     return tensor_out, scale_inv_out
 
 
@@ -242,6 +241,10 @@ schema = defs.OpSchema(
     domain="trt",
     since_version=1,
     doc="TRT MXFP8 Quantize Linear used for inference.",
+    attributes=[
+        defs.OpSchema.Attribute("axis", defs.OpSchema.AttrType.INT),
+        defs.OpSchema.Attribute("block_size", defs.OpSchema.AttrType.INT),
+    ],
     inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(float)", "Input tensor to quantize"),
     ],
@@ -264,7 +267,7 @@ TRT_MXFP8DynamicQuantize = onnxscript.values.Op(
 @torch.library.custom_op("tex::mxfp8_dequantize", mutates_args=[])
 def onnx_dequantize_mxfp8_op(tensor: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
     """Dequantize from MXFP8Tensor used for inference."""
-    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    quantizer = MXFP8Quantizer(DType.kFloat8E4M3)
     quantizer_tensor = quantizer.create_tensor_from_data(
         tensor, scale_inv, fake_dtype=torch.float32
     )
@@ -281,7 +284,9 @@ def onnx_dequantize_mxfp8_symbolic(
     tensor: onnxscript.onnx_types.TensorType, scale_inv: onnxscript.onnx_types.TensorType
 ) -> onnxscript.onnx_types.TensorType:
     """Symbolic dequantize from MXFP8Tensor used for inference."""
-    return TRT_MXFP8DequantizeLinear(tensor, scale_inv)
+    return TRT_MXFP8DequantizeLinear(
+        tensor, scale_inv, axis=-1, block_size=MXFP8_BLOCK_SCALING_SIZE
+    )
 
 
 schema = defs.OpSchema(
@@ -289,6 +294,10 @@ schema = defs.OpSchema(
     domain="trt",
     since_version=1,
     doc="TRT MXFP8 Dequantize Linear from MXFP8Tensor used for inference.",
+    attributes=[
+        defs.OpSchema.Attribute("axis", defs.OpSchema.AttrType.INT),
+        defs.OpSchema.Attribute("block_size", defs.OpSchema.AttrType.INT),
+    ],
     inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(uint8)", "Input tensor to dequantize"),
         defs.OpSchema.FormalParameter(
@@ -311,16 +320,13 @@ def onnx_layernorm_op(
     inp: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float
 ) -> torch.Tensor:
     """ONNX LayerNorm used for inference."""
-    model = tex.LayerNorm(inp.shape[1], eps=eps)
-    model.weight.data = weight
-    model.bias.data = bias
-    return model(inp)
+    return torch.nn.functional.layer_norm(inp, inp.shape[-1:], weight, bias, eps)
 
 
 @onnx_layernorm_op.register_fake
 def _(inp, *_):
     """Fake ONNX LayerNorm used for inference."""
-    return inp
+    return torch.empty_like(inp, memory_format=torch.contiguous_format)
 
 
 def onnx_layernorm_symbolic(

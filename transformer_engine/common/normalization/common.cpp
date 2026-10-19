@@ -128,7 +128,7 @@ void TeNormalizationPlan<KernelParamsType>::_build() {
 }
 
 template <typename KernelParamsType>
-std::vector<size_t> TeNormalizationPlan<KernelParamsType>::getWorkspaceShape() const {
+Shape TeNormalizationPlan<KernelParamsType>::getWorkspaceShape() const {
   size_t workspace_size = _launch_params.getTotalWorkspaceBytes(_is_layernorm);
   if (workspace_size == 0) {
     // Workspace size must not be zero since that corresponds to a
@@ -239,7 +239,7 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
       .set_intermediate_data_type(get_cudnn_fe_dtype(ctype))
       .set_compute_data_type(get_cudnn_fe_dtype(ctype));
 
-  if (cudnnGetVersion() >= 90400) _graph.set_sm_count(sm_count);
+  _graph.set_sm_count(sm_count);
 
   const auto batch_dim = static_cast<int32_t>(batch_size);
   const auto hidden_dim = static_cast<int32_t>(hidden_size);
@@ -304,7 +304,17 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
 
     if (_training) _rsigma->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype));
 
-    const auto ZDtype = _fp8_out ? ctype : otype;
+    auto ZDtype = _fp8_out ? ctype : otype;
+    if (_fp8_out) {
+      const bool use_input_dtype = cudnnGetVersion() >= 92500 && _ndim_scale_block == 1 &&
+                                   use_cudnn_mxfp8_norm_output_in_input_dtype();
+      if (use_input_dtype) {
+        NVTE_WARN(
+            "The cuDNN MXFP8 normalization intermediate output uses the input dtype (itype) "
+            "instead of the compute dtype; otype still applies to the final quantized output.");
+        ZDtype = itype;
+      }
+    }
     _z->set_output(!_fp8_out).set_data_type(get_cudnn_fe_dtype(ZDtype));
 
     if (_fp8_out) {
@@ -395,6 +405,23 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
       std::tie(_dx, _dgamma, _dbeta) = std::make_tuple(ret[0], ret[1], ret[2]);
       if (_dbeta != nullptr) NVTE_ERROR("cuDNN rmsnorm dbias incorrectly returned.");
     }
+    // Fuse the add for BackwardAdd stage
+    if (_norm_stage == NVTE_Norm_Stage::BackwardAdd) {
+      NVTE_CHECK(cudnnGetVersion() >= 92100,
+                 "Fused BackwardAdd requires cuDNN >= 9.21.0, but found ", cudnnGetVersion());
+
+      _add = _graph.tensor(fe::graph::Tensor_attributes()
+                               .set_name("add")
+                               .set_dim({batch_dim, hidden_dim, 1, 1})
+                               .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
+                               .set_data_type(get_cudnn_fe_dtype(wtype)));
+      auto add_options = fe::graph::Pointwise_attributes()
+                             .set_mode(fe::PointwiseMode_t::ADD)
+                             .set_compute_data_type(get_cudnn_fe_dtype(ctype));
+      auto _dx_with_add = _graph.pointwise(_dx, _add, add_options);
+      _dx->set_output(false).set_data_type(get_cudnn_fe_dtype(itype));
+      _dx = _dx_with_add;
+    }
     _dx->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
     _dgamma->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
   }
@@ -414,7 +441,7 @@ void CudnnNormalizationPlan::_build() {
       _graph.build_plans(_handle, cudnn_frontend::BuildPlanPolicy_t::HEURISTICS_CHOICE).is_good());
 }
 
-std::vector<size_t> CudnnNormalizationPlan::getWorkspaceShape() const {
+Shape CudnnNormalizationPlan::getWorkspaceShape() const {
   size_t workspace_size = _graph.get_workspace_size();
   if (workspace_size == 0) {
     // Workspace size must not be zero since that corresponds to a
@@ -467,12 +494,15 @@ void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_
                                      void* rsigma_dptr, void* dx_dptr, void* dz_dptr,
                                      void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
                                      void* workspace_dptr, cudaStream_t stream) {
-  // cuDNN does not currently support fused backward+add
-  NVTE_CHECK(add_dptr == nullptr);
-
   // Binding data pointers to graph tensors
   _variant_pack = {
       {_x, x_dptr}, {_rsigma, rsigma_dptr}, {_dz, dz_dptr}, {_dgamma, dgamma_dptr}, {_dx, dx_dptr}};
+
+  // Bind the add tensor for fused backward+add
+  if (_norm_stage == NVTE_Norm_Stage::BackwardAdd) {
+    NVTE_CHECK(add_dptr != nullptr, "add_dptr must not be null for BackwardAdd");
+    _variant_pack.insert({{_add, add_dptr}});
+  }
 
   if (_zero_centered)
     _variant_pack.insert({{_scalar_offset, reinterpret_cast<void*>(this->_scalar_dptr.get())},
@@ -541,6 +571,12 @@ bool& _zero_centered_gamma_in_weight_dtype() {
 }
 
 bool& use_zero_centered_gamma_in_weight_dtype() { return _zero_centered_gamma_in_weight_dtype(); }
+
+bool use_cudnn_mxfp8_norm_output_in_input_dtype() {
+  static bool flag =
+      transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM_OUTPUT_IN_INPUT_DTYPE");
+  return flag;
+}
 
 }  //  namespace normalization
 }  // namespace transformer_engine

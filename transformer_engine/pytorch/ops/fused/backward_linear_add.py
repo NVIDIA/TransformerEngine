@@ -9,9 +9,13 @@ from typing import Optional
 
 import torch
 
-from ...module.base import get_dummy_wgrad
 from ...utils import clear_tensor_data
 from ..basic import BasicLinear, MakeExtraOutput
+from .._common import (
+    get_accumulate_flag_in_param,
+    get_dummy_wgrads_for_params,
+    get_main_grad_from_param,
+)
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
@@ -36,7 +40,7 @@ class BackwardLinearAdd(FusedOperation):
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
         *,
-        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+        basic_op_grad_extra_outputs: list[tuple[Optional[torch.Tensor], ...]],
     ) -> tuple[
         torch.Tensor,
         list[tuple[Optional[torch.Tensor], ...]],
@@ -57,32 +61,27 @@ class BackwardLinearAdd(FusedOperation):
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
             weight_param = linear_op.weight
-            if hasattr(weight_param, "__fsdp_param__"):
-                weight_param.main_grad = weight_param.get_main_grad()
-            accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
-            if not hasattr(weight_param, "main_grad"):
-                raise RuntimeError(
-                    "BasicLinear op is configured with "
-                    "accumulate_into_main_grad=True, "
-                    "but weight parameter does not have main_grad attribute"
-                )
-            grad_weight = weight_param.main_grad.detach()
+            main_grad = get_main_grad_from_param(weight_param, op_label="BasicLinear")
+            accumulate_into_main_grad = get_accumulate_flag_in_param(weight_param)
+            grad_weight = main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
-        # Linear backward pass
+        # Linear backward pass. Skip in-place add when there is no
+        # extra-output gradient.
         grad_input = basic_op_grad_extra_outputs[0][0]
+        accumulate_into_grad_input = grad_input is not None
         grad_input, grad_weight = BasicLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
             weight=w,
             input_requires_grad=linear_op_ctx.input_requires_grad,
             weight_requires_grad=linear_op_ctx.weight_requires_grad,
-            dtype=grad_input.dtype,
+            dtype=None if grad_input is None else grad_input.dtype,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
             grad_input=grad_input,
-            accumulate_into_grad_input=True,
+            accumulate_into_grad_input=accumulate_into_grad_input,
             tensor_parallel_mode=linear_op.tensor_parallel_mode,
             tensor_parallel_group=linear_op.tensor_parallel_group,
             sequence_parallel=linear_op.sequence_parallel,
@@ -99,15 +98,7 @@ class BackwardLinearAdd(FusedOperation):
         # Megatron-LM wgrad fusion
         # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
-            grad_weight = None
-            weight_param = linear_op.weight
-            if hasattr(weight_param, "grad_added_to_main_grad"):
-                weight_param.grad_added_to_main_grad = True
-                grad_weight = get_dummy_wgrad(
-                    list(weight_param.size()),
-                    weight_param.dtype,
-                    zero=getattr(weight_param, "zero_out_wgrad", False),
-                )
+            grad_weight = get_dummy_wgrads_for_params([linear_op.weight])[0]
 
         return grad_input, [(), (grad_weight,)], [(), ()]
 

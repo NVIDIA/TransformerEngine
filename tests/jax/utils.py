@@ -119,13 +119,27 @@ def combine_biases(*masks: Optional[Array]):
     return mask
 
 
+TEST_LEVELS = ("L0", "L1", "L2")
+
+
+def get_test_level():
+    """
+    Returns the test level specified in the environment variable, NVTE_JAX_UNITTEST_LEVEL.
+    """
+    test_level = os.environ.get("NVTE_JAX_UNITTEST_LEVEL", TEST_LEVELS[0])
+    if test_level not in TEST_LEVELS:
+        raise ValueError(
+            f"Unsupported test level {test_level!r}, expected one of {', '.join(TEST_LEVELS)}"
+        )
+    return test_level
+
+
 def get_parameters_for_test_level(param_dict: dict):
     """
     Takes an input dictionary of parameters keyed by test type "L0", etc.
     Returns the parameters for the test level specified in the environment variable
     """
-    DEFAULT_TEST_LEVEL = "L0"
-    test_level = os.environ.get("NVTE_JAX_UNITTEST_LEVEL", DEFAULT_TEST_LEVEL)
+    test_level = get_test_level()
     if test_level not in param_dict:
         raise ValueError("Unsupported test level")
     return param_dict[test_level]

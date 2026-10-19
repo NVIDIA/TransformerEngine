@@ -5,7 +5,7 @@
 """Fusible operation for adding extra input tensor."""
 
 from __future__ import annotations
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
 import torch
@@ -44,7 +44,7 @@ class AddExtraInput(BasicOperation):
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
-            "{self.__class__.__name__} operation has "
+            f"{self.__class__.__name__} operation has "
             f"{self.num_extra_inputs} extra tensor inputs "
             f"and {self.num_extra_outputs} extra tensor outputs. "
             "It overrides `fuser_forward` instead of `op_forward`."
@@ -52,7 +52,7 @@ class AddExtraInput(BasicOperation):
 
     def op_backward(self, *args, **kwargs) -> None:
         raise RuntimeError(
-            "{self.__class__.__name__} operation has "
+            f"{self.__class__.__name__} operation has "
             f"{self.num_extra_inputs} extra tensor inputs "
             f"and {self.num_extra_outputs} extra tensor outputs. "
             "It overrides `fuser_backward` instead of `op_backward`."
@@ -67,7 +67,7 @@ class AddExtraInput(BasicOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
         extra_input = basic_op_extra_inputs[0][0]
         if self._in_place:
             extra_input = extra_input.detach()

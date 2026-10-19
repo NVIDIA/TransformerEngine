@@ -198,10 +198,17 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
       ptx::cp_async_bulk_commit_group();
 
       // Wait for TMA transfer to have finished reading shared memory.
-      ptx::cp_async_bulk_wait_group_read<FP8_PREFETCH_BUFFERS_NUM>();
+      ptx::cp_async_bulk_wait_group_read<FP8_BUFFERS_NUM - 1>();
+    }
+    // The bulk async-group is owned by the issuing thread. Hand its completion
+    // off to all cooperative writers before the output ring can be reused.
+    if (iter + 1 < FP8_ITERATIONS && iter + 1 >= FP8_BUFFERS_NUM) {
+      __syncthreads();
     }
   }
-  ptx::cp_async_bulk_wait_group_read<0>();
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
   __syncthreads();
 
   parity ^= 1;
@@ -251,8 +258,13 @@ template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), ty
           typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     cast_fp8_1D_kernel(const IType *input_ptr, OType *output_ptr, float *const amax_ptr,
-                       float *const scale_inv_ptr, const float *const scale_ptr, const size_t N) {
+                       float *const scale_inv_ptr, const float *const scale_ptr, const size_t N,
+                       const float *const noop) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
 
   const size_t block_offset = blockIdx.x * ELEMS_PER_BLOCK;
   const IType *input = input_ptr + block_offset;
@@ -326,10 +338,17 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
       ptx::cp_async_bulk_commit_group();
 
       // Wait for TMA transfer to have finished reading shared memory.
-      ptx::cp_async_bulk_wait_group_read<1>();
+      ptx::cp_async_bulk_wait_group_read<SHMEM_BUFFERS - 1>();
+    }
+    // The bulk async-group is owned by the issuing thread. Hand its completion
+    // off to all cooperative writers before the output ring can be reused.
+    if (next_iter < ITERATIONS && next_iter >= SHMEM_BUFFERS) {
+      __syncthreads();
     }
   }
-  ptx::cp_async_bulk_wait_group_read<0>();
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
   __syncthreads();
 
   if (amax_ptr != nullptr) {
@@ -353,7 +372,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
 }  // namespace quantize_1D_kernel
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
-void quantize_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
+void quantize_1D(const Tensor &input, const Tensor *noop, Tensor *output, cudaStream_t stream) {
   using namespace quantize_1D_kernel;
   const size_t N = product(input.data.shape);
 
@@ -368,6 +387,7 @@ void quantize_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   float *const scale_inv_ptr = reinterpret_cast<float *>(output->scale_inv.dptr);
   const float *const scale_ptr = reinterpret_cast<float *>(output->scale.dptr);
+  const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
   const dim3 block(THREADS_PER_BLOCK);
   const dim3 grid(blocks);
@@ -379,9 +399,10 @@ void quantize_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
           const IType *input_ptr = reinterpret_cast<const IType *>(input.data.dptr);
           OType *output_ptr = reinterpret_cast<OType *>(output->data.dptr);
 
-          cast_fp8_1D_kernel<IS_ACT, ParamOP, OP, IType, OType><<<grid, block, 0, stream>>>(
-              input_ptr, output_ptr, amax_ptr, scale_inv_ptr, scale_ptr, N););  // NOLINT(*)
-  );                                                                            // NOLINT(*)
+          cast_fp8_1D_kernel<IS_ACT, ParamOP, OP, IType, OType>
+          <<<grid, block, 0, stream>>>(input_ptr, output_ptr, amax_ptr, scale_inv_ptr, scale_ptr, N,
+                                       noop_ptr););  // NOLINT(*)
+  );                                                 // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -391,8 +412,7 @@ void quantize_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
   using namespace quantize_2D_kernel;
   checkCuDriverContext(stream);
 
-  const size_t rows = input.flat_first_dim();
-  const size_t cols = input.flat_last_dim();
+  const auto [rows, cols] = input.flat_2d_dims();
   const size_t chunks_Y = DIVUP(rows, FP8_CHUNK_DIM_Y);
   const size_t chunks_X = DIVUP(cols, FP8_CHUNK_DIM_X);
   const size_t blocks_Y = chunks_Y;
@@ -406,7 +426,7 @@ void quantize_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
 
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
-    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
+    NVTE_CHECK(dbias->data.shape == Shape{cols}, "Wrong shape of DBias.");
     NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
 
     if (workspace->data.dptr == nullptr) {
@@ -538,7 +558,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
           is_aligned_tensor_data(input, TMA_GMEM_ALIGNMENT) &&
           is_aligned_tensor_data(*output, TMA_GMEM_ALIGNMENT)) {
         // Aligned AND FP8
-        quantize_1D<IS_ACT, ParamOP, OP>(input, output, stream);
+        quantize_1D<IS_ACT, ParamOP, OP>(input, noop, output, stream);
       } else {
         // Unaligned
         CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);

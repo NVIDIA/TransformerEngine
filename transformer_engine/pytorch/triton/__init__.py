@@ -3,3 +3,4 @@
 # See LICENSE for license information.
 
 """PyTorch wrappers for Triton kernels."""
+from transformer_engine.pytorch.triton import mhc

@@ -8,10 +8,13 @@ from contextlib import nullcontext
 import pytest
 import torch
 from torch import nn
-from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.common.recipe import DelayedScaling, MXFP8BlockScaling, Float8BlockScaling
 from transformer_engine.pytorch import MultiheadAttention, quantized_model_init, is_bf16_available
+from transformer_engine.pytorch import QuantizedTensor
+from transformer_engine.pytorch.optimizers.fused_adam import (
+    _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL,
+)
 from transformer_engine.pytorch.utils import gpu_autocast_ctx
 
 # Check if FP8 is supported
@@ -100,6 +103,57 @@ class TestFusedAdam(TestFusedOptimizer):
     def test_float(self):
         self.gen_single_type_test(param_type=torch.float)
 
+    @pytest.mark.skipif(
+        not hasattr(torch.nn.Parameter(torch.empty(0)), "grad_dtype"),
+        reason="PyTorch does not support parameter grad_dtype",
+    )
+    @pytest.mark.parametrize(
+        "param_dtype,grad_dtype,master_weights",
+        [
+            (torch.float32, torch.bfloat16, False),
+            (torch.bfloat16, torch.float32, True),
+        ],
+    )
+    def test_capturable_mixed_param_grad_dtype(self, param_dtype, grad_dtype, master_weights):
+        """Capturable Adam supports parameter and gradient tensors with different dtypes."""
+        if param_dtype == torch.bfloat16 and not is_bf16_available():
+            pytest.skip("BF16 is not supported")
+
+        ref_param = torch.nn.Parameter(torch.ones(16, device="cuda", dtype=param_dtype))
+        tst_param = torch.nn.Parameter(ref_param.detach().clone())
+        for param in (ref_param, tst_param):
+            param.grad_dtype = grad_dtype
+            param.grad = torch.ones_like(param, dtype=grad_dtype)
+
+        ref_optim = self.fused_optim(
+            [ref_param], capturable=False, master_weights=master_weights, **self.options
+        )
+        tst_optim = self.fused_optim(
+            [tst_param], capturable=True, master_weights=master_weights, **self.options
+        )
+        # Initialize optimizer state before CUDA graph capture.
+        ref_optim.step()
+        tst_optim.step()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            tst_optim.step()
+        graph.replay()
+        ref_optim.step()
+
+        torch.testing.assert_close(tst_param, ref_param)
+        torch.testing.assert_close(
+            tst_optim.state[tst_param]["exp_avg"], ref_optim.state[ref_param]["exp_avg"]
+        )
+        torch.testing.assert_close(
+            tst_optim.state[tst_param]["exp_avg_sq"], ref_optim.state[ref_param]["exp_avg_sq"]
+        )
+        if master_weights:
+            torch.testing.assert_close(
+                tst_optim.state[tst_param]["master_param"],
+                ref_optim.state[ref_param]["master_param"],
+            )
+
     # NOTE(mkozuki): Current threshold values look too small for BFloat16.
     # TODO(mkozuki): Refactor `TestFusedOptimizer`
     def test_half(self):
@@ -122,6 +176,76 @@ class TestFusedAdam(TestFusedOptimizer):
             tst_optim.step()
 
             torch.testing.assert_close(ref_param, tst_param)
+
+    @pytest.mark.parametrize(
+        "param_dtype,master_weights,capturable",
+        [
+            (torch.float32, False, False),
+            (torch.bfloat16, True, True),
+        ],
+    )
+    def test_many_small_parameters(self, param_dtype, master_weights, capturable):
+        """FusedAdam chunks large parameter groups without changing optimizer semantics."""
+        if param_dtype == torch.bfloat16 and not is_bf16_available():
+            pytest.skip("BF16 is not supported")
+
+        # Keep this above the default 20 MiB handle-pool capacity so the test
+        # fails without FusedAdam's per-call bound, not just at the slice boundary.
+        num_params = 8 * _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL + 1
+        values = torch.linspace(-1, 1, num_params, dtype=param_dtype, device="cuda")
+        coefficients = torch.linspace(-0.5, 0.5, num_params, dtype=param_dtype, device="cuda")
+        ref_param = torch.nn.Parameter(values.float())
+        tst_params = [torch.nn.Parameter(value.reshape(1).clone()) for value in values]
+        ref_optim = torch.optim.Adam([ref_param], **self.options)
+        tst_optim = te.optimizers.FusedAdam(
+            tst_params,
+            capturable=capturable,
+            master_weights=master_weights,
+            **self.options,
+        )
+
+        def backward():
+            ref_optim.zero_grad()
+            tst_optim.zero_grad()
+            ref_loss = (ref_param.to(param_dtype).float() * coefficients.float()).sum()
+            tst_loss = (torch.cat(tst_params).float() * coefficients.float()).sum()
+            torch.testing.assert_close(tst_loss, ref_loss)
+            ref_loss.backward()
+            tst_loss.backward()
+            torch.testing.assert_close(
+                torch.cat([param.grad.float() for param in tst_params]), ref_param.grad
+            )
+
+        backward()
+        ref_optim.step()
+        tst_optim.step()
+
+        backward()
+        if capturable:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                tst_optim.step()
+            graph.replay()
+        else:
+            tst_optim.step()
+        ref_optim.step()
+
+        torch.testing.assert_close(
+            torch.cat([param.detach() for param in tst_params]), ref_param.detach().to(param_dtype)
+        )
+        torch.testing.assert_close(
+            torch.cat([tst_optim.state[param]["exp_avg"] for param in tst_params]),
+            ref_optim.state[ref_param]["exp_avg"],
+        )
+        torch.testing.assert_close(
+            torch.cat([tst_optim.state[param]["exp_avg_sq"] for param in tst_params]),
+            ref_optim.state[ref_param]["exp_avg_sq"],
+        )
+        if master_weights:
+            torch.testing.assert_close(
+                torch.cat([tst_optim.state[param]["master_param"] for param in tst_params]),
+                ref_param,
+            )
 
     def test_adam_option(self):
         nelem = 1
@@ -165,6 +289,44 @@ class TestFusedAdam(TestFusedOptimizer):
             tst_optim.step()
 
             torch.testing.assert_close(ref_param, tst_param)
+
+    @pytest.mark.parametrize("capturable", [False, True])
+    def test_empty_param_group_advances_step(self, capturable):
+        # An empty param group must advance its step counter like a populated one.
+        # The same group can be empty on one data-parallel rank and populated on
+        # another, and "step" is part of the checkpoint, so a group that stops
+        # counting makes a resumed run apply a stale bias correction.
+        param = torch.nn.Parameter(torch.rand(4, dtype=torch.float, device="cuda"))
+        tst_optim = self.fused_optim(
+            [{"params": [param]}, {"params": []}], capturable=capturable, **self.options
+        )
+
+        num_steps = 3
+        for _ in range(num_steps):
+            param.grad = torch.rand_like(param)
+            tst_optim.step()
+
+        populated_step, empty_step = (int(g["step"]) for g in tst_optim.param_groups)
+        assert populated_step == num_steps
+        assert empty_step == populated_step
+
+        # The counter is checkpointed through the param groups, so the empty group
+        # has to round trip with the same value as the populated one.
+        checkpoint = tst_optim.state_dict()
+        assert int(checkpoint["param_groups"][1]["step"]) == num_steps
+
+    def test_empty_param_at_end_of_group(self):
+        tensors = [
+            torch.ones(4, dtype=torch.float, device="cuda"),
+            torch.empty(0, dtype=torch.float, device="cuda"),
+        ]
+        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(tensors, self.options)
+
+        self.gen_grad(ref_param, tst_param)
+        ref_optim.step()
+        tst_optim.step()
+
+        torch.testing.assert_close(ref_param, tst_param)
 
     def gen_precision_aware_test(
         self,
@@ -519,6 +681,269 @@ class TestFusedAdam(TestFusedOptimizer):
             )
 
 
+class TestFusedAdamMXFP8(TestFusedOptimizer):
+    """FusedAdam with MXFP8BlockScaling quantized primary weights (single GPU, no FSDP)."""
+
+    def setup_method(self) -> None:
+        super().setup_method(iters=5)
+        mxfp8_available, self.mxfp8_reason = te.is_mxfp8_available(return_reason=True)
+        self.mxfp8_available = mxfp8_available
+
+    def _build_model(self):
+        recipe = MXFP8BlockScaling()
+        with quantized_model_init(enabled=True, recipe=recipe):
+            model = te.Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+        return model, recipe
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_mxfp8_linear_fused_adam_master_weights(self):
+        """quantized_model_init(MXFP8) + te.Linear + FusedAdam(master_weights=True).
+
+        Verifies:
+        - Model params are MXFP8 QuantizedTensors after init
+        - FP32 master weights track a reference Adam optimizer
+        - Params remain QuantizedTensors after training
+        - Loss decreases over training steps
+        """
+        if not self.mxfp8_available:
+            pytest.skip(self.mxfp8_reason)
+
+        model, recipe = self._build_model()
+
+        # Verify weight params are QuantizedTensors (bias stays bf16)
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"Expected QuantizedTensor for {name}, got {type(p).__name__}"
+
+        # Build reference: clone dequantized weights for a plain Adam
+        ref_params = [p.detach().clone().float() for p in model.parameters()]
+
+        options = {"lr": 5e-4, "betas": (0.9, 0.999), "eps": 1e-8, "weight_decay": 0}
+        ref_optim = torch.optim.Adam(ref_params, **options)
+        tst_optim = te.optimizers.FusedAdam(
+            list(model.parameters()),
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+            use_decoupled_grad=True,
+            **options,
+        )
+
+        for _ in range(self.iters):
+            for p_ref, p in zip(ref_params, model.parameters()):
+                p_ref.grad = torch.rand_like(p_ref)
+                p.decoupled_grad = p_ref.grad.clone()
+            ref_optim.step()
+            tst_optim.step()
+
+            # FP32 master weights should match reference Adam exactly
+            master_params = [
+                tst_optim.get_unscaled_state(p, "master_param") for p in model.parameters()
+            ]
+            torch.testing.assert_close(ref_params, master_params)
+
+        # Weight params should still be QuantizedTensors after training
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type after training: {type(p).__name__}"
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_mxfp8_linear_forward_backward_step(self):
+        """End-to-end: quantized_model_init + autocast forward + backward + FusedAdam.step().
+
+        Uses te.autocast with MXFP8BlockScaling recipe for the forward pass,
+        verifying the full training loop works with quantized compute.
+        """
+        if not self.mxfp8_available:
+            pytest.skip(self.mxfp8_reason)
+
+        model, recipe = self._build_model()
+
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        batch_size, seq_len, hidden = 4, 32, 256
+        x = torch.randn(batch_size, seq_len, hidden, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        losses = []
+        for i in range(self.iters):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=recipe):
+                output = model(x)
+            loss = torch.nn.functional.mse_loss(output, target)
+            losses.append(loss.item())
+            loss.backward()
+
+            # Verify all params have non-None gradients after backward
+            for name, p in model.named_parameters():
+                assert p.grad is not None, f"Step {i}: {name} has no gradient after backward"
+                assert (
+                    p.grad.shape == p.shape
+                ), f"Step {i}: {name} grad shape {p.grad.shape} != param shape {p.shape}"
+                assert torch.isfinite(p.grad).all(), f"Step {i}: {name} has non-finite gradients"
+                assert p.grad.any(), f"Step {i}: {name} gradient is all zeros"
+
+            optimizer.step()
+
+        # Verify loss decreased
+        assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
+
+        # Verify weight params remain QuantizedTensors
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type: {type(p).__name__}"
+
+        # Verify optimizer states are float32
+        for name, p in model.named_parameters():
+            state = optimizer.state[p]
+            assert state["exp_avg"].dtype == torch.float32
+            assert state["exp_avg_sq"].dtype == torch.float32
+            if "bias" not in name:
+                assert state["master_param"].dtype == torch.float32
+
+
+class TestFusedAdamFloat8Block(TestFusedOptimizer):
+    """FusedAdam with Float8BlockScaling quantized primary weights (single GPU, no FSDP)."""
+
+    def setup_method(self) -> None:
+        super().setup_method(iters=5)
+        fp8_block_available, self.fp8_block_reason = te.is_fp8_block_scaling_available(
+            return_reason=True
+        )
+        self.fp8_block_available = fp8_block_available
+
+    def _build_model(self):
+        recipe = Float8BlockScaling()
+        with quantized_model_init(enabled=True, recipe=recipe):
+            model = te.Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+        return model, recipe
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_float8block_linear_fused_adam_master_weights(self):
+        """quantized_model_init(Float8BlockScaling) + te.Linear + FusedAdam(master_weights=True).
+
+        Verifies:
+        - Model params are QuantizedTensors after init
+        - FP32 master weights track a reference Adam optimizer
+        - Params remain QuantizedTensors after training
+        """
+        if not self.fp8_block_available:
+            pytest.skip(self.fp8_block_reason)
+
+        model, recipe = self._build_model()
+
+        # Verify weight params are QuantizedTensors (bias stays bf16)
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"Expected QuantizedTensor for {name}, got {type(p).__name__}"
+
+        # Build reference: clone dequantized weights for a plain Adam
+        ref_params = [p.detach().clone().float() for p in model.parameters()]
+
+        options = {"lr": 5e-4, "betas": (0.9, 0.999), "eps": 1e-8, "weight_decay": 0}
+        ref_optim = torch.optim.Adam(ref_params, **options)
+        tst_optim = te.optimizers.FusedAdam(
+            list(model.parameters()),
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+            use_decoupled_grad=True,
+            **options,
+        )
+
+        for _ in range(self.iters):
+            for p_ref, p in zip(ref_params, model.parameters()):
+                p_ref.grad = torch.rand_like(p_ref)
+                p.decoupled_grad = p_ref.grad.clone()
+            ref_optim.step()
+            tst_optim.step()
+
+            # FP32 master weights should match reference Adam exactly
+            master_params = [
+                tst_optim.get_unscaled_state(p, "master_param") for p in model.parameters()
+            ]
+            torch.testing.assert_close(ref_params, master_params)
+
+        # Weight params should still be QuantizedTensors after training
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type after training: {type(p).__name__}"
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_float8block_linear_forward_backward_step(self):
+        """End-to-end: quantized_model_init + autocast forward + backward + FusedAdam.step().
+
+        Uses te.autocast with Float8BlockScaling recipe for the forward pass,
+        verifying the full training loop works with quantized compute.
+        """
+        if not self.fp8_block_available:
+            pytest.skip(self.fp8_block_reason)
+
+        model, recipe = self._build_model()
+
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        batch_size, seq_len, hidden = 4, 32, 256
+        x = torch.randn(batch_size, seq_len, hidden, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        losses = []
+        for i in range(self.iters):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=recipe):
+                output = model(x)
+            loss = torch.nn.functional.mse_loss(output, target)
+            losses.append(loss.item())
+            loss.backward()
+
+            # Verify all params have non-None gradients after backward
+            for name, p in model.named_parameters():
+                assert p.grad is not None, f"Step {i}: {name} has no gradient after backward"
+                assert (
+                    p.grad.shape == p.shape
+                ), f"Step {i}: {name} grad shape {p.grad.shape} != param shape {p.shape}"
+                assert torch.isfinite(p.grad).all(), f"Step {i}: {name} has non-finite gradients"
+                assert p.grad.any(), f"Step {i}: {name} gradient is all zeros"
+
+            optimizer.step()
+
+        # Verify loss decreased
+        assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
+
+        # Verify weight params remain QuantizedTensors
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type: {type(p).__name__}"
+
+        # Verify optimizer states are float32
+        for name, p in model.named_parameters():
+            state = optimizer.state[p]
+            assert state["exp_avg"].dtype == torch.float32
+            assert state["exp_avg_sq"].dtype == torch.float32
+            if "bias" not in name:
+                assert state["master_param"].dtype == torch.float32
+
+
 class TestFusedSGD(TestFusedOptimizer):
 
     def setup_method(self) -> None:
@@ -532,6 +957,19 @@ class TestFusedSGD(TestFusedOptimizer):
 
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
+
+    def test_empty_param_at_end_of_group(self):
+        tensors = [
+            torch.ones(4, dtype=torch.float, device="cuda"),
+            torch.empty(0, dtype=torch.float, device="cuda"),
+        ]
+        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(tensors, self.options)
+
+        self.gen_grad(ref_param, tst_param)
+        ref_optim.step()
+        tst_optim.step()
+
+        torch.testing.assert_close(ref_param, tst_param)
 
 
 class Model(torch.nn.Module):
@@ -789,8 +1227,13 @@ class TestAdamTest:
 
             self.model_.load_state_dict(copy.deepcopy(self.model.state_dict()))
 
-    @largeTensorTest("60GB", "cuda")
     def test_large_tensor(self):
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        if torch.cuda.memory.mem_get_info()[0] < 60 * 1024**3:
+            pytest.skip("Insufficient available memory")
         t = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         t2 = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         grad = torch.randn_like(t)

@@ -61,6 +61,7 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
 namespace {
 
 constexpr size_t kThreadsPerBlock = 256;
+
 template <typename TVectorized>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     memset_kernel(void *__restrict__ ptr, int value, size_t size_in_bytes) {
@@ -116,6 +117,7 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float, stream);
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, uint8_t, stream);
 }
+
 }  // extern "C"
 
 void checkCuDriverContext(CUstream stream) {

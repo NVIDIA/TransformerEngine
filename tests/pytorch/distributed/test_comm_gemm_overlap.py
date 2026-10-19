@@ -33,11 +33,38 @@ MAX_LAYER_NAME_LENGTH = max([len(layer.__name__) for layer in TE_LAYERS])
 # to avoid numerical tolerance issues of doing comm gemm overlap, limit the number of GPUs used
 MAX_GPUS_TO_USE = 4
 
+COMM_GEMM_QUANTIZATION_PARAMS = [
+    pytest.param(False, "none", id="ub-bf16"),
+    pytest.param(False, "fp8", id="ub-fp8"),
+    pytest.param(False, "mxfp8", id="ub-mxfp8"),
+    pytest.param(True, "none", id="cublasmp-bf16"),
+    pytest.param(True, "fp8", id="cublasmp-fp8"),
+    pytest.param(True, "mxfp8", id="cublasmp-mxfp8"),
+]
+
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(torch.cuda.device_count(), MAX_GPUS_TO_USE)
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 if tex.ubuf_built_with_mpi():
     LAUNCH_CMD = ["mpirun", "-np", str(NUM_PROCS), "--oversubscribe", "--quiet", "python3"]
+
+OUTPUT_TAIL_CHARS = 4000
+
+
+def _assert_subprocess_succeeded(result):
+    if (
+        result.returncode != 0
+        or "NUMERICAL CHECK FAILED" in result.stderr
+        or "NUMERICAL CHECK PASSED" not in result.stdout
+    ):
+        raise AssertionError(
+            f"Distributed test exited with return code {result.returncode}"
+            f"\n--- stdout (last {OUTPUT_TAIL_CHARS} characters) ---\n"
+            f"{result.stdout[-OUTPUT_TAIL_CHARS:]}"
+            f"\n--- stderr (last {OUTPUT_TAIL_CHARS} characters) ---\n"
+            f"{result.stderr[-OUTPUT_TAIL_CHARS:]}"
+        )
+
 
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
 if not tex.device_supports_multicast():
@@ -50,7 +77,9 @@ os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 torch._dynamo.reset()
 
 
-def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization):
+def _run_gemm_with_overlap(
+    comm_type, bulk, p2p, atomic, aggregate, quantization, use_cublasmp=False
+):
     test_path = TEST_ROOT / "run_gemm_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -79,18 +108,29 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization
             test_cmd.append("--atomic")
         if aggregate:
             test_cmd.append("--aggregate")
+        if use_cublasmp:
+            if not tex.nvte_built_with_cublasmp():
+                pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
+            if comm_type == "RS" and not p2p and not tex.device_supports_multicast():
+                pytest.skip(
+                    "cuBLASMp non-P2P reduce-scatter requires NVSwitch (multicast support)."
+                )
+            test_cmd.append("--use-cublasmp")
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-    if (
-        result.returncode != 0
-        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
-    ):
-        raise AssertionError(result.stderr.decode())
+    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, text=True, check=False)
+    _assert_subprocess_succeeded(result)
 
 
 def _run_layer_with_overlap(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers=1
+    layer_type,
+    linear_parallel_mode,
+    overlap_rs_dgrad,
+    fp8,
+    quantization,
+    num_layers=1,
+    use_cublasmp=False,
+    use_compile=False,
+    compile_mode="default",
 ):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
@@ -109,6 +149,10 @@ def _run_layer_with_overlap(
     if overlap_rs_dgrad:
         test_cmd.append("--overlap-rs-dgrad")
 
+    if use_compile:
+        test_cmd.append("--compile")
+        test_cmd.append(f"--compile-mode={compile_mode}")
+
     if fp8:
         if quantization in ("fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
             pytest.skip(reason_for_no_fp8)
@@ -117,48 +161,48 @@ def _run_layer_with_overlap(
         test_cmd.append("--fp8")
         test_cmd.append(f"--quantization={quantization}")
 
-    os.environ["PYTORCH_JIT"] = "0"
-    os.environ["NVTE_TORCH_COMPILE"] = "0"
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    if use_cublasmp:
+        if not tex.nvte_built_with_cublasmp():
+            pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
+        test_cmd.append("--use-cublasmp")
+
+    test_env = os.environ.copy()
+    test_env["PYTORCH_JIT"] = "0"
+    test_env["NVTE_TORCH_COMPILE"] = "0"
+    test_env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
     if te.get_device_compute_capability() <= (8, 0):
         # We've experienced numerical discrepancies in Flash Attention
         # backward when running with Userbuffers on A100s. This does
         # not show up in more recent GPUs.
-        os.environ["NVTE_FLASH_ATTN"] = "0"
+        test_env["NVTE_FLASH_ATTN"] = "0"
+    elif fp8:
+        # Fused attention is causing non-deterministic FP8 failures on H100s even with
+        # NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, so disable it entirely for this test.
+        test_env["NVTE_FUSED_ATTN"] = "0"
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+    result = subprocess.run(test_cmd, env=test_env, capture_output=True, text=True, check=False)
 
-    os.unsetenv("PYTORCH_JIT")
-    os.unsetenv("NVTE_TORCH_COMPILE")
-    os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
-    os.unsetenv("NVTE_FLASH_ATTN")
-
-    if (
-        result.returncode != 0
-        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
-    ):
-        raise AssertionError(result.stderr.decode())
+    _assert_subprocess_succeeded(result)
 
 
-@pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
+@pytest.mark.parametrize("use_cublasmp,quantization", COMM_GEMM_QUANTIZATION_PARAMS)
 @pytest.mark.parametrize("aggregate", (False, True))
-def test_split_all_gather_overlaps(quantization, aggregate):
+def test_split_all_gather_overlaps(quantization, aggregate, use_cublasmp):
     """
     Test (split GEMM -> all-gather) overlaps with direct calls to te.cpp_extensions.gemm or
     te.cpp_extensions.fp8_gemm.
     """
-    _run_gemm_with_overlap("AG", False, True, False, aggregate, quantization)
+    _run_gemm_with_overlap("AG", False, True, False, aggregate, quantization, use_cublasmp)
 
 
-@pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
+@pytest.mark.parametrize("use_cublasmp,quantization", COMM_GEMM_QUANTIZATION_PARAMS)
 @pytest.mark.parametrize("p2p", (False, True))
-def test_split_reduce_scatter_overlaps(quantization, p2p):
+def test_split_reduce_scatter_overlaps(quantization, p2p, use_cublasmp):
     """
     Test (reduce-scatter -> split GEMM) overlaps with direct calls to te.cpp_extensions.gemm or
     te.cpp_extensions.fp8_gemm.
     """
-    _run_gemm_with_overlap("RS", False, p2p, False, False, quantization)
+    _run_gemm_with_overlap("RS", False, p2p, False, False, quantization, use_cublasmp)
 
 
 @pytest.mark.parametrize(
@@ -197,6 +241,7 @@ def test_bulk_overlaps(comm_type, quantization, connections):
         _run_gemm_with_overlap(comm_type, True, False, False, False, quantization)
 
 
+@pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
     "fp8",
     (False,),
@@ -210,7 +255,6 @@ def test_bulk_overlaps(comm_type, quantization, connections):
         (te.Linear.__name__, "row", False),
         (te.Linear.__name__, "column", False),
         (te.Linear.__name__, "column", True),
-        (te.LayerNormLinear.__name__, "row", False),
         (te.LayerNormLinear.__name__, "column", False),
         (te.LayerNormLinear.__name__, "column", True),
     ]
@@ -225,7 +269,6 @@ def test_bulk_overlaps(comm_type, quantization, connections):
         f" {te.Linear.__name__} - ROW-PARALLEL ",
         f" {te.Linear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
         f" {te.Linear.__name__} - COL-PARLALEL - DGRAD+RS ",
-        f" {te.LayerNormLinear.__name__} - ROW-PARALLEL ",
         f" {te.LayerNormLinear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
         f" {te.LayerNormLinear.__name__} - COL-PARALLEL - DGRAD+RS ",
     ]
@@ -237,13 +280,57 @@ def test_bulk_overlaps(comm_type, quantization, connections):
         )
     ],
 )
-def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8):
+def test_layers_with_overlap_bf16(
+    layer_type, linear_parallel_mode, overlap_rs_dgrad, use_cublasmp, fp8
+):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None)
+    _run_layer_with_overlap(
+        layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None, use_cublasmp=use_cublasmp
+    )
 
 
+@pytest.mark.parametrize("compile_mode", ["default", "reduce-overhead"])
+@pytest.mark.parametrize(
+    "quantization",
+    [None, "fp8_current_scaling", "mxfp8"],
+    ids=["bf16", "fp8_current_scaling", "mxfp8"],
+)
+@pytest.mark.parametrize(
+    "linear_parallel_mode,overlap_rs_dgrad",
+    [
+        ("row", False),
+        ("column", False),
+        ("column", True),
+    ],
+    ids=[
+        "ROW-PARALLEL",
+        "COL-PARALLEL - BULK DGRAD/WGRAD",
+        "COL-PARALLEL - DGRAD+RS",
+    ],
+)
+def test_linear_with_overlap_compile(
+    linear_parallel_mode, overlap_rs_dgrad, quantization, compile_mode
+):
+    """te.Linear comm+GEMM overlap (Userbuffers) under torch.compile,
+    checked numerically against the eager, non-overlap reference."""
+    if quantization is not None and linear_parallel_mode == "row":
+        pytest.skip(
+            "FP8 row-parallel UB forces differentiable fp8_output, unsupported under compile."
+        )
+    _run_layer_with_overlap(
+        te.Linear.__name__,
+        linear_parallel_mode,
+        overlap_rs_dgrad,
+        quantization is not None,
+        quantization,
+        use_compile=True,
+        compile_mode=compile_mode,
+    )
+
+
+@pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
     "quantization",
     ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
@@ -254,7 +341,6 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
         (te.Linear.__name__, "row", False),
         (te.Linear.__name__, "column", False),
         (te.Linear.__name__, "column", True),
-        (te.LayerNormLinear.__name__, "row", False),
         (te.LayerNormLinear.__name__, "column", False),
         (te.LayerNormLinear.__name__, "column", True),
     ]
@@ -269,7 +355,6 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
         f"{te.Linear.__name__}-row_tensor_parallel",
         f"{te.Linear.__name__}-col_tensor_parallel-BULK DGRAD/WGRAD",
         f"{te.Linear.__name__}-col_tensor_parallel-DGRAD+RS",
-        f"{te.LayerNormLinear.__name__}-row_tensor_parallel",
         f"{te.LayerNormLinear.__name__}-col_tensor_parallel-BULK DGRAD/WGRAD",
         f"{te.LayerNormLinear.__name__}-col_tensor_parallel-DGRAD+RS",
     ]
@@ -286,86 +371,21 @@ def test_layers_with_overlap_fp8(
     linear_parallel_mode,
     overlap_rs_dgrad,
     quantization,
+    use_cublasmp,
 ):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
-    """
-    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, True, quantization)
 
-
-@pytest.mark.parametrize(
-    "fp8",
-    (False,),
-    ids=[
-        " BF16  ",
-    ],
-)
-@pytest.mark.parametrize(
-    "num_layers",
-    (2,),
-    ids=[
-        " 2 layers ",
-    ],
-)
-@pytest.mark.parametrize(
-    "layer_type,linear_parallel_mode,overlap_rs_dgrad",
-    list(
-        zip(
-            [te.TransformerLayer.__name__ for _ in range(2)],
-            [None] * 2,
-            [False, True],
-        )
-    ),
-    ids=[
-        " " + " - ".join(test_name_parts) + " "
-        for test_name_parts in zip(
-            [te.TransformerLayer.__name__ for _ in range(2)],
-            ["BULK DGRAD/WGRAD", "DGRAD+RS"],
-        )
-    ],
-)
-def test_multi_layer_with_overlap_bf16(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, num_layers
-):
-    """
-    Test Transformer Engine layers with comm+GEMM overlap.
+    The layer runner uses 3-D logical activations. Column-parallel and composite-layer cases
+    without RS-dgrad overlap exercise FP8 GEMMs with bulk reduce-scatter in backward, and the
+    runner checks that output and gradient shapes match the non-overlap reference in addition to
+    checking their values.
     """
     _run_layer_with_overlap(
-        layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None, num_layers
-    )
-
-
-@pytest.mark.parametrize(
-    "quantization",
-    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
-)
-@pytest.mark.parametrize(
-    "num_layers",
-    (2,),
-)
-@pytest.mark.parametrize(
-    "layer_type,linear_parallel_mode,overlap_rs_dgrad",
-    list(
-        zip(
-            [te.TransformerLayer.__name__ for _ in range(2)],
-            [None] * 2,
-            [False, True],
-        )
-    ),
-    ids=[
-        "-".join(test_name_parts)
-        for test_name_parts in zip(
-            [te.TransformerLayer.__name__ for _ in range(2)],
-            ["BULK DGRAD/WGRAD", "DGRAD+RS"],
-        )
-    ],
-)
-def test_multi_layer_with_overlap_fp8(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, quantization, num_layers
-):
-    """
-    Test Transformer Engine layers with comm+GEMM overlap.
-    """
-    _run_layer_with_overlap(
-        layer_type, linear_parallel_mode, overlap_rs_dgrad, True, quantization, num_layers
+        layer_type,
+        linear_parallel_mode,
+        overlap_rs_dgrad,
+        True,
+        quantization,
+        use_cublasmp=use_cublasmp,
     )

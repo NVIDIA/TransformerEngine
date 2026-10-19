@@ -15,3 +15,4 @@ Debug features
 .. autoapiclass:: transformer_engine.debug.features.fake_quant.FakeQuant
 .. autoapiclass:: transformer_engine.debug.features.disable_fp8_gemm.DisableFP8GEMM
 .. autoapiclass:: transformer_engine.debug.features.disable_fp8_layer.DisableFP8Layer
+.. autoapiclass:: transformer_engine.debug.features.dump_tensors.DumpTensors

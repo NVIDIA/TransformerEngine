@@ -4,7 +4,6 @@
 
 
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 
@@ -39,11 +38,11 @@ def check_mxfp8_quantize_swizzle_fusion(
     x_dtype: torch.dtype,
     M: int,
     N: int,
-    return_identity: bool,
+    return_rowwise: bool,
     return_transpose: bool,
 ) -> None:
 
-    te_dtype = tex.DType.kFloat8E4M3
+    te_dtype = te.DType.kFloat8E4M3
 
     # Setup device and random seed
     device = "cuda"
@@ -57,7 +56,7 @@ def check_mxfp8_quantize_swizzle_fusion(
     # Quantize
     quantizer = MXFP8Quantizer(
         fp8_dtype=te_dtype,
-        rowwise=return_identity,
+        rowwise=return_rowwise,
         columnwise=return_transpose,
     )
 
@@ -69,7 +68,7 @@ def check_mxfp8_quantize_swizzle_fusion(
     )
     x_qx_ref, x_sx_ref, x_qx_t_ref, x_sx_t_ref = unpack_quantized_tensor(quantizer(x))
 
-    if return_identity:
+    if return_rowwise:
         torch.testing.assert_close(x_qx_swf, x_qx_ref, atol=0.0, rtol=0.0)
         valid_scale_shape = get_mxfp8_scale_shape_no_padding(x.shape, False)
         assert valid_scale_shape == x_sx_swf.shape, (
@@ -103,9 +102,7 @@ def check_mxfp8_quantize_swizzle_fusion(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 def test_mxfp8_quantize_swizzle_fusion(
     x_dtype: torch.dtype,
     M: int,
@@ -113,14 +110,14 @@ def test_mxfp8_quantize_swizzle_fusion(
     quantize_mode: str,
 ) -> None:
 
-    if quantize_mode == "quantize":
-        return_identity = True
+    if quantize_mode == "rowwise_only":
+        return_rowwise = True
         return_transpose = False
-    elif quantize_mode == "quantize_transpose":
-        return_identity = True
+    elif quantize_mode == "both_directions":
+        return_rowwise = True
         return_transpose = True
-    elif quantize_mode == "quantize_colwise_only":
-        return_identity = False
+    elif quantize_mode == "columnwise_only":
+        return_rowwise = False
         return_transpose = True
     else:
         raise ValueError(f"Invalid quantize mode: {quantize_mode}")
@@ -129,6 +126,39 @@ def test_mxfp8_quantize_swizzle_fusion(
         x_dtype=x_dtype,
         M=M,
         N=N,
-        return_identity=return_identity,
+        return_rowwise=return_rowwise,
         return_transpose=return_transpose,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("M, N", [(96, 160), (4096, 576), (4096, 2112)])
+def test_mxfp8_bidirectional_swizzled_row_scale_padding(M: int, N: int) -> None:
+    """The specialized bidirectional kernel must not overwrite padded row scales."""
+    x = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    quantizer.optimize_for_gemm = True
+    scale = quantizer(x)._rowwise_scale_inv.view(torch.uint8)
+
+    scale_rows = torch.arange(M, device=scale.device, dtype=torch.int64).view(-1, 1)
+    scale_cols = torch.arange(N // 32, device=scale.device, dtype=torch.int64).view(1, -1)
+    num_tiles_x = math.ceil(N / 128)
+    scale_indices = (
+        ((scale_rows // 128) * num_tiles_x + scale_cols // 4) * (128 * 4)
+        + (scale_rows % 32) * 16
+        + ((scale_rows % 128) // 32) * 4
+        + scale_cols % 4
+    )
+    valid_mask = torch.zeros(scale.numel(), dtype=torch.bool, device=scale.device)
+    valid_mask[scale_indices.view(-1)] = True
+
+    torch.testing.assert_close(
+        scale.view(-1)[~valid_mask],
+        torch.zeros_like(scale.view(-1)[~valid_mask]),
+        atol=0,
+        rtol=0,
     )

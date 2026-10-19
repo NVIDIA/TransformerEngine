@@ -22,6 +22,7 @@ struct MatmulConfig {
   NVTETensor epilogue_aux_tensor = nullptr;
   bool use_split_accumulator = false;
   int sm_count = 0;
+  bool alpha_beta_on_device = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(NVTETensor),  // bias_tensor
@@ -30,7 +31,8 @@ struct MatmulConfig {
       sizeof(uint8_t),     // with_dgelu_epilogue
       sizeof(NVTETensor),  // epilogue_aux_tensor
       sizeof(uint8_t),     // use_split_accumulator
-      sizeof(int32_t)      // sm_count
+      sizeof(int32_t),     // sm_count
+      sizeof(uint8_t)      // alpha_beta_on_device
   };
 };
 
@@ -44,10 +46,13 @@ struct GroupedMatmulConfig {
   // Number of streaming multiprocessors to use in GEMM kernel
   int sm_count = 0;
 
+  // Split accumulator mode. Only taken into account on Hopper.
+  bool use_split_accumulator = false;
+
   // Note: API transfers the value type, not std::optional
-  static constexpr size_t attr_sizes[] = {sizeof(decltype(avg_m)::value_type),
-                                          sizeof(decltype(avg_n)::value_type),
-                                          sizeof(decltype(avg_k)::value_type), sizeof(sm_count)};
+  static constexpr size_t attr_sizes[] = {
+      sizeof(decltype(avg_m)::value_type), sizeof(decltype(avg_n)::value_type),
+      sizeof(decltype(avg_k)::value_type), sizeof(sm_count), sizeof(uint8_t)};
 };
 
 }  // namespace transformer_engine

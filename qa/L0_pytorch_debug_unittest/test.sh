@@ -22,6 +22,11 @@ FAILED_CASES=""
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"
 
+# L0 keeps one mature FlashAttention generation; L3 owns newer-generation coverage.
+export NVTE_FLASH_ATTN_V2=1
+export NVTE_FLASH_ATTN_V3=0
+export NVTE_FLASH_ATTN_V4=0
+
 # Config with the dummy feature which prevents nvinspect from being disabled.
 # Nvinspect will be disabled if no feature is active.
 : ${NVTE_TEST_NVINSPECT_DUMMY_CONFIG_FILE:=$TE_PATH/tests/pytorch/debug/test_configs/dummy_feature.yaml}

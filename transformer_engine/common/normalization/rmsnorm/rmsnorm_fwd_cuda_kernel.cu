@@ -6,6 +6,7 @@
 
 #include "../common.h"
 #include "../kernel_traits.h"
+#include "../rtc_dispatch.h"
 #include "rmsnorm_fwd_kernels.cuh"
 
 using namespace transformer_engine::normalization;
@@ -102,6 +103,31 @@ void launch_rmsnorm_fwd_general_(LaunchParams<ForwardKernelParams> &launch_param
   }
 }
 
+#define REGISTER_NORM_LAUNCHER_RMSN_FWD_tuned(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                                                   \
+                                              CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG,                                             \
+                                              STATIC_FALLBACK)                                                                           \
+  [[maybe_unused]] static const int                                                                                                      \
+      _rmsn_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##CTAS_PER_ROW##_##WARPS_M##_##WARPS_N##_##BYTES_PER_LDG = \
+          ([] {                                                                                                                          \
+            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_fwd_tuned(                                                   \
+                TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                                         \
+                TypeToDType<CTYPE>::value, HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N,                                                  \
+                BYTES_PER_LDG, STATIC_FALLBACK);                                                                                         \
+            return 0;                                                                                                                    \
+          })()
+#define REGISTER_NORM_LAUNCHER_RMSN_FWD_general(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M,                         \
+                                                WARPS_N, BYTES_PER_LDG, STATIC_FALLBACK)                                  \
+  [[maybe_unused]] static const int                                                                                       \
+      _rmsn_fwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##WARPS_M##_##WARPS_N##_##BYTES_PER_LDG = \
+          ([] {                                                                                                           \
+            ::transformer_engine::normalization::rtc_norm::register_rmsnorm_fwd_general(                                  \
+                TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                          \
+                TypeToDType<CTYPE>::value, HIDDEN_SIZE, WARPS_M, WARPS_N, BYTES_PER_LDG,                                  \
+                STATIC_FALLBACK);                                                                                         \
+            return 0;                                                                                                     \
+          })()
+
+#if NVTE_BUILD_LEGACY_STATIC_NORM
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \
                                OTYPE, CTYPE, ...)                                                               \
   namespace {                                                                                                   \
@@ -111,10 +137,16 @@ void launch_rmsnorm_fwd_general_(LaunchParams<ForwardKernelParams> &launch_param
     launch_rmsnorm_fwd_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE,                      \
                                         __VA_ARGS__>(launch_params, configure_params);                          \
   }                                                                                                             \
-  REGISTER_NORM_BASE(                                                                                           \
-      NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                              \
+  REGISTER_NORM_LAUNCHER_RMSN_FWD_##LAUNCH_TYPE(                                                                \
+      HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, __VA_ARGS__,                                                     \
       norm_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE); \
   }  // namespace
+#else
+#define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE, \
+                               OTYPE, CTYPE, ...)                                             \
+  REGISTER_NORM_LAUNCHER_RMSN_FWD_##LAUNCH_TYPE(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,      \
+                                                __VA_ARGS__, nullptr)
+#endif  // NVTE_BUILD_LEGACY_STATIC_NORM
 
 // Create rmsnorm tuned launch function and register. Macro signature:
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG
