@@ -340,23 +340,6 @@ __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
   }
 }
 
-// Repeat each array's own terminal offset so added sequences have zero length,
-// including when Q/KV differ or physical offsets include gaps between sequences.
-__global__ void pad_cu_seqlens_to_batch_bucket(int64_t actual_b, int64_t max_b, const int32_t *cu_q,
-                                               const int32_t *cu_kv, const int32_t *physical_q,
-                                               const int32_t *physical_kv, int32_t *out_cu_q,
-                                               int32_t *out_cu_kv, int32_t *out_physical_q,
-                                               int32_t *out_physical_kv) {
-  const int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid <= max_b) {
-    const int64_t src = min(tid, actual_b);
-    out_cu_q[tid] = cu_q[src];
-    out_cu_kv[tid] = cu_kv[src];
-    out_physical_q[tid] = physical_q[src];
-    out_physical_kv[tid] = physical_kv[src];
-  }
-}
-
 // convert cu_seqlens_padded to offsets
 template <class OFFSETS_T>
 __device__ void cu_seqlens_padded_to_offsets_impl(
