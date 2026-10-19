@@ -15,12 +15,12 @@ import torch
 
 import transformer_engine_torch as tex
 
+from transformer_engine import te_device_type
 from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
 from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 from ...utils import _empty_tensor
-from transformer_engine import te_device_type
 
 
 @functools.lru_cache(maxsize=None)

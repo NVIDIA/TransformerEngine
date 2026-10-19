@@ -19,9 +19,9 @@ from typing import Any, Iterable, Optional, Tuple, Union
 import torch
 from torch.ops import aten
 
+from transformer_engine import te_device_type
 from .storage.identity_tensor_storage import IdentityTensorStorage
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
-from transformer_engine import te_device_type
 
 
 class IdentityQuantizer(Quantizer):

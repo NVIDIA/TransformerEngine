@@ -10,8 +10,8 @@ from typing import Optional
 
 import torch
 
-from transformer_engine import te_device_type
 from transformer_engine_torch import FP8TensorMeta
+from transformer_engine import te_device_type
 from ..dynamo.tensor_spec import TensorSpec
 from ..ep import (
     EpBuffer,

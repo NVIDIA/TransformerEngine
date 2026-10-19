@@ -10,6 +10,7 @@ from einops import rearrange
 
 import torch
 
+from transformer_engine import te_device_type
 from transformer_engine.pytorch.attention.custom_ops import (
     copy_to_kv_cache,
     QKV_FORMAT_VALUE,

@@ -29,8 +29,8 @@ from typing import Optional
 
 import torch
 from transformer_engine.pytorch.quantization import QuantizerRole
-from ..constants import DType
 from transformer_engine import te_device_type
+from ..constants import DType
 
 
 def high_precision_factory(

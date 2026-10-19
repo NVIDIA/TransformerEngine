@@ -26,10 +26,12 @@ transformer_engine.TE_PLATFORM = getattr(transformer_engine, "TE_PLATFORM", torc
 
 
 def te_device_type() -> str:
+    """Torch device type used by Transformer Engine, e.g. `cuda`."""
     return transformer_engine.TE_DEVICE_TYPE
 
 
 def te_platform():
+    """Torch device module used by Transformer Engine, e.g. `torch.cuda`."""
     return transformer_engine.TE_PLATFORM
 
 

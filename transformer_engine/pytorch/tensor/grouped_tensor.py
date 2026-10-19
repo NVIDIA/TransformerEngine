@@ -10,10 +10,10 @@ from typing import List, Optional, Tuple
 import torch
 from torch.utils._pytree import tree_map
 
+from transformer_engine import te_device_type
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from .storage.grouped_tensor_storage import GroupedTensorStorage
 from ..constants import DType
-from transformer_engine import te_device_type
 
 
 def _stride_from_shape(shape: Tuple[int, ...]) -> Tuple[int, ...]:

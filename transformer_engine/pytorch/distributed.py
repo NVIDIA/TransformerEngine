@@ -20,7 +20,6 @@ from torch.utils.checkpoint import detach_variable, noop_context_fn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
-from transformer_engine import te_device_type
 
 try:
     import torch.distributed._symmetric_memory as symm_mem
@@ -32,6 +31,7 @@ except ImportError:
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.triton.pad import pad_columnwise_scale_inv
+from transformer_engine import te_device_type
 from .torch_version import torch_version
 from .utils import (
     is_non_tn_fp8_gemm_supported,

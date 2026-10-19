@@ -15,12 +15,12 @@ import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
+from transformer_engine import te_device_type
 from .constants import DType
 from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
 from .quantized_tensor import QuantizedTensor, QuantizedTensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from transformer_engine import te_device_type
 
 # Type-hint-only import; keeps the ``Recipe`` annotation without a runtime import of
 # common.recipe (the concrete recipe classes are imported lazily where used).

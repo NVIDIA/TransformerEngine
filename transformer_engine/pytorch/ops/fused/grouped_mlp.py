@@ -17,6 +17,7 @@ import torch
 from packaging.version import Version as PkgVersion
 
 import transformer_engine_torch as tex
+from transformer_engine import te_device_type
 from ....common.recipe import Format as RecipeFormat
 from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload

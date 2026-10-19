@@ -25,6 +25,7 @@ from transformer_engine.common.triton.mhc import (
     _mhc_sinkhorn_bwd_fused,
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
+from transformer_engine import te_device_type
 
 ENFORCE_DETERMINISTIC = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
 
