@@ -98,7 +98,7 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
-from ..dynamo.fake import _make_fused_quantization_output_spec, fake_norm
+from ..dynamo.fake import fake_activation, fake_norm
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
@@ -2125,9 +2125,6 @@ def _layernorm_mlp_forward_fake(
 
     in_features = args.ln_weight.shape[0]
     fc1_out_features = args.fc1_weight.shape[0]
-    act_features = (
-        fc1_out_features // 2 if args.activation in _GATED_ACTIVATIONS else fc1_out_features
-    )
     fc2_out_features = args.fc2_weight.shape[0]
     inp_leading = args.inp.shape[0] if len(args.inp.shape) > 1 else 1
     gemm_leading_shape = (
@@ -2273,22 +2270,19 @@ def _layernorm_mlp_forward_fake(
             dtype=fc1_out_dtype,
             device=device,
         )
-    act_out = TensorSpec(
-        shape=(*gemm_leading_shape, act_features),
+    act_out = fake_activation(
+        fc1_out_without_bias if bias_gelu_fusion else fc1_out,
+        args.fc2_input_quantizer if fp8_or_debug else None,
+        gated=args.activation in _GATED_ACTIVATIONS,
         dtype=args.activation_dtype,
-        quantizer=args.fc2_input_quantizer if fp8_or_debug else None,
-        device=device,
+        fused_quantization=(
+            args.fp8
+            and not args.debug
+            and not gemm_gelu_fusion
+            and not args.recipe_float8_block_scaling
+            and not args.recipe_custom
+        ),
     )
-    if (
-        args.fp8
-        and not args.debug
-        and not gemm_gelu_fusion
-        and not args.recipe_float8_block_scaling
-        and not args.recipe_custom
-    ):
-        act_out = _make_fused_quantization_output_spec(
-            act_out.shape, act_out.dtype, act_out.device, act_out.quantizer
-        )
     if args.fc2_output_quantizer is not None:
         args.fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)
 

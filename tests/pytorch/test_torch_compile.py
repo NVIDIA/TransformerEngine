@@ -66,7 +66,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
 )
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
-from transformer_engine.pytorch.dynamo.fake import fake_bgrad
+from transformer_engine.pytorch.dynamo.fake import fake_activation, fake_bgrad
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -1989,6 +1989,41 @@ def test_to_tensor_spec_quantized(factory, shape, swizzled):
         assert spec.with_gemm_swizzled_scales == swizzled
         assert rebuilt._with_gemm_swizzled_scales == swizzled
         assert spec.quantizer.optimize_for_gemm == q.optimize_for_gemm == (not swizzled)
+
+
+@pytest.mark.parametrize(
+    "activation, gated", [(tex.gelu, False), (tex.swiglu, True)], ids=["gelu", "swiglu"]
+)
+@pytest.mark.parametrize("shape", [(32, 128), (2, 4, 16, 128)])
+@pytest.mark.parametrize("with_rht", [False, True])
+@pytest.mark.parametrize("separate_quantize", [False, True])
+def test_fake_activation_nvfp4_matches_real(activation, gated, shape, with_rht, separate_quantize):
+    """Activation output and NVFP4 scale layout match the native path."""
+    if not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    quantizer = _nvfp4(with_rht=with_rht)
+    inp = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    spec = fake_activation(
+        to_tensor_spec(inp), quantizer, gated=gated, fused_quantization=not separate_quantize
+    )
+    real = activation(inp, None if separate_quantize else quantizer)
+    if separate_quantize:
+        real = quantizer(real)
+
+    assert spec.shape == tuple(real.shape)
+    assert spec.dtype == real.dtype
+    assert spec.create_metadata()["nontensor_kwargs"]["with_gemm_swizzled_scales"] == (
+        real._with_gemm_swizzled_scales
+    )
+    names = tuple(real.__tensor_flatten__()[0])
+    assert spec.inner_names() == names
+    for name, fake_inner in zip(names, spec.create_inner_tensors()):
+        real_inner = getattr(real, name)
+        assert (fake_inner.shape, fake_inner.dtype, fake_inner.stride()) == (
+            real_inner.shape,
+            real_inner.dtype,
+            real_inner.stride(),
+        )
 
 
 # ---------------------------------------------------------------------------
