@@ -4,10 +4,11 @@
 
 """Grouped tensor storage class for handling collections of tensors with different shapes"""
 from __future__ import annotations
-from typing import Optional, Tuple, List, Union
+from typing import TYPE_CHECKING, Optional, Tuple, List, Union
 import math
 
 import torch
+import transformer_engine_torch as tex
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 from ...constants import DType, TE_DType
 
@@ -20,6 +21,9 @@ from .mxfp8_tensor_storage import MXFP8TensorStorage
 from .float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from .nvfp4_tensor_storage import NVFP4TensorStorage
 from ...utils import is_non_tn_fp8_gemm_supported
+
+if TYPE_CHECKING:
+    from ...quantization import QuantizationCalibrationConfig
 
 
 class GroupedTensorStorage:
@@ -998,6 +1002,83 @@ class GroupedTensorStorage:
         )
         grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()
         return grouped_tensor
+
+    def calibrate(
+        self,
+        quantizers: List[Optional[Quantizer]],
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Calibrate each grouped tensor member from its packed quantization metadata."""
+        quantized_grouped_tensor = self
+        if self.quantizer is None:
+            # Non-Quantized Calibration
+            if self.rowwise_data is None:
+                raise RuntimeError("Grouped tensor has no rowwise storage to calibrate.")
+            if not quantizers or quantizers[0] is None:
+                raise RuntimeError("Grouped tensor calibration requires a quantizer.")
+            # Use group quantization to compute all calibration values as a batch.
+            quantized_grouped_tensor = tex.group_quantize(
+                self.rowwise_data.view(self.logical_shape),
+                quantizers[0],
+                self.num_tensors,
+                self.first_dims,
+                self.last_dims,
+                tensor_offsets=self.tensor_offsets,
+            )
+
+        # Calibrate rows of the GroupedTensor and update each quantizer
+        # with the observed calibration data for each row.
+        for index, quantizer in enumerate(quantizers):
+            if quantizer is None:
+                continue
+            recipe = quantizer._get_compatible_recipe()
+            if recipe is None:
+                continue
+            member_skip_calibration = skip_calibration
+            for dims in (
+                quantized_grouped_tensor.first_dims,
+                quantized_grouped_tensor.last_dims,
+            ):
+                if dims is None:
+                    continue
+                member_is_empty = dims[index : index + 1] == 0
+                member_skip_calibration = (
+                    member_is_empty
+                    if member_skip_calibration is None
+                    else torch.logical_or(member_skip_calibration != 0, member_is_empty)
+                )
+            if recipe.float8_current_scaling():
+                scale_inv = (
+                    quantized_grouped_tensor.scale_inv
+                    if quantized_grouped_tensor.scale_inv is not None
+                    else quantized_grouped_tensor.columnwise_scale_inv
+                )
+                if scale_inv is None:
+                    raise RuntimeError("Grouped FP8 tensor has no scale-inverse metadata.")
+                quantizer._update_calibration_value(
+                    "scale_inv",
+                    scale_inv[index : index + 1],
+                    calibration_config=calibration_config,
+                    skip_calibration=member_skip_calibration,
+                )
+            elif recipe.nvfp4():
+                if quantized_grouped_tensor.amax is None:
+                    raise RuntimeError("Grouped NVFP4 tensor has no amax metadata.")
+                quantizer._update_calibration_value(
+                    "amax",
+                    quantized_grouped_tensor.amax[index : index + 1],
+                    calibration_config=calibration_config,
+                    skip_calibration=member_skip_calibration,
+                )
+            else:
+                # Trigger error messages of non-supported quantization recipes.
+                quantizer.calibrate(
+                    quantized_grouped_tensor,
+                    calibration_config=calibration_config,
+                    skip_calibration=member_skip_calibration,
+                )
 
     def split_into_quantized_tensors(
         self,

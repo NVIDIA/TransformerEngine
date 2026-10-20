@@ -441,6 +441,51 @@ def is_fp8_ue5m3_available(return_reason: bool = False) -> Union[bool, Tuple[boo
     return check_fp8_ue5m3_support()[0]
 
 
+@dataclass(frozen=True, slots=True)
+class QuantizationCalibrationConfig:
+    """Configuration for collecting checkpointable quantization scaling factors.
+
+    Parameters
+    ----------
+    transformer_engine_calibration_decay : float, default = 0.0
+        Decay applied to buffered activation scaling factors before incorporating
+        each new observation. With zero decay, only the latest value is retained.
+    """
+
+    transformer_engine_calibration_decay: float = 0.0
+
+    def __post_init__(self) -> None:
+        if (
+            self.transformer_engine_calibration_decay < 0.0
+            or self.transformer_engine_calibration_decay > 1.0
+        ):
+            raise ValueError(
+                "transformer_engine_calibration_decay must be non-negative and <= 1.0."
+            )
+
+
+def _resolve_calibration_config(
+    calibrating: bool, calibration_config: Optional[QuantizationCalibrationConfig]
+) -> Optional[QuantizationCalibrationConfig]:
+    """Return the config to calibrate with, or None when not calibrating."""
+    if calibration_config is not None:
+        return calibration_config
+    return QuantizationCalibrationConfig() if calibrating else None
+
+
+@dataclass(frozen=True, slots=True)
+class TEAutocastState:
+    """Snapshot of process-global quantization autocast state."""
+
+    fp8_enabled: bool
+    fp8_calibration: bool
+    calibration_config: Optional[QuantizationCalibrationConfig]
+    fp8_recipe: Optional[Recipe]
+    fp8_distributed_group: Optional[dist_group_type]
+    is_first_fp8_module: bool
+    fp8_graph_capturing: bool
+
+
 @dataclass(slots=True)
 class FP8GlobalState:
     """Mutable process-global FP8 state stored on an instance.
@@ -466,6 +511,7 @@ class FP8GlobalState:
         default_factory=dict
     )
     skip_fp8_weight_update_tensor: Optional[torch.Tensor] = None
+    calibration_config: Optional[QuantizationCalibrationConfig] = None
 
 
 class FP8GlobalStateManager:
@@ -627,8 +673,21 @@ class FP8GlobalStateManager:
 
     @classmethod
     def is_fp8_calibration(cls) -> bool:
-        """Is FP8 calibration"""
+        """Whether quantization calibration is enabled."""
         return cls.quantization_state.fp8_calibration
+
+    @classmethod
+    def get_calibration_config(cls) -> Optional[QuantizationCalibrationConfig]:
+        """Get the active quantization calibration configuration."""
+        qstate = cls.quantization_state
+        if not qstate.fp8_calibration:
+            # User-declined calibration using the legacy fp8_calibration config.
+            return None
+        if qstate.calibration_config is not None:
+            # User-provided calibration config.
+            return qstate.calibration_config
+        # Default (fp8_calibration=True) config.
+        return QuantizationCalibrationConfig()
 
     @classmethod
     def with_fp8_parameters(cls) -> bool:
@@ -672,30 +731,30 @@ class FP8GlobalStateManager:
         return cls.quantization_state.fp8_distributed_group
 
     @classmethod
-    def get_autocast_state(cls) -> tuple:
+    def get_autocast_state(cls) -> TEAutocastState:
         """Snapshot the autocast-related fields of the quantization state."""
         qstate = cls.quantization_state
-        return (
-            qstate.fp8_enabled,
-            qstate.fp8_calibration,
-            qstate.fp8_recipe,
-            qstate.fp8_distributed_group,
-            qstate.is_first_fp8_module,
-            qstate.fp8_graph_capturing,
+        return TEAutocastState(
+            fp8_enabled=qstate.fp8_enabled,
+            fp8_calibration=qstate.fp8_calibration,
+            calibration_config=qstate.calibration_config,
+            fp8_recipe=qstate.fp8_recipe,
+            fp8_distributed_group=qstate.fp8_distributed_group,
+            is_first_fp8_module=qstate.is_first_fp8_module,
+            fp8_graph_capturing=qstate.fp8_graph_capturing,
         )
 
     @classmethod
-    def set_autocast_state(cls, state: tuple) -> None:
+    def set_autocast_state(cls, state: TEAutocastState) -> None:
         """Restore a previously saved autocast state snapshot."""
         qstate = cls.quantization_state
-        (
-            qstate.fp8_enabled,
-            qstate.fp8_calibration,
-            qstate.fp8_recipe,
-            qstate.fp8_distributed_group,
-            qstate.is_first_fp8_module,
-            qstate.fp8_graph_capturing,
-        ) = state
+        qstate.fp8_enabled = state.fp8_enabled
+        qstate.fp8_calibration = state.fp8_calibration
+        qstate.calibration_config = state.calibration_config
+        qstate.fp8_recipe = state.fp8_recipe
+        qstate.fp8_distributed_group = state.fp8_distributed_group
+        qstate.is_first_fp8_module = state.is_first_fp8_module
+        qstate.fp8_graph_capturing = state.fp8_graph_capturing
 
     @staticmethod
     def reduce_tensor_across_group_op_max(tensor: torch.Tensor, group: dist_group_type) -> None:
@@ -790,8 +849,11 @@ class FP8GlobalStateManager:
         fp8_recipe: Optional[Recipe] = None,
         fp8_group: Optional[dist_group_type] = None,
         _graph: bool = False,
+        calibration_config: Optional[QuantizationCalibrationConfig] = None,
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
+
+        calibration_config = _resolve_calibration_config(calibrating, calibration_config)
 
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
@@ -802,7 +864,8 @@ class FP8GlobalStateManager:
         )
 
         qstate.fp8_enabled = enabled
-        qstate.fp8_calibration = calibrating
+        qstate.fp8_calibration = calibration_config is not None
+        qstate.calibration_config = calibration_config
         qstate.fp8_recipe = fp8_recipe
         qstate.fp8_distributed_group = fp8_group
         qstate.fp8_graph_capturing = _graph
@@ -1000,6 +1063,7 @@ def fp8_autocast(
     fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
     _graph: bool = False,
+    calibration_config: Optional[QuantizationCalibrationConfig] = None,
 ) -> "autocast":
     """
     .. warning::
@@ -1022,6 +1086,7 @@ def fp8_autocast(
         recipe=fp8_recipe,
         amax_reduction_group=fp8_group,
         _graph=_graph,
+        calibration_config=calibration_config,
     )
 
 
@@ -1053,10 +1118,12 @@ class autocast:
     enabled : bool, default = True
              whether or not to enable low precision quantization (FP8/FP4).
     calibrating : bool, default = False
-                 calibration mode allows collecting statistics such as amax and scale
-                 data of quantized tensors even when executing without quantization enabled.
-                 This is useful for saving an inference ready checkpoint while training
-                 using a higher precision.
+                 Enables calibration, using `calibration_config` if provided and the default
+                 configuration otherwise. Calibration collects and buffers Transformer Engine
+                 calibration metadata even when executing without quantization enabled.
+    calibration_config : QuantizationCalibrationConfig, default = None
+                  Custom configuration for collecting checkpointable quantization scaling
+                  factors. Providing a config also enables calibration.
     recipe : recipe.Recipe, default = None
             recipe used for low precision quantization.
     amax_reduction_group : torch._C._distributed_c10d.ProcessGroup, default = None
@@ -1069,6 +1136,7 @@ class autocast:
     __slots__ = (
         "_enabled",
         "_calibrating",
+        "_calibration_config",
         "_recipe",
         "_amax_reduction_group",
         "_graph",
@@ -1082,9 +1150,11 @@ class autocast:
         recipe: Optional["Recipe"] = None,
         amax_reduction_group: Optional["dist_group_type"] = None,
         _graph: bool = False,
+        calibration_config: Optional[QuantizationCalibrationConfig] = None,
     ) -> None:
         self._enabled = enabled
         self._calibrating = calibrating
+        self._calibration_config = _resolve_calibration_config(calibrating, calibration_config)
         self._recipe = recipe
         self._amax_reduction_group = amax_reduction_group
         self._graph = _graph
@@ -1103,6 +1173,7 @@ class autocast:
         FP8GlobalStateManager.autocast_enter(
             enabled=self._enabled,
             calibrating=self._calibrating,
+            calibration_config=self._calibration_config,
             fp8_recipe=self._recipe,
             fp8_group=self._amax_reduction_group,
             _graph=self._graph,

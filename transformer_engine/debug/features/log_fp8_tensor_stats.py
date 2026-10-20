@@ -24,32 +24,15 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
-try:
-    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-
-    _nvfp4_available = True
-except ImportError:
-    _nvfp4_available = False
-    NVFP4Quantizer = None
-
 
 ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
 
 
-def _get_recipe_name(quantizer: Optional[Quantizer]):
+def _get_recipe_name(quantizer: Optional[Quantizer]) -> str:
     if quantizer is None:
         return ""
-    if isinstance(quantizer, Float8Quantizer):
-        return "fp8_delayed_scaling"
-    if isinstance(quantizer, Float8CurrentScalingQuantizer):
-        return "fp8_current_scaling"
-    if isinstance(quantizer, MXFP8Quantizer):
-        return "mxfp8"
-    if isinstance(quantizer, Float8BlockQuantizer):
-        return "fp8_block_scaling"
-    if _nvfp4_available and isinstance(quantizer, NVFP4Quantizer):
-        return "nvfp4"
-    raise ValueError(f"Unsupported quantizer type: {type(quantizer)}")
+    recipe_type = quantizer._get_compatible_recipe()
+    return "" if recipe_type is None else recipe_type.name()
 
 
 def _get_new_quantizer(recipe_name, fp8_dtype):

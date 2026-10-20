@@ -5,7 +5,17 @@
 """Pure Python base classes for quantization."""
 
 from __future__ import annotations
-from typing import NamedTuple, Optional, Tuple, Iterable, Any, Dict, Union, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    NamedTuple,
+    Optional,
+    Tuple,
+    Iterable,
+    Any,
+    Dict,
+    Union,
+    get_type_hints,
+)
 import abc
 import enum
 import warnings
@@ -23,6 +33,9 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _IdentityFunc,
     _stride_from_shape,
 )
+
+if TYPE_CHECKING:
+    from .quantization import QuantizationCalibrationConfig
 
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
 # QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
@@ -376,6 +389,23 @@ class Quantizer(abc.ABC):
 
     """
 
+    """Calibration metadata (absmax, scale_inv, etc.) template for the
+    FQN of the post-training quantization calibration state.
+
+    This state is stored as a non-persistent Module buffer and not
+    visible to model.state_dict(). To export this data, users can
+    manually reduce (TP, DP, or CP), gather (EP and PP), and inject
+    these `Module.named_buffers()` in the model state dictionary
+    prior to checkpoint save for PTQ and inference engines.
+
+    For example, an NVFP4 GroupedTensor expert weight 2 would appear as:
+    ``weight_gemm2_amax_nvfp4_te_ptq_calibrated``
+
+    """
+    calibration_buffer_name_template = (
+        "{tensor_name}_{metadata_name}_{recipe_name}_te_ptq_calibrated"
+    )
+
     """Whether to construct quantized tensors with "row-wise usage"
 
     Hand-wave explanation: Consider the matrix multiplication C = A *
@@ -421,6 +451,7 @@ class Quantizer(abc.ABC):
         self.columnwise_usage = columnwise
         self.internal = False
         self.optimize_for_gemm = False
+        self._calibration_state: Dict[str, torch.Tensor] = {}
 
     def __repr__(self):
         return (
@@ -581,13 +612,118 @@ class Quantizer(abc.ABC):
             "nontensor_kwargs": meta["nontensor_kwargs"],
         }
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        """Calibrate quantizer state
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Observe a tensor and update persistent calibration state.
 
-        Updates quantization state as if quantizing a tensor, but
-        without actually performing the quantization.
-
+        The calibration config controls how observations update persistent metadata.
+        If ``skip_calibration`` is nonzero, the persistent state is left unchanged.
         """
+
+    def _get_calibration_metadata_buffers(self, tensor_name: str) -> Dict[str, torch.Tensor]:
+        """Get module-buffer aliases for this quantizer's calibration state."""
+        if not self._calibration_state:
+            return {}
+        # Retrieve standardized name from Recipe class.
+        recipe_type = self._get_compatible_recipe()
+        if recipe_type is None:
+            return {}
+        recipe_name = recipe_type.name()
+        return {
+            self.calibration_buffer_name_template.format(
+                tensor_name=tensor_name,
+                metadata_name=metadata_name,
+                recipe_name=recipe_name,
+            ): value
+            for metadata_name, value in self._calibration_state.items()
+        }
+
+    def _update_calibration_value(
+        self,
+        metadata_name: str,
+        observed_value: Optional[torch.Tensor],
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Merge an observation into quantizer-owned calibration state."""
+        if observed_value is None:
+            # Un-initialized scale. Ignore it.
+            return
+        if skip_calibration is not None:
+            # Capture this skip_calibration tensor that masks
+            # the observed calibration value for non-calibration
+            # steps dynamically during CG replay.
+            observed_value = torch.where(
+                skip_calibration == 0,
+                observed_value,
+                torch.full_like(observed_value, torch.nan),
+            )
+        # Convert NaN to zero, which is the default calibration value.
+        # Track NaN indices so we can also skip calibration decay.
+        observed_mask = ~torch.isnan(observed_value).detach()
+        observed_value = torch.nan_to_num(observed_value, nan=0.0).detach()
+        # Retrieve the calibration state buffer.
+        calibration_state = self._calibration_state
+        calibration_value = calibration_state.get(metadata_name)
+        calibration_decay = calibration_config.transformer_engine_calibration_decay
+        if calibration_value is None:
+            # Initialize the calibration buffer. Requires a CUDA graph warmup step.
+            calibration_value = torch.zeros_like(observed_value)
+            calibration_state[metadata_name] = calibration_value
+        if calibration_value.shape != observed_value.shape:
+            raise RuntimeError(
+                "Quantizer calibration value shape changed from "
+                f"{tuple(calibration_value.shape)} to {tuple(observed_value.shape)}"
+            )
+        if calibration_decay > 0.0:
+            # Track a decaying maximum so early-training activation
+            # outliers do not permanently determine the inference scale.
+            # Only update (and decay) the non-NaN values indexed by the mask.
+            decay_tensor = torch.where(observed_mask, calibration_decay, 1.0)
+            observed_value = torch.where(observed_mask, observed_value, calibration_value)
+            torch.maximum(calibration_value * decay_tensor, observed_value, out=calibration_value)
+        else:
+            # Update the calibration buffer for non-NaN observed values.
+            torch.where(observed_mask, observed_value, calibration_value, out=calibration_value)
+
+    def _compute_calibration_amax(
+        self,
+        tensor: torch.Tensor,
+        *,
+        amax_reduction_group: Optional[dist_group_type] = None,
+    ) -> torch.Tensor:
+        """
+        Compute absmax, using NaN to represent an observation with no elements.
+        Not safe for CUDA graphs.
+        """
+        tensor_is_empty = tensor.numel() == 0
+        if tensor_is_empty:
+            amax = torch.zeros(1, dtype=torch.float32, device=tensor.device)
+        else:
+            amin, amax = tensor.aminmax()
+            amax = torch.maximum(-amin, amax).float().reshape(1)
+        has_values = torch.full_like(amax, not tensor_is_empty)
+        if amax_reduction_group is not None:
+            reduction_values = torch.cat((amax, has_values))
+            torch.distributed.all_reduce(
+                reduction_values,
+                op=torch.distributed.ReduceOp.MAX,
+                group=amax_reduction_group,
+            )
+            amax = reduction_values[:1]
+            has_values = reduction_values[1:]
+        amax.masked_fill_(has_values == 0, torch.nan)
+        return amax
+
+    def _share_calibration_state_with(self, quantizer: "Quantizer") -> None:
+        """Make a shallow quantizer copy share persistent calibration state."""
+        quantizer._calibration_state = self._calibration_state
 
     def set_usage(
         self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None
@@ -616,7 +752,7 @@ class Quantizer(abc.ABC):
         )
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
-        """Returns recipe class that is compatible with this quantizer"""
+        """Identify the recipe associated with this quantizer."""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement _get_compatible_recipe"
         )

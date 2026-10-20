@@ -32,7 +32,11 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..quantization import FP8GlobalStateManager, QuantizerRole
+from ..quantization import (
+    FP8GlobalStateManager,
+    QuantizationCalibrationConfig,
+    QuantizerRole,
+)
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
@@ -71,6 +75,7 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
+    _is_in_activation_recompute_phase,
     sum_bias_grad,
     apply_normalization,
     check_fp8_reduce_and_update,
@@ -263,6 +268,10 @@ class LayerNormMLPFwdArgs:
     # --- Weight-grad scheduling ---
     fuse_wgrad_accumulation: bool
     wgrad_store: Optional[Any]
+
+    # --- Calibration ---
+    calibration_config: Optional[QuantizationCalibrationConfig]
+    calibration_buffers: Optional[Dict[str, Optional[torch.Tensor]]]
 
     # --- Activation checkpointing (recompute in backward) ---
     checkpoint: bool
@@ -673,12 +682,12 @@ def _layernorm_mlp_forward_impl(
     new_fc2_weight_workspace = None
     fc1_weight_final = fc1_weight
     fc2_weight_final = fc2_weight
+    update_ws = is_first_microbatch is None or is_first_microbatch
     # FSDP2: Skip columnwise/transpose creation during forward (not
     # recompute) to avoid accumulating FP8 caches across layers.
     # Backward's FSDP2 all-gather will recreate them. (Issue #2681)
     fsdp2_skip_columnwise = is_fsdp2 and not is_recomputation
     if fp8 or debug:
-        update_ws = is_first_microbatch is None or is_first_microbatch
         # If weight is already quantized, weight._quantizer is its true quantizer.
         # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
         if isinstance(fc1_weight, QuantizedTensorStorage) and not debug:
@@ -735,12 +744,49 @@ def _layernorm_mlp_forward_impl(
     if fc2_bias is not None:
         fc2_bias_cast = cast_if_needed(fc2_bias, bias_dtype)
 
-    # Calibrate quantizers if needed
-    if not fp8 and fp8_calibration:
+    fc1_input_calibration_buffers = {}
+    fc1_weight_calibration_buffers = {}
+
+    # Calibrate FC1 quantizers and collect their metadata when requested.
+    should_calibrate = (
+        args.calibration_buffers is not None
+        and not _is_in_activation_recompute_phase()
+        and not is_recomputation
+    )
+    if should_calibrate:
+        assert args.calibration_config is not None
         if fc1_input_quantizer is not None:
-            fc1_input_quantizer.calibrate(ln_out_total)
+            fc1_input_quantizer.calibrate(
+                ln_out_total,
+                calibration_config=args.calibration_config,
+            )
+        skip_fc1_weight_calibration = (
+            # Not capturing weight calibration in CG.
+            args.skip_fp8_weight_update is None
+            # Valid quantized weight cache hit.
+            and args.fc1_weight_workspace is not None
+            and fc1_weight_final is args.fc1_weight_workspace
+            # Non-first ubatch (cached) nor quantizing every step.
+            and not update_ws
+        )
+        if fc1_weight_quantizer is not None and not skip_fc1_weight_calibration:
+            fc1_weight_quantizer.calibrate(
+                fc1_weight_final,
+                calibration_config=dataclass_replace(
+                    args.calibration_config,
+                    transformer_engine_calibration_decay=0.0,
+                ),
+                # Skip conditionally for CG replay.
+                skip_calibration=args.skip_fp8_weight_update,
+            )
+        if fc1_input_quantizer is not None:
+            fc1_input_calibration_buffers = fc1_input_quantizer._get_calibration_metadata_buffers(
+                "fc1_input"
+            )
         if fc1_weight_quantizer is not None:
-            fc1_weight_quantizer.calibrate(fc1_weight)
+            fc1_weight_calibration_buffers = fc1_weight_quantizer._get_calibration_metadata_buffers(
+                "fc1_weight"
+            )
 
     # ------------------------------------------------------
     # FC1 GEMM
@@ -832,9 +878,11 @@ def _layernorm_mlp_forward_impl(
             else:
                 act_out = activation_func(fc1_out, fc2_input_quantizer, **act_params)
 
-    if not fp8 and fp8_calibration:
-        if fc2_input_quantizer is not None:
-            fc2_input_quantizer.calibrate(act_out)
+    if should_calibrate and fc2_input_quantizer is not None:
+        fc2_input_quantizer.calibrate(
+            act_out,
+            calibration_config=args.calibration_config,
+        )
 
     # we want to skip fc2 computation if we are checkpointing and recomputing,
     # otherwise we compute fc2
@@ -850,10 +898,36 @@ def _layernorm_mlp_forward_impl(
         if checkpoint or not is_grad_enabled:  # we can safely get rid of these if this is the case
             clear_tensor_data(fc1_out)
 
-        if not fp8 and fp8_calibration:
-
+        if should_calibrate:
+            skip_fc2_weight_calibration = (
+                # Not capturing weight calibration in CG.
+                args.skip_fp8_weight_update is None
+                # Valid quantized weight cache hit.
+                and args.fc2_weight_workspace is not None
+                and fc2_weight_final is args.fc2_weight_workspace
+                # Non-first ubatch (cached) nor quantizing every step.
+                and not update_ws
+            )
+            if fc2_weight_quantizer is not None and not skip_fc2_weight_calibration:
+                fc2_weight_quantizer.calibrate(
+                    fc2_weight_final,
+                    calibration_config=dataclass_replace(
+                        args.calibration_config,
+                        transformer_engine_calibration_decay=0.0,
+                    ),
+                    # Skip conditionally for CG replay.
+                    skip_calibration=args.skip_fp8_weight_update,
+                )
+            args.calibration_buffers.update(fc1_input_calibration_buffers)
+            args.calibration_buffers.update(fc1_weight_calibration_buffers)
+            if fc2_input_quantizer is not None:
+                args.calibration_buffers.update(
+                    fc2_input_quantizer._get_calibration_metadata_buffers("fc2_input")
+                )
             if fc2_weight_quantizer is not None:
-                fc2_weight_quantizer.calibrate(fc2_weight)
+                args.calibration_buffers.update(
+                    fc2_weight_quantizer._get_calibration_metadata_buffers("fc2_weight")
+                )
 
         # Configure Userbuffers reduce-scatter if needed
         ub_obj_fc2out = None
@@ -2724,6 +2798,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_bias_tensor = (
                 fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None
             )
+            calibration_config = FP8GlobalStateManager.get_calibration_config()
+            calibration_buffers = None
+            if calibration_config is not None:
+                calibration_buffers = {
+                    name: value
+                    for name, value in self._buffers.items()
+                    if name.endswith("_te_ptq_calibrated")
+                }
             fwd_args = LayerNormMLPFwdArgs(
                 # tensors
                 inp=inp,
@@ -2808,6 +2890,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 # weight-grad scheduling
                 fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
                 wgrad_store=self.wgrad_store,
+                # calibration
+                calibration_config=calibration_config,
+                calibration_buffers=calibration_buffers,
                 # activation checkpointing
                 checkpoint=self.checkpoint,
                 fp8_meta=self.fp8_meta if self.checkpoint else None,
@@ -2840,6 +2925,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     fc2_bias_tensor,
                     fwd_args,
                 )
+
+            if calibration_buffers is not None:
+                for name, value in calibration_buffers.items():
+                    if value is not None:
+                        if name in self._buffers:
+                            setattr(self, name, value)
+                        else:
+                            self.register_buffer(name, value, persistent=False)
 
             if new_fc1_ws is not None and cache_name_fc1 is not None:
                 if isinstance(new_fc1_ws, torch.Tensor):
@@ -2881,6 +2974,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_grad_output_quantizer,
         ) = [None] * 10
         fc1_weight_quantizer, fc2_weight_quantizer = self._get_weight_quantizers()
+        # Calibration-only mode needs quantizers to observe non-quantized tensors.
         if self.fp8 or self.fp8_calibration:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
             fc1_input_quantizer.internal = True

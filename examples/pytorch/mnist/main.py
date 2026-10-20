@@ -76,7 +76,14 @@ def calibrate(model, device, test_loader, fp8):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
-            with te.autocast(enabled=fp8, calibrating=True):
+            with te.autocast(
+                enabled=fp8,
+                # Calibration
+                calibrating=True,
+                # Configure a calibration decay when calibrating during training
+                # for a steady-state scaling while the model is in-flight.
+                calibration_config=te.QuantizationCalibrationConfig(),
+            ):
                 output = model(data)
 
 

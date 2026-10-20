@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import warnings
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 import functools
 
 import torch
@@ -22,9 +22,16 @@ from ..utils import (
 )
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
-from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..quantized_tensor import (
+    QuantizedTensor,
+    QuantizedTensorStorage,
+    Quantizer,
+)
 from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+
+if TYPE_CHECKING:
+    from ..quantization import QuantizationCalibrationConfig
 
 aten = torch.ops.aten
 
@@ -269,6 +276,7 @@ class NVFP4Quantizer(Quantizer):
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
+        self._share_calibration_state_with(quantizer)
 
         return quantizer
 
@@ -343,14 +351,53 @@ class NVFP4Quantizer(Quantizer):
         shape[-1] = shape[-1] // 2
         return tuple(shape)
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        pass  # Calibration is no-op
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
+    ) -> None:
+        if self.row_scaled_nvfp4:
+            raise NotImplementedError(
+                "Row-wise NVFP4 calibration is not supported due to potentially "
+                "changing shape of scaling factors."
+            )
+        if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
+            # Retrieve the quantization metadata from quantized storage.
+            observed_amax = tensor._amax_rowwise
+        else:
+            # Direct calibration of a non-quantized tensor must reconstruct the metadata.
+            # This path is NOT performant and should only be used for non-quantized Tensor calibration.
+            amax_reduction_group = None
+            if self.with_amax_reduction and torch.distributed.is_initialized():
+                amax_reduction_group = self._canonicalized_amax_reduction_group()
+            observed_amax = self._compute_calibration_amax(
+                tensor,
+                amax_reduction_group=amax_reduction_group,
+            )
+        self._update_calibration_value(
+            "amax",
+            observed_amax,
+            calibration_config=calibration_config,
+            skip_calibration=skip_calibration,
+        )
+
+    def _get_calibration_metadata_buffers(self, tensor_name: str) -> Dict[str, torch.Tensor]:
+        """Get module-buffer aliases for NVFP4 calibration state."""
+        if self.row_scaled_nvfp4:
+            raise NotImplementedError(
+                "Row-wise NVFP4 calibration metadata buffering is not supported due to "
+                "potentially changing shape of scaling factors."
+            )
+        return super()._get_calibration_metadata_buffers(tensor_name)
 
     def _canonicalized_amax_reduction_group(self) -> dist_group_type:
         """Get process group for amax reduction"""
         return canonicalize_process_group(self.amax_reduction_group)
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Identify the recipe associated with this quantizer."""
         return NVFP4BlockScaling
 
     # ----- TensorSpec / pure-Python allocation -----
