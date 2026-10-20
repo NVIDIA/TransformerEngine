@@ -61,6 +61,15 @@ cuDNN 9.21 or later. ``NVTE_FP8_DPA_BWD=0`` keeps the original FP16/BF16 operand
 for MXFP8 backward, matching the PyTorch MXFP8 path.
 Attention bias, ALiBi, dropout and ``return_max_logit`` are excluded from this mode.
 
+To reuse quantizations, call ``quantize_attention_qkv((q, k, v))`` and pass its
+result to ``fused_attn(..., fp8="mxfp8", quantized_qkv=quantized)``. Each operand
+is a JAX ``ScaledTensor2x`` with independent rowwise/columnwise E4M3 data and
+unswizzled E8M0 scales in BHSD order. Equivalent operands from a producer may
+be supplied directly. The original BSHD arrays supply the gradient targets and
+the original FP16/BF16 operands for ``NVTE_FP8_DPA_BWD=0``. These auxiliary
+buffers are non-differentiable. Scale reordering happens after partitioning,
+so data and tensor parallel sharding preserve per-head scale boundaries.
+
 Paged KV-cache APIs and quantized module inputs/outputs require further JAX API
 and frontend-binding work. ``score_mod`` currently supports FP16/BF16 only.
 

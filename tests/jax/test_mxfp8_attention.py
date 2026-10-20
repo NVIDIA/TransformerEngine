@@ -20,9 +20,11 @@ from transformer_engine.jax.attention import (
     QKVLayout,
     SequenceDescriptor,
     fused_attn,
+    quantize_attention_qkv,
 )
 from transformer_engine.jax.cpp_extensions import cudnn_attention
 from transformer_engine.jax.cpp_extensions import mxfp8_attention
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
 @pytest.mark.parametrize("columnwise", (False, True))
@@ -347,3 +349,78 @@ def test_checkpoint_and_dropout_guard(monkeypatch):
         actual,
         jax.jit(lambda xs: _attention(xs, dropout_probability=0.25, is_training=False))(inputs),
     )
+
+
+@pytest.mark.parametrize(
+    "layout", (QKVLayout.BS3HD, QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD)
+)
+@pytest.mark.parametrize("fp8_backward", (False, True))
+def test_prequantized_inputs(layout, fp8_backward, monkeypatch):
+    """Reuse supplied quantizations and return gradients to the model-precision arrays."""
+    _require_mxfp8()
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
+    q = jnp.full((1, 128, 2, 64), 0.5, jnp.bfloat16)
+    v = jnp.zeros_like(q).at[:, ::2, :, 0].set(1.0)
+    inputs = _pack((q, q, v), layout)
+    prepared = jax.jit(quantize_attention_qkv)((q, q, v))
+    reference = lambda xs: _attention(xs, qkv_layout=layout)
+    expected = jax.jit(jax.value_and_grad(lambda xs: reference(xs).sum()))(inputs)
+
+    def fail_requantization(*args, **kwargs):
+        raise AssertionError("Supplied QKV must be consumed without requantization")
+
+    monkeypatch.setattr(mxfp8_attention, "prepare_qkv", fail_requantization)
+    forward = lambda xs, buffers: _attention(xs, qkv_layout=layout, quantized_qkv=buffers)
+    actual = jax.jit(jax.value_and_grad(lambda xs, ys: forward(xs, ys).sum()))(inputs, prepared)
+    for value, ref in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
+        assert value.dtype == ref.dtype
+        np.testing.assert_array_equal(value, ref)
+    # In one compiled training step, buffer preparation is non-differentiable
+    # while the attention VJP still supplies model-precision QKV gradients.
+    integrated = jax.jit(
+        jax.value_and_grad(
+            lambda xs: forward(xs, quantize_attention_qkv(_unpack(xs, layout))).sum()
+        )
+    )(inputs)
+    for value, ref in zip(jax.tree.leaves(integrated), jax.tree.leaves(expected)):
+        np.testing.assert_array_equal(value, ref)
+
+
+@pytest.mark.parametrize("axis", ("dp", "tp"))
+def test_prequantized_sharding(axis):
+    """Per-head scale packing happens after data/tensor parallel partitioning."""
+    _require_mxfp8()
+    if jax.local_device_count() < 2:
+        pytest.skip("Requires two GPUs for attention sharding")
+    mesh = jax.sharding.Mesh(np.array(jax.local_devices()[:2]), (axis,))
+    spec = (axis, None, None, None) if axis == "dp" else (None, None, axis, None)
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*spec))
+    q = jnp.full((2, 128, 4, 64), 0.5, jnp.bfloat16)
+    kv = q[:, :, :2]
+    v = jnp.zeros_like(kv).at[:, ::2, :, 0].set(1.0)
+    inputs = (q, kv, v)
+    loss = lambda xs: _attention(xs, quantized_qkv=quantize_attention_qkv(xs)).sum()
+    expected = jax.jit(jax.value_and_grad(loss))(inputs)
+    with jax.set_mesh(mesh), global_shard_guard(MeshResource(**{axis + "_resource": axis})):
+        actual = jax.jit(jax.value_and_grad(loss), in_shardings=((sharding,) * 3,))(inputs)
+    for value, ref in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
+        np.testing.assert_array_equal(value, ref)
+
+
+def test_prequantized_values_and_validation():
+    """Supplied FP8 values determine the output; incompatible modes fail at the API boundary."""
+    _require_mxfp8()
+    q = jnp.zeros((1, 128, 2, 64), jnp.bfloat16)
+    v = q.at[..., 0].set(1.0)
+    prepared = jax.jit(quantize_attention_qkv)((q, q, v))
+    output = jax.jit(lambda xs, ys: _attention(xs, quantized_qkv=ys))((q, q, q), prepared)
+    np.testing.assert_allclose(output, v)
+    with pytest.raises(ValueError, match="requires fp8"):
+        _attention((q, q, v), quantized_qkv=prepared, fp8=True)
+    with pytest.raises(ValueError, match="three separate BSHD"):
+        quantize_attention_qkv((q,))
+    with pytest.raises(ValueError, match="FP16/BF16"):
+        quantize_attention_qkv((q.astype(jnp.float32), q, v))
+    with pytest.raises(ValueError, match="unswizzled E4M3"):
+        swapped = prepared[0].__class__(prepared[2].colwise_tensor, prepared[2].rowwise_tensor)
+        _attention((q, q, v), quantized_qkv=(prepared[0], prepared[0], swapped))

@@ -493,7 +493,7 @@ def _packed_stats_to_dense(value, offsets, lengths, rows):
     return dense.transpose(0, 2, 1, 3)
 
 
-def execute(direction, args, config, result_avals):
+def execute(direction, args, config, result_avals, prepared_qkv=None):
     """Prepare device metadata with JAX and dispatch a cached graph through FFI."""
     plan = get_graph(direction, args, config)
     q, k, v, bias, sink = args[:5]
@@ -528,7 +528,11 @@ def execute(direction, args, config, result_avals):
                 unpacked = (q, k[..., 0, :, :], k[..., 1, :, :])
             else:
                 unpacked = (q, k, v)
-            values.update(mxfp8_attention.prepare_qkv(unpacked, backward))
+            values.update(
+                mxfp8_attention.prepare_qkv(unpacked, backward)
+                if prepared_qkv is None
+                else prepared_qkv
+            )
     elif config.fp8:
         for name in ("q", "k", "v"):
             # Empty dummy operands are not quantized.

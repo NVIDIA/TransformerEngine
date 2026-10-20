@@ -3544,6 +3544,7 @@ def fused_attn_fwd(
     stripe_size: int | None = None,
     return_max_logit: bool = False,
     fp8: bool | str = False,
+    quantized_qkv=None,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -3678,14 +3679,21 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    output, softmax_aux, rng_state, max_logit = primitive.bind(
+    operands = (
         *qkv_for_primitive,
         bias,
         softmax_offset,
         seed,
         *seq_desc_flatten,
-        config=fused_config,
     )
+    if quantized_qkv is None:
+        output, softmax_aux, rng_state, max_logit = primitive.bind(*operands, config=fused_config)
+    else:
+        from .mxfp8_attention import execute_prequantized
+
+        output, softmax_aux, rng_state, max_logit = execute_prequantized(
+            operands, quantized_qkv, fused_config, False
+        )
     rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
     return (output, softmax_aux, rng_state, max_logit)
 
@@ -3713,6 +3721,7 @@ def fused_attn_bwd(
     context_parallel_axis: str = "",
     stripe_size: int | None = None,
     fp8: bool | str = False,
+    quantized_qkv=None,
 ):
     """
     Perform the backward pass of the cuDNN fused attention implementations.
@@ -3856,7 +3865,7 @@ def fused_attn_bwd(
                 primitive = FusedRingAttnBwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    *qkv_grads, bias_grad, softmax_offset_grad = primitive.bind(
+    operands = (
         *qkv_for_primitive,
         bias,
         softmax_offset,
@@ -3865,6 +3874,12 @@ def fused_attn_bwd(
         output,
         doutput,
         *seq_desc_flatten,
-        config=fused_config,
     )
+    if quantized_qkv is None:
+        results = primitive.bind(*operands, config=fused_config)
+    else:
+        from .mxfp8_attention import execute_prequantized
+
+        results = execute_prequantized(operands, quantized_qkv, fused_config, True)
+    *qkv_grads, bias_grad, softmax_offset_grad = results
     return tuple(qkv_grads[: len(qkv)]), bias_grad, softmax_offset_grad

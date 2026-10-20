@@ -1354,6 +1354,7 @@ def _fused_attn(
     stripe_size: int | None = None,
     return_max_logit: bool = False,
     fp8: bool | str = False,
+    quantized_qkv=None,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -1377,6 +1378,7 @@ def _fused_attn(
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
         fp8=fp8,
+        quantized_qkv=quantized_qkv,
     )
     return output
 
@@ -1403,6 +1405,7 @@ def _fused_attn_fwd_rule(
     stripe_size,
     return_max_logit,
     fp8,
+    quantized_qkv=None,
 ):
     output, softmax_aux, rng_state, max_logit = tex.fused_attn_fwd(
         qkv,
@@ -1425,6 +1428,7 @@ def _fused_attn_fwd_rule(
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
         fp8=fp8,
+        quantized_qkv=quantized_qkv,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -1439,6 +1443,7 @@ def _fused_attn_fwd_rule(
         rng_state,
         softmax_offset,
         output,
+        quantized_qkv,
     )
 
 
@@ -1473,6 +1478,7 @@ def _fused_attn_bwd_rule(
         rng_state,
         softmax_offset,
         output,
+        quantized_qkv,
     ) = ctx
     grad_qkv, grad_bias, grad_softmax_offset = tex.fused_attn_bwd(
         qkv,
@@ -1497,6 +1503,7 @@ def _fused_attn_bwd_rule(
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
         fp8=fp8,
+        quantized_qkv=quantized_qkv,
     )
     if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
         grad_bias = None
@@ -1506,6 +1513,7 @@ def _fused_attn_bwd_rule(
         grad_qkv,
         grad_bias,
         grad_softmax_offset,
+        None,
         None,
         None,
     )
@@ -1567,6 +1575,23 @@ def _fused_attn_score_mod_bwd_rule(config, context_checkpoint_name, ctx, dz):
 _fused_attn_score_mod.defvjp(_fused_attn_score_mod_fwd_rule, _fused_attn_score_mod_bwd_rule)
 
 
+def quantize_attention_qkv(qkv):
+    """Quantize separate BSHD Q/K/V into attention-ready BHSD MXFP8 tensor pairs.
+
+    The returned ``ScaledTensor2x`` operands can be passed as ``quantized_qkv``
+    to :func:`fused_attn`. Both directions are quantized independently from the
+    original operands. Quantized buffers are non-differentiable auxiliary data;
+    attention gradients flow to the original ``qkv`` arrays.
+    """
+    from .cpp_extensions.mxfp8_attention import quantize_qkv
+
+    if len(qkv) != 3 or any(x.ndim != 4 for x in qkv):
+        raise ValueError("quantize_attention_qkv requires three separate BSHD arrays.")
+    if any(x.dtype not in (jnp.float16, jnp.bfloat16) for x in qkv):
+        raise ValueError("quantize_attention_qkv requires FP16/BF16 operands.")
+    return quantize_qkv(qkv)
+
+
 def fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -1593,6 +1618,7 @@ def fused_attn(
     score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
     return_max_logit: bool = False,
     fp8: bool | str = False,
+    quantized_qkv=None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1653,6 +1679,11 @@ def fused_attn(
             enables MXFP8 block-scaled attention on SM100 or later. Outputs and
             gradients retain the input FP16/BF16 dtype. MXFP8 uses E4M3 operands
             in both passes, with independent scales along the contraction axes.
+        quantized_qkv (Optional[Tuple[ScaledTensor2x, ...]]): Prequantized MXFP8
+            Q/K/V, each with independent unswizzled BHSD rowwise/columnwise data
+            and E8M0 scales. Requires ``fp8="mxfp8"``. The original ``qkv``
+            supplies shapes, model dtype, gradient targets and FP16/BF16 backward
+            operands. See :func:`quantize_attention_qkv`.
         return_max_logit (bool): If True, also return per-head maximum attention logits
             with shape ``[h]``.
     Returns:
@@ -1692,6 +1723,17 @@ def fused_attn(
     """
     if fp8 not in (False, True, "mxfp8"):
         raise ValueError('fp8 must be False, True, or "mxfp8".')
+    if quantized_qkv is not None:
+        if fp8 != "mxfp8":
+            raise ValueError('quantized_qkv requires fp8="mxfp8".')
+        if not isinstance(sequence_descriptor, SequenceDescriptor):
+            raise ValueError("quantized_qkv requires a SequenceDescriptor.")
+        from .cpp_extensions.mxfp8_attention import prequantized_buffers
+
+        # Keep auxiliary buffers as plain arrays across the custom VJP. The
+        # quantized tensor constructors validate real arrays, whereas JAX may
+        # reconstruct cotangent pytrees with opaque sentinel leaves.
+        quantized_qkv = prequantized_buffers(qkv, quantized_qkv, qkv_layout)
     if score_mod is None:
         score_mod_only_args = [
             name
@@ -1802,5 +1844,6 @@ def fused_attn(
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
         fp8=fp8,
+        quantized_qkv=quantized_qkv,
     )
     return output

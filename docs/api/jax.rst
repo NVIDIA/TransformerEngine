@@ -64,4 +64,5 @@ Attention functions
 -------------------
 
 .. autoapifunction:: transformer_engine.jax.attention.fused_attn
+.. autoapifunction:: transformer_engine.jax.attention.quantize_attention_qkv
 .. autoapifunction:: transformer_engine.jax.attention.is_fused_attn_kernel_available
