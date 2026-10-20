@@ -40,12 +40,18 @@ __all__ = [
 _NUM_MAX_UB_STREAMS = 3
 
 
-def get_cublas_workspace_size_bytes() -> None:
-    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
+@functools.lru_cache(maxsize=None)
+def _get_cublas_workspace_size_bytes_for_device(device: int) -> int:
+    """Cached per-device workspace size; the device properties are fixed per process."""
+    if torch.cuda.get_device_properties(device).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
         return 32 * 1024 * 1024 + 1024
     return 4_194_304
+
+
+def get_cublas_workspace_size_bytes() -> int:
+    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
+    return _get_cublas_workspace_size_bytes_for_device(torch.cuda.current_device())
 
 
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
@@ -58,21 +64,16 @@ def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Ten
     """
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
 
+    size = get_cublas_workspace_size_bytes()
     if ub:
-        return torch.empty(
-            get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS,
-            dtype=torch.uint8,
-            device=device,
-        )
+        return torch.empty(size * _NUM_MAX_UB_STREAMS, dtype=torch.uint8, device=device)
     if grouped_gemm:
-        _multi_stream_cublas_workspace = []
-        for _ in range(tex.get_num_cublas_streams()):
-            _multi_stream_cublas_workspace.append(
-                torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
-            )
-        return _multi_stream_cublas_workspace
+        return [
+            torch.empty(size, dtype=torch.uint8, device=device)
+            for _ in range(tex.get_num_cublas_streams())
+        ]
 
-    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+    return torch.empty(size, dtype=torch.uint8, device=device)
 
 
 def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
@@ -767,7 +768,6 @@ def general_gemm(
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
-    workspace = get_cublas_workspace(A.device.index, ub is not None, False)
 
     # Temporary hack to route NVFP4 GEMM with UE5M3 scale factors to
     # cuDNN Frontend kernels. UE5M3-specific logic should be removed
@@ -797,6 +797,9 @@ def general_gemm(
             extra_output,
             bulk_overlap,
         )
+
+    # Allocated after the UE5M3 path above, which does not use cuBLAS scratch.
+    workspace = get_cublas_workspace(A.device.index, ub is not None, False)
 
     if ub_type is not None:
         assert ub is not None, (
