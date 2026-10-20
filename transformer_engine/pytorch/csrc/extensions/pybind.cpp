@@ -589,6 +589,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply QKV RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
         "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_mla_kv_rope_mxfp8", &transformer_engine::pytorch::fused_mla_kv_rope_mxfp8,
+        "Split MLA key/value, apply RoPE to the key and quantize both to MXFP8", py::arg("kv"),
+        py::arg("k_rope"), py::arg("cos"), py::arg("sin"), py::arg("v_head_dim"),
+        py::arg("key_quantizer"), py::arg("value_quantizer"));
 
   // fused router
   transformer_engine::pytorch::init_router_bindings(m);
@@ -603,6 +607,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Misc
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
+  m.def("get_cublasLt_build_version", &nvte_get_cublaslt_build_version,
+        "Get the cublasLt version that Transformer Engine was built against",
+        py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
