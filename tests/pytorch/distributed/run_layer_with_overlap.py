@@ -381,6 +381,50 @@ def _compare_tensors(name, test, ref, rtol, atol):
     return numerics_failed, numerics_info
 
 
+def _ub_alias_hooks(aliases):
+    """Saved-tensor hooks that record tensors saved for backward inside a comm+GEMM overlap buffer."""
+
+    def ub_ranges():
+        # cuBLASMp reallocates its workspace when a GEMM needs more space, so query on every save
+        for (name, quantization_mode), ub_obj in te.module.base._ub_communicators.items():
+            if ub_obj.with_cublasmp():
+                if not te.module.base._cublasmp_keeps_gathered_input():
+                    continue  # get_buffer() requires cuBLASMp 0.11.0 or newer
+                backend = "cuBLASMp"
+            else:
+                backend = "Userbuffers"
+            buffer = ub_obj.get_buffer()
+            start = buffer.data_ptr()
+            yield (
+                f"{name} ({quantization_mode.name}) {backend} buffer",
+                start,
+                start + buffer.numel() * buffer.element_size(),
+            )
+
+    def storages(tensor):
+        # Quantized tensors are wrapper subclasses with empty storage, so check their inner tensors
+        if isinstance(tensor, te.QuantizedTensorStorage):
+            inner_names, _ = tensor.__tensor_flatten__()
+            for inner_name in inner_names:
+                yield from storages(getattr(tensor, inner_name))
+        else:
+            yield tensor.untyped_storage()
+
+    def pack_hook(tensor):
+        for storage in storages(tensor):
+            start = storage.data_ptr()
+            end = start + storage.nbytes()
+            for buffer_name, ub_start, ub_end in ub_ranges():
+                if start < ub_end and ub_start < end:
+                    aliases.append(
+                        f"{tensor.dtype} tensor with shape {list(tensor.shape)} aliases the"
+                        f" {buffer_name}"
+                    )
+        return tensor
+
+    return torch.autograd.graph.saved_tensors_hooks(pack_hook, lambda tensor: tensor)
+
+
 @record
 def _train(opts):
     if "OMPI_COMM_WORLD_SIZE" in os.environ:
@@ -577,11 +621,17 @@ def _train(opts):
             debug=True,
         )
 
+    # Comm+GEMM overlap buffers are shared by all layers, so the next layer's forward pass
+    # overwrites any tensor saved for backward that aliases one.
+    check_ub_aliases = not opts.skip_verify
+    ub_aliases = []
+    ub_alias_hooks = _ub_alias_hooks(ub_aliases) if check_ub_aliases else nullcontext()
+
     torch_rng_state = torch.get_rng_state()
     cuda_rng_state = torch.cuda.get_rng_state(torch.device(f"cuda:{LOCAL_RANK}"))
     if opts.use_cuda_graphs:
         test_graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(test_graph):
+        with torch.cuda.graph(test_graph), ub_alias_hooks:
             test_out = run_fwd_bwd(test_model, test_x)
         test_graph.replay()
         if not opts.benchmark:
@@ -595,7 +645,8 @@ def _train(opts):
                 test_model.zero_grad(set_to_none=True)
                 test_x.grad = None
             torch.compiler.cudagraph_mark_step_begin()
-        test_out = run_fwd_bwd(test_model, test_x)
+        with ub_alias_hooks:
+            test_out = run_fwd_bwd(test_model, test_x)
         if opts.compile and opts.compile_mode == "reduce-overhead" and dynamo_counters is not None:
             skips = dynamo_counters["inductor"]["cudagraph_skips"]
             assert skips == 0, f"reduce-overhead fell back to eager: {skips} cudagraph skip(s)"
@@ -645,6 +696,18 @@ def _train(opts):
                 if bool(numerics_failed.item()) and not opts.debug:
                     break
 
+    ub_aliases_failed = torch.tensor([len(ub_aliases) > 0], dtype=torch.uint8, device="cuda")
+    if check_ub_aliases:
+        if ub_aliases:
+            ub_aliases_info = "SAVED TENSOR CHECK FAILED: " + "; ".join(ub_aliases)
+        else:
+            ub_aliases_info = (
+                "SAVED TENSOR CHECK PASSED: No tensor saved for backward aliases a comm+GEMM"
+                " overlap buffer."
+            )
+        dist_print(ub_aliases_info, src=WORLD_RANK, error=bool(ub_aliases))
+        dist.all_reduce(ub_aliases_failed, dist.ReduceOp.MAX, nccl_world)
+
     if opts.benchmark:
         # Warmup to not profile CPU overhead
         for _ in range(100):
@@ -671,7 +734,7 @@ def _train(opts):
     if opts.debug and WORLD_RANK == 0:
         print("Exiting...\n", end="", flush=True)
 
-    return numerics_failed[0].item()
+    return int(numerics_failed[0].item() or ub_aliases_failed[0].item())
 
 
 if __name__ == "__main__":
