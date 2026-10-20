@@ -296,8 +296,7 @@ def _quantize_rowwise_mxfp8(
 
     # For irregular shapes, skip the scale store if this thread's logical row / col-block lies past the input's actual extents.
     # TMA already zero-fills OOB input reads and drops OOB output writes; only the direct scale-byte gmem store needs an explicit guard.
-    # If the input shape is divisible by the tile size, then we won't access OOB regions because
-    # we never we only access tiles we actually need (num_tiles) which are never OOB
+    # If the input shape is divisible by the tile size * tile num, then we won't access OOB regions for sure
     if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = biased_exp_r
     else:
@@ -457,8 +456,7 @@ def _quantize_colwise_mxfp8(
     # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SCALING_SIZE so each stage
     # is exactly one scale-row; valid iff `tile_row_start < M`.
     biased_exp_c = cvt_f32_to_fp8e8m0fnu(amax_c * MAX_NORM_RCP)
-    # If the input shape is divisible by the tile size, then we won't access OOB regions because
-    # we never we only access tiles we actually need (num_tiles) which are never OOB
+    # If the input shape is divisible by the tile size * tile num, then we won't access OOB regions for sure
     if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         if cutlass.const_expr(SWIZZLE):
             mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
@@ -685,6 +683,10 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         else:
             self._NUM_TILES = 2  # Each CTA handles 2 tiles stacked vertically
             self._THREADS_PER_CTA = 64
+        # If _USE_STATIC_NUM_TILES, then each CTA will always process _NUM_TILES tiles without checking if those tiles
+        # are OOB (which will be zero padded by TMA).
+        # Benchmarks show this is in general faster than the dynamic count except when DACT is fused
+        self._USE_STATIC_NUM_TILES = not cfg.WITH_DACT
         # Each thread handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
         self._TILE_COLS = self._THREADS_PER_CTA
         self._TILE_ROWS = MXFP8_BLOCK_SCALING_SIZE
@@ -1062,10 +1064,15 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         M = mX.shape[0]
         N = mX.shape[1]
 
-        num_tiles = cutlass.min(
-            self._NUM_TILES,
-            cute.ceil_div(M - bidy * self._TILE_ROWS * self._NUM_TILES, self._TILE_ROWS),
-        )
+        # With static num tiles, always process _NUM_TILES tiles like the CUDA kernel: TMA zero-fills
+        # OOB tiles, so the loop trip count is a compile-time constant.
+        if cutlass.const_expr(self._USE_STATIC_NUM_TILES):
+            num_tiles = self._NUM_TILES
+        else:
+            num_tiles = cutlass.min(
+                self._NUM_TILES,
+                cute.ceil_div(M - bidy * self._TILE_ROWS * self._NUM_TILES, self._TILE_ROWS),
+            )
 
         # Tile the TMA gmem view: ((TILE_Y, TILE_X), (M/TILE_Y, N/TILE_X)).
         gX_tiled = cute.zipped_divide(tma_src, (self._TILE_ROWS, self._TILE_COLS))

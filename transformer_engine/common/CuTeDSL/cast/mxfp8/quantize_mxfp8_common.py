@@ -341,10 +341,19 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                     )
         # If not using a specialized kernel, fall back to the general kernel
         if not dispatched_to_specialized:
+            # With _USE_STATIC_NUM_TILES, each CTA always processes _NUM_TILES tiles, including OOB ones,
+            # so the scale-bounds check can only be dropped if M divides TILE_ROWS * _NUM_TILES.
+            num_tiles_per_cta = (
+                self.general_skip_input_masking_kernel._NUM_TILES
+                if self.general_skip_input_masking_kernel._USE_STATIC_NUM_TILES
+                else 1
+            )
             # If the input shape can be perfectly tiled by the general kernel's tile size, we can skip some boundary check because
             # we know we will not touch any out-of-bounds region.
             shape_is_divisible = (
-                mX.shape[0] % self.general_skip_input_masking_kernel._TILE_ROWS == 0
+                mX.shape[0]
+                % (self.general_skip_input_masking_kernel._TILE_ROWS * num_tiles_per_cta)
+                == 0
                 and mX.shape[1] % self.general_skip_input_masking_kernel._TILE_COLS == 0
             )
             # If shape is divisible, then we won't access OOB regions regardless whatever
