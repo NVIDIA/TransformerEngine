@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from transformer_engine.common.recipe import MXFP8BlockScaling
-from transformer_engine.pytorch import DType, LayerNormLinear, MXFP8Quantizer, autocast
+from transformer_engine.pytorch import DType, LayerNormLinear, Linear, MXFP8Quantizer, autocast
 from transformer_engine.pytorch.distributed_weight import (
     get_weight_gradient_scale,
     mark_weight_gradient_scale,
@@ -89,6 +89,55 @@ for name in ("_rowwise_data", "_columnwise_data"):
         ],
         check=True,
         timeout=120,
+    )
+
+
+@pytest.mark.parametrize("module_type", [Linear, LayerNormLinear])
+@pytest.mark.parametrize("return_dummy", [False, True])
+def test_distributed_finalizer_owns_gradient(module_type, return_dummy):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    torch.manual_seed(1234)
+    options = dict(in_features=128, out_features=256, bias=False, params_dtype=torch.bfloat16)
+    reference = module_type(**options)
+    module = module_type(**options, fuse_wgrad_accumulation=True)
+    module.load_state_dict(reference.state_dict())
+    full_weight = module.weight.detach().clone()
+    weight = torch.nn.Parameter(full_weight[:128].clone())
+    module.weight = weight
+    weight.is_distributed_weight = True
+    weight.grad_added_to_main_grad = False
+    weight.main_grad = torch.zeros_like(weight, dtype=torch.float32)
+    workspace = torch.zeros_like(full_weight, dtype=torch.float32)
+    weight.grad_buffer = lambda: workspace
+    weight.materialize_group_for_forward = lambda: full_weight
+    weight.materialize_group_for_backward = lambda: full_weight
+    dummy = torch.full_like(weight, 3.25) if return_dummy else None
+    finalized = []
+
+    def finalize(gradient):
+        finalized.append(tuple(gradient.shape))
+        weight.main_grad.copy_(gradient[:128])
+        weight.grad_added_to_main_grad = True
+        return dummy
+
+    weight.finalize_group_grads = finalize
+    source = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    upstream = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
+    expected_input = source.clone().requires_grad_(True)
+    actual_input = source.clone().requires_grad_(True)
+    expected = reference(expected_input)
+    actual = module(actual_input)
+    expected.backward(upstream)
+    actual.backward(upstream)
+    assert finalized == [(256, 128)]
+    assert (weight.grad is None) == (dummy is None)
+    if dummy is not None:
+        torch.testing.assert_close(weight.grad, dummy, rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual_input.grad, expected_input.grad, rtol=0, atol=0)
+    torch.testing.assert_close(
+        weight.main_grad.to(torch.bfloat16), reference.weight.grad[:128], rtol=0.01, atol=0.01
     )
 
 

@@ -1693,7 +1693,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             dgrad_work.wait()
             dgrad_work = None
 
-    if bwd_args.requires_wgrad:
+    if bwd_args.requires_wgrad and not is_dist_weight:
         # Handle custom DDP from mcore.
         if bwd_args.fuse_wgrad_accumulation and hasattr(
             origin_weight_python_object, "grad_added_to_main_grad"
@@ -1716,7 +1716,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 )
         elif bwd_args.fuse_wgrad_accumulation:
             wgrad = None
-    else:
+    elif not bwd_args.requires_wgrad:
         wgrad = None
 
     # Scatter fp8 weight buffers

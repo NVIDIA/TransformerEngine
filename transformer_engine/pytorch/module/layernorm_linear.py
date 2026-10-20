@@ -1437,7 +1437,7 @@ def _layernorm_linear_backward_impl(
         clear_tensor_data(mu)
         clear_tensor_data(rsigma)
 
-    if args.requires_wgrad:
+    if args.requires_wgrad and not is_dist_weight:
         # Handle custom DDP from mcore.
         if args.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
             origin_weight.grad_added_to_main_grad = True
@@ -1454,7 +1454,7 @@ def _layernorm_linear_backward_impl(
                 )
         elif args.fuse_wgrad_accumulation:
             wgrad = None
-    else:
+    elif not args.requires_wgrad:
         wgrad = None
 
     return (
