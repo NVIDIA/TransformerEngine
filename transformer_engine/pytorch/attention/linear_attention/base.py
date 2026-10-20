@@ -104,10 +104,22 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         self.v_head_dim = v_head_dim
         self._dense_cu_seqlens_key: Optional[Tuple[torch.device, int, int]] = None
         self._dense_cu_seqlens: Optional[torch.Tensor] = None
+        # Resolved here when the cuDNN frontend is available so that the op is a plain
+        # attribute during `torch.compile` tracing. A missing runtime is only reported
+        # when the module is first run, so constructing it does not require cuDNN
+        # frontend.
+        self._op: Optional[Callable] = None
+        try:
+            self._op = self._resolve_op()
+        except ImportError:
+            pass
+
+    def _resolve_op(self) -> Callable:
+        """Import the cuDNN frontend custom op backing this variant."""
         try:
             from cudnn.linear_attention import ops
 
-            self._op = getattr(ops, self.op_name)
+            return getattr(ops, self.op_name)
         except (AttributeError, ImportError) as exc:
             raise ImportError(
                 f"{self.variant} attention requires a nvidia-cudnn-frontend installation that "
@@ -310,6 +322,8 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         batch_size = cu_seqlens.shape[0] - 1
         self._validate_initial_state(initial_state, batch_size=batch_size, device=device)
 
+        if self._op is None:
+            self._op = self._resolve_op()
         try:
             output, final_state = self._call_op(
                 _to_thd(query_layer, qkv_format),

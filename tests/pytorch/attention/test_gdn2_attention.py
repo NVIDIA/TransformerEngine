@@ -8,7 +8,6 @@ import importlib.util
 import math
 import os
 from typing import Optional, Tuple
-from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -586,7 +585,6 @@ def test_gdn2_matches_gdn_with_scalar_gates():
     _assert_rms_close(output, expected, 3e-2, "GDN-2 against GDN")
 
 
-@patch.dict("sys.modules", {"cudnn.linear_attention": Mock()})
 def test_gdn2_requires_all_gates():
     """A partial GDN-2 invocation fails before entering a softmax-attention backend."""
     q, k, v, g, beta, _ = _inputs(1, 128, 1, 1)
@@ -599,7 +597,6 @@ def test_gdn2_requires_all_gates():
         attention(q, k, v, g=g, beta=beta)
 
 
-@patch.dict("sys.modules", {"cudnn.linear_attention": Mock()})
 def test_gdn2_module_carries_no_quantization_state():
     """LinearAttentionBase is a plain nn.Module: no parameters, no FP8 state."""
     from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
