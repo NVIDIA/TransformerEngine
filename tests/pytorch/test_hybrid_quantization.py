@@ -92,16 +92,6 @@ _XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8 = pytest.mark.xfail(
     ),
 )
 
-_XFAIL_SELECTIVE_ATTENTION_RECOMPUTE = pytest.mark.xfail(
-    condition=is_non_tn_fp8_gemm_supported(),
-    raises=AttributeError,
-    strict=True,
-    reason=(
-        "Selective attention recompute currently consumes LayerNormLinear's saved "
-        "tensor objects twice; this also fails with BF16 and built-in FP8 recipes."
-    ),
-)
-
 requires_fp8 = pytest.mark.skipif(
     not fp8_available,
     reason=f"FP8: {reason_for_no_fp8}",
@@ -7526,7 +7516,6 @@ class TestHybridActivationRecompute:
     # ----- Selective attention recompute ----------------------------
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
-    @_XFAIL_SELECTIVE_ATTENTION_RECOMPUTE
     def test_selective_attention_recompute_transformer_layer_fp8_bitwise(self):
         """``TransformerLayer(..., checkpoint_core_attention=True)`` —
         the Megatron default memory-savings pattern.

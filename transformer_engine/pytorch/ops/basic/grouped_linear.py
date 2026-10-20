@@ -9,12 +9,14 @@ from collections.abc import Callable, Iterable, Sequence
 import contextlib
 import functools
 import math
+import os
 from typing import Any, Optional
+import warnings
 
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe
+from transformer_engine.common.recipe import Recipe, Format as RecipeFormat
 from ...constants import DType, TE_DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
@@ -39,8 +41,8 @@ from ...utils import (
     clear_tensor_data,
     devices_match,
     get_device_compute_capability,
-    resolve_grouped_linear_single_param_flags,
     round_up_to_nearest_multiple,
+    warn_if_single_grouped_parameters,
 )
 from .._common import (
     get_accumulate_flag_in_param,
@@ -74,6 +76,7 @@ GRAD_INPUT_BUFFER_KEY = "grad_input"
 def is_op_fuser_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
+    split_alignment: int = 128,
 ) -> bool:
     """Whether the op-fuser grouped-tensor path supports this recipe and dtype.
 
@@ -81,15 +84,16 @@ def is_op_fuser_grouped_tensor_path_supported(
       which is backed by ``nvte_grouped_gemm_with_discrete_inputA`` in the common
       library.
     * MXFP8 and NVFP4 are supported on Blackwell GPUs with Compute Capability
-      (CC) 10.x and 11.0. NVFP4 requires RHT because graph-safe grouped
-      quantization currently requires it.
+      (CC) 10.x and 11.0 when split alignment is divisible by 128. NVFP4
+      requires RHT because graph-safe grouped quantization currently requires it.
     * FP8 per-tensor current scaling uses grouped current-scaling quantization
       through ``tex.group_quantize`` and cuBLASLt grouped GEMM with per-batch
       scalar FP8 scaling. It is supported on Hopper and Blackwell, with
       cuBLASLt 13.5+ required on Hopper.
-    * FP8 block scaling uses the grouped-tensor path only on Hopper with
-      cuBLASLt 13.6+. On other architectures or older cuBLAS versions it
-      falls back to the split-quantize path for discrete parameters.
+    * FP8 block scaling uses the grouped-tensor path wherever MXFP8 does
+      (power-of-2 scales only) and on Hopper with cuBLASLt 13.6+, in both
+      cases with split alignment divisible by 128. Otherwise it falls back to
+      the split-quantize path for discrete parameters.
     * Custom recipes are unsupported because they may assign different
       quantizers to input, weight, and grad-output roles. This predicate
       currently supports only built-in recipes with known uniform layouts.
@@ -119,15 +123,21 @@ def is_op_fuser_grouped_tensor_path_supported(
     if recipe.float8_current_scaling():
         return device_capability >= (10, 0) or cublaslt_version >= 130500
     if recipe.float8_block_scaling():
-        # cuBLASLt 13.6 fixes Hopper grouped GEMM algo selection for block-scaled FP8.
-        return device_capability < (10, 0) and cublaslt_version >= 130600
+        # Blackwell and newer emulate FP8 block scaling with MXFP8 grouped GEMM, so it is
+        # supported wherever MXFP8 is. On Hopper, cuBLASLt 13.6 fixes grouped GEMM algo
+        # selection for block-scaled FP8.
+        return (
+            device_capability >= (10, 0) or cublaslt_version >= 130600
+        ) and split_alignment % 128 == 0
     if recipe.mxfp8():
-        return device_capability >= (10, 0)
+        return device_capability >= (10, 0) and split_alignment % 128 == 0
     if recipe.nvfp4():
         return (
             device_capability >= (10, 0)
             and not recipe.disable_rht
             and not recipe.row_scaled_activation
+            and recipe.fp8_format == RecipeFormat.E4M3
+            and split_alignment % 128 == 0
         )
     return False
 
@@ -140,6 +150,12 @@ class GroupedLinear(BasicOperation):
     This is equivalent to splitting the input tensor along its first
     dimension, applying a separate ``torch.nn.Linear`` to each split,
     and concatenating along the first dimension.
+
+    The grouped-tensor path is selected automatically where it is
+    supported (see ``is_op_fuser_grouped_tensor_path_supported``). With
+    MXFP8 or FP8 block scaling, it relies on every split size being a
+    multiple of 128, as ``split_alignment`` declares. This is checked only
+    on the device, so other split sizes can produce incorrect results.
 
     Parameters
     ----------
@@ -169,23 +185,22 @@ class GroupedLinear(BasicOperation):
         ``main_grad`` instead of accumulating.
     single_grouped_weight : bool, default = ``False``
         Store all expert weights as one ``GroupedTensor`` parameter ``weight``.
-        EXPERIMENTAL and subject to change. Gated by the
-        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
-        is not set this argument is forced to ``False`` with a warning.
+        EXPERIMENTAL and subject to change. Requires the native grouped-tensor path
+        for the current device, dtype, and quantization recipe.
     delay_wgrad_compute : bool, default = ``False``
         Whether to delay weight gradient computation
     single_grouped_bias : bool, default = ``False``
         If ``True`` (and ``bias=True``), store all expert biases as one ``GroupedTensor``
         parameter named ``bias`` instead of ``bias0``..``bias{N-1}``.
-        EXPERIMENTAL and subject to change. Gated by the
-        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
-        is not set this argument is forced to ``False`` with a warning.
+        EXPERIMENTAL and subject to change. Requires the native grouped-tensor path
+        for the current device, dtype, and quantization recipe.
     scale_bias : bool, default = ``False``
         If ``True`` (and ``bias=True``), expects a probability tensor as an
         additional extra input and adds ``bias * scales`` instead of ``bias``
         in the forward pass. The scale tensor has shape
         ``(total_tokens,)`` and is split according to the split sizes.
-
+    split_alignment : int, default = ``128``
+        Guaranteed alignment of each input split size.
     """
 
     # Operation expects input split sizes (and optionally scales tensor)
@@ -206,6 +221,7 @@ class GroupedLinear(BasicOperation):
         single_grouped_bias: bool = False,
         delay_wgrad_compute: bool = False,
         scale_bias: bool = False,
+        split_alignment: int = 128,
     ) -> None:
         # Decide before BasicOperation.__init__ sizes _extra_input_channels.
         self._scale_bias: bool = scale_bias and bias
@@ -220,12 +236,25 @@ class GroupedLinear(BasicOperation):
         self.num_groups: int = num_groups
         self.in_features: int = in_features
         self.out_features: int = out_features
-        single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
-            single_grouped_weight, single_grouped_bias
-        )
+        warn_if_single_grouped_parameters(single_grouped_weight, single_grouped_bias)
         self.single_grouped_weight: bool = single_grouped_weight
         self.single_grouped_bias: bool = single_grouped_bias
         self.use_bias: bool = bias
+        if not isinstance(split_alignment, int) or isinstance(split_alignment, bool):
+            raise TypeError(
+                f"split_alignment must be an int (got {type(split_alignment).__name__})"
+            )
+        if split_alignment <= 0:
+            raise ValueError(f"split_alignment must be positive (got {split_alignment})")
+        if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) > 0:
+            warnings.warn(
+                "NVTE_CUTEDSL_FUSED_GROUPED_MLP is deprecated; pass "
+                "split_alignment=256 to GroupedLinear instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            split_alignment = 256
+        self.split_alignment: int = split_alignment
         if self.num_groups <= 0:
             raise ValueError(f"Invalid number of groups ({self.num_groups})")
         if self.in_features <= 0:
@@ -665,10 +694,6 @@ class GroupedLinear(BasicOperation):
     def pre_first_fuser_forward(self) -> None:
         super().pre_first_fuser_forward()
 
-        # Initialize params if needed
-        if any(param.device.type == "meta" for param in self.parameters()):
-            self.reset_parameters()
-
         # Check that all weight params are consistent
         if not self.single_grouped_weight:
             dtype = self.weight0.dtype
@@ -1060,6 +1085,7 @@ class GroupedLinear(BasicOperation):
         use_grouped_tensor_path = is_op_fuser_grouped_tensor_path_supported(
             recipe,
             dtype,
+            self.split_alignment,
         )
         if (self.single_grouped_weight or self.single_grouped_bias) and not use_grouped_tensor_path:
             raise RuntimeError(
@@ -1085,6 +1111,7 @@ class GroupedLinear(BasicOperation):
             )
         else:
             out, tensors_to_save = self._fuser_forward_split_quantize(
+                ctx=ctx,
                 input_=input_,
                 split_sizes=split_sizes,
                 scales=scales,
@@ -1197,6 +1224,7 @@ class GroupedLinear(BasicOperation):
     def _fuser_forward_split_quantize(
         self,
         *,
+        ctx: OperationContext,
         input_: torch.Tensor,
         split_sizes: torch.Tensor,
         scales: Optional[torch.Tensor],
@@ -1217,6 +1245,7 @@ class GroupedLinear(BasicOperation):
             )
         num_groups = self.num_groups
         has_bias = self.has_bias
+        ctx.host_split_sizes = None
 
         # Need CPU split sizes for split_quantize / general_grouped_gemm.
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
@@ -1304,6 +1333,9 @@ class GroupedLinear(BasicOperation):
             saved.append(scales)
         saved.extend(xs)
         saved.extend(ws)
+        # The list form is needed again by backward. Cache it on this invocation's
+        # context so the device tensor is read back once per step instead of twice.
+        ctx.host_split_sizes = split_sizes_int
         return out, tuple(saved)
 
     def _fuser_forward_grouped_tensor(
@@ -1536,8 +1568,10 @@ class GroupedLinear(BasicOperation):
         xs, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
         ws, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
 
-        # Split grad output tensor and convert dtypes if needed
-        split_sizes_int = [int(s) for s in split_sizes.tolist()]
+        # Split grad output tensor and convert dtypes if needed. The forward pass of
+        # this same invocation always sets ``host_split_sizes`` on its own context, so
+        # the device tensor is not read back a second time.
+        split_sizes_int = ctx.host_split_sizes
         dy = maybe_dequantize(grad_output, ctx.dtype)
         dys = None
         grad_biases = [None] * num_groups

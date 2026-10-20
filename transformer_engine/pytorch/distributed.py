@@ -632,6 +632,7 @@ def get_te_classes():
         DotProductAttention,
     )
     from .attention.dot_product_attention.backends import UnfusedDotProductAttention
+    from .attention.linear_attention.base import LinearAttentionBase
     from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
@@ -639,6 +640,7 @@ def get_te_classes():
         LayerNorm,
         RMSNorm,
         TransformerEngineBaseModule,
+        LinearAttentionBase,
         UnfusedDotProductAttention,
         DotProductAttention,
         MultiheadAttention,
@@ -2016,6 +2018,9 @@ def symmetric_all_reduce(
     created symmetric memory tensors not in the cache currently will not be able to
     avoid the extra copies.
 
+    Note: Scratch buffers for uncached inputs are rounded up to a bucketed capacity, so
+    each one may use up to 25% more symmetric memory than the input tensor.
+
     Parameters
     ----------
     inp : torch.Tensor
@@ -2087,8 +2092,14 @@ def symmetric_all_reduce(
             group_name,
         )
     else:
-        # Get symmetric memory tensor. Build or retrieve from cache.
-        msg = get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group)
+        # Round up to one of four capacities per power of two. This bounds retained
+        # scratch space by the largest request while padding each buffer by at most 25%.
+        # Keep older capacities alive because captured graphs still reference them.
+        numel = max(1, tensor_numel)
+        step = 1 << max(0, numel.bit_length() - 3)
+        capacity = -(-numel // step) * step
+        msg = get_symmetric_memory_tensor(capacity, tensor_dtype, tensor_device, tp_group)
+        msg = msg[:tensor_numel]
 
         msg.copy_(inp.reshape(-1))
 

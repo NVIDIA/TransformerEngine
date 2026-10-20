@@ -523,6 +523,9 @@ def _make_graphed_callables(
             f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
         )
 
+    # Imported here because the attention package imports this module.
+    from .attention.linear_attention.base import LinearAttentionBase
+
     # Filter the TE modules that cudagraph can access.
     visited_te_modules = {}
     need_bwd_dw_graph = {}
@@ -534,7 +537,7 @@ def _make_graphed_callables(
 
         def hook_fn(module, inputs, outputs, func_idx=func_idx):  # pylint: disable=unused-argument
             modules = set()
-            if isinstance(module, TransformerEngineBaseModule):
+            if isinstance(module, (TransformerEngineBaseModule, LinearAttentionBase)):
                 modules.add(module)
             # If forward is called on a BasicOperation directly the hook will run
             elif isinstance(module, BasicOperation):

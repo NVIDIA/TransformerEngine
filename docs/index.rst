@@ -12,8 +12,8 @@ Transformer Engine documentation
       You are currently viewing unstable developer preview of the documentation.
       To see the documentation for the latest stable release, refer to:
 
-      * `Release Notes <https://docs.nvidia.com/deeplearning/transformer-engine/release-notes/index.html>`_
-      * `Developer Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ (stable version of this page)
+      * `Release Notes <https://docs.nvidia.com/deeplearning/transformer-engine/release_notes.html>`_
+      * `Developer Guide <https://docs.nvidia.com/deeplearning/transformer-engine/index.html>`_ (stable version of this page)
 
 .. include:: ../README.rst
    :start-after: overview-begin-marker-do-not-remove
@@ -30,8 +30,17 @@ Transformer Engine documentation
 
    installation
    getting_started/index
+   support_matrix
    faq
    release_notes.md
+
+.. toctree::
+   :hidden:
+   :caption: Project
+
+   project_updates
+   ecosystem
+   resources
 
 .. toctree::
    :hidden:

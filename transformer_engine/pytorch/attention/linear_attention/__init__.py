@@ -8,5 +8,13 @@ This module is **experimental** and subject to change.
 """
 
 from .gdn import GatedDeltaNetAttention
+from .gdn2 import GatedDeltaNet2Attention
+from .gdp import GatedDeltaProductAttention
+from .kda import KimiDeltaAttention
 
-__all__ = ["GatedDeltaNetAttention"]
+__all__ = [
+    "GatedDeltaNetAttention",
+    "GatedDeltaNet2Attention",
+    "GatedDeltaProductAttention",
+    "KimiDeltaAttention",
+]

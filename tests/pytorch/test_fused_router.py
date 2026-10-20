@@ -1,23 +1,90 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-import torch
+from copy import deepcopy
 from typing import Optional
+
+import pytest
+import torch
+
 from transformer_engine.pytorch.router import (
     QBHistogramMode,
     RoutingMapFormat,
     fused_topk_with_score_function,
     fused_compute_score_for_moe_aux_loss,
     fused_moe_aux_loss,
+    mark_qb_bin_bounds_validated,
 )
 import transformer_engine_torch as tex
-import pytest
-from copy import deepcopy
 
 seed = 42
 torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
+
+
+@pytest.mark.parametrize("topk", [1, 10, 32])
+@pytest.mark.parametrize("histogram_mode", [None, "two_kernel", "fused_atomic"])
+@pytest.mark.parametrize("layout", ["bytemap", "bitmap_u8", "dense"])
+@pytest.mark.parametrize("mixed_scores", [False, True])
+def test_sigmoid_bias_preserves_tiny_scores(topk, histogram_mode, layout, mixed_scores):
+    """Bias affects selection, but must not round away the selected raw scores."""
+    num_tokens, num_experts, num_bins = 17, 512, 1000
+    logits = torch.linspace(-8.0, -4.0, num_experts, device="cuda").repeat(num_tokens, 1)
+    logits[:, :topk] = -16.0 - torch.arange(topk, device="cuda") % 9
+    if mixed_scores:
+        logits[:, 0] = -1.0
+    logits.requires_grad_(True)
+    expert_bias = torch.zeros(num_experts, device="cuda")
+    expert_bias[:topk] = 0.75 + 0.001 * torch.arange(topk, device="cuda")
+    expert_bias -= expert_bias.mean()
+    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda")
+    histogram = torch.zeros(num_experts, num_bins, dtype=torch.int32, device="cuda")
+    reference_probs, reference_map = topk_score_function_pytorch(
+        logits, topk, scaling_factor=3.16, score_function="sigmoid", expert_bias=expert_bias
+    )
+    kwargs = {}
+    if histogram_mode is not None:
+        kwargs.update(
+            qb_histogram=histogram,
+            qb_bin_bounds=bin_bounds,
+            qb_histogram_mode=histogram_mode,
+        )
+    if layout == "dense":
+        kwargs["topk_indices"] = torch.empty(num_tokens, topk, dtype=torch.int16, device="cuda")
+    fused_logits = logits.detach().clone().requires_grad_(True)
+    probs, routing = fused_topk_with_score_function(
+        fused_logits,
+        topk,
+        False,
+        None,
+        None,
+        3.16,
+        "sigmoid",
+        expert_bias,
+        routing_map_format="bitmap_u8" if layout == "bitmap_u8" else "bytemap",
+        **kwargs,
+    )
+    if layout == "dense":
+        routing = topk_indices_to_routing_map(routing, num_experts)
+    elif layout == "bitmap_u8":
+        reference_map = _bytemap_to_bitmap_u8(reference_map)
+    torch.testing.assert_close(routing, reference_map)
+    # An absolute tolerance would hide precisely the tiny values under test.
+    torch.testing.assert_close(probs, reference_probs, atol=0, rtol=5e-6)
+    assert torch.all(probs[:, :topk] > 0)
+    if histogram_mode is not None:
+        reference = qb_topk_score_function_pytorch(logits, topk, expert_bias, bin_bounds, num_bins)
+        torch.testing.assert_close(histogram, reference["histogram"])
+    # Nonuniform upstream gradients exercise the normalization derivative.
+    upstream = torch.linspace(-0.7, 1.3, num_experts, device="cuda").expand_as(probs)
+    probs.backward(upstream)
+    reference_probs.backward(upstream)
+    torch.testing.assert_close(fused_logits.grad, logits.grad, atol=2e-7, rtol=2e-4)
+    if mixed_scores and topk > 1:
+        torch.testing.assert_close(
+            fused_logits.grad[:, 1:topk], logits.grad[:, 1:topk], atol=0, rtol=2e-4
+        )
 
 
 def _get_tolerances(dtype: torch.dtype, num_experts: int):
@@ -621,7 +688,8 @@ def test_qb_topk_rejects_invalid_bin_bounds(histogram_mode, invalid_bounds):
         )
 
 
-def test_qb_topk_revalidates_updated_bin_bounds():
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_topk_revalidates_updated_bin_bounds(histogram_mode):
     logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
     expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
     histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
@@ -637,7 +705,7 @@ def test_qb_topk_revalidates_updated_bin_bounds():
         expert_bias,
         qb_histogram=histogram,
         qb_bin_bounds=bin_bounds,
-        qb_histogram_mode="fused_atomic",
+        qb_histogram_mode=histogram_mode,
     )
     bin_bounds.fill_(0.0)
     with pytest.raises(ValueError, match="finite with lower < upper"):
@@ -652,7 +720,7 @@ def test_qb_topk_revalidates_updated_bin_bounds():
             expert_bias,
             qb_histogram=histogram,
             qb_bin_bounds=bin_bounds,
-            qb_histogram_mode="fused_atomic",
+            qb_histogram_mode=histogram_mode,
         )
 
 
@@ -699,7 +767,175 @@ def test_qb_raw_binding_rejects_invalid_bin_bounds_recoverably(histogram_mode, u
 
 
 @pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-def test_qb_topk_cuda_graph_uses_prevalidated_bounds(histogram_mode):
+@pytest.mark.parametrize("use_dense_indices", [False, True])
+def test_qb_topk_cuda_graph_uses_mutable_bounds(histogram_mode, use_dense_indices):
+    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
+    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
+    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
+    topk_indices = (
+        torch.empty(8, 4, device="cuda", dtype=torch.int32) if use_dense_indices else None
+    )
+
+    def run_router():
+        return fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            expert_bias,
+            topk_indices=topk_indices,
+            qb_histogram=histogram,
+            qb_bin_bounds=bin_bounds,
+            qb_histogram_mode=histogram_mode,
+        )
+
+    run_router()
+    bounds_data_ptr = bin_bounds.data_ptr()
+    initial_bounds = bin_bounds.clone()
+
+    histogram.zero_()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probs, routing_output = run_router()
+
+    bin_bounds.copy_(torch.tensor([-0.75, 0.25], device="cuda"))
+    assert bin_bounds.data_ptr() == bounds_data_ptr
+    histogram.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    reference = qb_topk_score_function_pytorch(
+        logits, 4, expert_bias, bin_bounds, histogram.shape[1]
+    )
+    torch.testing.assert_close(probs, reference["probs"])
+    if use_dense_indices:
+        torch.testing.assert_close(
+            topk_indices_to_routing_map(routing_output, logits.shape[1]),
+            reference["routing_map"],
+        )
+    else:
+        torch.testing.assert_close(routing_output, reference["routing_map"])
+    torch.testing.assert_close(histogram, reference["histogram"])
+    initial_reference = qb_topk_score_function_pytorch(
+        logits, 4, expert_bias, initial_bounds, histogram.shape[1]
+    )
+    assert not torch.equal(histogram, initial_reference["histogram"])
+
+
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_topk_cuda_graph_captures_bounds_update(histogram_mode):
+    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
+    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
+    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
+    next_bounds = torch.tensor([-0.75, 0.25], device="cuda", dtype=torch.float32)
+
+    def run_iteration():
+        probs, routing_map = fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            expert_bias,
+            qb_histogram=histogram,
+            qb_bin_bounds=bin_bounds,
+            qb_histogram_mode=histogram_mode,
+        )
+        bin_bounds.copy_(next_bounds)
+        mark_qb_bin_bounds_validated(bin_bounds)
+        return probs, routing_map
+
+    # Match full-iteration capture: an eager warmup ends with a bounds update, and the same
+    # update is part of the captured iteration.
+    run_iteration()
+    histogram.zero_()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probs, routing_map = run_iteration()
+    histogram.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    reference = qb_topk_score_function_pytorch(
+        logits, 4, expert_bias, next_bounds, histogram.shape[1]
+    )
+    torch.testing.assert_close(probs, reference["probs"])
+    torch.testing.assert_close(routing_map, reference["routing_map"])
+    torch.testing.assert_close(histogram, reference["histogram"])
+    torch.testing.assert_close(bin_bounds, next_bounds)
+
+
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_topk_eager_call_revalidates_after_captured_bounds_update(histogram_mode):
+    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
+    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
+    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
+    next_bounds = torch.tensor([-0.75, 0.25], device="cuda", dtype=torch.float32)
+
+    def run_router():
+        return fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            expert_bias,
+            qb_histogram=histogram,
+            qb_bin_bounds=bin_bounds,
+            qb_histogram_mode=histogram_mode,
+        )
+
+    run_router()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        bin_bounds.copy_(next_bounds)
+        mark_qb_bin_bounds_validated(bin_bounds)
+
+    # Replayed device writes do not advance bin_bounds._version. The capture-time marker must not
+    # let a subsequent eager router call inherit trust in the replay-produced values.
+    next_bounds.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    with pytest.raises(ValueError, match="finite with lower < upper"):
+        run_router()
+
+
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_topk_cuda_graph_rejects_unvalidated_bounds(histogram_mode):
+    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
+    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
+    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
+
+    with pytest.raises(RuntimeError, match="current version must be validated"):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            fused_topk_with_score_function(
+                logits,
+                4,
+                False,
+                None,
+                None,
+                None,
+                "sigmoid",
+                expert_bias,
+                qb_histogram=histogram,
+                qb_bin_bounds=bin_bounds,
+                qb_histogram_mode=histogram_mode,
+            )
+
+
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_topk_cuda_graph_rejects_stale_bounds_validation(histogram_mode):
     logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
     expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
     histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
@@ -721,13 +957,11 @@ def test_qb_topk_cuda_graph_uses_prevalidated_bounds(histogram_mode):
         )
 
     run_router()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        probs, routing_map = run_router()
-    graph.replay()
-    torch.cuda.synchronize()
-    assert torch.isfinite(probs).all()
-    assert routing_map.sum().item() == logits.shape[0] * 4
+    bin_bounds.zero_()
+    with pytest.raises(RuntimeError, match="current version must be validated"):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run_router()
 
 
 @pytest.mark.parametrize(
