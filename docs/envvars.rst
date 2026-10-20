@@ -571,6 +571,12 @@ JAX-Specific Variables
    :Default: None
    :Description: Test level for JAX unit tests (``"L0"``, ``"L1"``, ``"L2"``). Used internally by the test suite.
 
+.. envvar:: NVTE_EP_FUSED_PREPARE_DISPATCH
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use the fused prepare + dispatch path for expert parallelism (NCCL EP count mode) instead of separate prepare and dispatch calls. Supported only when EP stays within a single NVLink domain, and the received row order within an expert block may differ from the unfused path. In JAX the value is latched on first use.
+
 JAX Triton Extensions
 ^^^^^^^^^^^^^^^^^^^^^
 
