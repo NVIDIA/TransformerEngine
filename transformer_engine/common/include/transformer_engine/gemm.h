@@ -214,36 +214,36 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
 
 /*! \brief Compute a strided batched matrix multiplication.
  *
- * This is an experimental low-level interface. The batch dimension is
- * explicitly specified instead of inferred from tensor shape. Matrix data uses
- * cuBLASLt strided-batch layout attributes. A and B must both be high-precision
- * tensors or both be MXFP8 tensors. MXFP8 scale tensors are packed consecutively
- * by batch, i.e. [batch0_scales][batch1_scales]..., and must already be in the
- * GEMM-swizzled layout. Per-tensor FP8, FP8 block scaling, and NVFP4 are not
- * supported by this interface.
+ * This is an experimental low-level interface. Each operand is a batch
+ * of matrices in cuBLASLt strided-batch layout: matrix i starts
+ * stride*i elements after the start of the buffer and has leading
+ * dimension ld. Strides are passed explicitly because NVTETensor
+ * does not describe strided layouts, e.g. a batch dimension that is
+ * interleaved with the matrix rows. A and B must be high-precision
+ * tensors. See nvte_cublas_gemm_strided_batched_mxfp8 for MXFP8.
  *
  * Computes for each batch:
  *  - `D_i = alpha * op(A_i) * op(B_i) + beta * C_i`
  *
- * The `m`, `n`, and `k` dimensions follow the cuBLAS column-major convention
- * used internally by Transformer Engine's GEMM path. Row-major output tensors
- * with logical shape [N, M] are represented by a cuBLAS matrix with dimensions
- * M-by-N.
+ * The `m`, `n`, and `k` dimensions follow the cuBLAS column-major
+ * convention used internally by Transformer Engine's GEMM path.
+ * Row-major output tensors with logical shape [N, M] are represented
+ * by a cuBLAS matrix with dimensions M-by-N.
  *
  *  \param[in]  transa       Whether to transpose A matrix.
  *  \param[in]  transb       Whether to transpose B matrix.
  *  \param[in]  alpha        Scaling factor applied to matmul output.
- *  \param[in]  A            A matrix batch base.
+ *  \param[in]  A            A matrix batch.
  *  \param[in]  lda          Leading dimension for each A matrix.
  *  \param[in]  stridea      Element stride between A matrices.
- *  \param[in]  B            B matrix batch base.
+ *  \param[in]  B            B matrix batch.
  *  \param[in]  ldb          Leading dimension for each B matrix.
  *  \param[in]  strideb      Element stride between B matrices.
  *  \param[in]  beta         Scaling factor applied to C matrix.
- *  \param[in]  C            C matrix batch base.
+ *  \param[in]  C            C matrix batch.
  *  \param[in]  ldc          Leading dimension for each C matrix.
  *  \param[in]  stridec      Element stride between C matrices.
- *  \param[out] D            Output matrix batch base.
+ *  \param[out] D            Output matrix batch.
  *  \param[in]  ldd          Leading dimension for each D matrix.
  *  \param[in]  strided      Element stride between D matrices.
  *  \param[in]  batch_count  Number of matrices in the batch.
@@ -262,6 +262,54 @@ void nvte_cublas_gemm_strided_batched(int transa, int transb, const float *alpha
                                       int64_t batch_count, int64_t m, int64_t n, int64_t k,
                                       NVTETensor workspace, NVTEMatmulConfig config,
                                       cudaStream_t stream);
+
+/*! \brief Compute a strided batched matrix multiplication with MXFP8 inputs.
+ *
+ * This is an experimental low-level interface. It is the same as
+ * nvte_cublas_gemm_strided_batched, except that A and B are each
+ * passed as FP8 data and E8M0 scaling factors. MXFP8 scales are
+ * along the reduction dimension, so the data must be the row-wise
+ * MXFP8 data for transposed A and non-transposed B, and the
+ * column-wise MXFP8 data otherwise. The scaling factors must be
+ * packed by batch and GEMM-swizzled, as produced by
+ * nvte_pack_mxfp8_scales_for_batched_gemm or
+ * nvte_pack_mxfp8_columnwise_scales_for_batched_gemm.
+ *
+ *  \param[in]  transa       Whether to transpose A matrix.
+ *  \param[in]  transb       Whether to transpose B matrix.
+ *  \param[in]  alpha        Scaling factor applied to matmul output.
+ *  \param[in]  A_data       A matrix batch (FP8).
+ *  \param[in]  A_scale_inv  Packed, swizzled scaling factors for A (E8M0).
+ *  \param[in]  lda          Leading dimension for each A matrix.
+ *  \param[in]  stridea      Element stride between A matrices.
+ *  \param[in]  B_data       B matrix batch (FP8).
+ *  \param[in]  B_scale_inv  Packed, swizzled scaling factors for B (E8M0).
+ *  \param[in]  ldb          Leading dimension for each B matrix.
+ *  \param[in]  strideb      Element stride between B matrices.
+ *  \param[in]  beta         Scaling factor applied to C matrix.
+ *  \param[in]  C            C matrix batch.
+ *  \param[in]  ldc          Leading dimension for each C matrix.
+ *  \param[in]  stridec      Element stride between C matrices.
+ *  \param[out] D            Output matrix batch.
+ *  \param[in]  ldd          Leading dimension for each D matrix.
+ *  \param[in]  strided      Element stride between D matrices.
+ *  \param[in]  batch_count  Number of matrices in the batch.
+ *  \param[in]  m            Number of rows of op(A) and D in cuBLAS layout.
+ *  \param[in]  n            Number of columns of op(B) and D in cuBLAS layout.
+ *  \param[in]  k            Reduction dimension.
+ *  \param[in]  workspace    Workspace tensor.
+ *  \param[in]  config       Additional configuration.
+ *  \param[in]  stream       CUDA stream used for the operation.
+ */
+void nvte_cublas_gemm_strided_batched_mxfp8(int transa, int transb, const float *alpha,
+                                            const NVTETensor A_data, const NVTETensor A_scale_inv,
+                                            int64_t lda, int64_t stridea, const NVTETensor B_data,
+                                            const NVTETensor B_scale_inv, int64_t ldb,
+                                            int64_t strideb, const float *beta, const NVTETensor C,
+                                            int64_t ldc, int64_t stridec, NVTETensor D, int64_t ldd,
+                                            int64_t strided, int64_t batch_count, int64_t m,
+                                            int64_t n, int64_t k, NVTETensor workspace,
+                                            NVTEMatmulConfig config, cudaStream_t stream);
 
 /*! \brief Compute matrix multiplication of 2 matrices, potentially fused with other operations,
  * allowing for using a scaling factor for the GEMM result and the accumulation input (deprecated)

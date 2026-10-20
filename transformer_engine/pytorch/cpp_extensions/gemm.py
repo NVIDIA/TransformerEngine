@@ -1008,7 +1008,6 @@ def strided_batched_gemm(
         transb,
         out,
         workspace,
-        workspace.shape[0],
         m,
         n,
         k,

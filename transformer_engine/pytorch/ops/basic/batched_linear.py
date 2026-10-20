@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 import contextlib
-from typing import Any, Optional
+from typing import Optional
 import warnings
 
 import torch
@@ -63,8 +63,6 @@ class BatchedLinear(BasicOperation):
         Position of the GEMM batch dimension in the input.
     bias : bool, default = True
         Add one learned bias of shape ``[G, R]``.
-    return_bias : bool, default = False
-        Return the bias separately instead of applying it.
     device : torch.device, default = default CUDA device
         Parameter device.
     dtype : torch.dtype, default = default dtype
@@ -88,11 +86,9 @@ class BatchedLinear(BasicOperation):
     Notes
     -----
     Constructing this operation under ``quantized_model_init`` supports only
-    an MXFP8 recipe. Meta-device parameter materialization relies on the
-    operation fuser's deferred-initialization support.
+    an MXFP8 recipe. Parameters constructed on the meta device must be
+    materialized with ``reset_parameters`` before the first forward pass.
     """
-
-    num_extra_outputs: int = 0
 
     def __init__(
         self,
@@ -102,7 +98,6 @@ class BatchedLinear(BasicOperation):
         *,
         batch_dim: int = -2,
         bias: bool = True,
-        return_bias: bool = False,
         device: Optional[torch.device | str] = None,
         dtype: Optional[torch.dtype] = None,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
@@ -111,8 +106,6 @@ class BatchedLinear(BasicOperation):
         init_method: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         name: Optional[str] = None,
     ) -> None:
-        # The fuser allocates extra-output routing state in BasicOperation.__init__.
-        self.num_extra_outputs = int(bias and return_bias)
         super().__init__()
 
         for arg_name, value in (
@@ -139,8 +132,6 @@ class BatchedLinear(BasicOperation):
         self.out_features = out_features
         self.batch_dim = batch_dim
         self.use_bias = bias
-        self.return_bias = return_bias
-        self.apply_bias = bias and not return_bias
         self.name = name
         self._rng_state_tracker_function = rng_state_tracker_function
         self._accumulate_into_main_grad = accumulate_into_main_grad
@@ -208,7 +199,12 @@ class BatchedLinear(BasicOperation):
             self._configure_quantizer(quantizer, internal=False)
             quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
             with torch.no_grad():
-                weight = quantizer(weight)
+                if is_quantized_tensor(self.weight):
+                    # Keep param, which other modules may reference
+                    self.weight.quantize_(weight)
+                    weight = self.weight
+                else:
+                    weight = quantizer(weight)
 
         if not isinstance(weight, torch.nn.Parameter):
             weight = torch.nn.Parameter(weight, requires_grad=old_weight.requires_grad)
@@ -222,16 +218,10 @@ class BatchedLinear(BasicOperation):
                 bias = old_bias
             else:
                 bias = torch.empty_like(old_bias, device=device)
-            with torch.no_grad():
-                bias.zero_()
+            torch.nn.init.zeros_(bias)
             if not isinstance(bias, torch.nn.Parameter):
                 bias = torch.nn.Parameter(bias, requires_grad=old_bias.requires_grad)
             self.bias = bias
-
-    def pre_first_fuser_forward(self) -> None:
-        super().pre_first_fuser_forward()
-        if self.weight.device.type == "meta":
-            self.reset_parameters()
 
     def num_quantizers(self, mode: str) -> int:
         if mode == "forward":
@@ -458,7 +448,7 @@ class BatchedLinear(BasicOperation):
             )
 
     def _apply_bias(self, output: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-        if not self.apply_bias:
+        if not self.use_bias:
             return output
         if self.bias is None:
             raise RuntimeError("BatchedLinear bias parameter is missing")
@@ -579,15 +569,13 @@ class BatchedLinear(BasicOperation):
                 else None
             )
             ctx.grad_output_quantizer = self.get_quantizer("backward", 0)
-            ctx.apply_bias = self.apply_bias
 
         return output
 
-    def _op_backward(
+    def op_backward(
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
-        grad_returned_bias: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
         x, w = ctx.saved_tensors
         dy = maybe_dequantize(grad_output, ctx.dtype).contiguous()
@@ -708,75 +696,9 @@ class BatchedLinear(BasicOperation):
 
         grad_bias = None
         if ctx.bias_requires_grad:
-            if ctx.apply_bias:
-                grad_bias = self._reduce_bias_gradient(dy)
-            elif grad_returned_bias is not None:
-                grad_bias = maybe_dequantize(grad_returned_bias, self.bias.dtype)
+            grad_bias = self._reduce_bias_gradient(dy)
 
         grad_params = [grad_weight]
         if self.use_bias:
             grad_params.append(grad_bias)
         return grad_input, grad_params
-
-    def op_backward(
-        self,
-        ctx: OperationContext,
-        grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
-        return self._op_backward(ctx, grad_output, None)
-
-    def fuser_forward(
-        self,
-        basic_op_ctxs: list[OperationContext],
-        input_: torch.Tensor,
-        *,
-        basic_op_extra_inputs: Sequence[Sequence[Optional[torch.Tensor]]],
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-        basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Sequence[Sequence[Optional[torch.Tensor]]]]:
-        del basic_op_extra_inputs
-        output = self.op_forward(
-            basic_op_ctxs[0],
-            input_,
-            prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
-            next_op_input_quantizer=next_op_input_quantizer,
-            **basic_op_kwargs[0],
-        )
-        if self.num_extra_outputs == 0:
-            return output, [()]
-        if self.bias is None:
-            raise RuntimeError("BatchedLinear bias parameter is missing")
-        return output, [(maybe_dequantize(self.bias, output.dtype),)]
-
-    def fuser_backward(
-        self,
-        basic_op_ctxs: list[OperationContext],
-        grad_output: torch.Tensor,
-        *,
-        basic_op_grad_extra_outputs: Sequence[Sequence[Optional[torch.Tensor]]],
-    ) -> tuple[
-        torch.Tensor,
-        Sequence[Sequence[Optional[torch.Tensor]]],
-        Sequence[Sequence[Optional[torch.Tensor]]],
-    ]:
-        grad_returned_bias = None
-        if self.num_extra_outputs > 0:
-            grad_returned_bias = basic_op_grad_extra_outputs[0][0]
-        grad_input, grad_params = self._op_backward(
-            basic_op_ctxs[0],
-            grad_output,
-            grad_returned_bias,
-        )
-        return grad_input, [grad_params], [()]
-
-    def forward(
-        self,
-        input: torch.Tensor,  # pylint: disable=redefined-builtin
-        *extra_inputs: torch.Tensor,
-        **kwargs: Any,
-    ) -> torch.Tensor | tuple[torch.Tensor, Optional[torch.Tensor]]:
-        output = super().forward(input, *extra_inputs, **kwargs)
-        if self.return_bias and not self.use_bias:
-            return output, None
-        return output

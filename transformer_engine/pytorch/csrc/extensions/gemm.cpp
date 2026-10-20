@@ -6,7 +6,6 @@
 
 #include <pybind11/pybind11.h>
 
-#include <limits>
 #include <optional>
 #include <string>
 
@@ -446,23 +445,16 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
 namespace {
 
+/* MXFP8 operand for strided batched GEMM
+ *
+ * scale_inv holds E8M0 scaling factors that are packed by batch and
+ * GEMM-swizzled.
+ */
 struct PackedMXFP8Operand {
+  TensorWrapper data;
   at::Tensor scale_inv;
-  TensorWrapper tensor{NVTE_MXFP8_1D_SCALING};
+  TensorWrapper scale_inv_tensor;
 };
-
-int64_t checked_mul(int64_t lhs, int64_t rhs, const char* description) {
-  NVTE_CHECK(lhs >= 0 && rhs >= 0, "Negative value while calculating ", description, ".");
-  NVTE_CHECK(lhs == 0 || rhs <= std::numeric_limits<int64_t>::max() / lhs,
-             "Integer overflow while calculating ", description, ".");
-  return lhs * rhs;
-}
-
-int64_t round_up(int64_t value, int64_t multiple, const char* description) {
-  NVTE_CHECK(value >= 0, "Negative value while calculating ", description, ".");
-  const int64_t quotient = value / multiple + static_cast<int64_t>(value % multiple != 0);
-  return checked_mul(quotient, multiple, description);
-}
 
 PackedMXFP8Operand pack_mxfp8_operand_scales(py::handle operand,
                                              const TensorWrapper& operand_tensor, bool rowwise,
@@ -493,12 +485,12 @@ PackedMXFP8Operand pack_mxfp8_operand_scales(py::handle operand,
   NVTE_CHECK(data.dim() >= 2, "MXFP8 strided_batched_gemm requires at least 2D data for ", name,
              ".");
 
-  const int64_t matrix_numel = checked_mul(rows_per_batch, features, name);
-  const int64_t expected_data_numel = checked_mul(batch_count, matrix_numel, name);
+  const int64_t matrix_numel = rows_per_batch * features;
+  const int64_t expected_data_numel = batch_count * matrix_numel;
   NVTE_CHECK(data.numel() == expected_data_numel, "MXFP8 strided_batched_gemm ", name,
              " data buffer has invalid size (expected ", expected_data_numel, ", got ",
              data.numel(), ").");
-  const int64_t interleaved_leading_dim = checked_mul(batch_count, features, name);
+  const int64_t interleaved_leading_dim = batch_count * features;
   const bool batch_major = leading_dim == features && batch_stride == matrix_numel;
   const bool interleaved = leading_dim == interleaved_leading_dim && batch_stride == features;
   NVTE_CHECK(batch_major || interleaved, "MXFP8 strided_batched_gemm supports only contiguous ",
@@ -529,49 +521,41 @@ PackedMXFP8Operand pack_mxfp8_operand_scales(py::handle operand,
 
   TensorWrapper compact_tensor(NVTE_MXFP8_1D_SCALING);
   PackedMXFP8Operand packed;
+  int64_t output_numel = 0;
   if (rowwise) {
     NVTE_CHECK(features % 32 == 0, "Row-wise MXFP8 ", name,
                " feature dimension must be divisible by 32.");
-    const int64_t scale_rows = round_up(rows_per_batch, 128, name);
-    const int64_t scale_cols = round_up(features / 32, 4, name);
-    const int64_t output_numel =
-        checked_mul(batch_count, checked_mul(scale_rows, scale_cols, name), name);
-    packed.scale_inv = at::empty({output_numel}, scale_inv.options());
+    output_numel = batch_count *
+                   static_cast<int64_t>(roundup(rows_per_batch, 128) * roundup(features / 32, 4));
     compact_tensor.set_rowwise_data(input_data.data_ptr, static_cast<DType>(input_data.dtype),
                                     logical_shape);
     compact_tensor.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0,
                                          getTensorShape(scale_inv));
-    packed.tensor.set_rowwise_data(input_data.data_ptr, static_cast<DType>(input_data.dtype),
-                                   logical_shape);
-    packed.tensor.set_rowwise_scale_inv(packed.scale_inv.data_ptr(), DType::kFloat8E8M0,
-                                        getTensorShape(packed.scale_inv));
   } else {
     NVTE_CHECK(rows_per_batch % 32 == 0, "Column-wise MXFP8 ", name,
                " row count must be divisible by 32.");
-    const int64_t scale_rows = round_up(rows_per_batch / 32, 4, name);
-    const int64_t scale_cols = round_up(features, 128, name);
-    const int64_t output_numel =
-        checked_mul(batch_count, checked_mul(scale_rows, scale_cols, name), name);
-    packed.scale_inv = at::empty({output_numel}, scale_inv.options());
+    output_numel = batch_count *
+                   static_cast<int64_t>(roundup(rows_per_batch / 32, 4) * roundup(features, 128));
     compact_tensor.set_columnwise_data(input_data.data_ptr, static_cast<DType>(input_data.dtype),
                                        logical_shape);
     compact_tensor.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0,
                                             getTensorShape(scale_inv));
-    packed.tensor.set_columnwise_data(input_data.data_ptr, static_cast<DType>(input_data.dtype),
-                                      logical_shape);
-    packed.tensor.set_columnwise_scale_inv(packed.scale_inv.data_ptr(), DType::kFloat8E8M0,
-                                           getTensorShape(packed.scale_inv));
   }
-  packed.tensor.set_with_gemm_swizzled_scales(true);
+  packed.data = makeTransformerEngineTensor(input_data.data_ptr, logical_shape,
+                                            static_cast<DType>(input_data.dtype));
+  packed.scale_inv = at::empty({output_numel}, scale_inv.options());
+  packed.scale_inv_tensor = makeTransformerEngineTensor(
+      packed.scale_inv.data_ptr(), getTensorShape(packed.scale_inv), DType::kFloat8E8M0);
 
   NVTE_SCOPED_GIL_RELEASE({
     if (rowwise) {
-      nvte_pack_mxfp8_scales_for_batched_gemm(compact_tensor.data(), packed.tensor.data(),
+      nvte_pack_mxfp8_scales_for_batched_gemm(compact_tensor.data(), packed.scale_inv_tensor.data(),
                                               batch_dim, static_cast<int>(batch_in_features),
                                               at::cuda::getCurrentCUDAStream());
     } else {
-      nvte_pack_mxfp8_columnwise_scales_for_batched_gemm(
-          compact_tensor.data(), packed.tensor.data(), batch_dim, at::cuda::getCurrentCUDAStream());
+      nvte_pack_mxfp8_columnwise_scales_for_batched_gemm(compact_tensor.data(),
+                                                         packed.scale_inv_tensor.data(), batch_dim,
+                                                         at::cuda::getCurrentCUDAStream());
     }
   });
   return packed;
@@ -580,11 +564,11 @@ PackedMXFP8Operand pack_mxfp8_operand_scales(py::handle operand,
 }  // namespace
 
 at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool transb, at::Tensor D,
-                                at::Tensor workspace, size_t workspaceSize, int64_t m, int64_t n,
-                                int64_t k, int64_t batch_count, int64_t lda, int64_t stridea,
-                                int64_t ldb, int64_t strideb, int64_t ldd, int64_t strided,
-                                bool accumulate, bool use_split_accumulator, int math_sm_count,
-                                float alpha, std::optional<float> beta) {
+                                at::Tensor workspace, int64_t m, int64_t n, int64_t k,
+                                int64_t batch_count, int64_t lda, int64_t stridea, int64_t ldb,
+                                int64_t strideb, int64_t ldd, int64_t strided, bool accumulate,
+                                bool use_split_accumulator, int math_sm_count, float alpha,
+                                std::optional<float> beta) {
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
   NVTE_CHECK(!B.is_none(), "Tensor B has not been provided");
   NVTE_CHECK(D.is_cuda(), "Output tensor D must be on CUDA.");
@@ -592,8 +576,6 @@ at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool tr
   NVTE_CHECK(workspace.device() == D.device(),
              "cuBLASLt workspace must be on the same device as D.");
   NVTE_CHECK(workspace.is_contiguous(), "cuBLASLt workspace must be contiguous.");
-  NVTE_CHECK(workspaceSize <= workspace.nbytes(),
-             "cuBLASLt workspaceSize exceeds the available workspace bytes.");
 
   at::cuda::CUDAGuard device_guard(D.device());
 
@@ -608,8 +590,8 @@ at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool tr
   TensorWrapper A_tensor = makeTransformerEngineTensor(A, none);
   TensorWrapper B_tensor = makeTransformerEngineTensor(B, none);
   TensorWrapper D_tensor = makeTransformerEngineTensor(D);
-  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
-                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
+  auto te_workspace = makeTransformerEngineTensor(
+      workspace.data_ptr(), std::vector<size_t>{workspace.nbytes()}, DType::kByte);
 
   const bool high_precision_inputs =
       is_high_precision_dtype(A_tensor.dtype()) && is_high_precision_dtype(B_tensor.dtype());
@@ -638,18 +620,6 @@ at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool tr
   // Validate both operands before either scale-packing kernel is launched.
   check_operand_device(A, transa, "A data and scales");
   check_operand_device(B, !transb, "B data and scales");
-  const TensorWrapper* gemm_A = &A_tensor;
-  const TensorWrapper* gemm_B = &B_tensor;
-  std::optional<PackedMXFP8Operand> packed_A;
-  std::optional<PackedMXFP8Operand> packed_B;
-  if (mxfp8_inputs) {
-    packed_A.emplace(pack_mxfp8_operand_scales(A, A_tensor, transa, transa ? m : k, transa ? k : m,
-                                               batch_count, lda, stridea, "A"));
-    packed_B.emplace(pack_mxfp8_operand_scales(B, B_tensor, !transb, transb ? k : n, transb ? n : k,
-                                               batch_count, ldb, strideb, "B"));
-    gemm_A = &packed_A->tensor;
-    gemm_B = &packed_B->tensor;
-  }
   NVTE_CHECK(is_high_precision_dtype(D_tensor.dtype()),
              "strided_batched_gemm currently expects a high-precision output tensor.");
 
@@ -657,12 +627,28 @@ at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool tr
   config.set_use_split_accumulator(use_split_accumulator);
   config.set_sm_count(math_sm_count);
 
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_cublas_gemm_strided_batched(
-        transa, transb, &alpha, gemm_A->data(), lda, stridea, gemm_B->data(), ldb, strideb,
-        &beta.value(), D_tensor.data(), ldd, strided, D_tensor.data(), ldd, strided, batch_count, m,
-        n, k, te_workspace.data(), config, at::cuda::getCurrentCUDAStream());
-  });
+  if (mxfp8_inputs) {
+    // MXFP8 scales are along the reduction dim, so pack the
+    // row-wise scales for TN layouts and column-wise otherwise.
+    const auto packed_A = pack_mxfp8_operand_scales(A, A_tensor, transa, transa ? m : k,
+                                                    transa ? k : m, batch_count, lda, stridea, "A");
+    const auto packed_B = pack_mxfp8_operand_scales(B, B_tensor, !transb, transb ? k : n,
+                                                    transb ? n : k, batch_count, ldb, strideb, "B");
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_cublas_gemm_strided_batched_mxfp8(
+          transa, transb, &alpha, packed_A.data.data(), packed_A.scale_inv_tensor.data(), lda,
+          stridea, packed_B.data.data(), packed_B.scale_inv_tensor.data(), ldb, strideb,
+          &beta.value(), D_tensor.data(), ldd, strided, D_tensor.data(), ldd, strided, batch_count,
+          m, n, k, te_workspace.data(), config, at::cuda::getCurrentCUDAStream());
+    });
+  } else {
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_cublas_gemm_strided_batched(
+          transa, transb, &alpha, A_tensor.data(), lda, stridea, B_tensor.data(), ldb, strideb,
+          &beta.value(), D_tensor.data(), ldd, strided, D_tensor.data(), ldd, strided, batch_count,
+          m, n, k, te_workspace.data(), config, at::cuda::getCurrentCUDAStream());
+    });
+  }
   return D;
 }
 

@@ -122,7 +122,6 @@ def _cpp_strided_batched_gemm(
     ldd,
     strided,
     workspace=None,
-    workspace_size=None,
 ):
     if workspace is None:
         workspace = torch.empty(1, dtype=torch.uint8, device="cuda")
@@ -133,7 +132,6 @@ def _cpp_strided_batched_gemm(
         False,
         out,
         workspace,
-        workspace.nbytes if workspace_size is None else workspace_size,
         m,
         n,
         k,
@@ -154,7 +152,7 @@ def _cpp_strided_batched_gemm(
 
 @pytest.mark.parametrize(
     "invalid_buffer",
-    ["A", "B", "workspace_size", "workspace_stride", "A_device", "B_device", "workspace_device"],
+    ["A", "B", "workspace_stride", "A_device", "B_device", "workspace_device"],
 )
 def test_strided_batched_gemm_invalid_buffers(invalid_buffer):
     """Reject invalid buffers in the binding before launching CUDA work."""
@@ -162,16 +160,12 @@ def test_strided_batched_gemm_invalid_buffers(invalid_buffer):
     b = torch.empty_like(a)
     out = torch.empty_like(a)
     workspace = torch.empty(32, device="cuda", dtype=torch.uint8)
-    workspace_size = workspace.nbytes
     if invalid_buffer == "A":
         a = a.cpu()
         error = "same CUDA device as D"
     elif invalid_buffer == "B":
         b = b.cpu()
         error = "same CUDA device as D"
-    elif invalid_buffer == "workspace_size":
-        workspace_size += 1
-        error = "exceeds the available workspace bytes"
     elif invalid_buffer == "workspace_stride":
         workspace = workspace[::2]
         error = "workspace must be contiguous"
@@ -203,7 +197,6 @@ def test_strided_batched_gemm_invalid_buffers(invalid_buffer):
             ldd=32,
             strided=1024,
             workspace=workspace,
-            workspace_size=workspace_size,
         )
 
 
@@ -399,7 +392,7 @@ def test_strided_batched_gemm_rejects_out_of_bounds_layout(api, buffer_name, str
 
     call = strided_batched_gemm if api == "python" else _cpp_strided_batched_gemm
     call_kwargs = {**kwargs, "layout": "TN"} if api == "python" else kwargs
-    with pytest.raises(RuntimeError, match=rf"{buffer_name} data buffer is too small"):
+    with pytest.raises(RuntimeError, match=rf"{buffer_name} buffer is too small"):
         call(A, B, out, **call_kwargs)
 
 

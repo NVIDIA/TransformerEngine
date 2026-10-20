@@ -351,6 +351,7 @@ def test_init_method_and_rng_tracker(deferred_init: bool) -> None:
     if deferred_init:
         assert not events
         assert all(param.device.type == "meta" for param in op.parameters())
+        op.reset_parameters()
 
     inp = torch.randn(32, 2, 32, dtype=torch.bfloat16, device="cuda", requires_grad=True)
     output = op(inp)
@@ -372,7 +373,7 @@ def test_init_method_and_rng_tracker(deferred_init: bool) -> None:
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 def test_quantized_weight_deferred_init() -> None:
-    """Meta initialization materializes a primary MXFP8 weight on first use."""
+    """Meta initialization materializes a primary MXFP8 weight in reset_parameters."""
     recipe = make_recipe("mxfp8")
     with te.quantized_model_init(enabled=True, recipe=recipe):
         op = te_ops.BatchedLinear(
@@ -383,6 +384,7 @@ def test_quantized_weight_deferred_init() -> None:
             dtype=torch.bfloat16,
         )
     assert all(param.device.type == "meta" for param in op.parameters())
+    op.reset_parameters()
 
     inp = torch.randn(32, 2, 32, dtype=torch.bfloat16, device="cuda", requires_grad=True)
     with te.autocast(enabled=True, recipe=recipe):
@@ -424,57 +426,6 @@ def test_quantized_weight_inference() -> None:
         output = op(inp)
     assert_close(output, reference, **quantization_tols("mxfp8"))
     assert not op.weight._with_gemm_swizzled_scales
-
-
-@pytest.mark.parametrize("batch_dim", (0, -2))
-@pytest.mark.parametrize("bias", (False, True))
-def test_return_bias(batch_dim: int, bias: bool) -> None:
-    """return_bias leaves the bias unapplied and returns it separately."""
-    op = te_ops.BatchedLinear(
-        2,
-        32,
-        32,
-        batch_dim=batch_dim,
-        bias=bias,
-        return_bias=True,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    input_shape = (2, 32, 32) if batch_dim == 0 else (32, 2, 32)
-    inp = torch.randn(input_shape, dtype=torch.bfloat16, device="cuda")
-    output, returned_bias = op(inp)
-    weight_ref = op.weight.detach()
-    if batch_dim == 0:
-        output_ref = torch.einsum("g...d,grd->g...r", inp, weight_ref)
-    else:
-        output_ref = torch.einsum("...gd,grd->...gr", inp, weight_ref)
-    assert_close(output, output_ref, **dtype_tols(torch.bfloat16))
-    if bias:
-        assert_close(returned_bias, op.bias, **dtype_tols(torch.bfloat16))
-        grad_bias = torch.randn_like(returned_bias)
-        torch.autograd.backward((output, returned_bias), (torch.ones_like(output), grad_bias))
-        torch.testing.assert_close(op.bias.grad, grad_bias, rtol=0, atol=0)
-    else:
-        assert returned_bias is None
-
-
-def test_return_bias_in_sequential() -> None:
-    """The bias is exposed through the operation fuser's extra-output path."""
-    op = te_ops.BatchedLinear(
-        2,
-        32,
-        32,
-        bias=True,
-        return_bias=True,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    model = te_ops.Sequential(op)
-    inp = torch.randn(32, 2, 32, dtype=torch.bfloat16, device="cuda")
-    output, returned_bias = model(inp)
-    assert_close(returned_bias, op.bias, **dtype_tols(torch.bfloat16))
-    (output.sum() + returned_bias.sum()).backward()
-    torch.testing.assert_close(op.bias.grad, torch.ones_like(op.bias), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
