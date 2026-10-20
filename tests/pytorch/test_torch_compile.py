@@ -31,9 +31,14 @@ try:
         MemberType,
     )
 
-    _opaque_available = True
+    _opaque_available = hasattr(torch._library.opaque_object, "is_opaque_constant_type")
 except ImportError:
     _opaque_available = False
+
+pytestmark = pytest.mark.skipif(
+    not _opaque_available,
+    reason="This PyTorch build lacks the opaque-object API required by Transformer Engine",
+)
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
@@ -42,6 +47,7 @@ from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorId
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
+from transformer_engine.pytorch.ops.basic.bias import BiasBwdArgs
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
@@ -54,6 +60,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
 )
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
+from transformer_engine.pytorch.dynamo.fake import fake_bgrad
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -1549,7 +1556,7 @@ if _opaque_available:
 
 @pytest.mark.skipif(
     not _opaque_available,
-    reason="torch.compile opaque-object support requires PyTorch >= 2.11",
+    reason="torch opaque object API not available",
 )
 @pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
 def test_quantizer_value_object_fullgraph(factory):
@@ -1972,17 +1979,33 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize(
-    "input_shape",
-    [(64,), (2, 4, 4, 64)],
-    ids=["rank1", "rank4"],
+    "fp8_recipe,input_shape",
+    [
+        pytest.param(None, (64,), id="bf16-rank1"),
+        pytest.param(None, (2, 4, 4, 64), id="bf16-rank4"),
+    ]
+    + [
+        pytest.param(fp8_recipe, shape, id=f"{name}-{shape}")
+        for name, fp8_recipe in (
+            ("nvfp4", recipe.NVFP4BlockScaling()),
+            ("nvfp4-no-rht", recipe.NVFP4BlockScaling(disable_rht=True)),
+        )
+        for shape in ((1, 128, 128), (2, 4, 16, 128))
+    ],
 )
-def test_te_linear_compiles_non_2d_input(input_shape, compile_mode):
+def test_te_linear_compiles_non_2d_input(fp8_recipe, input_shape, compile_mode):
     """Compiled Linear preserves non-matrix activation shapes in forward and backward."""
+    if isinstance(fp8_recipe, recipe.NVFP4BlockScaling) and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
     dtype = torch.bfloat16
-    model = te.Linear(64, 32, params_dtype=dtype, device="cuda")
+    out_features = 32 if fp8_recipe is None else 128
+    model = te.Linear(input_shape[-1], out_features, params_dtype=dtype, device="cuda")
 
     def fn(inp):
-        return model(inp)
+        if fp8_recipe is None:
+            return model(inp)
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
 
     torch._dynamo.reset()
     if compile_mode == "reduce-overhead":
@@ -2852,12 +2875,83 @@ def test_te_ops_bias_compile_with_fp8_input(backward):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("quantization", [None, "fp8"])
-@pytest.mark.parametrize("case", ["linear", "bias", "pair", "unfused"])
-@pytest.mark.parametrize("grads", ["all", "input", "weight", "bias", "none"])
-def test_te_ops_linear_bias_compile(dtype, quantization, case, grads, monkeypatch):
-    _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch)
+@pytest.mark.parametrize(
+    "dtype,quantization,shape,disable_rht_fusion,case,grads",
+    [
+        (dtype, quantization, (2, 16, 32), False, case, grads)
+        for dtype in (torch.float16, torch.bfloat16)
+        for quantization in (None, "fp8")
+        for case in ("linear", "bias", "pair", "unfused")
+        for grads in ("all", "input", "weight", "bias", "none")
+    ]
+    + [
+        (torch.bfloat16, "nvfp4", (2, 16, 128), False, "pair", "all"),
+        (torch.bfloat16, "nvfp4", (64, 128), False, "pair", "all"),
+        (torch.bfloat16, "nvfp4", (64, 128), True, "pair", "all"),
+        (torch.bfloat16, "nvfp4-no-rht", (2, 16, 128), False, "pair", "all"),
+    ],
+)
+def test_te_ops_linear_bias_compile(
+    dtype, quantization, shape, disable_rht_fusion, case, grads, monkeypatch
+):
+    monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_rht_fusion)))
+    _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch, input_shape=shape)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("mode", ["rht", "2d", "row-scaled"])
+def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
+    quantizer = NVFP4Quantizer(
+        columnwise=True,
+        with_rht=mode == "rht",
+        with_post_rht_amax=mode == "rht",
+        with_2d_quantization=mode == "2d",
+        row_scaled_nvfp4=mode == "row-scaled",
+        with_random_sign_mask=False,
+    )
+
+    def bgrad(inp):
+        dx, ((db,),), _ = te.ops.Bias.compile_ops[1](BiasBwdArgs(inp, quantizer))
+        return dx, db
+
+    torch._dynamo.reset()
+    compiled, graphs = _compile_with_graphs(bgrad)
+    # Pairs preserve alignment, including distinct nonzero remainders.
+    shapes = ((128, 128), (256, 256), (96, 160), (160, 224))
+    if mode == "row-scaled":
+        shapes = shapes[:1]
+    cases = [(False, True, shape) for shape in shapes]
+    if mode == "rht":
+        cases += [(True, True, (128, 128)), (False, True, (128, 128))]
+    if mode != "row-scaled":
+        cases.append((False, False, (128, 128)))
+
+    for i, (disable_fusion, optimize_for_gemm, shape) in enumerate(cases):
+        monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_fusion)))
+        quantizer.optimize_for_gemm = optimize_for_gemm
+        inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        torch._dynamo.mark_dynamic(inp, (0, 1))
+        previous_graph_count = len(graphs)
+        dx, db = compiled(inp)
+        expected_db, expected_dx = tex.bgrad_quantize(inp, quantizer)
+        assert dx._with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+        torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
+        torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
+        torch.testing.assert_close(
+            dx._columnwise_data, expected_dx._columnwise_data, atol=0, rtol=0
+        )
+        if i < len(shapes) and i % 2 == 1:
+            assert len(graphs) == previous_graph_count
+
+    shape = (64, 1, 128)
+    inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    _, expected_dx = tex.bgrad_quantize(inp, quantizer)
+    _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
+    assert dx_spec.with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+    for name, (inner_shape, inner_dtype) in dx_spec.quantizer.inner_tensor_specs(shape).items():
+        inner = getattr(expected_dx, name)
+        assert inner.shape == inner_shape
+        assert inner.dtype == inner_dtype
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -2928,22 +3022,43 @@ def test_te_ops_linear_workspace_fake_mode(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("training", [False, True])
-@pytest.mark.parametrize("initial_device", ["cuda", "cpu", "meta"])
-def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
+@pytest.mark.parametrize(
+    "initial_device,quantization",
+    [("cuda", None), ("cpu", None), ("meta", None), ("cuda", "nvfp4"), ("cuda", "nvfp4-no-rht")],
+)
+def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantization):
     """A fresh process prevents earlier GEMMs from hiding lazy workspace allocation."""
+    if quantization is not None and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
     script = textwrap.dedent(
         """
         import contextlib
+        import copy
         import sys
         import torch
         import transformer_engine.pytorch as te
+        from transformer_engine.common import recipe
         from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
         from torch._dynamo.utils import counters
 
-        training, initial_device = sys.argv[1:]
+        training, initial_device, quantization = sys.argv[1:]
         training = training == "True"
+        is_nvfp4 = quantization != "None"
+        quant_recipe = (
+            recipe.NVFP4BlockScaling(
+                disable_rht=quantization == "nvfp4-no-rht",
+                disable_stochastic_rounding=True,
+            )
+            if is_nvfp4
+            else None
+        )
+        in_features, out_features = (128, 128) if is_nvfp4 else (32, 64)
+        batch_size = 32
+        eager_tols = {"rtol": 0, "atol": 0} if is_nvfp4 else {}
         assert get_cublas_workspace.cache_info().currsize == 0
-        linear = te.ops.BasicLinear(32, 64, device=initial_device, dtype=torch.bfloat16)
+        linear = te.ops.BasicLinear(
+            in_features, out_features, device=initial_device, dtype=torch.bfloat16
+        )
         if initial_device == "cpu":
             assert get_cublas_workspace.cache_info().currsize == 0
             linear.cuda()
@@ -2952,28 +3067,35 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
             linear.to_empty(device="cuda")
             linear.reset_parameters()
         assert get_cublas_workspace.cache_info().currsize > 0
-        model = te.ops.Sequential(linear, te.ops.Bias(64, dtype=torch.bfloat16))
-        x = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16, requires_grad=training)
+        model = te.ops.Sequential(linear, te.ops.Bias(out_features, dtype=torch.bfloat16))
+        reference_model = copy.deepcopy(model)
+        x = torch.randn(
+            batch_size, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=training
+        )
         targets = (x, *model.parameters())
-        dy = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+        reference_targets = (x, *reference_model.parameters())
+        dy = torch.randn(batch_size, out_features, device="cuda", dtype=torch.bfloat16)
 
-        def forward(x):
-            return model(x)
+        def forward(x, module):
+            if quant_recipe is None:
+                return module(x)
+            with te.autocast(recipe=quant_recipe):
+                return module(x)
 
         compiled = torch.compile(forward, fullgraph=True, mode="reduce-overhead")
         counters.clear()
         with contextlib.nullcontext() if training else torch.no_grad():
             for _ in range(5):
                 torch.compiler.cudagraph_mark_step_begin()
-                actual = compiled(x)
+                actual = compiled(x, model)
                 if training:
                     grads = torch.autograd.grad(actual, targets, dy)
                 # Eager reference runs only after the first compiled invocation.
-                expected = forward(x)
-                torch.testing.assert_close(actual, expected)
+                expected = forward(x, reference_model)
+                torch.testing.assert_close(actual, expected, **eager_tols)
                 if training:
-                    expected_grads = torch.autograd.grad(expected, targets, dy)
-                    torch.testing.assert_close(grads, expected_grads)
+                    expected_grads = torch.autograd.grad(expected, reference_targets, dy)
+                    torch.testing.assert_close(grads, expected_grads, **eager_tols)
                     del grads, expected_grads
                 del actual, expected
         torch.cuda.synchronize()
@@ -2984,7 +3106,7 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
         """
     )
     result = subprocess.run(
-        [sys.executable, "-c", script, str(training), initial_device],
+        [sys.executable, "-c", script, str(training), initial_device, str(quantization)],
         capture_output=True,
         text=True,
         check=False,
@@ -2994,29 +3116,44 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
 
 
 def _check_linear_bias_compile(
-    dtype, quantization, case, grads, monkeypatch, *, backward_override=None
+    dtype,
+    quantization,
+    case,
+    grads,
+    monkeypatch,
+    *,
+    backward_override=None,
+    input_shape=(2, 16, 32),
 ):
+    is_nvfp4 = quantization in ("nvfp4", "nvfp4-no-rht")
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if is_nvfp4 and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
     if (case == "linear" and grads == "bias") or (case == "bias" and grads == "weight"):
         pytest.skip("Requested parameter is absent")
     torch._dynamo.reset()
     if case == "unfused":
         monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    in_features = input_shape[-1]
+    out_features = 128 if is_nvfp4 else 64
     ops = []
     if case != "bias":
-        ops.append(te.ops.BasicLinear(32, 64, dtype=dtype))
+        ops.append(te.ops.BasicLinear(in_features, out_features, dtype=dtype))
         ops[-1].weight.requires_grad_(grads in ("all", "weight"))
     if case != "linear":
-        ops.append(te.ops.Bias(32 if case == "bias" else 64, dtype=dtype))
+        ops.append(te.ops.Bias(in_features if case == "bias" else out_features, dtype=dtype))
         ops[-1].bias.requires_grad_(grads in ("all", "bias"))
     model = te.ops.Sequential(*ops)
     eager_model = copy.deepcopy(model)
-    quant_recipe = (
-        recipe.Float8CurrentScaling(backward_override=backward_override)
-        if quantization == "fp8"
-        else None
-    )
+    quant_recipe = None
+    if quantization == "fp8":
+        quant_recipe = recipe.Float8CurrentScaling(backward_override=backward_override)
+    elif is_nvfp4:
+        quant_recipe = recipe.NVFP4BlockScaling(
+            disable_rht=quantization == "nvfp4-no-rht", disable_stochastic_rounding=True
+        )
+    eager_tols = {"rtol": 0, "atol": 0} if is_nvfp4 else {}
 
     def run(x, module=model):
         if quant_recipe is None:
@@ -3025,16 +3162,17 @@ def _check_linear_bias_compile(
             return module(x)
 
     compiled, graphs = _compile_with_graphs(run)
-    x = torch.randn(2, 16, 32, device="cuda", dtype=dtype)
+    x = torch.randn(input_shape, device="cuda", dtype=dtype)
     x.requires_grad_(grads in ("all", "input"))
     targets = tuple(t for t in (x, *model.parameters()) if t.requires_grad)
     eager_targets = tuple(t for t in (x, *eager_model.parameters()) if t.requires_grad)
     graph_count = None
     with torch.no_grad() if grads == "none" else contextlib.nullcontext():
         for iteration in range(3):
+            check_reference = iteration == 0 and not is_nvfp4
             with torch.no_grad():
                 for tensor in (x, *model.parameters()):
-                    if iteration == 0:
+                    if check_reference:
                         # These binary fractions survive FP8 quantization exactly,
                         # allowing a strict comparison with native PyTorch.
                         tensor.copy_(torch.randint(-2, 3, tensor.shape, device=tensor.device) / 16)
@@ -3044,8 +3182,8 @@ def _check_linear_bias_compile(
                     eager_param.copy_(param)
             actual = compiled(x)
             expected = run(x, eager_model)
-            torch.testing.assert_close(actual, expected)
-            if iteration == 0:
+            torch.testing.assert_close(actual, expected, **eager_tols)
+            if check_reference:
                 reference = x.double()
                 for op in ops:
                     reference = (
@@ -3059,14 +3197,14 @@ def _check_linear_bias_compile(
             if targets:
                 dy = (
                     torch.randint_like(actual, -2, 3) / 16
-                    if iteration == 0
+                    if check_reference
                     else torch.randn_like(actual)
                 )
                 actual_grads = torch.autograd.grad(actual, targets, dy)
                 torch.testing.assert_close(
-                    actual_grads, torch.autograd.grad(expected, eager_targets, dy)
+                    actual_grads, torch.autograd.grad(expected, eager_targets, dy), **eager_tols
                 )
-                if iteration == 0:
+                if check_reference:
                     torch.testing.assert_close(
                         actual_grads,
                         torch.autograd.grad(reference, targets, dy.double()),
