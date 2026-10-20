@@ -29,9 +29,12 @@ from transformer_engine.common.cudnn.graph import (
     check_graph_support,
     compile_graph,
     uses_ragged_attention_graph,
+    mxfp8_scale_spec,
 )
+from transformer_engine.common.cudnn import mxfp8 as mxfp8_rules
 
 from .cudnn_graph import import_cudnn, check_frontend_version, serialize_graph, graph_attributes
+from . import mxfp8_attention
 
 
 def device_capabilities():
@@ -235,7 +238,20 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
     graph_sq = _bucket(max(batch * sq, 1), 1024, 32768) if ragged_stats else sq
     graph_sk = _bucket(max(batch * sk, 1), 1024, 32768) if ragged_stats else sk
     fp8 = config.fp8 and (not backward or fp8_backward)
+    mxfp8 = fp8 and config.fp8 == "mxfp8"
     version = cudnn_version()
+    if config.fp8 == "mxfp8":
+        error = mxfp8_rules.support_error(
+            capabilities[0], version, "thd" if ragged else "bshd"
+        ) or mxfp8_rules.shape_error(sq, sk, dq, dv)
+        if error:
+            raise ValueError(error)
+        if config.qkv_layout.name != "BSHD_BSHD_BSHD":
+            raise ValueError("MXFP8 attention currently requires separate BSHD query/key/value.")
+        if config.return_max_logit:
+            raise ValueError("MXFP8 attention does not support return_max_logit=True.")
+        if config.attn_bias_type.name != "NO_BIAS":
+            raise ValueError("MXFP8 attention does not support attention bias or ALiBi.")
     if ragged and capabilities[0] < 90:
         raise ValueError("F16/BF16 fused attention with THD format requires sm90 or later.")
     if backward and not fp8 and ragged_stats:
@@ -283,6 +299,9 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
     kdim = (graph_batch, hg, graph_sk, dq)
     vdim = (graph_batch, hg, graph_sk, dv)
     odim = (graph_batch, h, graph_sq, dv)
+    grad_strides = (qstride, kstride, vstride)
+    if mxfp8:
+        qstride, kstride, vstride = (_stride(dim) for dim in (qdim, kdim, vdim))
     tensor("q", qdim, qstride, qkv_dtype, ragged_offset="offset_q" if ragged else "")
     tensor(
         "k",
@@ -333,13 +352,26 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
             output("dsink", (1, h, 1, 1), (h, 1, 1, 1), 4, dtype="FLOAT")
     constant("attn_scale", config.scaling_factor)
     if fp8:
-        for name in ("descale_q", "descale_k", "descale_v"):
-            tensor(name, (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
-        constant("scale_s", 448.0)
-        constant("descale_s", 1.0 / 448.0)
+        for name, dim in zip(("q", "k", "v"), (qdim, kdim, vdim)):
+            if mxfp8:
+                specs["descale_" + name] = mxfp8_scale_spec(
+                    dim, "bhsd", columnwise=name == "v" and not backward
+                )
+                inputs.append(("descale_" + name, "descale_" + name, 0))
+            else:
+                tensor("descale_" + name, (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
+        if not mxfp8:
+            constant("scale_s", 448.0)
+            constant("descale_s", 1.0 / 448.0)
     if backward:
         tensor("o", odim, ostride, ragged_offset=o_offset)
-        tensor("do", odim, ostride, "FP8_E5M2" if fp8 else io_dtype, ragged_offset=o_offset)
+        tensor(
+            "do",
+            odim,
+            _stride(odim) if mxfp8 else ostride,
+            "FP8_E4M3" if mxfp8 else "FP8_E5M2" if fp8 else io_dtype,
+            ragged_offset=o_offset,
+        )
         tensor("stats", stats_dim, stats_stride, "FLOAT", ragged_offset=stats_offset)
         grad_slots = (0, 0 if qpack == 3 else 1, 0 if qpack == 3 else (1 if kvpack == 2 else 2))
         grad_offsets = (
@@ -354,13 +386,21 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
         for name, dim, stride, slot, offset, ragged_offset in zip(
             ("dq", "dk", "dv"),
             (qdim, kdim, vdim),
-            (qstride, kstride, vstride),
+            grad_strides,
             grad_slots,
             grad_offsets,
             ("offset_q", "offset_k", "offset_v"),
         ):
             output(name, dim, stride, slot, offset, ragged_offset=ragged_offset if ragged else "")
-        if fp8:
+        if mxfp8:
+            tensor("do_f16", odim, _stride(odim))
+            for name, dim in (("q_t", qdim), ("k_t", kdim), ("do_t", odim)):
+                tensor(name, dim, _stride(dim), "FP8_E4M3")
+                specs["descale_" + name] = mxfp8_scale_spec(dim, "bhsd", columnwise=True)
+                inputs.append(("descale_" + name, "descale_" + name, 0))
+            specs["descale_do"] = mxfp8_scale_spec(odim, "bhsd")
+            inputs.append(("descale_do", "descale_do", 0))
+        elif fp8:
             tensor("descale_do", (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
             for name in ("descale_o", "scale_dp", "descale_dp", "scale_dq", "scale_dk", "scale_dv"):
                 constant(name, 1.0)
@@ -371,13 +411,14 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
         output("stats", stats_dim, stats_stride, 1, dtype="FLOAT", ragged_offset=stats_offset)
         if config.return_max_logit:
             output("max", stats_dim, stats_stride, 2, dtype="FLOAT", ragged_offset=stats_offset)
-        if fp8:
+        if fp8 and not mxfp8:
             constant("scale_o", 1.0)
             output("amax_s", (1, 1, 1, 1), (1, 1, 1, 1), 3, dtype="FLOAT")
             output("amax_o", (1, 1, 1, 1), (1, 1, 1, 1), 4, dtype="FLOAT")
     options = AttentionOptions(
         backward=backward,
         fp8=fp8,
+        mxfp8=mxfp8,
         bottom_right=config.bottom_right_diagonal,
         left_bound=left + 1 if left >= 0 else None,
         right_bound=right if right >= 0 else None,
@@ -475,7 +516,10 @@ def execute(direction, args, config, result_avals):
             plan.multipliers,
         ):
             values[name] = _offset64(offsets, multiplier)
-    if config.fp8:
+    if config.fp8 == "mxfp8":
+        if plan.fp8:
+            values.update(mxfp8_attention.prepare_qkv((q, k, v), backward))
+    elif config.fp8:
         for name in ("q", "k", "v"):
             # Empty dummy operands are not quantized.
             if values[name].size:
@@ -499,10 +543,12 @@ def execute(direction, args, config, result_avals):
                 values["seq_q"],
                 q.shape[-4] if config.qkv_layout.is_qkvpacked() else q.shape[-3],
             )
-        if plan.fp8:
+        if plan.fp8 and config.fp8 == "mxfp8":
+            values.update(mxfp8_attention.prepare_doutput(do))
+        elif plan.fp8:
             values["do"], values["descale_do"] = _quantize(do, jnp.float8_e5m2)
         specs = list(result_avals[:-1])
-        if plan.fp8:
+        if plan.fp8 and config.fp8 != "mxfp8":
             specs += [jax.ShapeDtypeStruct((1,), jnp.float32)] * 4
     else:
         specs = list(result_avals[:3])
@@ -512,7 +558,7 @@ def execute(direction, args, config, result_avals):
             specs[1] = jax.ShapeDtypeStruct(dense_shape, jnp.float32)
             if config.return_max_logit:
                 specs[2] = jax.ShapeDtypeStruct(dense_shape, jnp.float32)
-        if plan.fp8:
+        if plan.fp8 and config.fp8 != "mxfp8":
             specs += [jax.ShapeDtypeStruct((1,), jnp.float32)] * 2
     specs.append(jax.ShapeDtypeStruct((plan.graph.workspace_size,), jnp.uint8))
     attributes = graph_attributes(plan.graph)

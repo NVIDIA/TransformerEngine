@@ -136,7 +136,7 @@ class _FusedAttnConfig:
     )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
     return_max_logit: bool = False
     allow_fast_causal_path: bool = True
-    fp8: bool = False
+    fp8: bool | str = False
 
     @property
     def effective_window_size(self) -> Tuple[int, int]:
@@ -176,7 +176,7 @@ class FusedAttnHelper:
     bias_seqlen_q: Optional[int] = None
     bias_seqlen_kv: Optional[int] = None
     max_segments_per_seq: int = 1
-    fp8: bool = False
+    fp8: bool | str = False
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -193,6 +193,8 @@ class FusedAttnHelper:
         that no fused backend is available), and ``NVTE_DEBUG_LEVEL=2`` additionally logs the
         resolved config and the reason fused attention was rejected.
         """
+        if self.fp8 not in (False, True, "mxfp8"):
+            raise ValueError('fp8 must be False, True, or "mxfp8".')
         if self.q_dtype != self.kv_dtype:
             raise ValueError("Q and KV must have the same data type.")
         backend = NVTE_Fused_Attn_Backend.NVTE_No_Backend
@@ -3541,7 +3543,7 @@ def fused_attn_fwd(
     context_parallel_axis: str = "",
     stripe_size: int | None = None,
     return_max_logit: bool = False,
-    fp8: bool = False,
+    fp8: bool | str = False,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -3710,7 +3712,7 @@ def fused_attn_bwd(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     stripe_size: int | None = None,
-    fp8: bool = False,
+    fp8: bool | str = False,
 ):
     """
     Perform the backward pass of the cuDNN fused attention implementations.

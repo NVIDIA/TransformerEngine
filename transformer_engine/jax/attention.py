@@ -348,7 +348,7 @@ def is_fused_attn_kernel_available(
     bias_seqlen_q: Optional[int] = None,
     bias_seqlen_kv: Optional[int] = None,
     max_segments_per_seq: int = 1,
-    fp8: bool = False,
+    fp8: bool | str = False,
 ):
     """
     To check whether the fused attention kernel is supported.
@@ -1144,7 +1144,7 @@ def _legacy_fused_attn(
     context_parallel_axis: str = "",
     softmax_offset: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
-    fp8: bool = False,
+    fp8: bool | str = False,
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -1266,7 +1266,7 @@ def fused_attn_thd(
     context_parallel_axis: str = "",
     softmax_offset: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
-    fp8: bool = False,
+    fp8: bool | str = False,
 ):
     """
     Deprecated THD fused attn, please use fusd_attn with SequenceDescriptor
@@ -1353,7 +1353,7 @@ def _fused_attn(
     context_checkpoint_name: str = "context",
     stripe_size: int | None = None,
     return_max_logit: bool = False,
-    fp8: bool = False,
+    fp8: bool | str = False,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -1592,7 +1592,7 @@ def fused_attn(
     score_mod_tensors: Optional[Mapping[str, Any]] = None,
     score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
     return_max_logit: bool = False,
-    fp8: bool = False,
+    fp8: bool | str = False,
 ):
     """
     Perform cuDNN fused attention.
@@ -1649,9 +1649,10 @@ def fused_attn(
             non-differentiable auxiliary inputs.
         score_mod_bprop_tensors (Optional[Mapping[str, Any]]): Additional tensors or
             Python/NumPy scalars made available to `score_mod_bprop`.
-        fp8 (bool): Use tensor-scaled cuDNN FP8 SDPA with E4M3 query/key/value and
-            E5M2 output gradients. Scaling uses the current tensor maximum. Outputs
-            and gradients retain the input FP16/BF16 dtype.
+        fp8 (bool | str): True enables tensor-scaled cuDNN FP8 SDPA; "mxfp8"
+            enables MXFP8 block-scaled attention on SM100 or later. Outputs and
+            gradients retain the input FP16/BF16 dtype. MXFP8 uses E4M3 operands
+            in both passes, with independent scales along the contraction axes.
         return_max_logit (bool): If True, also return per-head maximum attention logits
             with shape ``[h]``.
     Returns:
@@ -1689,6 +1690,8 @@ def fused_attn(
                              AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
                              QKVLayout.T3HD, 0.125, 0, True, 3)
     """
+    if fp8 not in (False, True, "mxfp8"):
+        raise ValueError('fp8 must be False, True, or "mxfp8".')
     if score_mod is None:
         score_mod_only_args = [
             name
