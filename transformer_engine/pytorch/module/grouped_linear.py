@@ -87,6 +87,7 @@ from ...debug.pytorch.debug_state import TEDebugState
 __all__ = ["GroupedLinear", "is_module_grouped_tensor_path_supported"]
 
 
+@functools.lru_cache(maxsize=None)
 def is_module_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
