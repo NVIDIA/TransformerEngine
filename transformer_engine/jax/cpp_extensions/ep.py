@@ -590,9 +590,7 @@ class EpDispatchPrimitive(BasePrimitive):
     ):
         del is_outer, result_infos
         tokens_spec = arg_infos[2].sharding.spec
-        ok, ep_axis, outer_axes = _leading_axis_ok(
-            tokens_spec, resource_axes, hidden_trailing=True
-        )
+        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, resource_axes, hidden_trailing=True)
         if not ok:
             raise NotImplementedError(
                 "EpDispatch: tokens leading dim must include ep_resource"
