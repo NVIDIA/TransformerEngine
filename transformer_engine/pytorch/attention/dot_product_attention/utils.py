@@ -36,6 +36,12 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_S,
     META_DP,
 )
+from transformer_engine.common.cudnn.mxfp8 import (
+    quantization_layouts as mxfp8_quantization_layouts,
+    scale_reordering as mxfp8_scale_reordering,
+    shape_error as mxfp8_shape_error,
+    support_error as mxfp8_support_error,
+)
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
@@ -784,23 +790,16 @@ def get_attention_backend(
                         )
                         use_fused_attention = False
         if use_fused_attention and fp8_recipe.mxfp8():
-            if device_compute_capability < (10, 0):
-                logger.debug("Disabling FusedAttention for MXFP8 on arch < sm100")
+            reason = mxfp8_support_error(
+                10 * device_compute_capability[0] + device_compute_capability[1],
+                10000 * cudnn_version[0] + 100 * cudnn_version[1] + cudnn_version[2],
+                qkv_format,
+            )
+            if fp8_recipe.fp8_mha:
+                reason = "MXFP8 attention does not support fp8_mha=True."
+            if reason:
+                logger.debug("Disabling FusedAttention: %s", reason)
                 use_fused_attention = False
-            elif fp8_recipe.fp8_mha:
-                logger.debug("Disabling FusedAttention for MXFP8 with fp8_mha=True")
-                use_fused_attention = False
-            else:
-                if cudnn_version < (9, 21, 0):
-                    logger.debug("Disabling FusedAttention for MXFP8 with cuDNN < 9.21.0")
-                    use_fused_attention = False
-                elif cudnn_version in ((9, 23, 0), (9, 23, 1)):
-                    # 9.23.0/9.23.1: known bugs with MXFP8 SDPA
-                    logger.debug("Disabling FusedAttention for MXFP8 with cuDNN 9.23.0/9.23.1")
-                    use_fused_attention = False
-                elif qkv_format == "thd":
-                    logger.debug("Disabling FusedAttention for MXFP8 with qkv_format = thd")
-                    use_fused_attention = False
         if use_fused_attention and (fp8_recipe.float8_block_scaling() or fp8_recipe.nvfp4()):
             logger.debug("Disabling FusedAttention for %s", fp8_recipe.__class__.__name__)
             use_fused_attention = False
@@ -3457,25 +3456,21 @@ def mxfp8_transpose_swizzle(fp8_tensors, src_format):
     rs_list = [t._rowwise_scale_inv for t in fp8_tensors]
     cs_list = [t._columnwise_scale_inv for t in fp8_tensors]
 
-    def _align_up(x, a):
-        return ((x + a - 1) // a) * a
-
-    def _bhsd_shape(src_4d, d_pad):
+    def _bhsd_shape(src_4d):
         if src_format == "sbhd":
             S, B, H, _ = src_4d.shape
         else:
             B, S, H, _ = src_4d.shape
-        return (B, H, S, d_pad)
+        return (B, H, S, src_4d.shape[-1])
 
-    def _build_outputs(scale_list, alignment):
+    def _build_outputs(scale_list, columnwise):
         entries = []
         total = 0
         for s in scale_list:
             if s is None:
                 entries.append(None)
                 continue
-            d_pad = _align_up(s.shape[-1], alignment)
-            shape = _bhsd_shape(s, d_pad)
+            shape, _, _ = mxfp8_scale_reordering(_bhsd_shape(s), columnwise)
             numel = 1
             for dim in shape:
                 numel *= dim
@@ -3487,8 +3482,8 @@ def mxfp8_transpose_swizzle(fp8_tensors, src_format):
         buf = torch.empty(total, dtype=torch.uint8, device=device)
         return [buf[e[0] : e[0] + e[1]].view(e[2]) if e is not None else None for e in entries]
 
-    rs_outs = _build_outputs(rs_list, 4)
-    cs_outs = _build_outputs(cs_list, 128)
+    rs_outs = _build_outputs(rs_list, False)
+    cs_outs = _build_outputs(cs_list, True)
 
     rs_permuted = tex.multi_tensor_transpose_to_bhsd(
         rs_list, original_format=src_format, outputs=rs_outs
@@ -3541,10 +3536,8 @@ def combine_and_quantize(
         d_v = v.shape[_d_dim[qkv_format]]
         s_q = q.shape[_s_dim[q_format]]
         s_kv = v.shape[_s_dim[kv_format]]
-        assert s_q % 128 == 0 and s_kv % 128 == 0 and d_qk % 32 == 0 and d_v % 32 == 0, (
-            "MXFP8 quantization requires s_q % 128 == 0, s_kv % 128 == 0, d_qk % 32 == 0, d_v % 32"
-            f" == 0. Found {s_q=}, {s_kv=}, {d_qk=}, {d_v=}."
-        )
+        alignment_error = mxfp8_shape_error(s_q, s_kv, d_qk, d_v)
+        assert not alignment_error, alignment_error
 
         if qkv_layout not in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
             keep_same_data_and_scale_inv_format = True
@@ -3552,20 +3545,13 @@ def combine_and_quantize(
         # ---- Fast path: quantize in original layout, permute scale_inv to BHSD, then swizzle ----
         if not keep_same_data_and_scale_inv_format:
             q_quantizer, k_quantizer, v_quantizer = [qkv_quantizer.copy() for _ in range(3)]
-            if used_in_forward and not used_in_backward:
-                q_quantizer.rowwise_usage = True
-                q_quantizer.columnwise_usage = False
-                k_quantizer.rowwise_usage = True
-                k_quantizer.columnwise_usage = False
-                v_quantizer.rowwise_usage = False
-                v_quantizer.columnwise_usage = True
-            elif (not used_in_forward) and used_in_backward:
-                q_quantizer.rowwise_usage = True
-                q_quantizer.columnwise_usage = True
-                k_quantizer.rowwise_usage = True
-                k_quantizer.columnwise_usage = True
-                v_quantizer.rowwise_usage = True
-                v_quantizer.columnwise_usage = False
+            if used_in_forward != used_in_backward:
+                for quantizer, (rowwise, columnwise) in zip(
+                    (q_quantizer, k_quantizer, v_quantizer),
+                    mxfp8_quantization_layouts(backward=used_in_backward),
+                ):
+                    quantizer.rowwise_usage = rowwise
+                    quantizer.columnwise_usage = columnwise
             (q_fp8, k_fp8, v_fp8), qkv_scale_inv_format = mxfp8_quantize_fast_path(
                 [(q, q_quantizer), (k, k_quantizer), (v, v_quantizer)], qkv_format
             )
@@ -3588,20 +3574,13 @@ def combine_and_quantize(
         q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
 
         q_quantizer, k_quantizer, v_quantizer = [qkv_quantizer.copy() for _ in range(3)]
-        if used_in_forward and not used_in_backward:
-            q_quantizer.rowwise_usage = True
-            q_quantizer.columnwise_usage = False
-            k_quantizer.rowwise_usage = True
-            k_quantizer.columnwise_usage = False
-            v_quantizer.rowwise_usage = False
-            v_quantizer.columnwise_usage = True
-        elif (not used_in_forward) and used_in_backward:
-            q_quantizer.rowwise_usage = True
-            q_quantizer.columnwise_usage = True
-            k_quantizer.rowwise_usage = True
-            k_quantizer.columnwise_usage = True
-            v_quantizer.rowwise_usage = True
-            v_quantizer.columnwise_usage = False
+        if used_in_forward != used_in_backward:
+            for quantizer, (rowwise, columnwise) in zip(
+                (q_quantizer, k_quantizer, v_quantizer),
+                mxfp8_quantization_layouts(backward=used_in_backward),
+            ):
+                quantizer.rowwise_usage = rowwise
+                quantizer.columnwise_usage = columnwise
         q_fp8, k_fp8, v_fp8 = [
             quant(x) for quant, x in zip([q_quantizer, k_quantizer, v_quantizer], [q, k, v])
         ]
