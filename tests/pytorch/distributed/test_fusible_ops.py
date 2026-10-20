@@ -1132,6 +1132,7 @@ def main() -> None:
             torch.distributed.barrier(world_group())
             torch.cuda.synchronize()
         finally:
+            # Stop NCCL background work before the CUDA runtime shuts down.
             if torch.distributed.is_initialized():
                 torch.distributed.destroy_process_group()
 

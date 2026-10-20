@@ -97,6 +97,9 @@ enum NVTEGroupedMatmulConfigAttribute {
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
+/*! \brief Get the cuBLASLt version that Transformer Engine was built against. */
+int nvte_get_cublaslt_build_version();
+
 /*! \brief Create a matrix multiplication configuration. */
 NVTEMatmulConfig nvte_create_matmul_config();
 
