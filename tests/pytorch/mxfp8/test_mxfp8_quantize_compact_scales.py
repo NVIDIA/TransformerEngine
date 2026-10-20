@@ -55,6 +55,34 @@ def _make_output(shape, scale_shapes, rowwise, columnwise, with_2d_quantization,
     return out, guards
 
 
+def _check_quantized(out, ref, guards, shape):
+    """Compare with TE's own quantization into padded scales, byte by byte.
+
+    Only the leading entry of each scale row per block is compared, and no byte around a
+    scale view may change.
+    """
+    rows, cols = shape
+    for name, (buf, start, numel) in guards.items():
+        outside = torch.cat([buf[:start], buf[start + numel :]])
+        assert torch.all(outside == CANARY), f"{name} scales were written outside their buffer"
+    if out._rowwise_data is not None:
+        torch.testing.assert_close(out._rowwise_data, ref._rowwise_data, rtol=0, atol=0)
+        torch.testing.assert_close(
+            out._rowwise_scale_inv[:, : cols // 32],
+            ref._rowwise_scale_inv[:rows, : cols // 32],
+            rtol=0,
+            atol=0,
+        )
+    if out._columnwise_data is not None:
+        torch.testing.assert_close(out._columnwise_data, ref._columnwise_data, rtol=0, atol=0)
+        torch.testing.assert_close(
+            out._columnwise_scale_inv[:, :cols],
+            ref._columnwise_scale_inv[: rows // 32, :cols],
+            rtol=0,
+            atol=0,
+        )
+
+
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "shape",
@@ -88,23 +116,50 @@ def test_quantize_into_compact_scales(shape, dtype, usage, with_2d_quantization,
         scale_offset,
     )
     out.quantize_(src)
+    _check_quantized(out, ref, guards, shape)
 
-    for name, (buf, start, numel) in guards.items():
-        outside = torch.cat([buf[:start], buf[start + numel :]])
-        assert torch.all(outside == CANARY), f"{name} scales were written outside their buffer"
-    if rowwise:
-        torch.testing.assert_close(out._rowwise_data, ref._rowwise_data, rtol=0, atol=0)
-        torch.testing.assert_close(
-            out._rowwise_scale_inv, ref._rowwise_scale_inv[:rows, : cols // 32], rtol=0, atol=0
-        )
-    if columnwise:
-        torch.testing.assert_close(out._columnwise_data, ref._columnwise_data, rtol=0, atol=0)
-        torch.testing.assert_close(
-            out._columnwise_scale_inv,
-            ref._columnwise_scale_inv[: rows // 32, :cols],
-            rtol=0,
-            atol=0,
-        )
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "shape",
+    # Reach the register-resident rowwise and bidimensional kernels and the staged ones.
+    [(64, 128), (64, 256), (96, 384)],
+    ids=lambda shape: f"{shape[0]}x{shape[1]}",
+)
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.bfloat16, torch.float16], ids=lambda dtype: str(dtype)[6:]
+)
+@pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
+@pytest.mark.parametrize(
+    "extra",
+    # Scale entries per row beyond one per block, as (rowwise, columnwise).
+    [(0, 1), (4, 0), (4, 16), (1, 1)],
+    ids=lambda extra: f"extra{extra[0]}x{extra[1]}",
+)
+def test_quantize_into_pitched_scales(shape, dtype, usage, extra):
+    """Unswizzled scale rows may hold more entries than blocks, as in a padded view.
+
+    Whichever kernel runs, the leading entries hold the same values as TE's padded scales.
+    """
+    rows, cols = shape
+    rowwise = usage in ("rowwise", "both")
+    columnwise = usage in ("columnwise", "both")
+    torch.manual_seed(1234)
+    src = (8 * torch.randn(shape, device="cuda")).to(dtype)
+
+    ref = _make_quantizer(rowwise, columnwise, False)(src)
+    out, guards = _make_output(
+        shape,
+        {
+            "rowwise": (rows, cols // 32 + extra[0]),
+            "columnwise": (rows // 32, cols + extra[1]),
+        },
+        rowwise,
+        columnwise,
+        with_2d_quantization=False,
+    )
+    out.quantize_(src)
+    _check_quantized(out, ref, guards, shape)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

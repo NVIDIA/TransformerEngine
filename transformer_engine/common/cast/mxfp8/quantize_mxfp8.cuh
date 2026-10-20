@@ -842,10 +842,15 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               // in the staged bidimensional kernel, colwise scales for whole iterations, which
               // TE's padded scale tensors always accommodate. Compact scales that do not, such
               // as rows that are not a multiple of four scales long or a view that is not
-              // 16-byte aligned, use the generic kernel.
+              // 16-byte aligned, use the generic kernel. So do rowwise-only casts into scale rows
+              // longer than one entry per block: the register-resident kernel rejects them, and
+              // the staged kernel's scale flush, which skips threads past the last column, leaves
+              // some of those rows unwritten.
               const bool scales_fit_specialized =
                   is_aligned_ptr(scales_rowwise_ptr, 16) &&
                   is_aligned_ptr(scales_colwise_ptr, 16) && scale_stride_rowwise % 4 == 0 &&
+                  (scaling_type != ScalingType::ROWWISE ||
+                   scale_stride_rowwise == cols / SCALE_DIM_X) &&
                   (scaling_type != ScalingType::BIDIMENSIONAL ||
                    scale_stride_colwise >=
                        DIVUP_TO_MULTIPLE(cols, bidimensional_staged_traits::blockIterDim::N));
@@ -913,7 +918,10 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     // Gated per path: the colwise scale axis is transposed under the
                     // GEMM swizzle, so this kernel does not handle it yet.
                     if constexpr (std::is_same_v<IType, bf16> && !WITH_GEMM_SWIZZLED_SCALES) {
-                      if (register_resident_supported && rows % 32 == 0 && cols % 256 == 0) {
+                      // Its 64- and 128-bit colwise scale stores need every colwise scale row
+                      // to start 16-byte aligned; other row lengths take the staged kernel.
+                      if (register_resident_supported && rows % 32 == 0 && cols % 256 == 0 &&
+                          scale_stride_colwise % 16 == 0) {
                         // Both scale arrays must share a layout; this kernel only
                         // writes the packed one.  The template gate above should
                         // already have excluded swizzled tensors, so this catches
