@@ -604,6 +604,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Misc
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
+  m.def("get_cublasLt_build_version", &nvte_get_cublaslt_build_version,
+        "Get the cublasLt version that Transformer Engine was built against",
+        py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
