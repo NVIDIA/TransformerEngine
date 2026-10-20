@@ -6,12 +6,17 @@
 
 from email.parser import Parser
 from io import StringIO
+from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
 from setuptools import Distribution
 
-from build_tools import jax as jax_build
+# CI runs outside the checkout root and tests the installed TE package.
+# Expose the source-only build tools just for this import.
+with pytest.MonkeyPatch.context() as _build_import_path:
+    _build_import_path.syspath_prepend(str(Path(__file__).resolve().parents[2]))
+    from build_tools import jax as jax_build
 
 
 @pytest.mark.parametrize("frontend_version", ("1.29.0", "1.30.0"))
