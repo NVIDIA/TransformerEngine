@@ -32,9 +32,14 @@ try:
         MemberType,
     )
 
-    _opaque_available = True
+    _opaque_available = hasattr(torch._library.opaque_object, "is_opaque_constant_type")
 except ImportError:
     _opaque_available = False
+
+pytestmark = pytest.mark.skipif(
+    not _opaque_available,
+    reason="This PyTorch build lacks the opaque-object API required by Transformer Engine",
+)
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
@@ -48,6 +53,7 @@ from transformer_engine.pytorch.module import (
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
+from transformer_engine.pytorch.ops.basic.bias import BiasBwdArgs
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
@@ -60,6 +66,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
 )
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
+from transformer_engine.pytorch.dynamo.fake import fake_bgrad
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -1600,7 +1607,7 @@ if _opaque_available:
 
 @pytest.mark.skipif(
     not _opaque_available,
-    reason="torch.compile opaque-object support requires PyTorch >= 2.11",
+    reason="torch opaque object API not available",
 )
 @pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
 def test_quantizer_value_object_fullgraph(factory):
@@ -2065,7 +2072,10 @@ def test_te_modules_compile_non_2d_input(input_shape, fp8_recipe, module, compil
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize(
     "fp8_recipe,input_shape",
-    [pytest.param(None, (64,), id="bf16-rank1")]
+    [
+        pytest.param(None, (64,), id="bf16-rank1"),
+        pytest.param(None, (2, 4, 4, 64), id="bf16-rank4"),
+    ]
     + [
         pytest.param(fp8_recipe, shape, id=f"{name}-{shape}")
         for name, fp8_recipe in (
@@ -3258,6 +3268,62 @@ def test_te_ops_linear_bias_compile(
 ):
     monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_rht_fusion)))
     _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch, input_shape=shape)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("mode", ["rht", "2d", "row-scaled"])
+def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
+    quantizer = NVFP4Quantizer(
+        columnwise=True,
+        with_rht=mode == "rht",
+        with_post_rht_amax=mode == "rht",
+        with_2d_quantization=mode == "2d",
+        row_scaled_nvfp4=mode == "row-scaled",
+        with_random_sign_mask=False,
+    )
+
+    def bgrad(inp):
+        dx, ((db,),), _ = te.ops.Bias.compile_ops[1](BiasBwdArgs(inp, quantizer))
+        return dx, db
+
+    torch._dynamo.reset()
+    compiled, graphs = _compile_with_graphs(bgrad)
+    # Pairs preserve alignment, including distinct nonzero remainders.
+    shapes = ((128, 128), (256, 256), (96, 160), (160, 224))
+    if mode == "row-scaled":
+        shapes = shapes[:1]
+    cases = [(False, True, shape) for shape in shapes]
+    if mode == "rht":
+        cases += [(True, True, (128, 128)), (False, True, (128, 128))]
+    if mode != "row-scaled":
+        cases.append((False, False, (128, 128)))
+
+    for i, (disable_fusion, optimize_for_gemm, shape) in enumerate(cases):
+        monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_fusion)))
+        quantizer.optimize_for_gemm = optimize_for_gemm
+        inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        torch._dynamo.mark_dynamic(inp, (0, 1))
+        previous_graph_count = len(graphs)
+        dx, db = compiled(inp)
+        expected_db, expected_dx = tex.bgrad_quantize(inp, quantizer)
+        assert dx._with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+        torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
+        torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
+        torch.testing.assert_close(
+            dx._columnwise_data, expected_dx._columnwise_data, atol=0, rtol=0
+        )
+        if i < len(shapes) and i % 2 == 1:
+            assert len(graphs) == previous_graph_count
+
+    shape = (64, 1, 128)
+    inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    _, expected_dx = tex.bgrad_quantize(inp, quantizer)
+    _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
+    assert dx_spec.with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+    for name, (inner_shape, inner_dtype) in dx_spec.quantizer.inner_tensor_specs(shape).items():
+        inner = getattr(expected_dx, name)
+        assert inner.shape == inner_shape
+        assert inner.dtype == inner_dtype
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

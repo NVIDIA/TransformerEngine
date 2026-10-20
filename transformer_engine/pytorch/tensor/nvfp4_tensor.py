@@ -330,29 +330,11 @@ class NVFP4Quantizer(Quantizer):
 
     @staticmethod
     def get_columnwise_shape(shape: Iterable[int]) -> Tuple[int, ...]:
-        """Calculate the shape of a tensor after columnwise quantization.
-
-        For NVFP4 columnwise quantization, it's performing 16x1 quantization block scaling.
-
-        Parameters
-        ----------
-        shape : Iterable[int]
-            Original shape of the tensor
-
-        Returns
-        -------
-        Tuple[int, ...]
-            New shape with dimensions rearranged for columnwise layout.
-            For a shape (d1, d2, ..., dn), returns (dn, d1, d2, ..., dn-1).
-            Returns empty tuple for empty input shape.
-        """
-        if len(shape) == 0:
-            return tuple()
-        # and then after AG, a reorganize kernel will be called to restore the shape
-        colwise_shape = [shape[-1]]
-        for i in range(len(shape) - 1):
-            colwise_shape.append(shape[i])
-        return tuple(colwise_shape)
+        """Return the flattened columnwise shape before FP4 packing."""
+        shape = tuple(shape)
+        if not shape:
+            return ()
+        return (shape[-1], math.prod(shape[:-1]))
 
     @staticmethod
     def convert_shape_for_fp4(shape: Iterable[int]) -> Tuple[int, ...]:
@@ -418,7 +400,8 @@ class NVFP4Quantizer(Quantizer):
             amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
             specs["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
         if self.columnwise_usage:
-            specs["_amax_columnwise"] = ((1,), torch.float32)
+            amax_columnwise_shape = (shape[-1],) if self.row_scaled_nvfp4 else (1,)
+            specs["_amax_columnwise"] = (amax_columnwise_shape, torch.float32)
         return specs
 
 

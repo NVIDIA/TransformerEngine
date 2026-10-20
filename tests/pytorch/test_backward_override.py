@@ -813,21 +813,22 @@ def _run_grouped_linear_single_step_with_ctx_state(
             raise RuntimeError(
                 "Output tensor has no grad_fn; cannot inspect grouped backward state."
             )
+        state_holder = y.grad_fn.backward_objects
         required_attrs = (
             "backward_override",
             "fp8",
             "reduce_and_update_bwd_fp8_tensors",
         )
-        missing_attrs = [attr for attr in required_attrs if not hasattr(y.grad_fn, attr)]
+        missing_attrs = [attr for attr in required_attrs if not hasattr(state_holder, attr)]
         if missing_attrs:
             raise RuntimeError(
                 "Grouped grad_fn does not expose required backward context attributes: "
                 f"{', '.join(missing_attrs)}."
             )
         ctx_state = (
-            getattr(y.grad_fn, "backward_override"),
-            bool(getattr(y.grad_fn, "fp8")),
-            bool(getattr(y.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
+            getattr(state_holder, "backward_override"),
+            bool(getattr(state_holder, "fp8")),
+            bool(getattr(state_holder, "reduce_and_update_bwd_fp8_tensors")),
         )
     y.backward(dy)
     assert x_run.grad is not None

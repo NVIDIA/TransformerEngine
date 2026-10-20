@@ -2062,7 +2062,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
       scale_dtype, ScaleType,
       quantize_transpose_impl<ScaleType, use_2d_quantization, apply_columnwise_rht>(
-          input, noop, output, quant_config, stream, nullptr);)
+          input, noop, output, quant_config, stream, rht_matrix);)
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
