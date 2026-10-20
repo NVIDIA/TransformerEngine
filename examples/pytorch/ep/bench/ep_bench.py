@@ -208,6 +208,7 @@ def main():
         recv_capacity_per_rank=recv_pr,
         hidden_dim=H,
         num_local_experts=num_local_experts,
+        alignment=0,
     )
 
     tokens = tokens_hbm

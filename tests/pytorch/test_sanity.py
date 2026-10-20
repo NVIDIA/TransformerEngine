@@ -605,8 +605,6 @@ def test_sanity_grouped_linear(
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
-    if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_param:
-        pytest.skip("single parameter grouped linear requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
     skip_unsupported_backward_override("grouped_linear", fp8_recipe, backward_override)
     if fp8_recipe is not None:
         fp8_recipe = copy.deepcopy(fp8_recipe)
@@ -1186,6 +1184,96 @@ def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgra
     _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_recipe, skip_wgrad)
 
 
+def _wgrad_fusion_module(module: str, hidden: int, dtype: torch.dtype):
+    """A module that accumulates its weight gradients into ``main_grad``, and its forward."""
+    kwargs = dict(params_dtype=dtype, device="cuda", fuse_wgrad_accumulation=True)
+    if module == "Linear":
+        block = Linear(hidden, hidden, bias=False, **kwargs)
+    elif module == "LayerNormLinear":
+        block = LayerNormLinear(hidden, hidden, bias=False, **kwargs)
+    elif module == "LayerNormMLP":
+        block = LayerNormMLP(hidden, 2 * hidden, bias=False, **kwargs)
+    elif module == "GroupedLinear":
+        block = GroupedLinear(2, hidden, hidden, bias=False, **kwargs)
+        return block, lambda x: block(x, [x.shape[0] // 2, x.shape[0] - x.shape[0] // 2])
+    else:
+        block = te.ops.Linear(
+            hidden, hidden, bias=False, device="cuda", dtype=dtype, accumulate_into_main_grad=True
+        )
+    return block, block
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Needs two GPUs.")
+# GroupedLinear is left out: its multi-stream cuBLAS GEMM keeps the streams of the first device
+# it runs on, so its forward pass fails on a second device before any weight gradient.
+@pytest.mark.parametrize("module", ["Linear", "LayerNormLinear", "LayerNormMLP", "ops.Linear"])
+@pytest.mark.parametrize("zero_out_wgrad", all_boolean)
+def test_sanity_dummy_wgrad_device(module, zero_out_wgrad):
+    """The cached dummy weight gradient is on the weight's device when the same module shape
+    runs backward on one GPU and then on another."""
+    dtype, hidden, tokens = torch.bfloat16, 128, 64
+    for device in (0, 1):
+        with torch.cuda.device(device):
+            block, forward = _wgrad_fusion_module(module, hidden, dtype)
+            weights = [
+                p
+                for name, p in block.named_parameters()
+                if "weight" in name and "layer_norm" not in name
+            ]
+            for p in weights:
+                p.main_grad = torch.zeros(p.shape, dtype=torch.float32, device="cuda")
+                p.grad_added_to_main_grad = False
+                p.zero_out_wgrad = zero_out_wgrad
+            x = torch.randn(tokens, hidden, dtype=dtype, device="cuda")
+            forward(x).backward(torch.randn(tokens, hidden, dtype=dtype, device="cuda"))
+            for p in weights:
+                assert p.grad is not None and p.grad.device == p.device
+
+
+@pytest.mark.parametrize(
+    "module", ["Linear", "LayerNormLinear", "LayerNormMLP", "GroupedLinear", "ops.Linear"]
+)
+@pytest.mark.parametrize("zero_out_wgrad", all_boolean)
+def test_sanity_zero_tensor_dummy_wgrad(module, zero_out_wgrad):
+    """``zero_tensor_dummy_wgrad`` makes the dummy weight gradient a ZeroTensor.
+
+    The module runs twice before one backward pass, as an LM head shared by the main and MTP
+    heads does, so autograd adds the two dummy weight gradients. ``main_grad`` must not
+    change, and ``zero_out_wgrad`` keeps its zero-filled dummy.
+    """
+    dtype, hidden, tokens = torch.bfloat16, 128, 64
+    torch.manual_seed(seed)
+    block, forward = _wgrad_fusion_module(module, hidden, dtype)
+    weights = [
+        p for name, p in block.named_parameters() if "weight" in name and "layer_norm" not in name
+    ]
+    inputs = [torch.randn(tokens, hidden, dtype=dtype, device="cuda") for _ in range(2)]
+    grad_outputs = [torch.randn(tokens, hidden, dtype=dtype, device="cuda") for _ in range(2)]
+
+    main_grads = {}
+    for zero_tensor_dummy_wgrad in (False, True):
+        for p in weights:
+            p.main_grad = torch.zeros(p.shape, dtype=torch.float32, device="cuda")
+            p.grad_added_to_main_grad = False
+            p.zero_out_wgrad = zero_out_wgrad
+            p.zero_tensor_dummy_wgrad = zero_tensor_dummy_wgrad
+            p.grad = None
+        outputs = [forward(x) for x in inputs]
+        torch.autograd.backward(outputs, grad_outputs)
+        main_grads[zero_tensor_dummy_wgrad] = [p.main_grad for p in weights]
+        for p in weights:
+            assert p.grad_added_to_main_grad
+            assert p.grad is not None
+            if zero_tensor_dummy_wgrad and not zero_out_wgrad:
+                assert p.grad._is_zerotensor()
+            elif zero_out_wgrad:
+                assert not p.grad._is_zerotensor()
+                assert torch.count_nonzero(p.grad) == 0
+    for reference, main_grad in zip(main_grads[False], main_grads[True]):
+        assert torch.count_nonzero(reference) > 0
+        torch.testing.assert_close(main_grad, reference, rtol=0, atol=0)
+
+
 def test_model_multiple_cast():
     a = torch.zeros((16, 16), device="cuda")
     m = Linear(16, 32)
@@ -1358,9 +1446,8 @@ def test_quantized_param_attrs_survive_apply(move):
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-def test_grouped_linear_single_param_preserves_high_precision_init(monkeypatch):
+def test_grouped_linear_single_param_preserves_high_precision_init():
     """Grouped MXFP8 and discrete weights produce identical FP32 master initialization."""
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     num_gemms = 3
 
     def make_module(single_grouped_weight):
@@ -1411,9 +1498,8 @@ def test_grouped_linear_single_param_preserves_high_precision_init(monkeypatch):
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-def test_grouped_linear_rejects_partial_high_precision_init(monkeypatch):
+def test_grouped_linear_rejects_partial_high_precision_init():
     """Packing fails rather than mixing preserved and dequantized initialization."""
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     with quantized_model_init(
         enabled=True,
         recipe=recipe.MXFP8BlockScaling(),
