@@ -224,6 +224,8 @@ def test_fused_attn_backend_message():
 @pytest.mark.parametrize("qkv_format", ("bshd", "sbhd"))
 def test_fused_attn_python_execution(monkeypatch, dtype, qkv_format):
     """The public module must use Python cuDNN for selection, forward, and backward."""
+    if _deterministic and device_compute_capability < (9, 0):
+        pytest.skip("TE disables deterministic cuDNN attention training below SM90")
 
     def common_attention(*_args, **_kwargs):
         raise AssertionError("PyTorch attention called the TE common attention API")
