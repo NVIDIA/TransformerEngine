@@ -26,6 +26,8 @@ namespace rtc_nvfp4 {
 
 #if FP4_TYPE_SUPPORTED
 
+using nvfp4_scale_t = fp8e4m3;
+
 void compile_quantize_4over6_rtc(const std::string &kernel_label, const std::string &itype_name,
                                  bool use_2d, bool return_identity, bool return_transpose,
                                  bool row_scaled, const std::string &mode_name, bool err_fast_math,

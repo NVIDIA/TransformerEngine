@@ -61,7 +61,7 @@ with mesh, global_shard_guard(mesh_resource):
         activation_type="silu",
         score_function="softmax",
         aux_loss_coeff=1e-2,  # load-balancing loss; 0 disables it
-        ep_axis=ep_axis,
+        mesh_resource=mesh_resource,
         dtype=x.dtype,
         recv_capacity_per_rank=recv_capacity_per_rank,
     )

@@ -7,6 +7,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax import random
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from functools import partial
@@ -16,6 +17,7 @@ from utils import assert_allclose, pytest_parametrize_wrapper
 
 import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax import autocast
+from transformer_engine.jax.cpp_extensions.misc import is_all_reduce_in_float32
 from transformer_engine.jax.dense import dense
 
 
@@ -70,6 +72,21 @@ def _get_sharding_for_gemm(mesh, mesh_resource, partition_layout="rowwise"):
     output_sharding = NamedSharding(mesh, output_spec)
 
     return x_sharding, weight_sharding, bias_sharding, output_sharding
+
+
+@pytest.fixture
+def te_all_reduce_in_fp32():
+    """Make TE sum per-device GEMM partial results in FP32 rather than BF16.
+
+    Some weight-gradient rows in these tests are sums of per-device partials that nearly cancel.
+    Rounding each step of a BF16 psum can then exceed the BF16 tolerance against an FP32 reference.
+    """
+    # TE reads NVTE_JAX_ALL_REDUCE_IN_FP32 once and caches it, so reset the cache on entry and exit.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("NVTE_JAX_ALL_REDUCE_IN_FP32", "1")
+        is_all_reduce_in_float32.cache_clear()
+        yield
+    is_all_reduce_in_float32.cache_clear()
 
 
 @partial(jax.jit, static_argnames=("contracting_dims", "output_sharding"))
@@ -173,9 +190,15 @@ class TestDistributedDense:
 
     def _jax_sum_dense(self, x, weight, bias, contracting_dims, output_sharding):
         """JAX dot function for gradient testing"""
-        output = (
-            jax.lax.dot_general(x, weight, dimension_numbers=(contracting_dims, ((), ()))) + bias
-        )
+        # Compute the reference in FP32. A BF16 XLA GEMM may select split-K algorithms that round
+        # partial sums to BF16, which is too inaccurate for the long wgrad contraction in this test.
+        output = jax.lax.dot_general(
+            x.astype(jnp.float32),
+            weight.astype(jnp.float32),
+            dimension_numbers=(contracting_dims, ((), ())),
+            precision=jax.lax.Precision.HIGHEST,
+        ) + bias.astype(jnp.float32)
+        output = output.astype(x.dtype)
         if output_sharding is not None:
             output = jax.lax.with_sharding_constraint(output, output_sharding)
         return jnp.sum(output)
@@ -198,10 +221,16 @@ class TestDistributedDense:
         input_shape,
         weight_shape,
         partition,
+        request,
     ):
         """Test TE GEMM gradients against JAX dot gradients"""
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
+        # A BF16 sum of two partials rounds once, like an FP32 sum. Splitting the batch over more
+        # devices adds BF16 roundings that can exceed tolerance against the FP32 reference.
+        batch_axes = [a for a in (mesh_resource.dp_resource, mesh_resource.fsdp_resource) if a]
+        if np.prod([mesh.shape[a] for a in batch_axes]) > 2:
+            request.getfixturevalue("te_all_reduce_in_fp32")
 
         # Generate inputs
         x, weight, bias = _generate_inputs(input_shape, weight_shape, dtype)

@@ -4,7 +4,6 @@
 
 """Tests for GroupedTensor class"""
 
-import os
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
@@ -34,20 +33,16 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
-# The fused grouped FP8 block-scaling quantize/dequantize kernels are Hopper-only: they gate on
-# SM90-SM99 (NVTE_CHECK(sm >= 90 && sm < 100)). FP8 block scaling is still reported "available" on
-# Blackwell (SM100+) for the emulated/non-grouped paths, so ``fp8_block_scaling_available`` alone
-# does not exclude SM100 — add the Hopper arch bound for the grouped tests.
+# Grouped FP8 block-scaling quantize/dequantize kernels need TMA (SM90+). On Blackwell and newer
+# the FP8 block-scaling recipe is emulated with MXFP8, which only supports power-of-2 scales.
 _device_cc = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
-fp8_block_scaling_grouped_available = fp8_block_scaling_available and (9, 0) <= _device_cc < (10, 0)
+fp8_block_scaling_grouped_available = fp8_block_scaling_available and _device_cc >= (9, 0)
 reason_for_no_fp8_block_scaling_grouped = (
     reason_for_no_fp8_block_scaling
     if not fp8_block_scaling_available
-    else (
-        "Fused grouped FP8 block-scaling quantize/dequantize is only supported on Hopper"
-        " (SM90-SM99)."
-    )
+    else "Grouped FP8 block-scaling quantize/dequantize requires SM90 or newer."
 )
+_fp8bs_pow2_required = _device_cc >= (10, 0)
 
 
 def test_mark_grouped_tensor_supports_plain_tensor():
@@ -629,11 +624,15 @@ class TestGroupedTensor:
         "shape_case",
         ["varying_first", "varying_last", "varying_both"],
     )
+    @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
+    @pytest.mark.parametrize("optimize_for_gemm", [False, True])
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_quantize_grouped_mxfp8(self, shape_case: str, output_dbias: bool) -> None:
+    def test_quantize_grouped_mxfp8(
+        self, shape_case: str, usage: str, optimize_for_gemm: bool, output_dbias: bool
+    ) -> None:
         """Test grouped MXFP8 quantization against per-tensor quantization for
-        varying first/last/both dimensions."""
+        varying first/last/both dimensions and compact or GEMM-swizzled scales."""
         if output_dbias and shape_case != "varying_first":
             pytest.skip("bgrad_group_quantize requires constant last dimension")
 
@@ -688,7 +687,10 @@ class TestGroupedTensor:
         )
 
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-        quantizer.set_usage(rowwise=True, columnwise=False)
+        rowwise = usage in ("rowwise", "both")
+        columnwise = usage in ("columnwise", "both")
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        quantizer.optimize_for_gemm = optimize_for_gemm
 
         if output_dbias:
             grouped_output, dbias = tex.bgrad_group_quantize(
@@ -700,19 +702,23 @@ class TestGroupedTensor:
             )
 
         # Reference: quantize each tensor independently and concatenate the
-        # rowwise data / scale_inv buffers in tensor order.
-        expected_data = []
-        expected_scale_inv = []
-        for tensor in input_tensors:
-            qtensor = quantizer(tensor)
-            expected_data.append(qtensor._rowwise_data.reshape(-1))
-            expected_scale_inv.append(qtensor._rowwise_scale_inv.reshape(-1))
-
-        expected_data = torch.cat(expected_data)
-        expected_scale_inv = torch.cat(expected_scale_inv)
-
-        assert torch.equal(grouped_output.rowwise_data, expected_data)
-        assert torch.equal(grouped_output.scale_inv, expected_scale_inv)
+        # data / scale_inv buffers in tensor order. Both dimensions of every member
+        # are multiples of 128, so swizzled scales need no padding between members.
+        expected_tensors = [quantizer(tensor) for tensor in input_tensors]
+        if rowwise:
+            expected_data = torch.cat([t._rowwise_data.reshape(-1) for t in expected_tensors])
+            expected_scales = torch.cat(
+                [t._rowwise_scale_inv.reshape(-1) for t in expected_tensors]
+            )
+            assert torch.equal(grouped_output.rowwise_data, expected_data)
+            assert torch.equal(grouped_output.scale_inv, expected_scales)
+        if columnwise:
+            expected_data = torch.cat([t._columnwise_data.reshape(-1) for t in expected_tensors])
+            expected_scales = torch.cat(
+                [t._columnwise_scale_inv.reshape(-1) for t in expected_tensors]
+            )
+            assert torch.equal(grouped_output.columnwise_data, expected_data)
+            assert torch.equal(grouped_output.columnwise_scale_inv, expected_scales)
 
         if output_dbias:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
@@ -1092,7 +1098,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=False,
-            force_pow_2_scales=False,
+            force_pow_2_scales=_fp8bs_pow2_required,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -1153,7 +1159,7 @@ class TestGroupedTensor:
                 fp8_dtype=tex.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
-                force_pow_2_scales=False,
+                force_pow_2_scales=_fp8bs_pow2_required,
                 amax_epsilon=0.0,
                 block_scaling_dim=1,
             )
@@ -1496,6 +1502,21 @@ class TestGroupedTensor:
         (``varying_first``); ``varying_last``/``varying_both`` are rejected at the kernel level.
         Per-tensor first dim must be a multiple of 128 (kernel tile size).
         """
+        if not force_pow_2_scales and _fp8bs_pow2_required:
+            # Non-power-of-2 FP8 block scales cannot be emulated with MXFP8 on Blackwell+.
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
+                block_scaling_dim=block_scaling_dim,
+            )
+            x = torch.randn(256, 256, dtype=torch.bfloat16, device="cuda")
+            with pytest.raises(RuntimeError, match="power of two scaling factors"):
+                tex.group_quantize(x, quantizer, 2, None)
+            return
+
         rowwise = direction in ("rowwise", "both")
         columnwise = direction in ("columnwise", "both")
 
@@ -1826,7 +1847,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
-            force_pow_2_scales=False,
+            force_pow_2_scales=_fp8bs_pow2_required,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -1896,7 +1917,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
-            force_pow_2_scales=False,
+            force_pow_2_scales=_fp8bs_pow2_required,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -1944,8 +1965,6 @@ class TestGroupedTensor:
         in_features = 64
         out_features = 32
         dtype = torch.float32
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         src = te.GroupedLinear(
             num_gemms=num_gemms,
             in_features=in_features,
@@ -1996,8 +2015,6 @@ class TestGroupedTensor:
 
     def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         num_gemms = 3
         in_features = 64
         out_features = 32

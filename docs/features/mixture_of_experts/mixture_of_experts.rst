@@ -683,8 +683,8 @@ same static capacity to ``ep_bootstrap``.
 
       * ``transformer_engine.jax.moe.moe`` runs the whole MoE block (router,
         dispatch, expert MLPs, combine) as a single differentiable call. It is
-        executed inside a ``Mesh``; ``ep_axis`` names the mesh axis the experts
-        are sharded over and the dispatch and combine become all-to-all
+        executed inside a ``Mesh``; ``MeshResource.ep_resource`` names the mesh
+        axis the experts are sharded over and dispatch and combine become all-to-all
         collectives over that axis. It also returns the load-balancing loss when
         ``aux_loss_coeff`` is non-zero. Before the first call, initialize EP
         eagerly with ``ep_bootstrap`` and record the same configuration with
