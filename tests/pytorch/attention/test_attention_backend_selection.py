@@ -233,3 +233,56 @@ def _fa4_normalized_kwargs(kwargs):
 def test_fa4_window_sentinel_normalization(sent, expected):
     """Convert only TE's -1 sentinel for both FA4 window argument forms."""
     assert _fa4_normalized_kwargs(sent) == expected
+
+
+@pytest.mark.parametrize(
+    "capability,head_dims,dropout,is_training,requires_backward,expect_flash",
+    [
+        pytest.param((12, 0), (256, 256), 0.1, True, True, False, id="sm120-d256-dropout"),
+        pytest.param((12, 0), (224, 224), 0.1, True, True, False, id="sm120-d224-dropout"),
+        pytest.param((12, 0), (192, 256), 0.1, True, True, False, id="sm120-mla-d256-dropout"),
+        pytest.param((12, 0), (256, 256), 0.0, True, True, True, id="sm120-d256-no-dropout"),
+        pytest.param((12, 0), (256, 256), 0.1, False, True, True, id="sm120-d256-eval"),
+        pytest.param((12, 0), (256, 256), 0.1, True, False, True, id="sm120-d256-forward-only"),
+        pytest.param((12, 0), (192, 192), 0.1, True, True, True, id="sm120-d192-dropout"),
+        pytest.param((10, 0), (256, 256), 0.1, True, True, True, id="sm100-d256-dropout"),
+    ],
+)
+def test_fa2_large_head_dim_dropout_backend_selection(
+    monkeypatch, capability, head_dims, dropout, is_training, requires_backward, expect_flash
+):
+    """FA2 is not selected where its head_dim 256 dropout backward has no kernel (< 144 KB smem)."""
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V2", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V4", "0")
+    monkeypatch.setattr(dpa_utils, "get_device_compute_capability", lambda device: capability)
+    monkeypatch.setattr(dpa_utils, "get_cudnn_version", lambda: (9, 26, 0))
+    fa2_version = PkgVersion("2.8.3")
+    monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "is_installed", True)
+    monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "version", fa2_version)
+    for flag in (
+        "v2_plus",
+        "v2_1_plus",
+        "v2_3_plus",
+        "v2_4_plus",
+        "v2_4_1_plus",
+        "v2_5_plus",
+        "v2_5_7_plus",
+        "v2_6_0_plus",
+        "v2_7_0_plus",
+    ):
+        monkeypatch.setattr(dpa_utils.FlashAttentionUtils, flag, True)
+    params = dpa_utils.AttentionParams(
+        device=torch.device("cuda:0"),
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="bshd_bshd_bshd",
+        head_dim_qk=head_dims[0],
+        head_dim_v=head_dims[1],
+        attn_mask_type="causal",
+        attention_dropout=dropout,
+        is_training=is_training,
+        requires_backward=requires_backward,
+    )
+    flash, selected_version, _, _, _, available = dpa_utils.get_attention_backend(params)
+    assert bool(flash) is expect_flash
+    assert selected_version == (fa2_version if expect_flash else None)
+    assert bool(available[0]) is expect_flash
