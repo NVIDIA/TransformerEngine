@@ -5,11 +5,12 @@
 """Attention-boundary payload, gradient scaling, and normalization contracts."""
 
 import math
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 import torch
-import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch import DType, LayerNormLinear, MXFP8Quantizer, autocast
@@ -62,6 +63,33 @@ def require_cuda():
         pytest.skip("CUDA is required")
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("MXFP8 requires Blackwell")
+
+
+@pytest.mark.usefixtures("require_cuda")
+def test_segmented_first_call():
+    if torch.cuda.get_device_capability() != (10, 3):
+        pytest.skip("The direct segmented binding is qualified for SM103")
+    # A fresh process must reach segmented conversion before any native TE call.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import torch
+from transformer_engine.pytorch import DType, MXFP8Quantizer
+x = torch.ones(128, 128, device="cuda", dtype=torch.bfloat16)
+q = MXFP8Quantizer(DType.kFloat8E4M3, rowwise=True, columnwise=True)
+q.optimize_for_gemm = True
+actual = q.quantize_segments((x,))
+expected = q(x)
+torch.testing.assert_close(actual.dequantize(), expected.dequantize(), rtol=0, atol=0)
+for name in ("_rowwise_data", "_columnwise_data"):
+    assert torch.equal(getattr(actual, name), getattr(expected, name)), name
+""",
+        ],
+        check=True,
+        timeout=120,
+    )
 
 
 @pytest.mark.parametrize("usage", [(True, False), (False, True), (True, True)])
@@ -169,7 +197,7 @@ def scaling_inputs(monkeypatch, scale=1.0 / 64):
         cpu_offloading=False,
         ub_bulk_wgrad=False,
         wgrad_store=None,
-        input_quantizer=MXFP8Quantizer(tex.DType.kFloat8E4M3),
+        input_quantizer=MXFP8Quantizer(DType.kFloat8E4M3),
     )
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     return weight, args

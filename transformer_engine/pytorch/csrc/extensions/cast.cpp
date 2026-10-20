@@ -139,6 +139,7 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
 
 py::object quantize_mxfp8_segments(const std::vector<at::Tensor> &segments, py::handle quantizer,
                                    const std::vector<size_t> &shape) {
+  init_extension();
   NVTE_CHECK(segments.size() == 1 || segments.size() == 3,
              "Expected one or three MXFP8 column segments.");
   NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()), "Expected a native MXFP8 quantizer.");
