@@ -449,9 +449,7 @@ class _AutocastThreadState(threading.local):
         self.fp8_calibration = False
         self.fp8_recipe = None
         self.fp8_distributed_group = None
-        self.is_first_fp8_module = False
         self.fp8_graph_capturing = False
-        self.autocast_depth = 0
 
 
 def _thread_state_field(name: str) -> property:
@@ -468,21 +466,22 @@ class FP8GlobalState:
     Using an instance avoids class-level `setattr(type, ...)` writes, which
     `torch.compile` cannot trace in fullgraph mode.
 
-    Autocast fields are per thread; the rest is process-wide because backward
-    runs on autograd worker threads.
+    Precision fields are per thread. The rest stays process-wide: backward runs
+    on autograd worker threads, and delayed-scaling updates happen once, after
+    the last open autocast exits.
     """
 
     fp8_enabled = _thread_state_field("fp8_enabled")
     fp8_calibration = _thread_state_field("fp8_calibration")
     fp8_recipe = _thread_state_field("fp8_recipe")
     fp8_distributed_group = _thread_state_field("fp8_distributed_group")
-    is_first_fp8_module = _thread_state_field("is_first_fp8_module")
     fp8_graph_capturing = _thread_state_field("fp8_graph_capturing")
-    autocast_depth = _thread_state_field("autocast_depth")
 
     thread_state: _AutocastThreadState = field(default_factory=_AutocastThreadState)
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
+    is_first_fp8_module: bool = False
+    autocast_depth: int = 0
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
     global_amax_history_buffer: Dict[str, list] = field(default_factory=dict)
     global_scale_buffer: Dict[str, list] = field(default_factory=dict)

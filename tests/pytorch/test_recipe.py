@@ -529,8 +529,14 @@ class TestFP8Recipe:
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_autocast_state_is_per_thread():
+def test_autocast_state_is_per_thread(monkeypatch):
     """An autocast entered in another thread must not quantize this thread's modules."""
+    updates = []
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "reduce_and_update_fp8_tensors",
+        lambda forward=True: updates.append(1),
+    )
     module = Linear(64, 64).cuda()
     x = torch.randn(64, 64, device="cuda")
     entered, release = threading.Event(), threading.Event()
@@ -541,13 +547,18 @@ def test_autocast_state_is_per_thread():
             release.wait()
 
     thread = threading.Thread(target=hold_fp8_autocast)
-    with te.autocast(enabled=False):
-        thread.start()
-        try:
+    try:
+        with te.autocast(enabled=False):
+            thread.start()
             assert entered.wait(timeout=60)
             module(x)
-        finally:
-            release.set()
+        # Amax updates stay process-wide: none while the other thread's autocast is open.
+        with te.autocast(enabled=True):
+            pass
+        assert not updates
+    finally:
+        release.set()
+        if thread.is_alive():
             thread.join()
     assert not module.fp8
 
