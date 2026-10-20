@@ -21,6 +21,8 @@ def support_error(sm_arch, backend_version, qkv_format):
     """Return shared hardware, backend-defect, and layout exclusions."""
     if sm_arch < 100:
         return "MXFP8 attention requires SM100 or later."
+    if 120 <= sm_arch < 130:
+        return "cuDNN MXFP8 attention is not supported on SM12x."
     if backend_version < 92100:
         return "MXFP8 attention requires cuDNN 9.21.0 or later."
     if backend_version in (92300, 92301):

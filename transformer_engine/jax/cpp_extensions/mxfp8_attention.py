@@ -23,11 +23,11 @@ def reorder_scale(scale, columnwise=False):
 
 def quantize_operand(value, rowwise=True, columnwise=False):
     """Quantize a logical BHSD operand along its attention contraction axes."""
-    layout = (
-        QuantizeLayout.ROWWISE_COLWISE
-        if rowwise and columnwise
-        else QuantizeLayout.ROWWISE if rowwise else QuantizeLayout.COLWISE
-    )
+    # The public colwise-only wrapper uses a pure-JAX fallback. Its division
+    # by the minimum E8M0 scale can turn constant zero blocks into NaNs during
+    # XLA constant folding. Request the fused common kernel and discard its
+    # unused rowwise result when only columnwise data is needed.
+    layout = QuantizeLayout.ROWWISE_COLWISE if columnwise else QuantizeLayout.ROWWISE
     quantizer = QuantizerFactory.create(
         scaling_mode=ScalingMode.MXFP8_1D_SCALING,
         q_dtype=jnp.float8_e4m3fn,
@@ -35,8 +35,8 @@ def quantize_operand(value, rowwise=True, columnwise=False):
     )
     result = quantize(value, quantizer)
     if isinstance(result, ScaledTensor2x):
-        return result.rowwise_tensor, result.colwise_tensor
-    return (result, None) if rowwise else (None, result)
+        return result.rowwise_tensor if rowwise else None, result.colwise_tensor
+    return result, None
 
 
 def prepare_qkv(qkv, backward=False):
@@ -58,8 +58,8 @@ def prepare_qkv(qkv, backward=False):
 
 def prepare_doutput(value):
     """Keep the original gradient and prepare both MXFP8 representations."""
-    value = value.reshape(-1, *value.shape[-3:]).transpose(0, 2, 1, 3)
-    row, col = quantize_operand(value, True, True)
+    value = value.reshape(-1, *value.shape[-3:])
+    row, col = quantize_operand(value.transpose(0, 2, 1, 3), True, True)
     return {
         "do": row.data,
         "do_t": col.data,

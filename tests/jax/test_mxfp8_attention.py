@@ -45,6 +45,8 @@ def test_scale_reordering_matches_graph(dim, columnwise):
     "sm,version,fmt,error",
     (
         (90, 92600, "bshd", "SM100"),
+        (120, 92600, "bshd", "SM12x"),
+        (121, 92600, "bshd", "SM12x"),
         (100, 92000, "bshd", "9.21"),
         (100, 92300, "bshd", "defects"),
         (100, 92301, "bshd", "defects"),
@@ -88,15 +90,27 @@ def _attention(qkv, **kwargs):
         fp8="mxfp8",
     )
     options.update(kwargs)
-    return fused_attn(qkv, None, SequenceDescriptor(), None, **options)
+    descriptor = options.pop("sequence_descriptor", SequenceDescriptor())
+    seed = options.pop("seed", None)
+    return fused_attn(qkv, None, descriptor, seed, **options)
 
 
-def _reference(qkv):
+def _reference(qkv, mask=None, sink=None):
     q, k, v = (x.astype(jnp.float32) for x in qkv)
     repeats = q.shape[-2] // k.shape[-2]
     k, v = (jnp.repeat(x, repeats, axis=-2) for x in (k, v))
     scores = jnp.einsum("bqhd,bkhd->bhqk", q, k) * 0.125
-    return jnp.einsum("bhqk,bkhd->bqhd", jax.nn.softmax(scores, -1), v)
+    if mask is not None:
+        scores = jnp.where(mask[:, None], scores, -1e30)
+    if sink is None:
+        probability = jax.nn.softmax(scores, -1)
+    else:
+        sink = jnp.broadcast_to(sink, (*scores.shape[:-1], 1))
+        probability = jax.nn.softmax(jnp.concatenate((scores, sink), axis=-1), -1)[..., :-1]
+    output = jnp.einsum("bhqk,bkhd->bqhd", probability, v)
+    if mask is not None:
+        output = jnp.where(jnp.any(mask, axis=-1)[..., None, None], output, 0.0)
+    return output
 
 
 @pytest.mark.parametrize("dtype", (jnp.float16, jnp.bfloat16))
@@ -180,3 +194,156 @@ def test_flax_mxfp8_mode(deterministic):
     actual = jax.jit(forward)(value)
     np.testing.assert_allclose(actual[..., 0], 0.5, rtol=5e-3, atol=5e-4)
     np.testing.assert_allclose(jax.jit(jax.grad(lambda v: forward(v).sum()))(value), 1.0)
+
+
+def _pack(qkv, layout):
+    q, k, v = qkv
+    if layout.is_qkvpacked():
+        return (jnp.stack((q, k, v), axis=-3),)
+    if layout.is_kvpacked():
+        return q, jnp.stack((k, v), axis=-3)
+    return qkv
+
+
+def _unpack(qkv, layout):
+    if layout.is_qkvpacked():
+        return tuple(qkv[0][..., i, :, :] for i in range(3))
+    if layout.is_kvpacked():
+        return qkv[0], qkv[1][..., 0, :, :], qkv[1][..., 1, :, :]
+    return qkv
+
+
+@pytest.mark.parametrize("layout", (QKVLayout.BS3HD, QKVLayout.BSHD_BS2HD))
+@pytest.mark.parametrize("dtype", (jnp.float16, jnp.bfloat16))
+@pytest.mark.parametrize("fp8_backward", (False, True))
+def test_packed_forward_backward(layout, dtype, fp8_backward, monkeypatch):
+    """Packed result storage preserves every gradient slice and original layout."""
+    _require_mxfp8()
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
+    q = jnp.full((2, 128, 2, 64), 0.5, dtype)
+    kv = q if layout.is_qkvpacked() else q[:, :, :1]
+    value = jnp.zeros_like(kv).at[:, ::2, :, 0].set(1.0)
+    inputs = _pack((q, kv, value), layout)
+    attention = lambda xs: _attention(xs, qkv_layout=layout)
+    reference = lambda xs: _reference(_unpack(xs, layout))
+    np.testing.assert_allclose(jax.jit(attention)(inputs), reference(inputs), rtol=5e-3, atol=5e-4)
+    actual = jax.jit(jax.grad(lambda xs: attention(xs).sum()))(inputs)
+    expected = jax.jit(jax.grad(lambda xs: reference(xs).sum()))(inputs)
+    for grad, ref_grad, operand in zip(actual, expected, inputs):
+        assert grad.shape == operand.shape
+        assert grad.dtype == dtype
+        np.testing.assert_allclose(grad, ref_grad, rtol=1e-2, atol=1e-3)
+
+
+@pytest.mark.parametrize("kind", ("dense", "causal", "bottom_right", "padding", "window"))
+@pytest.mark.parametrize("fp8_backward", (False, True))
+def test_gqa_masks(kind, fp8_backward, monkeypatch):
+    """Bound the error from cuDNN's internal FP8 probabilities and dP on nonuniform data."""
+    _require_mxfp8()
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
+    keys = jax.random.split(jax.random.key(123), 4)
+    sq, sk = (128, 256) if kind == "bottom_right" else (128, 128)
+    q = jax.random.choice(keys[0], jnp.array([-0.5, 0.5], jnp.bfloat16), (2, sq, 4, 64))
+    k = jax.random.choice(keys[1], jnp.array([-0.5, 0.5], jnp.bfloat16), (2, sk, 2, 64))
+    v = jax.random.choice(keys[2], jnp.array([-1.0, 1.0], jnp.bfloat16), k.shape)
+    weight = jax.random.choice(keys[3], jnp.array([-1.0, 1.0], jnp.bfloat16), q.shape)
+    qpos, kpos = jnp.arange(sq)[:, None], jnp.arange(sk)[None, :]
+    mask = jnp.ones((2, sq, sk), jnp.bool_)
+    options = {}
+    if kind in ("causal", "bottom_right"):
+        diagonal = sk - sq if kind == "bottom_right" else 0
+        mask &= kpos <= qpos + diagonal
+        options["attn_mask_type"] = (
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK if diagonal else AttnMaskType.CAUSAL_MASK
+        )
+    elif kind == "padding":
+        qlength, klength = jnp.array([112, 96]), jnp.array([96, 80])
+        mask &= (qpos[None] < qlength[:, None, None]) & (kpos[None] < klength[:, None, None])
+        options.update(
+            attn_mask_type=AttnMaskType.PADDING_MASK,
+            sequence_descriptor=SequenceDescriptor.from_seqlens((qlength, klength)),
+        )
+    elif kind == "window":
+        mask &= (kpos >= qpos - 31) & (kpos <= qpos + 15)
+        options["window_size"] = (31, 15)
+    inputs = (q, k, v)
+    attention = lambda xs: _attention(xs, **options)
+    reference = lambda xs: _reference(xs, mask)
+    actual = jax.jit(attention)(inputs)
+    expected = jax.jit(reference)(inputs)
+    relative_error = lambda a, b: float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
+    assert relative_error(actual, expected) < 0.04
+    actual_grads = jax.jit(jax.grad(lambda xs: (attention(xs) * weight).sum()))(inputs)
+    expected_grads = jax.jit(jax.grad(lambda xs: (reference(xs) * weight).sum()))(inputs)
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        assert relative_error(actual_grad, expected_grad) < 0.08
+
+
+@pytest.mark.parametrize("softmax", tuple(AttnSoftmaxType))
+@pytest.mark.parametrize("deterministic", (False, True))
+def test_softmax_variants(softmax, deterministic, monkeypatch):
+    """MXFP8 attention preserves attention-sink outputs and learnable-sink gradients."""
+    _require_mxfp8()
+    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0" if deterministic else "1")
+    q = jnp.zeros((1, 128, 2, 64), jnp.bfloat16)
+    v = jnp.zeros_like(q).at[:, ::2, :, 0].set(1.0)
+    sink = jnp.zeros((1, 2, 1, 1), jnp.float32)
+    options = dict(softmax_type=softmax)
+    if softmax == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+        options["softmax_offset"] = sink
+    actual = jax.jit(lambda xs: _attention(xs, **options))((q, q, v))
+    denominator = 128 if softmax == AttnSoftmaxType.VANILLA_SOFTMAX else 129
+    expected = jnp.zeros_like(actual).at[..., 0].set(64 / denominator)
+    np.testing.assert_allclose(actual, expected, rtol=1e-2, atol=5e-4)
+    gradients = jax.jit(jax.grad(lambda xs: _attention(xs, **options).sum()))((q, q, v))
+    assert all(bool(jnp.all(jnp.isfinite(grad))) for grad in gradients)
+    np.testing.assert_allclose(gradients[2], 128 / denominator, rtol=1e-2, atol=5e-4)
+    if softmax == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+        dsink = jax.jit(
+            jax.grad(lambda s: _attention((q, q, v), softmax_type=softmax, softmax_offset=s).sum())
+        )(sink)
+        np.testing.assert_allclose(dsink, -128 * 64 / denominator**2, rtol=2e-2, atol=1e-3)
+
+
+@pytest.mark.parametrize("head_dims", ((64, 128), (128, 64), (128, 128)))
+def test_different_head_dimensions(head_dims):
+    """Per-head scales retain their direction when QK and V dimensions differ."""
+    _require_mxfp8()
+    dq, dv = head_dims
+    q = jnp.full((1, 128, 2, dq), 0.5, jnp.bfloat16)
+    k = jnp.full((1, 256, 1, dq), 0.5, jnp.bfloat16)
+    v = jnp.zeros((1, 256, 1, dv), jnp.bfloat16).at[:, ::2, :, 0].set(1.0)
+    inputs = (q, k, v)
+    np.testing.assert_allclose(jax.jit(_attention)(inputs), _reference(inputs), atol=5e-4)
+    actual = jax.jit(jax.grad(lambda xs: _attention(xs).sum()))(inputs)
+    expected = jax.jit(jax.grad(lambda xs: _reference(xs).sum()))(inputs)
+    for grad, ref_grad in zip(actual, expected):
+        np.testing.assert_allclose(grad, ref_grad, rtol=1e-2, atol=1e-3)
+
+
+def test_checkpoint_and_dropout_guard(monkeypatch):
+    """Recomputation preserves gradients and unsupported dropout has an actionable error."""
+    _require_mxfp8()
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "0")
+    q = jnp.zeros((1, 128, 2, 64), jnp.bfloat16)
+    v = jnp.zeros_like(q).at[..., 0].set(1.0)
+    inputs = (q, q, v)
+    forward = lambda xs, key: _attention(xs, seed=key)
+    key = jax.random.PRNGKey(41)
+    actual = jax.jit(forward)(inputs, key)
+    np.testing.assert_array_equal(actual, jax.jit(forward)(inputs, key))
+    np.testing.assert_allclose(actual[..., 0], 1.0)
+    plain = jax.jit(jax.value_and_grad(lambda xs: forward(xs, key).sum()))(inputs)
+    recomputed = jax.jit(jax.value_and_grad(lambda xs: jax.checkpoint(forward)(xs, key).sum()))(
+        inputs
+    )
+    for value, reference in zip(jax.tree.leaves(plain), jax.tree.leaves(recomputed)):
+        assert bool(jnp.all(jnp.isfinite(value)))
+        np.testing.assert_array_equal(value, reference)
+    with pytest.raises(ValueError, match="MXFP8 attention does not support dropout"):
+        jax.jit(lambda xs: _attention(xs, seed=key, dropout_probability=0.25))(inputs)
+    # Inference ignores the configured training dropout probability.
+    np.testing.assert_array_equal(
+        actual,
+        jax.jit(lambda xs: _attention(xs, dropout_probability=0.25, is_training=False))(inputs),
+    )

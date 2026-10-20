@@ -55,9 +55,11 @@ Pass ``fp8="mxfp8"`` to select MXFP8 attention on SM100 or later. MXFP8 uses
 E4M3 operands with E8M0 block scales along the attention contraction axes in
 both passes. Inputs, outputs and gradients remain FP16/BF16. Sequence lengths
 must be divisible by 128 and head dimensions by 32. This mode currently supports
-separate BSHD inputs; THD and cuDNN 9.23.0/9.23.1 are excluded. It requires
+separate, QKV-packed and KV-packed BSHD inputs. THD, SM12x, and cuDNN
+9.23.0/9.23.1 are excluded. It requires
 cuDNN 9.21 or later. ``NVTE_FP8_DPA_BWD=0`` keeps the original FP16/BF16 operands
 for MXFP8 backward, matching the PyTorch MXFP8 path.
+Attention bias, ALiBi, dropout and ``return_max_logit`` are excluded from this mode.
 
 Paged KV-cache APIs and quantized module inputs/outputs require further JAX API
 and frontend-binding work. ``score_mod`` currently supports FP16/BF16 only.

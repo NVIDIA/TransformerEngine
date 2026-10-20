@@ -246,12 +246,12 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
         ) or mxfp8_rules.shape_error(sq, sk, dq, dv)
         if error:
             raise ValueError(error)
-        if config.qkv_layout.name != "BSHD_BSHD_BSHD":
-            raise ValueError("MXFP8 attention currently requires separate BSHD query/key/value.")
         if config.return_max_logit:
             raise ValueError("MXFP8 attention does not support return_max_logit=True.")
         if config.attn_bias_type.name != "NO_BIAS":
             raise ValueError("MXFP8 attention does not support attention bias or ALiBi.")
+        if config.is_training and config.dropout_probability:
+            raise ValueError("cuDNN MXFP8 attention does not support dropout.")
     if ragged and capabilities[0] < 90:
         raise ValueError("F16/BF16 fused attention with THD format requires sm90 or later.")
     if backward and not fp8 and ragged_stats:
@@ -308,8 +308,8 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
         kdim,
         kstride,
         qkv_dtype,
-        source="q" if qpack == 3 else "k",
-        offset=h * dq * itemsize if qpack == 3 else 0,
+        source="q" if qpack == 3 and not mxfp8 else "k",
+        offset=h * dq * itemsize if qpack == 3 and not mxfp8 else 0,
         ragged_offset="offset_k" if ragged else "",
     )
     tensor(
@@ -317,8 +317,12 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
         vdim,
         vstride,
         qkv_dtype,
-        source="q" if qpack == 3 else ("k" if kvpack == 2 else "v"),
-        offset=2 * h * dq * itemsize if qpack == 3 else (hg * dq * itemsize if kvpack == 2 else 0),
+        source="v" if mxfp8 else "q" if qpack == 3 else ("k" if kvpack == 2 else "v"),
+        offset=(
+            0
+            if mxfp8
+            else 2 * h * dq * itemsize if qpack == 3 else hg * dq * itemsize if kvpack == 2 else 0
+        ),
         ragged_offset="offset_v" if ragged else "",
     )
     multipliers = (qpack * h * dq, kvpack * hg * dq, kvpack * hg * dv, h * dv, h)
@@ -393,7 +397,7 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
         ):
             output(name, dim, stride, slot, offset, ragged_offset=ragged_offset if ragged else "")
         if mxfp8:
-            tensor("do_f16", odim, _stride(odim))
+            tensor("do_f16", odim, ostride)
             for name, dim in (("q_t", qdim), ("k_t", kdim), ("do_t", odim)):
                 tensor(name, dim, _stride(dim), "FP8_E4M3")
                 specs["descale_" + name] = mxfp8_scale_spec(dim, "bhsd", columnwise=True)
@@ -518,7 +522,13 @@ def execute(direction, args, config, result_avals):
             values[name] = _offset64(offsets, multiplier)
     if config.fp8 == "mxfp8":
         if plan.fp8:
-            values.update(mxfp8_attention.prepare_qkv((q, k, v), backward))
+            if config.qkv_layout.is_qkvpacked():
+                unpacked = tuple(q[..., index, :, :] for index in range(3))
+            elif config.qkv_layout.is_kvpacked():
+                unpacked = (q, k[..., 0, :, :], k[..., 1, :, :])
+            else:
+                unpacked = (q, k, v)
+            values.update(mxfp8_attention.prepare_qkv(unpacked, backward))
     elif config.fp8:
         for name in ("q", "k", "v"):
             # Empty dummy operands are not quantized.
