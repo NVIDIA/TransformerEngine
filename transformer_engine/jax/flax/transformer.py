@@ -327,6 +327,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         deterministic: bool = False,
         score_mod_tensors: Optional[Mapping[str, Any]] = None,
         score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
+        quantized_qkv=None,
     ) -> Array:
 
         seed = None
@@ -372,6 +373,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         }
         if self.fp8:
             fused_attn_kwargs["fp8"] = self.fp8
+        if quantized_qkv is not None:
+            fused_attn_kwargs["quantized_qkv"] = quantized_qkv
 
         if self.qkv_layout.is_qkvpacked():
             """qkvpacked format, treat
@@ -713,6 +716,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         mask: Optional[Union[SequenceDescriptor, Array]] = None,
         score_mod_tensors: Optional[Mapping[str, Any]] = None,
         score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
+        quantized_qkv=None,
     ) -> Array:
         """
         Parameters
@@ -737,6 +741,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             Additional tensor/scalar operands passed to ``score_mod``.
         score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
             Additional tensor/scalar operands passed to ``score_mod_bprop``.
+        quantized_qkv: Optional[Tuple[ScaledTensor2x, ...]], default = None
+            Separate prequantized MXFP8 Q/K/V in BHSD order, independent of the
+            model input layout. Requires ``fp8="mxfp8"`` and a SequenceDescriptor.
+            See :func:`transformer_engine.jax.attention.quantize_attention_qkv`.
 
         Returns
         -------
@@ -744,6 +752,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             Output tensor, or ``(output, max_logit)`` when ``return_max_logit`` is enabled.
         """
         input_dtype = query.dtype
+        if quantized_qkv is not None and self.fp8 != "mxfp8":
+            raise ValueError('quantized_qkv requires fp8="mxfp8".')
 
         if mask is not None:
             if sequence_descriptor is not None:
@@ -980,6 +990,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 deterministic=deterministic,
                 score_mod_tensors=score_mod_tensors,
                 score_mod_bprop_tensors=score_mod_bprop_tensors,
+                quantized_qkv=quantized_qkv,
             )
         output = x[0] if self.return_max_logit else x
         assert (

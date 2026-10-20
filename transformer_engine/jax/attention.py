@@ -1734,6 +1734,19 @@ def fused_attn(
         # quantized tensor constructors validate real arrays, whereas JAX may
         # reconstruct cotangent pytrees with opaque sentinel leaves.
         quantized_qkv = prequantized_buffers(qkv, quantized_qkv, qkv_layout)
+    if fp8 == "mxfp8":
+        if qkv_layout.is_thd():
+            raise ValueError("MXFP8 attention does not support THD format.")
+        from .sharding import is_mesh_available, global_mesh_resource, get_mesh_axis_size
+
+        if is_mesh_available():
+            cp_axis = context_parallel_axis or global_mesh_resource().cp_resource
+            if get_mesh_axis_size(cp_axis) > 1:
+                from .cpp_extensions.mxfp8_attention import context_parallel_qkv
+
+                qkv = context_parallel_qkv(qkv, quantized_qkv, qkv_layout)
+                qkv_layout = QKVLayout.BSHD_BSHD_BSHD
+                quantized_qkv = None
     if score_mod is None:
         score_mod_only_args = [
             name

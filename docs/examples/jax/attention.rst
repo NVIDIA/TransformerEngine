@@ -60,6 +60,9 @@ separate, QKV-packed and KV-packed BSHD inputs. THD, SM12x, and cuDNN
 cuDNN 9.21 or later. ``NVTE_FP8_DPA_BWD=0`` keeps the original FP16/BF16 operands
 for MXFP8 backward, matching the PyTorch MXFP8 path.
 Attention bias, ALiBi, dropout and ``return_max_logit`` are excluded from this mode.
+Exact head-dimension availability is checked by cuDNN. Frontend 1.29.0 has an
+incorrect MXFP8 backward scale stride for Q/K heads wider than 128; these
+configurations require ``NVTE_FP8_DPA_BWD=0``. This check protects both frontends.
 
 To reuse quantizations, call ``quantize_attention_qkv((q, k, v))`` and pass its
 result to ``fused_attn(..., fp8="mxfp8", quantized_qkv=quantized)``. Each operand
@@ -69,9 +72,18 @@ be supplied directly. The original BSHD arrays supply the gradient targets and
 the original FP16/BF16 operands for ``NVTE_FP8_DPA_BWD=0``. These auxiliary
 buffers are non-differentiable. Scale reordering happens after partitioning,
 so data and tensor parallel sharding preserve per-head scale boundaries.
+Ring and AllGather context parallelism communicate FP16/BF16 operands and
+quantize each local attention step. Prequantized inputs are decoded before CP
+communication, as in the PyTorch MXFP8 implementation. Separate and packed
+BSHD storage, GQA, and causal dual-chunk load balancing are supported. Every
+local attention step must meet the 128-token alignment requirement; 256 tokens
+per CP rank accommodates the half-sequence steps used by causal load balancing
+and AllGather. The existing JAX CP restrictions on sliding windows, padding,
+dropout and non-vanilla softmax still apply.
 
-Paged KV-cache APIs and quantized module inputs/outputs require further JAX API
-and frontend-binding work. ``score_mod`` currently supports FP16/BF16 only.
+Paged KV-cache APIs, quantized module outputs, and automatic quantized
+projection-to-attention integration require further JAX API and frontend-binding
+work. ``score_mod`` currently supports FP16/BF16 only.
 
 ``AttnBiasType.ALIBI`` (``attn_bias_type="alibi"`` in Flax) enables cuDNN's
 ALiBi mask without an explicit bias tensor. Explicit dropout keys have JAX's
