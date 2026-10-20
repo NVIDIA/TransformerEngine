@@ -5,6 +5,7 @@
 from typing import Optional
 
 import pickle
+import threading
 
 import pytest
 import torch
@@ -525,6 +526,30 @@ class TestFP8Recipe:
                     y = module(x, [batch_size])
                 else:
                     y = module(x)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_autocast_state_is_per_thread():
+    """An autocast entered in another thread must not quantize this thread's modules."""
+    module = Linear(64, 64).cuda()
+    x = torch.randn(64, 64, device="cuda")
+    entered, release = threading.Event(), threading.Event()
+
+    def hold_fp8_autocast():
+        with te.autocast(enabled=True):
+            entered.set()
+            release.wait()
+
+    thread = threading.Thread(target=hold_fp8_autocast)
+    with te.autocast(enabled=False):
+        thread.start()
+        try:
+            assert entered.wait(timeout=60)
+            module(x)
+        finally:
+            release.set()
+            thread.join()
+    assert not module.fp8
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)

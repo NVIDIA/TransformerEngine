@@ -9,6 +9,7 @@ import abc
 import dataclasses
 import warnings
 import os
+import threading
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from collections import deque
@@ -441,23 +442,47 @@ def is_fp8_ue5m3_available(return_reason: bool = False) -> Union[bool, Tuple[boo
     return check_fp8_ue5m3_support()[0]
 
 
+class _AutocastThreadState(threading.local):
+    def __init__(self) -> None:
+        # Set here, not as class defaults: torch.compile keeps reading class defaults.
+        self.fp8_enabled = False
+        self.fp8_calibration = False
+        self.fp8_recipe = None
+        self.fp8_distributed_group = None
+        self.is_first_fp8_module = False
+        self.fp8_graph_capturing = False
+        self.autocast_depth = 0
+
+
+def _thread_state_field(name: str) -> property:
+    return property(
+        lambda self: getattr(self.thread_state, name),
+        lambda self, value: setattr(self.thread_state, name, value),
+    )
+
+
 @dataclass(slots=True)
 class FP8GlobalState:
-    """Mutable process-global FP8 state stored on an instance.
+    """Mutable FP8 state stored on an instance.
 
     Using an instance avoids class-level `setattr(type, ...)` writes, which
     `torch.compile` cannot trace in fullgraph mode.
+
+    Autocast fields are per thread; the rest is process-wide because backward
+    runs on autograd worker threads.
     """
 
-    fp8_enabled: bool = False
-    fp8_calibration: bool = False
-    fp8_recipe: Optional[Recipe] = None
-    fp8_distributed_group: Optional[dist_group_type] = None
+    fp8_enabled = _thread_state_field("fp8_enabled")
+    fp8_calibration = _thread_state_field("fp8_calibration")
+    fp8_recipe = _thread_state_field("fp8_recipe")
+    fp8_distributed_group = _thread_state_field("fp8_distributed_group")
+    is_first_fp8_module = _thread_state_field("is_first_fp8_module")
+    fp8_graph_capturing = _thread_state_field("fp8_graph_capturing")
+    autocast_depth = _thread_state_field("autocast_depth")
+
+    thread_state: _AutocastThreadState = field(default_factory=_AutocastThreadState)
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
-    is_first_fp8_module: bool = False
-    fp8_graph_capturing: bool = False
-    autocast_depth: int = 0
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
     global_amax_history_buffer: Dict[str, list] = field(default_factory=dict)
     global_scale_buffer: Dict[str, list] = field(default_factory=dict)
