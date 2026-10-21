@@ -378,6 +378,8 @@ def _fake_workspace_valid(workspace: TensorSpec, quantizer: Optional[Quantizer])
 
 def _linear_forward_impl(
     args: LinearFwdArgs,
+    *,
+    save_materialized_parameters: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple], Optional[Dict]]:
     """Forward implementation for the linear layer.
 
@@ -391,6 +393,9 @@ def _linear_forward_impl(
     is_dist_weight = is_distributed_weight(weight)
     inp = args.inp
     bias = materialize_concat(args.bias_list) if args.bias_list else args.bias
+    if save_materialized_parameters and (args.weight_list or args.bias_list):
+        args.weight, args.bias = weight, bias
+        args.weight_list = args.bias_list = None
     input_quantizer = args.input_quantizer
     weight_quantizer = args.weight_quantizer
     output_quantizer = args.output_quantizer
@@ -1848,16 +1853,16 @@ class _Linear(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        weight: torch.Tensor,
+        weight: Optional[torch.Tensor],
         inp: torch.Tensor,
         bias: Optional[torch.Tensor],
         fwd_args: LinearFwdArgs,
+        *parameter_parts: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward pass: compute linear output and set up autograd context.
 
-        ``weight``, ``inp`` and ``bias`` are positional Tensor arguments so
-        autograd tracks them; they are immediately re-attached to ``fwd_args``
-        so every downstream helper can be invoked with a single argument.
+        Tensor operands, including split parameter parts, are explicit
+        autograd inputs and are re-attached to ``fwd_args``.
 
         ``weight_workspace`` is intentionally NOT a positional input: it is a
         non-differentiable cached tensor passed in via
@@ -1867,12 +1872,20 @@ class _Linear(torch.autograd.Function):
         fwd_args.weight = weight
         fwd_args.inp = inp
         fwd_args.bias = bias
+        if parameter_parts:
+            weight_count = len(fwd_args.weight_list or ())
+            fwd_args.weight_list = list(parameter_parts[:weight_count]) if weight_count else None
+            fwd_args.bias_list = list(parameter_parts[weight_count:]) or None
+            ctx.parameter_split_sizes = (
+                tuple(t.shape[0] for t in fwd_args.weight_list or ()),
+                tuple(t.shape[0] for t in fwd_args.bias_list or ()),
+            )
         (
             out,
             new_weight_workspace,
             tensors_to_save_from_forward,
             ctx_attrs,
-        ) = _linear_forward_impl(fwd_args)
+        ) = _linear_forward_impl(fwd_args, save_materialized_parameters=True)
         if ctx is not None:
             bwd_args = LinearBwdArgs()
             tensors_to_save_from_setup = _linear_setup_ctx(
@@ -1911,6 +1924,22 @@ class _Linear(torch.autograd.Function):
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
         result = _linear_backward_impl(bwd_args) + (None,)  # fwd_args grad slot
+        if len(ctx.needs_input_grad) > 4:
+            wgrad, dgrad, bgrad, _ = result
+            weight_sizes, bias_sizes = ctx.parameter_split_sizes
+            part_grads = []
+            for grad, sizes in ((wgrad, weight_sizes), (bgrad, bias_sizes)):
+                if sizes:
+                    part_grads.extend(
+                        grad.split(sizes) if grad is not None else (None,) * len(sizes)
+                    )
+            result = (
+                None if weight_sizes else wgrad,
+                dgrad,
+                None if bias_sizes else bgrad,
+                None,
+                *part_grads,
+            )
         reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
         # main_grad closure) so they don't outlive backward via ctx under retain_graph.
@@ -1925,7 +1954,7 @@ class _Linear(torch.autograd.Function):
 
 @no_torch_dynamo()
 def _linear_eager(
-    weight_tensor: torch.Tensor,
+    weight_tensor: Optional[torch.Tensor],
     inp: torch.Tensor,
     bias: Optional[torch.Tensor],
     fwd_args: LinearFwdArgs,
@@ -1933,6 +1962,15 @@ def _linear_eager(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Run ``_Linear`` eagerly, bypassing Dynamo."""
     if is_grad_enabled:
+        if fwd_args.weight_list or fwd_args.bias_list:
+            return _Linear.apply(
+                weight_tensor,
+                inp,
+                bias,
+                fwd_args,
+                *(fwd_args.weight_list or ()),
+                *(fwd_args.bias_list or ()),
+            )
         return _Linear.apply(weight_tensor, inp, bias, fwd_args)
     return _Linear.forward(None, weight_tensor, inp, bias, fwd_args)
 
@@ -2443,7 +2481,7 @@ class Linear(TransformerEngineBaseModule):
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
         try:
             weight, bias, weight_list, bias_list = self._get_weight_and_bias_tensors(
-                defer_concatenation=use_compiled_op
+                defer_concatenation=True
             )
             weight_shape = concat_shape(weight_list) if weight_list else None
             weight_requires_grad = (
@@ -2594,14 +2632,6 @@ class Linear(TransformerEngineBaseModule):
                         msg=f"te.Linear falling back to eager: {fallback_reason}"
                     )
                     use_compiled_op = False
-                    weight, bias, _, _ = self._get_weight_and_bias_tensors()
-                    linear_bias = (
-                        bias if self.apply_bias and not self.gemm_bias_unfused_add else None
-                    )
-                    fwd_args.weight = weight
-                    fwd_args.bias = linear_bias
-                    fwd_args.weight_list = None
-                    fwd_args.bias_list = None
 
             if use_compiled_op:
                 check_gemm_dims(

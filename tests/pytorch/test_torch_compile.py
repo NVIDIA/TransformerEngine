@@ -3192,15 +3192,16 @@ def test_te_split_parameters_recipes(fp8_recipe, bias_mode):
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("training", [False, True])
-def test_te_split_parameters_no_cat(training):
+@pytest.mark.parametrize("execution_mode", ["eager", "compile"])
+def test_te_split_parameters_no_cat(training, execution_mode):
     """Adjacent parameter storage does not launch a concatenation in either pass."""
     model = te.Linear(64, 128, parameters_split=dict(q=64, k=32, v=32), params_dtype=torch.bfloat16)
-    compiled = torch.compile(model, fullgraph=True)
+    run_model = torch.compile(model, fullgraph=True) if execution_mode == "compile" else model
     inp = torch.randn(16, 64, device="cuda", dtype=torch.bfloat16, requires_grad=training)
 
     def run():
         with torch.set_grad_enabled(training):
-            out = compiled(inp)
+            out = run_model(inp)
             if training:
                 out.sum().backward()
         model.zero_grad(set_to_none=True)
@@ -3214,7 +3215,8 @@ def test_te_split_parameters_no_cat(training):
     model.k_weight.data = model.k_weight.detach().clone()
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
         run()
-    assert "aten::cat" in {event.key for event in prof.key_averages()}
+    cats = sum(event.count for event in prof.key_averages() if event.key == "aten::cat")
+    assert cats == (2 if training and execution_mode == "compile" else 1)
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
@@ -3230,7 +3232,17 @@ def test_te_split_parameters_saved_versions():
 
 
 @pytest.mark.parametrize(
-    "layout", ["adjacent", "offset", "disjoint", "strided", "singleton", "negative", "conjugate"]
+    "layout",
+    [
+        "adjacent",
+        "offset",
+        "single_row",
+        "disjoint",
+        "strided",
+        "singleton",
+        "negative",
+        "conjugate",
+    ],
 )
 def test_concat_storage(layout):
     from transformer_engine.pytorch.dynamo.concat import materialize_concat
@@ -3248,14 +3260,16 @@ def test_concat_storage(layout):
     elif layout == "conjugate":
         storage = torch.complex(storage.float(), storage.float()).conj()
     parts = list(storage.split([1, storage.shape[0] - 3, 2]))
-    if layout == "disjoint":
+    if layout == "single_row":
+        parts[0] = parts[0].as_strided(parts[0].shape, (0, *parts[0].stride()[1:]))
+    elif layout == "disjoint":
         parts[1] = parts[1].clone()
     tensor, deferred = concat_input(parts, defer=True)
     assert tensor is None
     assert isinstance(deferred, list)
     result = materialize_concat(deferred)
     torch.testing.assert_close(result, torch.cat(parts), rtol=0, atol=0)
-    if layout in ("adjacent", "offset"):
+    if layout in ("adjacent", "offset", "single_row"):
         assert result.data_ptr() == parts[0].data_ptr()
     else:
         assert result.untyped_storage().data_ptr() != parts[0].untyped_storage().data_ptr()

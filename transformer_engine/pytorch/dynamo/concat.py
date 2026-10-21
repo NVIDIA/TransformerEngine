@@ -4,10 +4,10 @@
 
 """Deferred row concatenation for tensors consumed inside a custom op."""
 
+import math
 from typing import List, Sequence, Tuple, Union
 
 import torch
-from torch._prims_common import make_contiguous_strides_for
 
 from .tensor_spec import TensorSpec
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage
@@ -73,4 +73,4 @@ def materialize_concat(value: List[torch.Tensor]) -> torch.Tensor:
     if offset * first.element_size() > storage.nbytes():
         return torch.cat(value)
     shape = concat_shape(value)
-    return first.as_strided(shape, make_contiguous_strides_for(shape))
+    return first.as_strided(shape, (math.prod(shape[1:]), *first.stride()[1:]))
