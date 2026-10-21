@@ -151,6 +151,27 @@ void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
  */
 int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size);
 
+/*! \brief Get the device workspace of a comm-gemm context.
+ *
+ *  After nvte_all_gather_gemm with transb = false completes on its stream, the workspace begins
+ *  with the gathered B: the local B of every rank, in rank order, which together form the
+ *  gathered (N, K) tensor. The data remains valid until the next operation with the context on
+ *  any rank, since the other ranks write into the workspace. cuBLASMp versions before 0.11.0 keep
+ *  the gathered B elsewhere, so with those this function returns nullptr.
+ *
+ *  \param[in]  ctx   Comm-GEMM context.
+ *  \param[out] size  Workspace size in bytes (0 when the function returns nullptr).
+ *  \return Workspace pointer, or nullptr before the first operation or with cuBLASMp before 0.11.0.
+ */
+void* nvte_comm_gemm_workspace(NVTECommGemmCtx* ctx, size_t* size);
+
+/*! \brief Get the version of the cuBLASMp library loaded at run time.
+ *
+ *  \return MAJOR * 10000 + MINOR * 100 + PATCH (for example, 1100 for 0.11.0), or 0 if
+ *          Transformer Engine has not been built with cuBLASMp support.
+ */
+int nvte_cublasmp_version(void);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
