@@ -1720,9 +1720,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
-            if not inp.is_cuda:
+            if inp.device.type != te_device_type():
                 raise RuntimeError(
-                    f"TransformerEngine needs CUDA. Got input on device: {inp.device}"
+                    f"TransformerEngine needs {te_device_type()}. Got input on device: {inp.device}"
                 )
 
             if self.tp_size > 1:
