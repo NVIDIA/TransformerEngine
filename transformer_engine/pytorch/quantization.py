@@ -452,10 +452,14 @@ class _AutocastThreadState(threading.local):
         self.fp8_graph_capturing = False
 
 
+# Read directly by the hot getters below: a property per read costs about 2x more.
+_autocast_thread_state = _AutocastThreadState()
+
+
 def _thread_state_field(name: str) -> property:
     return property(
-        lambda self: getattr(self.thread_state, name),
-        lambda self, value: setattr(self.thread_state, name, value),
+        lambda self: getattr(_autocast_thread_state, name),
+        lambda self, value: setattr(_autocast_thread_state, name, value),
     )
 
 
@@ -477,7 +481,6 @@ class FP8GlobalState:
     fp8_distributed_group = _thread_state_field("fp8_distributed_group")
     fp8_graph_capturing = _thread_state_field("fp8_graph_capturing")
 
-    thread_state: _AutocastThreadState = field(default_factory=_AutocastThreadState)
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
     is_first_fp8_module: bool = False
@@ -490,6 +493,11 @@ class FP8GlobalState:
         default_factory=dict
     )
     skip_fp8_weight_update_tensor: Optional[torch.Tensor] = None
+
+    def __post_init__(self) -> None:
+        # A new state (for example, FP8GlobalStateManager.reset) clears the precision fields.
+        global _autocast_thread_state
+        _autocast_thread_state = _AutocastThreadState()
 
 
 class FP8GlobalStateManager:
@@ -647,12 +655,12 @@ class FP8GlobalStateManager:
     @classmethod
     def is_fp8_enabled(cls) -> bool:
         """Is FP8 enabled"""
-        return cls.quantization_state.fp8_enabled
+        return _autocast_thread_state.fp8_enabled
 
     @classmethod
     def is_fp8_calibration(cls) -> bool:
         """Is FP8 calibration"""
-        return cls.quantization_state.fp8_calibration
+        return _autocast_thread_state.fp8_calibration
 
     @classmethod
     def with_fp8_parameters(cls) -> bool:
@@ -668,10 +676,10 @@ class FP8GlobalStateManager:
     def fp8_graph_capturing(cls) -> bool:
         """Is CUDA graph capture under way?"""
         if torch.compiler.is_compiling():
-            assert not cls.quantization_state.fp8_graph_capturing
+            assert not _autocast_thread_state.fp8_graph_capturing
             return False
         return (
-            cls.quantization_state.fp8_graph_capturing or torch.cuda.is_current_stream_capturing()
+            _autocast_thread_state.fp8_graph_capturing or torch.cuda.is_current_stream_capturing()
         )
 
     @classmethod
@@ -686,14 +694,15 @@ class FP8GlobalStateManager:
     @classmethod
     def get_fp8_recipe(cls) -> Recipe:
         """Return the fp8 recipe"""
-        if cls.quantization_state.fp8_recipe is not None:
-            return cls.quantization_state.fp8_recipe
+        fp8_recipe = _autocast_thread_state.fp8_recipe
+        if fp8_recipe is not None:
+            return fp8_recipe
         return get_default_fp8_recipe()
 
     @classmethod
     def get_fp8_group(cls) -> Union[dist_group_type, None]:
         """Return the fp8 group for scale/amax comm"""
-        return cls.quantization_state.fp8_distributed_group
+        return _autocast_thread_state.fp8_distributed_group
 
     @classmethod
     def get_autocast_state(cls) -> tuple:
