@@ -389,7 +389,7 @@ class NVFP4Quantizer(Quantizer):
             )
         if self.columnwise_usage:
             specs["_columnwise_data"] = (
-                (shape[-1], math.prod(shape[:-1]) // 2),
+                type(self).convert_shape_for_fp4(type(self).get_columnwise_shape(shape)),
                 torch.uint8,
             )
             specs["_columnwise_scale_inv"] = (
