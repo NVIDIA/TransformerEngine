@@ -224,7 +224,9 @@ def _leading_axis_ok(spec, resource_axes=None):
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
     if ep_axis not in elts:
-        return False, ep_axis, outer_axes
+        # JAX canonicalizes size-one mesh axes out of PartitionSpec.
+        if get_ep_config().ep_size != 1:
+            return False, ep_axis, outer_axes
     allowed = set(outer_axes) | {ep_axis}
     return all(a in allowed for a in elts), ep_axis, outer_axes
 

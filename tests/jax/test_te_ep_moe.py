@@ -136,7 +136,7 @@ from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 EP_AXIS = "ep"
 FSDP_AXIS = "fsdp"
-EP_SIZE = 2
+EP_SIZE = int(os.environ.get("NVTE_TEST_EP_SIZE", "2"))
 assert (
     jax.device_count() % EP_SIZE == 0
 ), f"device_count {jax.device_count()} must be divisible by EP_SIZE={EP_SIZE}"
