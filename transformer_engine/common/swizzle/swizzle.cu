@@ -8,6 +8,7 @@
 #include <transformer_engine/swizzle.h>
 
 #include <cassert>
+#include <climits>
 #include <mutex>
 #include <numeric>
 #include <type_traits>
@@ -24,6 +25,93 @@ namespace {
 
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
+
+// Keep this exception local to swizzling: other consumers may still require
+// padded input strides. Only the exact logical MXFP8 scale shape is accepted.
+bool has_compact_mxfp8_scales(const Tensor& input) {
+  if (input.scaling_mode != NVTE_MXFP8_1D_SCALING || input.with_gemm_swizzled_scales) {
+    return false;
+  }
+  const bool rowwise = input.scale_inv.has_data();
+  if (rowwise == input.columnwise_scale_inv.has_data()) return false;
+  const auto [rows, cols] = input.flat_2d_dims();
+  const auto& shape = rowwise ? input.scale_inv.shape : input.columnwise_scale_inv.shape;
+  const size_t m = rowwise ? rows : cols;
+  const size_t k = DIVUP(rowwise ? cols : rows, size_t{MXFP8_BLOCK_SIZE});
+  return shape.size() == 2 && shape[0] == (rowwise ? m : k) && shape[1] == (rowwise ? k : m) &&
+         (m % 128 != 0 || k % 4 != 0);
+}
+
+struct CompactSwizzleTensor {
+  const uint8_t* input;
+  uint8_t* output;
+  size_t m, k, tiles_k;
+};
+
+constexpr int kMaxCompactTensors = 32;
+struct CompactSwizzleArgs {
+  CompactSwizzleTensor tensors[kMaxCompactTensors];
+  size_t first_block[kMaxCompactTensors + 1];
+  int num_tensors = 0;
+};
+
+// One block writes one 128x4 scale tile. Map each contiguous output byte
+// back to its logical (m,k) coordinate; out-of-range coordinates become zero.
+// Byte loads avoid both alignment requirements and reading beyond compact rows.
+template <bool ROWWISE>
+__global__ void swizzle_compact_mxfp8_kernel(const CompactSwizzleArgs args) {
+  int tensor_id = 0;
+  while (tensor_id + 1 < args.num_tensors && args.first_block[tensor_id + 1] <= blockIdx.x) {
+    ++tensor_id;
+  }
+  const auto& tensor = args.tensors[tensor_id];
+  const size_t tile = blockIdx.x - args.first_block[tensor_id];
+  const size_t tile_m = tile / tensor.tiles_k;
+  const size_t tile_k = tile % tensor.tiles_k;
+#pragma unroll
+  for (int byte = threadIdx.x; byte < 512; byte += 256) {
+    const size_t m = tile_m * 128 + byte / 16 + (byte % 16 / 4) * 32;
+    const size_t k = tile_k * 4 + byte % 4;
+    uint8_t value = 0;
+    if (m < tensor.m && k < tensor.k) {
+      value = ROWWISE ? tensor.input[m * tensor.k + k] : tensor.input[k * tensor.m + m];
+    }
+    tensor.output[tile * 512 + byte] = value;
+  }
+}
+
+CompactSwizzleTensor compact_swizzle_tensor(const Tensor& input, const Tensor& output,
+                                            bool rowwise) {
+  NVTE_CHECK(
+      output.scaling_mode == input.scaling_mode && output.flat_2d_dims() == input.flat_2d_dims(),
+      "Input and output tensor layouts must match.");
+  const auto& src = rowwise ? input.scale_inv : input.columnwise_scale_inv;
+  const auto& dst = rowwise ? output.scale_inv : output.columnwise_scale_inv;
+  NVTE_CHECK(dst.has_data(), "Missing output scaling factors.");
+  NVTE_CHECK(src.dtype == DType::kFloat8E8M0 && dst.dtype == DType::kFloat8E8M0,
+             "Expected MXFP8 E8M0 scales.");
+  const size_t m = src.shape[rowwise ? 0 : 1];
+  const size_t k = src.shape[rowwise ? 1 : 0];
+  const std::array<size_t, 2> expected =
+      rowwise ? std::array<size_t, 2>{DIVUP(m, size_t{128}) * 128, DIVUP(k, size_t{4}) * 4}
+              : std::array<size_t, 2>{DIVUP(k, size_t{4}) * 4, DIVUP(m, size_t{128}) * 128};
+  NVTE_CHECK(dst.shape == expected, "Invalid swizzled scale shape (expected ", expected, ", got ",
+             dst.shape, ").");
+  return {static_cast<const uint8_t*>(src.dptr), static_cast<uint8_t*>(dst.dptr), m, k,
+          DIVUP(k, size_t{4})};
+}
+
+void launch_compact_swizzle(CompactSwizzleArgs& args, bool rowwise, cudaStream_t stream) {
+  const size_t blocks = args.first_block[args.num_tensors];
+  if (blocks == 0) return;
+  NVTE_CHECK(blocks <= INT_MAX, "Too many compact scale tiles.");
+  if (rowwise) {
+    swizzle_compact_mxfp8_kernel<true><<<blocks, 256, 0, stream>>>(args);
+  } else {
+    swizzle_compact_mxfp8_kernel<false><<<blocks, 256, 0, stream>>>(args);
+  }
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
@@ -1276,7 +1364,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
              "Input tensor has invalid scaling mode (", to_string(input->scaling_mode), ").");
 
   // Check tensors
-  CheckInputTensor(*input, "scaling_factor_input");
+  const bool compact_mxfp8 = has_compact_mxfp8_scales(*input);
+  CheckInputTensor(*input, "scaling_factor_input", !compact_mxfp8);
   CheckInputTensor(*output, "scaling_factor_output");
   NVTE_CHECK(!input->with_gemm_swizzled_scales,
              "Expected input tensor with scales in compact format.");
@@ -1301,6 +1390,15 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   NVTE_CHECK(!has_rowwise_scale_inv || !has_columnwise_scale_inv,
              "Input tensor has both row-wise and column-wise scaling factors");
   if (!has_rowwise_scale_inv && !has_columnwise_scale_inv) {
+    return;
+  }
+
+  if (compact_mxfp8) {
+    CompactSwizzleArgs args{};
+    args.num_tensors = 1;
+    args.tensors[0] = compact_swizzle_tensor(*input, *output, has_rowwise_scale_inv);
+    args.first_block[1] = DIVUP(args.tensors[0].m, size_t{128}) * args.tensors[0].tiles_k;
+    launch_compact_swizzle(args, has_rowwise_scale_inv, stream);
     return;
   }
 
@@ -1819,6 +1917,7 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
   bool all_has_data = true;
   bool all_has_columnwise_data = true;
   bool all_nvfp4 = true;
+  bool any_compact = false;
   for (size_t i = 0; i < num_tensors; i++) {
     auto scaling_mode = input[i]->scaling_mode;
     auto is_fp8 = is_fp8_dtype(input[i]->dtype());
@@ -1833,7 +1932,9 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 
     // We don't allow empty tensors. They should be filtered out before calling this function.
     NVTE_CHECK(input[i]->numel() != 0, "Tensor input[", i, "] is empty.");
-    CheckInputTensor(*input[i], "scaling_factor_input", check_scale_inv_shapes);
+    const bool compact = check_scale_inv_shapes && has_compact_mxfp8_scales(*input[i]);
+    any_compact = any_compact || compact;
+    CheckInputTensor(*input[i], "scaling_factor_input", check_scale_inv_shapes && !compact);
     CheckInputTensor(*output[i], "scaling_factor_output", check_scale_inv_shapes);
     all_has_data = all_has_data && input[i]->scale_inv.has_data();
     all_has_columnwise_data =
@@ -1844,6 +1945,35 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
              "All tensors should have data or columnwise data.");
   NVTE_CHECK(!all_has_data || !all_has_columnwise_data,
              "All tensors have both data and columnwise data.");
+
+  if (any_compact) {
+    CompactSwizzleArgs args{};
+    std::vector<Tensor*> padded_inputs, padded_outputs;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      if (!has_compact_mxfp8_scales(*input[i])) {
+        padded_inputs.push_back(input[i]);
+        padded_outputs.push_back(output[i]);
+        continue;
+      }
+      const int index = args.num_tensors++;
+      args.tensors[index] = compact_swizzle_tensor(*input[i], *output[i], all_has_data);
+      args.first_block[index + 1] =
+          args.first_block[index] +
+          DIVUP(args.tensors[index].m, size_t{128}) * args.tensors[index].tiles_k;
+      if (args.num_tensors == kMaxCompactTensors) {
+        launch_compact_swizzle(args, all_has_data, stream);
+        args.num_tensors = 0;
+      }
+    }
+    if (args.num_tensors != 0) launch_compact_swizzle(args, all_has_data, stream);
+    // Preserve the existing optimized dispatch for every padded tensor in a
+    // mixed batch. The recursive call contains no compact tensors.
+    if (!padded_inputs.empty()) {
+      multi_tensor_swizzle_scaling_factors(padded_inputs, padded_outputs, stream,
+                                           check_scale_inv_shapes);
+    }
+    return;
+  }
 
   const bool rowwise_swizzle = all_has_data || all_nvfp4;
   const bool columnwise_swizzle = all_has_columnwise_data && !all_nvfp4;
