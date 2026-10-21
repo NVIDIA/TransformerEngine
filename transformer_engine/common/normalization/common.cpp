@@ -306,9 +306,24 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
 
     auto ZDtype = _fp8_out ? ctype : otype;
     if (_fp8_out) {
-      const bool use_input_dtype = cudnnGetVersion() >= 92500 && _ndim_scale_block == 1 &&
-                                   use_cudnn_mxfp8_norm_output_in_input_dtype();
-      if (use_input_dtype) {
+      // cuDNN 9.26 heuristics overflow a stack buffer in
+      // libcudnn_engines_runtime_compiled while planning the BF16-intermediate
+      // MXFP8 RMSNorm at 2048x7168, forward training (row- and column-wise
+      // quantize). The FP32 intermediate plans successfully. Drop this guard
+      // once a cuDNN release fixes that shape.
+      const size_t cudnn_version = static_cast<size_t>(cudnnGetVersion());
+      const bool cudnn_926_rmsnorm_overflow =
+          cudnn_version >= 92600 && cudnn_version < 92700 && _training &&
+          _norm_type == NVTE_Norm_Type::RMSNorm && batch_dim == 2048 && hidden_dim == 7168;
+      const bool use_input_dtype = cudnn_version >= 92500 && _ndim_scale_block == 1 &&
+                                   use_cudnn_mxfp8_norm_output_in_input_dtype() &&
+                                   !cudnn_926_rmsnorm_overflow;
+      if (cudnn_926_rmsnorm_overflow && _ndim_scale_block == 1 &&
+          use_cudnn_mxfp8_norm_output_in_input_dtype()) {
+        NVTE_WARN(
+            "cuDNN 9.26 MXFP8 RMSNorm at 2048x7168 keeps the FP32 intermediate. "
+            "The BF16 intermediate crashes in heuristics.");
+      } else if (use_input_dtype) {
         NVTE_WARN(
             "The cuDNN MXFP8 normalization intermediate output uses the input dtype (itype) "
             "instead of the compute dtype; otype still applies to the final quantized output.");
