@@ -684,9 +684,8 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
             self._NUM_TILES = 2  # Each CTA handles 2 tiles stacked vertically
             self._THREADS_PER_CTA = 64
         # If _USE_STATIC_NUM_TILES, then each CTA will always process _NUM_TILES tiles without checking if those tiles
-        # are OOB (which will be zero padded by TMA).
-        # Benchmarks show this is in general faster than the dynamic count except when DACT is fused
-        self._USE_STATIC_NUM_TILES = not cfg.WITH_DACT
+        # are OOB (which will be zero padded by TMA). Hardcoded to true because benchmark shows this is always better
+        self._USE_STATIC_NUM_TILES = True
         # A hint that is tuned based on the benchmark which helps when ACT/DACT is fused
         self._MIN_BLOCKS_PER_MP = 1 if (cfg.WITH_ACT or cfg.WITH_DACT) else 0
         # Each thread handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
