@@ -2449,6 +2449,33 @@ class TestFusedAttnWithDeterminism:
         )
 
 
+def _require_cudnn_attention(q, k, v, **overrides):
+    """Skip unsupported graphs with cuDNN's reason, including FP8 output restrictions."""
+    helper = FusedAttnHelper(
+        is_training=True,
+        batch_size=q.shape[0],
+        q_dtype=q.dtype,
+        kv_dtype=k.dtype,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=q.shape[-2],
+        kv_num_heads=k.shape[-2],
+        q_max_seqlen=q.shape[1],
+        kv_max_seqlen=k.shape[1],
+        head_dim_qk=q.shape[-1],
+        head_dim_v=v.shape[-1],
+        window_size=(-1, -1),
+        bottom_right_diagonal=False,
+        attn_scale=0.125,
+    )
+    backend, reason = replace(helper, **overrides).get_fused_attn_backend()
+    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip(reason)
+
+
 @pytest.mark.parametrize("dtype", [jnp.float16, jnp.bfloat16])
 @pytest.mark.parametrize("fp8_backward", [False, True])
 @pytest.mark.parametrize(
@@ -2500,8 +2527,7 @@ def test_cudnn_python_fp8_forward_backward(dtype, layout, fp8_backward, monkeypa
             fp8=True,
         )
 
-    if get_device_compute_capability(0) < 90:
-        pytest.skip("cuDNN FP8 SDPA requires Hopper or newer.")
+    _require_cudnn_attention(q, k, v, qkv_layout=layout, fp8=True)
     actual = jax.jit(attention)(operands)
     expected = jax.jit(reference)(operands)
     np.testing.assert_allclose(actual, expected, rtol=5e-3, atol=5e-3)
@@ -2585,8 +2611,8 @@ def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, monkeypatch, request):
     """Compare non-uniform FP8 attention and gradients against native FP32 GQA."""
     ragged = kind.startswith("ragged")
     fp8 = not kind.endswith("_f16")
-    if get_device_compute_capability(0) < (100 if ragged else 90):
-        pytest.skip("FP8 ragged backward requires Blackwell; dense FP8 requires Hopper.")
+    if ragged and get_device_compute_capability(0) < 100:
+        pytest.skip("Ragged backward and emulated SM12x statistics require Blackwell.")
     if sm_arch is not None:
         from transformer_engine.jax.cpp_extensions import cudnn_attention
 
@@ -2626,6 +2652,18 @@ def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, monkeypatch, request):
         mask &= ids[:, :, None] == ids[:, None, :]
         attn_mask = AttnMaskType.PADDING_CAUSAL_MASK
         layout = QKVLayout.THD_THD_THD
+
+    _require_cudnn_attention(
+        q,
+        k,
+        v,
+        qkv_layout=layout,
+        attn_mask_type=attn_mask,
+        max_segments_per_seq=2 if ragged else 1,
+        window_size=window if window is not None else (-1, -1),
+        fp8=fp8,
+        return_max_logit=True,
+    )
 
     def reference(arrays):
         query, key, value = (tensor.astype(jnp.float32) for tensor in arrays)
@@ -2755,8 +2793,6 @@ def test_cudnn_python_flax_forward_backward(softmax, deterministic, fp8, monkeyp
     """Flax attention preserves sink gradients even when dropout is disabled."""
     from transformer_engine.jax.flax import DotProductAttention
 
-    if fp8 and get_device_compute_capability(0) < 90:
-        pytest.skip("cuDNN FP8 SDPA requires Hopper or newer.")
     monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
     module = DotProductAttention(
         head_dim=64,
@@ -2768,6 +2804,18 @@ def test_cudnn_python_flax_forward_backward(softmax, deterministic, fp8, monkeyp
     )
     q = jnp.zeros((1, 128, 2, 64), jnp.bfloat16)
     v = jnp.zeros_like(q).at[:, ::2, :, 0].set(1.0)
+    if fp8:
+        _require_cudnn_attention(
+            q,
+            q,
+            v,
+            fp8=True,
+            softmax_type=(
+                AttnSoftmaxType.LEARNABLE_SOFTMAX
+                if softmax == "learnable"
+                else AttnSoftmaxType.VANILLA_SOFTMAX
+            ),
+        )
     variables = module.init(jax.random.PRNGKey(0), q, q, v, deterministic=deterministic)
 
     def forward(variables, value):
@@ -2795,33 +2843,9 @@ def test_cudnn_python_flax_forward_backward(softmax, deterministic, fp8, monkeyp
 @pytest.mark.parametrize("fp8,fp8_backward", [(False, False), (True, False), (True, True)])
 def test_cudnn_python_dropout_replay(fp8, fp8_backward, monkeypatch):
     """Explicit keys replay dropout through JIT and forward recomputation."""
-    if fp8 and get_device_compute_capability(0) < 90:
-        pytest.skip("cuDNN FP8 SDPA requires Hopper or newer.")
     monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
-    helper = FusedAttnHelper(
-        is_training=True,
-        batch_size=1,
-        q_dtype=jnp.bfloat16,
-        kv_dtype=jnp.bfloat16,
-        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
-        attn_bias_type=AttnBiasType.NO_BIAS,
-        attn_mask_type=AttnMaskType.NO_MASK,
-        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
-        dropout_probability=0.2,
-        q_num_heads=2,
-        kv_num_heads=2,
-        q_max_seqlen=128,
-        kv_max_seqlen=128,
-        head_dim_qk=64,
-        head_dim_v=64,
-        window_size=(-1, -1),
-        attn_scale=0.125,
-        fp8=fp8,
-    )
-    backend, reason = helper.get_fused_attn_backend()
-    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
-        pytest.skip(reason)
     arrays = tuple(jnp.ones((1, 128, 2, 64), jnp.bfloat16) for _ in range(3))
+    _require_cudnn_attention(*arrays, dropout_probability=0.2, fp8=fp8)
 
     def attention(arrays, seed):
         return fused_attn(
@@ -2856,12 +2880,26 @@ def test_cudnn_python_context_parallel(strategy, fp8):
     """Two-device context parallel attention preserves FP8 forward and backward."""
     if jax.local_device_count() < 2:
         pytest.skip("Context parallel attention requires two GPUs.")
-    if fp8 and get_device_compute_capability(0) < 90:
-        pytest.skip("cuDNN FP8 SDPA requires Hopper or newer.")
     mesh = Mesh(np.asarray(jax.local_devices()[:2]), ("cp",))
     sharding = NamedSharding(mesh, PartitionSpec(None, "cp", None, None))
     q = jnp.full((2, 256, 2, 64), 0.5, jnp.bfloat16)
     v = jnp.zeros_like(q).at[:, ::2, :, 0].set(1.0)
+    if fp8:
+        # Query the per-device graph: all-gather retains the global KV sequence,
+        # while ring attention uses local Q and KV blocks.
+        _require_cudnn_attention(
+            q,
+            q,
+            v,
+            fp8=True,
+            qkv_layout=(
+                QKVLayout.BSHD_BSHD_BSHD
+                if strategy == CPStrategy.ALL_GATHER
+                else QKVLayout.BSHD_BS2HD
+            ),
+            q_max_seqlen=q.shape[1] // 2,
+            kv_max_seqlen=q.shape[1] if strategy == CPStrategy.ALL_GATHER else q.shape[1] // 2,
+        )
     arrays = tuple(jax.device_put(value, sharding) for value in (q, q, v))
 
     def attention(arrays):
