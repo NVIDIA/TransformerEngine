@@ -7,9 +7,11 @@
 #include "transformer_engine/comm_gemm.h"
 
 #include <cuda_runtime.h>
+#include <transformer_engine/recipe.h>
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -101,6 +103,35 @@ CublasMpMatmulDesc CublasMpMatmulDescCreate(cublasComputeType_t compute_type) {
       cublasMpMatmulDescriptorCreate, cublasMpMatmulDescriptorDestroy, compute_type);
 }
 
+using CudaDeviceFloats = std::unique_ptr<float, decltype(&cudaFree)>;
+
+// GEMM scalars in device memory for cuBLASMp's device pointer mode: the NVFP4 alpha, which is
+// computed on the stream from the tensors' global scales, followed by the betas 0 and 1.
+constexpr size_t kAlphaIndex = 0;
+constexpr size_t kBetaZeroIndex = 1;
+constexpr size_t kBetaOneIndex = 2;
+
+CudaDeviceFloats DeviceScalarsCreate() {
+  const float values[] = {1.0f, 0.0f, 1.0f};
+  float* raw{};
+  NVTE_CHECK_CUDA(cudaMalloc(&raw, sizeof values));
+  CudaDeviceFloats scalars(raw, cudaFree);
+  NVTE_CHECK_CUDA(cudaMemcpy(scalars.get(), values, sizeof values, cudaMemcpyHostToDevice));
+  return scalars;
+}
+
+#if CUBLASMP_VERSION >= 1100
+// Version of the loaded cuBLASMp library, which can differ from the headers TE was built with.
+int CublasMpRuntimeVersion() {
+  static const int version = [] {
+    int v{};
+    NVTE_CHECK_CUBLASMP(cublasMpGetVersion(&v));
+    return v;
+  }();
+  return version;
+}
+#endif  // CUBLASMP_VERSION >= 1100
+
 }  // namespace
 
 struct NVTECommGemmCtx {
@@ -116,6 +147,7 @@ struct NVTECommGemmCtx {
   CublasMpMatrixDesc b_desc;
   CublasMpMatrixDesc d_desc;
   CublasMpMatmulDesc matmul_desc;
+  CudaDeviceFloats device_scalars;
   void* workspace;
   size_t workspace_size;
 };
@@ -263,8 +295,10 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
   const bool tensor_scaling =
       is_tensor_scaling(a->scaling_mode) && is_tensor_scaling(b->scaling_mode);
   const bool mxfp8 = is_mxfp_scaling(a->scaling_mode) && is_mxfp_scaling(b->scaling_mode);
+  const bool nvfp4 = is_nvfp_scaling(a->scaling_mode) && is_nvfp_scaling(b->scaling_mode);
 
-  NVTE_CHECK(tensor_scaling || mxfp8, "Unsupported scaling modes: A=", to_string(a->scaling_mode),
+  NVTE_CHECK(tensor_scaling || mxfp8 || nvfp4,
+             "Unsupported scaling modes: A=", to_string(a->scaling_mode),
              ", B=", to_string(b->scaling_mode));
   NVTE_CHECK(is_tensor_scaling(d->scaling_mode),
              "Unsupported scaling mode for D: ", to_string(d->scaling_mode));
@@ -280,7 +314,29 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
 #endif
   }
 
-  // Mirror cublaslt_gemm.cu's input canonicalization. Tensor FP8 columnwise data is a
+  if (nvfp4) {
+    // NVFP4 needs alpha computed on the stream from the global scales, so it needs
+    // cuBLASMp's device pointer mode.
+#if CUBLASMP_VERSION < 1100
+    NVTE_ERROR("NVFP4 GEMM requires cuBLASMp 0.11.0+, but compile-time cuBLASMp version is ",
+               CUBLASMP_VERSION);
+#else
+    NVTE_CHECK(CublasMpRuntimeVersion() >= 1100,
+               "NVFP4 GEMM requires cuBLASMp 0.11.0+, but run-time cuBLASMp version is ",
+               CublasMpRuntimeVersion());
+    NVTE_CHECK(!a->row_scaled_nvfp4 && !b->row_scaled_nvfp4,
+               "cuBLASMp GEMM does not support row-scaled NVFP4 inputs.");
+    NVTE_CHECK(a->with_gemm_swizzled_scales,
+               "NVFP4 scales for A are not in format expected by GEMM");
+    NVTE_CHECK(b->with_gemm_swizzled_scales,
+               "NVFP4 scales for B are not in format expected by GEMM");
+    NVTE_CHECK(!is_fp8_dtype(d->dtype()) && !is_fp4_dtype(d->dtype()),
+               "NVFP4 GEMM with cuBLASMp does not support quantized output (D is ",
+               to_string(d->dtype()), ")");
+#endif
+  }
+
+  // Mirror cublaslt_gemm.cu's input canonicalization. Tensor FP8 and NVFP4 columnwise data is a
   // transposed view, while MXFP8 columnwise data keeps the logical shape.
   const bool fp8_needs_tn = !nvte_is_non_tn_fp8_gemm_supported();
   auto canonicalize_input = [fp8_needs_tn](const Tensor* t, bool current_trans, bool is_a,
@@ -312,6 +368,16 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
       return {*t, current_trans};
     }
 
+    if (is_nvfp_scaling(t->scaling_mode)) {
+      // NVFP4 GEMMs only support the TN layout.
+      if (current_trans == is_a) {
+        NVTE_CHECK(t->has_data(), "NVFP4 input ", side, " is missing row-wise data");
+        return {*t, current_trans};
+      }
+      NVTE_CHECK(t->has_columnwise_data(), "NVFP4 input ", side, " is missing column-wise data");
+      return use_columnwise(!current_trans);
+    }
+
     if (!is_fp8_dtype(t->dtype())) {
       return {*t, current_trans};
     }
@@ -329,6 +395,9 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
 
   auto [a_used, transa_eff] = canonicalize_input(a, transa, /*is_a=*/true, "A");
   auto [b_used, transb_eff] = canonicalize_input(b, transb, /*is_a=*/false, "B");
+  // NVFP4 column-wise data is transposed, so the flag flips when it replaces the row-wise data.
+  [[maybe_unused]] const bool a_rowwise = transa_eff == transa;
+  [[maybe_unused]] const bool b_rowwise = transb_eff == transb;
   transa = transa_eff;
   transb = transb_eff;
 
@@ -346,6 +415,22 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
       ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_TRANSB, &trans_b,
       sizeof trans_b));
   cublasMpMatmulAlgoType_t algo_attr = cublasmp_algo(algo);
+  // The split ReduceScatter and AllReduce algorithms take NVFP4 B scales as one padded tensor per
+  // output-column chunk, with one chunk per rank. The rank-local scale tensor passed here has that
+  // layout only if the chunks span whole 128-column scale tiles, so otherwise use the default
+  // algorithm, which takes the rank-local tensor.
+  if (nvfp4 && init_matrices_fn != AgGemmInitMatrices &&
+      (algo_attr == CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_P2P ||
+       algo_attr == CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_MULTICAST) &&
+      (n % ctx->nranks != 0 || (n / ctx->nranks) % 128 != 0)) {
+    static std::once_flag warned;
+    std::call_once(warned, [&] {
+      NVTE_WARN("cuBLASMp NVFP4 comm+GEMM splits the output into ", ctx->nranks, " chunks of ", n,
+                " / ", ctx->nranks,
+                " columns, which is not a multiple of 128, so it uses the default algorithm.");
+    });
+    algo_attr = CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT;
+  }
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
       ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_ALGO_TYPE, &algo_attr,
       sizeof algo_attr));
@@ -357,9 +442,17 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
       return CUBLASMP_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
     }
 #endif
+#if CUBLASMP_VERSION >= 1100
+    if (is_nvfp_scaling(t.scaling_mode)) {
+      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "Unsupported dtype for NVFP4 scales (",
+                 to_string(t.scale_inv.dtype), ").");
+      return CUBLASMP_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+    }
+#endif
     return scale_mode;
   };
-  if (is_fp8_dtype(a_used.dtype()) || is_mxfp_scaling(a_used.scaling_mode)) {
+  if (is_fp8_dtype(a_used.dtype()) || is_mxfp_scaling(a_used.scaling_mode) ||
+      is_nvfp_scaling(a_used.scaling_mode)) {
     const cublasMpMatmulMatrixScale_t input_scale_mode = get_input_scale_mode(a_used);
     NVTE_CHECK(a_used.scale_inv.dptr, "Scaling must be set for input A");
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
@@ -369,7 +462,8 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_POINTER,
         &a_used.scale_inv.dptr, sizeof(void*)));
   }
-  if (is_fp8_dtype(b_used.dtype()) || is_mxfp_scaling(b_used.scaling_mode)) {
+  if (is_fp8_dtype(b_used.dtype()) || is_mxfp_scaling(b_used.scaling_mode) ||
+      is_nvfp_scaling(b_used.scaling_mode)) {
     const cublasMpMatmulMatrixScale_t input_scale_mode = get_input_scale_mode(b_used);
     NVTE_CHECK(b_used.scale_inv.dptr, "Scaling must be set for input B");
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
@@ -470,12 +564,30 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
 
   float alpha = 1.0;
   float beta = accumulate ? 1.0 : 0.0;
+  const void* alpha_ptr = &alpha;
+  const void* beta_ptr = &beta;
+#if CUBLASMP_VERSION >= 1100
+  if (nvfp4) {
+    // Apply the NVFP4 global scales of A and B through alpha, which is computed on the stream
+    // from their amaxes. Device pointer mode applies to alpha and beta alike.
+    float* alpha_device = ctx->device_scalars.get() + kAlphaIndex;
+    TensorWrapper alpha_tensor(alpha_device, std::vector<size_t>{1}, DType::kFloat32);
+    nvte_nvfp4_compute_per_tensor_scale(a->nvte_tensor, a_rowwise, b->nvte_tensor, b_rowwise, alpha,
+                                        alpha_tensor.data(), main_stream);
+    const cublasMpPointerMode_t pointer_mode = CUBLASMP_POINTER_MODE_DEVICE;
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_POINTER_MODE, &pointer_mode,
+        sizeof pointer_mode));
+    alpha_ptr = alpha_device;
+    beta_ptr = ctx->device_scalars.get() + (accumulate ? kBetaOneIndex : kBetaZeroIndex);
+  }
+#endif
   std::tuple args{ctx->cublas_mp.get(),
                   ctx->matmul_desc.get(),
                   m,
                   n,
                   k,
-                  &alpha,
+                  alpha_ptr,
                   a_used.data.dptr,
                   1,
                   1,
@@ -484,7 +596,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
                   1,
                   1,
                   ctx->b_desc.get(),
-                  &beta,
+                  beta_ptr,
                   accumulate ? d->data.dptr : nullptr,
                   1,
                   1,
@@ -533,6 +645,7 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
   auto d_desc = CublasMpMatrixDescCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get());
 
   auto matmul_desc = CublasMpMatmulDescCreate(CUBLAS_COMPUTE_32F);
+  auto device_scalars = DeviceScalarsCreate();
 
   return new NVTECommGemmCtx{
       .nranks = nranks,
@@ -547,6 +660,7 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
       .b_desc = std::move(b_desc),
       .d_desc = std::move(d_desc),
       .matmul_desc = std::move(matmul_desc),
+      .device_scalars = std::move(device_scalars),
       .workspace = nullptr,
       .workspace_size = 0,
   };
