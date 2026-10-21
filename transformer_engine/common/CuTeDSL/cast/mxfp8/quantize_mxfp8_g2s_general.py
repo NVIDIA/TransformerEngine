@@ -687,6 +687,8 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         # are OOB (which will be zero padded by TMA).
         # Benchmarks show this is in general faster than the dynamic count except when DACT is fused
         self._USE_STATIC_NUM_TILES = not cfg.WITH_DACT
+        # A hint that is tuned based on the benchmark which helps when ACT/DACT is fused
+        self._MIN_BLOCKS_PER_MP = 1 if (cfg.WITH_ACT or cfg.WITH_DACT) else 0
         # Each thread handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
         self._TILE_COLS = self._THREADS_PER_CTA
         self._TILE_ROWS = MXFP8_BLOCK_SCALING_SIZE
@@ -831,6 +833,7 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         ).launch(
             grid=grid,
             block=block,
+            min_blocks_per_mp=self._MIN_BLOCKS_PER_MP,
             stream=stream,
         )
 
@@ -1172,10 +1175,12 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         for tile_idx in cutlass.range(num_tiles, unroll=1):
             mainloop_pipeline.consumer_wait(cons_state)
             # Only allow at most _NUM_STAGES-1 stages to be in-flight, because this iteration will reuse the ring buffer
-            # that is read _NUM_STAGES iterations ago so we must wait for whoever is reading that buffer to finish
-            if warp_idx == 0:
-                cute.arch.cp_async_bulk_wait_group(self._NUM_STAGES - 1, read=True)
-            cute.arch.sync_threads()
+            # that is read _NUM_STAGES iterations ago so we must wait for whoever is reading that buffer to finish.
+            # Note: no sO buffer is reused when _NUM_TILES <= _NUM_STAGES, so we can always skip waiting when this holds
+            if cutlass.const_expr(self._NUM_TILES > self._NUM_STAGES):
+                if warp_idx == 0:
+                    cute.arch.cp_async_bulk_wait_group(self._NUM_STAGES - 1, read=True)
+                cute.arch.sync_threads()
             # The current pipeline stage index, which is the tile index modulo the number of stages.
             # This is used to index into the shared memory ring buffers that are wrapped around the number of stages.
             stage_idx = cons_state.index
@@ -1312,9 +1317,9 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
             sAmax = storage.sAmax.get_tensor(cute.make_layout(self._NUM_WARPS))
             self._amax_epilogue(sAmax, mAmax, tidx, warp_idx, per_thread_amax)
 
-        # Wait for in-flight TMA stores so data is visible to the host
-        # before the kernel returns.
-        cute.arch.cp_async_bulk_wait_group(0, read=False)
+        # Wait only until in-flight TMA stores have read SMEM so the CTA retires (frees its SMEM) early;
+        # the grid's completion still guarantees the global writes are done.
+        cute.arch.cp_async_bulk_wait_group(0, read=True)
 
     @cute.jit
     def _dbias_reduction_rowwise_epilouge(
