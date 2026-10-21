@@ -460,10 +460,12 @@ struct PackedMXFP8Operand {
  *
  * The operand is a batch of row-major matrices, with the same
  * batch_dim convention as nvte_cublas_gemm_strided_batched. As a
- * special case, 2D data with batch_dim=-2 is interpreted as a
+ * special case, 2D data with batch_dim=-2 is always interpreted as a
  * [rows, batch_size*cols] view of a [rows, batch_size, cols] tensor.
  * Quantizing with this view keeps MXFP8 column-wise scaling blocks
- * from mixing batch entries.
+ * from mixing batch entries. A 2D [batch_size, cols] tensor (one row
+ * per batch entry) has the same layout with batch_dim=0, so callers
+ * should pass batch_dim=0 or a 3D tensor in that case.
  */
 PackedMXFP8Operand pack_mxfp8_operand(py::handle operand, const TensorWrapper& operand_tensor,
                                       bool rowwise, int64_t batch_dim, int64_t batch_size,
@@ -493,8 +495,9 @@ PackedMXFP8Operand pack_mxfp8_operand(py::handle operand, const TensorWrapper& o
   int64_t cols = data.size(-1);
   if (batch_in_features) {
     NVTE_CHECK(cols % batch_size == 0, "MXFP8 ", name, " with shape ", data.sizes(),
-               " can't be interpreted as a [rows, batch_size*cols] view (batch_size=", batch_size,
-               ").");
+               " and batch_dim=-2 is interpreted as a [rows, batch_size*cols] view, but its ",
+               "last dim is not divisible by batch_size=", batch_size,
+               ". For a [batch_size, cols] tensor, use batch_dim=0.");
     rows = data.size(0);
     cols /= batch_size;
   } else {

@@ -972,10 +972,12 @@ def strided_batched_gemm(
 
     MXFP8 inputs must use compact scales. The extension packs and
     GEMM-swizzles the required scaling direction for each operand before
-    launching cuBLASLt. A 2D MXFP8 tensor with ``batch_dim=-2`` is
+    launching cuBLASLt. A 2D MXFP8 tensor with ``batch_dim=-2`` is always
     interpreted as a ``[R, G*C]`` view of a ``[R, G, C]`` tensor, which is
-    required for column-wise MXFP8 data with ``batch_dim=-2``. Other input
-    formats fall back to a high-precision GEMM.
+    required for column-wise MXFP8 data with ``batch_dim=-2``. A 2D
+    ``[G, C]`` tensor (one row per batch entry) has the same layout with
+    ``batch_dim=0``, so pass ``batch_dim=0`` or a 3D tensor in that case.
+    Other input formats fall back to a high-precision GEMM.
     """
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
 

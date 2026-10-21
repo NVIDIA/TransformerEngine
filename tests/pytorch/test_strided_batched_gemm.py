@@ -365,3 +365,30 @@ def test_strided_batched_gemm_rejects_invalid_compact_scale_shape(api, buffer_na
             strided_batched_gemm(A, B, out, layout="TN")
         else:
             _cpp_strided_batched_gemm(A, B, out)
+
+
+def test_strided_batched_gemm_two_dim_mxfp8_operand():
+    """A 2D [G, C] MXFP8 operand uses batch_dim=0.
+
+    With batch_dim=-2, 2D MXFP8 data is interpreted as a [R, G*C] view
+    of a [R, G, C] tensor.
+
+    """
+    _skip_if_unavailable("mxfp8")
+
+    torch.manual_seed(1234)
+    # Note: MXFP8 quantization requires 32 | groups. The error check
+    # requires groups not to divide hidden.
+    groups, out_features, hidden = 64, 64, 96
+    x = torch.randn(groups, hidden, dtype=torch.bfloat16, device="cuda")
+    w = torch.randn(groups, out_features, hidden, dtype=torch.bfloat16, device="cuda")
+    A = _quantize_mxfp8_batched(w, batch_dim=0)
+    B = _quantize_mxfp8_batched(x, batch_dim=0)
+    out = torch.empty(groups, out_features, dtype=torch.bfloat16, device="cuda")
+
+    strided_batched_gemm(A, B, out, layout="TN")
+    ref = torch.einsum("gd,grd->gr", B.dequantize().float(), A.dequantize().float())
+    torch.testing.assert_close(out.float(), ref, rtol=1.6e-2, atol=1e-2)
+
+    with pytest.raises(RuntimeError, match="use batch_dim=0"):
+        strided_batched_gemm(A, B, out, layout="TN", batch_dim_b=-2, batch_dim_out=-2)

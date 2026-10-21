@@ -457,3 +457,60 @@ def test_rejects_unsupported_layout() -> None:
     assert inp.shape == (32, 2, 32) and not inp.is_contiguous()
     with pytest.raises(ValueError, match="contiguous input"):
         op(inp)
+
+
+@pytest.mark.parametrize("input_batch_dim", (0, -2))
+def test_two_dim_input(input_batch_dim: int) -> None:
+    """A 2D input holds one row per batch entry."""
+    dtype = torch.bfloat16
+    batch_size, in_features, out_features = 4, 64, 32
+    op = te_ops.BatchedLinear(
+        batch_size,
+        in_features,
+        out_features,
+        input_batch_dim=input_batch_dim,
+        dtype=dtype,
+        device="cuda",
+    )
+    inp = torch.rand(batch_size, in_features, dtype=dtype, device="cuda", requires_grad=True)
+    grad_output = torch.rand(batch_size, out_features, dtype=dtype, device="cuda")
+
+    inp_ref = _to_reference(inp, requires_grad=True)
+    weight_ref = _to_reference(op.weight, requires_grad=True)
+    bias_ref = _to_reference(op.bias, requires_grad=True)
+    output_ref = torch.einsum("gd,grd->gr", inp_ref, weight_ref) + bias_ref
+    output_ref.backward(_to_reference(grad_output, requires_grad=False))
+
+    output = op(inp)
+    output.backward(grad_output)
+
+    tols = dtype_tols(dtype)
+    assert tuple(output.shape) == (batch_size, out_features)
+    assert_close(output, output_ref, **tols)
+    assert_close(inp.grad, inp_ref.grad, **tols)
+    assert_close(op.weight.grad, weight_ref.grad, **tols)
+    assert_close(op.bias.grad, bias_ref.grad, **tols)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+def test_two_dim_input_mxfp8_inference() -> None:
+    """MXFP8 inference supports one row per batch entry."""
+    dtype = torch.bfloat16
+    batch_size, in_features, out_features = 32, 1024, 64
+    recipe = make_recipe("mxfp8")
+    op = te_ops.BatchedLinear(
+        batch_size,
+        in_features,
+        out_features,
+        input_batch_dim=-2,
+        bias=False,
+        dtype=dtype,
+        device="cuda",
+    )
+    inp = torch.rand(batch_size, in_features, dtype=dtype, device="cuda")
+    reference = torch.einsum("gd,grd->gr", inp.float(), op.weight.float())
+
+    with torch.no_grad(), te.autocast(enabled=True, recipe=recipe):
+        output = op(inp)
+    assert tuple(output.shape) == (batch_size, out_features)
+    assert_close(output, reference, **quantization_tols("mxfp8"))

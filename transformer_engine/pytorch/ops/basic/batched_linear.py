@@ -388,12 +388,25 @@ class BatchedLinear(BasicOperation):
             if not self.bias.is_contiguous():
                 raise ValueError("BatchedLinear requires a contiguous bias")
 
-    def _validate_mxfp8_dimensions(self, rows: int) -> None:
-        for name, size in (
-            ("rows per GEMM", rows),
-            ("in_features", self.in_features),
-            ("out_features", self.out_features),
-        ):
+    def _gemm_shape(self, rows: int, features: int) -> tuple[int, int, int]:
+        """3D shape of input or output in strided batched GEMM
+
+        The input is always passed to strided batched GEMM as a 3D
+        tensor, so it can be distinguished from the 2D view that is
+        used when quantizing MXFP8 data with input_batch_dim=-2.
+
+        """
+        if self.input_batch_dim == 0:
+            return (self.batch_size, rows, features)
+        return (rows, self.batch_size, features)
+
+    def _validate_mxfp8_dimensions(self, rows: int, *, with_columnwise_input: bool) -> None:
+        # Row count only matters for column-wise scaling, which is
+        # needed for the weight gradient
+        dims = [("in_features", self.in_features), ("out_features", self.out_features)]
+        if with_columnwise_input:
+            dims.append(("rows per GEMM", rows))
+        for name, size in dims:
             if size % 32 != 0:
                 raise ValueError(
                     f"MXFP8 BatchedLinear requires {name} divisible by 32 (got {size})"
@@ -481,7 +494,7 @@ class BatchedLinear(BasicOperation):
         rows = self._validate_input(input_)
         self._validate_parameters()
         dtype = maybe_autocast_dtype(default_dtype=self.weight.dtype)
-        x = maybe_dequantize(input_, dtype)
+        x = maybe_dequantize(input_, dtype).view(self._gemm_shape(rows, self.in_features))
         input_requires_grad = ctx.requires_grad
         weight_requires_grad = ctx.requires_grad and self.weight.requires_grad
         bias_requires_grad = ctx.requires_grad and self.bias is not None and self.bias.requires_grad
@@ -514,7 +527,7 @@ class BatchedLinear(BasicOperation):
         gemm_w: torch.Tensor = w
         if with_quantized_compute:
             if with_mxfp8_compute:
-                self._validate_mxfp8_dimensions(rows)
+                self._validate_mxfp8_dimensions(rows, with_columnwise_input=weight_requires_grad)
             gemm_x = self._quantize_for_batched_gemm(
                 x,
                 self.get_quantizer("forward", 0),
@@ -536,7 +549,11 @@ class BatchedLinear(BasicOperation):
         # Batched GEMM
         output_shape = list(input_.shape)
         output_shape[-1] = self.out_features
-        output = torch.empty(output_shape, dtype=dtype, device=input_.device)
+        output = torch.empty(
+            self._gemm_shape(rows, self.out_features),
+            dtype=dtype,
+            device=input_.device,
+        )
         strided_batched_gemm(
             gemm_w,
             gemm_x,
@@ -547,7 +564,7 @@ class BatchedLinear(BasicOperation):
             layout="TN",
             use_split_accumulator=_2X_ACC_FPROP,
         )
-        output = self._apply_bias(output, dtype)
+        output = self._apply_bias(output, dtype).view(output_shape)
 
         if ctx.requires_grad:
             ctx.save_for_backward(
@@ -559,6 +576,7 @@ class BatchedLinear(BasicOperation):
             ctx.bias_requires_grad = bias_requires_grad
             ctx.input_shape = tuple(input_.shape)
             ctx.output_shape = tuple(output_shape)
+            ctx.rows = rows
             ctx.dtype = dtype
             ctx.with_quantized_compute = with_quantized_compute
             ctx.save_original_input = save_original_input
@@ -583,6 +601,7 @@ class BatchedLinear(BasicOperation):
                 "BatchedLinear grad output has invalid shape "
                 f"(expected {ctx.output_shape}, got {tuple(dy.shape)})"
             )
+        dy = dy.view(self._gemm_shape(ctx.rows, self.out_features))
 
         gemm_dy = dy
         if ctx.with_quantized_compute:
@@ -599,7 +618,11 @@ class BatchedLinear(BasicOperation):
         if ctx.input_requires_grad:
             if w is None:
                 raise RuntimeError("BatchedLinear weight was not saved for input gradient")
-            grad_input = torch.empty(ctx.input_shape, dtype=ctx.dtype, device=dy.device)
+            grad_input = torch.empty(
+                self._gemm_shape(ctx.rows, self.in_features),
+                dtype=ctx.dtype,
+                device=dy.device,
+            )
             strided_batched_gemm(
                 w,
                 gemm_dy,
@@ -616,7 +639,9 @@ class BatchedLinear(BasicOperation):
             if x is None:
                 raise RuntimeError("BatchedLinear input was not saved for weight gradient")
             if ctx.save_original_input:
-                x = maybe_dequantize(x, ctx.dtype)
+                x = maybe_dequantize(x, ctx.dtype).view(
+                    self._gemm_shape(ctx.rows, self.in_features)
+                )
                 if ctx.with_quantized_compute:
                     x = self._quantize_for_batched_gemm(
                         x,
@@ -682,4 +707,6 @@ class BatchedLinear(BasicOperation):
         grad_params = [grad_weight]
         if self.use_bias:
             grad_params.append(grad_bias)
+        if grad_input is not None:
+            grad_input = grad_input.view(ctx.input_shape)
         return grad_input, grad_params
