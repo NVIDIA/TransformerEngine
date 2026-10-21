@@ -212,6 +212,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"));
   m.def("quantize_mxfp8_segments", &transformer_engine::pytorch::quantize_mxfp8_segments,
         py::arg("segments"), py::arg("quantizer"), py::arg("shape"));
+  m.def("nvfp4_gemm_swizzled_scales_alignment",
+        &transformer_engine::pytorch::NVFP4Quantizer::gemm_swizzled_scales_alignment,
+        py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
+        py::arg("row_scaled_nvfp4"), py::arg("nvfp4_use_4over6"), py::arg("sm_arch"),
+        py::arg("disable_rht_cast_fusion"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
@@ -609,6 +614,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Misc
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
+  m.def("get_cublasLt_build_version", &nvte_get_cublaslt_build_version,
+        "Get the cublasLt version that Transformer Engine was built against",
+        py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
