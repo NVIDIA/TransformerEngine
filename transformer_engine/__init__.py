@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Optional, Tuple
 import transformer_engine.common
 
-
 # Minimum NCCL version for the runtime-loaded NCCL EP backend.
 _NCCL_EP_MIN_VERSION = (2, 30, 4)
 
