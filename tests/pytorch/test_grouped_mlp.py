@@ -42,6 +42,7 @@ from transformer_engine.pytorch import (
     QuantizerRole,
     is_bf16_available,
 )
+from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
@@ -3288,6 +3289,105 @@ class TestGroupedMLPFusedOp:
         else:
             for graph_grad, param in zip(graph_param_grads, reference_module.parameters()):
                 assert_close(graph_grad, param.grad, **tols)
+
+    # (group_size, tokens_per_group): token counts chosen so the quantized inputs' byte sizes
+    # never coincide with a weight's, which the saved-tensor counting below relies on.
+    @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+    @pytest.mark.parametrize("group_size,tokens_per_group", ((1, 768), (4, 256)))
+    def test_nvfp4_saves_columnwise_inputs_only(
+        self,
+        group_size: int,
+        tokens_per_group: int,
+        *,
+        hidden_size: int = 256,
+        glu_interleave_size: int = 32,
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cuda",
+    ) -> None:
+        """The fused grouped MLP must not save the NVFP4 rowwise input copies for backward.
+
+        Every wgrad path (the cuDNN grouped kernel, the single-group dense GEMM and the generic
+        grouped GEMM fallback) reads only the columnwise tiles (data and scales) of the saved FC1
+        and FC2 inputs, so the rowwise copies are dead after forward. Saving them doubled the
+        activation memory held (and offloaded) for the quantized inputs.
+
+        Checked through ``saved_tensors_hooks``: the saved set must hold exactly one FP4 data
+        tensor and one scale tensor per quantized input. Grouped storage is saved as its raw
+        buffers; the single-group dense path (cuDNN frontend >= 1.27) instead saves a
+        ``GroupedTensor`` wrapper whose buffers are inspected directly.
+
+        Weights require grad here: with frozen weights the input quantizers skip the columnwise
+        copy and the fused op's ``mark_grouped_tensor`` call rejects the input before the pruning
+        is reached.
+        """
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("Fused grouped MLP (CuTeDSL) is not supported on this system")
+
+        total_tokens = group_size * tokens_per_group
+        split_sizes = torch.tensor([tokens_per_group] * group_size, dtype=torch.int, device=device)
+        # The fused grouped MLP requires a split alignment divisible by 256 (the default is 128).
+        fc1 = te.ops.GroupedLinear(
+            group_size,
+            hidden_size,
+            2 * hidden_size,
+            bias=False,
+            device=device,
+            dtype=dtype,
+            split_alignment=256,
+        )
+        fc2 = te.ops.GroupedLinear(
+            group_size,
+            hidden_size,
+            hidden_size,
+            bias=False,
+            device=device,
+            dtype=dtype,
+            split_alignment=256,
+        )
+        module = te.ops.Sequential(
+            fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
+        )
+        x = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+        x.requires_grad_()
+        probs = torch.rand((total_tokens,), dtype=dtype, device=device)
+        dy = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+
+        saved = []
+
+        def pack(t):
+            if isinstance(t, GroupedTensor):
+                # Dense single-group path: the wrapper is saved whole, so count its buffers.
+                assert t.rowwise_data is None, "rowwise FP4 input data was saved"
+                assert t.scale_inv is None, "rowwise FP4 input scales were saved"
+                for buf in (t.columnwise_data, t.columnwise_scale_inv):
+                    if buf is not None:
+                        saved.append((buf.dtype, buf.numel()))
+            elif isinstance(t, torch.Tensor):
+                saved.append((t.dtype, t.numel()))
+            return t
+
+        with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+            with te.autocast(enabled=True, recipe=make_recipe("nvfp4_rht")):
+                y = module(x, split_sizes, probs, split_sizes)
+        forward_ops = module._module_groups[0]._forward_ops
+        assert isinstance(forward_ops[0][0], te.ops.fused.GroupedMLP_CuTeGEMMGLU)
+
+        # Byte counts that identify the quantized FC1/FC2 inputs (both are [tokens, hidden_size]
+        # in NVFP4: 2 elements per byte, one E4M3 scale per 16 elements). Weights have other
+        # sizes.
+        fp4_data_numel = total_tokens * hidden_size // 2
+        fp4_scale_numel = total_tokens * hidden_size // 16
+        n_data = sum(1 for d, n in saved if d == torch.uint8 and n == fp4_data_numel)
+        n_scale = sum(1 for d, n in saved if d == torch.uint8 and n == fp4_scale_numel)
+        # One columnwise data + one columnwise scale tensor per quantized input (FC1 x, FC2 x).
+        assert n_data == 2, f"expected 2 FP4 input data tensors saved, got {n_data}"
+        assert n_scale == 2, f"expected 2 FP4 input scale tensors saved, got {n_scale}"
+
+        # Backward still runs on what was saved.
+        y.backward(dy)
+        assert x.grad is not None and torch.isfinite(x.grad).all()
+        for p in module.parameters():
+            assert p.grad is not None and torch.isfinite(p.grad).all()
 
 
 class TestGroupedMLPDeterminism:
