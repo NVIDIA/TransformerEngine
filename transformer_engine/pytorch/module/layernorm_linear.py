@@ -154,7 +154,6 @@ class LayerNormLinearFwdArgs:
     activation_dtype: torch.dtype
     fp8: bool
     fp8_calibration: bool
-    fp8_output: bool
     backward_override: Optional[str]
     dgrad_use_split_accumulator: bool
     wgrad_use_split_accumulator: bool
@@ -2581,7 +2580,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 activation_dtype=self.activation_dtype,
                 fp8=self.fp8,
                 fp8_calibration=self.fp8_calibration,
-                fp8_output=fp8_output,
                 backward_override=backward_override,
                 dgrad_use_split_accumulator=dgrad_use_split_accumulator,
                 wgrad_use_split_accumulator=wgrad_use_split_accumulator,

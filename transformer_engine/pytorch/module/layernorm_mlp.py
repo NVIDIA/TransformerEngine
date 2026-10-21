@@ -3,13 +3,12 @@
 # See LICENSE for license information.
 
 """LayerNormMLP API"""
+import math
 import os
 import warnings
 from dataclasses import dataclass, replace as dataclass_replace
 import weakref
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union, List
-from functools import reduce
-from operator import mul as multiply_op
 
 import torch
 from torch.nn.parameter import Parameter
@@ -3332,7 +3331,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 act_features = fc1_weight.shape[0]
                 if self.activation in _GATED_ACTIVATIONS:
                     act_features //= 2
-                rows = reduce(multiply_op, inp.shape[:-1], 1)
+                rows = math.prod(inp.shape[:-1])
                 rows_total = rows * self.tp_size if self.sequence_parallel else rows
                 check_gemm_dims((rows_total, act_features), fc2_weight.shape, self.fp8)
                 out, ln_out, new_fc1_ws, new_fc2_ws = _layernorm_mlp_op(fwd_args)
