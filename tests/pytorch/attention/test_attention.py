@@ -1461,8 +1461,7 @@ def test_dpa_mla_should_pad_cache(dtype, model_configs, model):
         os.environ["NVTE_FLASH_ATTN"] = "0"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         cached = should_pad_qkv_head_dim(native_params, False)
-        dpa_utils.clear_should_pad_qkv_head_dim_cache()
-        fresh = should_pad_qkv_head_dim(native_params, False)
+        fresh = should_pad_qkv_head_dim(native_params, False, invalidate_cache=True)
     finally:
         for name, value in saved.items():
             if value is None:

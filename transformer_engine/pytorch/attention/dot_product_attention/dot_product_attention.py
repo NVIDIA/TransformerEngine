@@ -2834,9 +2834,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 pad_between_seqs=pad_between_seqs,
             )
 
-            if _attention_backends["backend_selection_requires_update"]:
-                dpa_utils.clear_should_pad_qkv_head_dim_cache()
-
             # Optionally pad inputs to `max(head_dim_qk, head_dim_v)` when it's required by the
             # kernel or when it leads to faster kernel selection. Note that the padded tensors could
             # still be unsupported input shapes by `{Flash,Fused}Attention`.
@@ -2849,7 +2846,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             is_qkv_head_dim_padded = False
             orig_head_dim_v = head_dim_v
             if can_pad_qkv_head_dim and dpa_utils.should_pad_qkv_head_dim(
-                attention_params, has_packed_qkv
+                attention_params,
+                has_packed_qkv,
+                invalidate_cache=_attention_backends["backend_selection_requires_update"],
             ):
                 query_layer, key_layer, value_layer, _, _ = _pad_qkv_head_dim(
                     query_layer, key_layer, value_layer

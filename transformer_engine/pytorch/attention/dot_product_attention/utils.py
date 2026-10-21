@@ -2019,6 +2019,7 @@ def get_attention_backend(
 def should_pad_qkv_head_dim(
     attention_params: AttentionParams,
     has_packed_qkv: bool,
+    invalidate_cache: bool = False,
 ) -> bool:
     """Decide whether to pad Q/K/V to a common head dim.
 
@@ -2029,8 +2030,8 @@ def should_pad_qkv_head_dim(
        backend selection ranks higher for this configuration.
 
     The decision is memoized on `attention_params`, `has_packed_qkv` and the backend-selection
-    environment. Callers that invalidate backend selection for any other reason must also call
-    `clear_should_pad_qkv_head_dim_cache`.
+    environment. Callers that invalidate backend selection for any other reason must pass
+    `invalidate_cache=True`.
 
     Parameters
     ----------
@@ -2038,12 +2039,16 @@ def should_pad_qkv_head_dim(
         Attention parameters for the native (unpadded) QK and V head dimensions.
     has_packed_qkv : bool
         Whether the caller passed a packed `qkv_layer` or `kv_layer` buffer.
+    invalidate_cache : bool
+        Whether to invalidate the cache prior to checking it.
 
     Returns
     -------
     bool
         Whether Q/K/V should be padded to a common (the wider) head dim.
     """
+    if invalidate_cache:
+        clear_should_pad_qkv_head_dim_cache()
     if attention_params.head_dim_qk == attention_params.head_dim_v:
         return False
 
