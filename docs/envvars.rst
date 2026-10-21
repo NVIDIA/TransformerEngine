@@ -159,6 +159,12 @@ General
    :Default: ``0``
    :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to available CuTeDSL kernels. Useful to verify if the CuTeDSL path is taken.
 
+.. envvar:: NVTE_CUTEDSL_FUSED_GROUPED_MLP_WARN_FALLBACK
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Warn when a ``GroupedLinear`` + activation + ``GroupedLinear`` pattern in ``transformer_engine.pytorch.ops`` is not fused into the CuTeDSL grouped MLP kernels and falls back to unfused ops. The warning states the reason, for example an unsupported GPU, recipe, activation, or dimensions, or cuDNN frontend kernels that fail to import. Useful to verify if the fused grouped MLP path is taken.
+
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
    :Type: ``int`` (positive integer)

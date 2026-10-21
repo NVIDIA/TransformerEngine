@@ -12,6 +12,7 @@ import random
 import sys
 import types
 from typing import Optional
+import warnings
 
 import pytest
 
@@ -173,6 +174,78 @@ def test_cudnn_frontend_situglu_feature_detection(monkeypatch, unsupported_wrapp
         assert not _cudnn_frontend_supports_grouped_gemm_situglu()
     finally:
         _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ("unsupported_system", "unsupported_recipe", "unsupported_dims", "unsupported_device"),
+)
+def test_grouped_mlp_fallback_warning(monkeypatch, reason: str) -> None:
+    """Warn with the cause of a grouped MLP fallback, only when requested."""
+    from transformer_engine.common.recipe import Format, MXFP8BlockScaling
+
+    if reason == "unsupported_device" and (
+        not torch.cuda.is_available() or get_device_compute_capability()[0] == 10
+    ):
+        pytest.skip("Requires a GPU that does not support grouped MLP fusion")
+
+    fused_op_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
+    monkeypatch.setattr(
+        fused_op_cls, "is_supported", classmethod(lambda cls: reason != "unsupported_system")
+    )
+    if reason == "unsupported_system":
+        monkeypatch.setattr(
+            fused_op_cls, "_unsupported_reason", classmethod(lambda cls: "broken cutlass-dsl")
+        )
+
+    in_features = 96 if reason == "unsupported_dims" else 128
+    fc1 = te.ops.GroupedLinear(2, in_features, 256, bias=False, device="meta")
+    activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
+    fc2 = te.ops.GroupedLinear(2, 128, in_features, bias=False, device="meta")
+    recipe = None if reason == "unsupported_recipe" else MXFP8BlockScaling(fp8_format=Format.E4M3)
+    expected = {
+        "unsupported_system": "broken cutlass-dsl",
+        "unsupported_recipe": "Unsupported recipe",
+        "unsupported_dims": "Unsupported dims for FC1",
+        "unsupported_device": "unsupported compute capability",
+    }[reason]
+
+    def fuse(ops):
+        if reason in ("unsupported_recipe", "unsupported_device"):
+            return grouped_mlp_module.fuse_glu_ops(ops, recipe=recipe)
+        return grouped_mlp_module.fuse_grouped_mlp_ops(
+            ops,
+            recipe=recipe,
+            fused_op_cls=fused_op_cls,
+            activation_op_types=(te.ops.ScaledSwiGLU,),
+        )
+
+    def clear_caches():
+        grouped_mlp_module._grouped_mlp_fallback_warnings_enabled.cache_clear()
+        grouped_mlp_module._warn_grouped_mlp_fallback.cache_clear()
+
+    ops = [fc1, activation, fc2]
+    clear_caches()
+    try:
+        monkeypatch.delenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP_WARN_FALLBACK", raising=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert fuse(ops) == ops
+
+        monkeypatch.setenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP_WARN_FALLBACK", "1")
+        clear_caches()
+        with pytest.warns(
+            UserWarning, match=f"ScaledSwiGLU .* GroupedMLP_CuTeGEMMGLU .*{expected}"
+        ):
+            assert fuse(ops) == ops
+
+        # Ops without a grouped MLP pattern never warn
+        grouped_mlp_module._warn_grouped_mlp_fallback.cache_clear()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert fuse([fc1, fc2]) == [fc1, fc2]
+    finally:
+        clear_caches()
 
 
 def _clear_grouped_glu_kernel_caches() -> None:
