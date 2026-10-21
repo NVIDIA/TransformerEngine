@@ -312,9 +312,9 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
       // quantize). The FP32 intermediate plans successfully. Drop this guard
       // once a cuDNN release fixes that shape.
       const size_t cudnn_version = static_cast<size_t>(cudnnGetVersion());
-      const bool cudnn_926_rmsnorm_overflow =
-          cudnn_version >= 92600 && cudnn_version < 92700 && _training &&
-          _norm_type == NVTE_Norm_Type::RMSNorm && batch_dim == 2048 && hidden_dim == 7168;
+      const bool cudnn_926_rmsnorm_overflow = cudnn_version >= 92600 && cudnn_version < 92700 &&
+                                              _training && _norm_type == NVTE_Norm_Type::RMSNorm &&
+                                              batch_dim == 2048 && hidden_dim == 7168;
       const bool use_input_dtype = cudnn_version >= 92500 && _ndim_scale_block == 1 &&
                                    use_cudnn_mxfp8_norm_output_in_input_dtype() &&
                                    !cudnn_926_rmsnorm_overflow;
