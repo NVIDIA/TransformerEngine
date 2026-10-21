@@ -69,19 +69,10 @@ pybind11::dict Registrations() {
                      pybind11::arg("initialize") = EncapsulateFFI(NormBackwardInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(NormBackwardHandler));
 
-  // Attention
-  dict["te_fused_attn_forward_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnForwardHandler));
-  dict["te_fused_attn_backward_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
-  dict["te_fused_attn_score_mod_forward_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnScoreModForwardHandler));
-  dict["te_fused_attn_score_mod_backward_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnScoreModBackwardHandler));
+  // Python-built cuDNN graphs use a JAX-owned executor and handle cache.
+  dict["te_cudnn_graph_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(CudnnGraphInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(CudnnGraphHandler));
 
   // GEMM
   dict["te_gemm_ffi"] =
@@ -160,8 +151,6 @@ pybind11::dict Registrations() {
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("registrations", &Registrations);
-  m.def("get_fused_attn_backend", &GetFusedAttnBackend, "Get Fused Attention backend",
-        pybind11::arg("fused_attn_params"));
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
   m.def("get_cudnn_frontend_version", &GetCudnnFrontendVersion);
@@ -172,10 +161,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_dbias_quantize_workspace_sizes", &GetDBiasQuantizeWorkspaceSizes);
   m.def("get_norm_fwd_workspace_sizes", &GetNormForwardWorkspaceSizes);
   m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
-  m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
-  m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("get_topk_workspace_sizes", &GetTopkWorkspaceSizes);
-  m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
   m.def("nvte_built_with_cublasmp", &::nvte_built_with_cublasmp);
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
@@ -211,7 +197,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
-      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)
+      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI);
 
   pybind11::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type", pybind11::module_local())
       .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)

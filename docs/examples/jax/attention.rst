@@ -16,6 +16,80 @@ FlexAttention-style customization. The API also supports different Q/K and V
 head dimensions, as used by the attention operation after the projection
 stages in DeepSeek-style MLA.
 
+cuDNN execution and FP8
+----------------------
+
+JAX fused attention constructs and selects cuDNN execution plans with the
+``nvidia-cudnn-frontend`` Python package. The compiled JAX FFI executor caches
+those plans and its own cuDNN handles per device. Ordinary attention and
+``score_mod`` share this executor; neither calls TE common's attention APIs.
+The Python frontend and the headers used to build the JAX extension must have
+the same version, since execution plans are serialized between the two.
+
+Pass ``fp8=True`` to ``transformer_engine.jax.attention.fused_attn`` or to the
+Flax ``DotProductAttention``, ``MultiHeadAttention`` or ``TransformerLayer``
+module to enable cuDNN FP8 attention. Inputs remain FP16 or BF16. Query, key
+and value are quantized to E4M3 using their current tensor maximum; backward
+quantizes the output gradient to E5M2. Outputs and input gradients retain the
+input dtype, and softmax statistics use FP32. Packed layouts use one scale per
+packed tensor. This option is independent of the GEMM quantization recipe and
+does not maintain delayed-scaling history.
+
+``NVTE_FP8_DPA_BWD=0`` selects FP16/BF16 backward while keeping FP8 forward.
+The backward pass uses dequantized forward operands, so both passes operate on
+the same quantized query, key and value. The default, ``1``, uses FP8 for both.
+
+FP8 THD attention requires cuDNN 9.23 or later. FP8 THD backward with off-by-one
+or learnable softmax requires cuDNN 9.26 or later; select
+``NVTE_FP8_DPA_BWD=0`` to use FP16/BF16 backward instead. For FP16/BF16 THD
+learnable-softmax backward with packed statistics, cuDNN versions before 9.26
+remain eligible for value-head dimensions 64, 128, and 256. Other value-head
+dimensions require cuDNN 9.26 or later. Execution-plan support still depends on
+the complete attention configuration.
+
+FP8 availability depends on cuDNN, GPU architecture, layout and the selected
+features. Unsupported combinations produce a diagnostic rather than silently
+using a different precision. For example, cuDNN 9.26 rejects FP8 backward with
+dropout on Blackwell; use ``NVTE_FP8_DPA_BWD=0`` for that combination.
+Pass ``fp8="mxfp8"`` to select MXFP8 attention on SM100 or later. MXFP8 uses
+E4M3 operands with E8M0 block scales along the attention contraction axes in
+both passes. Inputs, outputs and gradients remain FP16/BF16. Sequence lengths
+must be divisible by 128 and head dimensions by 32. This mode currently supports
+separate, QKV-packed and KV-packed BSHD inputs. THD, SM12x, and cuDNN
+9.23.0/9.23.1 are excluded. It requires
+cuDNN 9.21 or later. ``NVTE_FP8_DPA_BWD=0`` keeps the original FP16/BF16 operands
+for MXFP8 backward, matching the PyTorch MXFP8 path.
+Attention bias, ALiBi, dropout and ``return_max_logit`` are excluded from this mode.
+Exact head-dimension availability is checked by cuDNN. Frontend 1.29.0 has an
+incorrect MXFP8 backward scale stride for Q/K heads wider than 128; these
+configurations require ``NVTE_FP8_DPA_BWD=0``. This check protects both frontends.
+
+To reuse quantizations, call ``quantize_attention_qkv((q, k, v))`` and pass its
+result to ``fused_attn(..., fp8="mxfp8", quantized_qkv=quantized)``. Each operand
+is a JAX ``ScaledTensor2x`` with independent rowwise/columnwise E4M3 data and
+unswizzled E8M0 scales in BHSD order. Equivalent operands from a producer may
+be supplied directly. The original BSHD arrays supply the gradient targets and
+the original FP16/BF16 operands for ``NVTE_FP8_DPA_BWD=0``. These auxiliary
+buffers are non-differentiable. Scale reordering happens after partitioning,
+so data and tensor parallel sharding preserve per-head scale boundaries.
+Ring and AllGather context parallelism communicate FP16/BF16 operands and
+quantize each local attention step. Prequantized inputs are decoded before CP
+communication, as in the PyTorch MXFP8 implementation. Separate and packed
+BSHD storage, GQA, and causal dual-chunk load balancing are supported. Every
+local attention step must meet the 128-token alignment requirement; 256 tokens
+per CP rank accommodates the half-sequence steps used by causal load balancing
+and AllGather. The existing JAX CP restrictions on sliding windows, padding,
+dropout and non-vanilla softmax still apply.
+
+Paged KV-cache APIs, quantized module outputs, and automatic quantized
+projection-to-attention integration require further JAX API and frontend-binding
+work. ``score_mod`` currently supports FP16/BF16 only.
+
+``AttnBiasType.ALIBI`` (``attn_bias_type="alibi"`` in Flax) enables cuDNN's
+ALiBi mask without an explicit bias tensor. Explicit dropout keys have JAX's
+usual replay semantics: using the same key repeats the mask, including when
+recomputing a forward pass for its backward pass.
+
 For long contexts, selected BSHD and THD configurations support context
 parallelism with Ring or AllGather collectives. Exact fused-kernel availability
 depends on the input shape, dtype, GPU architecture, and feature combination;

@@ -6,6 +6,7 @@
 
 import os
 import warnings
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from packaging import version
 
@@ -27,7 +28,12 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0", "triton"]
+    # Python serializes graphs for C++ built with headers from this distribution.
+    # Keep the runtime serializer at the exact version used by this build.
+    frontend_version = distribution_version("nvidia-cudnn-frontend")
+    if version.parse(frontend_version) < version.parse("1.29.0"):
+        raise RuntimeError("Building TE/JAX requires nvidia-cudnn-frontend>=1.29.0.")
+    return ["jax", "flax>=0.7.1", f"nvidia-cudnn-frontend=={frontend_version}", "triton"]
 
 
 def test_requirements() -> List[str]:

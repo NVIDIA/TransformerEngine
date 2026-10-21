@@ -5,6 +5,8 @@
 import os
 import sys
 import pathlib
+from types import FunctionType
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -154,6 +156,109 @@ def _score_mod_cache_cpu_inputs():
     o = torch.empty((2, 4, 3, 8), dtype=torch.float16)
     stats = torch.empty((2, 3, 4, 1), dtype=torch.float32)
     return q, k, v, o, stats
+
+
+def _score_mod_with_defaults(graph, score, _tensors, mode=False, *, options=None):
+    if options is not None:
+        mode = options["modes"][0]
+    return graph.tanh(input=score) if mode else score
+
+
+def _clone_score_mod(default=False, options=None):
+    callback = FunctionType(_score_mod_with_defaults.__code__, globals(), argdefs=(default,))
+    callback.__kwdefaults__ = {"options": options}
+    return callback
+
+
+@pytest.mark.parametrize("direction", ("fwd", "bwd"))
+@pytest.mark.parametrize("difference", ("positional", "keyword", "code", "type"))
+def test_score_mod_cache_separates_function_defaults(monkeypatch, direction, difference):
+    """Different code or defaults must build separate forward and backward graphs."""
+    first = _clone_score_mod()
+    second = _clone_score_mod(True)
+    if difference == "keyword":
+        second = _clone_score_mod(options={"modes": [True]})
+    elif difference == "code":
+        second = FunctionType(_score_mod_identity_bprop.__code__, globals())
+        second.__qualname__ = first.__qualname__
+    elif difference == "type":
+        second = _clone_score_mod(0)
+    q, k, v, out, stats = _score_mod_cache_cpu_inputs()
+    monkeypatch.setattr(flex_attention, "_cudnn_score_mod_graph_cache", {})
+    build = Mock(side_effect=lambda *_args: object())
+    monkeypatch.setattr(flex_attention, f"_build_cudnn_score_mod_{direction}_graph", build)
+
+    def get(callback):
+        if direction == "fwd":
+            return flex_attention._get_cudnn_score_mod_fwd_graph(
+                True, q, k, v, "bshd", "bshd", 1.0, callback, {}, out, stats
+            )
+        return flex_attention._get_cudnn_score_mod_bwd_graph(
+            q,
+            k,
+            v,
+            out,
+            out,
+            stats,
+            "bshd",
+            "bshd",
+            1.0,
+            _score_mod_identity_bprop,
+            callback,
+            {},
+            {},
+            False,
+        )
+
+    entry = get(first)
+    assert get(first) is entry
+    other = get(second)
+    assert other is not entry
+    assert get(second) is other
+    assert build.call_count == 2
+
+    # Keys snapshot nested defaults rather than retaining mutable references.
+    first.__kwdefaults__["options"] = {"modes": [False]}
+    changed = get(first)
+    assert changed is not entry
+    first.__kwdefaults__["options"]["modes"].append(True)
+    assert get(first) is not changed
+    assert build.call_count == 4
+
+
+@pytest.mark.parametrize("kind", ("tensor", "opaque", "cycle"))
+def test_score_mod_cache_unsafe_defaults_are_uncached(kind):
+    """Opaque state, runtime tensors and recursive defaults cannot imply a stable graph."""
+    if kind == "tensor":
+        default = torch.tensor(1.0)
+    elif kind == "opaque":
+        default = object()
+    else:
+        default = []
+        default.append(default)
+    callback = _clone_score_mod(default)
+    key = flex_attention._score_mod_callback_cache_key(callback)
+    assert key is flex_attention._SCORE_MOD_UNCACHEABLE
+
+    # An explicit structural key remains the caller's opt-in caching contract.
+    callback.score_mod_graph_cache_key = lambda: ("explicit-mode", True)
+    assert flex_attention._score_mod_callback_cache_key(callback) is not key
+
+
+def test_score_mod_cache_snapshots_positional_defaults():
+    """Changing positional defaults invalidates the old key while unchanged NaNs stay stable."""
+    callback = _clone_score_mod(False)
+    before = flex_attention._score_mod_callback_cache_key(callback)
+    callback.__defaults__ = (True,)
+    assert flex_attention._score_mod_callback_cache_key(callback) != before
+    callback.__defaults__ = (float("nan"),)
+    assert flex_attention._score_mod_callback_cache_key(callback) == (
+        flex_attention._score_mod_callback_cache_key(callback)
+    )
+    callback.__defaults__ = (0.0,)
+    positive_zero = flex_attention._score_mod_callback_cache_key(callback)
+    callback.__defaults__ = (-0.0,)
+    assert flex_attention._score_mod_callback_cache_key(callback) != positive_zero
 
 
 def test_score_mod_cache_bound_method_requires_explicit_key():

@@ -16,6 +16,30 @@ Prerequisites
 3. |driver link|_ supporting CUDA 12.1 or later.
 4. `cuDNN 9.12 <https://developer.nvidia.com/cudnn>`__ or later.
 
+The PyTorch and JAX cuDNN attention backends use shared graph builders through
+the cuDNN frontend Python API. Both installations require
+``nvidia-cudnn-frontend`` version 1.29.0 or later. JAX builds pin their runtime
+dependency to the exact frontend version that supplies the build headers.
+Graph descriptions are cached by tensor metadata
+and target device or architecture. Support queries select supported plans without
+compiling their kernels. PyTorch compiles on first execution and uses its CUDA
+generator for dropout, including CUDA graph capture and replay. JAX compiles
+during tracing when workspace sizes are needed, then serializes plans for its
+native FFI executor. The JAX extension and the frontend Python package must use
+matching cuDNN frontend versions; rebuild the extension after upgrading that
+package.
+
+Automatic ``score_mod`` graph caching includes the callback's code and snapshots
+of builtin scalar and container defaults, including keyword-only defaults.
+Callbacks with tensor or opaque stateful defaults bypass automatic caching.
+Stateful callbacks can provide ``score_mod_graph_cache_key`` to explicitly
+describe their graph structure; pass runtime data through ``score_mod_tensors``
+and ``score_mod_bprop_tensors``.
+
+On SM12x GPUs, including SM120 and SM121, packed attention uses dense
+per-sequence softmax statistics internally. Graph construction and context
+parallelism use the same statistics layout.
+
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set
 `NVTE_CUDA_INCLUDE_PATH` in the environment.
