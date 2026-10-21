@@ -9,6 +9,7 @@ import itertools
 import math
 import os
 import functools
+import warnings
 import torch
 import transformer_engine_torch as tex
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
@@ -949,16 +950,9 @@ def strided_batched_gemm(
     B: torch.Tensor,
     out: torch.Tensor,
     *,
-    m: int,
-    n: int,
-    k: int,
-    batch_count: int,
-    lda: int,
-    stridea: int,
-    ldb: int,
-    strideb: int,
-    ldd: int,
-    strided: int,
+    batch_dim_a: int = 0,
+    batch_dim_b: int = 0,
+    batch_dim_out: int = 0,
     layout: str = "TN",
     accumulate: bool = False,
     use_split_accumulator: bool = False,
@@ -967,35 +961,53 @@ def strided_batched_gemm(
 ) -> torch.Tensor:
     """Experimental strided batched GEMM.
 
-    The shape is intentionally explicit. ``m``, ``n``, and ``k`` use the same
-    cuBLAS/TE convention as the C++ GEMM backend. For the common row-major
-    ``layout="TN"`` case, this computes per batch:
-    ``out[n, m] = B[n, k] @ A[m, k].T``.
-    ``out`` serves as both the C and D matrices, so accumulation applies
-    ``beta`` to the existing contents of ``out`` in place.
+    Each tensor holds a batch of matrices and is flattened to 3D based on
+    its batch dim: with ``batch_dim=0``, ``[G, ..., C]`` is interpreted as
+    ``[G, R, C]``, and with ``batch_dim=-2``, ``[..., G, C]`` is interpreted
+    as ``[R, G, C]``. Following the same convention as ``general_gemm``,
+    this computes per batch entry (e.g. for ``layout="TN"``):
+    ``out[i] = B[i] @ A[i].T``. ``out`` serves as both the C and D
+    matrices, so accumulation applies ``beta`` to the existing contents of
+    ``out`` in place.
 
-    Inputs must both be high-precision tensors or both be MXFP8 tensors. MXFP8
-    inputs must use compact scales; the extension packs and GEMM-swizzles the
-    required scaling direction for each operand before launching cuBLASLt.
-    MXFP8 operand strides must describe a contiguous ``[G, ..., D]`` or
-    ``[..., G, D]`` layout.
+    MXFP8 inputs must use compact scales. The extension packs and
+    GEMM-swizzles the required scaling direction for each operand before
+    launching cuBLASLt. A 2D MXFP8 tensor with ``batch_dim=-2`` is
+    interpreted as a ``[R, G*C]`` view of a ``[R, G, C]`` tensor, which is
+    required for column-wise MXFP8 data with ``batch_dim=-2``. Other input
+    formats fall back to a high-precision GEMM.
     """
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
-    high_precision_dtypes = (torch.float32, torch.float16, torch.bfloat16)
-    high_precision_inputs = all(
-        isinstance(tensor, torch.Tensor)
-        and not isinstance(tensor, QuantizedTensorStorage)
-        and tensor.dtype in high_precision_dtypes
-        for tensor in (A, B)
-    )
-    mxfp8_inputs = isinstance(A, MXFP8TensorStorage) and isinstance(B, MXFP8TensorStorage)
-    assert (
-        high_precision_inputs or mxfp8_inputs
-    ), "strided_batched_gemm supports only high-precision or MXFP8 A and B tensor pairs."
-    if mxfp8_inputs:
-        assert (
-            not A._with_gemm_swizzled_scales and not B._with_gemm_swizzled_scales
-        ), "strided_batched_gemm expects compact MXFP8 scales."
+
+    # Output dtype
+    dtype = out.dtype
+    if dtype not in (torch.float32, torch.float16, torch.bfloat16):
+        raise ValueError(f"Strided batched GEMM requires a high-precision output (got {dtype}).")
+
+    # Make sure data is in supported format
+    if isinstance(A, MXFP8TensorStorage) and isinstance(B, MXFP8TensorStorage):
+        # MXFP8 GEMM
+        if A._with_gemm_swizzled_scales or B._with_gemm_swizzled_scales:
+            raise ValueError("Strided batched GEMM expects compact MXFP8 scales.")
+    else:
+        # Fallback to high-precision GEMM
+        A_is_quantized = isinstance(A, QuantizedTensorStorage)
+        B_is_quantized = isinstance(B, QuantizedTensorStorage)
+        if A_is_quantized or B_is_quantized:
+            warnings.warn(
+                "Strided batched GEMM does not support this quantization format "
+                f"(A is {A.__class__.__name__}, B is {B.__class__.__name__}). "
+                "Falling back to high-precision GEMM."
+            )
+        if A_is_quantized:
+            A = A.dequantize(dtype=dtype)
+        elif A.dtype != dtype:
+            A = A.to(dtype=dtype)
+        if B_is_quantized:
+            B = B.dequantize(dtype=dtype)
+        elif B.dtype != dtype:
+            B = B.to(dtype=dtype)
+
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     beta = validate_gemm_scale(beta, accumulate)
@@ -1004,20 +1016,13 @@ def strided_batched_gemm(
     return tex.strided_batched_gemm(
         A,
         transa,
+        batch_dim_a,
         B,
         transb,
+        batch_dim_b,
         out,
+        batch_dim_out,
         workspace,
-        m,
-        n,
-        k,
-        batch_count,
-        lda,
-        stridea,
-        ldb,
-        strideb,
-        ldd,
-        strided,
         accumulate,
         use_split_accumulator,
         sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),

@@ -25,7 +25,7 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 _UNSUPPORTED_INPUT_ERROR = (
     "strided_batched_gemm supports only high-precision or MXFP8 A and B tensor pairs"
 )
-_SWIZZLED_MXFP8_ERROR = "strided_batched_gemm expects compact MXFP8 scales"
+_SWIZZLED_MXFP8_ERROR = "expects compact MXFP8 scales"
 
 
 def _skip_if_unavailable(recipe):
@@ -111,16 +111,9 @@ def _cpp_strided_batched_gemm(
     B,
     out,
     *,
-    m,
-    n,
-    k,
-    batch_count,
-    lda,
-    stridea,
-    ldb,
-    strideb,
-    ldd,
-    strided,
+    batch_dim_a=0,
+    batch_dim_b=0,
+    batch_dim_out=0,
     workspace=None,
 ):
     if workspace is None:
@@ -128,20 +121,13 @@ def _cpp_strided_batched_gemm(
     return tex.strided_batched_gemm(
         A,
         True,
+        batch_dim_a,
         B,
         False,
+        batch_dim_b,
         out,
+        batch_dim_out,
         workspace,
-        m,
-        n,
-        k,
-        batch_count,
-        lda,
-        stridea,
-        ldb,
-        strideb,
-        ldd,
-        strided,
         False,
         False,
         0,
@@ -150,9 +136,28 @@ def _cpp_strided_batched_gemm(
     )
 
 
+def _interleaved_operands(seq, micro_batch, groups, hidden, out_features, dtype=torch.bfloat16):
+    """Logical operation: X: [S, B, G, D], W: [G, R, D] -> Y: [S, B, G, R]"""
+    x = torch.randn(seq, micro_batch, groups, hidden, dtype=dtype, device="cuda")
+    w = torch.randn(groups, out_features, hidden, dtype=dtype, device="cuda")
+    out = torch.empty(seq, micro_batch, groups, out_features, dtype=dtype, device="cuda")
+    return x, w, out
+
+
+_INTERLEAVED_BATCH_DIMS = {"batch_dim_a": 0, "batch_dim_b": -2, "batch_dim_out": -2}
+
+
 @pytest.mark.parametrize(
     "invalid_buffer",
-    ["A", "B", "workspace_stride", "A_device", "B_device", "workspace_device"],
+    [
+        "A",
+        "B",
+        "D_expanded",
+        "workspace_stride",
+        "A_device",
+        "B_device",
+        "workspace_device",
+    ],
 )
 def test_strided_batched_gemm_invalid_buffers(invalid_buffer):
     """Reject invalid buffers in the binding before launching CUDA work."""
@@ -166,6 +171,10 @@ def test_strided_batched_gemm_invalid_buffers(invalid_buffer):
     elif invalid_buffer == "B":
         b = b.cpu()
         error = "same CUDA device as D"
+    elif invalid_buffer == "D_expanded":
+        # Expanded tensor has fewer stored elements than logical elements
+        out = torch.empty(1, 1, 1, device="cuda", dtype=torch.float32).expand(2, 32, 32)
+        error = "D must be contiguous"
     elif invalid_buffer == "workspace_stride":
         workspace = workspace[::2]
         error = "workspace must be contiguous"
@@ -182,22 +191,7 @@ def test_strided_batched_gemm_invalid_buffers(invalid_buffer):
             workspace = workspace.to(device=other_device)
             error = "same device as D"
     with pytest.raises(RuntimeError, match=error):
-        _cpp_strided_batched_gemm(
-            a,
-            b,
-            out,
-            m=32,
-            n=32,
-            k=32,
-            batch_count=2,
-            lda=32,
-            stridea=1024,
-            ldb=32,
-            strideb=1024,
-            ldd=32,
-            strided=1024,
-            workspace=workspace,
-        )
+        _cpp_strided_batched_gemm(a, b, out, workspace=workspace)
 
 
 @pytest.mark.parametrize("accumulate", [False, True])
@@ -210,12 +204,9 @@ def test_strided_batched_gemm_interleaved_activation(recipe, accumulate):
     seq, micro_batch, groups, hidden, out_features = 12, 8, 3, 160, 96
     rows = seq * micro_batch
 
-    # Logical operation:
-    #   X: [S, B, G, D], W: [G, R, D] -> Y: [S, B, G, R]
     # The GEMM view for each group is:
     #   X_g: [S*B, D], W_g: [R, D], Y_g: [S*B, R].
-    x = torch.randn(seq, micro_batch, groups, hidden, dtype=dtype, device="cuda")
-    w = torch.randn(groups, out_features, hidden, dtype=dtype, device="cuda")
+    x, w, out = _interleaved_operands(seq, micro_batch, groups, hidden, out_features)
     x_mats = [x[:, :, g, :].reshape(rows, hidden).contiguous() for g in range(groups)]
     w_mats = list(w.unbind(dim=0))
     if recipe == "bf16":
@@ -230,7 +221,6 @@ def test_strided_batched_gemm_interleaved_activation(recipe, accumulate):
         ref_A = _quantize_mxfp8_reference(w_mats)
         ref_B = _quantize_mxfp8_reference(x_mats)
 
-    out = torch.empty(seq, micro_batch, groups, out_features, dtype=dtype, device="cuda")
     out_initial = None
     if accumulate:
         out_initial = torch.randn_like(out)
@@ -240,18 +230,9 @@ def test_strided_batched_gemm_interleaved_activation(recipe, accumulate):
         A,
         B,
         out,
-        m=out_features,
-        n=rows,
-        k=hidden,
-        batch_count=groups,
-        lda=hidden,
-        stridea=out_features * hidden,
-        ldb=groups * hidden,
-        strideb=hidden,
-        ldd=groups * out_features,
-        strided=out_features,
         layout="TN",
         accumulate=accumulate,
+        **_INTERLEAVED_BATCH_DIMS,
     )
 
     if recipe == "mxfp8":
@@ -283,117 +264,82 @@ def test_strided_batched_gemm_rejects_swizzled_mxfp8_scales(api):
     _skip_if_unavailable("mxfp8")
 
     torch.manual_seed(1234)
-    dtype = torch.bfloat16
-    seq, micro_batch, groups, hidden, out_features = 12, 8, 3, 160, 96
-    rows = seq * micro_batch
-    x = torch.randn(seq, micro_batch, groups, hidden, dtype=dtype, device="cuda")
-    w = torch.randn(groups, out_features, hidden, dtype=dtype, device="cuda")
+    x, w, out = _interleaved_operands(12, 8, 3, 160, 96)
     A, B = _quantize_mxfp8_reference([w, x])
     assert A._with_gemm_swizzled_scales and B._with_gemm_swizzled_scales
-    out = torch.empty(seq, micro_batch, groups, out_features, dtype=dtype, device="cuda")
 
-    kwargs = {
-        "m": out_features,
-        "n": rows,
-        "k": hidden,
-        "batch_count": groups,
-        "lda": hidden,
-        "stridea": out_features * hidden,
-        "ldb": groups * hidden,
-        "strideb": hidden,
-        "ldd": groups * out_features,
-        "strided": out_features,
-    }
     if api == "python":
-        with pytest.raises(AssertionError, match=_SWIZZLED_MXFP8_ERROR):
-            strided_batched_gemm(A, B, out, layout="TN", **kwargs)
+        with pytest.raises(ValueError, match=_SWIZZLED_MXFP8_ERROR):
+            strided_batched_gemm(A, B, out, layout="TN", **_INTERLEAVED_BATCH_DIMS)
     else:
         with pytest.raises(RuntimeError, match=_SWIZZLED_MXFP8_ERROR):
-            _cpp_strided_batched_gemm(A, B, out, **kwargs)
+            _cpp_strided_batched_gemm(A, B, out, **_INTERLEAVED_BATCH_DIMS)
 
 
-@pytest.mark.parametrize("api", ["python", "cpp"])
 @pytest.mark.parametrize("recipe", ["fp8", "fp8_block", "nvfp4"])
-def test_strided_batched_gemm_rejects_unsupported_inputs(recipe, api):
+def test_strided_batched_gemm_unsupported_inputs_fallback(recipe):
+    """The Python API dequantizes unsupported formats."""
     _skip_if_unavailable(recipe)
 
     torch.manual_seed(1234)
-    dtype = torch.bfloat16
-    seq, micro_batch, groups, hidden, out_features = 16, 8, 2, 128, 128
-    rows = seq * micro_batch
-    x = torch.randn(seq, micro_batch, groups, hidden, dtype=dtype, device="cuda")
-    w = torch.randn(groups, out_features, hidden, dtype=dtype, device="cuda")
+    x, w, out = _interleaved_operands(16, 8, 2, 128, 128)
     A, B = _quantize_unsupported_operands(recipe, x, w)
-    out = torch.empty(seq, micro_batch, groups, out_features, dtype=dtype, device="cuda")
 
-    if api == "python":
-        with pytest.raises(AssertionError, match=_UNSUPPORTED_INPUT_ERROR):
-            strided_batched_gemm(
-                A,
-                B,
-                out,
-                m=out_features,
-                n=rows,
-                k=hidden,
-                batch_count=groups,
-                lda=hidden,
-                stridea=out_features * hidden,
-                ldb=groups * hidden,
-                strideb=hidden,
-                ldd=groups * out_features,
-                strided=out_features,
-                layout="TN",
-            )
-        return
+    with pytest.warns(UserWarning, match="Falling back to high-precision GEMM"):
+        strided_batched_gemm(A, B, out, layout="TN", **_INTERLEAVED_BATCH_DIMS)
 
+    # The fallback dequantizes to the output dtype
+    w_ref = A.dequantize(dtype=out.dtype).float()
+    x_ref = B.dequantize(dtype=out.dtype).float()
+    ref = torch.einsum("sbgd,grd->sbgr", x_ref, w_ref)
+    torch.testing.assert_close(out.float(), ref, rtol=1.6e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("recipe", ["fp8", "fp8_block", "nvfp4"])
+def test_strided_batched_gemm_rejects_unsupported_inputs(recipe):
+    """The C++ binding only supports high-precision and MXFP8 data."""
+    _skip_if_unavailable(recipe)
+
+    torch.manual_seed(1234)
+    x, w, out = _interleaved_operands(16, 8, 2, 128, 128)
+    A, B = _quantize_unsupported_operands(recipe, x, w)
     with pytest.raises(RuntimeError, match=_UNSUPPORTED_INPUT_ERROR):
-        _cpp_strided_batched_gemm(
-            A,
-            B,
-            out,
-            m=out_features,
-            n=rows,
-            k=hidden,
-            batch_count=groups,
-            lda=hidden,
-            stridea=out_features * hidden,
-            ldb=groups * hidden,
-            strideb=hidden,
-            ldd=groups * out_features,
-            strided=out_features,
-        )
+        _cpp_strided_batched_gemm(A, B, out, **_INTERLEAVED_BATCH_DIMS)
 
 
 @pytest.mark.parametrize("api", ["python", "cpp"])
 @pytest.mark.parametrize(
-    "buffer_name,stride_name",
-    [("A", "stridea"), ("B", "strideb"), ("D", "strided")],
+    "invalid_dim,error",
+    [
+        ("batch_size", "inconsistent batch sizes"),
+        ("k", "incompatible matrix dims"),
+        ("out", "incompatible matrix dims"),
+        ("batch_dim", "supports batch_dim=0 or batch_dim=-2"),
+    ],
 )
-def test_strided_batched_gemm_rejects_out_of_bounds_layout(api, buffer_name, stride_name):
+def test_strided_batched_gemm_rejects_inconsistent_shapes(api, invalid_dim, error):
     _skip_if_unavailable("bf16")
 
     groups, m, n, k = 2, 32, 64, 96
-    A = torch.randn(groups, m, k, dtype=torch.bfloat16, device="cuda")
-    B = torch.randn(groups, n, k, dtype=torch.bfloat16, device="cuda")
-    out = torch.empty(groups, n, m, dtype=torch.bfloat16, device="cuda")
-    kwargs = {
-        "m": m,
-        "n": n,
-        "k": k,
-        "batch_count": groups,
-        "lda": k,
-        "stridea": m * k,
-        "ldb": k,
-        "strideb": n * k,
-        "ldd": m,
-        "strided": n * m,
-    }
-    kwargs[stride_name] += 1
+    A_shape, B_shape, out_shape = [groups, m, k], [groups, n, k], [groups, n, m]
+    batch_dims = {"batch_dim_a": 0, "batch_dim_b": 0, "batch_dim_out": 0}
+    if invalid_dim == "batch_size":
+        A_shape[0] += 1
+    elif invalid_dim == "k":
+        B_shape[-1] += 32
+    elif invalid_dim == "out":
+        out_shape[-1] += 32
+    else:
+        batch_dims["batch_dim_a"] = 1
+    A = torch.randn(A_shape, dtype=torch.bfloat16, device="cuda")
+    B = torch.randn(B_shape, dtype=torch.bfloat16, device="cuda")
+    out = torch.empty(out_shape, dtype=torch.bfloat16, device="cuda")
 
-    call = strided_batched_gemm if api == "python" else _cpp_strided_batched_gemm
-    call_kwargs = {**kwargs, "layout": "TN"} if api == "python" else kwargs
-    with pytest.raises(RuntimeError, match=rf"{buffer_name} buffer is too small"):
-        call(A, B, out, **call_kwargs)
+    with pytest.raises(RuntimeError, match=error):
+        if api == "python":
+            strided_batched_gemm(A, B, out, layout="TN", **batch_dims)
+        else:
+            _cpp_strided_batched_gemm(A, B, out, **batch_dims)
 
 
 @pytest.mark.parametrize("api", ["python", "cpp"])
@@ -413,20 +359,9 @@ def test_strided_batched_gemm_rejects_invalid_compact_scale_shape(api, buffer_na
     operand = A if buffer_name == "A" else B
     operand._rowwise_scale_inv = operand._rowwise_scale_inv.reshape(-1)[:-1]
     out = torch.empty(groups, n, m, dtype=torch.bfloat16, device="cuda")
-    kwargs = {
-        "m": m,
-        "n": n,
-        "k": k,
-        "batch_count": groups,
-        "lda": k,
-        "stridea": m * k,
-        "ldb": k,
-        "strideb": n * k,
-        "ldd": m,
-        "strided": n * m,
-    }
 
-    call = strided_batched_gemm if api == "python" else _cpp_strided_batched_gemm
-    call_kwargs = {**kwargs, "layout": "TN"} if api == "python" else kwargs
     with pytest.raises(RuntimeError, match="expects 2D compact scaling factors"):
-        call(A, B, out, **call_kwargs)
+        if api == "python":
+            strided_batched_gemm(A, B, out, layout="TN")
+        else:
+            _cpp_strided_batched_gemm(A, B, out)

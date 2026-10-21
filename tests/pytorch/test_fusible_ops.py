@@ -1506,8 +1506,6 @@ class TestFuser:
             in_shape = (size, num_groups, size)
         if quantization is None:
             pytest.skip("Quantization scheme is not specified")
-        if op_type == "batched_linear" and quantization != "mxfp8":
-            pytest.skip("BatchedLinear supports only MXFP8 quantization")
         if op_type == "grouped_linear" and quantization == "nvfp4_4over6":
             pytest.skip("NVFP4 4over6 grouped quantization is not supported")
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
@@ -3204,26 +3202,25 @@ class TestBasicOps:
             if bias:
                 assert_close_grads(getattr(op, f"bias{group_idx}"), bs_ref[group_idx], **tols)
 
-    @pytest.mark.parametrize("batch_dim", (0, -2))
+    @pytest.mark.parametrize("input_batch_dim", (0, -2))
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", (None, "mxfp8"))
-    @pytest.mark.parametrize("quantized_compute", (False, True))
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("weight_requires_grad", (False, True))
     def test_batched_linear(
         self,
         *,
-        num_gemms: int = 3,
-        batch_dim: int,
+        batch_size: int = 3,
+        input_batch_dim: int,
         bias: bool,
-        weight_shape: tuple[int, int] = (96, 64),
-        rows_shape: tuple[int, int] = (2, 32),
+        weight_shape: tuple[int, int] = (128, 128),
+        rows_shape: tuple[int, int] = (4, 32),
         dtype: torch.dtype,
         device: torch.device = "cuda",
         quantization: Optional[str],
-        quantized_compute: bool,
+        quantized_compute: Optional[bool] = None,
         quantized_weight: bool,
         input_requires_grad: bool,
         weight_requires_grad: bool,
@@ -3232,19 +3229,19 @@ class TestBasicOps:
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape
-        if batch_dim == 0:
-            in_shape = (num_gemms, *rows_shape, in_features)
+        if input_batch_dim == 0:
+            in_shape = (batch_size, *rows_shape, in_features)
         else:
-            in_shape = (*rows_shape, num_gemms, in_features)
+            in_shape = (*rows_shape, batch_size, in_features)
         out_shape = in_shape[:-1] + (out_features,)
 
         # Skip invalid configurations
+        if quantized_compute is None:
+            quantized_compute = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
-        if quantization is None and (quantized_compute or quantized_weight):
+        if quantization is None and quantized_weight:
             pytest.skip("Quantization scheme is not specified")
-        if quantization is not None and not (quantized_compute or quantized_weight):
-            pytest.skip("Quantization scheme is not used")
         if quantization is not None and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized batched GEMM is only supported with BF16/FP16")
 
@@ -3257,7 +3254,7 @@ class TestBasicOps:
             requires_grad=input_requires_grad,
         )
         w_ref, w_test = make_reference_and_test_tensors(
-            (num_gemms, out_features, in_features),
+            (batch_size, out_features, in_features),
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
@@ -3266,7 +3263,7 @@ class TestBasicOps:
         b_ref, b_test = None, None
         if bias:
             b_ref, b_test = make_reference_and_test_tensors(
-                (num_gemms, out_features),
+                (batch_size, out_features),
                 test_dtype=dtype,
                 test_device=device,
                 requires_grad=weight_requires_grad,
@@ -3280,10 +3277,10 @@ class TestBasicOps:
         )
 
         # Plain PyTorch implementation
-        if batch_dim == 0:
+        if input_batch_dim == 0:
             y_ref = torch.einsum("g...d,grd->g...r", x_ref, w_ref)
             if bias:
-                y_ref = y_ref + b_ref.view(num_gemms, *([1] * len(rows_shape)), out_features)
+                y_ref = y_ref + b_ref.view(batch_size, *([1] * len(rows_shape)), out_features)
         else:
             y_ref = torch.einsum("...gd,grd->...gr", x_ref, w_ref)
             if bias:
@@ -3295,10 +3292,10 @@ class TestBasicOps:
         recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te_ops.BatchedLinear(
-                num_gemms,
+                batch_size,
                 in_features,
                 out_features,
-                batch_dim=batch_dim,
+                input_batch_dim=input_batch_dim,
                 bias=bias,
                 device=device,
                 dtype=dtype,
@@ -3330,6 +3327,28 @@ class TestBasicOps:
         assert_close_grads(op.weight, w_ref, **tols)
         if bias:
             assert_close_grads(op.bias, b_ref, **tols)
+
+    @pytest.mark.parametrize("input_batch_dim", (0, -2))
+    @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
+    @pytest.mark.parametrize("quantization", ("mxfp8",))
+    def test_batched_linear_with_weight_dequantization(
+        self,
+        *,
+        input_batch_dim: int,
+        dtype: torch.dtype,
+        quantization: str,
+    ) -> None:
+        """Strided batched GEMM with quantized weight and high-precision compute"""
+        self.test_batched_linear(
+            input_batch_dim=input_batch_dim,
+            bias=True,
+            dtype=dtype,
+            quantization=quantization,
+            quantized_compute=False,
+            quantized_weight=True,
+            input_requires_grad=True,
+            weight_requires_grad=True,
+        )
 
     def test_grouped_linear_caller_buffers(
         self,

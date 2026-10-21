@@ -73,24 +73,24 @@ def test_forward_backward(
 
     dtype = torch.bfloat16
     device = torch.device("cuda")
-    num_gemms, rows0, rows1 = 3, 3, 32
+    batch_size, rows0, rows1 = 3, 3, 32
     in_features, out_features = 160, 96
     if batch_dim == 0:
-        input_shape = (num_gemms, rows0, rows1, in_features)
-        output_shape = (num_gemms, rows0, rows1, out_features)
+        input_shape = (batch_size, rows0, rows1, in_features)
+        output_shape = (batch_size, rows0, rows1, out_features)
     else:
-        input_shape = (rows0, rows1, num_gemms, in_features)
-        output_shape = (rows0, rows1, num_gemms, out_features)
+        input_shape = (rows0, rows1, batch_size, in_features)
+        output_shape = (rows0, rows1, batch_size, out_features)
 
     inp = torch.rand(input_shape, dtype=dtype, device=device, requires_grad=True)
     weight = torch.rand(
-        num_gemms,
+        batch_size,
         out_features,
         in_features,
         dtype=dtype,
         device=device,
     )
-    bias = torch.rand(num_gemms, out_features, dtype=dtype, device=device)
+    bias = torch.rand(batch_size, out_features, dtype=dtype, device=device)
     grad_output = torch.rand(
         *output_shape[:-1],
         2 * output_shape[-1],
@@ -102,10 +102,10 @@ def test_forward_backward(
     recipe = make_recipe("mxfp8")
     with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
         op = te_ops.BatchedLinear(
-            num_gemms,
+            batch_size,
             in_features,
             out_features,
-            batch_dim=batch_dim,
+            input_batch_dim=batch_dim,
             accumulate_into_main_grad=accumulate_into_main_grad,
             dtype=dtype,
             device=device,
@@ -211,7 +211,7 @@ def test_mxfp8_selective_gradients(
         2,
         64,
         32,
-        batch_dim=batch_dim,
+        input_batch_dim=batch_dim,
         bias=False,
         dtype=torch.bfloat16,
         device="cuda",
@@ -238,19 +238,19 @@ def test_mxfp8_selective_gradients(
 def test_save_original_input(monkeypatch: pytest.MonkeyPatch, batch_dim: int) -> None:
     """MXFP8 backward reconstructs its column-wise operand from the original input."""
     dtype = torch.bfloat16
-    num_gemms, rows = 2, 32
+    batch_size, rows = 2, 32
     in_features, out_features = 64, 32
     input_shape = (
-        (num_gemms, rows, in_features) if batch_dim == 0 else (rows, num_gemms, in_features)
+        (batch_size, rows, in_features) if batch_dim == 0 else (rows, batch_size, in_features)
     )
     output_shape = list(input_shape)
     output_shape[-1] = out_features
 
     op = te_ops.BatchedLinear(
-        num_gemms,
+        batch_size,
         in_features,
         out_features,
-        batch_dim=batch_dim,
+        input_batch_dim=batch_dim,
         bias=False,
         save_original_input=True,
         dtype=dtype,
@@ -271,12 +271,12 @@ def test_save_original_input(monkeypatch: pytest.MonkeyPatch, batch_dim: int) ->
     input_quantizations = []
     original_quantize = batched_linear_op.BatchedLinear._quantize_for_batched_gemm
 
-    def capture_quantize(tensor, quantizer, batch_dim_, num_gemms_, *, rowwise, columnwise):
+    def capture_quantize(tensor, quantizer, batch_dim_, batch_size_, *, rowwise, columnwise):
         quantized = original_quantize(
             tensor,
             quantizer,
             batch_dim_,
-            num_gemms_,
+            batch_size_,
             rowwise=rowwise,
             columnwise=columnwise,
         )
@@ -428,33 +428,10 @@ def test_quantized_weight_inference() -> None:
     assert not op.weight._with_gemm_swizzled_scales
 
 
-@pytest.mark.parametrize(
-    "recipe",
-    (
-        transformer_engine.common.recipe.DelayedScaling(),
-        transformer_engine.common.recipe.Float8CurrentScaling(),
-        transformer_engine.common.recipe.Float8BlockScaling(),
-        transformer_engine.common.recipe.NVFP4BlockScaling(),
-    ),
-)
-def test_rejects_non_mxfp8_recipe(recipe) -> None:
-    """Only high precision and MXFP8 compute are accepted."""
-    with pytest.raises(ValueError, match="only high-precision compute or the MXFP8 recipe"):
-        with te.quantized_model_init(enabled=True, recipe=recipe):
-            te_ops.BatchedLinear(
-                2,
-                32,
-                32,
-                bias=False,
-                dtype=torch.bfloat16,
-                device="cuda",
-            )
-
-
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 @pytest.mark.parametrize("backward_override", ("high_precision", "dequantized"))
 def test_rejects_backward_override(backward_override: str) -> None:
-    """MXFP8 backward overrides are not implemented."""
+    """Backward overrides are not implemented."""
     op = te_ops.BatchedLinear(
         2,
         32,
@@ -465,17 +442,17 @@ def test_rejects_backward_override(backward_override: str) -> None:
     )
     inp = torch.randn(32, 2, 32, dtype=torch.bfloat16, device="cuda")
     recipe = transformer_engine.common.recipe.MXFP8BlockScaling(backward_override=backward_override)
-    with pytest.raises(ValueError, match="does not support MXFP8 backward_override"):
+    with pytest.raises(ValueError, match="does not support backward_override"):
         with te.autocast(enabled=True, recipe=recipe):
             op(inp)
 
 
 def test_rejects_unsupported_layout() -> None:
     """Reject ambiguous batch dimensions and non-contiguous input storage."""
-    with pytest.raises(ValueError, match="batch_dim=0 or batch_dim=-2"):
-        te_ops.BatchedLinear(2, 32, 32, batch_dim=1, device="cuda")
+    with pytest.raises(ValueError, match="input_batch_dim=0 or input_batch_dim=-2"):
+        te_ops.BatchedLinear(2, 32, 32, input_batch_dim=1, device="cuda")
 
-    op = te_ops.BatchedLinear(2, 32, 32, batch_dim=-2, device="cuda")
+    op = te_ops.BatchedLinear(2, 32, 32, input_batch_dim=-2, device="cuda")
     inp = torch.empty(32, 2, 64, device="cuda")[:, :, ::2]
     assert inp.shape == (32, 2, 32) and not inp.is_contiguous()
     with pytest.raises(ValueError, match="contiguous input"):
