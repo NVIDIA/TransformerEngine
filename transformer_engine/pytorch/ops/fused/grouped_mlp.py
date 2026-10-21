@@ -382,6 +382,15 @@ def _group_quantize_with_amax_for_grouped_mlp(
     )
 
 
+def _weight_quantizers(op: GroupedLinear, num_groups: int) -> list[Quantizer]:
+    """Per-expert weight quantizers of ``op``.
+
+    Only built where they are consumed (discrete or distributed weights), so the single grouped
+    weight path does not pay for ``num_groups`` lookups it never uses.
+    """
+    return [op.get_quantizer("forward", 2 * idx + 1) for idx in range(num_groups)]
+
+
 def _quantize_unquantized_weights(
     weights: Iterable[Any],
     quantizers: Sequence[Quantizer],
@@ -1386,16 +1395,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Quantizers
         fc1_input_quantizer = fc1_op.get_quantizer("forward", 0)
         fc1_weight_quantizer = fc1_op.get_quantizer("forward", 1)
-        fc1_weight_quantizers = [
-            fc1_op.get_quantizer("forward", 2 * idx + 1) for idx in range(num_groups)
-        ]
         fc1_grad_output_quantizer = fc1_op.get_quantizer("backward", 0)
         fc2_input_quantizer = fc2_op.get_quantizer("forward", 0)
         fc2_weight_quantizer = fc2_op.get_quantizer("forward", 1)
-        fc2_weight_quantizers = [
-            fc2_op.get_quantizer("forward", 2 * idx + 1) for idx in range(num_groups)
-        ]
         fc2_grad_output_quantizer = fc2_op.get_quantizer("backward", 0)
+        # Per-expert weight quantizer lists are built lazily, only on the discrete-weight and
+        # distributed-weight paths that consume them.
+        fc1_weight_quantizers = None
+        fc2_weight_quantizers = None
 
         # Extract split sizes from extra input
         fc1_split_sizes = basic_op_extra_inputs[0][0]
@@ -1516,6 +1523,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 )
         else:
             fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
+            fc1_weight_quantizers = _weight_quantizers(fc1_op, num_groups)
             # Distributed weights gather first (native-quantized shards gather quantized, BF16
             # shards gather as BF16); anything still unquantized is quantized here.
             grouped_fc1_weight = _quantize_unquantized_weights(
@@ -1553,13 +1561,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
             # Distributed weights are gathered (and quantized if needed) after the FC1 kernel so
             # the gather overlaps FC1 compute.
-            grouped_fc2_weight = (
-                fc2_weights
-                if fc2_is_dist
-                else _quantize_unquantized_weights(
+            if fc2_is_dist:
+                grouped_fc2_weight = fc2_weights
+            else:
+                fc2_weight_quantizers = _weight_quantizers(fc2_op, num_groups)
+                grouped_fc2_weight = _quantize_unquantized_weights(
                     fc2_weights, fc2_weight_quantizers, rowwise=True, columnwise=input_requires_grad
                 )
-            )
 
         # Some wrapper-copy paths may drop grouped storage metadata; enforce defaults.
         if isinstance(grouped_fc1_weight, GroupedTensor) and not hasattr(
@@ -1888,6 +1896,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         activation_in = activation_in.view(in_shape[0], fc1_weight_shape[0])
 
         if fc2_is_dist:
+            fc2_weight_quantizers = _weight_quantizers(fc2_op, num_groups)
             grouped_fc2_weight = _quantize_unquantized_weights(
                 materialize_weight_for_forward(grouped_fc2_weight),
                 fc2_weight_quantizers,
@@ -2279,7 +2288,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
 
             fc1_ctx.input_quantizers = [fc1_input_quantizer]
-            fc1_ctx.weight_quantizers = fc1_weight_quantizers
+            # Backward re-quantizes re-gathered distributed weights with the quantizers saved
+            # here; other paths only read the first expert's quantizer.
+            fc1_ctx.weight_quantizers = (
+                fc1_weight_quantizers if fc1_is_dist else [fc1_weight_quantizer]
+            )
             fc1_ctx.grad_output_quantizers = [fc1_grad_output_quantizer]
             fc1_ctx.dtype = dtype
             fc1_ctx.input_requires_grad = input_requires_grad
@@ -2288,7 +2301,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
             fc2_ctx.input_quantizers = [fc2_input_quantizer]
             fc2_ctx.grad_output_quantizers = [fc2_grad_output_quantizer]
-            fc2_ctx.weight_quantizers = fc2_weight_quantizers
+            fc2_ctx.weight_quantizers = (
+                fc2_weight_quantizers if fc2_is_dist else [fc2_weight_quantizer]
+            )
             fc2_ctx.dtype = dtype
             fc2_ctx.input_requires_grad = input_requires_grad
             fc2_ctx.weight_requires_grad = weight_requires_grad
