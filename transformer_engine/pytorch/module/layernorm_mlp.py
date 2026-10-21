@@ -20,7 +20,9 @@ from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
+    get_cublasmp_all_gather_output,
     _ub_communicators,
+    get_dummy_wgrad,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -1391,10 +1393,14 @@ def _layernorm_mlp_backward_impl(
         if args.fc2_grad_output_quantizer is not None:
             quantizer = args.fc2_grad_output_quantizer
             quantizer.set_usage(rowwise=True, columnwise=True)
-            if args.ub_overlap_ag:
+            if args.ub_overlap_ag and not (
+                using_cublasmp_backend() and isinstance(quantizer, NVFP4Quantizer)
+            ):
                 # Userbuffers only supports communication for one
                 # tensor usage at a time. Configure quantizer with
-                # usage for only dgrad GEMM.
+                # usage for only dgrad GEMM. cuBLASMp all-gathers only
+                # the row-wise data, so NVFP4 keeps its column-wise
+                # data for wgrad.
                 quantizer.set_usage(columnwise=False)
             # Amax reduction group for FC2 grad output (row-parallel sequence parallel)
             set_quantizer_amax_reduction_group(
@@ -1521,30 +1527,44 @@ def _layernorm_mlp_backward_impl(
         # Finished FC2 DGRAD...
         # --------------------------------------------------
 
-        # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and
-        # does not preserve it for fc2_wgrad. Userbuffers leaves the
-        # gathered tensor in its persistent buffer; cuBLASMp does not, so
-        # we gather here. Route through the same FP8-aware all-gather as
-        # the non-overlap path in
-        # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
+        # cuBLASMp's AG+GEMM leaves the gathered grad_output at the start of
+        # its workspace, as Userbuffers leaves it in its persistent buffer,
+        # so fc2_wgrad reuses it for unquantized and per-tensor FP8 data. A
+        # delayed wgrad runs after the workspace is reused, and other formats
+        # need data the dgrad GEMM did not gather, so those gather here.
+        # Route through the same FP8-aware all-gather as the non-overlap path
+        # in ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
         # the grad_output quantizer. Per-tensor FP8 can reconstruct columnwise
         # data from the gathered rowwise data; MXFP8 must instead quantize
         # the original gradient columnwise to avoid double quantization.
+        # NVFP4 gathers the columnwise data quantized with the rowwise data.
         if (
             args.fc2_weight_requires_grad
             and args.ub_overlap_ag
             and args.ub_obj_gradout is not None
             and args.ub_obj_gradout.with_cublasmp()
         ):
-            if args.fc2_grad_output_quantizer is not None:
-                set_quantizer_usage_for_wgrad_all_gather(args.fc2_grad_output_quantizer)
-            if isinstance(args.fc2_grad_output_quantizer, MXFP8Quantizer):
-                grad_output = grad_output_arg.reshape(-1, grad_output_arg.shape[-1]).contiguous()
-            grad_output, _ = gather_along_first_dim(
-                grad_output,
-                args.tp_group,
-                quantizer=args.fc2_grad_output_quantizer,
-            )
+            grad_output_total = None
+            if not (args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute()):
+                grad_output_total = get_cublasmp_all_gather_output(
+                    args.ub_obj_gradout,
+                    grad_output,
+                    args.fc2_grad_output_quantizer,
+                    args.tp_group,
+                )
+            if grad_output_total is None:
+                if args.fc2_grad_output_quantizer is not None:
+                    set_quantizer_usage_for_wgrad_all_gather(args.fc2_grad_output_quantizer)
+                if isinstance(args.fc2_grad_output_quantizer, MXFP8Quantizer):
+                    grad_output = grad_output_arg.reshape(
+                        -1, grad_output_arg.shape[-1]
+                    ).contiguous()
+                grad_output_total, _ = gather_along_first_dim(
+                    grad_output,
+                    args.tp_group,
+                    quantizer=args.fc2_grad_output_quantizer,
+                )
+            grad_output = grad_output_total
 
         # --------------------------------------------------
         # FC2 WGRAD
@@ -2003,20 +2023,12 @@ def _layernorm_mlp_backward_impl(
             fc1_weight_python_object, "grad_added_to_main_grad"
         ):
             fc1_weight_python_object.grad_added_to_main_grad = True
-            if getattr(fc1_weight_python_object, "zero_out_wgrad", False):
-                fc1_wgrad = torch.zeros(
-                    fc1_weight_main_grad.shape,
-                    dtype=fc1_weight_python_object.dtype,
-                    device=torch.cuda.current_device(),
-                    requires_grad=False,
-                )
-            else:
-                fc1_wgrad = torch.empty(
-                    fc1_weight_main_grad.shape,
-                    dtype=fc1_weight_python_object.dtype,
-                    device=torch.cuda.current_device(),
-                    requires_grad=False,
-                )
+            fc1_wgrad = get_dummy_wgrad(
+                list(fc1_weight_main_grad.shape),
+                fc1_weight_python_object.dtype,
+                zero=getattr(fc1_weight_python_object, "zero_out_wgrad", False),
+                zero_tensor=getattr(fc1_weight_python_object, "zero_tensor_dummy_wgrad", False),
+            )
         elif args.fuse_wgrad_accumulation:
             fc1_wgrad = None
     else:
@@ -2028,20 +2040,12 @@ def _layernorm_mlp_backward_impl(
             fc2_weight_python_object, "grad_added_to_main_grad"
         ):
             fc2_weight_python_object.grad_added_to_main_grad = True
-            if getattr(fc2_weight_python_object, "zero_out_wgrad", False):
-                fc2_wgrad = torch.zeros(
-                    fc2_weight_main_grad.shape,
-                    dtype=fc2_weight_python_object.dtype,
-                    device=torch.cuda.current_device(),
-                    requires_grad=False,
-                )
-            else:
-                fc2_wgrad = torch.empty(
-                    fc2_weight_main_grad.shape,
-                    dtype=fc2_weight_python_object.dtype,
-                    device=torch.cuda.current_device(),
-                    requires_grad=False,
-                )
+            fc2_wgrad = get_dummy_wgrad(
+                list(fc2_weight_main_grad.shape),
+                fc2_weight_python_object.dtype,
+                zero=getattr(fc2_weight_python_object, "zero_out_wgrad", False),
+                zero_tensor=getattr(fc2_weight_python_object, "zero_tensor_dummy_wgrad", False),
+            )
         elif args.fuse_wgrad_accumulation:
             fc2_wgrad = None
     else:

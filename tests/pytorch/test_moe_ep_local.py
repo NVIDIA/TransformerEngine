@@ -25,6 +25,22 @@ DEVICE = "cuda"
 TOLERANCES = {"rtol": 2e-2, "atol": 2e-2}
 
 
+@pytest.mark.parametrize(
+    "has_group,alignment,expected",
+    [
+        (False, None, 0),
+        (True, None, 256),
+        (False, 0, 0),
+        (True, 0, 0),
+        (False, 128, 128),
+        (True, 128, 128),
+    ],
+)
+def test_alignment_defaults_preserve_local_and_distributed_backends(has_group, alignment, expected):
+    config = replace(_config(), ep_group=object() if has_group else None, alignment=alignment)
+    assert config.alignment == expected
+
+
 def _config(num_local_experts=NUM_EXPERTS, top_k=TOP_K):
     """EP=1 config: every expert of the group is local, so no buffer is needed."""
     return EpConfig(
