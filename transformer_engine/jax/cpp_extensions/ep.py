@@ -212,7 +212,7 @@ def _capture_ep_resource_axes():
     return resource.ep_resource, outer_axes
 
 
-def _leading_axis_ok(spec, resource_axes=None):
+def _leading_axis_ok(spec, resource_axes=None, mesh=None):
     """Validate replicated trailing dimensions and EP plus optional outer axes."""
     ep_axis, outer_axes = (
         resource_axes if resource_axes is not None else _capture_ep_resource_axes()
@@ -223,7 +223,9 @@ def _leading_axis_ok(spec, resource_axes=None):
         return False, ep_axis, outer_axes
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
-    if ep_axis not in elts:
+    elts = tuple(axis for axis in elts if axis is not None)
+    # JAX canonicalizes size-one mesh axes out of partition specs.
+    if ep_axis not in elts and (mesh is None or mesh.shape.get(ep_axis) != 1):
         return False, ep_axis, outer_axes
     allowed = set(outer_axes) | {ep_axis}
     return all(a in allowed for a in elts), ep_axis, outer_axes
@@ -387,7 +389,7 @@ class EpPreparePrimitive(BasePrimitive):
     ):
         del is_outer, result_infos
         idx_spec = arg_infos[0].sharding.spec
-        ok, ep_axis, outer_axes = _leading_axis_ok(idx_spec, resource_axes)
+        ok, ep_axis, outer_axes = _leading_axis_ok(idx_spec, resource_axes, mesh)
         if not ok:
             raise NotImplementedError(
                 "EpPrepare: topk_idx leading dim must include ep_resource"
@@ -562,7 +564,7 @@ class EpDispatchPrimitive(BasePrimitive):
     ):
         del is_outer, result_infos
         tokens_spec = arg_infos[2].sharding.spec
-        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, resource_axes)
+        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, resource_axes, mesh)
         if not ok:
             raise NotImplementedError(
                 "EpDispatch: tokens leading dim must include ep_resource"
@@ -765,7 +767,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
     ):
         del is_outer, result_infos
         tokens_spec = arg_infos[1].sharding.spec
-        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, resource_axes)
+        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, resource_axes, mesh)
         if not ok:
             raise NotImplementedError(
                 "EpPrepareAndDispatch: tokens leading dim must include ep_resource"
