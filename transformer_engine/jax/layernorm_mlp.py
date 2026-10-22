@@ -23,6 +23,7 @@ from jax.ad_checkpoint import checkpoint_name
 
 from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
+from .sharding import MeshResource, _mesh_resource_snapshot
 from .layernorm import canonicalize_norm_type
 from .quantize import (
     with_sharding_constraint_by_logical_axes,
@@ -56,6 +57,7 @@ def layernorm_mlp(
         tex.noop_collective_op_set,
     ),
     quantizer_sets: Tuple[QuantizerSet] = (noop_quantizer_set, noop_quantizer_set),
+    mesh_resource: MeshResource | None = None,
 ) -> jnp.ndarray:
     """Apply layer normalization followed by MLP block.
 
@@ -89,6 +91,8 @@ def layernorm_mlp(
         activation_type: Activation function(s) to apply after the first dense layer transformation
         collective_op_sets: Tuple of two collective gemm config sets for the two dense layer transformations
         quantizer_sets: Tuple of two quantizer sets for the two dense layer transformations
+        mesh_resource: Optional mesh role override for both dense transformations.
+            None uses the global mesh resource context.
 
     Returns:
         Output tensor with shape [batch..., hidden_in]
@@ -142,11 +146,12 @@ def layernorm_mlp(
         activation_params,
         collective_op_sets,
         quantizer_sets,
+        _mesh_resource_snapshot(mesh_resource),
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -170,6 +175,7 @@ def _layernorm_mlp(
     activation_params: dict,
     collective_op_sets: Tuple[tex.CollectiveOpSet],
     quantizer_sets,
+    mesh_resource,
 ):
     """Internal implementation of layernorm_mlp with custom VJP.
 
@@ -226,6 +232,7 @@ def _layernorm_mlp(
         activation_params,
         collective_op_sets,
         quantizer_sets,
+        mesh_resource,
     )
     return output
 
@@ -253,6 +260,7 @@ def _layernorm_mlp_fwd_rule(
     activation_params,
     collective_op_sets,
     quantizer_sets,
+    mesh_resource,
 ):
     """Forward pass rule for layernorm_mlp.
 
@@ -310,6 +318,7 @@ def _layernorm_mlp_fwd_rule(
         quantizer=ffn1_quantizer_set.x,
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
@@ -319,6 +328,7 @@ def _layernorm_mlp_fwd_rule(
         quantizer=ffn1_quantizer_set.kernel,
         amax_scope=AmaxScope.FSDP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     # NN GEMM
@@ -330,6 +340,7 @@ def _layernorm_mlp_fwd_rule(
         transpose_batch_sequence=transpose_batch_sequence,
         bias=bias_1,
         collective_op=collective_op_set_1.forward,
+        mesh_resource=mesh_resource,
     )
 
     # This sharding constraint is needed to correct the Shardy sharding propagation
@@ -353,6 +364,7 @@ def _layernorm_mlp_fwd_rule(
         ),
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
@@ -362,6 +374,7 @@ def _layernorm_mlp_fwd_rule(
         quantizer=ffn2_quantizer_set.kernel,
         amax_scope=AmaxScope.FSDP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     # NN GEMM
@@ -373,6 +386,7 @@ def _layernorm_mlp_fwd_rule(
         transpose_batch_sequence=transpose_batch_sequence,
         bias=bias_2,
         collective_op=collective_op_set_2.forward,
+        mesh_resource=mesh_resource,
     )
 
     # sharding of outputs should be the same as dot_1's input
@@ -417,6 +431,7 @@ def _layernorm_mlp_bwd_rule(
     activation_type,
     activation_params,
     collective_op_sets,
+    mesh_resource,
     ctx,
     grad,
 ):
@@ -469,6 +484,7 @@ def _layernorm_mlp_bwd_rule(
         quantizer=ffn1_quantizer_set.dgrad,
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
@@ -488,6 +504,7 @@ def _layernorm_mlp_bwd_rule(
         contracting_dims=(g_contracting_dims_2, k_contracting_dims_2),
         transpose_batch_sequence=transpose_batch_sequence,
         collective_op=collective_op_set_2.backward,
+        mesh_resource=mesh_resource,
     )
 
     dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
@@ -503,6 +520,7 @@ def _layernorm_mlp_bwd_rule(
         casted_grad.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, g_contracting_dims),
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
     wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
 
@@ -519,6 +537,7 @@ def _layernorm_mlp_bwd_rule(
         ),
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
@@ -538,6 +557,7 @@ def _layernorm_mlp_bwd_rule(
         contracting_dims=(g_contracting_dims_1, k_contracting_dims_1),
         transpose_batch_sequence=transpose_batch_sequence,
         collective_op=collective_op_set_1.backward,
+        mesh_resource=mesh_resource,
     )
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)
@@ -549,6 +569,7 @@ def _layernorm_mlp_bwd_rule(
         casted_dact_out.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, g_contracting_dims),
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     wgrad_1 = with_sharding_constraint_by_logical_axes(wgrad_1, kernel_1_axes)
@@ -563,6 +584,7 @@ def _layernorm_mlp_bwd_rule(
         zero_centered_gamma=zero_centered_gamma,
         epsilon=epsilon,
         norm_type=norm_type,
+        mesh_resource=mesh_resource,
     )
 
     return (dx, dgamma, dbeta, wgrad_1, wgrad_2, dbias_1, dbias_2, quantizer_sets)

@@ -52,10 +52,10 @@ from ..quantize import (
 from .misc import get_padded_spec, is_all_reduce_in_float32, get_min_device_compute_capability
 from ..sharding import (
     global_mesh_resource,
+    _mesh_resource_snapshot,
     tpsp_axis_size,
     dp_or_fsdp_axis_size,
 )
-
 
 __all__ = [
     "CollectiveOp",
@@ -450,42 +450,44 @@ def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
             )
 
 
-def _reorder_tpsp_leading(tensor, original_shape):
+def _reorder_tpsp_leading(tensor, original_shape, mesh_resource=None):
     """Reorder tensor so the tpsp axis is leading: reshape (dp, n, tpsp, m, ...), transpose (2, 0, 1, 3, ...)."""
-    assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+    dp_size = dp_or_fsdp_axis_size(mesh_resource)
+    sp_size = tpsp_axis_size(mesh_resource)
+    assert original_shape[0] % dp_size == 0 or original_shape[0] == 1, (
         f"Original_shape[0]={original_shape[0]} is not divisible by"
-        f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+        f" dp_or_fsdp_axis_size()={dp_size}"
     )
-    assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
-        f"Original_shape[1]={original_shape[1]} is not divisible by"
-        f" tpsp_axis_size()={tpsp_axis_size()}"
+    assert original_shape[1] % sp_size == 0 or original_shape[1] == 1, (
+        f"Original_shape[1]={original_shape[1]} is not divisible by" f" tpsp_axis_size()={sp_size}"
     )
     reshaped = tensor.reshape(
-        dp_or_fsdp_axis_size(),
-        int(original_shape[0] / dp_or_fsdp_axis_size()),
-        tpsp_axis_size(),
-        int(original_shape[1] / tpsp_axis_size()),
+        dp_size,
+        int(original_shape[0] / dp_size),
+        sp_size,
+        int(original_shape[1] / sp_size),
         *original_shape[2:],
     )
     reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
     return reordered.reshape(original_shape)
 
 
-def _reorder_dp_leading(tensor, original_shape):
+def _reorder_dp_leading(tensor, original_shape, mesh_resource=None):
     """Reorder tensor so the dp axis is leading: reshape (tpsp, dp, n, m, ...), transpose (1, 2, 0, 3, ...)."""
-    assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+    dp_size = dp_or_fsdp_axis_size(mesh_resource)
+    sp_size = tpsp_axis_size(mesh_resource)
+    assert original_shape[0] % dp_size == 0 or original_shape[0] == 1, (
         f"Original_shape[0]={original_shape[0]} is not divisible by"
-        f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+        f" dp_or_fsdp_axis_size()={dp_size}"
     )
-    assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
-        f"Original_shape[1]={original_shape[1]} is not divisible by"
-        f" tpsp_axis_size()={tpsp_axis_size()}"
+    assert original_shape[1] % sp_size == 0 or original_shape[1] == 1, (
+        f"Original_shape[1]={original_shape[1]} is not divisible by" f" tpsp_axis_size()={sp_size}"
     )
     reshaped = tensor.reshape(
-        tpsp_axis_size(),
-        dp_or_fsdp_axis_size(),
-        int(original_shape[0] / dp_or_fsdp_axis_size()),
-        int(original_shape[1] / tpsp_axis_size()),
+        sp_size,
+        dp_size,
+        int(original_shape[0] / dp_size),
+        int(original_shape[1] / sp_size),
         *original_shape[2:],
     )
     reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
@@ -499,7 +501,7 @@ class GemmPrimitive(BasePrimitive):
 
     name = "te_gemm_v2_ffi"
     multiple_results = True
-    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14)
+    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15)
     inner_primitive = None
     outer_primitive = None
 
@@ -520,8 +522,9 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        mesh_resource=None,
     ):
-        del use_split_accumulator, transpose_batch_sequence
+        del use_split_accumulator, transpose_batch_sequence, mesh_resource
 
         def _dims_are_consecutive(dims):
             if len(dims) <= 1:
@@ -680,8 +683,9 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        mesh_resource=None,
     ):
-        del out_dtype, transpose_batch_sequence, sequence_dim, is_outer
+        del out_dtype, transpose_batch_sequence, sequence_dim, is_outer, mesh_resource
 
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
@@ -719,6 +723,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        mesh_resource=None,
     ):
         if scaling_mode.is_1d_block_scaling():
             lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
@@ -748,10 +753,10 @@ class GemmPrimitive(BasePrimitive):
                     f" rhs_flatten_axis={rhs_flatten_axis}"
                 )
                 # The scale needs to be in good shape for reordering
-                assert lhs_scale_inv.shape[sequence_dim] % tpsp_axis_size() == 0, (
+                assert lhs_scale_inv.shape[sequence_dim] % tpsp_axis_size(mesh_resource) == 0, (
                     "MXFP8 + Collective AG/RS requires RHS scale inv sequence dimension to be"
                     f" multiples of tpsp_axis_size. Got lhs_scale_inv.shape={lhs_scale_inv.shape},"
-                    f" tpsp_axis_size={tpsp_axis_size()}, sequence_dim={sequence_dim}"
+                    f" tpsp_axis_size={tpsp_axis_size(mesh_resource)}, sequence_dim={sequence_dim}"
                 )
             else:
                 lhs_scale_inv = apply_padding_to_scale_inv(
@@ -776,7 +781,7 @@ class GemmPrimitive(BasePrimitive):
         # Alter lhs blocks so that CGEMM RS outputs correctly
         if need_reorder and collective_op.is_reduce_scatter and lhs.shape[0] != 1:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
-            lhs = _reorder_tpsp_leading(lhs, lhs.shape)
+            lhs = _reorder_tpsp_leading(lhs, lhs.shape, mesh_resource)
 
         if (
             need_reorder
@@ -785,9 +790,9 @@ class GemmPrimitive(BasePrimitive):
             and scaling_mode.is_1d_block_scaling()
         ):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
-            lhs_scale_inv = _reorder_tpsp_leading(lhs_scale_inv, lhs_scale_inv.shape)
+            lhs_scale_inv = _reorder_tpsp_leading(lhs_scale_inv, lhs_scale_inv.shape, mesh_resource)
 
-        (output, _) = GemmPrimitive.inner_primitive.bind(
+        output, _ = GemmPrimitive.inner_primitive.bind(
             lhs,
             lhs_scale_inv,
             rhs,
@@ -803,11 +808,12 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim=sequence_dim,
             is_outer=is_outer,
             collective_op=collective_op,
+            mesh_resource=mesh_resource,
         )
         # Alter output blocks for CGEMM AG
         if need_reorder and collective_op.is_all_gather and output.shape[0] != 1:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
-            output = _reorder_dp_leading(output, output.shape)
+            output = _reorder_dp_leading(output, output.shape, mesh_resource)
 
         return (output,)
 
@@ -828,6 +834,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        mesh_resource=None,
     ):
         return GemmPrimitive.impl(
             lhs,
@@ -845,6 +852,7 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim,
             is_outer,
             collective_op,
+            mesh_resource,
         )
 
     @staticmethod
@@ -859,6 +867,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        mesh_resource=None,
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
         if GemmPrimitive.outer_primitive is None:
@@ -880,6 +889,7 @@ class GemmPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 use_split_accumulator=use_split_accumulator,
                 collective_op=collective_op,
+                mesh_resource=mesh_resource,
                 transpose_batch_sequence=transpose_batch_sequence,
                 sequence_dim=sequence_dim,
                 is_outer=is_outer,
@@ -894,10 +904,11 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         collective_op,
         scaling_mode,
+        mesh_resource=None,
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
-        gsr = global_mesh_resource()
+        gsr = global_mesh_resource() if mesh_resource is None else mesh_resource
 
         # Ensure that tensor sequence parallelism is not used via setting tp_resource
         if gsr.tp_resource is not None:
@@ -1004,18 +1015,32 @@ class GemmPrimitive(BasePrimitive):
             rhs_cspecs = (None,) * len(rhs_cspecs)
 
             # Non-contracting dims of RHS always needs to be gathered along the FSDP axis
-            rhs_non_cspecs = tuple(
-                (
-                    None
-                    if spec is not None
-                    and (
-                        spec == gsr.fsdp_resource
-                        or (isinstance(spec, tuple) and gsr.fsdp_resource in spec)
+            if mesh_resource is None:
+                rhs_non_cspecs = tuple(
+                    (
+                        None
+                        if spec is not None
+                        and (
+                            spec == gsr.fsdp_resource
+                            or (isinstance(spec, tuple) and gsr.fsdp_resource in spec)
+                        )
+                        else spec
                     )
-                    else spec
+                    for spec in rhs_non_cspecs
                 )
-                for spec in rhs_non_cspecs
-            )
+            else:
+                fsdp_axes = _convert_axis_spec_to_list(gsr.fsdp_resource)
+                rhs_non_cspecs = tuple(
+                    _retain_axes(
+                        spec,
+                        [
+                            axis
+                            for axis in _convert_axis_spec_to_list(spec)
+                            if axis not in fsdp_axes
+                        ],
+                    )
+                    for spec in rhs_non_cspecs
+                )
 
         # Only do AG Sequence dim if not Overlap
         if not collective_op.is_all_gather:
@@ -1098,6 +1123,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
@@ -1110,12 +1136,13 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim,
         )
 
-        (_, out_specs, *_) = GemmPrimitive._parse_operand_output_specs(
+        _, out_specs, *_ = GemmPrimitive._parse_operand_output_specs(
             arg_infos,
             contracting_dims,
             transpose_batch_sequence,
             collective_op,
             scaling_mode,
+            mesh_resource,
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -1131,6 +1158,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
@@ -1148,6 +1176,7 @@ class GemmPrimitive(BasePrimitive):
             transpose_batch_sequence,
             collective_op,
             scaling_mode,
+            mesh_resource,
         )
 
         # Block scale inverses match their operands, but tensor scale inverses are unsharded.
@@ -1194,6 +1223,7 @@ class GemmPrimitive(BasePrimitive):
                 sequence_dim=inferred_sequence_dim,
                 is_outer=False,
                 collective_op=collective_op,
+                mesh_resource=mesh_resource,
             )
 
             if reduce_spec is not None:
@@ -1222,12 +1252,13 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
         collective_op,
+        mesh_resource,
         mesh,
         operand_types,
         result_types,
     ):
         del out_dtype, use_split_accumulator
-        del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer
+        del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer, mesh_resource
 
         if not collective_op.is_none:
             warnings.warn(
@@ -1260,7 +1291,7 @@ class GemmPrimitive(BasePrimitive):
 
         lhs, _, rhs, *_ = operand_types
         operand_ndims = (len(lhs.shape), len(rhs.shape))
-        (lhs_cdims, rhs_cdims) = map(sanitize_dims, operand_ndims, contracting_dims)
+        lhs_cdims, rhs_cdims = map(sanitize_dims, operand_ndims, contracting_dims)
         lhs_specs, rhs_specs = map(
             _generate_operand_rules,
             ("lhs", "rhs"),
@@ -1310,6 +1341,7 @@ def _te_gemm(
     use_split_accumulator: bool = False,
     transpose_batch_sequence: bool = False,
     collective_op: CollectiveOp = CollectiveOp.NONE,
+    mesh_resource=None,
 ) -> Tuple[jax.Array, ...]:
 
     # Prepare non-quantized GEMM operands
@@ -1402,6 +1434,7 @@ def _te_gemm(
         sequence_dim=-1,  #  Dummy value and will be set in the primitive
         is_outer=True,
         collective_op=collective_op,
+        mesh_resource=_mesh_resource_snapshot(mesh_resource),
     )
     return output
 
@@ -1692,7 +1725,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        (out, *_) = GroupedGemmPrimitive.abstract(*args, **kwargs)
+        out, *_ = GroupedGemmPrimitive.abstract(*args, **kwargs)
         return (out,)
 
     @staticmethod
@@ -1783,7 +1816,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             additional_args = (additional_arg_0, additional_arg_1)
         else:
             additional_args = (additional_arg_0,)
-        (out, *_) = GroupedGemmPrimitive.inner_primitive.bind(
+        out, *_ = GroupedGemmPrimitive.inner_primitive.bind(
             lhs_data,
             lhs_scale_inv,
             rhs_data,
@@ -2010,6 +2043,7 @@ def gemm(
     rhs_quantizer: Quantizer = None,
     transpose_batch_sequence: bool = False,
     collective_op: CollectiveOp = CollectiveOp.NONE,
+    mesh_resource=None,
     **kwargs,
 ) -> Tuple[jnp.ndarray, ...]:
     r"""General matrix multiplication with optional quantization.
@@ -2054,6 +2088,10 @@ def gemm(
             ``collective_op`` is ``CollectiveOp.NONE`` or when using the Userbuffers
             backend instead of cuBLASMp.
 
+    mesh_resource: MeshResource, default = None
+        Override the mesh roles for this GEMM's partitioning. None uses the
+        global mesh resource context. Explicit resources are snapshotted before tracing.
+
     Returns
     -------
     jax.Array:
@@ -2096,6 +2134,7 @@ def gemm(
         use_split_accumulator=use_split_accumulator,
         transpose_batch_sequence=transpose_batch_sequence,
         collective_op=collective_op,
+        mesh_resource=mesh_resource,
     )
 
     return output
