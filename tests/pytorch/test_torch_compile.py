@@ -3232,3 +3232,55 @@ def _check_linear_bias_compile(
         forward=case in ("bias", "unfused"),
         backward=case != "linear" and bool(targets),
     )
+
+
+@pytest.mark.parametrize("device", ["cpu", "meta", "cuda:0", "cuda:1"])
+@pytest.mark.parametrize("backward", [False, True])
+def test_custom_op_none_device(device, backward):
+    from transformer_engine.pytorch.dynamo.custom_op import (
+        _decode_none,
+        _pack_bwd_result,
+        _pack_fwd_result,
+        _register_op,
+    )
+
+    if device.startswith("cuda") and int(device[-1]) >= torch.cuda.device_count():
+        pytest.skip("CUDA device is unavailable")
+
+    @dataclasses.dataclass
+    class Args:
+        scalar: torch.Tensor
+        tensor: torch.Tensor
+
+    def impl(args):
+        output = args.tensor.sin()
+        return (None, output) if backward else (None, output, (None,), {})
+
+    def fake_impl(args):
+        output = args.tensor
+        return (None, output) if backward else (None, output, (None,), {})
+
+    def pack(result, output_device):
+        if backward:
+            return _pack_bwd_result(result, 2, "test_none_device", output_device)
+        return _pack_fwd_result(result, output_device)
+
+    op = _register_op(
+        name=f"test_none_device_{device.replace(':', '_')}_{backward}",
+        arg_type=Args,
+        impl=impl,
+        fake_impl=fake_impl,
+        pack_result=pack,
+    )
+    scalar = torch.tensor(1.0)
+    x = torch.randn(8, device=device)
+    for fake in (False, True):
+        with FakeTensorMode() if fake else contextlib.nullcontext() as mode:
+            args = Args(mode.from_tensor(scalar), mode.from_tensor(x)) if fake else Args(scalar, x)
+            outputs = op(args)
+            assert all(output.device == x.device for output in outputs)
+            assert _decode_none(outputs[0]) is None
+            if not backward:
+                assert _decode_none(outputs[2]) is None
+            if not fake and device != "meta":
+                torch.testing.assert_close(outputs[1], x.sin())

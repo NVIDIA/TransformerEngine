@@ -134,10 +134,10 @@ TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
 _NONE_SENTINEL_DTYPE = torch.complex32
 
 
-def _encode_none(t: Optional[torch.Tensor]) -> torch.Tensor:
+def _encode_none(t: Optional[torch.Tensor], device: torch.device) -> torch.Tensor:
     """Replace ``None`` with a 0-element sentinel tensor."""
     if t is None:
-        return torch.empty(0, dtype=_NONE_SENTINEL_DTYPE)
+        return torch.empty(0, dtype=_NONE_SENTINEL_DTYPE, device=device)
     return t
 
 
@@ -765,6 +765,7 @@ def _spec_slot_count(spec: Optional[TensorSpec]) -> int:
 
 def _flatten_value(
     value: Optional[Union[torch.Tensor, QuantizedTensorStorage, TensorSpec]],
+    device: torch.device,
 ) -> List[torch.Tensor]:
     """Return the flat ``Tensor[]`` slots that represent one op output ``value``.
 
@@ -772,14 +773,14 @@ def _flatten_value(
     matches :func:`_spec_slot_count`.
     """
     if value is None:
-        return [_encode_none(None)]
+        return [_encode_none(None, device)]
     if isinstance(value, TensorSpec):
-        return [_encode_none(t) for t in value.create_inner_tensors()]
+        return [_encode_none(t, device) for t in value.create_inner_tensors()]
     if hasattr(value, "__tensor_flatten__"):
         inner_names, _ = value.__tensor_flatten__()
-        return [_encode_none(getattr(value, n)) for n in inner_names]
+        return [_encode_none(getattr(value, n), device) for n in inner_names]
     if isinstance(value, torch.Tensor):
-        return [_encode_none(value)]
+        return [_encode_none(value, device)]
     raise TypeError(
         f"unsupported value type {type(value).__name__}; expected None / "
         "torch.Tensor / tensor subclass / bare storage / TensorSpec."
@@ -815,7 +816,7 @@ def _check_fwd_result(result: Any) -> None:
         raise TypeError("fwd impl 'ctx_attrs' slot must be a dict or None")
 
 
-def _pack_fwd_result(result: Any) -> List[torch.Tensor]:
+def _pack_fwd_result(result: Any, device: torch.device) -> List[torch.Tensor]:
     """Pack a fwd-impl return tuple into the op's ``Tensor[]`` payload.
 
     User outputs first, then saved-for-backward tensors in declaration order.
@@ -823,16 +824,16 @@ def _pack_fwd_result(result: Any) -> List[torch.Tensor]:
     num_outputs = len(result) - _FWD_TRAILING_SLOTS
     flat: List[torch.Tensor] = []
     for value in result[:num_outputs]:
-        flat.extend(_flatten_value(value))
+        flat.extend(_flatten_value(value, device))
     saved = result[num_outputs]
     if saved is not None:
         for value in saved:
-            flat.extend(_flatten_value(value))
+            flat.extend(_flatten_value(value, device))
     return flat
 
 
 def _pack_bwd_result(
-    grads: Any, num_grad_inputs: Optional[int], op_qualname: str
+    grads: Any, num_grad_inputs: Optional[int], op_qualname: str, device: torch.device
 ) -> List[torch.Tensor]:
     """Pack a backward-impl return tuple into the op's ``Tensor[]`` payload.
 
@@ -848,9 +849,9 @@ def _pack_bwd_result(
     out: List[torch.Tensor] = []
     for g in grads:
         if isinstance(g, TensorSpec):
-            out.append(_encode_none(g.create_tensor()))
+            out.append(_encode_none(g.create_tensor(), device))
         else:
-            out.append(_encode_none(g))
+            out.append(_encode_none(g, device))
     return out
 
 
@@ -967,6 +968,15 @@ def _mark_effectful(op_def: Any) -> None:
         _register_effectful_op(op_def, EffectType.ORDERED)
 
 
+def _op_device(flat: Sequence[Any]) -> torch.device:
+    """Choose the tensor device, allowing CPU scalar inputs to CUDA ops."""
+    leaves, _ = tree_flatten(flat)
+    for value in leaves:
+        if isinstance(value, torch.Tensor) and value.device.type != "cpu":
+            return value.device
+    return torch.device("cpu")
+
+
 def _register_base_op(
     *,
     op_name: str,
@@ -974,7 +984,7 @@ def _register_base_op(
     plan: _ArgPlan,
     impl: Callable[[Any], Any],
     fake_impl: Callable[[Any], Any],
-    pack_result: Callable[[Any], List[torch.Tensor]],
+    pack_result: Callable[[Any, torch.device], List[torch.Tensor]],
     tags: Sequence[torch.Tag] = (),
 ) -> Any:
     """Define the op via ``torch.library.custom_op`` with the real ``impl`` + the
@@ -987,12 +997,12 @@ def _register_base_op(
 
     def _impl(*flat: Any) -> List[torch.Tensor]:
         obj = plan.unpack(dict(zip(plan.slot_names, flat)))
-        return pack_result(impl(obj))
+        return pack_result(impl(obj), _op_device(flat))
 
     def _fake(*flat: Any) -> List[torch.Tensor]:
         obj = plan.unpack(dict(zip(plan.slot_names, flat)))
         spec_obj = _spec_view(obj, plan.tensor_field_names())
-        return pack_result(fake_impl(spec_obj))
+        return pack_result(fake_impl(spec_obj), _op_device(flat))
 
     op = torch.library.custom_op(
         f"{_TE_OP_NAMESPACE}::{op_name}", _impl, mutates_args=(), schema=schema_str, tags=tags
@@ -1203,7 +1213,7 @@ def _register_op(
     arg_type: type,
     impl: Callable[[Any], Any],
     fake_impl: Callable[[Any], Any],
-    pack_result: Callable[[Any], List[torch.Tensor]],
+    pack_result: Callable[[Any, torch.device], List[torch.Tensor]],
     tags: Sequence[torch.Tag] = (),
 ) -> _RegisteredOp:
     """Define one two-tier custom op: the base kernel, the wrapper op that lets
@@ -1274,9 +1284,9 @@ def register_custom_op(
     Duplicate operator names raise ValueError.
     """
 
-    def pack_result(result):
+    def pack_result(result, device):
         values, _ = tree_flatten(result)
-        return [tensor for value in values for tensor in _flatten_value(value)]
+        return [tensor for value in values for tensor in _flatten_value(value, device)]
 
     try:
         op = _register_op(
@@ -1426,7 +1436,9 @@ def _register_custom_op_with_autograd_impl(
         arg_type=bwd_arg_type,
         impl=bwd_impl,
         fake_impl=bwd_fake_impl,
-        pack_result=lambda grads: _pack_bwd_result(grads, num_grad_inputs, bwd_qualname),
+        pack_result=lambda grads, device: _pack_bwd_result(
+            grads, num_grad_inputs, bwd_qualname, device
+        ),
     )
 
     autograd_common = {
