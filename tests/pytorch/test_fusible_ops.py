@@ -2333,10 +2333,62 @@ class TestBasicOps:
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
     @pytest.mark.parametrize("in_shape", ((1, 37, 16, 128), (6, 16, 64)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    def test_silu_gate(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+    ) -> None:
+        """SiLU gate"""
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        g_ref, g_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation. The op computes in FP32 and rounds
+        # the result to the input dtype, so the reference does the same.
+        y_ref = (x_ref.float() * torch.nn.functional.silu(g_ref.float())).to(dtype)
+        y_ref.backward(dy_ref.to(dtype))
+        dx_ref = x_ref.grad.to(dtype)
+        dg_ref = g_ref.grad.to(dtype)
+
+        # Implementation with fusible operation
+        op = te_ops.SiLUGate()
+        y_test = op(x_test, g_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dg_test = g_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref.to(dtype=torch.float64, device="cpu"), **tols)
+        torch.testing.assert_close(dx_test, dx_ref.to(dtype=torch.float64, device="cpu"), **tols)
+        torch.testing.assert_close(dg_test, dg_ref.to(dtype=torch.float64, device="cpu"), **tols)
+
+    @pytest.mark.parametrize("in_shape", ((1, 37, 16, 128), (6, 16, 64)))
     @pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
     @pytest.mark.parametrize("gate_layout", ("contiguous", "strided"))
-    def test_rmsnorm_gated(
+    def test_rmsnorm_silu_gate(
         self,
         *,
         in_shape: Iterable[int],
@@ -2406,7 +2458,7 @@ class TestBasicOps:
         y_ref.backward(dy_ref)
 
         # Implementation with fusible operation
-        op = te_ops.RMSNormGated(
+        op = te_ops.RMSNorm(
             weight_shape,
             eps=eps,
             device=device,
@@ -2416,7 +2468,8 @@ class TestBasicOps:
         with torch.no_grad():
             op.weight.copy_(w_test)
             del w_test
-        y_test = op(x_test, g_test)
+        forward = te_ops.Sequential(op, te_ops.SiLUGate())
+        y_test = forward(x_test, g_test)
         y_test.backward(dy_test)
 
         # Expected numerical error
@@ -2431,43 +2484,6 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
         torch.testing.assert_close(dg_test, g_ref.grad, **tols)
-
-    @pytest.mark.parametrize("quantization", _quantization_list[1:])
-    def test_rmsnorm_gated_quantized_output(
-        self,
-        *,
-        quantization: str,
-        device: torch.device = "cuda",
-        in_shape: Iterable[int] = (16, 128),
-        dtype: torch.dtype = torch.bfloat16,
-    ) -> None:
-        """RMSNorm with SiLU gate rejects quantized output"""
-
-        # Skip unsupported BF16
-        if not is_bf16_available():
-            pytest.skip("BF16 requires sm_80 or higher")
-
-        # Random data
-        _, x_test = make_reference_and_test_tensors(
-            in_shape,
-            test_dtype=dtype,
-            test_device=device,
-        )
-        _, g_test = make_reference_and_test_tensors(
-            in_shape,
-            test_dtype=dtype,
-            test_device=device,
-        )
-
-        # Implementation with fusible operation
-        op = te_ops.RMSNormGated(in_shape[-1], device=device, dtype=dtype)
-        forward = te_ops.Sequential(
-            op,
-            te_ops.Quantize(forward=True, backward=False),
-        )
-        with te.autocast(enabled=True, recipe=make_recipe(quantization)):
-            with pytest.raises(NotImplementedError, match="quantized output"):
-                forward(x_test, g_test)
 
     @pytest.mark.parametrize("in_shape", ((32,), (6, 16, 64), (32, 64)))
     @pytest.mark.parametrize("dtype", _dtypes)
