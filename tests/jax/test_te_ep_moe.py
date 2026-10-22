@@ -1286,7 +1286,7 @@ class TestTeEpMoeAuxLoss:
                 g_te,
                 g_ref,
                 rtol=2e-2,
-                atol=2e-2 * float(np.abs(g_ref).max()),
+                atol=4e-3 * float(np.abs(g_ref).max()),
                 err_msg=f"aux {name} grad parity breach [config={config}]",
             )
 
