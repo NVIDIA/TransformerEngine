@@ -108,9 +108,7 @@ struct TypeInfo {
     struct Helper {
         constexpr static DType getType() {
             constexpr int i = static_cast<int>(current);
-            // The DType enum carries values (e.g. kFloat8UE5M3) whose type is only
-            // added to ``types`` on CUDA >= 13.4, so guard the tuple access to keep
-            // the enum walk from indexing past the tuple on older toolkits.
+            // fp8ue5m3 is only in types on CUDA >= 13.4.
             if constexpr (i < static_cast<int>(std::tuple_size<types>::value)) {
                 if (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
                     return current;
@@ -129,6 +127,8 @@ struct TypeInfo {
 
     template <typename U>
     constexpr static DType getType() {
+        static_assert(Helper<U, DType::kByte>::getType() != DType::kNumTypes,
+                      "Type is not registered");
         return Helper<U, DType::kByte>::getType();
     }
 
