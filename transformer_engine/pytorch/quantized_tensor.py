@@ -18,6 +18,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.constants import dist_group_type
+from transformer_engine.pytorch.distributed_weight import is_distributed_weight
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
@@ -288,19 +289,37 @@ class _SavedQuantizedTensor(NamedTuple):
     metadata: Dict[str, Any]
 
 
+class _SavedDistributedWeight(NamedTuple):
+    """A DistributedWeight kept by reference instead of saved through autograd."""
+
+    weight: torch.Tensor
+
+
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorStorage],
 ) -> Tuple[
     list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
-    list[Optional[Union[QuantizedTensorStorage, _SavedQuantizedTensor]]],
+    list[Optional[Union[QuantizedTensorStorage, _SavedQuantizedTensor, _SavedDistributedWeight]]],
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
-    the internal TensorStorage types too."""
+    the internal TensorStorage types too.
+
+    A DistributedWeight is kept by reference and not saved through autograd:
+    saved-tensor hooks (e.g. activation offloading) unpack saved tensors as
+    plain tensors, which drops the subclass and its distributed-weight hooks."""
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
-        if tensor is None or isinstance(tensor, torch.Tensor):
+        # Skipped under torch.compile so traced graphs are unchanged.
+        if (
+            tensor is not None
+            and not torch.compiler.is_compiling()
+            and is_distributed_weight(tensor)
+        ):
+            tensor_list.append(None)
+            tensor_objects_list.append(_SavedDistributedWeight(tensor))
+        elif tensor is None or isinstance(tensor, torch.Tensor):
             tensor_list.append(tensor)
             tensor_objects_list.append(None)
         elif torch.compiler.is_compiling():
@@ -316,7 +335,13 @@ def prepare_for_saving(
 
 
 def restore_from_saved(
-    tensors: list[Optional[Union[torch.Tensor, QuantizedTensorStorage, _SavedQuantizedTensor]]],
+    tensors: list[
+        Optional[
+            Union[
+                torch.Tensor, QuantizedTensorStorage, _SavedQuantizedTensor, _SavedDistributedWeight
+            ]
+        ]
+    ],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
     return_saved_tensors: bool = False,
 ) -> (
@@ -331,7 +356,10 @@ def restore_from_saved(
     """
     tensor_objects = []
     for tensor in tensors:
-        if tensor is None or isinstance(tensor, torch.Tensor):
+        if isinstance(tensor, _SavedDistributedWeight):
+            tensor_objects.append(tensor.weight)
+            saved_tensors = saved_tensors[1:]
+        elif tensor is None or isinstance(tensor, torch.Tensor):
             tensor_objects.append(saved_tensors[0])
             saved_tensors = saved_tensors[1:]
         elif isinstance(tensor, _SavedQuantizedTensor):
