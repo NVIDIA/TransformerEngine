@@ -697,9 +697,15 @@ class TestGroupedTensor:
     @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
     @pytest.mark.parametrize("optimize_for_gemm", [False, True])
     @pytest.mark.parametrize("output_dbias", [False, True])
+    @pytest.mark.parametrize("num_tensors", [3, 65])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_quantize_grouped_mxfp8(
-        self, shape_case: str, usage: str, optimize_for_gemm: bool, output_dbias: bool
+        self,
+        shape_case: str,
+        usage: str,
+        optimize_for_gemm: bool,
+        output_dbias: bool,
+        num_tensors: int,
     ) -> None:
         """Test grouped MXFP8 quantization against per-tensor quantization for
         varying first/last/both dimensions and compact or GEMM-swizzled scales."""
@@ -718,7 +724,7 @@ class TestGroupedTensor:
         else:  # varying_both
             per_tensor_shapes = [(128, 256), (256, 512), (384, 384)]
 
-        num_tensors = len(per_tensor_shapes)
+        per_tensor_shapes = [per_tensor_shapes[i % 3] for i in range(num_tensors)]
 
         # Each tensor occupies a contiguous chunk of a flat buffer; the kernel
         # locates each chunk via tensor_offsets, so the 2D view below only needs
@@ -793,6 +799,50 @@ class TestGroupedTensor:
         if output_dbias:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
             torch.testing.assert_close(dbias, expected_dbias, rtol=1e-5, atol=4e-3)
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_quantize_concurrent_cuda_graphs(self) -> None:
+        """Captured grouped quantizers must keep their TMA scratch storage independent."""
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=True)
+        num_tensors = 65
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        inputs = []
+        metadata = []
+        expected = []
+        for index in range(2):
+            rows = [128 * (1 + (i + index) % 2) for i in range(num_tensors)]
+            cols = [128 * (1 + (i + index) % 3) for i in range(num_tensors)]
+            inputs.append(
+                torch.randn(
+                    sum(m * n for m, n in zip(rows, cols)), device="cuda", dtype=torch.bfloat16
+                ).view(1, -1)
+            )
+            metadata.append(
+                (
+                    torch.tensor(rows, device="cuda", dtype=torch.int64),
+                    torch.tensor(cols, device="cuda", dtype=torch.int64),
+                )
+            )
+            expected.append(tex.group_quantize(inputs[-1], quantizer, num_tensors, *metadata[-1]))
+        torch.cuda.synchronize()
+
+        graphs = []
+        outputs = []
+        for stream, tensor, (rows, cols) in zip(streams, inputs, metadata):
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                outputs.append(tex.group_quantize(tensor, quantizer, num_tensors, rows, cols))
+            graphs.append(graph)
+        for _ in range(20):
+            for stream, graph in zip(streams, graphs):
+                with torch.cuda.stream(stream):
+                    graph.replay()
+        torch.cuda.synchronize()
+
+        for actual, reference in zip(outputs, expected):
+            for attr in ("rowwise_data", "columnwise_data", "scale_inv", "columnwise_scale_inv"):
+                assert torch.equal(getattr(actual, attr), getattr(reference, attr)), attr
 
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)

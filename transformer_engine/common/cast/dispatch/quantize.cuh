@@ -506,20 +506,31 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                                const NVTEQuantizationConfig quant_config, cudaStream_t stream,
-                               NVTEResourceHandle handle = nullptr) {
+                               NVTETensor workspace = nullptr) {
   using namespace detail;
 
   NVTEScalingMode scaling_mode = nvte_grouped_tensor_scaling_mode(output);
 
   const NVTEGroupedTensor activation = nullptr;
   NVTEGroupedTensor dbias = nullptr;
-  NVTETensor workspace = nullptr;
 
   const GroupedTensor *input_tensor = convertNVTEGroupedTensorCheck(input);
   GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
   const GroupedTensor *activations_tensor = convertNVTEGroupedTensor(activation);
   GroupedTensor *dbias_tensor = convertNVTEGroupedTensor(dbias);
   Tensor *workspace_tensor = convertNVTETensor(workspace);
+
+  // Only grouped MXFP8 needs TMA descriptor storage
+  if (workspace_tensor != nullptr && scaling_mode != NVTE_MXFP8_1D_SCALING) {
+    if (workspace_tensor->data.dptr == nullptr) {
+      workspace_tensor->data.shape = {1};
+      workspace_tensor->data.dtype = DType::kByte;
+      return;
+    }
+    NVTE_CHECK(workspace_tensor->data.dtype == DType::kByte &&
+                   workspace_tensor->data.shape.size() == 1 && workspace_tensor->data.shape[0] >= 1,
+               "Workspace must be a nonempty one-dimensional byte tensor.");
+  }
 
   // Quantization config
   QuantizationConfig quant_config_cpp;
@@ -544,7 +555,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, &quant_config_cpp, stream, handle);
+          workspace_tensor, &quant_config_cpp, stream);
       break;
     }
     case NVTE_BLOCK_SCALING_1D: {

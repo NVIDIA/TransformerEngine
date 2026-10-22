@@ -19,14 +19,24 @@
 #include "fp8/group_amax_fp8.cuh"
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                         const NVTEQuantizationConfig quant_config, cudaStream_t stream,
-                         NVTEResourceHandle handle) {
+                         const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize);
   using namespace transformer_engine;
 
   constexpr bool IS_ACT = false;
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
+}
+
+void nvte_group_quantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                            NVTETensor workspace, const NVTEQuantizationConfig quant_config,
+                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_quantize_v2);
+  using namespace transformer_engine;
+
+  convertNVTETensorCheck(workspace);
+  constexpr bool IS_ACT = false;
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream,
-                                                               handle);
+                                                              workspace);
 }
 
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,

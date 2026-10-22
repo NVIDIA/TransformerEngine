@@ -9,15 +9,12 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
-#include <exception>
 #include <stdexcept>
-#include <thread>
 
 #include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
-#include "../../../transformer_engine/common/resource_handle.h"
 
 using namespace transformer_engine;
 using namespace test;
@@ -269,8 +266,9 @@ void performTest(const ProcessingMethod processing_method,
                  const bool rowwise,
                  const bool colwise,
                  const bool use_2d_quantization = false,
-                 const bool use_handle = false,
-                 const bool capture_with_handle = false) {
+                 const bool use_workspace = false,
+                 const bool capture_with_workspace = false,
+                 const bool validate_workspace = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -533,41 +531,78 @@ void performTest(const ProcessingMethod processing_method,
 
     // GPU
     Tensor workspace;
-    NVTEResourceHandle handle = use_handle ? nvte_create_resource_handle() : nullptr;
     switch (processing_method) {
         case ProcessingMethod::CAST_ONLY: {
-            if (capture_with_handle) {
-                ASSERT_TRUE(use_handle);
-                cudaStream_t stream;
-                ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
-                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-                nvte_resource_handle_reserve(handle, NVTE_RESOURCE_GROUPED_TMA_DESCRIPTORS,
-                                             num_tensors, stream);
-
-                cudaGraph_t graph;
-                ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed), cudaSuccess);
-                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, stream,
-                                    handle);
-                ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
-
-                cudaGraphExec_t graph_exec;
-                ASSERT_EQ(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0),
-                          cudaSuccess);
-                ASSERT_EQ(cudaGraphLaunch(graph_exec, stream), cudaSuccess);
-                ASSERT_EQ(cudaGraphLaunch(graph_exec, stream), cudaSuccess);
-                ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
-                ASSERT_EQ(cudaGraphExecDestroy(graph_exec), cudaSuccess);
-                ASSERT_EQ(cudaGraphDestroy(graph), cudaSuccess);
-                ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
-            } else if (use_handle) {
-                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0, handle);
-                if (shape_rep == VARYING_LAST_DIM || shape_rep == VARYING_BOTH_DIMS) {
-                    nvte_resource_handle_reserve(handle, NVTE_RESOURCE_GROUPED_TMA_DESCRIPTORS,
-                                                 num_tensors + 1, 0);
+            if (use_workspace) {
+                auto quantize = [&](NVTETensor ws, cudaStream_t stream) {
+                    nvte_group_quantize_v2(in_group_tensor, out_group_tensor, ws, quant_config,
+                                           stream);
+                };
+                quantize(workspace.data(), 0);
+                ASSERT_EQ(workspace.dtype(), DType::kByte);
+                ASSERT_EQ(workspace.rowwise_shape().ndim, 1);
+                ASSERT_GT(workspace.rowwise_shape().data[0], 0);
+                if (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM) {
+                    EXPECT_EQ(workspace.rowwise_shape().data[0], 1);
                 }
-                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0, handle);
-                // Reuse the grown descriptor allocation.
-                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0, handle);
+                // A size query must leave both quantized outputs untouched.
+                if (rowwise) {
+                    ASSERT_EQ(cudaMemcpy(out_data_rowwise_h.data(), out_data_rowwise_d,
+                                         out_data_size, cudaMemcpyDeviceToHost), cudaSuccess);
+                    EXPECT_TRUE(std::all_of(out_data_rowwise_h.begin(), out_data_rowwise_h.end(),
+                                            [](OutputType x) { return static_cast<float>(x) == 0.f; }));
+                }
+                if (colwise) {
+                    ASSERT_EQ(cudaMemcpy(out_data_colwise_h.data(), out_data_colwise_d,
+                                         out_data_size, cudaMemcpyDeviceToHost), cudaSuccess);
+                    EXPECT_TRUE(std::all_of(out_data_colwise_h.begin(), out_data_colwise_h.end(),
+                                            [](OutputType x) { return static_cast<float>(x) == 0.f; }));
+                }
+                workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+                if (validate_workspace) {
+                    EXPECT_THROW(quantize(nullptr, 0), std::runtime_error);
+                    const auto bytes = workspace.rowwise_shape().data[0];
+                    TensorWrapper invalid;
+                    invalid.set_rowwise_data(workspace.rowwise_dptr(), DType::kByte,
+                                              std::vector<size_t>{bytes - 1});
+                    EXPECT_THROW(quantize(invalid.data(), 0), std::runtime_error);
+                    invalid.set_rowwise_data(workspace.rowwise_dptr(), DType::kFloat32,
+                                              std::vector<size_t>{bytes});
+                    EXPECT_THROW(quantize(invalid.data(), 0), std::runtime_error);
+                    invalid.set_rowwise_data(workspace.rowwise_dptr(), DType::kByte,
+                                              std::vector<size_t>{1, bytes});
+                    EXPECT_THROW(quantize(invalid.data(), 0), std::runtime_error);
+                    invalid.set_rowwise_data(static_cast<char*>(workspace.rowwise_dptr()) + 1,
+                                              DType::kByte, std::vector<size_t>{bytes});
+                    EXPECT_THROW(quantize(invalid.data(), 0), std::runtime_error);
+                    EXPECT_THROW(nvte_group_quantize(in_group_tensor, out_group_tensor,
+                                                       quant_config, 0), std::runtime_error);
+                }
+                if (capture_with_workspace) {
+                    cudaStream_t stream;
+                    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+                    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                    cudaGraph_t graph;
+                    ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed), cudaSuccess);
+                    quantize(workspace.data(), stream);
+                    ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
+                    cudaGraphExec_t graph_exec;
+                    ASSERT_EQ(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0),
+                              cudaSuccess);
+                    ASSERT_EQ(cudaGraphLaunch(graph_exec, stream), cudaSuccess);
+                    ASSERT_EQ(cudaGraphLaunch(graph_exec, stream), cudaSuccess);
+                    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+                    ASSERT_EQ(cudaGraphExecDestroy(graph_exec), cudaSuccess);
+                    ASSERT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+                    ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+                } else {
+                    // Contents are scratch space and are rebuilt on each invocation.
+                    for (int repeat = 0; repeat < 3; ++repeat) {
+                        ASSERT_EQ(cudaMemset(workspace.rowwise_dptr(), 0xa5,
+                                             workspace.rowwise_shape().data[0]), cudaSuccess);
+                        quantize(workspace.data(), 0);
+                    }
+                }
             } else {
                 nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
             }
@@ -614,7 +649,6 @@ void performTest(const ProcessingMethod processing_method,
     }
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
-    nvte_destroy_resource_handle(handle);
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
     auto [atol, rtol] = getTolerances(otype);
@@ -901,6 +935,11 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
             performTest<InputType, OutputType>(processing_method, OP, shape_rep, num_tensors,
                                                logical_shape, first_dims, last_dims, offsets,
                                                rowwise, colwise);
+            if (processing_method == ProcessingMethod::CAST_ONLY) {
+                performTest<InputType, OutputType>(processing_method, OP, shape_rep, num_tensors,
+                                                   logical_shape, first_dims, last_dims, offsets,
+                                                   rowwise, colwise, false, true);
+            }
         );
     );
 }
@@ -931,10 +970,14 @@ TEST(OperatorTest_GroupedFusedCastMXFP8, Test2DQuantization) {
             rowwise,
             colwise,
             /*use_2d_quantization=*/true);
+        performTest<bf16, fp8e4m3>(
+            ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::SAME_BOTH_DIMS,
+            num_tensors, logical_shape, first_dims, last_dims, offsets, rowwise, colwise,
+            /*use_2d_quantization=*/true, /*use_workspace=*/true);
     }
 }
 
-TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleMoreThanOneCtaOfGroups) {
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceMoreThanOneCtaOfGroups) {
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
@@ -951,68 +994,10 @@ TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleMoreThanOneCtaOfGroups) {
         ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_FIRST_DIM,
         num_tensors, {offsets.back() / 128, 128}, first_dims, last_dims, offsets,
         /*rowwise=*/true, /*colwise=*/false, /*use_2d_quantization=*/false,
-        /*use_handle=*/true);
+        /*use_workspace=*/true);
 }
 
-TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleThreadAndStreamStorage) {
-    cudaStream_t stream_a;
-    cudaStream_t stream_b;
-    ASSERT_EQ(cudaStreamCreateWithFlags(&stream_a, cudaStreamNonBlocking), cudaSuccess);
-    ASSERT_EQ(cudaStreamCreateWithFlags(&stream_b, cudaStreamNonBlocking), cudaSuccess);
-
-    NVTEResourceHandle handle = nvte_create_resource_handle();
-    EXPECT_THROW(nvte_resource_handle_reserve(handle, static_cast<NVTEResourceType>(-1), 0,
-                                              stream_a), std::runtime_error);
-    nvte_resource_handle_reserve(handle, NVTE_RESOURCE_GROUPED_TMA_DESCRIPTORS, 65, stream_a);
-    auto main_a = get_grouped_tma_storage(handle, 65, stream_a);
-    auto main_b = get_grouped_tma_storage(handle, 65, stream_b);
-    auto main_default = get_grouped_tma_storage(handle, 65, nullptr);
-    EXPECT_NE(main_a.input, nullptr);
-    EXPECT_EQ(main_a.input, get_grouped_tma_storage(handle, 32, stream_a).input);
-    EXPECT_NE(main_a.input, main_b.input);
-    EXPECT_NE(main_a.input, main_default.input);
-    EXPECT_NE(main_b.input, main_default.input);
-
-    // Evict the thread-local lookup cache; the handle must still find the
-    // original slot and its reserved capacity in the owning registry.
-    for (size_t i = 0; i < 129; ++i) {
-        NVTEResourceHandle transient = nvte_create_resource_handle();
-        get_grouped_tma_storage(transient, 0, stream_a);
-        nvte_destroy_resource_handle(transient);
-    }
-    EXPECT_EQ(main_a.input, get_grouped_tma_storage(handle, 65, stream_a).input);
-
-    GroupedTmaStorageView worker_storage[3];
-    std::exception_ptr worker_errors[3];
-    auto reserve_on_worker = [&](size_t index, cudaStream_t stream) {
-        try {
-            worker_storage[index] = get_grouped_tma_storage(handle, 129, stream);
-        } catch (...) {
-            worker_errors[index] = std::current_exception();
-        }
-    };
-    std::thread first(reserve_on_worker, 0, stream_a);
-    std::thread second(reserve_on_worker, 1, stream_a);
-    std::thread third(reserve_on_worker, 2, nullptr);
-    first.join();
-    second.join();
-    third.join();
-    for (size_t i = 0; i < 3; ++i) {
-        EXPECT_FALSE(worker_errors[i]);
-        EXPECT_NE(worker_storage[i].input, nullptr);
-        EXPECT_NE(worker_storage[i].input, main_a.input);
-        EXPECT_NE(worker_storage[i].input, main_default.input);
-        for (size_t j = i + 1; j < 3; ++j) {
-            EXPECT_NE(worker_storage[i].input, worker_storage[j].input);
-        }
-    }
-
-    nvte_destroy_resource_handle(handle);
-    ASSERT_EQ(cudaStreamDestroy(stream_a), cudaSuccess);
-    ASSERT_EQ(cudaStreamDestroy(stream_b), cudaSuccess);
-}
-
-TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandlePreReservedGraphCapture) {
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceGraphCapture) {
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
@@ -1030,10 +1015,10 @@ TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandlePreReservedGraphCapture) 
         ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_BOTH_DIMS,
         num_tensors, {1, offsets.back()}, first_dims, last_dims, offsets,
         /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/false,
-        /*use_handle=*/true, /*capture_with_handle=*/true);
+        /*use_workspace=*/true, /*capture_with_workspace=*/true);
 }
 
-TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleMoreThan64Descriptors) {
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceMoreThan64Descriptors) {
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
@@ -1051,7 +1036,28 @@ TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleMoreThan64Descriptors) {
         ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_BOTH_DIMS,
         num_tensors, {1, offsets.back()}, first_dims, last_dims, offsets,
         /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/false,
-        /*use_handle=*/true);
+        /*use_workspace=*/true, /*capture_with_workspace=*/false,
+        /*validate_workspace=*/true);
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceVaryingLastDimGraphCapture) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t num_tensors = 129;
+    std::vector<size_t> first_dims(num_tensors, 128);
+    std::vector<size_t> last_dims(num_tensors, 128);
+    last_dims.back() = 256;
+    std::vector<size_t> offsets(num_tensors + 1, 0);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+    }
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_LAST_DIM,
+        num_tensors, {128, offsets.back() / 128}, first_dims, last_dims, offsets,
+        /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/true,
+        /*use_workspace=*/true, /*capture_with_workspace=*/true);
 }
 
 std::string to_string(const ProcessingMethod method) {

@@ -454,8 +454,15 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
       }
       quant_config_cpp.set_mxfp8_2d_quantization(mxfp8_quantizer_cpp->with_2d_quantization);
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+        const auto stream = at::cuda::getCurrentCUDAStream();
+        TensorWrapper workspace_nvte;
+        nvte_group_quantize_v2(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                               workspace_nvte.data(), quant_config_cpp, stream);
+        at::Tensor workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+        workspace_nvte.set_rowwise_data(workspace_torch.data_ptr(), workspace_nvte.dtype(),
+                                        workspace_nvte.shape());
+        nvte_group_quantize_v2(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                               workspace_nvte.data(), quant_config_cpp, stream);
       });
       break;
     }
