@@ -58,7 +58,7 @@ bool LogCollectiveGemmStreamIds() {
 void LogCollectiveGemmStreamId(cudaStream_t stream, int rank) {
   if (!LogCollectiveGemmStreamIds()) return;
 
-  unsigned long long stream_id{};
+  unsigned long long stream_id{};  // NOLINT(runtime/int)
   NVTE_CHECK_CUDA(cudaStreamGetId(stream, &stream_id));
   std::cout << "NVTE collective GEMM stream ID (rank " << rank << "): " << stream_id << std::endl;
 }

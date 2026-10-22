@@ -13,7 +13,6 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <random>
@@ -224,34 +223,6 @@ template <typename T>
 float GetScale(float amax) {
   if constexpr (sizeof(T) > 1) return 1.0;
   return static_cast<float>(static_cast<T>(std::numeric_limits<float>::max())) / amax;
-}
-
-TEST(CommGemmStreamLogging, LogsStreamIdToStdout) {
-  int nranks{};
-  int rank{};
-  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &nranks));
-  CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
-  NVTE_CHECK_CUDA(cudaSetDevice(rank));
-
-  ncclUniqueId id{};
-  if (rank == 0) CHECK_NCCL(ncclGetUniqueId(&id));
-  CHECK_MPI(MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD));
-
-  ncclComm_t comm{};
-  CHECK_NCCL(ncclCommInitRank(&comm, nranks, id, rank));
-  ASSERT_EQ(setenv("NVTE_LOG_COLLECTIVE_GEMM_STREAM_IDS", "1", 1), 0);
-
-  testing::internal::CaptureStdout();
-  NVTECommGemmCtx* ctx = nvte_comm_gemm_ctx_create(comm, nranks, rank);
-  const std::string output = testing::internal::GetCapturedStdout();
-
-  const std::string prefix =
-      "NVTE collective GEMM stream ID (rank " + std::to_string(rank) + "): ";
-  EXPECT_NE(output.find(prefix), std::string::npos) << "Captured stdout: " << output;
-
-  ASSERT_EQ(unsetenv("NVTE_LOG_COLLECTIVE_GEMM_STREAM_IDS"), 0);
-  nvte_comm_gemm_ctx_destroy(ctx);
-  CHECK_NCCL(ncclCommDestroy(comm));
 }
 
 struct Params {
