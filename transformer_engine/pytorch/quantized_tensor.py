@@ -18,7 +18,6 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.constants import dist_group_type
-from transformer_engine.pytorch.distributed_weight import is_distributed_weight
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
@@ -311,17 +310,21 @@ def prepare_for_saving(
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
-        # Skipped under torch.compile so traced graphs are unchanged.
-        if (
-            tensor is not None
-            and not torch.compiler.is_compiling()
-            and is_distributed_weight(tensor)
-        ):
+        if tensor is None:
             tensor_list.append(None)
-            tensor_objects_list.append(_SavedDistributedWeight(tensor))
-        elif tensor is None or isinstance(tensor, torch.Tensor):
-            tensor_list.append(tensor)
             tensor_objects_list.append(None)
+        elif isinstance(tensor, torch.Tensor):
+            # Inline is_distributed_weight(): this runs for every saved tensor.
+            # Skipped under torch.compile so traced graphs are unchanged.
+            if (
+                getattr(tensor, "is_distributed_weight", False)
+                and not torch.compiler.is_compiling()
+            ):
+                tensor_list.append(None)
+                tensor_objects_list.append(_SavedDistributedWeight(tensor))
+            else:
+                tensor_list.append(tensor)
+                tensor_objects_list.append(None)
         elif torch.compiler.is_compiling():
             inner_names, metadata = tensor.__tensor_flatten__()
             tensor_list.extend(getattr(tensor, name) for name in inner_names)
@@ -356,11 +359,11 @@ def restore_from_saved(
     """
     tensor_objects = []
     for tensor in tensors:
-        if isinstance(tensor, _SavedDistributedWeight):
-            tensor_objects.append(tensor.weight)
-            saved_tensors = saved_tensors[1:]
-        elif tensor is None or isinstance(tensor, torch.Tensor):
+        if tensor is None or isinstance(tensor, torch.Tensor):
             tensor_objects.append(saved_tensors[0])
+            saved_tensors = saved_tensors[1:]
+        elif isinstance(tensor, _SavedDistributedWeight):
+            tensor_objects.append(tensor.weight)
             saved_tensors = saved_tensors[1:]
         elif isinstance(tensor, _SavedQuantizedTensor):
             count = len(tensor.inner_names)
