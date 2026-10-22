@@ -234,16 +234,16 @@ def test_grouped_gemms_match_exact_reference(dtype, execution):
 )
 def test_compiled_gemm_graph_generations(monkeypatch):
     """An opaque GEMM's scratch must remain valid when graph trees are rerecorded."""
-    original = gemm.get_cublas_workspace
-    captured_workspaces = []
+    original = gemm.tex.generic_gemm
+    captured_workspace_requests = []
 
-    def allocate(*args, **kwargs):
-        workspace = original(*args, **kwargs)
+    def observe_native_gemm(*args, **kwargs):
         if torch.cuda.is_current_stream_capturing():
-            captured_workspaces.append(weakref.ref(workspace))
-        return workspace
+            # Record only scalar metadata, never tensors or capture-pool owners.
+            captured_workspace_requests.append((args[12] is None, args[13]))
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(gemm, "get_cublas_workspace", allocate)
+    monkeypatch.setattr(gemm.tex, "generic_gemm", observe_native_gemm)
 
     @torch.library.custom_op("te_workspace_test::gemm", mutates_args=())
     def run(inp: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
@@ -263,7 +263,11 @@ def test_compiled_gemm_graph_generations(monkeypatch):
             out = compiled(inp, grad)
             torch.testing.assert_close(out, torch.full_like(out, reduction * value), rtol=0, atol=0)
             del out
-    assert len(captured_workspaces) >= 2, "Expected CUDA graph captures for different shapes"
-    assert all(ref() is None for ref in captured_workspaces)
+    assert (
+        len(captured_workspace_requests) >= 2
+    ), "Expected CUDA graph captures for different shapes"
+    assert all(
+        native and size == 0 for native, size in captured_workspace_requests
+    ), "Captured GEMMs must request invocation-local native scratch with workspace=None, size=0"
     del compiled
     torch._dynamo.reset()

@@ -798,9 +798,6 @@ def general_gemm(
             bulk_overlap,
         )
 
-    # Allocated after the UE5M3 path above, which does not use cuBLAS scratch.
-    workspace = get_cublas_workspace(A.device.index, ub is not None, False)
-
     if ub_type is not None:
         assert ub is not None, (
             f"{'AG+GEMM' if ub_type == tex.CommOverlapType.AG else 'GEMM+RS'} overlap requires"
@@ -819,6 +816,7 @@ def general_gemm(
 
     # If A or B are custom tensors -> dispatch to quantizers's qgemm implementation
     if is_custom(A) or is_custom(B):
+        workspace = get_cublas_workspace(A.device.index, ub is not None, False)
         return custom_gemm(
             A,
             B,
@@ -844,6 +842,10 @@ def general_gemm(
         # FP8 block-scaling requires split accumulator
         use_split_accumulator = True
 
+    # Native GEMMs allocate scratch through the framework allocator in C++.
+    # Communication overlap still requires an explicit Tensor workspace.
+    workspace = get_cublas_workspace(A.device.index, True, False) if ub is not None else None
+
     args = (
         A,
         transa,  # transa
@@ -858,7 +860,7 @@ def general_gemm(
         gelu_in,
         grad,  # grad
         workspace,
-        workspace.shape[0],
+        workspace.shape[0] if workspace is not None else 0,
         accumulate,
         use_split_accumulator,
     )
@@ -987,7 +989,6 @@ def general_grouped_gemm(
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
     sm_count = get_sm_count()
-    workspaces = get_cublas_workspace(A[0].device.index, False, True)
 
     if grad and use_bias:
         grad_bias = [
@@ -1063,8 +1064,8 @@ def general_grouped_gemm(
         single_output,
         gelu_input,  # this is pre_gelu_out
         grad,  # grad
-        workspaces,
-        workspaces[0].shape[0],
+        None,  # Allocate invocation-local scratch in the native binding.
+        0,
         accumulate,
         use_split_accumulator,
         sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),

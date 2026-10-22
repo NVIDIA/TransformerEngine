@@ -4,7 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <pybind11/pybind11.h>
+#include <torch/csrc/autograd/python_variable.h>
 
 #include <optional>
 #include <string>
@@ -17,6 +19,28 @@
 #include "util.h"
 
 namespace {
+
+at::Device gemm_device(pybind11::handle tensor) {
+  NVTE_CHECK(!tensor.is_none(), "Tensor A has not been provided");
+  // Avoid a Python property lookup for ordinary tensors. Quantized storage
+  // objects expose the device of their underlying data through .device.
+  const auto device = THPVariable_CheckExact(tensor.ptr())
+                          ? THPVariable_Unpack(tensor.ptr()).device()
+                          : tensor.attr("device").cast<at::Device>();
+  NVTE_CHECK(device.is_cuda(), "GEMM expects CUDA operands");
+  return device;
+}
+
+size_t cublas_workspace_bytes(int device_id) {
+  // Match the Tensor-workspace path, including NVFP4 alignment/scales storage.
+  return transformer_engine::cuda::sm_arch(device_id) >= 90 ? 32 * 1024 * 1024 + 1024 : 4194304;
+}
+
+void check_workspace(const at::Tensor& workspace, size_t size) {
+  NVTE_CHECK(workspace.is_cuda() && workspace.scalar_type() == at::kByte &&
+                 workspace.is_contiguous() && size <= static_cast<size_t>(workspace.numel()),
+             "Workspace must be a contiguous CUDA byte tensor with at least workspace_size bytes");
+}
 
 void* get_data_ptr(transformer_engine::pytorch::MaybeTensor tensor) {
   if (tensor.has_value()) return tensor->data_ptr();
@@ -160,7 +184,7 @@ std::pair<TensorWrapper, py::object> createOutputTensor(const std::vector<size_t
 std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool transb, py::object D,
                              py::handle quantizer, std::optional<DType> out_dtype, MaybeTensor bias,
                              DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
-                             at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                             MaybeTensor workspace, size_t workspaceSize, bool accumulate,
                              bool use_split_accumulator, CommOverlapCore* comm_overlap,
                              std::optional<CommOverlapType> comm_type, MaybeTensor extra_output,
                              bool bulk_overlap, float alpha, std::optional<float> beta) {
@@ -169,7 +193,14 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace.device());
+  at::cuda::CUDAGuard device_guard(workspace ? workspace->device() : gemm_device(A));
+  if (workspace) {
+    check_workspace(*workspace, workspaceSize);
+  } else {
+    NVTE_CHECK(comm_overlap == nullptr, "Communication overlap requires an explicit workspace");
+    NVTE_CHECK(workspaceSize == 0, "workspace_size must be zero when workspace is None");
+    workspaceSize = cublas_workspace_bytes(device_guard.current_device().index());
+  }
 
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
@@ -304,8 +335,16 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       makeTransformerEngineTensor(get_data_ptr(pre_gelu_out), gelu_shape, gelu_type);
 
   // Workspace
-  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
-                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
+  // Keep scratch alive until all work has been submitted. The CUDA allocator
+  // orders eager reuse on this stream and owns capture allocations in the
+  // graph's private pool. No Python Tensor or persistent workspace cache is needed.
+  c10::DataPtr workspace_owner;
+  if (!workspace) {
+    workspace_owner = c10::cuda::CUDACachingAllocator::get()->allocate(workspaceSize);
+  }
+  auto te_workspace =
+      makeTransformerEngineTensor(workspace ? workspace->data_ptr() : workspace_owner.get(),
+                                  std::vector<size_t>{workspaceSize}, DType::kByte);
 
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
@@ -498,8 +537,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     std::vector<py::handle> A, bool transa, std::vector<py::handle> B, bool transb,
     std::optional<std::vector<at::Tensor>> D, DType D_type, std::vector<int64_t> m_splits,
     std::vector<at::Tensor> bias, DType bias_type, bool single_output,
-    std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
-    size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count) {
+    std::vector<at::Tensor> pre_gelu_out, bool grad,
+    std::optional<std::vector<at::Tensor>> workspace, size_t workspaceSize, bool accumulate,
+    bool use_split_accumulator, int math_sm_count) {
   if (single_output && D == std::nullopt) {
     NVTE_ERROR("not implemented, D should be allocated for single output case.");
   }
@@ -507,7 +547,21 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace[0].device());
+  NVTE_CHECK(!A.empty(), "Grouped GEMM expects at least one operand");
+  const size_t num_workspaces = nvte_get_num_compute_streams();
+  NVTE_CHECK(!workspace || workspace->size() == num_workspaces,
+             "Grouped GEMM expects one workspace per compute stream");
+  at::cuda::CUDAGuard device_guard(workspace ? (*workspace)[0].device() : gemm_device(A[0]));
+  if (workspace) {
+    for (const auto& buffer : *workspace) {
+      check_workspace(buffer, workspaceSize);
+      NVTE_CHECK(buffer.device() == (*workspace)[0].device(),
+                 "Grouped GEMM workspaces must be on the same device");
+    }
+  } else {
+    NVTE_CHECK(workspaceSize == 0, "workspace_size must be zero when workspace is None");
+    workspaceSize = cublas_workspace_bytes(device_guard.current_device().index());
+  }
 
   void* output_data_ptr = nullptr;
   if (single_output) {
@@ -644,9 +698,19 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
   std::vector<NVTETensor> te_workspace_vector;
   std::vector<TensorWrapper> te_workspace_wrappers;
-  for (size_t i = 0; i < workspace.size(); i++) {
-    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
-                                           std::vector<size_t>{workspaceSize}, DType::kByte);
+  // cuBLASLt requires 256-byte alignment for every workspace. One allocation
+  // supplies disjoint slices; the native grouped call joins its helper streams
+  // back to the caller before this owner is released.
+  const size_t workspace_stride = (workspaceSize + 255) / 256 * 256;
+  c10::DataPtr workspace_owner;
+  if (!workspace) {
+    workspace_owner =
+        c10::cuda::CUDACachingAllocator::get()->allocate(workspace_stride * num_workspaces);
+  }
+  for (size_t i = 0; i < num_workspaces; i++) {
+    void* data = workspace ? (*workspace)[i].data_ptr()
+                           : static_cast<char*>(workspace_owner.get()) + i * workspace_stride;
+    auto wsp = makeTransformerEngineTensor(data, std::vector<size_t>{workspaceSize}, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     te_workspace_wrappers.emplace_back(std::move(wsp));
   }
