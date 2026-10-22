@@ -21,12 +21,6 @@ from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
-# The grouped-tensor GEMM tests below need the graph-safe grouped row-scaled cast (PR #3649).
-row_scaled_grouped_cast_available = hasattr(tex, "nvfp4_group_row_scaled_cast_graph_safe")
-reason_for_no_row_scaled_grouped_cast = (
-    "Grouped row-scaled NVFP4 cast (nvfp4_group_row_scaled_cast_graph_safe) is unavailable."
-)
-
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
@@ -875,8 +869,7 @@ def _make_row_scaled_grouped_activation(
 ) -> GroupedTensor:
     """Pack per-expert bf16 activations into one row-scaled NVFP4 GroupedTensor.
 
-    The graph-safe grouped row-scaled cast (PR #3649) requires each expert row count and
-    ``k`` to be multiples of 128.
+    Each expert row count and ``k`` must be multiples of 128.
     """
     device = "cuda"
     if tokens is None:
@@ -894,10 +887,7 @@ def _make_row_scaled_grouped_activation(
     )
     # Bake cuBLAS-swizzled scales in the cast so the GEMM needs no separate swizzle pass.
     quantizer.optimize_for_gemm = True
-    offsets = tex.splits_to_offsets(tokens_per_expert, k)
-    return tex.nvfp4_group_row_scaled_cast_graph_safe(
-        tokens, quantizer, len(m_splits), tokens_per_expert, offsets
-    )
+    return tex.group_quantize(tokens, quantizer, len(m_splits), tokens_per_expert)
 
 
 def _make_output_grouped_tensor(
@@ -916,9 +906,6 @@ def _make_output_grouped_tensor(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(
-    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
-)
 @pytest.mark.parametrize(
     "m_splits, k, n",
     [
@@ -979,9 +966,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_fprop(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(
-    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
-)
 @pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
 def test_nvfp4_row_scaled_grouped_tensor_gemm_cudagraph(
     m_splits: list[int], k: int, n: int
@@ -1047,9 +1031,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_cudagraph(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(
-    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
-)
 @pytest.mark.parametrize(
     "m_splits, k, n",
     [
@@ -1098,9 +1079,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(
-    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
-)
 @pytest.mark.parametrize("m_splits, k, n", [([256, 128, 384], 512, 256)])
 def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad_discrete_out(
     m_splits: list[int], k: int, n: int
@@ -1134,9 +1112,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad_discrete_out(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(
-    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
-)
 @pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
 def test_nvfp4_row_scaled_grouped_tensor_gemm_uneven_colscale(
     m_splits: list[int], k: int, n: int
@@ -1172,9 +1147,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_uneven_colscale(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(
-    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
-)
 @pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
 def test_nvfp4_row_scaled_grouped_tensor_gemm_colscale_cudagraph(
     m_splits: list[int], k: int, n: int
@@ -1231,9 +1203,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_colscale_cudagraph(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(
-    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
-)
 @pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
 def test_nvfp4_row_scaled_grouped_tensor_gemm_output_capacity(
     m_splits: list[int], k: int, n: int
