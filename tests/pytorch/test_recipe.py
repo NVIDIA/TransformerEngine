@@ -5,6 +5,7 @@
 from typing import Optional
 
 import pickle
+import sys
 import threading
 
 import pytest
@@ -561,6 +562,65 @@ def test_autocast_state_is_per_thread(monkeypatch):
         if thread.is_alive():
             thread.join()
     assert not module.fp8
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_autocast_state_is_per_thread_under_load():
+    """Two threads run modules at the same time, one in FP8 and one in BF16.
+
+    The BF16 thread runs a layer stack under one autocast, while the FP8 thread enters and
+    exits its autocast many times. Every BF16 step must match a single-thread run bitwise.
+    """
+    torch.manual_seed(1234)
+    fp8_module = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+    bf16_layers = [Linear(128, 128, params_dtype=torch.bfloat16).cuda() for _ in range(8)]
+    x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    fp8_recipe = Float8CurrentScaling()
+
+    def bf16_step():
+        for layer in bf16_layers:
+            layer.zero_grad(set_to_none=True)
+        inp = x.clone().requires_grad_()
+        out = inp
+        with te.autocast(enabled=False):
+            for layer in bf16_layers:
+                out = layer(out)
+        out.sum().backward()
+        return [out.detach(), inp.grad] + [layer.weight.grad for layer in bf16_layers]
+
+    expected = bf16_step()
+    errors = []
+    stop = threading.Event()
+
+    def fp8_loop():
+        try:
+            while not stop.is_set():
+                with te.autocast(enabled=True, recipe=fp8_recipe):
+                    out = fp8_module(x)
+                out.sum().backward()
+                if not fp8_module.fp8:
+                    errors.append("FP8 thread ran a module without FP8")
+        except Exception as e:  # pylint: disable=broad-except
+            errors.append(f"FP8 thread failed: {e!r}")
+
+    switch_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # Switch threads often, so autocast contexts overlap.
+    thread = threading.Thread(target=fp8_loop)
+    thread.start()
+    try:
+        for step in range(300):
+            actual = bf16_step()
+            if any(layer.fp8 for layer in bf16_layers):
+                errors.append(f"step {step}: BF16 thread ran a module in FP8")
+            if not all(torch.equal(a, e) for a, e in zip(actual, expected)):
+                errors.append(f"step {step}: BF16 thread differs from the single-thread run")
+            if errors:
+                break
+    finally:
+        stop.set()
+        thread.join()
+        sys.setswitchinterval(switch_interval)
+    assert not errors, errors[:5]
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
