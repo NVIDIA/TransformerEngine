@@ -342,10 +342,11 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
       NVTE_CHECK(first_dims->is_contiguous() && first_dims->scalar_type() == at::kLong,
                  "group_quantize: first_dims must be a contiguous int64 tensor.");
     } else {
-      NVTE_CHECK(num_tensors > 0 && logical_first_dim % num_tensors == 0,
+      NVTE_CHECK(num_tensors > 0 && logical_first_dim % (num_tensors * 128) == 0,
                  "group_quantize: row-scaled NVFP4 with uniform shapes requires the first "
                  "dimension (",
-                 logical_first_dim, ") to be divisible by num_tensors (", num_tensors, ").");
+                 logical_first_dim, ") to be a multiple of 128 * num_tensors (", num_tensors,
+                 ").");
       first_dims = at::full({static_cast<int64_t>(num_tensors)},
                             static_cast<int64_t>(logical_first_dim / num_tensors),
                             tensor.options().dtype(at::kLong));

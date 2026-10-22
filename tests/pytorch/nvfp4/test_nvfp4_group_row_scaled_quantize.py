@@ -184,6 +184,14 @@ def test_non_contiguous_input_matches_contiguous() -> None:
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_rejects_unaligned_uniform_shapes() -> None:
+    x = torch.randn((128, 128), dtype=torch.bfloat16, device="cuda")
+
+    with pytest.raises(RuntimeError):
+        _group_quantize(x, 2, None)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 def test_rejects_strided_first_dims() -> None:
     x = torch.randn((384, 128), dtype=torch.bfloat16, device="cuda")
     strided = torch.tensor([256, 0, 128, 0], dtype=torch.int64, device="cuda")[::2]
