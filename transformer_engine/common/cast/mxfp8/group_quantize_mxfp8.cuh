@@ -625,8 +625,7 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     const int64_t *const __restrict__ last_dims_ptr, e8m0_t *const __restrict__ scales_rowwise_ptr,
     e8m0_t *const __restrict__ scales_colwise_ptr, const float *__restrict__ noop,
     float *const __restrict__ dbias_workspace, float *const __restrict__ amax_ptr,
-    const size_t work_blocks_X, const size_t work_blocks_Y,
-    const GroupedTmaStorageView storage) {
+    const size_t work_blocks_X, const size_t work_blocks_Y, const GroupedTmaStorageView storage) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr uint SCALE_DIM_Y = CastTraits::SCALE_DIM_Y;
   constexpr uint SCALE_DIM_X = CastTraits::SCALE_DIM_X;
@@ -688,8 +687,8 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     // Validate every tensor boundary, including groups larger than one CTA.
     if (blockIdx.x == 0) {
       for (size_t tensor_id = threadIdx.x; tensor_id < num_tensors; tensor_id += blockDim.x) {
-        get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(
-            tensor_id, first_logical_dim, first_dims_ptr, num_tensors);
+        get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(tensor_id, first_logical_dim,
+                                                                    first_dims_ptr, num_tensors);
       }
     }
   }
@@ -921,12 +920,10 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
         is_single_tensor ? tensor_map_input_static : input_maps[tensor_id];
     const CUtensorMap &tensor_map_act_input =
         is_single_tensor ? tensor_map_act_input_static : act_input_maps[tensor_id];
-    const CUtensorMap &tensor_map_output_rowwise = is_single_tensor
-                                                       ? tensor_map_output_rowwise_static
-                                                       : rowwise_maps[tensor_id];
-    const CUtensorMap &tensor_map_output_colwise = is_single_tensor
-                                                       ? tensor_map_output_colwise_static
-                                                       : colwise_maps[tensor_id];
+    const CUtensorMap &tensor_map_output_rowwise =
+        is_single_tensor ? tensor_map_output_rowwise_static : rowwise_maps[tensor_id];
+    const CUtensorMap &tensor_map_output_colwise =
+        is_single_tensor ? tensor_map_output_colwise_static : colwise_maps[tensor_id];
 
     if (leading_thread && (!is_single_tensor) && (last_acquired_tensor_id != tensor_id)) {
       fence_acquire_tensormap(&tensor_map_input);
@@ -1138,7 +1135,7 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void group_quantize(const GroupedTensor *input, const GroupedTensor *activations,
                     const Tensor *noop, GroupedTensor *output, GroupedTensor *dbias,
                     Tensor *workspace, const QuantizationConfig *quant_config,
-                    cudaStream_t stream, NVTEResourceHandle handle = nullptr) {
+                    cudaStream_t stream) {
   using namespace group_quantize_kernel;
 
   checkCuDriverContext(stream);
@@ -1188,10 +1185,11 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   const size_t elts_total = first_logical_dim * last_logical_dim;
 
   const size_t num_tensors = input->num_tensors;
-  NVTE_CHECK(num_tensors > 0 &&
-                 (handle != nullptr || num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS),
-             "Number of tensors in a group must be between 1 and ",
-             MAX_SUPPORTED_TENSOR_DESCRIPTORS, " without a resource handle.");
+  NVTE_CHECK(num_tensors > 0, "A group must contain at least one tensor.");
+  NVTE_CHECK(
+      is_single_tensor || workspace != nullptr || num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+      "Groups with varying last dimensions support at most ", MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+      " tensors without workspace. Use nvte_group_quantize_v2.");
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
   const bool use_2d_quantization = quant_config != nullptr && quant_config->mxfp8_2d_quantization;
@@ -1241,9 +1239,18 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     }
   }
 
-  const GroupedTmaStorageView storage =
-      is_single_tensor ? GroupedTmaStorageView{}
-                       : get_grouped_tma_storage(handle, num_tensors, stream);
+  GroupedTmaStorageView storage;
+  if constexpr (!IS_DBIAS) {
+    if (workspace != nullptr) {
+      const size_t descriptor_count = is_single_tensor ? 0 : num_tensors;
+      if (workspace->data.dptr == nullptr) {
+        workspace->data.shape = {get_grouped_tma_workspace_size(descriptor_count)};
+        workspace->data.dtype = DType::kByte;
+        return;
+      }
+      storage = get_grouped_tma_storage(workspace, descriptor_count);
+    }
+  }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input->dtype(), IType,

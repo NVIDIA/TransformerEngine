@@ -12,7 +12,6 @@
 #define TRANSFORMER_ENGINE_CAST_H_
 
 #include "transformer_engine.h"
-#include "resource_handle.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -100,20 +99,37 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
  *  \param[in,out] output           Output grouped tensor.
  *  \param[in]     quant_config     Quantization configuration.
  *  \param[in]     stream           CUDA stream used for the operation.
- *  \param[in]     handle           Optional resource handle for grouped MXFP8 TMA descriptors.
- *                                 NULL uses legacy storage and its 64-descriptor limit for
- *                                 groups with varying last dimensions.
- *                                 Keep the handle alive until submitted kernels finish.
+ *  For MXFP8 groups with varying last dimensions, this entry point uses shared descriptor
+ *  storage with a limit of 64 groups. Use nvte_group_quantize_v2 for caller-owned storage
+ *  and concurrent execution on different CUDA streams.
  */
-#ifdef __cplusplus
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                         const NVTEQuantizationConfig quant_config, cudaStream_t stream,
-                         NVTEResourceHandle handle = nullptr);
-#else
-void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                         const NVTEQuantizationConfig quant_config, cudaStream_t stream,
-                         NVTEResourceHandle handle);
-#endif
+                         const NVTEQuantizationConfig quant_config, cudaStream_t stream);
+
+/*! \brief Casts an input grouped tensor using caller-owned workspace.
+ *
+ *  Supports the same scaling modes as nvte_group_quantize. Calling with an empty workspace
+ *  tensor (a tensor with a NULL data pointer) sets its required shape and dtype without
+ *  performing quantization. Allocate that workspace and call again to execute the operation.
+ *  The workspace is a one-dimensional byte tensor and requires at least one byte even when
+ *  the selected kernel does not need temporary storage.
+ *
+ *  MXFP8 groups with varying last dimensions use the workspace for TMA descriptors and
+ *  metadata, removing the legacy 64-group limit. Its data pointer must be 128-byte aligned.
+ *  Contents are rebuilt on every invocation; no initialization is required. Keep the memory
+ *  alive until submitted work completes, and for the lifetime of captured graphs that use it.
+ *  Concurrent executions must use separate workspaces or be ordered by CUDA synchronization.
+ *  Query and allocate the workspace before CUDA graph capture.
+ *
+ *  \param[in]     input            Input grouped tensor to be cast.
+ *  \param[in,out] output           Output grouped tensor.
+ *  \param[in,out] workspace        Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in]     quant_config     Quantization configuration.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                            NVTETensor workspace, const NVTEQuantizationConfig quant_config,
+                            cudaStream_t stream);
 
 /*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.

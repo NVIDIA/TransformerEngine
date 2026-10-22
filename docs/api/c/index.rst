@@ -25,7 +25,6 @@ directly from C/C++, without Python.
    padding.h <padding>
    permutation.h <permutation>
    recipe.h <recipe>
-   resource_handle.h <resource_handle>
    softmax.h <softmax>
    swizzle.h <swizzle>
    transpose.h <transpose>
