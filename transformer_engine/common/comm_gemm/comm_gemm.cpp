@@ -8,6 +8,7 @@
 
 #include <cuda_runtime.h>
 
+#include <iostream>
 #include <map>
 #include <memory>
 #include <string>
@@ -19,6 +20,7 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+#include "../util/system.h"
 
 #ifdef NVTE_WITH_CUBLASMP
 
@@ -45,6 +47,20 @@ using CudaStream =
 
 CudaStream CudaStreamCreate() {
   return CreateWithCudaCheck<cudaStream_t>(cudaStreamCreate, cudaStreamDestroy);
+}
+
+bool LogCollectiveGemmStreamIds() {
+  static const bool enabled =
+      transformer_engine::getenv<bool>("NVTE_LOG_COLLECTIVE_GEMM_STREAM_IDS", false);
+  return enabled;
+}
+
+void LogCollectiveGemmStreamId(cudaStream_t stream, int rank) {
+  if (!LogCollectiveGemmStreamIds()) return;
+
+  unsigned long long stream_id{};
+  NVTE_CHECK_CUDA(cudaStreamGetId(stream, &stream_id));
+  std::cout << "NVTE collective GEMM stream ID (rank " << rank << "): " << stream_id << std::endl;
 }
 
 using CudaEvent = std::unique_ptr<std::remove_pointer_t<cudaEvent_t>, decltype(&cudaEventDestroy)>;
@@ -481,6 +497,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
 NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank) {
   NVTE_API_CALL(nvte_comm_gemm_ctx_create);
   auto stream = CudaStreamCreate();
+  LogCollectiveGemmStreamId(stream.get(), rank);
   auto event = CudaEventCreate(cudaEventDisableTiming);
   auto cublas_mp = CublasMpCreate(stream.get());
 
