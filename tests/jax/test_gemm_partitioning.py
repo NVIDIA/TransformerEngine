@@ -354,6 +354,36 @@ CASES = {
         ("fsdp", None, "tpsp"),
         None,
     ),
+    # Compound activation spec partially overlapping the weight: the weight keeps "tpsp" after
+    # the fsdp gather, so only "tpsp" is gathered from the activation (not the whole tuple).
+    "tpsp_compound_activation_gathers_shared_axis": Case(
+        ("fsdp", "tpsp"),
+        dict(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+        (128, 512),
+        (("fsdp", "tpsp"), None),
+        (512, 256),
+        (None, ("fsdp", "tpsp")),
+        ((1,), (0,)),
+        ("fsdp", None),
+        (None, "tpsp"),
+        ("fsdp", "tpsp"),
+        None,
+    ),
+    # Reduction path: the axis shared with the activation is gathered from the compound weight
+    # spec, rather than gathering the activation's token dim.
+    "reduce_compound_weight_drops_shared_axis": Case(
+        _TP_AXES,
+        _MR_TP,
+        (128, 512),
+        ("expert", "tp"),
+        (512, 256),
+        ("tp", ("expert", "fsdp")),
+        ((1,), (0,)),
+        ("expert", "tp"),
+        ("tp", "fsdp"),
+        ("expert", "fsdp"),
+        "tp",
+    ),
 }
 
 
