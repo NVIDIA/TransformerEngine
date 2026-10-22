@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
+
 import operator
 from functools import reduce
 from typing import Tuple, Optional, Union
@@ -29,6 +30,7 @@ from .misc import (
     NamedSharding,
 )
 from ..sharding import (
+    _mesh_resource_snapshot,
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
     get_num_devices_in_mesh,
@@ -47,7 +49,6 @@ from ..quantize import (
     get_rht_matrix,
     QuantizeLayout,
 )
-
 
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
 
@@ -69,6 +70,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         12,  # is_outer
         13,  # stochastic_rounding
         14,  # use_rht
+        15,  # mesh_resource
     )
     inner_primitive = None
     outer_primitive = None
@@ -91,10 +93,12 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         is_outer,
         stochastic_rounding,
         use_rht,
+        mesh_resource=None,
     ):
         """
         te_dbias_quantize_p abstract
         """
+        del mesh_resource
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         out_shape = x_aval.shape
@@ -253,10 +257,12 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         is_outer,
         stochastic_rounding,
         use_rht,
+        mesh_resource=None,
     ):
         """
         te_dbias_quantize_p lowering rules
         """
+        del mesh_resource
         del out_dtype, scale_dtype, is_outer
         x_aval, scale_aval, amax_aval, _, _, _ = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -297,6 +303,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         is_outer,
         stochastic_rounding,
         use_rht,
+        mesh_resource=None,
     ):
         """
         te_dbias_quantize_p implementation
@@ -327,6 +334,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             is_outer=False,
             stochastic_rounding=stochastic_rounding,
             use_rht=use_rht,
+            mesh_resource=_mesh_resource_snapshot(mesh_resource),
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
@@ -363,6 +371,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         is_outer,
         stochastic_rounding,
         use_rht,
+        mesh_resource=None,
     ):
         """
         to describe batch rules for vmap
@@ -390,6 +399,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 is_dbias=is_dbias,
                 stochastic_rounding=stochastic_rounding,
                 use_rht=use_rht,
+                mesh_resource=_mesh_resource_snapshot(mesh_resource),
             ),
             out_bdims,
         )
@@ -405,10 +415,12 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         is_outer,
         stochastic_rounding,
         use_rht,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
     ):
+        del mesh_resource
         del (
             out_dtype,
             result_infos,
@@ -492,6 +504,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         is_outer,
         stochastic_rounding,
         use_rht,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
@@ -600,15 +613,20 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 is_outer=True,
                 stochastic_rounding=stochastic_rounding,
                 use_rht=use_rht,
+                mesh_resource=mesh_resource,
             )
 
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(
+                    local_amax, mesh, mesh_resource=mesh_resource
+                )
             else:
                 global_updated_amax = local_amax
 
             if is_dbias:
-                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
+                global_dbias = all_reduce_sum_along_dp_fsdp(
+                    local_dbias, mesh, mesh_resource=mesh_resource
+                )
             else:
                 global_dbias = local_dbias
 
@@ -634,10 +652,12 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         is_outer,
         stochastic_rounding,
         use_rht,
+        mesh_resource,
         mesh,
         value_types,
         result_types,
     ):
+        del mesh_resource
         del (
             out_dtype,
             scale_dtype,
@@ -744,6 +764,7 @@ def _quantize_dbias_impl(
     flatten_axis: int = -1,
     amax_scope: AmaxScope = AmaxScope.LOCAL,  # Only works when using current-scaling
     transpose_batch_sequence: bool = False,
+    mesh_resource=None,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """
     Cast wrapper
@@ -795,6 +816,7 @@ def _quantize_dbias_impl(
             flatten_axis=flatten_axis,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            mesh_resource=mesh_resource,
         )
         dbias = _jax_dbias(x.data, dtype=dq_dtype, flatten_axis=flatten_axis)
         return out, dbias
@@ -816,6 +838,7 @@ def _quantize_dbias_impl(
             transpose_batch_sequence=transpose_batch_sequence,
             produce_regular_amax=amax is None,
             flatten_axis=flatten_axis,
+            mesh_resource=mesh_resource,
         )
         if amax is None:
             # If amax is already calculated in a previous layer, we skip calculating it in the TE kernel
@@ -828,6 +851,7 @@ def _quantize_dbias_impl(
                 x.data,
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
+                mesh_resource=mesh_resource,
             )
         scale = compute_scale_from_amax(amax, quantizer.q_dtype, margin=0.0)
     elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
@@ -840,6 +864,7 @@ def _quantize_dbias_impl(
                 x.data,
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
+                mesh_resource=mesh_resource,
             )
 
     # Make sure amax is not None
@@ -887,6 +912,7 @@ def _quantize_dbias_impl(
         is_outer=True,
         stochastic_rounding=sr_rng_state.size != 0,
         use_rht=use_rht,
+        mesh_resource=_mesh_resource_snapshot(mesh_resource),
     )
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
     if quantizer.scaling_mode.is_tensor_scaling() and quantizer.q_layout.is_rowwise_colwise:
@@ -927,6 +953,7 @@ def quantize(
     flatten_axis: int = -1,
     amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
+    mesh_resource=None,
 ) -> Tuple[ScaledTensor]:
     """Quantize input tensor according to the quantizer.
 
@@ -948,6 +975,7 @@ def quantize(
         flatten_axis=flatten_axis,
         amax_scope=amax_scope,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
     return out
 
@@ -959,6 +987,7 @@ def quantize_dbias(
     flatten_axis: int = -1,
     amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
+    mesh_resource=None,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """Quantize input tensor and compute bias gradient.
 
@@ -986,6 +1015,7 @@ def quantize_dbias(
         flatten_axis=flatten_axis,
         amax_scope=amax_scope,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
 
