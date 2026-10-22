@@ -832,3 +832,155 @@ def test_cp_with_flash_attention_no_load_balance(cp_pool, model):
         deterministic=_deterministic,
         log_level=pytest_logging_level,
     )
+
+
+# A shared fixture avoids backend-specific model keys referring to different shapes.
+# Keep it separate from the existing model dictionaries and their test matrices.
+first_dkv_model_config = ModelConfig(2, 4096, 32, 256, num_gqa_groups=4, attn_mask_type="causal")
+
+
+@pytest.mark.skipif(
+    get_device_compute_capability() not in ((10, 0), (10, 3)),
+    reason="The D256 AllGather accumulator test requires Blackwell server GPUs.",
+)
+@pytest.mark.parametrize("kernel_backend", ["FusedAttention", "FlashAttention"])
+@pytest.mark.parametrize("qkv_format,world_size", [("thd", 4), ("thd", 8), ("thd", 2), ("sbhd", 4)])
+@pytest.mark.parametrize("reuse_first_dkv", [False, True])
+def test_cp_allgather_first_dkv(
+    cp_pool, monkeypatch, kernel_backend, qkv_format, world_size, reuse_first_dkv
+):
+    """Check complete CP gradients, including padded THD and ineligible fallbacks.
+
+    The existing worker compares every valid output/gradient with non-CP attention.
+    Its seeded inputs include unequal THD lengths and GQA8. THD CP4 and CP8
+    exercise accumulator reuse; CP2 and SBHD retain the original allocation
+    path even when the experimental flag is enabled.
+    Each case uses a fresh worker so an environment toggle cannot reuse a worker
+    started with a different value, or leak the opt-in into subsequent cases.
+    """
+    if kernel_backend == "FlashAttention":
+        if not (fa4_enabled and FlashAttentionUtils.v4_is_installed):
+            pytest.skip("The first-dK/dV FlashAttention path requires enabled FA4.")
+    else:
+        required = (9, 25, 0) if qkv_format == "thd" else (9, 23, 0)
+        if get_cudnn_version() < required:
+            pytest.skip(f"D256 {qkv_format.upper()} requires cuDNN {required} or newer.")
+    config = copy.deepcopy(first_dkv_model_config)
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    if qkv_format == "thd":
+        config.attn_mask_type = "padding_causal"
+    available, *_ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="_".join([qkv_format] * 3),
+        pad_between_seqs=qkv_format == "thd",
+        is_training=True,
+        deterministic=_deterministic,
+        cp_size=world_size,
+        cp_size_a2a=1,
+    )
+    flash, fused, _ = available
+    if not (fused if kernel_backend == "FusedAttention" else flash):
+        pytest.skip(f"{kernel_backend} does not support this CP configuration.")
+    # Unequal lengths must not accidentally exercise the separate uniform-layout
+    # promise. This test isolates accumulator reuse; dense adaptation is separate.
+    for suffix in (
+        "UNIFORM_DENSE_FWD",
+        "UNIFORM_DENSE_BWD",
+        "STRIDED_DENSE_BWD",
+        "UNIFORM_NO_ZERO_WIDE",
+    ):
+        monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_" + suffix, "0")
+    monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_AG_FIRST_DKV", str(int(reuse_first_dkv)))
+    pool = cp_pool(world_size)
+    pool._kill()
+    try:
+        _submit(
+            pool,
+            dtype="bf16",
+            model="first_dkv",
+            qkv_format=qkv_format,
+            kernel_backend=kernel_backend,
+            cp_comm_type="all_gather",
+            fa_pad_between_seqs=True,
+            fp8_bwd=False,
+            fp8_dpa=False,
+            fp8_mha=False,
+            scaling_mode=None,
+            f16_O=True,
+            deterministic=_deterministic,
+            log_level=pytest_logging_level,
+        )
+    finally:
+        pool._kill()
+
+
+# These small shapes exercise the exact AllGather physical-layout contract.
+# They do not expand the normal attention test matrix or assert performance.
+native_head_model_configs = {
+    "native_head_d256": ModelConfig(2, 512, 32, 256, num_gqa_groups=8, attn_mask_type="causal"),
+    "native_head_d128": ModelConfig(2, 512, 32, 128, num_gqa_groups=8, attn_mask_type="causal"),
+}
+
+
+@pytest.mark.skipif(
+    get_device_compute_capability() != (10, 0),
+    reason="Native AllGather head partition qualification targets SM100.",
+)
+@pytest.mark.parametrize("head_chunk", [0, 8, 16, 4])
+@pytest.mark.parametrize(
+    "model,qkv_format,world_size",
+    [
+        ("native_head_d256", "thd", 4),
+        ("native_head_d256", "thd", 2),
+        ("native_head_d256", "sbhd", 4),
+        ("native_head_d128", "thd", 4),
+    ],
+)
+def test_cp_allgather_native_head_partition(
+    cp_pool, monkeypatch, head_chunk, model, qkv_format, world_size
+):
+    """Compare all CP outputs/gradients with full-sequence attention.
+
+    The four-GPU D256 THD case exercises both physical Q origins and every KV
+    prefix across ranks. CP2, SBHD and D128 cover ineligible native-head paths.
+    Fresh workers are required because the common C++ opt-in is process-static.
+    """
+    if _deterministic:
+        pytest.skip("The bounded native-head path requires nondeterministic backward.")
+    if get_cudnn_version() < (9, 29, 0):
+        pytest.skip("This native-head qualification uses cuDNN 9.29 or newer.")
+    for suffix in (
+        "UNIFORM_DENSE_FWD",
+        "UNIFORM_NO_ZERO_WIDE",
+        "AG_FIRST_DKV",
+        "A2A_PACK16",
+        "THD_REORDER_TUNED",
+        "FROST_AG_BWD",
+    ):
+        monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_" + suffix, "0")
+    for suffix in ("UNIFORM_DENSE_BWD", "STRIDED_DENSE_BWD"):
+        monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_" + suffix, "1")
+    monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS", str(head_chunk))
+    pool = cp_pool(world_size)
+    pool._kill()
+    try:
+        _submit(
+            pool,
+            dtype="bf16",
+            model=model,
+            qkv_format=qkv_format,
+            kernel_backend="FusedAttention",
+            cp_comm_type="all_gather",
+            fa_pad_between_seqs=False,
+            fp8_bwd=False,
+            fp8_dpa=False,
+            fp8_mha=False,
+            scaling_mode=None,
+            f16_O=True,
+            deterministic=False,
+            log_level=pytest_logging_level,
+        )
+    finally:
+        pool._kill()
