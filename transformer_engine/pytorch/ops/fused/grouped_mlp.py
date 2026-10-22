@@ -880,11 +880,12 @@ def _compute_grad_params(
                 )
                 accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
             else:
-                grouped_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
+                grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
                     num_tensors=num_groups,
-                    shapes=[weight_shape] * num_groups,
-                    quantizer=None,
-                    device=device,
+                    tensor_shape=weight_shape,
+                    rowwise_data=torch.empty(
+                        (num_groups, *weight_shape), dtype=dtype, device=device
+                    ),
                     dtype=dtype,
                 )
             wgrad_output = grouped_wgrad
@@ -3332,11 +3333,11 @@ def fuse_unary_activation_ops(
 #     FC1/FC2 wgrad        grouped_gemm_wgrad_wrapper_sm100  GroupedGemmWgradBf16API
 #
 # Every operand is passed in cuDNN's canonical layout -- A (M, K), C/D (M, N),
-# prob/dprob (M,), packed B (experts, N, K) -- which the BF16 wrappers accept
-# from cuDNN frontend PR #1602 on (``supports_bf16_canonical_layouts``). The
-# same PR made ``padded_offsets`` / ``b_ptrs`` / ``wgrad_ptrs`` a device-data
-# contract: warm ``execute()`` calls never copy them to the host, so nothing on
-# this path synchronizes the stream.
+# prob/dprob (M,), packed B (experts, N, K), or (experts, K, N) for the N-major
+# dgrad B -- which the BF16 wrappers accept from cuDNN frontend PR #1602 on
+# (``supports_bf16_canonical_layouts``). The same PR made ``padded_offsets`` /
+# ``b_ptrs`` / ``wgrad_ptrs`` a device-data contract: warm ``execute()`` calls never
+# copy them to the host, so nothing on this path synchronizes the stream.
 #
 # Four contract differences from the block-scaled path:
 #
@@ -3432,17 +3433,11 @@ def _bf16_weight_names(num_groups: int) -> tuple[str, ...]:
 
 
 def _bf16_per_expert_weights(fc_op: GroupedLinear, num_groups: int) -> list[torch.Tensor]:
-    """Per-expert ``(out_features, in_features)`` weight views.
+    """Per-expert ``(out_features, in_features)`` weight parameters.
 
-    Both parameter layouts are flattened to the same list so the pointer-array
-    (discrete) call path is identical for packed and per-expert parameters. For
-    ``single_grouped_weight=True`` these are views into the one packed buffer,
-    not copies. Per-expert parameters are read from ``_parameters`` directly:
-    ``nn.Module.__getattr__`` costs about a microsecond per lookup on this hot path.
+    Read from ``_parameters`` directly: ``nn.Module.__getattr__`` costs about a
+    microsecond per lookup on this hot path.
     """
-    if fc_op.single_grouped_weight:
-        packed = _bf16_packed_weight(fc_op, num_groups)
-        return [packed[idx] for idx in range(num_groups)]
     params = fc_op._parameters
     return [params[name] for name in _bf16_weight_names(num_groups)]
 
@@ -3464,24 +3459,18 @@ def _bf16_packed_weight(fc_op: GroupedLinear, num_groups: int) -> torch.Tensor:
 def _bf16_weight_ptrs(fc_op: GroupedLinear, num_groups: int, device: torch.device) -> torch.Tensor:
     """Device table of per-expert weight data pointers, reused while they are unchanged.
 
-    The table's contents are exactly its cache key, so a hit is always correct; it is
-    rebuilt only when a weight is reallocated. Reuse replaces a per-call
+    Only per-expert parameters need it; a packed weight is always passed as one dense
+    tensor. The table's contents are exactly its cache key, so a hit is always correct;
+    it is rebuilt only when a weight is reallocated. Reuse replaces a per-call
     ``copy_data_ptrs_to_device`` upload, and keeps the table's address stable across
     CUDA graph replays. The same table serves both orientations: forward GEMMs read
     the ``(out, in)`` weights K-major, dgrad GEMMs read them N-major.
     """
-    if fc_op.single_grouped_weight:
-        packed = _bf16_packed_weight(fc_op, num_groups)
-        key = (device, packed.data_ptr(), packed.shape)
-        weights = None
-    else:
-        weights = _bf16_per_expert_weights(fc_op, num_groups)
-        key = (device, tuple(w.data_ptr() for w in weights))
+    weights = _bf16_per_expert_weights(fc_op, num_groups)
+    key = (device, tuple(w.data_ptr() for w in weights))
     cached = fc_op.__dict__.get("_bf16_weight_ptrs_cache")
     if cached is not None and cached[0] == key:
         return cached[1]
-    if weights is None:
-        weights = [packed[idx] for idx in range(num_groups)]
     ptrs = tex.copy_data_ptrs_to_device(weights, device)
     fc_op.__dict__["_bf16_weight_ptrs_cache"] = (key, ptrs)
     return ptrs
@@ -3517,11 +3506,15 @@ def _bf16_dgrad_weight_kwargs(
 
     A dgrad GEMM contracts over ``out_features``, so a K-major B would be the
     per-expert transpose of how TE stores weights. Both BF16 dgrad kernels -- the
-    dGLU (FC2 dgrad) and the plain grouped GEMM (FC1 dgrad) -- accept
-    ``b_major="n"`` in discrete pointer-array mode, which declares the existing
-    ``(out, in)`` buffers MN-major with no copy. Packed weights use the same table
-    of per-expert views.
+    dGLU (FC2 dgrad) and the plain grouped GEMM (FC1 dgrad) -- instead accept
+    ``b_major="n"``, which reads the stored ``(out, in)`` weights MN-major with no
+    copy. A packed weight is cuDNN's canonical N-major B, ``(experts, K, N)``
+    row-major with ``K = out`` and ``N = in``, so it is passed as one dense tensor:
+    that spares the kernel's per-expert TMA descriptor setup. Per-expert weights go
+    through the pointer table.
     """
+    if fc_op.single_grouped_weight:
+        return {"b_tensor": _bf16_packed_weight(fc_op, num_groups), "b_major": "n"}
     return {
         "b_ptrs": _bf16_weight_ptrs(fc_op, num_groups, device),
         "n": fc_op.in_features,

@@ -3996,3 +3996,34 @@ class TestGroupedMLPBf16FusedOp:
         assert tuple(captured["a_tensor"].shape) == (out_features, tokens)
         assert tuple(captured["b_tensor"].shape) == (tokens, in_features)
         assert tuple(captured["wgrad_tensor"].shape) == (num_groups, out_features, in_features)
+
+    @pytest.mark.parametrize("single_grouped_weight", (False, True))
+    def test_dgrad_weight_is_n_major_without_copy(self, single_grouped_weight: bool) -> None:
+        """Both dgrads read the stored ``(out, in)`` weights N-major, never a transposed copy.
+
+        A packed weight is cuDNN's canonical N-major dense B as-is; per-expert weights
+        go through the device pointer table. Needs no SM100.
+        """
+        num_groups, in_features, out_features = 3, 64, 128
+        fc = te.ops.GroupedLinear(
+            num_groups,
+            in_features,
+            out_features,
+            bias=False,
+            device="cuda",
+            dtype=torch.bfloat16,
+            single_grouped_weight=single_grouped_weight,
+        )
+        kwargs = grouped_mlp_module._bf16_dgrad_weight_kwargs(fc, num_groups, torch.device("cuda"))
+        assert kwargs["b_major"] == "n"
+        if single_grouped_weight:
+            assert set(kwargs) == {"b_tensor", "b_major"}
+            b = kwargs["b_tensor"]
+            assert tuple(b.shape) == (num_groups, out_features, in_features)
+            assert b.is_contiguous()
+            assert b.data_ptr() == fc.weight.rowwise_data.data_ptr()
+        else:
+            assert "b_tensor" not in kwargs
+            assert kwargs["n"] == in_features
+            ptrs = kwargs["b_ptrs"].tolist()
+            assert ptrs == [getattr(fc, f"weight{idx}").data_ptr() for idx in range(num_groups)]
