@@ -20,9 +20,7 @@ from transformer_engine.jax.ep import (
 )
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
-pytestmark = pytest.mark.skipif(
-    jax.device_count() != 1, reason="run with exactly one visible GPU"
-)
+pytestmark = pytest.mark.skipif(jax.device_count() != 1, reason="run with exactly one visible GPU")
 
 
 def test_ep1_bootstrap_dispatch_combine_and_gradients():
@@ -89,9 +87,7 @@ def test_ep1_bootstrap_dispatch_combine_and_gradients():
             expected = tokens * jnp.sum(topk_weights, axis=-1, keepdims=True)
             np.testing.assert_allclose(output, expected, rtol=1e-6, atol=1e-6)
             np.testing.assert_array_equal(jnp.sum(counts), recv_capacity)
-            np.testing.assert_array_equal(
-                total, jnp.asarray([[recv_capacity]], jnp.int32)
-            )
+            np.testing.assert_array_equal(total, jnp.asarray([[recv_capacity]], jnp.int32))
 
             def loss(x, weights):
                 return jnp.sum(run(x, weights)[0])
@@ -111,8 +107,6 @@ def test_ep1_bootstrap_dispatch_combine_and_gradients():
             expected_weight_grad = jnp.repeat(
                 jnp.sum(tokens, axis=-1, keepdims=True), top_k, axis=-1
             )
-            np.testing.assert_allclose(
-                grad_weights, expected_weight_grad, rtol=1e-6, atol=1e-6
-            )
+            np.testing.assert_allclose(grad_weights, expected_weight_grad, rtol=1e-6, atol=1e-6)
         finally:
             ep_finalize()
