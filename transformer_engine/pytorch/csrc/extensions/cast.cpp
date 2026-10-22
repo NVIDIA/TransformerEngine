@@ -235,8 +235,8 @@ void group_quantize_nvfp4_row_scaled_impl(const GroupedTensorWrapper &grouped_in
     quant_config_cpp.set_use_fast_math(true);
   }
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor.data(),
-                        quant_config_cpp, stream);
+    nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor.data(), quant_config_cpp,
+                        stream);
   });
 }
 

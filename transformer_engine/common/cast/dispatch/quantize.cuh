@@ -579,9 +579,8 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
                                     : output_tensor->columnwise_scale_inv.dtype;
       TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
           scale_dtype, ScaleType,
-          nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(input_tensor, noop_tensor,
-                                                             output_tensor, &quant_config_cpp,
-                                                             stream););
+          nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(
+              input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream););
       break;
     }
     default:
