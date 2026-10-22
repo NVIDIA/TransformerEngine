@@ -850,8 +850,6 @@ def _row_scaled_grouped_tensor_gemm_supported() -> bool:
         return False
     if torch.cuda.get_device_capability() < (10, 0):
         return False
-    # cuBLAS enables grouped NVFP4 GEMM at 13.4 (CUBLAS_NVFP4_GROUPED_GEMM_VERSION 130400);
-    # below that the GEMM rejects the call, so skip rather than fail the version check.
     return tex.get_cublasLt_version() >= 130400
 
 
@@ -867,10 +865,7 @@ def _make_row_scaled_grouped_activation(
     columnwise: bool,
     tokens: torch.Tensor | None = None,
 ) -> GroupedTensor:
-    """Pack per-expert bf16 activations into one row-scaled NVFP4 GroupedTensor.
-
-    Each expert row count and ``k`` must be multiples of 128.
-    """
+    """Cast tokens to a row-scaled NVFP4 GroupedTensor; splits and k must be multiples of 128."""
     device = "cuda"
     if tokens is None:
         tokens = torch.randn(sum(m_splits), k, dtype=torch.bfloat16, device=device)
@@ -885,7 +880,6 @@ def _make_row_scaled_grouped_activation(
         with_post_rht_amax=False,
         row_scaled_nvfp4=True,
     )
-    # Bake cuBLAS-swizzled scales in the cast so the GEMM needs no separate swizzle pass.
     quantizer.optimize_for_gemm = True
     return tex.group_quantize(tokens, quantizer, len(m_splits), tokens_per_expert)
 
@@ -919,9 +913,7 @@ def _make_output_grouped_tensor(
 def test_nvfp4_row_scaled_grouped_tensor_gemm_fprop(
     m_splits: list[int], k: int, n: int, out_dtype: torch.dtype
 ) -> None:
-    """Forward (TN) grouped-tensor GEMM with a row-scaled activation matches a per-expert
-    dense GEMM. Only the activation is row-scaled (rowwise RHS), so this covers post_scale_rows.
-    """
+    """Row-scaled grouped-tensor TN GEMM matches a per-expert dense GEMM."""
     if not _row_scaled_grouped_tensor_gemm_supported():
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
@@ -956,7 +948,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_fprop(
     general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
     actual = grouped_out.split_into_quantized_tensors()
 
-    # Identical FP4 operands and post-scale; only grouped-vs-single cuBLAS accumulation differs.
     if out_dtype == torch.bfloat16:
         tols = dict(atol=0.0, rtol=7.8e-3)
     else:
@@ -970,9 +961,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_fprop(
 def test_nvfp4_row_scaled_grouped_tensor_gemm_cudagraph(
     m_splits: list[int], k: int, n: int
 ) -> None:
-    """The row-scaled grouped-tensor GEMM is CUDA-graph capturable: a captured GEMM replayed
-    after refreshing the activation buffers in place matches an eager recompute.
-    """
+    """A captured row-scaled grouped-tensor GEMM replays correctly."""
     if not _row_scaled_grouped_tensor_gemm_supported():
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
@@ -1005,7 +994,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_cudagraph(
     def _run():
         general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
 
-    # Warmup to initialize kernels/allocator before capture.
     torch.cuda.synchronize()
     _run()
     torch.cuda.synchronize()
@@ -1014,7 +1002,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_cudagraph(
     with torch.cuda.graph(graph):
         _run()
 
-    # Refresh the activation in place with freshly cast values, then replay.
     fresh = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
     activation.rowwise_data.copy_(fresh.rowwise_data)
     activation.scale_inv.copy_(fresh.scale_inv)
@@ -1044,10 +1031,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_cudagraph(
 def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad(
     m_splits: list[int], k: int, n: int, out_dtype: torch.dtype
 ) -> None:
-    """Weight-gradient (NT) grouped-tensor GEMM with two row-scaled operands matches a per-expert
-    dense GEMM. Both X and dY are consumed columnwise, covering post_scale_cols, post_scale_rows,
-    and the columnwise swizzled-scale epilogue.
-    """
+    """Row-scaled grouped-tensor NT GEMM matches a per-expert dense GEMM."""
     if not _row_scaled_grouped_tensor_gemm_supported():
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
@@ -1069,7 +1053,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad(
     general_grouped_gemm_for_grouped_tensor(x, dy, grouped_out, layout="NT")
     actual = grouped_out.split_into_quantized_tensors()
 
-    # Identical FP4 operands and post-scales; only grouped-vs-single cuBLAS accumulation differs.
     if out_dtype == torch.bfloat16:
         tols = dict(atol=0.0, rtol=7.8e-3)
     else:
@@ -1083,9 +1066,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad(
 def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad_discrete_out(
     m_splits: list[int], k: int, n: int
 ) -> None:
-    """Weight-gradient (NT) grouped-tensor GEMM into a list output exercises the discrete-out
-    post-scale path (per-expert row/column slices) against a per-expert dense GEMM.
-    """
+    """Row-scaled NT GEMM into a list output matches a per-expert dense GEMM."""
     if not _row_scaled_grouped_tensor_gemm_supported():
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
@@ -1116,9 +1097,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad_discrete_out(
 def test_nvfp4_row_scaled_grouped_tensor_gemm_uneven_colscale(
     m_splits: list[int], k: int, n: int
 ) -> None:
-    """TN grouped-tensor GEMM with both operands row-scaled and uneven output rows exercises the
-    grouped-out column post-scale over each group's actual rows (not an equal split).
-    """
+    """Column post-scale with uneven groups matches a per-expert dense GEMM."""
     if not _row_scaled_grouped_tensor_gemm_supported():
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
@@ -1127,7 +1106,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_uneven_colscale(
     num_gemms = len(m_splits)
     out_dtype = torch.float32
 
-    # A (weights): uniform [n, k] per expert; B (activation): uneven [m_i, k].
     weights = _make_row_scaled_grouped_activation([n] * num_gemms, k, columnwise=False)
     activation = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
     w_splits = weights.split_into_quantized_tensors()
@@ -1151,10 +1129,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_uneven_colscale(
 def test_nvfp4_row_scaled_grouped_tensor_gemm_colscale_cudagraph(
     m_splits: list[int], k: int, n: int
 ) -> None:
-    """The grouped-out column post-scale (two row-scaled operands, uneven rows) is CUDA-graph
-    capturable: the device per-expert row counts drive the column-scale expansion with no host
-    sync, so a captured GEMM replayed after refreshing both operands matches an eager recompute.
-    """
+    """A captured column post-scale with uneven groups replays correctly."""
     if not _row_scaled_grouped_tensor_gemm_supported():
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
@@ -1184,7 +1159,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_colscale_cudagraph(
     with torch.cuda.graph(graph):
         _run()
 
-    # Refresh both operands in place with freshly cast values, then replay.
     fresh_w = _make_row_scaled_grouped_activation([n] * num_gemms, k, columnwise=False)
     fresh_act = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
     for dst, src in ((weights, fresh_w), (activation, fresh_act)):
@@ -1207,11 +1181,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_colscale_cudagraph(
 def test_nvfp4_row_scaled_grouped_tensor_gemm_output_capacity(
     m_splits: list[int], k: int, n: int
 ) -> None:
-    """A grouped output whose backing buffer carries extra capacity rows beyond the live region
-    is scaled only over the live rows. The post-scale restricts itself to logical_shape[0]
-    instead of the full buffer, so the extra rows neither break the per-row multiply nor change
-    the result, which still matches a per-expert dense GEMM.
-    """
+    """Output capacity rows beyond the live region do not affect the result."""
     if not _row_scaled_grouped_tensor_gemm_supported():
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
@@ -1243,9 +1213,6 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_output_capacity(
         )
 
     grouped_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
-    # Enlarge the backing buffer past the live region (logical_shape keeps the live size), as a
-    # capacity-padded output would. Groups are still written at their live offsets; without the
-    # live-row slice the per-row multiply would hit the extra rows and misalign.
     live_numel = grouped_out.rowwise_data.numel()
     padded = torch.full(
         (live_numel + 128 * n,),

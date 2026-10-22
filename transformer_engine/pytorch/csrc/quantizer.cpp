@@ -2205,7 +2205,6 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
     columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
     if (!disable_second_level_scale) {
-      // Per-column for row-scaled, one per group otherwise (matches rowwise amax).
       const int64_t col_amax_elements =
           row_scaled_nvfp4
               ? static_cast<int64_t>(num_tensors) * static_cast<int64_t>(logical_last_dim)

@@ -1139,9 +1139,6 @@ def general_grouped_gemm_for_grouped_tensor(
     if is_discrete_in and is_discrete_out:
         raise ValueError("Both A and out are discrete. This is not supported yet.")
 
-    # Row-scaled operands carry an outer FP32 scale the per-tensor grouped GEMM cannot
-    # apply. Neutralize it, GEMM into an FP32 scratch, then post-scale the output
-    # (mirrors the dense general_gemm path).
     def _is_row_scaled(operand) -> bool:
         return isinstance(operand, GroupedTensorStorage) and operand.row_scaled_nvfp4
 
@@ -1166,9 +1163,6 @@ def general_grouped_gemm_for_grouped_tensor(
             raise NotImplementedError(
                 "Row-scaled NVFP4 grouped GEMM does not support explicit beta; use accumulate."
             )
-        # A's scale lands on output columns, B's on output rows; rowwise amax for an
-        # untransposed operand, columnwise for a transposed one (see
-        # _nvfp4_row_scaled_gemm_inputs).
         if _is_row_scaled(A):
             A = A.copy()
             if transa:
@@ -1187,7 +1181,6 @@ def general_grouped_gemm_for_grouped_tensor(
                 post_scale_rows = B.amax
                 B.amax = post_scale_rows.new_ones(B.num_tensors)
             B.row_scaled_nvfp4 = False
-        # Post-scale happens after the GEMM, so cuBLAS must not accumulate itself.
         accumulate = False
 
     def _is_fp8_blockwise(operand) -> bool:
@@ -1299,8 +1292,6 @@ def general_grouped_gemm_for_grouped_tensor(
             dst.copy_(src.to(dst.dtype))
 
     if is_discrete_out:
-        # Slice the per-row/per-column scales by each output's actual shape so uneven
-        # per-expert row/column counts are handled correctly.
         row_offset = 0
         col_offset = 0
         for i in range(num_tensors):
@@ -1317,27 +1308,17 @@ def general_grouped_gemm_for_grouped_tensor(
             row_offset += rows
             col_offset += cols
     else:
-        # Single packed output. Groups are stacked along rows (uniform or varying first
-        # dim) and share one output width, so the scales below index the buffer by row.
-        # A varying per-expert output width packs groups along columns instead, which this
-        # row-wise expansion cannot represent; no TE caller produces such an output, since
-        # grouped GEMM outputs share the non-contracted free dimension.
         if out.last_dims is not None:
             raise NotImplementedError(
                 "Row-scaled grouped GEMM does not support a varying per-expert output width."
             )
         last_dim = out.logical_shape[-1]
-        # logical_shape[0] is the live row count (host int). Restrict to it so a buffer
-        # carrying extra capacity rows does not misalign with the per-row/per-group scales.
         live_rows = out.logical_shape[0]
         flat = scratch.rowwise_data.view(-1, last_dim)[:live_rows]
         if post_scale_rows is not None:
-            # One scale per output row.
             flat.mul_(post_scale_rows.view(-1, 1))
         if post_scale_cols is not None:
-            # Per-expert, per-column. Expand each group's column scale over its rows from
-            # the device per-expert row counts. Passing output_size keeps repeat_interleave
-            # from syncing the counts to host, so this stays valid under CUDA-graph capture.
+            # output_size avoids a host sync under CUDA-graph capture.
             col_scales = post_scale_cols.view(num_tensors, last_dim)
             if out.first_dims is None:
                 rows = live_rows // num_tensors

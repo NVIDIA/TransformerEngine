@@ -860,7 +860,6 @@ class GroupedTensorStorage:
                     raise ValueError(
                         "Row-scaled NVFP4 grouped quantization requires rowwise usage."
                     )
-            # Per-row/per-column for row-scaled, one per group otherwise.
             total_amax_elements = (
                 sum(math.prod(s[:-1]) for s in shape) if row_scaled_nvfp4 else num_tensors
             )

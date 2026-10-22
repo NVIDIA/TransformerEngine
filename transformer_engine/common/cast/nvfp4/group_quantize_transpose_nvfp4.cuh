@@ -1564,8 +1564,6 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
       ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFrowwise[row]);
       const size_t local_row = static_cast<size_t>(local_row_base) + row;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        // gemm_swizzled_scale_idx takes the compact scale column count
-        // (scale_stride_row = K / SCALE_DIM); local_row is expert-local.
         const ScaleType *scales = reinterpret_cast<const ScaleType *>(&scales_vec);
 #pragma unroll
         for (int k = 0; k < SCALES_PER_CHUNK_X; ++k) {
@@ -1588,8 +1586,6 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
       ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);
       const size_t global_col = static_cast<size_t>(block_offset_X) + row_tr;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        // Columnwise counterpart: column count is scale_stride_col = M_t / SCALE_DIM,
-        // and global_col indexes the K rows.
         const ScaleType *scales = reinterpret_cast<const ScaleType *>(&scales_vec);
 #pragma unroll
         for (int k = 0; k < SCALES_PER_CHUNK_Y; ++k) {
