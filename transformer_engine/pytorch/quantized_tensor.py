@@ -289,7 +289,7 @@ class _SavedQuantizedTensor(NamedTuple):
 
 
 class _SavedDistributedWeight(NamedTuple):
-    """A DistributedWeight kept by reference instead of saved through autograd."""
+    """A DistributedWeight's original object, restored in place of its saved tensor."""
 
     weight: torch.Tensor
 
@@ -304,9 +304,11 @@ def prepare_for_saving(
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
     the internal TensorStorage types too.
 
-    A DistributedWeight is kept by reference and not saved through autograd:
-    saved-tensor hooks (e.g. activation offloading) unpack saved tensors as
-    plain tensors, which drops the subclass and its distributed-weight hooks."""
+    A DistributedWeight is still saved through autograd (which keeps autograd's
+    in-place modification check), but its original object is also kept by
+    reference and restored in place of the saved tensor: saved-tensor hooks
+    (e.g. activation offloading) unpack saved tensors as plain tensors, which
+    drops the subclass and its distributed-weight hooks."""
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
@@ -320,7 +322,7 @@ def prepare_for_saving(
                 getattr(tensor, "is_distributed_weight", False)
                 and not torch.compiler.is_compiling()
             ):
-                tensor_list.append(None)
+                tensor_list.append(tensor)
                 tensor_objects_list.append(_SavedDistributedWeight(tensor))
             else:
                 tensor_list.append(tensor)
@@ -363,6 +365,8 @@ def restore_from_saved(
             tensor_objects.append(saved_tensors[0])
             saved_tensors = saved_tensors[1:]
         elif isinstance(tensor, _SavedDistributedWeight):
+            # The saved tensor was unpacked (running autograd's version check), but
+            # may have lost its subclass under hooks; use the original object.
             tensor_objects.append(tensor.weight)
             saved_tensors = saved_tensors[1:]
         elif isinstance(tensor, _SavedQuantizedTensor):

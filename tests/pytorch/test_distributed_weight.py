@@ -199,8 +199,9 @@ def test_finalize_grads_noop_on_plain_tensor():
 # (e.g. "weight was removed while fuse_wgrad_accumulation=True") or used the wrong weights.
 #
 # Activation offloading (TE's or Megatron-LM's fine-grained offloading) and non-reentrant
-# activation checkpointing both install such hooks. ``prepare_for_saving`` therefore keeps a
-# DistributedWeight by reference instead of saving it through autograd. These tests pin that:
+# activation checkpointing both install such hooks. ``prepare_for_saving`` therefore also keeps
+# a DistributedWeight by reference and restores that object in place of the unpacked saved
+# tensor (which is still saved, so autograd's in-place check is kept). These tests pin that:
 # with hooks installed, the distributed path must still be taken and produce the same results
 # as without hooks.
 #
@@ -341,12 +342,14 @@ def test_saved_tensor_hooks_unpack_subclass_as_plain_tensor():
 
 
 def test_prepare_for_saving_keeps_distributed_weight_by_reference():
-    """A DistributedWeight is not handed to autograd and is restored as the same object."""
+    """A DistributedWeight is still saved, but restored as the original object."""
     w = FakeDistributedWeight()
     plain = torch.zeros(2)
     tensors, tensor_objects = prepare_for_saving(plain, w, None)
-    assert tensors[0] is plain and tensors[1] is None and tensors[2] is None
-    restored = restore_from_saved(tensor_objects, tensors)
+    assert tensors[0] is plain and tensors[1] is w and tensors[2] is None
+    # Under saved-tensor hooks autograd hands back a plain tensor in the weight's slot.
+    unpacked = [tensors[0], torch.Tensor(w), None]
+    restored = restore_from_saved(tensor_objects, unpacked)
     assert restored[0] is plain and restored[1] is w and restored[2] is None
 
 
@@ -379,6 +382,31 @@ def test_prepare_for_saving_round_trips_distributed_weight(mode):
         out = torch_checkpoint(_SaveWeight.apply, x, w, use_reentrant=False)
     out.sum().backward()
     assert seen["w"] is w
+
+
+def test_prepare_for_saving_keeps_inplace_check_for_distributed_weight():
+    """Restoring the original object must not bypass autograd's in-place modification check."""
+
+    class _SaveWeight(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, w):
+            tensors_to_save, tensor_objects = prepare_for_saving(x, w)
+            ctx.save_for_backward(*tensors_to_save)
+            ctx.tensor_objects = tensor_objects
+            return x * 2
+
+        @staticmethod
+        def backward(ctx, g):
+            restore_from_func_ctx(ctx)
+            return g * 2, None
+
+    w = _FakeDistWeight(torch.ones(4))
+    x = torch.ones(4, requires_grad=True)
+    out = _SaveWeight.apply(x, w)
+    with torch.no_grad():
+        w.add_(1)  # e.g. an optimizer step between forward and backward
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        out.sum().backward()
 
 
 @HOOK_MODES
