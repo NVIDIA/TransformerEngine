@@ -6,6 +6,7 @@
 
 #include "../extensions.h"
 #include "common.h"
+#include "common/fused_attn/frost_output_policy.h"
 #include "pybind.h"
 
 namespace transformer_engine::pytorch {
@@ -506,10 +507,18 @@ std::vector<py::object> fused_attn_bwd(
   } else if (dqkv_quantizer.is_none() ||
              detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr()) ||
              detail::IsMXFP8Quantizers(dqkv_quantizer.ptr())) {
-    if (dq_format == NVTE_QKV_Format::NVTE_THD) {
+    const bool compact_d128 = dqkv_quantizer.is_none() && cu_seqlens_q.dim() == 1 &&
+                              cu_seqlens_q.numel() > 1 &&
+                              cu_seqlens_kv.sizes() == cu_seqlens_q.sizes() &&
+                              q_shape.size() == 3 && k_shape.size() == 3 && v_shape == k_shape &&
+                              fused_attn::frost_d128_compact_outputs(
+                                  qkv_layout, dqkv_layout, static_cast<NVTEDType>(dqkv_fake_dtype),
+                                  q_shape[2], v_shape[2], cu_seqlens_q.numel() - 1, q_shape[0],
+                                  k_shape[0], max_seqlen_q, max_seqlen_kv, q_shape[1], k_shape[1]);
+    if (dq_format == NVTE_QKV_Format::NVTE_THD && !compact_d128) {
       dQ.fill_(0);
     }
-    if (dkv_format == NVTE_QKV_Format::NVTE_THD) {
+    if (dkv_format == NVTE_QKV_Format::NVTE_THD && !compact_d128) {
       dK.fill_(0);
       dV.fill_(0);
     }
