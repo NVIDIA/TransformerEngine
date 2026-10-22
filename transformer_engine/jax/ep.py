@@ -61,10 +61,14 @@ def _allgather_uid(uid_arr, world_size, uid_size):
             f"_allgather_uid fallback expected {world_size} global devices, got {devices.size}."
         )
     mesh = jax.sharding.Mesh(devices, ("_uid_all",))
-    sharded = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("_uid_all", None))
+    sharded = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("_uid_all", None)
+    )
     replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     local = np.asarray(uid_arr).reshape(1, uid_size)
-    g_in = jax.make_array_from_process_local_data(sharded, local, (world_size, uid_size))
+    g_in = jax.make_array_from_process_local_data(
+        sharded, local, (world_size, uid_size)
+    )
     g_out = jax.jit(lambda x: x, out_shardings=replicated)(g_in)
     return np.asarray(g_out).reshape(world_size, uid_size)
 
@@ -182,11 +186,6 @@ def ep_bootstrap(
         )
     if world_size is None:
         world_size = get_num_devices_in_mesh(mesh)
-    if world_size < 2:
-        raise ValueError(
-            f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
-            " at least 2 ranks to form a group."
-        )
     if get_num_devices_in_mesh(mesh) != world_size:
         raise ValueError(
             f"ep_bootstrap: mesh device count ({get_num_devices_in_mesh(mesh)}) must equal"
@@ -198,7 +197,9 @@ def ep_bootstrap(
     outer_axis = _ep_outer_axis()
     num_ep_groups = 1 if outer_axis is None else get_mesh_axis_size(outer_axis)
     if num_experts % ep_size != 0:
-        raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
+        raise ValueError(
+            f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})."
+        )
 
     common_cfg = {
         "world_size": world_size,
@@ -211,6 +212,12 @@ def ep_bootstrap(
         "recv_capacity_per_rank": recv_capacity_per_rank,
         "hidden_dim": hidden_dim,
     }
+
+    # EP=1 is entirely local. Keep the same bootstrap contract and config so
+    # callers can use the EP APIs unchanged, but do not initialize NCCL EP.
+    if ep_size == 1:
+        tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
+        return
 
     # Borrowed-comm path (auto-selected by tex.ep.use_nccl_comm_from_xla): XLA
     # owns the EP communicator, so a one-shot bootstrap op fetches it and
@@ -233,11 +240,15 @@ def ep_bootstrap(
         )
         tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
         # Initialize EPBackend now so trace-time handle_mem_size finds it ready.
-        tex.ep.run_borrowed_comm_bootstrap(mesh, replica_groups, ep_group_size, communication_id)
+        tex.ep.run_borrowed_comm_bootstrap(
+            mesh, replica_groups, ep_group_size, communication_id
+        )
         return
 
     UID_SIZE = 128
-    root_rank, rank_within_group, _num_domains = _ep_domain_for_rank(mesh, ep_resource, rank)
+    root_rank, rank_within_group, _num_domains = _ep_domain_for_rank(
+        mesh, ep_resource, rank
+    )
     is_color_root = rank_within_group == 0
     if is_color_root:
         libnccl = ctypes.CDLL("libnccl.so.2", use_errno=True)
@@ -293,8 +304,11 @@ def ep_finalize():
     Reinitialization must use the same communicator mode; switching modes
     requires a process restart.
     """
+    ep_size = tex.ep.get_ep_config().ep_size
     jax.clear_caches()
-    transformer_engine_jax.release_ep_resources()
+    # EP=1 never initialized the C++/NCCL backend.
+    if ep_size > 1:
+        transformer_engine_jax.release_ep_resources()
     tex.ep.reset_ep_config()
 
 
@@ -339,10 +353,18 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
     recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
-        tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
+        tex.ep_prepare_and_dispatch_fwd(
+            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+        )
     )
     out_leading = tuple(tokens.shape[:-1])
-    primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)
+    primal = (
+        recv_tokens,
+        recv_topk_weights,
+        handle_mem,
+        token_counts,
+        total_recv_tokens,
+    )
     return primal, (handle_mem, out_leading)
 
 
@@ -422,7 +444,9 @@ def _combine_bwd(cfg, _num_local_tokens, _out_sharding, res, g_result):
         _out_sharding = _default_out_partition_spec()
     spec = jax.sharding.PartitionSpec(*_out_sharding)
     g_result = with_sharding_constraint(g_result, spec)
-    grad_expert_out = tex.ep_combine_bwd(cfg, handle_mem, g_result, recv_capacity_per_rank)
+    grad_expert_out = tex.ep_combine_bwd(
+        cfg, handle_mem, g_result, recv_capacity_per_rank
+    )
     return (None, None, grad_expert_out)
 
 
