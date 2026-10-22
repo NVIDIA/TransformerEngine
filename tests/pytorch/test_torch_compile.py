@@ -1936,19 +1936,18 @@ def test_to_tensor_spec_quantized(factory, shape):
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 def test_te_linear_cublas_workspace_graph_generations(monkeypatch):
     """Compiled forward/backward scratch follows graph generations, not a Python cache."""
-    import weakref
     from transformer_engine.pytorch.cpp_extensions import gemm
 
-    original = gemm.get_cublas_workspace
-    captured_workspaces = []
+    original = gemm.tex.generic_gemm
+    captured_workspace_requests = []
 
-    def allocate(*args, **kwargs):
-        workspace = original(*args, **kwargs)
+    def observe_native_gemm(*args, **kwargs):
         if torch.cuda.is_current_stream_capturing():
-            captured_workspaces.append(weakref.ref(workspace))
-        return workspace
+            # Do not retain tensor arguments or graph-pool owners.
+            captured_workspace_requests.append((args[12] is None, args[13]))
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(gemm, "get_cublas_workspace", allocate)
+    monkeypatch.setattr(gemm.tex, "generic_gemm", observe_native_gemm)
     model = te.Linear(4096, 128, bias=False, params_dtype=torch.bfloat16, device="cuda")
     with torch.no_grad():
         model.weight.fill_(1)
@@ -1970,8 +1969,12 @@ def test_te_linear_cublas_workspace_graph_generations(monkeypatch):
                     model.weight.grad, torch.full_like(model.weight, batch * value), rtol=0, atol=0
                 )
                 del out, inp
-    assert len(captured_workspaces) >= 2, "Expected CUDA graph captures for different shapes"
-    assert all(ref() is None for ref in captured_workspaces)
+    assert (
+        len(captured_workspace_requests) >= 2
+    ), "Expected CUDA graph captures for different shapes"
+    assert all(
+        native and size == 0 for native, size in captured_workspace_requests
+    ), "Captured GEMMs must request invocation-local native scratch with workspace=None, size=0"
     del compiled
     torch._dynamo.reset()
 
@@ -3115,7 +3118,6 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
         import contextlib
         import copy
         import sys
-        import weakref
         import torch
         import transformer_engine.pytorch as te
         from transformer_engine.common import recipe
@@ -3124,18 +3126,22 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
 
         training, initial_device, quantization = sys.argv[1:]
         training = training == "True"
-        workspaces, captured_workspaces = [], []
-        allocate_workspace = gemm.get_cublas_workspace
+        workspace_requests, captured_workspace_requests = [], []
+        original = gemm.tex.generic_gemm
 
-        def allocate(*args, **kwargs):
-            workspace = allocate_workspace(*args, **kwargs)
-            ref = weakref.ref(workspace)
-            workspaces.append(ref)
+        def observe_native_gemm(*args, **kwargs):
+            # Retain only scalar metadata, never tensors or graph-pool owners.
+            request = (args[12] is None, args[13])
+            workspace_requests.append(request)
             if torch.cuda.is_current_stream_capturing():
-                captured_workspaces.append(ref)
-            return workspace
+                captured_workspace_requests.append(request)
+            return original(*args, **kwargs)
 
-        gemm.get_cublas_workspace = allocate
+        def unexpected_python_workspace(*args, **kwargs):
+            raise AssertionError("Native GEMMs must not allocate Python workspace tensors")
+
+        gemm.tex.generic_gemm = observe_native_gemm
+        gemm.get_cublas_workspace = unexpected_python_workspace
         is_nvfp4 = quantization != "None"
         quant_recipe = (
             recipe.NVFP4BlockScaling(
@@ -3156,7 +3162,7 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
         elif initial_device == "meta":
             linear.to_empty(device="cuda")
             linear.reset_parameters()
-        assert not workspaces, "Module initialization must not allocate GEMM scratch"
+        assert not workspace_requests, "Module initialization must not allocate GEMM scratch"
         model = te.ops.Sequential(linear, te.ops.Bias(out_features, dtype=torch.bfloat16))
         reference_model = copy.deepcopy(model)
         x = torch.randn(
@@ -3189,8 +3195,10 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
                     del grads, expected_grads
                 del actual, expected
         torch.cuda.synchronize()
-        assert captured_workspaces, "Expected workspace allocations during CUDA graph capture"
-        assert all(ref() is None for ref in workspaces), "Invocations must release workspace tensors"
+        assert captured_workspace_requests, "Expected native workspace requests during graph capture"
+        assert all(native and size == 0 for native, size in workspace_requests), (
+            "GEMMs must request invocation-local native scratch with workspace=None, size=0"
+        )
         assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
         assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0, dict(
             counters["inductor"]
