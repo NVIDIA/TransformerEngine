@@ -2227,7 +2227,6 @@ _FALLBACK_CASES = [
 ] + [
     ("Linear", "fp8_output_differentiable"),
     ("Linear", "quantized_input"),
-    ("LayerNormLinear", "is_first_microbatch"),
     ("LayerNormMLP", "checkpoint"),
 ]
 
@@ -2251,8 +2250,6 @@ def _fallback_case(module, case, dtype, device):
         with te.autocast(enabled=use_fp8, recipe=fp8_recipe):
             if case == "fp8_output_differentiable":
                 return model(inp, fp8_output=True).dequantize()
-            if case == "is_first_microbatch":
-                return model(inp, is_first_microbatch=True)
             return model(inp)
 
     if case == "fp8_output_differentiable":
@@ -2268,8 +2265,6 @@ def _fallback_case(module, case, dtype, device):
         return model, fn, "bwd", model.backward_dw, "delayed wgrad compute"
     if case == "quantized_input":
         return model, fn, "no_grad", None, "a quantized input tensor"
-    if case == "is_first_microbatch":
-        return model, fn, "bwd", None, "FP8 weight caching"
     if case == "checkpoint":
         return model, fn, "bwd", None, "activation checkpointing"
     raise ValueError(case)
@@ -2392,14 +2387,17 @@ def test_te_linear_compile_delayed_scaling_raises():
     ],
     ids=recipe_id,
 )
-def test_te_linear_compile_is_first_microbatch(
-    fp8_recipe, compile_mode, deferred_backward, monkeypatch
+@pytest.mark.parametrize("module", _LINEAR_MODULES)
+def test_te_modules_compile_is_first_microbatch(
+    module, fp8_recipe, compile_mode, deferred_backward, monkeypatch
 ):
     """Reuse cached weights across microbatches and refresh after optimizer updates."""
     dtype, device = torch.bfloat16, "cuda"
-    model = te.Linear(128, 128, params_dtype=dtype, device=device)
-    ref_model = te.Linear(128, 128, params_dtype=dtype, device=device)
+    model = getattr(te, module)(128, 128, params_dtype=dtype, device=device)
+    ref_model = getattr(te, module)(128, 128, params_dtype=dtype, device=device)
     ref_model.load_state_dict(model.state_dict())
+    cache_names = ("fc1_weight", "fc2_weight") if module == "LayerNormMLP" else ("weight",)
+    cached_workspaces = {}
 
     def fn(inp, is_first):
         with te.autocast(recipe=fp8_recipe):
@@ -2443,17 +2441,20 @@ def test_te_linear_compile_is_first_microbatch(
                 out = compiled(inp, is_first).clone()
                 torch.testing.assert_close(out, out_ref, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
 
-                workspace = model._fp8_workspaces["weight"]
-                if is_first:
-                    cached_workspace = workspace
-                else:
-                    assert workspace is cached_workspace
-                torch.testing.assert_close(
-                    workspace.dequantize(),
-                    ref_model._fp8_workspaces["weight"].dequantize(),
-                    atol=_EAGER_ATOL,
-                    rtol=_EAGER_RTOL,
-                )
+                for name in cache_names:
+                    workspace = model._fp8_workspaces[name]
+                    if is_first:
+                        if name in cached_workspaces:
+                            assert workspace is not cached_workspaces[name]
+                        cached_workspaces[name] = workspace
+                    else:
+                        assert workspace is cached_workspaces[name]
+                    torch.testing.assert_close(
+                        workspace.dequantize(),
+                        ref_model._fp8_workspaces[name].dequantize(),
+                        atol=_EAGER_ATOL,
+                        rtol=_EAGER_RTOL,
+                    )
 
                 pending.append((out, out_ref, inp, inp_ref))
                 if not deferred_backward or microbatch == 2:
@@ -2474,7 +2475,7 @@ def test_te_linear_compile_is_first_microbatch(
                 for param, ref_param in zip(model.parameters(), ref_model.parameters()):
                     param.add_(param.grad, alpha=-0.001)
                     ref_param.add_(ref_param.grad, alpha=-0.001)
-            del cached_workspace, workspace, out, out_ref, result, ref_result
+            del workspace, out, out_ref, result, ref_result
 
     torch._dynamo.reset()
 

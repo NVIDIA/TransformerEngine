@@ -2442,6 +2442,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
+
+                             Under ``torch.compile``, the FP8 weight cache is replaced on
+                             the first microbatch and reused on subsequent microbatches.
+                             ``fuse_wgrad_accumulation=True`` remains unsupported.
+                             With ``mode="reduce-overhead"``, call
+                             ``torch.compiler.cudagraph_mark_step_begin()`` once before
+                             each minibatch to keep the cache live across its microbatches.
         """
         is_grad_enabled = torch.is_grad_enabled()
 
@@ -2468,7 +2475,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         if torch.compiler.is_compiling() and _layernorm_linear_op is not None:
             reason = self._compile_eager_fallback_reason(
-                inp, is_first_microbatch, fp8_output, fp8_grad, is_grad_enabled, debug
+                inp, skip_fp8_weight_update, fp8_output, fp8_grad, is_grad_enabled, debug
             )
             if reason is not None:
                 # A break inside the try/finally below would skip the whole frame.
@@ -2517,9 +2524,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                         set_quantizer_amax_reduction_group(quantizer, None)
 
             cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
-            weight_workspace = (
-                self._fp8_workspaces.get(cache_name) if cache_name is not None else None
-            )
+            weight_workspace = None
+            if cache_name is not None and not (use_compiled_op and is_first_microbatch):
+                weight_workspace = self._fp8_workspaces.get(cache_name)
 
             dgrad_use_split_accumulator = _2X_ACC_DGRAD
             wgrad_use_split_accumulator = _2X_ACC_WGRAD
@@ -2720,7 +2727,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
     def _compile_eager_fallback_reason(
         self,
         inp: torch.Tensor,
-        is_first_microbatch: Optional[bool],
+        skip_fp8_weight_update: Optional[torch.Tensor],
         fp8_output: bool,
         fp8_grad: bool,
         is_grad_enabled: bool,
@@ -2764,8 +2771,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             and not (self.ub_overlap_rs_dgrad or self.ub_bulk_wgrad)
         ):
             return "a quantized input grad (fp8_grad=True)"
-        if fp8 and is_first_microbatch is not None and not self.is_fsdp2:
-            return "FP8 weight caching (is_first_microbatch)"
+        if fp8 and skip_fp8_weight_update is not None:
+            return "GPU-controlled FP8 weight cache updates"
         return None
 
     @torch._dynamo.disable
