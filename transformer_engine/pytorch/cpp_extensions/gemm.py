@@ -971,6 +971,9 @@ def general_grouped_gemm(
     A = [_unwrap_tensor(a, "rowwise" if transa else "columnwise") for a in A]
     B = [_unwrap_tensor(b, "columnwise" if transb else "rowwise") for b in B]
 
+    if any(isinstance(tensor, Float8BlockwiseQTensorStorage) for tensor in (*A, *B)):
+        use_split_accumulator = True
+
     empty_tensor = _empty_tensor()
     empty_tensors = [empty_tensor] * num_gemms
 
