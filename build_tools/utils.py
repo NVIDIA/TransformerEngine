@@ -404,6 +404,32 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
 
 @functools.lru_cache(maxsize=None)
+def cudnn_include_path() -> Optional[Path]:
+    """Return the cuDNN include directory.
+
+    Mirrors the search hints in transformer_engine/common/cmake/cuDNN.cmake, so the
+    framework extensions see the same cudnn.h as the core library, including a cuDNN
+    that only comes from the nvidia-cudnn wheel while the CUDA Toolkit is installed.
+    """
+    candidates = []
+    for env in ("CUDNN_INCLUDE_PATH", "CUDNN_PATH"):
+        if value := os.getenv(env):
+            candidates += [Path(value), Path(value) / "include"]
+    try:
+        import nvidia.cudnn  # pylint: disable=import-outside-toplevel
+
+        candidates += [Path(path) / "include" for path in nvidia.cudnn.__path__]
+    except ModuleNotFoundError:
+        pass
+    if (toolkit_include := cuda_toolkit_include_path()) is not None:
+        candidates.append(toolkit_include)
+    for candidate in candidates:
+        if (candidate / "cudnn.h").is_file():
+            return candidate
+    return None
+
+
+@functools.lru_cache(maxsize=None)
 def cudnn_frontend_include_path() -> Path:
     """Return the C++ include directory from nvidia-cudnn-frontend."""
     package = "nvidia-cudnn-frontend"
