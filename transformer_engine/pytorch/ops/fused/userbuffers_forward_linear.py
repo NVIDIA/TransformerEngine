@@ -448,6 +448,8 @@ class UserbuffersForwardLinear(FusedOperation):
                     continue
                 if reduce_scatter.process_group_size == 1:
                     continue
+                if reduce_scatter.reduction_dtype is not None:
+                    continue
 
             # Replace window with fused op
             op = UserbuffersForwardLinear(

@@ -1,0 +1,2436 @@
+{
+  "environment": {
+    "torch": "2.7.0+cu128",
+    "torch_path": "/root/miniconda3/lib/python3.12/site-packages/torch/__init__.py",
+    "torch_cuda": "12.8",
+    "te_path": "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/transformer_engine/pytorch/__init__.py",
+    "versions": {
+      "transformer-engine": "2.21.0.dev0",
+      "nvidia-cudnn-cu12": "9.7.1.26",
+      "nvidia-nccl-cu12": "2.26.2",
+      "nvidia-cudnn-frontend": "1.29.0",
+      "transformers": "4.57.1",
+      "pytest": "9.1.1"
+    }
+  },
+  "native_build": {
+    "native_source": "bfc06495d0ec8d734f23700afd7ca7de7e103359",
+    "cutlass": "cdcf8d86daa9b417840fd99875a1b1af685d389d",
+    "installed_libraries": [
+      {
+        "path": "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/lib/python3.12/site-packages/transformer_engine/libtransformer_engine.so",
+        "bytes": 126817336,
+        "sha256": "f2ac1c5e53bb2c6ef1a06a0e1cfa9de16f74f21c4373c11e1cb72917964d412f"
+      },
+      {
+        "path": "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/lib/python3.12/site-packages/transformer_engine/transformer_engine_torch.cpython-312-x86_64-linux-gnu.so",
+        "bytes": 3035032,
+        "sha256": "2e81cdacd919340f802e7491385045eb2f506c5623143d151147f528ceb29367"
+      }
+    ],
+    "build": {
+      "pid": 54006,
+      "started": 1790834754.201375,
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "setup.py",
+        "bdist_wheel",
+        "--dist-dir",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/wheels/offline"
+      ],
+      "env": {
+        "CUDA_HOME": "/usr/local/cuda-12.8",
+        "NVTE_FRAMEWORK": "pytorch",
+        "NVTE_CUDA_ARCHS": "90",
+        "NVTE_WITH_NCCL_EP": "0",
+        "NVTE_BUILD_MAX_JOBS": "16",
+        "CUDNN_PATH": "/root/miniconda3/lib/python3.12/site-packages/nvidia/cudnn",
+        "NCCL_HOME": "/root/miniconda3/lib/python3.12/site-packages/nvidia/nccl",
+        "NVTE_CMAKE_EXTRA_ARGS": "-DNCCL_INCLUDE_DIR=/root/miniconda3/lib/python3.12/site-packages/nvidia/nccl/include"
+      },
+      "exit_code": 0,
+      "elapsed_s": 408.77224612236023
+    }
+  },
+  "precommit": {
+    "pid": 77080,
+    "exit_code": 0,
+    "elapsed_s": 142.23207187652588,
+    "files": [
+      "docs/api/pytorch.rst",
+      "tests/pytorch/distributed/test_reduction_dtype.py",
+      "tests/pytorch/distributed/validation_reduction/benchmark.py",
+      "tests/pytorch/distributed/validation_reduction/launch.py",
+      "tests/pytorch/distributed/validation_reduction/model_e2e.py",
+      "transformer_engine/pytorch/distributed.py",
+      "transformer_engine/pytorch/module/layernorm_linear.py",
+      "transformer_engine/pytorch/module/layernorm_mlp.py",
+      "transformer_engine/pytorch/module/linear.py",
+      "transformer_engine/pytorch/ops/basic/all_reduce.py",
+      "transformer_engine/pytorch/ops/basic/reduce_scatter.py",
+      "transformer_engine/pytorch/ops/fused/userbuffers_forward_linear.py",
+      "transformer_engine/pytorch/ops/linear.py"
+    ]
+  },
+  "model_manifest": {
+    "model": "Qwen/Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "files": [
+      {
+        "name": "config.json",
+        "bytes": 726,
+        "sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd"
+      },
+      {
+        "name": "generation_config.json",
+        "bytes": 239,
+        "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+      },
+      {
+        "name": "merges.txt",
+        "bytes": 1671853,
+        "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+      },
+      {
+        "name": "model.safetensors",
+        "bytes": 1503300328,
+        "sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"
+      },
+      {
+        "name": "tokenizer.json",
+        "bytes": 11422654,
+        "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+      },
+      {
+        "name": "tokenizer_config.json",
+        "bytes": 9732,
+        "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+      },
+      {
+        "name": "vocab.json",
+        "bytes": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    ]
+  },
+  "cleanup": {
+    "path": "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+    "bytes_removed": 1519183121,
+    "model_pids_exited": [
+      80935,
+      80936,
+      82027,
+      82028,
+      82843,
+      82844,
+      83444,
+      83445,
+      84207,
+      84208,
+      84796,
+      84797,
+      85404,
+      85405,
+      86017,
+      86018,
+      86598,
+      86599,
+      87204,
+      87205,
+      87893,
+      87894,
+      88581,
+      88582,
+      89416,
+      89417,
+      90327,
+      90328,
+      91010,
+      91011,
+      91601,
+      91602
+    ],
+    "completed": 1790837876.179178
+  },
+  "formal_status": [
+    {
+      "label": "formal-graph-default-control-b0-p0-A",
+      "workload": "graph",
+      "comparison": "default-control",
+      "block": 0,
+      "order": "APPA",
+      "position": 0,
+      "arm": "A",
+      "variant": "base",
+      "dtype": "default",
+      "source_sha": "bfc06495d0ec8d734f23700afd7ca7de7e103359",
+      "exit_code": 0,
+      "elapsed_s": 10.914888620376587,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 75716,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p0-A-rank0.log",
+          "started": 1790836448.7595592,
+          "exit_code": 0,
+          "elapsed_s": 10.748106241226196
+        },
+        {
+          "rank": 1,
+          "pid": 75717,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p0-A-rank1.log",
+          "started": 1790836448.7595592,
+          "exit_code": 0,
+          "elapsed_s": 10.790719509124756
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-default-control-b0-p1-P",
+      "workload": "graph",
+      "comparison": "default-control",
+      "block": 0,
+      "order": "APPA",
+      "position": 1,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "default",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.017599821090698,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 76013,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p1-P-rank0.log",
+          "started": 1790836459.701777,
+          "exit_code": 0,
+          "elapsed_s": 10.876723766326904
+        },
+        {
+          "rank": 1,
+          "pid": 76014,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p1-P-rank1.log",
+          "started": 1790836459.701777,
+          "exit_code": 0,
+          "elapsed_s": 10.877867460250854
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-default-control-b0-p2-P",
+      "workload": "graph",
+      "comparison": "default-control",
+      "block": 0,
+      "order": "APPA",
+      "position": 2,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "default",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.14432978630066,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 76323,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p2-P-rank0.log",
+          "started": 1790836470.713273,
+          "exit_code": 0,
+          "elapsed_s": 11.020554780960083
+        },
+        {
+          "rank": 1,
+          "pid": 76324,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p2-P-rank1.log",
+          "started": 1790836470.713273,
+          "exit_code": 0,
+          "elapsed_s": 11.02151870727539
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-default-control-b0-p3-A",
+      "workload": "graph",
+      "comparison": "default-control",
+      "block": 0,
+      "order": "APPA",
+      "position": 3,
+      "arm": "A",
+      "variant": "base",
+      "dtype": "default",
+      "source_sha": "bfc06495d0ec8d734f23700afd7ca7de7e103359",
+      "exit_code": 0,
+      "elapsed_s": 10.993241786956787,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 76614,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p3-A-rank0.log",
+          "started": 1790836481.8675833,
+          "exit_code": 0,
+          "elapsed_s": 10.86925745010376
+        },
+        {
+          "rank": 1,
+          "pid": 76615,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p3-A-rank1.log",
+          "started": 1790836481.8675833,
+          "exit_code": 0,
+          "elapsed_s": 10.870330810546875
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-default-control-b1-p0-P",
+      "workload": "graph",
+      "comparison": "default-control",
+      "block": 1,
+      "order": "PAAP",
+      "position": 0,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "default",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.471920490264893,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 76895,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p0-P-rank0.log",
+          "started": 1790836492.8700693,
+          "exit_code": 0,
+          "elapsed_s": 11.346911907196045
+        },
+        {
+          "rank": 1,
+          "pid": 76896,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p0-P-rank1.log",
+          "started": 1790836492.8700693,
+          "exit_code": 0,
+          "elapsed_s": 11.347981214523315
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-default-control-b1-p1-A",
+      "workload": "graph",
+      "comparison": "default-control",
+      "block": 1,
+      "order": "PAAP",
+      "position": 1,
+      "arm": "A",
+      "variant": "base",
+      "dtype": "default",
+      "source_sha": "bfc06495d0ec8d734f23700afd7ca7de7e103359",
+      "exit_code": 0,
+      "elapsed_s": 10.852878093719482,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 77204,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p1-A-rank0.log",
+          "started": 1790836504.3523674,
+          "exit_code": 0,
+          "elapsed_s": 10.727773427963257
+        },
+        {
+          "rank": 1,
+          "pid": 77205,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p1-A-rank1.log",
+          "started": 1790836504.3523674,
+          "exit_code": 0,
+          "elapsed_s": 10.728788137435913
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-default-control-b1-p2-A",
+      "workload": "graph",
+      "comparison": "default-control",
+      "block": 1,
+      "order": "PAAP",
+      "position": 2,
+      "arm": "A",
+      "variant": "base",
+      "dtype": "default",
+      "source_sha": "bfc06495d0ec8d734f23700afd7ca7de7e103359",
+      "exit_code": 0,
+      "elapsed_s": 10.939235210418701,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 77542,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p2-A-rank0.log",
+          "started": 1790836515.2147667,
+          "exit_code": 0,
+          "elapsed_s": 10.693288087844849
+        },
+        {
+          "rank": 1,
+          "pid": 77543,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p2-A-rank1.log",
+          "started": 1790836515.2147667,
+          "exit_code": 0,
+          "elapsed_s": 10.816661357879639
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-default-control-b1-p3-P",
+      "workload": "graph",
+      "comparison": "default-control",
+      "block": 1,
+      "order": "PAAP",
+      "position": 3,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "default",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 10.963965654373169,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 77824,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p3-P-rank0.log",
+          "started": 1790836526.1657097,
+          "exit_code": 0,
+          "elapsed_s": 10.836676120758057
+        },
+        {
+          "rank": 1,
+          "pid": 77825,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p3-P-rank1.log",
+          "started": 1790836526.1657097,
+          "exit_code": 0,
+          "elapsed_s": 10.838636875152588
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-fp32-cost-b0-p0-A",
+      "workload": "graph",
+      "comparison": "fp32-cost",
+      "block": 0,
+      "order": "APPA",
+      "position": 0,
+      "arm": "A",
+      "variant": "patch",
+      "dtype": "bf16",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.045538187026978,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 78109,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p0-A-rank0.log",
+          "started": 1790836537.1386714,
+          "exit_code": 0,
+          "elapsed_s": 10.795546293258667
+        },
+        {
+          "rank": 1,
+          "pid": 78110,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p0-A-rank1.log",
+          "started": 1790836537.1386714,
+          "exit_code": 0,
+          "elapsed_s": 10.921934843063354
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-fp32-cost-b0-p1-P",
+      "workload": "graph",
+      "comparison": "fp32-cost",
+      "block": 0,
+      "order": "APPA",
+      "position": 1,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "fp32",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 10.98936152458191,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 78468,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p1-P-rank0.log",
+          "started": 1790836548.1930406,
+          "exit_code": 0,
+          "elapsed_s": 10.86396312713623
+        },
+        {
+          "rank": 1,
+          "pid": 78469,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p1-P-rank1.log",
+          "started": 1790836548.1930406,
+          "exit_code": 0,
+          "elapsed_s": 10.866211891174316
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-fp32-cost-b0-p2-P",
+      "workload": "graph",
+      "comparison": "fp32-cost",
+      "block": 0,
+      "order": "APPA",
+      "position": 2,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "fp32",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.815629005432129,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 78762,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p2-P-rank0.log",
+          "started": 1790836559.1950266,
+          "exit_code": 0,
+          "elapsed_s": 11.689236879348755
+        },
+        {
+          "rank": 1,
+          "pid": 78763,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p2-P-rank1.log",
+          "started": 1790836559.1950266,
+          "exit_code": 0,
+          "elapsed_s": 11.690872192382812
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-fp32-cost-b0-p3-A",
+      "workload": "graph",
+      "comparison": "fp32-cost",
+      "block": 0,
+      "order": "APPA",
+      "position": 3,
+      "arm": "A",
+      "variant": "patch",
+      "dtype": "bf16",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.762680053710938,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 79077,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p3-A-rank0.log",
+          "started": 1790836571.018386,
+          "exit_code": 0,
+          "elapsed_s": 11.609277725219727
+        },
+        {
+          "rank": 1,
+          "pid": 79078,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p3-A-rank1.log",
+          "started": 1790836571.018386,
+          "exit_code": 0,
+          "elapsed_s": 11.639970779418945
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-fp32-cost-b1-p0-P",
+      "workload": "graph",
+      "comparison": "fp32-cost",
+      "block": 1,
+      "order": "PAAP",
+      "position": 0,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "fp32",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.359668731689453,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 79539,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p0-P-rank0.log",
+          "started": 1790836582.7947497,
+          "exit_code": 0,
+          "elapsed_s": 11.2316312789917
+        },
+        {
+          "rank": 1,
+          "pid": 79540,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p0-P-rank1.log",
+          "started": 1790836582.7947497,
+          "exit_code": 0,
+          "elapsed_s": 11.232615232467651
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-fp32-cost-b1-p1-A",
+      "workload": "graph",
+      "comparison": "fp32-cost",
+      "block": 1,
+      "order": "PAAP",
+      "position": 1,
+      "arm": "A",
+      "variant": "patch",
+      "dtype": "bf16",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.529612064361572,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 79833,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p1-A-rank0.log",
+          "started": 1790836594.163531,
+          "exit_code": 0,
+          "elapsed_s": 11.404310941696167
+        },
+        {
+          "rank": 1,
+          "pid": 79834,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p1-A-rank1.log",
+          "started": 1790836594.163531,
+          "exit_code": 0,
+          "elapsed_s": 11.406002044677734
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-fp32-cost-b1-p2-A",
+      "workload": "graph",
+      "comparison": "fp32-cost",
+      "block": 1,
+      "order": "PAAP",
+      "position": 2,
+      "arm": "A",
+      "variant": "patch",
+      "dtype": "bf16",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.149227857589722,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 80127,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p2-A-rank0.log",
+          "started": 1790836605.7033856,
+          "exit_code": 0,
+          "elapsed_s": 11.023886919021606
+        },
+        {
+          "rank": 1,
+          "pid": 80128,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p2-A-rank1.log",
+          "started": 1790836605.7033856,
+          "exit_code": 0,
+          "elapsed_s": 11.024936437606812
+        }
+      ]
+    },
+    {
+      "label": "formal-graph-fp32-cost-b1-p3-P",
+      "workload": "graph",
+      "comparison": "fp32-cost",
+      "block": 1,
+      "order": "PAAP",
+      "position": 3,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "fp32",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 11.169084072113037,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 80584,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p3-P-rank0.log",
+          "started": 1790836616.8661933,
+          "exit_code": 0,
+          "elapsed_s": 10.955547571182251
+        },
+        {
+          "rank": 1,
+          "pid": 80585,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p3-P-rank1.log",
+          "started": 1790836616.8661933,
+          "exit_code": 0,
+          "elapsed_s": 11.041856527328491
+        }
+      ]
+    },
+    {
+      "label": "formal-model-default-control-b0-p0-A",
+      "workload": "model",
+      "comparison": "default-control",
+      "block": 0,
+      "order": "APPA",
+      "position": 0,
+      "arm": "A",
+      "variant": "base",
+      "dtype": "default",
+      "source_sha": "bfc06495d0ec8d734f23700afd7ca7de7e103359",
+      "exit_code": 0,
+      "elapsed_s": 73.84308862686157,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 80935,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p0-A-rank0.log",
+          "started": 1790836628.0421922,
+          "exit_code": 0,
+          "elapsed_s": 73.71746945381165
+        },
+        {
+          "rank": 1,
+          "pid": 80936,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p0-A-rank1.log",
+          "started": 1790836628.0421922,
+          "exit_code": 0,
+          "elapsed_s": 73.71787786483765
+        }
+      ]
+    },
+    {
+      "label": "formal-model-default-control-b0-p1-P",
+      "workload": "model",
+      "comparison": "default-control",
+      "block": 0,
+      "order": "APPA",
+      "position": 1,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "default",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 77.94555830955505,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 82027,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p1-P-rank0.log",
+          "started": 1790836701.8971846,
+          "exit_code": 0,
+          "elapsed_s": 77.75921511650085
+        },
+        {
+          "rank": 1,
+          "pid": 82028,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p1-P-rank1.log",
+          "started": 1790836701.8971846,
+          "exit_code": 0,
+          "elapsed_s": 77.80910515785217
+        }
+      ]
+    },
+    {
+      "label": "formal-model-default-control-b0-p2-P",
+      "workload": "model",
+      "comparison": "default-control",
+      "block": 0,
+      "order": "APPA",
+      "position": 2,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "default",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 77.11930394172668,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 82843,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p2-P-rank0.log",
+          "started": 1790836779.8551342,
+          "exit_code": 0,
+          "elapsed_s": 76.98879098892212
+        },
+        {
+          "rank": 1,
+          "pid": 82844,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p2-P-rank1.log",
+          "started": 1790836779.8551342,
+          "exit_code": 0,
+          "elapsed_s": 76.98931527137756
+        }
+      ]
+    },
+    {
+      "label": "formal-model-default-control-b0-p3-A",
+      "workload": "model",
+      "comparison": "default-control",
+      "block": 0,
+      "order": "APPA",
+      "position": 3,
+      "arm": "A",
+      "variant": "base",
+      "dtype": "default",
+      "source_sha": "bfc06495d0ec8d734f23700afd7ca7de7e103359",
+      "exit_code": 0,
+      "elapsed_s": 76.82875347137451,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 83444,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p3-A-rank0.log",
+          "started": 1790836856.9850304,
+          "exit_code": 0,
+          "elapsed_s": 76.64305233955383
+        },
+        {
+          "rank": 1,
+          "pid": 83445,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p3-A-rank1.log",
+          "started": 1790836856.9850304,
+          "exit_code": 0,
+          "elapsed_s": 76.7009048461914
+        }
+      ]
+    },
+    {
+      "label": "formal-model-default-control-b1-p0-P",
+      "workload": "model",
+      "comparison": "default-control",
+      "block": 1,
+      "order": "PAAP",
+      "position": 0,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "default",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 76.23730874061584,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 84207,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p0-P-rank0.log",
+          "started": 1790836933.8220322,
+          "exit_code": 0,
+          "elapsed_s": 76.07535409927368
+        },
+        {
+          "rank": 1,
+          "pid": 84208,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p0-P-rank1.log",
+          "started": 1790836933.8220322,
+          "exit_code": 0,
+          "elapsed_s": 76.11279439926147
+        }
+      ]
+    },
+    {
+      "label": "formal-model-default-control-b1-p1-A",
+      "workload": "model",
+      "comparison": "default-control",
+      "block": 1,
+      "order": "PAAP",
+      "position": 1,
+      "arm": "A",
+      "variant": "base",
+      "dtype": "default",
+      "source_sha": "bfc06495d0ec8d734f23700afd7ca7de7e103359",
+      "exit_code": 0,
+      "elapsed_s": 76.47386050224304,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 84796,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p1-A-rank0.log",
+          "started": 1790837010.0710776,
+          "exit_code": 0,
+          "elapsed_s": 76.3473391532898
+        },
+        {
+          "rank": 1,
+          "pid": 84797,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p1-A-rank1.log",
+          "started": 1790837010.0710776,
+          "exit_code": 0,
+          "elapsed_s": 76.34775471687317
+        }
+      ]
+    },
+    {
+      "label": "formal-model-default-control-b1-p2-A",
+      "workload": "model",
+      "comparison": "default-control",
+      "block": 1,
+      "order": "PAAP",
+      "position": 2,
+      "arm": "A",
+      "variant": "base",
+      "dtype": "default",
+      "source_sha": "bfc06495d0ec8d734f23700afd7ca7de7e103359",
+      "exit_code": 0,
+      "elapsed_s": 77.01438903808594,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 85404,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p2-A-rank0.log",
+          "started": 1790837086.5590887,
+          "exit_code": 0,
+          "elapsed_s": 76.88416242599487
+        },
+        {
+          "rank": 1,
+          "pid": 85405,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p2-A-rank1.log",
+          "started": 1790837086.5590887,
+          "exit_code": 0,
+          "elapsed_s": 76.88457202911377
+        }
+      ]
+    },
+    {
+      "label": "formal-model-default-control-b1-p3-P",
+      "workload": "model",
+      "comparison": "default-control",
+      "block": 1,
+      "order": "PAAP",
+      "position": 3,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "default",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 75.8359842300415,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 86017,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p3-P-rank0.log",
+          "started": 1790837163.5796242,
+          "exit_code": 0,
+          "elapsed_s": 75.71059989929199
+        },
+        {
+          "rank": 1,
+          "pid": 86018,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p3-P-rank1.log",
+          "started": 1790837163.5796242,
+          "exit_code": 0,
+          "elapsed_s": 75.7110116481781
+        }
+      ]
+    },
+    {
+      "label": "formal-model-fp32-cost-b0-p0-A",
+      "workload": "model",
+      "comparison": "fp32-cost",
+      "block": 0,
+      "order": "APPA",
+      "position": 0,
+      "arm": "A",
+      "variant": "patch",
+      "dtype": "bf16",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 76.3708803653717,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 86598,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p0-A-rank0.log",
+          "started": 1790837239.4249492,
+          "exit_code": 0,
+          "elapsed_s": 76.21135568618774
+        },
+        {
+          "rank": 1,
+          "pid": 86599,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p0-A-rank1.log",
+          "started": 1790837239.4249492,
+          "exit_code": 0,
+          "elapsed_s": 76.24924325942993
+        }
+      ]
+    },
+    {
+      "label": "formal-model-fp32-cost-b0-p1-P",
+      "workload": "model",
+      "comparison": "fp32-cost",
+      "block": 0,
+      "order": "APPA",
+      "position": 1,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "fp32",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 77.60471272468567,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 87204,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p1-P-rank0.log",
+          "started": 1790837315.8069863,
+          "exit_code": 0,
+          "elapsed_s": 77.36089396476746
+        },
+        {
+          "rank": 1,
+          "pid": 87205,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p1-P-rank1.log",
+          "started": 1790837315.8069863,
+          "exit_code": 0,
+          "elapsed_s": 77.48120999336243
+        }
+      ]
+    },
+    {
+      "label": "formal-model-fp32-cost-b0-p2-P",
+      "workload": "model",
+      "comparison": "fp32-cost",
+      "block": 0,
+      "order": "APPA",
+      "position": 2,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "fp32",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 82.95992350578308,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 87893,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p2-P-rank0.log",
+          "started": 1790837393.4244077,
+          "exit_code": 0,
+          "elapsed_s": 82.8086953163147
+        },
+        {
+          "rank": 1,
+          "pid": 87894,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p2-P-rank1.log",
+          "started": 1790837393.4244077,
+          "exit_code": 0,
+          "elapsed_s": 82.81365752220154
+        }
+      ]
+    },
+    {
+      "label": "formal-model-fp32-cost-b0-p3-A",
+      "workload": "model",
+      "comparison": "fp32-cost",
+      "block": 0,
+      "order": "APPA",
+      "position": 3,
+      "arm": "A",
+      "variant": "patch",
+      "dtype": "bf16",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 81.20000886917114,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 88581,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p3-A-rank0.log",
+          "started": 1790837476.4015954,
+          "exit_code": 0,
+          "elapsed_s": 81.07206201553345
+        },
+        {
+          "rank": 1,
+          "pid": 88582,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p3-A-rank1.log",
+          "started": 1790837476.4015954,
+          "exit_code": 0,
+          "elapsed_s": 81.07251572608948
+        }
+      ]
+    },
+    {
+      "label": "formal-model-fp32-cost-b1-p0-P",
+      "workload": "model",
+      "comparison": "fp32-cost",
+      "block": 1,
+      "order": "PAAP",
+      "position": 0,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "fp32",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 84.67218685150146,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 89416,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p0-P-rank0.log",
+          "started": 1790837557.7187343,
+          "exit_code": 0,
+          "elapsed_s": 84.4291820526123
+        },
+        {
+          "rank": 1,
+          "pid": 89417,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p0-P-rank1.log",
+          "started": 1790837557.7187343,
+          "exit_code": 0,
+          "elapsed_s": 84.46820545196533
+        }
+      ]
+    },
+    {
+      "label": "formal-model-fp32-cost-b1-p1-A",
+      "workload": "model",
+      "comparison": "fp32-cost",
+      "block": 1,
+      "order": "PAAP",
+      "position": 1,
+      "arm": "A",
+      "variant": "patch",
+      "dtype": "bf16",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 80.06908106803894,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 90327,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p1-A-rank0.log",
+          "started": 1790837642.3254793,
+          "exit_code": 0,
+          "elapsed_s": 79.84619426727295
+        },
+        {
+          "rank": 1,
+          "pid": 90328,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p1-A-rank1.log",
+          "started": 1790837642.3254793,
+          "exit_code": 0,
+          "elapsed_s": 79.94592237472534
+        }
+      ]
+    },
+    {
+      "label": "formal-model-fp32-cost-b1-p2-A",
+      "workload": "model",
+      "comparison": "fp32-cost",
+      "block": 1,
+      "order": "PAAP",
+      "position": 2,
+      "arm": "A",
+      "variant": "patch",
+      "dtype": "bf16",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 75.62116241455078,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 91010,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p2-A-rank0.log",
+          "started": 1790837722.4024925,
+          "exit_code": 0,
+          "elapsed_s": 75.36788511276245
+        },
+        {
+          "rank": 1,
+          "pid": 91011,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p2-A-rank1.log",
+          "started": 1790837722.4024925,
+          "exit_code": 0,
+          "elapsed_s": 75.49902057647705
+        }
+      ]
+    },
+    {
+      "label": "formal-model-fp32-cost-b1-p3-P",
+      "workload": "model",
+      "comparison": "fp32-cost",
+      "block": 1,
+      "order": "PAAP",
+      "position": 3,
+      "arm": "P",
+      "variant": "patch",
+      "dtype": "fp32",
+      "source_sha": "c0fda11ad0ab0216f3d7780c4a31624bad328141",
+      "exit_code": 0,
+      "elapsed_s": 78.06949234008789,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 91601,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p3-P-rank0.log",
+          "started": 1790837798.0356913,
+          "exit_code": 0,
+          "elapsed_s": 77.9456377029419
+        },
+        {
+          "rank": 1,
+          "pid": 91602,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p3-P-rank1.log",
+          "started": 1790837798.0356913,
+          "exit_code": 0,
+          "elapsed_s": 77.94607496261597
+        }
+      ]
+    }
+  ],
+  "launches": [
+    {
+      "label": "formal-graph-default-control-b0-p0-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p0-A.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 32, 1980 MHz, 119.04 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 63, 1980 MHz, 147.29 W\n",
+      "cpu_load_before": [
+        4.26416015625,
+        5.37841796875,
+        6.70703125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 75716,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p0-A-rank0.log",
+          "started": 1790836448.7595592,
+          "exit_code": 0,
+          "elapsed_s": 10.748106241226196
+        },
+        {
+          "rank": 1,
+          "pid": 75717,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p0-A-rank1.log",
+          "started": 1790836448.7595592,
+          "exit_code": 0,
+          "elapsed_s": 10.790719509124756
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 32, 1980 MHz, 117.19 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 64, 1980 MHz, 146.53 W\n"
+    },
+    {
+      "label": "formal-graph-default-control-b0-p1-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p1-P.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 32, 1980 MHz, 117.41 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 64, 1980 MHz, 146.76 W\n",
+      "cpu_load_before": [
+        5.25830078125,
+        5.54150390625,
+        6.73974609375
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 76013,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p1-P-rank0.log",
+          "started": 1790836459.701777,
+          "exit_code": 0,
+          "elapsed_s": 10.876723766326904
+        },
+        {
+          "rank": 1,
+          "pid": 76014,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p1-P-rank1.log",
+          "started": 1790836459.701777,
+          "exit_code": 0,
+          "elapsed_s": 10.877867460250854
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.13 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 64, 1980 MHz, 147.24 W\n"
+    },
+    {
+      "label": "formal-graph-default-control-b0-p2-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p2-P.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.39 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 64, 1980 MHz, 147.45 W\n",
+      "cpu_load_before": [
+        5.4462890625,
+        5.5732421875,
+        6.73681640625
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 76323,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p2-P-rank0.log",
+          "started": 1790836470.713273,
+          "exit_code": 0,
+          "elapsed_s": 11.020554780960083
+        },
+        {
+          "rank": 1,
+          "pid": 76324,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p2-P-rank1.log",
+          "started": 1790836470.713273,
+          "exit_code": 0,
+          "elapsed_s": 11.02151870727539
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.08 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 64, 1980 MHz, 147.92 W\n"
+    },
+    {
+      "label": "formal-graph-default-control-b0-p3-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p3-A.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.28 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 64, 1980 MHz, 148.10 W\n",
+      "cpu_load_before": [
+        5.986328125,
+        5.6865234375,
+        6.76123046875
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 76614,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p3-A-rank0.log",
+          "started": 1790836481.8675833,
+          "exit_code": 0,
+          "elapsed_s": 10.86925745010376
+        },
+        {
+          "rank": 1,
+          "pid": 76615,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b0-p3-A-rank1.log",
+          "started": 1790836481.8675833,
+          "exit_code": 0,
+          "elapsed_s": 10.870330810546875
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.12 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 64, 1980 MHz, 147.59 W\n"
+    },
+    {
+      "label": "formal-graph-default-control-b1-p0-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p0-P.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.40 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 64, 1980 MHz, 147.76 W\n",
+      "cpu_load_before": [
+        6.22265625,
+        5.74658203125,
+        6.76953125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 76895,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p0-P-rank0.log",
+          "started": 1790836492.8700693,
+          "exit_code": 0,
+          "elapsed_s": 11.346911907196045
+        },
+        {
+          "rank": 1,
+          "pid": 76896,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p0-P-rank1.log",
+          "started": 1790836492.8700693,
+          "exit_code": 0,
+          "elapsed_s": 11.347981214523315
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.13 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 147.81 W\n"
+    },
+    {
+      "label": "formal-graph-default-control-b1-p1-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p1-A.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.42 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 147.99 W\n",
+      "cpu_load_before": [
+        6.419921875,
+        5.8095703125,
+        6.7734375
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 77204,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p1-A-rank0.log",
+          "started": 1790836504.3523674,
+          "exit_code": 0,
+          "elapsed_s": 10.727773427963257
+        },
+        {
+          "rank": 1,
+          "pid": 77205,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p1-A-rank1.log",
+          "started": 1790836504.3523674,
+          "exit_code": 0,
+          "elapsed_s": 10.728788137435913
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.16 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 147.86 W\n"
+    },
+    {
+      "label": "formal-graph-default-control-b1-p2-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p2-A.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.45 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 148.08 W\n",
+      "cpu_load_before": [
+        6.34912109375,
+        5.8154296875,
+        6.76513671875
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 77542,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p2-A-rank0.log",
+          "started": 1790836515.2147667,
+          "exit_code": 0,
+          "elapsed_s": 10.693288087844849
+        },
+        {
+          "rank": 1,
+          "pid": 77543,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p2-A-rank1.log",
+          "started": 1790836515.2147667,
+          "exit_code": 0,
+          "elapsed_s": 10.816661357879639
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.43 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 148.00 W\n"
+    },
+    {
+      "label": "formal-graph-default-control-b1-p3-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p3-P.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.59 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 148.16 W\n",
+      "cpu_load_before": [
+        6.14111328125,
+        5.7880859375,
+        6.74560546875
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 77824,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p3-P-rank0.log",
+          "started": 1790836526.1657097,
+          "exit_code": 0,
+          "elapsed_s": 10.836676120758057
+        },
+        {
+          "rank": 1,
+          "pid": 77825,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-default-control-b1-p3-P-rank1.log",
+          "started": 1790836526.1657097,
+          "exit_code": 0,
+          "elapsed_s": 10.838636875152588
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.18 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 148.12 W\n"
+    },
+    {
+      "label": "formal-graph-fp32-cost-b0-p0-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "bf16",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p0-A.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.37 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 148.35 W\n",
+      "cpu_load_before": [
+        5.97216796875,
+        5.7626953125,
+        6.72607421875
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 78109,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p0-A-rank0.log",
+          "started": 1790836537.1386714,
+          "exit_code": 0,
+          "elapsed_s": 10.795546293258667
+        },
+        {
+          "rank": 1,
+          "pid": 78110,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p0-A-rank1.log",
+          "started": 1790836537.1386714,
+          "exit_code": 0,
+          "elapsed_s": 10.921934843063354
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1516 MiB, 2 %, 33, 1980 MHz, 117.40 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 148.30 W\n"
+    },
+    {
+      "label": "formal-graph-fp32-cost-b0-p1-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "fp32",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p1-P.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1516 MiB, 0 %, 33, 1980 MHz, 117.61 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 148.49 W\n",
+      "cpu_load_before": [
+        6.05712890625,
+        5.78759765625,
+        6.72412109375
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 78468,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p1-P-rank0.log",
+          "started": 1790836548.1930406,
+          "exit_code": 0,
+          "elapsed_s": 10.86396312713623
+        },
+        {
+          "rank": 1,
+          "pid": 78469,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p1-P-rank1.log",
+          "started": 1790836548.1930406,
+          "exit_code": 0,
+          "elapsed_s": 10.866211891174316
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.13 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 148.62 W\n"
+    },
+    {
+      "label": "formal-graph-fp32-cost-b0-p2-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "fp32",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p2-P.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.38 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 148.79 W\n",
+      "cpu_load_before": [
+        5.970703125,
+        5.7822265625,
+        6.70703125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 78762,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p2-P-rank0.log",
+          "started": 1790836559.1950266,
+          "exit_code": 0,
+          "elapsed_s": 11.689236879348755
+        },
+        {
+          "rank": 1,
+          "pid": 78763,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p2-P-rank1.log",
+          "started": 1790836559.1950266,
+          "exit_code": 0,
+          "elapsed_s": 11.690872192382812
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.21 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 148.89 W\n"
+    },
+    {
+      "label": "formal-graph-fp32-cost-b0-p3-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "bf16",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p3-A.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.40 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 149.12 W\n",
+      "cpu_load_before": [
+        6.35009765625,
+        5.8720703125,
+        6.72705078125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 79077,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p3-A-rank0.log",
+          "started": 1790836571.018386,
+          "exit_code": 0,
+          "elapsed_s": 11.609277725219727
+        },
+        {
+          "rank": 1,
+          "pid": 79078,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b0-p3-A-rank1.log",
+          "started": 1790836571.018386,
+          "exit_code": 0,
+          "elapsed_s": 11.639970779418945
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 122.44 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 154.09 W\n"
+    },
+    {
+      "label": "formal-graph-fp32-cost-b1-p0-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "fp32",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p0-P.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 122.67 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 154.34 W\n",
+      "cpu_load_before": [
+        7.052734375,
+        6.041015625,
+        6.7734375
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 79539,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p0-P-rank0.log",
+          "started": 1790836582.7947497,
+          "exit_code": 0,
+          "elapsed_s": 11.2316312789917
+        },
+        {
+          "rank": 1,
+          "pid": 79540,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p0-P-rank1.log",
+          "started": 1790836582.7947497,
+          "exit_code": 0,
+          "elapsed_s": 11.232615232467651
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.24 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 149.22 W\n"
+    },
+    {
+      "label": "formal-graph-fp32-cost-b1-p1-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "bf16",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p1-A.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.44 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 149.38 W\n",
+      "cpu_load_before": [
+        7.25048828125,
+        6.13671875,
+        6.7939453125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 79833,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p1-A-rank0.log",
+          "started": 1790836594.163531,
+          "exit_code": 0,
+          "elapsed_s": 11.404310941696167
+        },
+        {
+          "rank": 1,
+          "pid": 79834,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p1-A-rank1.log",
+          "started": 1790836594.163531,
+          "exit_code": 0,
+          "elapsed_s": 11.406002044677734
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.28 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 148.66 W\n"
+    },
+    {
+      "label": "formal-graph-fp32-cost-b1-p2-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "bf16",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p2-A.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 117.50 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 148.82 W\n",
+      "cpu_load_before": [
+        6.8173828125,
+        6.08203125,
+        6.76904296875
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 80127,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p2-A-rank0.log",
+          "started": 1790836605.7033856,
+          "exit_code": 0,
+          "elapsed_s": 11.023886919021606
+        },
+        {
+          "rank": 1,
+          "pid": 80128,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p2-A-rank1.log",
+          "started": 1790836605.7033856,
+          "exit_code": 0,
+          "elapsed_s": 11.024936437606812
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 119.24 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 148.88 W\n"
+    },
+    {
+      "label": "formal-graph-fp32-cost-b1-p3-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/benchmark.py",
+        "--reduction",
+        "fp32",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p3-P.json"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 2 %, 33, 1980 MHz, 119.38 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 149.05 W\n",
+      "cpu_load_before": [
+        6.75244140625,
+        6.09521484375,
+        6.76611328125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 80584,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p3-P-rank0.log",
+          "started": 1790836616.8661933,
+          "exit_code": 0,
+          "elapsed_s": 10.955547571182251
+        },
+        {
+          "rank": 1,
+          "pid": 80585,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-graph-fp32-cost-b1-p3-P-rank1.log",
+          "started": 1790836616.8661933,
+          "exit_code": 0,
+          "elapsed_s": 11.041856527328491
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.43 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 2 %, 65, 1980 MHz, 148.75 W\n"
+    },
+    {
+      "label": "formal-model-default-control-b0-p0-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p0-A.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.64 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 65, 1980 MHz, 148.92 W\n",
+      "cpu_load_before": [
+        6.88330078125,
+        6.14208984375,
+        6.77392578125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 80935,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p0-A-rank0.log",
+          "started": 1790836628.0421922,
+          "exit_code": 0,
+          "elapsed_s": 73.71746945381165
+        },
+        {
+          "rank": 1,
+          "pid": 80936,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p0-A-rank1.log",
+          "started": 1790836628.0421922,
+          "exit_code": 0,
+          "elapsed_s": 73.71787786483765
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.61 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 68, 1980 MHz, 152.77 W\n"
+    },
+    {
+      "label": "formal-model-default-control-b0-p1-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p1-P.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 6 %, 33, 1980 MHz, 117.80 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 68, 1980 MHz, 152.93 W\n",
+      "cpu_load_before": [
+        6.34912109375,
+        6.0810546875,
+        6.69970703125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 82027,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p1-P-rank0.log",
+          "started": 1790836701.8971846,
+          "exit_code": 0,
+          "elapsed_s": 77.75921511650085
+        },
+        {
+          "rank": 1,
+          "pid": 82028,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p1-P-rank1.log",
+          "started": 1790836701.8971846,
+          "exit_code": 0,
+          "elapsed_s": 77.80910515785217
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 6 %, 33, 1980 MHz, 117.75 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 69, 1980 MHz, 153.63 W\n"
+    },
+    {
+      "label": "formal-model-default-control-b0-p2-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p2-P.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.99 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 69, 1980 MHz, 153.82 W\n",
+      "cpu_load_before": [
+        6.33642578125,
+        6.1826171875,
+        6.68798828125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 82843,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p2-P-rank0.log",
+          "started": 1790836779.8551342,
+          "exit_code": 0,
+          "elapsed_s": 76.98879098892212
+        },
+        {
+          "rank": 1,
+          "pid": 82844,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p2-P-rank1.log",
+          "started": 1790836779.8551342,
+          "exit_code": 0,
+          "elapsed_s": 76.98931527137756
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.81 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 69, 1980 MHz, 154.45 W\n"
+    },
+    {
+      "label": "formal-model-default-control-b0-p3-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p3-A.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 6 %, 33, 1980 MHz, 117.97 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 69, 1980 MHz, 154.63 W\n",
+      "cpu_load_before": [
+        6.0244140625,
+        6.134765625,
+        6.63232421875
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 83444,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p3-A-rank0.log",
+          "started": 1790836856.9850304,
+          "exit_code": 0,
+          "elapsed_s": 76.64305233955383
+        },
+        {
+          "rank": 1,
+          "pid": 83445,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b0-p3-A-rank1.log",
+          "started": 1790836856.9850304,
+          "exit_code": 0,
+          "elapsed_s": 76.7009048461914
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 5 %, 33, 1980 MHz, 117.92 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 69, 1980 MHz, 153.86 W\n"
+    },
+    {
+      "label": "formal-model-default-control-b1-p0-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p0-P.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 5 %, 33, 1980 MHz, 118.10 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 69, 1980 MHz, 154.07 W\n",
+      "cpu_load_before": [
+        6.69580078125,
+        6.29150390625,
+        6.6474609375
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 84207,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p0-P-rank0.log",
+          "started": 1790836933.8220322,
+          "exit_code": 0,
+          "elapsed_s": 76.07535409927368
+        },
+        {
+          "rank": 1,
+          "pid": 84208,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p0-P-rank1.log",
+          "started": 1790836933.8220322,
+          "exit_code": 0,
+          "elapsed_s": 76.11279439926147
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 6 %, 33, 1980 MHz, 117.82 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 69, 1980 MHz, 154.90 W\n"
+    },
+    {
+      "label": "formal-model-default-control-b1-p1-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p1-A.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 118.04 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 69, 1980 MHz, 155.01 W\n",
+      "cpu_load_before": [
+        6.61279296875,
+        6.419921875,
+        6.6669921875
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 84796,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p1-A-rank0.log",
+          "started": 1790837010.0710776,
+          "exit_code": 0,
+          "elapsed_s": 76.3473391532898
+        },
+        {
+          "rank": 1,
+          "pid": 84797,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p1-A-rank1.log",
+          "started": 1790837010.0710776,
+          "exit_code": 0,
+          "elapsed_s": 76.34775471687317
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 6 %, 33, 1980 MHz, 117.67 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 69, 1980 MHz, 154.85 W\n"
+    },
+    {
+      "label": "formal-model-default-control-b1-p2-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p2-A.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.89 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 69, 1980 MHz, 154.89 W\n",
+      "cpu_load_before": [
+        7.23388671875,
+        6.60791015625,
+        6.708984375
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 85404,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p2-A-rank0.log",
+          "started": 1790837086.5590887,
+          "exit_code": 0,
+          "elapsed_s": 76.88416242599487
+        },
+        {
+          "rank": 1,
+          "pid": 85405,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p2-A-rank1.log",
+          "started": 1790837086.5590887,
+          "exit_code": 0,
+          "elapsed_s": 76.88457202911377
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 119.26 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 69, 1980 MHz, 156.53 W\n"
+    },
+    {
+      "label": "formal-model-default-control-b1-p3-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "default",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p3-P.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 6 %, 33, 1980 MHz, 118.06 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 69, 1980 MHz, 155.05 W\n",
+      "cpu_load_before": [
+        7.2431640625,
+        6.70849609375,
+        6.73486328125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 86017,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p3-P-rank0.log",
+          "started": 1790837163.5796242,
+          "exit_code": 0,
+          "elapsed_s": 75.71059989929199
+        },
+        {
+          "rank": 1,
+          "pid": 86018,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-default-control-b1-p3-P-rank1.log",
+          "started": 1790837163.5796242,
+          "exit_code": 0,
+          "elapsed_s": 75.7110116481781
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 6 %, 33, 1980 MHz, 117.62 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 7 %, 69, 1980 MHz, 154.37 W\n"
+    },
+    {
+      "label": "formal-model-fp32-cost-b0-p0-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "bf16",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p0-A.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.85 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 69, 1980 MHz, 154.53 W\n",
+      "cpu_load_before": [
+        7.4580078125,
+        7.1611328125,
+        6.91064453125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 86598,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p0-A-rank0.log",
+          "started": 1790837239.4249492,
+          "exit_code": 0,
+          "elapsed_s": 76.21135568618774
+        },
+        {
+          "rank": 1,
+          "pid": 86599,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p0-A-rank1.log",
+          "started": 1790837239.4249492,
+          "exit_code": 0,
+          "elapsed_s": 76.24924325942993
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.78 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 69, 1980 MHz, 154.78 W\n"
+    },
+    {
+      "label": "formal-model-fp32-cost-b0-p1-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "fp32",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p1-P.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 6 %, 33, 1980 MHz, 118.03 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 69, 1980 MHz, 154.97 W\n",
+      "cpu_load_before": [
+        7.14501953125,
+        7.19482421875,
+        6.94775390625
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 87204,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p1-P-rank0.log",
+          "started": 1790837315.8069863,
+          "exit_code": 0,
+          "elapsed_s": 77.36089396476746
+        },
+        {
+          "rank": 1,
+          "pid": 87205,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p1-P-rank1.log",
+          "started": 1790837315.8069863,
+          "exit_code": 0,
+          "elapsed_s": 77.48120999336243
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 117.92 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 6 %, 69, 1980 MHz, 154.55 W\n"
+    },
+    {
+      "label": "formal-model-fp32-cost-b0-p2-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "fp32",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p2-P.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 1190 MiB, 0 %, 33, 1980 MHz, 118.06 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 1190 MiB, 0 %, 69, 1980 MHz, 154.72 W\n",
+      "cpu_load_before": [
+        7.59765625,
+        7.330078125,
+        7.0126953125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 87893,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p2-P-rank0.log",
+          "started": 1790837393.4244077,
+          "exit_code": 0,
+          "elapsed_s": 82.8086953163147
+        },
+        {
+          "rank": 1,
+          "pid": 87894,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p2-P-rank1.log",
+          "started": 1790837393.4244077,
+          "exit_code": 0,
+          "elapsed_s": 82.81365752220154
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 0 MiB, 0 %, 33, 1980 MHz, 117.82 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 0 MiB, 0 %, 69, 1980 MHz, 156.08 W\n"
+    },
+    {
+      "label": "formal-model-fp32-cost-b0-p3-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "bf16",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p3-A.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 0 MiB, 6 %, 33, 1980 MHz, 118.10 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 0 MiB, 0 %, 69, 1980 MHz, 156.30 W\n",
+      "cpu_load_before": [
+        7.94189453125,
+        7.4775390625,
+        7.08984375
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 88581,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p3-A-rank0.log",
+          "started": 1790837476.4015954,
+          "exit_code": 0,
+          "elapsed_s": 81.07206201553345
+        },
+        {
+          "rank": 1,
+          "pid": 88582,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b0-p3-A-rank1.log",
+          "started": 1790837476.4015954,
+          "exit_code": 0,
+          "elapsed_s": 81.07251572608948
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 50963 MiB, 0 %, 33, 1980 MHz, 118.09 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 50963 MiB, 6 %, 70, 1980 MHz, 156.26 W\n"
+    },
+    {
+      "label": "formal-model-fp32-cost-b1-p0-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "fp32",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p0-P.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 50963 MiB, 0 %, 33, 1980 MHz, 118.58 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 50963 MiB, 0 %, 69, 1980 MHz, 156.65 W\n",
+      "cpu_load_before": [
+        8.625,
+        7.79443359375,
+        7.234375
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 89416,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p0-P-rank0.log",
+          "started": 1790837557.7187343,
+          "exit_code": 0,
+          "elapsed_s": 84.4291820526123
+        },
+        {
+          "rank": 1,
+          "pid": 89417,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p0-P-rank1.log",
+          "started": 1790837557.7187343,
+          "exit_code": 0,
+          "elapsed_s": 84.46820545196533
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 51483 MiB, 6 %, 33, 1980 MHz, 118.06 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 51483 MiB, 6 %, 70, 1980 MHz, 157.21 W\n"
+    },
+    {
+      "label": "formal-model-fp32-cost-b1-p1-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "bf16",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p1-A.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 51483 MiB, 0 %, 33, 1980 MHz, 118.27 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 51483 MiB, 0 %, 70, 1980 MHz, 157.33 W\n",
+      "cpu_load_before": [
+        7.68359375,
+        7.70654296875,
+        7.255859375
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 90327,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p1-A-rank0.log",
+          "started": 1790837642.3254793,
+          "exit_code": 0,
+          "elapsed_s": 79.84619426727295
+        },
+        {
+          "rank": 1,
+          "pid": 90328,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p1-A-rank1.log",
+          "started": 1790837642.3254793,
+          "exit_code": 0,
+          "elapsed_s": 79.94592237472534
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 0 MiB, 6 %, 33, 1980 MHz, 117.99 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 0 MiB, 6 %, 70, 1980 MHz, 156.53 W\n"
+    },
+    {
+      "label": "formal-model-fp32-cost-b1-p2-A",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "bf16",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p2-A.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 0 MiB, 0 %, 33, 1980 MHz, 118.17 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 0 MiB, 6 %, 70, 1980 MHz, 156.67 W\n",
+      "cpu_load_before": [
+        12.2314453125,
+        9.1015625,
+        7.77392578125
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 91010,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p2-A-rank0.log",
+          "started": 1790837722.4024925,
+          "exit_code": 0,
+          "elapsed_s": 75.36788511276245
+        },
+        {
+          "rank": 1,
+          "pid": 91011,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p2-A-rank1.log",
+          "started": 1790837722.4024925,
+          "exit_code": 0,
+          "elapsed_s": 75.49902057647705
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 0 MiB, 0 %, 33, 1980 MHz, 118.09 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 0 MiB, 6 %, 69, 1980 MHz, 155.23 W\n"
+    },
+    {
+      "label": "formal-model-fp32-cost-b1-p3-P",
+      "command": [
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/runtime/bin/python",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/patch/tests/pytorch/distributed/validation_reduction/model_e2e.py",
+        "--reduction",
+        "fp32",
+        "--output",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p3-P.json",
+        "--model",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/models/qwen3-0.6b",
+        "--reference",
+        "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/model-screen-base-default-reference"
+      ],
+      "cwd": "/root/autodl-tmp/transformerengine-tp-reduction-h20",
+      "gpu_before": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 0 MiB, 0 %, 33, 1980 MHz, 118.29 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 0 MiB, 0 %, 69, 1980 MHz, 155.44 W\n",
+      "cpu_load_before": [
+        9.52197265625,
+        8.85546875,
+        7.7822265625
+      ],
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 91601,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p3-P-rank0.log",
+          "started": 1790837798.0356913,
+          "exit_code": 0,
+          "elapsed_s": 77.9456377029419
+        },
+        {
+          "rank": 1,
+          "pid": 91602,
+          "log": "/root/autodl-tmp/transformerengine-tp-reduction-h20/evidence/distributed/formal-model-fp32-cost-b1-p3-P-rank1.log",
+          "started": 1790837798.0356913,
+          "exit_code": 0,
+          "elapsed_s": 77.94607496261597
+        }
+      ],
+      "gpu_after": "0, GPU-edf64e5f-21ef-a1f2-6601-e8620b5664ff, 0 MiB, 6 %, 33, 1980 MHz, 117.96 W\n1, GPU-8ee84e7d-143f-dd29-1097-85943783e027, 0 MiB, 0 %, 69, 1980 MHz, 155.00 W\n"
+    }
+  ],
+  "method": "Two fresh APPA/PAAP quartets per workload/comparison; median of paired-round rank maxima, then geometric mean over four arms per role.",
+  "measurement_files": [
+    "h20_reduction_graph.json",
+    "h20_reduction_model.json"
+  ]
+}
