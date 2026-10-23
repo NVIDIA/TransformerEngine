@@ -1901,7 +1901,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 materialize_weight_for_forward(grouped_fc2_weight),
                 fc2_weight_quantizers,
                 rowwise=True,
-                columnwise=input_requires_grad,
+                columnwise=False,
             )
         if isinstance(grouped_fc2_weight, GroupedTensor) and not hasattr(
             grouped_fc2_weight, "_with_gemm_swizzled_scales"
