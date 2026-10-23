@@ -299,6 +299,76 @@ class TestGroupedTensor:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
+    def test_autograd_identity_view_preserves_grouped_storage_and_gradient(self) -> None:
+        """Autograd's identity view keeps grouped metadata and passes back a dense gradient."""
+
+        class Identity(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, tensor):
+                return tensor
+
+            @staticmethod
+            def backward(ctx, grad):
+                return grad
+
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        source = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            first_dims=first_dims,
+            tensor_offsets=tensor_offsets,
+            requires_grad=True,
+        )
+
+        view = Identity.apply(source)
+        assert isinstance(view, GroupedTensor)
+        assert view is not source
+        assert view._base is source
+        assert view.rowwise_data is source.rowwise_data
+        assert view.first_dims is first_dims
+        assert view.tensor_offsets is tensor_offsets
+
+        expected = torch.arange(1, 13, dtype=torch.float32, device="cuda").reshape(3, 4)
+        (grad,) = torch.autograd.grad(view, source, grad_outputs=expected)
+        assert type(grad) is torch.Tensor
+        torch.testing.assert_close(grad, expected)
+
+    def test_record_stream_tracks_grouped_buffers(self, monkeypatch) -> None:
+        """record_stream should reach every allocation owned by the wrapper."""
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        last_dims = torch.tensor([4, 4], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        grouped_tensor = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            columnwise_data=torch.randn(12, device="cuda"),
+            scale_inv=torch.ones(2, device="cuda"),
+            columnwise_scale_inv=torch.ones(2, device="cuda"),
+            amax=torch.zeros(2, device="cuda"),
+            columnwise_amax=torch.zeros(2, device="cuda"),
+            scale=torch.ones(2, device="cuda"),
+            first_dims=first_dims,
+            last_dims=last_dims,
+            tensor_offsets=tensor_offsets,
+        )
+        buffers = grouped_tensor.get_data_tensors()
+        recorded = []
+        original_record_stream = torch.Tensor.record_stream
+
+        def record_stream(tensor, stream):
+            recorded.append(tensor)
+            return original_record_stream(tensor, stream)
+
+        monkeypatch.setattr(torch.Tensor, "record_stream", record_stream)
+        grouped_tensor.record_stream(torch.cuda.Stream())
+
+        assert all(any(record is buffer for record in recorded) for buffer in buffers)
+
     def test_basic_construction_all_same_shape(self) -> None:
         """Test GroupedTensor construction with all tensors having same shape"""
         num_tensors = 4
