@@ -1057,6 +1057,26 @@ def get_attention_backend(
             ".".join([str(i) for i in device_compute_capability]),
         )
         use_flash_attention_2 = False
+    # flash-attn's head_dim 256 backward launches no kernel when dropout is enabled on GPUs with
+    # less than 144 KB of opt-in shared memory per block, leaving dq/dk/dv unwritten.
+    if (  # pylint: disable=too-many-boolean-expressions
+        use_flash_attention_2
+        and FlashAttentionUtils.is_installed
+        and fa2_padded_head_dim > 192
+        and attention_dropout != 0.0
+        and is_training
+        and attention_params.requires_backward
+        and device_compute_capability in ((8, 6), (8, 9), (12, 0), (12, 1))
+    ):
+        logger.debug(
+            "Disabling FlashAttention 2 for padded head_dim > 192 with dropout in training on"
+            " sm%s: its backward needs >= 144 KB of shared memory per block. Found: padded"
+            " head_dim = %s, attention_dropout = %s.",
+            ".".join([str(i) for i in device_compute_capability]),
+            fa2_padded_head_dim,
+            attention_dropout,
+        )
+        use_flash_attention_2 = False
 
     if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
 
