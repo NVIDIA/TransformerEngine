@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+from jax._src.lib import gpu_triton
 from jax.sharding import PartitionSpec
 from jax.experimental.custom_partitioning import SdyShardingRule
 import triton
@@ -35,7 +36,8 @@ from transformer_engine.jax.version_utils import (
     TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION,
     jax_version_meet_requirement,
 )
-from .utils import triton_call_lowering, gpu_triton
+
+from .utils import triton_call_lowering
 
 __all__ = [
     "mhc_projection_fwd",
