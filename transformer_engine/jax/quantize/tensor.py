@@ -8,9 +8,10 @@ This module provides tensor classes for handling quantized tensors in JAX, inclu
 both single-scale (1x) and double-scale (2x) quantization schemes. It supports
 rowwise and colwise quantization modes with proper scaling and dequantization.
 """
+import math
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
-from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
@@ -435,6 +436,15 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         assert (
             0 < self.flatten_axis < data_ndim
         ), f"flatten_axis {self.flatten_axis} is out of bounds for data.ndim = {data_ndim}"
+
+        # A grouped tensor used as a shard_map residual temporarily has global
+        # physical data/scale buffers while ``original_shape`` intentionally
+        # continues to describe the shard-local logical tensor. The matching
+        # shard_map input restores local leaves before grouped GEMM consumes
+        # the wrapper. Validate scale layout only when this is a genuine local
+        # tensor view; the global transport view is not itself a GEMM operand.
+        if self.data.size != math.prod(self.original_shape):
+            return
 
         active_dims = (
             self.first_dims

@@ -32,7 +32,7 @@ Additionally, we offer [Jupyter notebook tutorials](https://github.com/NVIDIA/Tr
   - Model Parallelism: Divide a model across multiple GPUs for parallel training.
   - Multiprocessing with Model Parallelism: Multiprocessing for model parallelism, including multi-node support and hardware affinity setup.
 - [Basic MNIST Example](https://github.com/NVIDIA/TransformerEngine/tree/main/examples/jax/mnist)
-- [TE JAX Integration Tutorial](https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/te_jax_integration.ipynb)
+- [TE JAX Integration Guide](https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/te_jax_integration.rst)
   - Introduction to integrating TE into an existing JAX model framework, building a Transformer Layer, and instructions on integrating TE modules like Linear and LayerNorm.
 
 # Third party

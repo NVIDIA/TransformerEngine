@@ -78,9 +78,8 @@ inline size_t per_expert_scale_floats(BlockDim block_dim, bool columnwise, size_
 template <typename InputType, typename OutputType>
 void performTest(ShapeRep shape_rep, BlockDim block_dim, bool rowwise,
                  const std::vector<size_t>& first_dims_h, size_t K) {
-  // FP8 block-scaling grouped kernels are Hopper-only (SM90-SM99).
-  if (getDeviceComputeCapability() < hopperComputeCapability ||
-      getDeviceComputeCapability() >= blackwellComputeCapability) {
+  // Grouped FP8 block-scaling kernels need TMA (SM90+).
+  if (getDeviceComputeCapability() < hopperComputeCapability) {
     GTEST_SKIP();
   }
 

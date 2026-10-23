@@ -38,6 +38,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
     std::optional<at::Tensor> topk_indices = std::nullopt);
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
+                                      std::optional<float> scaling_factor, at::Tensor expert_bias,
+                                      int routing_map_format,
+                                      std::optional<at::Tensor> topk_indices, at::Tensor histogram,
+                                      at::Tensor bin_bounds, int histogram_mode,
+                                      bool bin_bounds_validated = false);
+
 void fused_topk_with_score_function_bwd(
     at::Tensor routing_map, at::Tensor intermediate_output, at::Tensor grad_probs,
     at::Tensor grad_logits, int topk, bool use_pre_softmax, std::optional<float> scaling_factor,
@@ -86,12 +94,8 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
  * Attention
  **************************************************************************************************/
 
-NVTE_Fused_Attn_Backend get_fused_attn_backend(
-    bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic);
+std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
+    const py::object &fused_attn_params);
 
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
@@ -215,21 +219,26 @@ void nvfp4_multi_tensor_compute_partial_amax(
     std::vector<int64_t> w_list, std::vector<int64_t> start_offset_list, int64_t block_len);
 
 void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output, int64_t tile_rows,
-                               int64_t tile_cols, int64_t rows_padded, int64_t block_len);
+                               int64_t tile_cols, int64_t rows_padded, int64_t block_len,
+                               DType scale_dtype = DType::kFloat8E4M3);
 
-void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax);
+void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax,
+                                   const DType scale_dtype = DType::kFloat8E4M3);
 
 void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax, at::Tensor per_block_scale,
                        at::Tensor target_scale, at::Tensor target_amax, int64_t tile_rows,
-                       int64_t tile_cols, int64_t rows_padded, int64_t block_len);
+                       int64_t tile_cols, int64_t rows_padded, int64_t block_len,
+                       const DType scale_dtype = DType::kFloat8E4M3);
 
 void nvfp4_multi_tensor_fused_scale(
     std::vector<at::Tensor> block_amax_list, std::vector<at::Tensor> global_amax_list,
     std::vector<at::Tensor> per_block_scale_list, std::vector<at::Tensor> target_scale_list,
     std::vector<at::Tensor> target_amax_list, std::vector<int64_t> tile_rows_list,
-    std::vector<int64_t> tile_cols_list, std::vector<int64_t> rows_padded_list, int64_t block_len);
+    std::vector<int64_t> tile_cols_list, std::vector<int64_t> rows_padded_list, int64_t block_len,
+    const DType scale_dtype = DType::kFloat8E4M3);
 
-void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale);
+void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale,
+                                const DType scale_dtype = DType::kFloat8E4M3);
 
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
@@ -285,6 +294,11 @@ py::object swiglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
+py::object situglu(const at::Tensor &input, py::handle quantizer, float beta1, float beta2);
+
+py::object dsituglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                    float beta1, float beta2);
+
 py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha,
                           float glu_linear_offset);
 
@@ -294,6 +308,10 @@ py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::
 /* Scaled activation */
 py::object scaled_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
                          py::handle quantizer, int64_t glu_interleave_size);
+
+py::object scaled_situglu(const at::Tensor &input, const at::Tensor &act_scales,
+                          py::handle quantizer, float beta1, float beta2,
+                          int64_t glu_interleave_size);
 
 py::object scaled_clamped_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
                                  py::handle quantizer, float limit, float alpha,
@@ -305,6 +323,10 @@ py::object scaled_srelu(const at::Tensor &input, const at::Tensor &act_scales,
 py::tuple scaled_dswiglu(const at::Tensor &grad, const at::Tensor &input,
                          const at::Tensor &act_scales, py::handle quantizer,
                          int64_t glu_interleave_size, bool compute_scale_grad);
+
+py::tuple scaled_dsituglu(const at::Tensor &grad, const at::Tensor &input,
+                          const at::Tensor &act_scales, py::handle quantizer, float beta1,
+                          float beta2, int64_t glu_interleave_size, bool compute_scale_grad);
 
 py::tuple scaled_clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input,
                                  const at::Tensor &act_scales, py::handle quantizer, float limit,
@@ -376,6 +398,19 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
                           std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
                           std::optional<at::Tensor> tensor_offsets,
                           std::optional<at::Tensor> noop_flag, const py::object &output);
+
+py::object group_scaled_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
+                               py::handle quantizer, const size_t num_tensors,
+                               std::optional<at::Tensor> first_dims,
+                               std::optional<at::Tensor> last_dims,
+                               std::optional<at::Tensor> tensor_offsets);
+
+py::object group_scaled_clamped_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
+                                       py::handle quantizer, const size_t num_tensors, float limit,
+                                       float alpha, float glu_linear_offset,
+                                       std::optional<at::Tensor> first_dims,
+                                       std::optional<at::Tensor> last_dims,
+                                       std::optional<at::Tensor> tensor_offsets);
 
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                           const size_t num_tensors,
@@ -489,14 +524,15 @@ void nvfp4_2d_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, si
 
 void nvfp4_2d_partial_cast(const at::Tensor &inp, py::handle out, const at::Tensor &scale,
                            const at::Tensor &global_scale, size_t h, size_t w, size_t start_offset,
-                           size_t block_len);
+                           size_t block_len, const DType scale_dtype = DType::kFloat8E4M3);
 
 void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
                                         std::vector<at::Tensor> out_list,
                                         std::vector<at::Tensor> scale_list,
                                         std::vector<at::Tensor> global_scale_list,
                                         std::vector<int64_t> h_list, std::vector<int64_t> w_list,
-                                        std::vector<int64_t> start_offset_list, int64_t block_len);
+                                        std::vector<int64_t> start_offset_list, int64_t block_len,
+                                        const DType scale_dtype = DType::kFloat8E4M3);
 void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
                                         at::Tensor amax_colwise, int rows, int cols,
                                         size_t start_offset);
@@ -533,6 +569,10 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
                                    const std::vector<int> &qkv_split_arg_list,
                                    const NVTE_QKV_Format qkv_format, const bool interleaved,
                                    const int cp_size, const int cp_rank);
+
+std::tuple<py::object, py::object> fused_mla_kv_rope_mxfp8(
+    const at::Tensor &kv, const at::Tensor &k_rope, const at::Tensor &cos, const at::Tensor &sin,
+    const int64_t v_head_dim, py::handle key_quantizer, py::handle value_quantizer);
 
 /***************************************************************************************************
  * Miscellaneous
@@ -585,9 +625,9 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
                                     bool lse_packed, int second_half_lse_seqlen);
 
-void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
-                        const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
-                        bool only_second_half, bool lse_packed);
+void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &old_lse,
+                        const at::Tensor &lse, const at::Tensor &lse_per_step,
+                        const at::Tensor &cu_seqlens, bool only_second_half, bool lse_packed);
 
 void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
                          const at::Tensor &cu_seqlens, const std::string &first_half,
@@ -700,7 +740,10 @@ void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise)
  * Expert Parallelism
  **************************************************************************************************/
 
-// Borrows torch's NCCL host comm (``comm_ptr`` from ``ProcessGroupNCCL._comm_ptr()``).
+// Borrow torch's host ncclComm_t from a process group's CUDA backend.
+int64_t get_nccl_comm_ptr(c10d::ProcessGroup *process_group);
+
+// Borrows torch's NCCL host comm (``comm_ptr`` from ``get_nccl_comm_ptr``).
 // ``group_name`` is the PG name used by the symm-mem window resolver.
 // ``zero_copy`` is forwarded into ``NVTEEpGroupConfig.zero_copy``.
 void ep_initialize(uintptr_t comm_ptr, const std::string &group_name, int64_t num_experts,
@@ -724,6 +767,24 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
                  std::optional<at::Tensor> tokens_scale_inv = std::nullopt,
                  std::optional<at::Tensor> recv_scale_inv = std::nullopt);
+
+// Fused prepare + dispatch in a single call. When the recv outputs are omitted
+// (eager mode), they are sized and allocated here from the per-step recv-count:
+// prepare writes the total into pinned-host total_recv_tokens (UVA), a stream sync
+// makes it host-readable with no D2H copy, and the recv outputs are carved from it
+// and returned; this path forbids symm-mem zero-copy IO. When the caller supplies
+// the recv outputs (non-eager), they are used as-is and mutated in place with no
+// stream sync. Passing tokens_scale_inv selects the MXFP8 path (recv_scale_inv is
+// then required or, in eager mode, allocated). Returns the allocated recv outputs
+// in eager mode ({recv_tokens, recv_topk_weights[, recv_scale_inv]}), else empty.
+std::vector<at::Tensor> ep_prepare_and_dispatch(
+    at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens, at::Tensor topk_weights,
+    at::Tensor tokens_per_expert, at::Tensor total_recv_tokens, int64_t top_k,
+    int64_t dispatch_output_per_expert_alignment,
+    std::optional<at::Tensor> recv_tokens = std::nullopt,
+    std::optional<at::Tensor> recv_topk_weights = std::nullopt,
+    std::optional<at::Tensor> recv_scale_inv = std::nullopt,
+    std::optional<at::Tensor> tokens_scale_inv = std::nullopt);
 
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
 
@@ -817,6 +878,9 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+  // cuBLASMp: shape and dtype of the buffer view returned by get_buffer()
+  std::vector<size_t> _cublasmp_buffer_shape;
+  at::ScalarType _cublasmp_buffer_dtype{at::kByte};
 
  public:
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -830,6 +894,8 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   // the construction-time warmup matmul that primes cuBLASMp's lazy NCCL
   // window registrations and workspace allocation so subsequent matmuls
   // (including those captured in CUDA graphs) avoid the unsafe lazy paths.
+  // get_buffer() returns a view of cuBLASMp's workspace with `buffer_shape`
+  // and `buffer_dtype`: after an all-gather GEMM, it holds the gathered input.
   CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
               transformer_engine::CommOverlapType comm_type,
               const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -852,6 +918,9 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+  // cuBLASMp: shape and dtype of the buffer view returned by get_buffer()
+  std::vector<size_t> _cublasmp_buffer_shape;
+  at::ScalarType _cublasmp_buffer_dtype{at::kByte};
 
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,

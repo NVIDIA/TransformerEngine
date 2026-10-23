@@ -321,11 +321,6 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
         return super().quantize_(tensor, noop_flag=noop_flag)
 
-    def detach(self) -> MXFP8Tensor:
-        # pylint: disable=missing-function-docstring
-        # TODO(ksivamani): Fix the detach bug
-        return MXFP8Tensor.make_like(self)
-
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
         # _rowwise_data may be None for columnwise-only sub-storages (hybrid quantization)

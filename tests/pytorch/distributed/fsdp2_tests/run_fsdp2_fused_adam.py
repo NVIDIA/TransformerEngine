@@ -1733,6 +1733,10 @@ def test_fused_adam_hybrid_scale_uniform_across_shards(hybrid_recipe_name):
     ), f"missing hybrid current-scaling directions: {checked}"
 
 
+@pytest.mark.skipif(
+    not te.is_fp8_available(),
+    reason=te.is_fp8_available(return_reason=True)[1],
+)
 def test_fused_adam_hybrid_identity_fp8_master_weights():
     """FSDP2 + FusedAdam with Hybrid(FP8 current rowwise, Identity columnwise).
 
@@ -2188,8 +2192,13 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
             with te.autocast(enabled=True, recipe=hybrid_recipe):
                 ref_output = model(x).clone()
 
+        # CustomRecipe's _extra_state pickle size isn't guaranteed across models/
+        # ranks, so strip it like the DelayedScaling case above (#1860).
+        model_state = {
+            k: v for k, v in model.state_dict().items() if not k.endswith("_extra_state")
+        }
         save_state = {
-            "model": model.state_dict(),
+            "model": model_state,
             "optimizer": optimizer.state_dict(),
         }
         dcp.save(save_state, checkpoint_id=checkpoint_dir)
@@ -2209,12 +2218,15 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
         F.mse_loss(out_tmp, target).backward()
         optimizer2.step()
 
+        model2_state = {
+            k: v for k, v in model2.state_dict().items() if not k.endswith("_extra_state")
+        }
         state_to_load = {
-            "model": model2.state_dict(),
+            "model": model2_state,
             "optimizer": optimizer2.state_dict(),
         }
         dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
-        model2.load_state_dict(state_to_load["model"])
+        model2.load_state_dict(state_to_load["model"], strict=False)
         optimizer2.load_state_dict(state_to_load["optimizer"])
 
         with torch.no_grad():

@@ -4,47 +4,76 @@
 
 import abc
 import contextlib
+import copy
+import dataclasses
+import os
+import re
+import subprocess
+import sys
+import textwrap
 import warnings
+from typing import Literal, NamedTuple, Union
 
 import pytest
 import torch
+
+try:
+    from torch._dynamo.utils import counters
+except ImportError:  # pragma: no cover
+    counters = None
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 
 try:
     from torch._opaque_base import OpaqueBaseMeta
     from torch._library.opaque_object import (
         get_opaque_type_name,
-        register_opaque_type,
+        register_custom_class,
         MemberType,
     )
 
-    _opaque_available = True
+    _opaque_available = hasattr(torch._library.opaque_object, "is_opaque_constant_type")
 except ImportError:
     _opaque_available = False
 
-from torch._dynamo.utils import counters
+pytestmark = pytest.mark.skipif(
+    not _opaque_available,
+    reason="This PyTorch build lacks the opaque-object API required by Transformer Engine",
+)
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
+from transformer_engine.pytorch.ops.basic.bias import BiasBwdArgs
+from transformer_engine.pytorch.ops.fuser import OperationFuser
+from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
-from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-from transformer_engine.pytorch.quantized_tensor import QuantizedTensor, Quantizer
+from transformer_engine.pytorch.quantized_tensor import (
+    QuantizedTensor,
+    QuantizedTensorStorage,
+    Quantizer,
+)
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
+from transformer_engine.pytorch.dynamo.fake import fake_bgrad
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
     is_fp8_block_scaling_available,
     is_nvfp4_available,
-    Float8BlockQuantizer,
-    MXFP8Quantizer,
-    NVFP4Quantizer,
 )
+
+# Import from the local utils.py by explicit path: importing cutedsl makes a
+# top-level ``utils`` package visible that would shadow it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import ModelConfig, dtype_tols, get_available_attention_backends, recipe_id
+
+sys.path.pop(0)
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
     UnfusedDotProductAttention,
 )
@@ -55,6 +84,15 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = is_fp8_block_scal
     return_reason=True
 )
 nvfp4_available, reason_for_no_nvfp4 = is_nvfp4_available(return_reason=True)
+
+
+@pytest.fixture(autouse=True)
+def _reset_fp8_global_state():
+    """Pending FP8 global state (e.g. delayed-scaling amax reductions) must not
+    leak between tests: a leftover buffer makes a later autocast __exit__ call
+    raw tex bindings, which graph-breaks fullgraph=True tests."""
+    yield
+    FP8GlobalStateManager.reset()
 
 
 def nvfp4_row_scaled():
@@ -96,6 +134,73 @@ if nvfp4_available:
     _all_recipes.append(nvfp4_row_scaled())
 
 
+# Modes exercised by the te.Linear tests; "reduce-overhead" = CUDA-graph trees.
+_compile_modes = ["default", "reduce-overhead"]
+
+
+def _cudagraph_warmup(fn, inp, *, backward: bool) -> None:
+    """One eager iteration so lazily-initialized TE state (fp8 meta, workspaces)
+    is allocated before any CUDA-graph capture."""
+    out = fn(inp)
+    if backward:
+        out.sum().backward()
+
+
+def _dynamo_counter(group: str, key: str):
+    """Read a torch._dynamo counter; None (with a warning) if the private
+    counters API is gone, so CI degrades instead of failing."""
+    try:
+        return counters[group][key]
+    except Exception:  # pylint: disable=broad-except
+        warnings.warn(f"torch._dynamo.utils.counters[{group!r}][{key!r}] unavailable")
+        return None
+
+
+@contextlib.contextmanager
+def _assert_no_cudagraph_skips(enabled: bool):
+    """Assert reduce-overhead really captured CUDA graphs: inductor may skip
+    capture and silently fall back to eager, which ``fullgraph=True`` does not
+    catch. No-op when ``enabled`` is False."""
+    before = _dynamo_counter("inductor", "cudagraph_skips")
+    yield
+    if enabled and before is not None:
+        skipped = _dynamo_counter("inductor", "cudagraph_skips") - before
+        assert skipped == 0, (
+            f"reduce-overhead fell back to eager: {skipped} cudagraph skip(s); "
+            "see the 'skipping cudagraphs due to ...' log for the reason"
+        )
+
+
+# All compute runs inside the op and the loss grad is ones, so bit-exact.
+_EAGER_ATOL, _EAGER_RTOL = 0.0, 0.0
+
+
+def _assert_close_eager_compiled(fn, compiled, model, base):
+    """Run ``fn`` eagerly and ``compiled`` on identical inputs; assert the
+    forward output and the input / weight / bias gradients match."""
+    inp_eager = base.detach().clone().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    out_eager = fn(inp_eager)
+    out_eager.sum().backward()
+    ref_out = out_eager.detach().clone()
+    ref_wgrad = model.weight.grad.detach().clone()
+    ref_igrad = inp_eager.grad.detach().clone()
+    # bias=False keeps a 0-element ``bias`` around; grad is None then.
+    ref_bgrad = model.bias.grad.detach().clone() if model.bias.grad is not None else None
+
+    inp_compiled = base.detach().clone().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    # Clone before a later cuda-graph replay overwrites the static output buffer.
+    out_compiled = compiled(inp_compiled).clone()
+    out_compiled.sum().backward()
+
+    torch.testing.assert_close(out_compiled, ref_out, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    torch.testing.assert_close(inp_compiled.grad, ref_igrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    torch.testing.assert_close(model.weight.grad, ref_wgrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    if ref_bgrad is not None:
+        torch.testing.assert_close(model.bias.grad, ref_bgrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+
+
 # ---------------------------------------------------------------------------
 # ToyQuantizer – opaque value-type quantizer for torch.compile
 # (requires torch opaque object support, not available in older PyTorch)
@@ -128,9 +233,9 @@ if _opaque_available:
                 {"ToyQuantizer": ToyQuantizer},
             )
 
-    register_opaque_type(
+    register_custom_class(
         ToyQuantizer,
-        typ="value",
+        typ="constant",
         members={
             "__setattr__": MemberType.USE_REAL,
             "set_usage": MemberType.USE_REAL,
@@ -602,6 +707,9 @@ def _packed_layout(qkv_format: str, packed_dim: int, interleave_dim: int) -> str
 
 _DPA_COMPILE_CONFIGS = {
     "self_bshd_causal": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal")),
+    "self_bshd_causal_dropout": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", dropout_p=0.1)
+    ),
     "self_sbhd_no_mask": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="no_mask"), "sbhd"),
     "self_bshd_swa": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal", window_size=(16, 0))),
     "gqa_bshd_causal": _cfg(ModelConfig(2, 128, 8, 64, num_gqa_groups=2, attn_mask_type="causal")),
@@ -622,6 +730,21 @@ _DPA_COMPILE_CONFIGS = {
         ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="qkv", interleave_dim=-2
     ),
     "packed_kv_bshd_bs2hd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="kv"),
+    "packed_kv_bshd_bsh2d": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="kv", interleave_dim=-2
+    ),
+    "packed_qkv_bs3hd_singleton": _cfg(
+        ModelConfig(1, 1, 1, 64, attn_mask_type="causal"), packed="qkv"
+    ),
+    "packed_qkv_bsh3d_singleton": _cfg(
+        ModelConfig(1, 1, 1, 64, attn_mask_type="causal"), packed="qkv", interleave_dim=-2
+    ),
+    "packed_kv_bshd_bs2hd_singleton": _cfg(
+        ModelConfig(1, 1, 1, 64, attn_mask_type="causal"), packed="kv"
+    ),
+    "packed_kv_bshd_bsh2d_singleton": _cfg(
+        ModelConfig(1, 1, 1, 64, attn_mask_type="causal"), packed="kv", interleave_dim=-2
+    ),
     "packed_kv_thd_th2d": _cfg(
         ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"),
         "thd",
@@ -806,16 +929,8 @@ def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
     return args, kwargs, grad_tensors
 
 
-def _skip_unsupported(
-    spec: dict, backend: str, dtype, compiled: bool = True, inference_params=None
-) -> None:
-    """Skip what the backend under test cannot run, or -- for a test that
-    compiles it -- cannot be compiled."""
-    if compiled and backend == "fused":
-        # FusedAttention's forward carries @no_torch_dynamo, so there is nothing
-        # to compile: it runs as an eager island. Drop this skip once it traces,
-        # and the tests below cover it as they do the others.
-        pytest.skip("FusedAttention is an eager island and does not compile")
+def _skip_unsupported(spec: dict, backend: str, dtype, inference_params=None) -> None:
+    """Skip configurations the backend under test cannot run."""
     available, _, _ = get_available_attention_backends(
         spec["model_config"],
         dtype,
@@ -923,12 +1038,17 @@ def _compare_compiled_to_eager(
 ) -> None:
     """Run the module eagerly and compiled on the same inputs, and compare both
     the output and every input gradient."""
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_state = torch.cuda.get_rng_state()
     eager = _run_and_capture(module, args, kwargs, grads)
 
     torch._dynamo.reset()
     # Force backend selection to be re-run (and traced) inside the compiled
     # region instead of being served from the cache the eager call populated.
     _force_dpa_backend(monkeypatch, backend)
+    # Reuse the eager dropout mask when comparing outputs and gradients.
+    torch.set_rng_state(cpu_rng_state)
+    torch.cuda.set_rng_state(cuda_rng_state)
     compiled = _run_and_capture(torch.compile(module, **compile_kwargs), args, kwargs, grads)
 
     _assert_dpa_backend(backend)
@@ -937,7 +1057,8 @@ def _compare_compiled_to_eager(
 
 @pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("config", _DPA_COMPILE_CONFIGS.keys())
-def test_dpa_torch_compile(monkeypatch, backend, config):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_dpa_torch_compile(monkeypatch, backend, config, dtype):
     """`DotProductAttention` under `torch.compile(fullgraph=True)` must match
     eager in forward and backward, for every backend that supports the
     configuration.
@@ -946,45 +1067,59 @@ def test_dpa_torch_compile(monkeypatch, backend, config):
     whole module: input unpacking, qkv layout, backend selection and the backend
     itself.
     """
-    dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS[config]
     module = _make_dpa(spec, dtype)
     args, kwargs, grads = _make_dpa_inputs(spec, dtype)
     _skip_unsupported(spec, backend, dtype, inference_params=kwargs.get("inference_params"))
     _force_dpa_backend(monkeypatch, backend)
 
+    # Inductor uses a different RNG for unfused dropout by default. Keep the
+    # eager RNG here so this numerical comparison uses the same dropout mask.
+    options = (
+        {"fallback_random": True} if backend == "unfused" and spec["model_config"].dropout_p else {}
+    )
     _compare_compiled_to_eager(
-        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True
+        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True, options=options
     )
 
 
-def test_dpa_torch_compile_around_fused(monkeypatch):
-    """FusedAttention itself is an eager island, but everything around it is
-    compiled: DotProductAttention traces up to the backend call, breaks the
-    graph there and resumes afterwards. What crosses that break has to survive
-    it -- the sub-backend enum did not, and reached cuDNN as the function that
-    produced it."""
+def test_dpa_torch_compile_fused_op_unavailable(monkeypatch):
+    """Without the fused attention custom op, FusedAttention is an eager island
+    and everything around it is compiled: DotProductAttention traces up to the
+    backend call, breaks the graph there and resumes afterwards. What crosses
+    that break has to survive it -- the sub-backend enum did not, and reached
+    cuDNN as the function that produced it."""
+    from transformer_engine.pytorch.attention.dot_product_attention import backends
+
     dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
-    _skip_unsupported(spec, "fused", dtype, compiled=False)
+    _skip_unsupported(spec, "fused", dtype)
     _force_dpa_backend(monkeypatch, "fused")
+    monkeypatch.setattr(backends, "_fused_attn_op", None)
 
     module = _make_dpa(spec, dtype)
     args, kwargs, grads = _make_dpa_inputs(spec, dtype)
     # No fullgraph: the graph break at the eager island is the point here.
-    _compare_compiled_to_eager(module, args, kwargs, grads, monkeypatch, "fused", dtype)
+    with pytest.warns(UserWarning, match="Falling back to eager execution"):
+        _compare_compiled_to_eager(module, args, kwargs, grads, monkeypatch, "fused", dtype)
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
-@pytest.mark.parametrize("config", ["self_bshd_causal", "kv_cache_bshd"])
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
+@pytest.mark.parametrize(
+    "config",
+    ["self_bshd_causal", "kv_cache_bshd", "packed_qkv_bsh3d", "packed_kv_bshd_bsh2d"],
+)
 def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
     """`mode="reduce-overhead"`: forward and backward of DotProductAttention
     are captured into CUDA graphs and replayed on subsequent iterations."""
     dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS[config]
-    _force_dpa_backend(monkeypatch, backend)
-
     module = _make_dpa(spec, dtype)
+    _, kwargs, _ = _make_dpa_inputs(spec, dtype)
+    # Before forcing the backend: probing the available backends re-runs the
+    # selection and would otherwise be cached over the forced one.
+    _skip_unsupported(spec, backend, dtype, inference_params=kwargs.get("inference_params"))
+    _force_dpa_backend(monkeypatch, backend)
 
     torch._dynamo.reset()
     counters.clear()
@@ -1004,7 +1139,7 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
     assert not counters["inductor"]["cudagraph_skips"], "inductor skipped CUDA graphs"
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("paged", [False, True], ids=["non_paged", "paged"])
 @pytest.mark.parametrize("cuda_graphs", [False, True], ids=["default", "cudagraphs"])
 def test_dpa_torch_compile_kv_cache_decoding(monkeypatch, backend, paged, cuda_graphs):
@@ -1143,7 +1278,7 @@ _EAGER_FALLBACK_CASES = {
 }
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("case", _EAGER_FALLBACK_CASES.keys())
 def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
     """Calls that cannot be traced run as an eager island instead, with a
@@ -1154,6 +1289,7 @@ def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
     dtype = torch.bfloat16
     config_name, make_inputs = _EAGER_FALLBACK_CASES[case]
     spec = _DPA_COMPILE_CONFIGS[config_name]
+    _skip_unsupported(spec, backend, dtype)
     _force_dpa_backend(monkeypatch, backend)
 
     module = _make_dpa(spec, dtype)
@@ -1269,7 +1405,7 @@ def test_get_attention_backend_traceable(monkeypatch):
     monkeypatch.setattr(
         dpa_utils.tex,
         "get_fused_attn_backend",
-        lambda *args: dpa_utils.FusedAttnBackend["No_Backend"],
+        lambda *args: (tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend, "disabled by test"),
     )
 
     def fn_no_backend(x, params):
@@ -1330,12 +1466,18 @@ def _hw_available(quantizer):
     return fp8_available  # Float8CurrentScalingQuantizer
 
 
-# (factory, kwargs producing a different-but-valid config)
 _VALUE_QUANTIZERS = [
     pytest.param(_mxfp8, id="mxfp8"),
     pytest.param(_blockwise, id="float8_blockwise"),
     pytest.param(_current_scaling, id="float8_current_scaling"),
-    pytest.param(_nvfp4, id="nvfp4"),
+    pytest.param(
+        _nvfp4,
+        id="nvfp4",
+        marks=pytest.mark.skipif(
+            not torch.cuda.is_available(),
+            reason="NVFP4Quantizer requires CUDA to construct",
+        ),
+    ),
 ]
 
 
@@ -1414,7 +1556,7 @@ if _opaque_available:
 
 @pytest.mark.skipif(
     not _opaque_available,
-    reason="torch.compile opaque-object support requires PyTorch >= 2.11",
+    reason="torch opaque object API not available",
 )
 @pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
 def test_quantizer_value_object_fullgraph(factory):
@@ -1702,9 +1844,13 @@ def test_tensor_spec_matches_primitives(factory, shape):
     # Metadata matches the quantizer's.
     assert spec.create_metadata() == q.create_metadata(shape, dtype=torch.bfloat16)
 
-    # inner_names + create_inner_tensors match inner_tensor_specs.
+    # inner_names follows the storage's canonical __tensor_flatten__ order (the
+    # order the real op flattens its outputs to), while create_inner_tensors
+    # matches the inner_tensor_specs geometry (a name->shape/dtype mapping).
     specs = q.inner_tensor_specs(shape)
-    names = tuple(specs)
+    direct = _build_from_primitives(q, shape, torch.bfloat16)
+    names = tuple(direct.__tensor_flatten__()[0])
+    assert set(names) == set(specs)
     assert spec.inner_names() == names
     inner_tensors = spec.create_inner_tensors()
     assert len(inner_tensors) == len(names)
@@ -1714,7 +1860,6 @@ def test_tensor_spec_matches_primitives(factory, shape):
         assert inner.dtype == exp_dtype
 
     # The assembled tensor matches one built directly from the primitives.
-    direct = _build_from_primitives(q, shape, torch.bfloat16)
     assert _signature(spec.create_tensor(), names) == _signature(direct, names)
 
 
@@ -1780,4 +1925,1346 @@ def test_to_tensor_spec_quantized(factory, shape):
     # Rebuilding from the derived spec matches the original tensor's structure.
     assert _signature(spec.create_tensor(), spec.inner_names()) == _signature(
         tensor, spec.inner_names()
+    )
+
+
+# ---------------------------------------------------------------------------
+# te.Linear
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [None, *_all_recipes],
+    ids=lambda r: "bf16" if r is None else type(r).__name__,
+)
+def test_te_linear_compiles(fp8_recipe, compile_mode):
+    """
+    torch.compile(fullgraph=True) of ``te.Linear`` under every built-in
+    recipe (plus the bf16-only baseline with no autocast), for both the default
+    backend and ``mode="reduce-overhead"`` (CUDA-graph trees).
+    """
+    dtype = torch.bfloat16
+    device = "cuda"
+
+    # FP8 GEMMs require leading dimensions divisible by 16.
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    def fn(inp):
+        if fp8_recipe is None:
+            return model(inp)
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        _cudagraph_warmup(
+            fn,
+            torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True),
+            backward=True,
+        )
+        model.zero_grad(set_to_none=True)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    # Iterate a few times so reduce-overhead actually replays a captured graph.
+    n_iters = 3 if compile_mode == "reduce-overhead" else 1
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(n_iters):
+            base = torch.randn(32, 64, dtype=dtype, device=device)
+            _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize(
+    "fp8_recipe,input_shape",
+    [
+        pytest.param(None, (64,), id="bf16-rank1"),
+        pytest.param(None, (2, 4, 4, 64), id="bf16-rank4"),
+    ]
+    + [
+        pytest.param(fp8_recipe, shape, id=f"{name}-{shape}")
+        for name, fp8_recipe in (
+            ("nvfp4", recipe.NVFP4BlockScaling()),
+            ("nvfp4-no-rht", recipe.NVFP4BlockScaling(disable_rht=True)),
+        )
+        for shape in ((1, 128, 128), (2, 4, 16, 128))
+    ],
+)
+def test_te_linear_compiles_non_2d_input(fp8_recipe, input_shape, compile_mode):
+    """Compiled Linear preserves non-matrix activation shapes in forward and backward."""
+    if isinstance(fp8_recipe, recipe.NVFP4BlockScaling) and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    dtype = torch.bfloat16
+    out_features = 32 if fp8_recipe is None else 128
+    model = te.Linear(input_shape[-1], out_features, params_dtype=dtype, device="cuda")
+
+    def fn(inp):
+        if fp8_recipe is None:
+            return model(inp)
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        _cudagraph_warmup(
+            fn,
+            torch.randn(input_shape, dtype=dtype, device="cuda", requires_grad=True),
+            backward=True,
+        )
+        model.zero_grad(set_to_none=True)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(3 if compile_mode == "reduce-overhead" else 1):
+            base = torch.randn(input_shape, dtype=dtype, device="cuda")
+            _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+def test_te_linear_compile_with_quantized_fp8_weight(compile_mode):
+    """torch.compile of Linear with the weight initialized as an FP8 tensor
+    (exercises the wrapper op's ``register_torch_dispatch`` input flattening)."""
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    with te.quantized_model_init(enabled=True, recipe=fp8_recipe):
+        model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    assert isinstance(model.weight, te.Float8Tensor)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        _cudagraph_warmup(
+            fn,
+            torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True),
+            backward=True,
+        )
+        model.zero_grad(set_to_none=True)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    n_iters = 3 if compile_mode == "reduce-overhead" else 1
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(n_iters):
+            base = torch.randn(32, 64, dtype=dtype, device=device)
+            _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+def test_te_linear_compile_with_fp8_output(compile_mode):
+    """torch.compile of ``te.Linear(..., fp8_output=True)`` under no_grad:
+    forward must return a working :class:`Float8Tensor` (exercises the output
+    rewrap path). The differentiable case falls back to eager, so it is not
+    covered here."""
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, fp8_output=True)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        with torch.no_grad():
+            _cudagraph_warmup(fn, torch.randn(32, 64, dtype=dtype, device=device), backward=False)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    n_iters = 3 if compile_mode == "reduce-overhead" else 1
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(n_iters):
+            inp = torch.randn(32, 64, dtype=dtype, device=device)
+            with torch.no_grad():
+                out_eager = fn(inp)
+                out = compiled(inp)
+            assert isinstance(
+                out, te.Float8Tensor
+            ), f"expected Float8Tensor output, got {type(out).__name__}"
+            assert out.shape == (32, 32)
+            assert (
+                out._quantizer is not None
+            ), "FP8 output lost its quantizer on the torch.compile path"
+            deq = out.dequantize()
+            assert deq.shape == (32, 32)
+            assert deq.dtype == dtype
+            torch.testing.assert_close(
+                deq, out_eager.dequantize(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+            )
+
+
+# Configs rejected by LinearFwdArgs.compile_unsupported_reason() that a
+# single-GPU unit test can construct. Distributed-only reasons (fsdp_group,
+# DistributedWeight) and CPU offloading need machinery this file doesn't have;
+# delayed scaling is a hard error (check_recipe_support), tested separately.
+# Modes: "bwd" = fwd+bwd vs eager; "fwd_grad" = grad-enabled forward only
+# (differentiable fp8_output backward hits a PyTorch limitation: the Float8
+# output crossing the graph-break boundary gets a plain-tensor tangent);
+# "no_grad" = forward under no_grad.
+_FALLBACK_CASES = [
+    "fp8_output_differentiable",
+    "fuse_wgrad_accumulation",
+    "delayed_wgrad",
+    "quantized_input",
+]
+
+
+def _fallback_case(case, dtype, device):
+    """Build ``(model, fn, mode, post_backward, reason)`` for one case."""
+    model_kwargs = {}
+    if case == "fuse_wgrad_accumulation":
+        model_kwargs["fuse_wgrad_accumulation"] = True
+    elif case == "delayed_wgrad":
+        model_kwargs["delay_wgrad_compute"] = True
+    model = te.Linear(64, 32, params_dtype=dtype, device=device, **model_kwargs)
+
+    if case == "fp8_output_differentiable":
+        fp8_recipe = recipe.Float8CurrentScaling()
+
+        def fn(inp):
+            with te.autocast(recipe=fp8_recipe):
+                return model(inp, fp8_output=True).dequantize()
+
+        return model, fn, "fwd_grad", None, "differentiable fp8_output=True"
+    if case == "fuse_wgrad_accumulation":
+        model.weight.main_grad = torch.zeros_like(model.weight, dtype=torch.float32)
+        return model, model, "bwd", None, "fuse_wgrad_accumulation"
+    if case == "delayed_wgrad":
+        return model, model, "bwd", model.backward_dw, "delayed wgrad compute"
+    if case == "quantized_input":
+        fp8_recipe = recipe.Float8CurrentScaling()
+
+        def fn(inp):
+            with te.autocast(recipe=fp8_recipe):
+                return model(inp)
+
+        return model, fn, "no_grad", None, "a quantized input tensor"
+    raise ValueError(case)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("case", _FALLBACK_CASES)
+def test_te_linear_compile_eager_fallback(case):
+    """Configs unsupported on the compiled custom-op path must fall back to
+    eager under ``torch.compile`` -- warning + numerics identical to eager --
+    and graph-break with the explicit reason under ``fullgraph=True``."""
+    dtype, device = torch.bfloat16, "cuda"
+    torch.manual_seed(0)
+    model_ref, fn_ref, mode, post_bwd_ref, _ = _fallback_case(case, dtype, device)
+    torch.manual_seed(0)
+    model, fn, _, post_bwd, reason = _fallback_case(case, dtype, device)
+
+    def make_inp():
+        torch.manual_seed(1)
+        x = torch.randn(32, 64, dtype=dtype, device=device)
+        if case == "quantized_input":
+            quantizer = Float8CurrentScalingQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, device=device
+            )
+            return quantizer(x)
+        return x.requires_grad_(mode != "no_grad")
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn)
+    grad_ctx = torch.no_grad() if mode == "no_grad" else contextlib.nullcontext()
+
+    inp_ref, inp = make_inp(), make_inp()
+    with grad_ctx:
+        out_ref = fn_ref(inp_ref)
+        with pytest.warns(UserWarning, match="Falling back to eager execution under torch.compile"):
+            out = compiled(inp)
+    if mode == "bwd":
+        out_ref.sum().backward()
+        if post_bwd_ref is not None:
+            post_bwd_ref()
+        out.sum().backward()
+        if post_bwd is not None:
+            post_bwd()
+        torch.testing.assert_close(inp.grad, inp_ref.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+        # The fallback must also preserve the stateful side effects that define
+        # these cases (main_grad accumulation, delayed wgrad), not just inp.grad.
+        if getattr(model_ref.weight, "main_grad", None) is not None:
+            assert model.weight.grad is None
+            torch.testing.assert_close(
+                model.weight.main_grad,
+                model_ref.weight.main_grad,
+                atol=_EAGER_ATOL,
+                rtol=_EAGER_RTOL,
+            )
+        else:
+            torch.testing.assert_close(
+                model.weight.grad, model_ref.weight.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+            )
+    torch.testing.assert_close(out.detach(), out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+
+    torch._dynamo.reset()
+    compiled_fg = torch.compile(fn, fullgraph=True)
+    with pytest.raises(Exception, match=re.escape(reason)):
+        with grad_ctx:
+            compiled_fg(make_inp())
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_te_linear_compile_delayed_scaling_raises():
+    """Delayed scaling is rejected under torch.compile with a hard error
+    (``check_recipe_support`` in ``te.autocast.__enter__``), not a fallback.
+    Without fullgraph the raising frame is skipped and re-run eagerly (where
+    the guard passes), so only ``fullgraph=True`` surfaces the error."""
+    dtype, device = torch.bfloat16, "cuda"
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+    fp8_recipe = recipe.DelayedScaling()
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
+    with pytest.raises(Exception, match="DelayedScaling is not supported under torch.compile"):
+        torch.compile(fn, fullgraph=True)(inp)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize("deferred_backward", [False, True])
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [
+        pytest.param(
+            recipe.Float8CurrentScaling(),
+            marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+        ),
+        pytest.param(
+            recipe.Float8BlockScaling(),
+            marks=pytest.mark.skipif(
+                not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling
+            ),
+        ),
+        pytest.param(
+            recipe.MXFP8BlockScaling(),
+            marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+        ),
+        pytest.param(
+            recipe.NVFP4BlockScaling(disable_stochastic_rounding=True),
+            marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+        ),
+    ],
+    ids=recipe_id,
+)
+def test_te_linear_compile_is_first_microbatch(
+    fp8_recipe, compile_mode, deferred_backward, monkeypatch
+):
+    """Reuse cached weights across microbatches and refresh after optimizer updates."""
+    dtype, device = torch.bfloat16, "cuda"
+    model = te.Linear(128, 128, params_dtype=dtype, device=device)
+    ref_model = te.Linear(128, 128, params_dtype=dtype, device=device)
+    ref_model.load_state_dict(model.state_dict())
+
+    def fn(inp, is_first):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, is_first_microbatch=is_first)
+
+    def ref_fn(inp, is_first):
+        with te.autocast(recipe=fp8_recipe):
+            return ref_model(inp, is_first_microbatch=is_first)
+
+    for forward in (fn, ref_fn):
+        inp = torch.randn(128, 128, dtype=dtype, device=device, requires_grad=True)
+        forward(inp, None).sum().backward()
+
+    replay_count = 0
+    original_replay = torch.cuda.CUDAGraph.replay
+
+    def replay(graph):
+        nonlocal replay_count
+        replay_count += 1
+        return original_replay(graph)
+
+    if compile_mode == "reduce-overhead":
+        monkeypatch.setattr(torch.cuda.CUDAGraph, "replay", replay)
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for step in range(5):
+            if compile_mode == "reduce-overhead":
+                torch.compiler.cudagraph_mark_step_begin()
+            model.zero_grad(set_to_none=True)
+            ref_model.zero_grad(set_to_none=True)
+            pending = []
+            replays_before = replay_count
+            for microbatch in range(3):
+                base = torch.randn(128, 128, dtype=dtype, device=device)
+                inp_ref = base.detach().clone().requires_grad_(True)
+                inp = base.detach().clone().requires_grad_(True)
+                is_first = microbatch == 0
+                out_ref = ref_fn(inp_ref, is_first)
+                out = compiled(inp, is_first).clone()
+                torch.testing.assert_close(out, out_ref, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+
+                workspace = model._fp8_workspaces["weight"]
+                if is_first:
+                    cached_workspace = workspace
+                else:
+                    assert workspace is cached_workspace
+                torch.testing.assert_close(
+                    workspace.dequantize(),
+                    ref_model._fp8_workspaces["weight"].dequantize(),
+                    atol=_EAGER_ATOL,
+                    rtol=_EAGER_RTOL,
+                )
+
+                pending.append((out, out_ref, inp, inp_ref))
+                if not deferred_backward or microbatch == 2:
+                    for result, ref_result, input_tensor, ref_input in pending:
+                        ref_result.sum().backward()
+                        result.sum().backward()
+                        torch.testing.assert_close(
+                            input_tensor.grad, ref_input.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+                        )
+                        for param, ref_param in zip(model.parameters(), ref_model.parameters()):
+                            torch.testing.assert_close(
+                                param.grad, ref_param.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+                            )
+                    pending.clear()
+            if step == 4 and compile_mode == "reduce-overhead":
+                assert replay_count > replays_before, "CUDA graphs were recorded but never replayed"
+            with torch.no_grad():
+                for param, ref_param in zip(model.parameters(), ref_model.parameters()):
+                    param.add_(param.grad, alpha=-0.001)
+                    ref_param.add_(ref_param.grad, alpha=-0.001)
+            del cached_workspace, workspace, out, out_ref, result, ref_result
+
+    torch._dynamo.reset()
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.xfail(
+    reason=(
+        "value-opaque module state comes back as None on recompile"
+        " (pytorch/pytorch#187041; fixed by #187057 (cold compile, merged)"
+        " + #193190 (FX-graph-cache hit, in review))"
+    ),
+    strict=False,
+)
+def test_te_linear_compile_train_eval_switch():
+    """train -> eval -> train on the same compiled ``te.Linear``, vs eager."""
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    def train_step():
+        inp = torch.randn(16, 64, dtype=dtype, device=device, requires_grad=True)
+        out = compiled(inp)
+        out.sum().backward()
+        inp_ref = inp.detach().clone().requires_grad_(True)
+        model.zero_grad(set_to_none=True)
+        out_ref = fn(inp_ref)
+        out_ref.sum().backward()
+        torch.testing.assert_close(
+            out.detach(), out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+        )
+        torch.testing.assert_close(inp.grad, inp_ref.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+        model.zero_grad(set_to_none=True)
+
+    train_step()
+
+    model.eval()
+    x = torch.randn(16, 64, dtype=dtype, device=device)
+    with torch.no_grad():
+        out_eval = compiled(x)
+        ref_eval = fn(x)
+    torch.testing.assert_close(out_eval, ref_eval, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+
+    model.train()
+    train_step()
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+def test_te_linear_dynamic_shapes():
+    """torch.compile of ``te.Linear`` with a ``mark_dynamic`` batch dimension:
+    one graph must serve all batch sizes -- no recompiles -- and match eager
+    numerically.
+
+    Only the leading (batch/sequence) dims may be dynamic; the last dim is
+    fixed by the weight's ``in_features``.
+    """
+    dtype = torch.bfloat16
+    device = "cuda"
+    in_features, out_features = 64, 32
+    model = te.Linear(in_features, out_features, params_dtype=dtype, device=device)
+
+    def fn(inp):
+        return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    batch_sizes = [16, 32, 48]
+
+    # Two warmup calls: the second absorbs the one-time recompile from module
+    # attributes lazily created during call one (e.g. the cached ``is_fsdp2``).
+    for _ in range(2):
+        warm = torch.randn(batch_sizes[0], in_features, dtype=dtype, device=device)
+        torch._dynamo.mark_dynamic(warm, 0)
+        compiled(warm.requires_grad_(True)).sum().backward()
+    model.zero_grad(set_to_none=True)
+    unique_graphs_baseline = _dynamo_counter("stats", "unique_graphs")
+    if not unique_graphs_baseline:
+        warnings.warn("unique_graphs counter is stale; skipping the recompile check")
+
+    for batch in batch_sizes:
+        inp = torch.randn(batch, in_features, dtype=dtype, device=device, requires_grad=True)
+        # Mark batch dim as dynamic so Dynamo traces once and reuses across batch sizes.
+        torch._dynamo.mark_dynamic(inp, 0)
+        out = compiled(inp)
+        assert out.shape == (batch, out_features), f"wrong output shape for batch={batch}"
+        out.sum().backward()
+        assert inp.grad is not None, f"no input gradient for batch={batch}"
+        assert inp.grad.shape == inp.shape, f"wrong grad shape for batch={batch}"
+
+        # Verify numerics against eager on each distinct batch size.
+        inp_eager = inp.detach().clone().requires_grad_(True)
+        model.zero_grad(set_to_none=True)
+        out_eager = model(inp_eager)
+        out_eager.sum().backward()
+        torch.testing.assert_close(
+            out.detach(),
+            out_eager.detach(),
+            atol=_EAGER_ATOL,
+            rtol=_EAGER_RTOL,
+            msg=f"forward mismatch at batch={batch}",
+        )
+        torch.testing.assert_close(
+            inp.grad,
+            inp_eager.grad,
+            atol=_EAGER_ATOL,
+            rtol=_EAGER_RTOL,
+            msg=f"dgrad mismatch at batch={batch}",
+        )
+
+    if unique_graphs_baseline:
+        unique_graphs_after = _dynamo_counter("stats", "unique_graphs")
+        assert unique_graphs_after == unique_graphs_baseline, (
+            "Unexpected recompilation(s) across different batch sizes: "
+            f"{unique_graphs_after - unique_graphs_baseline} extra graph(s) compiled"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# transformer_engine.pytorch.ops under torch.compile
+# --------------------------------------------------------------------------- #
+
+
+@dataclasses.dataclass(slots=True)
+class _AffineFwdArgs:
+    input_: torch.Tensor
+    weight: torch.Tensor
+    gain: float = 1.0
+    offset: Union[torch.Tensor, QuantizedTensorStorage] = None
+
+
+@dataclasses.dataclass(slots=True)
+class _AffineBwdArgs:
+    grad_output: torch.Tensor
+    input_: torch.Tensor
+    weight: torch.Tensor
+    gain: float
+
+
+class _AffineOp(BasicOperation):
+    """Learnable scale with read-only gain and offset kwargs."""
+
+    fwd_args_type = _AffineFwdArgs
+    bwd_args_type = _AffineBwdArgs
+
+    def __init__(self, weight=2.0, dtype=torch.float32):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(weight, dtype=dtype, device="cuda"))
+
+    @classmethod
+    def forward_compute(cls, args, *, in_custom_op=False):
+        output = args.input_ * args.weight * args.gain
+        offset = args.offset
+        if isinstance(offset, QuantizedTensorStorage):
+            offset = offset.dequantize()
+        if offset is not None:
+            output = output + offset
+        return output, [()], ()
+
+    @classmethod
+    def forward_compute_fake(cls, args):
+        return args.input_, [()], ()
+
+    @classmethod
+    def backward_compute(cls, args, *, in_custom_op=False):
+        dy = args.grad_output
+        return dy * args.weight * args.gain, [((dy * args.input_).sum() * args.gain,)], [()]
+
+    @classmethod
+    def backward_compute_fake(cls, args):
+        dy = args.grad_output
+        return dy, [(TensorSpec(shape=(), dtype=dy.dtype, device=dy.device),)], [()]
+
+    def pack_forward_args(self, basic_op_ctxs, input_, *, basic_op_kwargs, **unused):
+        return _AffineFwdArgs(input_, self.weight, **basic_op_kwargs[0])
+
+    def forward_setup_context(self, basic_op_ctxs, args, aux):
+        ctx = basic_op_ctxs[0]
+        ctx.save_for_backward(args.input_, args.weight)
+        ctx.gain = args.gain
+
+    def pack_backward_args(self, basic_op_ctxs, grad_output, **unused):
+        ctx = basic_op_ctxs[0]
+        return _AffineBwdArgs(grad_output, *ctx.saved_tensors, ctx.gain)
+
+
+class _BackwardAffinePair(te.ops.FusedOperation):
+    def fuser_backward(self, basic_op_ctxs, grad_output, **unused):
+        grads = []
+        for op, ctx in reversed(list(zip(self.basic_ops, basic_op_ctxs))):
+            grad_output, params, _ = op.fuser_backward(
+                [ctx], grad_output, basic_op_grad_extra_outputs=[()]
+            )
+            grads.insert(0, params[0])
+        return grad_output, grads, [(), ()]
+
+
+@dataclasses.dataclass(slots=True)
+class _AffinePairFwdArgs:
+    input_: torch.Tensor
+    weight0: torch.Tensor
+    weight1: torch.Tensor
+    residual: torch.Tensor
+
+
+@dataclasses.dataclass(slots=True)
+class _AffinePairBwdArgs:
+    grad_output: torch.Tensor
+    input_: torch.Tensor
+    intermediate: torch.Tensor
+    weight0: torch.Tensor
+    weight1: torch.Tensor
+    grad_extra_output: torch.Tensor
+
+
+class _AffinePair(te.ops.FusedOperation):
+    """Two scales with a residual input and a squared intermediate output."""
+
+    fwd_args_type = _AffinePairFwdArgs
+    bwd_args_type = _AffinePairBwdArgs
+
+    @classmethod
+    def forward_compute(cls, args, *, in_custom_op=False):
+        intermediate = args.input_ * args.weight0
+        output = intermediate * args.weight1 + args.residual
+        return output, [(), (intermediate.square(), None)], (intermediate,)
+
+    @classmethod
+    def forward_compute_fake(cls, args):
+        return args.input_, [(), (args.input_, None)], (args.input_,)
+
+    @classmethod
+    def backward_compute(cls, args, *, in_custom_op=False):
+        dy = args.grad_output
+        du = dy * args.weight1 + 2 * args.intermediate * args.grad_extra_output
+        return (
+            du * args.weight0,
+            [((du * args.input_).sum(),), ((dy * args.intermediate).sum(),)],
+            [(), (dy.clone(),)],
+        )
+
+    @classmethod
+    def backward_compute_fake(cls, args):
+        dy = args.grad_output
+        scalar = TensorSpec(shape=(), dtype=dy.dtype, device=dy.device)
+        return dy, [(scalar,), (scalar,)], [(), (dy,)]
+
+    def pack_forward_args(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
+        return _AffinePairFwdArgs(
+            input_,
+            self.basic_ops[0].weight,
+            self.basic_ops[1].weight,
+            basic_op_extra_inputs[1][0],
+        )
+
+    def forward_setup_context(self, basic_op_ctxs, args, aux):
+        basic_op_ctxs[0].save_for_backward(args.input_, args.weight0)
+        basic_op_ctxs[1].save_for_backward(aux[0], args.weight1)
+
+    def pack_backward_args(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
+        x, weight0 = basic_op_ctxs[0].saved_tensors
+        intermediate, weight1 = basic_op_ctxs[1].saved_tensors
+        return _AffinePairBwdArgs(
+            grad_output, x, intermediate, weight0, weight1, basic_op_grad_extra_outputs[1][0]
+        )
+
+
+def _compile_with_graphs(fn):
+    graphs = []
+
+    def backend(graph, inputs):
+        graphs.append(graph)
+        return torch._dynamo.lookup_backend("inductor")(graph, inputs)
+
+    return torch.compile(fn, fullgraph=True, backend=backend), graphs
+
+
+_ExecutionPath = Literal["custom_op", "eager"]
+
+
+def _assert_custom_ops(
+    graphs,
+    name,
+    *,
+    forward: bool = True,
+    backward: bool = True,
+):
+    targets = {
+        str(node.target).removesuffix(".default").removesuffix("_base")
+        for graph in graphs
+        for module in graph.modules()
+        if isinstance(module, torch.fx.GraphModule)
+        for node in module.graph.nodes
+        if node.op == "call_function"
+    }
+    for suffix, expected in (("", forward), ("_backward", backward)):
+        assert (f"transformer_engine_compile.{name}{suffix}" in targets) == expected, targets
+
+
+def _check_ops(fn, model, x, dy, kwargs=None):
+    """Compare the pipeline with native PyTorch forward and autograd."""
+    params = tuple(model.parameters())
+    kwargs = kwargs or {}
+    offset = kwargs.get("offset", 0)
+    if isinstance(offset, QuantizedTensorStorage):
+        offset = offset.dequantize()
+    reference = x
+    for i, weight in enumerate(params):
+        reference = reference * weight
+        if i == 0:
+            reference = reference * kwargs.get("gain", 1.0) + offset
+    output = fn(x, op_kwargs={0: kwargs})
+    actual = output, torch.autograd.grad(output, (x, *params), dy)
+    expected = reference, torch.autograd.grad(reference, (x, *params), dy)
+    torch.testing.assert_close(actual, expected)
+
+
+class _Scenario(NamedTuple):
+    variant: str
+    expected_warning: str | None
+    forward_path: _ExecutionPath
+    backward_path: _ExecutionPath
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        _Scenario(
+            variant="single",
+            expected_warning=None,
+            forward_path="custom_op",
+            backward_path="custom_op",
+        ),
+        _Scenario(
+            variant="single_forward",
+            expected_warning="without a custom op for backward",
+            forward_path="custom_op",
+            backward_path="eager",
+        ),
+        _Scenario(
+            variant="single_backward",
+            expected_warning="without a custom op for forward",
+            forward_path="eager",
+            backward_path="custom_op",
+        ),
+        _Scenario(
+            variant="single_eager",
+            expected_warning="without a custom op",
+            forward_path="eager",
+            backward_path="eager",
+        ),
+        # A pipeline can dispatch each operation through its own custom op.
+        _Scenario(
+            variant="multi",
+            expected_warning=None,
+            forward_path="custom_op",
+            backward_path="custom_op",
+        ),
+        # This test fusion only implements eager backward; forward still compiles.
+        _Scenario(
+            variant="backward_fusion",
+            expected_warning="without a custom op for backward",
+            forward_path="custom_op",
+            backward_path="eager",
+        ),
+        _Scenario(
+            variant="legacy",
+            expected_warning="without a custom op",
+            forward_path="eager",
+            backward_path="eager",
+        ),
+    ],
+    ids=lambda scenario: scenario.variant,
+)
+def test_te_ops_pipeline(scenario, dtype, monkeypatch):
+    torch._dynamo.reset()
+    if scenario.variant.startswith("single"):
+        monkeypatch.setattr(
+            _AffineOp,
+            "compile_ops",
+            tuple(
+                op if path == "custom_op" else None
+                for op, path in zip(
+                    _AffineOp.compile_ops, (scenario.forward_path, scenario.backward_path)
+                )
+            ),
+        )
+    if scenario.variant == "backward_fusion":
+
+        def fuse(ops, **unused):
+            if len(ops) == 2 and all(isinstance(op, _AffineOp) for op in ops):
+                return [_BackwardAffinePair(ops)]
+            return ops
+
+        monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [fuse])
+    ops = (
+        [te.ops.Identity()]
+        if scenario.variant == "legacy"
+        else [
+            _AffineOp(float(i + 2), dtype)
+            for i in range(1 if scenario.variant.startswith("single") else 2)
+        ]
+    )
+    model = te.ops.Sequential(*ops)
+    compiled, graphs = _compile_with_graphs(model)
+    # Keep products exact in BF16 across eager and fused reductions.
+    x = (torch.randint(-8, 9, (8, 16), device="cuda").to(dtype) / 8).requires_grad_()
+    dy = torch.randint_like(x, -8, 9) / 8
+    with (
+        pytest.warns(UserWarning, match=scenario.expected_warning)
+        if scenario.expected_warning
+        else contextlib.nullcontext()
+    ):
+        _check_ops(compiled, model, x, dy)
+    _check_ops(model, model, x, dy)
+    _assert_custom_ops(
+        graphs,
+        "_affineop",
+        forward=scenario.forward_path == "custom_op",
+        backward=scenario.backward_path == "custom_op",
+    )
+    if scenario.variant == "single_forward":
+        compiled, graphs = _compile_with_graphs(model)
+        with torch.no_grad():
+            torch.testing.assert_close(compiled(x), x * ops[0].weight)
+        _assert_custom_ops(graphs, "_affineop", backward=False)
+
+
+@pytest.mark.parametrize(
+    "forward,backward", [(True, True), (True, False), (False, True), (False, False)]
+)
+def test_te_ops_registration(forward, backward, monkeypatch):
+    registered = []
+
+    def register(**kwargs):
+        registered.append(kwargs["op_name"])
+        return kwargs["impl"]
+
+    def compute(args, *, in_custom_op=False):
+        return in_custom_op
+
+    monkeypatch.setattr("transformer_engine.pytorch.ops.op.register_custom_op", register)
+    monkeypatch.setattr(_AffineOp, "forward_compute", staticmethod(compute))
+    monkeypatch.setattr(_AffineOp, "backward_compute", staticmethod(compute))
+    monkeypatch.setattr(_AffineOp, "fwd_args_type", _AffineFwdArgs if forward else None)
+    monkeypatch.setattr(_AffineOp, "bwd_args_type", _AffineBwdArgs if backward else None)
+    monkeypatch.setattr(_AffineOp, "compile_ops", (None, None))
+    _AffineOp._register_compile_ops()
+    assert registered == (["_affineop"] if forward else []) + (
+        ["_affineop_backward"] if backward else []
+    )
+    for custom_op, enabled in zip(_AffineOp.compile_ops, (forward, backward)):
+        if enabled:
+            assert custom_op(None) is True
+        else:
+            assert custom_op is None
+    assert _AffineOp.forward_compute(None) is False
+    assert _AffineOp.backward_compute(None) is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("use_custom_ops", [False, True])
+def test_te_ops_fused_compute_contract(use_custom_ops):
+    """Exercise the shared interface directly; pipeline fusion stays gated under compile."""
+    torch._dynamo.reset()
+    fused = _AffinePair([_AffineOp(2.0), _AffineOp(3.0)])
+    x = torch.randn(8, 16, device="cuda", requires_grad=True)
+    residual = torch.randn_like(x, requires_grad=True)
+    dy, dextra = torch.randn_like(x), torch.randn_like(x)
+
+    def run(input_, extra_input, grad_output, grad_extra_output):
+        ctxs = [OperationContext(), OperationContext()]
+        output, extras = fused.fuser_forward(
+            ctxs,
+            input_,
+            basic_op_extra_inputs=[(), (extra_input,)],
+            prev_op_grad_output_quantizer=None,
+            next_op_input_quantizer=None,
+            basic_op_kwargs=[{}, {}],
+            use_custom_ops=use_custom_ops,
+        )
+        for ctx in ctxs:
+            ctx.saved_tensors = ctx.to_save
+        grads = fused.fuser_backward(
+            ctxs,
+            grad_output,
+            basic_op_grad_extra_outputs=[(), (grad_extra_output, None)],
+            use_custom_ops=use_custom_ops,
+        )
+        return output, extras, grads
+
+    graphs = []
+    if use_custom_ops:
+        run, graphs = _compile_with_graphs(run)
+    with torch.no_grad():
+        actual = run(x, residual, dy, dextra)
+    weight0, weight1 = tuple(fused.parameters())
+    intermediate = x * weight0
+    output, extra = intermediate * weight1 + residual, intermediate.square()
+    dx, dw0, dw1, dr = torch.autograd.grad(
+        (output, extra), (x, weight0, weight1, residual), (dy, dextra)
+    )
+    expected = output, [(), (extra, None)], (dx, [(dw0,), (dw1,)], [(), (dr,)])
+    torch.testing.assert_close(actual, expected)
+    _assert_custom_ops(graphs, "_affinepair", forward=use_custom_ops, backward=use_custom_ops)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_te_ops_forward_kwargs_compile():
+    torch._dynamo.reset()
+    model = te.ops.Sequential(_AffineOp())
+    compiled, graphs = _compile_with_graphs(model)
+    quantizer = Float8CurrentScalingQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3, device=torch.device("cuda")
+    )
+    x = torch.randn(8, 16, device="cuda", requires_grad=True)
+    dy = torch.randn_like(x)
+    for i, value in enumerate((0.5, 0.5, 1.5, -0.5)):
+        offset = quantizer(torch.full((16,), value, device="cuda"))
+        _check_ops(compiled, model, x, dy, {"offset": offset})
+        if i == 1:
+            warmed_graph_count = len(graphs)
+        elif i > 1:
+            assert len(graphs) == warmed_graph_count, "Tensor kwarg triggered recompilation"
+    _assert_custom_ops(graphs, "_affineop")
+    with pytest.warns(UserWarning, match="non-tensor keyword arguments"):
+        for gain in (3.0, 5.0):
+            _check_ops(compiled, model, x, dy, {"gain": gain})
+    _assert_custom_ops(graphs[-1:], "_affineop", forward=False, backward=False)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("backward", [False, True])
+def test_te_ops_bias_compile_with_fp8_input(backward):
+    """A quantized tensor subclass must cross the Bias custom-op boundary."""
+    torch._dynamo.reset()
+    quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
+    x = quantizer(torch.randn(32, 64, device="cuda", dtype=torch.bfloat16))
+    model = te.ops.Bias(64, device="cuda", dtype=torch.bfloat16)
+    compiled = torch.compile(lambda inp: model(inp), fullgraph=True)
+
+    with contextlib.nullcontext() if backward else torch.no_grad():
+        expected = model(x)
+        actual = compiled(x)
+        torch.testing.assert_close(actual, expected)
+        if backward:
+            dy = torch.randn_like(expected)
+            expected_db = torch.autograd.grad(expected, model.bias, dy)[0]
+            actual_db = torch.autograd.grad(actual, model.bias, dy)[0]
+            torch.testing.assert_close(actual_db, expected_db)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "dtype,quantization,shape,disable_rht_fusion,case,grads",
+    [
+        (dtype, quantization, (2, 16, 32), False, case, grads)
+        for dtype in (torch.float16, torch.bfloat16)
+        for quantization in (None, "fp8")
+        for case in ("linear", "bias", "pair", "unfused")
+        for grads in ("all", "input", "weight", "bias", "none")
+    ]
+    + [
+        (torch.bfloat16, "nvfp4", (2, 16, 128), False, "pair", "all"),
+        (torch.bfloat16, "nvfp4", (64, 128), False, "pair", "all"),
+        (torch.bfloat16, "nvfp4", (64, 128), True, "pair", "all"),
+        (torch.bfloat16, "nvfp4-no-rht", (2, 16, 128), False, "pair", "all"),
+    ],
+)
+def test_te_ops_linear_bias_compile(
+    dtype, quantization, shape, disable_rht_fusion, case, grads, monkeypatch
+):
+    monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_rht_fusion)))
+    _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch, input_shape=shape)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("mode", ["rht", "2d", "row-scaled"])
+def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
+    quantizer = NVFP4Quantizer(
+        columnwise=True,
+        with_rht=mode == "rht",
+        with_post_rht_amax=mode == "rht",
+        with_2d_quantization=mode == "2d",
+        row_scaled_nvfp4=mode == "row-scaled",
+        with_random_sign_mask=False,
+    )
+
+    def bgrad(inp):
+        dx, ((db,),), _ = te.ops.Bias.compile_ops[1](BiasBwdArgs(inp, quantizer))
+        return dx, db
+
+    torch._dynamo.reset()
+    compiled, graphs = _compile_with_graphs(bgrad)
+    # Pairs preserve alignment, including distinct nonzero remainders.
+    shapes = ((128, 128), (256, 256), (96, 160), (160, 224))
+    if mode == "row-scaled":
+        shapes = shapes[:1]
+    cases = [(False, True, shape) for shape in shapes]
+    if mode == "rht":
+        cases += [(True, True, (128, 128)), (False, True, (128, 128))]
+    if mode != "row-scaled":
+        cases.append((False, False, (128, 128)))
+
+    for i, (disable_fusion, optimize_for_gemm, shape) in enumerate(cases):
+        monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_fusion)))
+        quantizer.optimize_for_gemm = optimize_for_gemm
+        inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        torch._dynamo.mark_dynamic(inp, (0, 1))
+        previous_graph_count = len(graphs)
+        dx, db = compiled(inp)
+        expected_db, expected_dx = tex.bgrad_quantize(inp, quantizer)
+        assert dx._with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+        torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
+        torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
+        torch.testing.assert_close(
+            dx._columnwise_data, expected_dx._columnwise_data, atol=0, rtol=0
+        )
+        if i < len(shapes) and i % 2 == 1:
+            assert len(graphs) == previous_graph_count
+
+    shape = (64, 1, 128)
+    inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    _, expected_dx = tex.bgrad_quantize(inp, quantizer)
+    _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
+    assert dx_spec.with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+    for name, (inner_shape, inner_dtype) in dx_spec.quantizer.inner_tensor_specs(shape).items():
+        inner = getattr(expected_dx, name)
+        assert inner.shape == inner_shape
+        assert inner.dtype == inner_dtype
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("backward_override", ["high_precision", "dequantized"])
+def test_te_ops_linear_bias_backward_override(dtype, backward_override, monkeypatch):
+    _check_linear_bias_compile(
+        dtype, "fp8", "pair", "all", monkeypatch, backward_override=backward_override
+    )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize(
+    "input_dtype,weight_dtype",
+    [(torch.float32, torch.bfloat16), (torch.bfloat16, torch.float32)],
+)
+def test_te_ops_linear_saved_fp8_dtype_with_autocast(input_dtype, weight_dtype):
+    """Saved FP8 tensors retain their source dtype across the custom-op boundary."""
+    torch._dynamo.reset()
+    model = te.ops.BasicLinear(32, 64, device="cuda", dtype=weight_dtype)
+    eager_model = copy.deepcopy(model)
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    def run(module, inp):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with te.autocast(recipe=fp8_recipe):
+                return module(inp)
+
+    compiled, graphs = _compile_with_graphs(lambda inp: run(model, inp))
+    x = torch.randn(16, 32, device="cuda", dtype=input_dtype, requires_grad=True)
+    eager_x = x.detach().clone().requires_grad_()
+    actual = compiled(x)
+    expected = run(eager_model, eager_x)
+    torch.testing.assert_close(actual, expected)
+
+    dy = torch.randn_like(actual)
+    actual_grads = torch.autograd.grad(actual, (x, model.weight), dy)
+    expected_grads = torch.autograd.grad(expected, (eager_x, eager_model.weight), dy)
+    torch.testing.assert_close(actual_grads, expected_grads)
+    _assert_custom_ops(graphs, "basiclinear")
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with te.autocast(recipe=fp8_recipe):
+            args = model.pack_forward_args(
+                [OperationContext()],
+                x,
+                prev_op_grad_output_quantizer=None,
+                next_op_input_quantizer=None,
+                basic_op_kwargs=[{}],
+            )
+            _, _, (saved_input, saved_weight) = model.forward_compute_fake(args)
+    assert saved_input.dtype == x.dtype
+    assert saved_weight.dtype == model.weight.dtype
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_te_ops_linear_workspace_fake_mode(monkeypatch):
+    def unexpected_allocation(*args, **kwargs):
+        pytest.fail("Fake initialization must not populate the real workspace cache")
+
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.ops.basic.basic_linear.get_cublas_workspace",
+        unexpected_allocation,
+    )
+    with FakeTensorMode():
+        te.ops.BasicLinear(32, 64, device="cuda", dtype=torch.bfloat16)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("training", [False, True])
+@pytest.mark.parametrize(
+    "initial_device,quantization",
+    [("cuda", None), ("cpu", None), ("meta", None), ("cuda", "nvfp4"), ("cuda", "nvfp4-no-rht")],
+)
+def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantization):
+    """A fresh process prevents earlier GEMMs from hiding lazy workspace allocation."""
+    if quantization is not None and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    script = textwrap.dedent(
+        """
+        import contextlib
+        import copy
+        import sys
+        import torch
+        import transformer_engine.pytorch as te
+        from transformer_engine.common import recipe
+        from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
+        from torch._dynamo.utils import counters
+
+        training, initial_device, quantization = sys.argv[1:]
+        training = training == "True"
+        is_nvfp4 = quantization != "None"
+        quant_recipe = (
+            recipe.NVFP4BlockScaling(
+                disable_rht=quantization == "nvfp4-no-rht",
+                disable_stochastic_rounding=True,
+            )
+            if is_nvfp4
+            else None
+        )
+        in_features, out_features = (128, 128) if is_nvfp4 else (32, 64)
+        batch_size = 32
+        eager_tols = {"rtol": 0, "atol": 0} if is_nvfp4 else {}
+        assert get_cublas_workspace.cache_info().currsize == 0
+        linear = te.ops.BasicLinear(
+            in_features, out_features, device=initial_device, dtype=torch.bfloat16
+        )
+        if initial_device == "cpu":
+            assert get_cublas_workspace.cache_info().currsize == 0
+            linear.cuda()
+        elif initial_device == "meta":
+            assert get_cublas_workspace.cache_info().currsize == 0
+            linear.to_empty(device="cuda")
+            linear.reset_parameters()
+        assert get_cublas_workspace.cache_info().currsize > 0
+        model = te.ops.Sequential(linear, te.ops.Bias(out_features, dtype=torch.bfloat16))
+        reference_model = copy.deepcopy(model)
+        x = torch.randn(
+            batch_size, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=training
+        )
+        targets = (x, *model.parameters())
+        reference_targets = (x, *reference_model.parameters())
+        dy = torch.randn(batch_size, out_features, device="cuda", dtype=torch.bfloat16)
+
+        def forward(x, module):
+            if quant_recipe is None:
+                return module(x)
+            with te.autocast(recipe=quant_recipe):
+                return module(x)
+
+        compiled = torch.compile(forward, fullgraph=True, mode="reduce-overhead")
+        counters.clear()
+        with contextlib.nullcontext() if training else torch.no_grad():
+            for _ in range(5):
+                torch.compiler.cudagraph_mark_step_begin()
+                actual = compiled(x, model)
+                if training:
+                    grads = torch.autograd.grad(actual, targets, dy)
+                # Eager reference runs only after the first compiled invocation.
+                expected = forward(x, reference_model)
+                torch.testing.assert_close(actual, expected, **eager_tols)
+                if training:
+                    expected_grads = torch.autograd.grad(expected, reference_targets, dy)
+                    torch.testing.assert_close(grads, expected_grads, **eager_tols)
+                    del grads, expected_grads
+                del actual, expected
+        torch.cuda.synchronize()
+        assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
+        assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0, dict(
+            counters["inductor"]
+        )
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(training), initial_device, str(quantization)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _check_linear_bias_compile(
+    dtype,
+    quantization,
+    case,
+    grads,
+    monkeypatch,
+    *,
+    backward_override=None,
+    input_shape=(2, 16, 32),
+):
+    is_nvfp4 = quantization in ("nvfp4", "nvfp4-no-rht")
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if is_nvfp4 and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    if (case == "linear" and grads == "bias") or (case == "bias" and grads == "weight"):
+        pytest.skip("Requested parameter is absent")
+    torch._dynamo.reset()
+    if case == "unfused":
+        monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    in_features = input_shape[-1]
+    out_features = 128 if is_nvfp4 else 64
+    ops = []
+    if case != "bias":
+        ops.append(te.ops.BasicLinear(in_features, out_features, dtype=dtype))
+        ops[-1].weight.requires_grad_(grads in ("all", "weight"))
+    if case != "linear":
+        ops.append(te.ops.Bias(in_features if case == "bias" else out_features, dtype=dtype))
+        ops[-1].bias.requires_grad_(grads in ("all", "bias"))
+    model = te.ops.Sequential(*ops)
+    eager_model = copy.deepcopy(model)
+    quant_recipe = None
+    if quantization == "fp8":
+        quant_recipe = recipe.Float8CurrentScaling(backward_override=backward_override)
+    elif is_nvfp4:
+        quant_recipe = recipe.NVFP4BlockScaling(
+            disable_rht=quantization == "nvfp4-no-rht", disable_stochastic_rounding=True
+        )
+    eager_tols = {"rtol": 0, "atol": 0} if is_nvfp4 else {}
+
+    def run(x, module=model):
+        if quant_recipe is None:
+            return module(x)
+        with te.autocast(recipe=quant_recipe):
+            return module(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    x = torch.randn(input_shape, device="cuda", dtype=dtype)
+    x.requires_grad_(grads in ("all", "input"))
+    targets = tuple(t for t in (x, *model.parameters()) if t.requires_grad)
+    eager_targets = tuple(t for t in (x, *eager_model.parameters()) if t.requires_grad)
+    graph_count = None
+    with torch.no_grad() if grads == "none" else contextlib.nullcontext():
+        for iteration in range(3):
+            check_reference = iteration == 0 and not is_nvfp4
+            with torch.no_grad():
+                for tensor in (x, *model.parameters()):
+                    if check_reference:
+                        # These binary fractions survive FP8 quantization exactly,
+                        # allowing a strict comparison with native PyTorch.
+                        tensor.copy_(torch.randint(-2, 3, tensor.shape, device=tensor.device) / 16)
+                    else:
+                        tensor.uniform_(-0.5, 0.5)
+                for param, eager_param in zip(model.parameters(), eager_model.parameters()):
+                    eager_param.copy_(param)
+            actual = compiled(x)
+            expected = run(x, eager_model)
+            torch.testing.assert_close(actual, expected, **eager_tols)
+            if check_reference:
+                reference = x.double()
+                for op in ops:
+                    reference = (
+                        torch.nn.functional.linear(reference, op.weight.double())
+                        if isinstance(op, BasicLinear)
+                        else reference + op.bias.double()
+                    )
+                torch.testing.assert_close(
+                    actual, reference, check_dtype=False, **dtype_tols(dtype)
+                )
+            if targets:
+                dy = (
+                    torch.randint_like(actual, -2, 3) / 16
+                    if check_reference
+                    else torch.randn_like(actual)
+                )
+                actual_grads = torch.autograd.grad(actual, targets, dy)
+                torch.testing.assert_close(
+                    actual_grads, torch.autograd.grad(expected, eager_targets, dy), **eager_tols
+                )
+                if check_reference:
+                    torch.testing.assert_close(
+                        actual_grads,
+                        torch.autograd.grad(reference, targets, dy.double()),
+                        **dtype_tols(dtype),
+                    )
+            if iteration == 1:
+                graph_count = len(graphs)
+            elif iteration == 2:
+                assert len(graphs) == graph_count
+    _assert_custom_ops(
+        graphs,
+        "forwardlinearbiasactivation",
+        forward=case == "pair",
+        backward=False,
+    )
+    _assert_custom_ops(
+        graphs,
+        "basiclinear",
+        forward=case in ("linear", "unfused"),
+        backward=case != "bias" and grads in ("all", "input", "weight"),
+    )
+    _assert_custom_ops(
+        graphs,
+        "bias",
+        forward=case in ("bias", "unfused"),
+        backward=case != "linear" and bool(targets),
     )

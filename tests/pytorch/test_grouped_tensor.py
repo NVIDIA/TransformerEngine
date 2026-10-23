@@ -4,8 +4,9 @@
 
 """Tests for GroupedTensor class"""
 
+from types import SimpleNamespace
 from typing import List, Optional, Tuple
-import os
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -18,8 +19,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
 )
-from transformer_engine.pytorch.constants import TE_DType_To_Torch
-from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported, mark_grouped_tensor
 import transformer_engine_torch as tex
 
 # Import test utilities
@@ -33,20 +33,55 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
-# The fused grouped FP8 block-scaling quantize/dequantize kernels are Hopper-only: they gate on
-# SM90-SM99 (NVTE_CHECK(sm >= 90 && sm < 100)). FP8 block scaling is still reported "available" on
-# Blackwell (SM100+) for the emulated/non-grouped paths, so ``fp8_block_scaling_available`` alone
-# does not exclude SM100 — add the Hopper arch bound for the grouped tests.
+# Grouped FP8 block-scaling quantize/dequantize kernels need TMA (SM90+). On Blackwell and newer
+# the FP8 block-scaling recipe is emulated with MXFP8, which only supports power-of-2 scales.
 _device_cc = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
-fp8_block_scaling_grouped_available = fp8_block_scaling_available and (9, 0) <= _device_cc < (10, 0)
+fp8_block_scaling_grouped_available = fp8_block_scaling_available and _device_cc >= (9, 0)
 reason_for_no_fp8_block_scaling_grouped = (
     reason_for_no_fp8_block_scaling
     if not fp8_block_scaling_available
-    else (
-        "Fused grouped FP8 block-scaling quantize/dequantize is only supported on Hopper"
-        " (SM90-SM99)."
-    )
+    else "Grouped FP8 block-scaling quantize/dequantize requires SM90 or newer."
 )
+_fp8bs_pow2_required = _device_cc >= (10, 0)
+
+
+def test_mark_grouped_tensor_supports_plain_tensor():
+    tensor = torch.empty(16)
+
+    mark_grouped_tensor(tensor)
+
+    assert tensor.grouped_tensor_scale_inv is False
+
+
+def test_mark_grouped_tensor_supports_unquantized_rowwise_storage():
+    rowwise_data = torch.empty(16)
+    grouped_tensor = SimpleNamespace(
+        rowwise_data=rowwise_data,
+        columnwise_data=None,
+        columnwise_scale_inv=None,
+    )
+
+    mark_grouped_tensor(grouped_tensor)
+
+    assert rowwise_data.grouped_tensor_scale_inv is False
+
+
+def test_mark_grouped_tensor_marks_quantized_columnwise_storage():
+    rowwise_data = torch.empty(16)
+    columnwise_data = torch.empty(16)
+    columnwise_scale_inv = torch.empty(4)
+    grouped_tensor = SimpleNamespace(
+        rowwise_data=rowwise_data,
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+    )
+
+    mark_grouped_tensor(grouped_tensor)
+
+    assert not hasattr(rowwise_data, "grouped_tensor_scale_inv")
+    assert columnwise_data.grouped_tensor_scale_inv is False
+    assert columnwise_scale_inv.grouped_tensor_scale_inv is True
+
 
 _quantization_params = [
     pytest.param(
@@ -155,6 +190,105 @@ def _fp8bs_per_expert_scale_floats(
     if block_scaling_dim == 1:
         return blocks_y * align4(k) if columnwise else blocks_x * align4(m_t)
     return blocks_x * align4(blocks_y) if columnwise else blocks_y * align4(blocks_x)
+
+
+def _scaled_swiglu_reference(
+    input_2h: torch.Tensor,
+    prob: torch.Tensor,
+    *,
+    limit: Optional[float] = None,
+    alpha: float = 1.0,
+    glu_linear_offset: float = 0.0,
+) -> torch.Tensor:
+    """PyTorch reference for the (clamped) scaled SwiGLU that the grouped kernel recomputes.
+
+    ``limit=None`` selects plain SwiGLU, where ``alpha`` and ``glu_linear_offset`` sit at
+    their identity values. The clamps use ``torch.where`` rather than ``Tensor.clamp`` so
+    this stays character-for-character the formulation that #3424 settled on in
+    tests/pytorch/test_fusible_ops.py.
+
+    Evaluated in fp32 because the kernel also widens its bf16 input to fp32 and quantizes
+    from there; a bf16 reference would carry a rounding step the kernel never takes.
+    """
+    x_glu, x_linear = input_2h.float().chunk(2, dim=-1)
+    if limit is not None:
+        x_glu = torch.where(x_glu > limit, limit, x_glu)
+        x_linear = torch.where(x_linear < -limit, -limit, x_linear)
+        x_linear = torch.where(x_linear > limit, limit, x_linear)
+    out_glu = x_glu * torch.sigmoid(alpha * x_glu)
+    return out_glu * (x_linear + glu_linear_offset) * prob.float().unsqueeze(-1)
+
+
+# MXFP8 scales one e8m0 exponent per 32-row block of a column, and e4m3 carries 3 mantissa
+# bits, so within a block the representable values are spaced 2^-3 of the leading binade
+# apart. Using the block amax as a stand-in for that binade (it is within 2x of it) puts one
+# code step at ``amax * 2^-3``; the bound below allows two, which covers a block whose two
+# e8m0 exponents land one step apart and so quantizes at twice the spacing.
+#
+# Note the scope: this bounds the resolution the kernel is entitled to lose, so it catches a
+# defect that moves some element far. It is measured against each block's largest element, so
+# it is much weaker against a defect that perturbs many elements a little without moving that
+# one -- a wrong ``alpha`` is the case in point, since sigmoid has saturated where the largest
+# element sits. Measured on GB200, a doubled alpha lands at 1.14 steps, inside this bound.
+_MXFP8_STEPS_ALLOWED = 2.0
+_MXFP8_E4M3_MANTISSA_BITS = 3
+
+_MXFP8_SCALE_BLOCK_ROWS = 32
+
+
+def _assert_mxfp8_matches_reference(actual, expected, *, context: str) -> None:
+    """Compare two columnwise-MXFP8 tensors produced by the same quantizer.
+
+    Both sides must come from the same quantizer instance so the scale layout (compact or
+    GEMM-swizzled) and the usage flags agree; only the values being quantized differ, which
+    is what makes a resolution-level comparison meaningful.
+
+    Two independent assertions. The e8m0 scales are compared as raw exponents, where any
+    disagreement beyond one step means the two sides indexed different data rather than
+    rounded differently. The values are then compared after dequantization, elementwise,
+    against the quantization step of their own 32-row block.
+    """
+    actual_scale = actual._columnwise_scale_inv.reshape(-1).view(torch.uint8)
+    expected_scale = expected._columnwise_scale_inv.reshape(-1).view(torch.uint8)
+    assert actual_scale.shape == expected_scale.shape, (
+        f"{context}: scale size {tuple(actual_scale.shape)} != reference"
+        f" {tuple(expected_scale.shape)}"
+    )
+
+    scale_delta = (actual_scale.int() - expected_scale.int()).abs()
+    scale_bad = int((scale_delta > 1).sum())
+    assert scale_bad == 0, (
+        f"{context}: {scale_bad} of {expected_scale.numel()} scales differ by more than one"
+        f" e8m0 step (max delta {int(scale_delta.max())}); that is an indexing or layout"
+        " error, not rounding"
+    )
+
+    actual_deq = actual.dequantize().float()
+    expected_deq = expected.dequantize().float()
+    assert actual_deq.shape == expected_deq.shape, (
+        f"{context}: dequantized shape {tuple(actual_deq.shape)} != reference"
+        f" {tuple(expected_deq.shape)}"
+    )
+    rows, cols = actual_deq.shape
+    assert rows % _MXFP8_SCALE_BLOCK_ROWS == 0, (
+        f"{context}: {rows} rows is not a whole number of {_MXFP8_SCALE_BLOCK_ROWS}-row scale"
+        " blocks, so the per-block bound below would not line up"
+    )
+
+    blocked = (rows // _MXFP8_SCALE_BLOCK_ROWS, _MXFP8_SCALE_BLOCK_ROWS, cols)
+    block_amax = expected_deq.reshape(blocked).abs().amax(dim=1, keepdim=True)
+    tolerance = block_amax * _MXFP8_STEPS_ALLOWED * 2.0**-_MXFP8_E4M3_MANTISSA_BITS
+    deviation = (actual_deq - expected_deq).reshape(blocked).abs()
+
+    n_over = int((deviation > tolerance).sum())
+    floor = torch.finfo(torch.float32).tiny
+    worst = float((deviation / tolerance.clamp(min=floor)).max()) * _MXFP8_STEPS_ALLOWED
+    assert n_over == 0, (
+        f"{context}: {n_over} of {deviation.numel()} elements deviate by more than"
+        f" {_MXFP8_STEPS_ALLOWED:g} MXFP8 code steps of their block"
+        f" (worst {worst:.3f} steps); scales differing by one step:"
+        f" {int((scale_delta != 0).sum())}"
+    )
 
 
 class TestGroupedTensor:
@@ -490,11 +624,15 @@ class TestGroupedTensor:
         "shape_case",
         ["varying_first", "varying_last", "varying_both"],
     )
+    @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
+    @pytest.mark.parametrize("optimize_for_gemm", [False, True])
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_quantize_grouped_mxfp8(self, shape_case: str, output_dbias: bool) -> None:
+    def test_quantize_grouped_mxfp8(
+        self, shape_case: str, usage: str, optimize_for_gemm: bool, output_dbias: bool
+    ) -> None:
         """Test grouped MXFP8 quantization against per-tensor quantization for
-        varying first/last/both dimensions."""
+        varying first/last/both dimensions and compact or GEMM-swizzled scales."""
         if output_dbias and shape_case != "varying_first":
             pytest.skip("bgrad_group_quantize requires constant last dimension")
 
@@ -549,7 +687,10 @@ class TestGroupedTensor:
         )
 
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-        quantizer.set_usage(rowwise=True, columnwise=False)
+        rowwise = usage in ("rowwise", "both")
+        columnwise = usage in ("columnwise", "both")
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        quantizer.optimize_for_gemm = optimize_for_gemm
 
         if output_dbias:
             grouped_output, dbias = tex.bgrad_group_quantize(
@@ -561,19 +702,23 @@ class TestGroupedTensor:
             )
 
         # Reference: quantize each tensor independently and concatenate the
-        # rowwise data / scale_inv buffers in tensor order.
-        expected_data = []
-        expected_scale_inv = []
-        for tensor in input_tensors:
-            qtensor = quantizer(tensor)
-            expected_data.append(qtensor._rowwise_data.reshape(-1))
-            expected_scale_inv.append(qtensor._rowwise_scale_inv.reshape(-1))
-
-        expected_data = torch.cat(expected_data)
-        expected_scale_inv = torch.cat(expected_scale_inv)
-
-        assert torch.equal(grouped_output.rowwise_data, expected_data)
-        assert torch.equal(grouped_output.scale_inv, expected_scale_inv)
+        # data / scale_inv buffers in tensor order. Both dimensions of every member
+        # are multiples of 128, so swizzled scales need no padding between members.
+        expected_tensors = [quantizer(tensor) for tensor in input_tensors]
+        if rowwise:
+            expected_data = torch.cat([t._rowwise_data.reshape(-1) for t in expected_tensors])
+            expected_scales = torch.cat(
+                [t._rowwise_scale_inv.reshape(-1) for t in expected_tensors]
+            )
+            assert torch.equal(grouped_output.rowwise_data, expected_data)
+            assert torch.equal(grouped_output.scale_inv, expected_scales)
+        if columnwise:
+            expected_data = torch.cat([t._columnwise_data.reshape(-1) for t in expected_tensors])
+            expected_scales = torch.cat(
+                [t._columnwise_scale_inv.reshape(-1) for t in expected_tensors]
+            )
+            assert torch.equal(grouped_output.columnwise_data, expected_data)
+            assert torch.equal(grouped_output.columnwise_scale_inv, expected_scales)
 
         if output_dbias:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
@@ -636,6 +781,182 @@ class TestGroupedTensor:
         assert grouped_output.tensor_offsets.data_ptr() == tensor_offsets.data_ptr()
         assert torch.equal(grouped_output.rowwise_data, expected_output.rowwise_data)
         assert torch.equal(grouped_output.scale_inv, expected_output.scale_inv)
+
+    @pytest.mark.parametrize("optimize_for_gemm", [False, True])
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_scaled_swiglu_shapes(self, optimize_for_gemm: bool) -> None:
+        """Test the grouped scaled SwiGLU MXFP8 recompute binding plumbs shapes/dtypes.
+
+        Covers the pybind layer and its rejection paths: a [N, 2H] input plus a [N] prob must
+        come back as a columnwise-MXFP8 [N, H] grouped output, and non-contiguous or
+        wrong-dtype operands must raise. Values are checked in
+        ``test_group_scaled_swiglu_matches_reference``.
+        """
+        num_tensors = 3
+        last_dim = 256
+        split_sizes_list = [128, 384, 512]
+        total_tokens = sum(split_sizes_list)
+
+        input_2h = torch.randn(total_tokens, 2 * last_dim, dtype=torch.bfloat16, device="cuda")
+        # prob rides in the model dtype, matching TE's cuDNN fc1_prob_tensor convention.
+        prob = torch.rand(total_tokens, dtype=torch.bfloat16, device="cuda")
+        first_dims = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
+
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=False, columnwise=True)
+        quantizer.optimize_for_gemm = optimize_for_gemm
+
+        grouped_output = tex.group_scaled_swiglu(input_2h, prob, quantizer, num_tensors, first_dims)
+
+        outputs = grouped_output.split_into_quantized_tensors()
+        assert len(outputs) == num_tensors
+        for rows, output in zip(split_sizes_list, outputs):
+            assert output.shape == (rows, last_dim)
+            assert output._columnwise_data.numel() == rows * last_dim
+            # One e8m0 exponent per 32-row block of every column. Both the compact and the
+            # GEMM-swizzled layout need the same number of scales.
+            assert output._columnwise_scale_inv.numel() == (rows // 32) * last_dim
+
+        with pytest.raises(RuntimeError):
+            tex.group_scaled_swiglu(input_2h, prob.float(), quantizer, num_tensors, first_dims)
+
+        # Both operands reach the kernel as raw pointers over a densely packed range, so a
+        # strided view must be rejected instead of being read as if it were contiguous.
+        wide = torch.randn(total_tokens, 4 * last_dim, dtype=torch.bfloat16, device="cuda")
+        with pytest.raises(RuntimeError):
+            tex.group_scaled_swiglu(
+                wide[:, : 2 * last_dim], prob, quantizer, num_tensors, first_dims
+            )
+
+        strided_prob = torch.rand(2 * total_tokens, dtype=torch.bfloat16, device="cuda")[::2]
+        with pytest.raises(RuntimeError):
+            tex.group_scaled_swiglu(input_2h, strided_prob, quantizer, num_tensors, first_dims)
+
+    @pytest.mark.parametrize("optimize_for_gemm", [False, True])
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_scaled_clamped_swiglu_shapes(self, optimize_for_gemm: bool) -> None:
+        """Test the clamped variant's binding plumbs shapes, dtypes and clamp parameters.
+
+        Covers the pybind layer, the identity case that must collapse onto the unclamped
+        kernel, and rejection of a non-positive limit. Values are checked in
+        ``test_group_scaled_swiglu_matches_reference``.
+        """
+        num_tensors = 3
+        last_dim = 256
+        split_sizes_list = [128, 384, 512]
+        total_tokens = sum(split_sizes_list)
+
+        input_2h = torch.randn(total_tokens, 2 * last_dim, dtype=torch.bfloat16, device="cuda")
+        prob = torch.rand(total_tokens, dtype=torch.bfloat16, device="cuda")
+        first_dims = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
+
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=False, columnwise=True)
+        quantizer.optimize_for_gemm = optimize_for_gemm
+
+        grouped_output = tex.group_scaled_clamped_swiglu(
+            input_2h, prob, quantizer, num_tensors, 7.0, 1.702, 1.0, first_dims
+        )
+
+        outputs = grouped_output.split_into_quantized_tensors()
+        assert len(outputs) == num_tensors
+        for rows, output in zip(split_sizes_list, outputs):
+            assert output.shape == (rows, last_dim)
+            assert output._columnwise_data.numel() == rows * last_dim
+            assert output._columnwise_scale_inv.numel() == (rows // 32) * last_dim
+
+        # A clamp wider than any input, with alpha and offset at their identity values,
+        # must reproduce the unclamped kernel exactly.
+        wide_limit = float(input_2h.abs().max()) + 1.0
+        clamped_identity = tex.group_scaled_clamped_swiglu(
+            input_2h, prob, quantizer, num_tensors, wide_limit, 1.0, 0.0, first_dims
+        )
+        plain = tex.group_scaled_swiglu(input_2h, prob, quantizer, num_tensors, first_dims)
+        for lhs, rhs in zip(
+            clamped_identity.split_into_quantized_tensors(),
+            plain.split_into_quantized_tensors(),
+        ):
+            assert torch.equal(lhs._columnwise_data, rhs._columnwise_data)
+            assert torch.equal(lhs._columnwise_scale_inv, rhs._columnwise_scale_inv)
+
+        for bad_limit in (0.0, -1.0):
+            with pytest.raises(RuntimeError):
+                tex.group_scaled_clamped_swiglu(
+                    input_2h, prob, quantizer, num_tensors, bad_limit, 1.702, 1.0, first_dims
+                )
+
+    @pytest.mark.parametrize("optimize_for_gemm", [False, True])
+    @pytest.mark.parametrize("clamped", [False, True])
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_scaled_swiglu_matches_reference(
+        self, clamped: bool, optimize_for_gemm: bool
+    ) -> None:
+        """Check both grouped kernels against a quantized PyTorch reference, expert by expert.
+
+        Each expert's reference is computed from that expert's own rows and quantized with
+        the very quantizer the kernel used, so a wrong expert offset, a dropped prob multiply
+        or a mis-applied clamp all surface as codes differing far beyond the rounding budget
+        that ``_assert_mxfp8_matches_reference`` allows.
+        """
+        limit, alpha, glu_linear_offset = (7.0, 1.702, 1.0) if clamped else (None, 1.0, 0.0)
+
+        # Row counts are multiples of the kernel's 128-row chunk, and deliberately unequal so
+        # that a per-expert offset computed from the wrong group is caught.
+        split_sizes_list = [128, 256, 384, 512]
+        num_tensors = len(split_sizes_list)
+        last_dim = 256
+        total_tokens = sum(split_sizes_list)
+
+        # Scaled up so the tails reach past the clamp limit: standard normals essentially
+        # never exceed 7.0, which would leave the clamped path untested on its own numerics.
+        input_2h = 4.0 * torch.randn(
+            total_tokens, 2 * last_dim, dtype=torch.bfloat16, device="cuda"
+        )
+        prob = torch.rand(total_tokens, dtype=torch.bfloat16, device="cuda")
+        first_dims = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
+
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=False, columnwise=True)
+        quantizer.optimize_for_gemm = optimize_for_gemm
+
+        if clamped:
+            grouped_output = tex.group_scaled_clamped_swiglu(
+                input_2h,
+                prob,
+                quantizer,
+                num_tensors,
+                limit,
+                alpha,
+                glu_linear_offset,
+                first_dims,
+            )
+        else:
+            grouped_output = tex.group_scaled_swiglu(
+                input_2h, prob, quantizer, num_tensors, first_dims
+            )
+
+        outputs = grouped_output.split_into_quantized_tensors()
+        assert len(outputs) == num_tensors
+
+        row = 0
+        for expert, (rows, output) in enumerate(zip(split_sizes_list, outputs)):
+            reference = _scaled_swiglu_reference(
+                input_2h[row : row + rows],
+                prob[row : row + rows],
+                limit=limit,
+                alpha=alpha,
+                glu_linear_offset=glu_linear_offset,
+            )
+            assert reference.shape == (rows, last_dim)
+            _assert_mxfp8_matches_reference(
+                output,
+                quantizer(reference),
+                context=(
+                    f"expert {expert} ({rows}x{last_dim}, clamped={clamped},"
+                    f" optimize_for_gemm={optimize_for_gemm})"
+                ),
+            )
+            row += rows
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_bgrad_group_quantize_zero_size_tensor(self) -> None:
@@ -777,7 +1098,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=False,
-            force_pow_2_scales=False,
+            force_pow_2_scales=_fp8bs_pow2_required,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -838,7 +1159,7 @@ class TestGroupedTensor:
                 fp8_dtype=tex.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
-                force_pow_2_scales=False,
+                force_pow_2_scales=_fp8bs_pow2_required,
                 amax_epsilon=0.0,
                 block_scaling_dim=1,
             )
@@ -1181,6 +1502,21 @@ class TestGroupedTensor:
         (``varying_first``); ``varying_last``/``varying_both`` are rejected at the kernel level.
         Per-tensor first dim must be a multiple of 128 (kernel tile size).
         """
+        if not force_pow_2_scales and _fp8bs_pow2_required:
+            # Non-power-of-2 FP8 block scales cannot be emulated with MXFP8 on Blackwell+.
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
+                block_scaling_dim=block_scaling_dim,
+            )
+            x = torch.randn(256, 256, dtype=torch.bfloat16, device="cuda")
+            with pytest.raises(RuntimeError, match="power of two scaling factors"):
+                tex.group_quantize(x, quantizer, 2, None)
+            return
+
         rowwise = direction in ("rowwise", "both")
         columnwise = direction in ("columnwise", "both")
 
@@ -1511,7 +1847,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
-            force_pow_2_scales=False,
+            force_pow_2_scales=_fp8bs_pow2_required,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -1581,7 +1917,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
-            force_pow_2_scales=False,
+            force_pow_2_scales=_fp8bs_pow2_required,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -1629,8 +1965,6 @@ class TestGroupedTensor:
         in_features = 64
         out_features = 32
         dtype = torch.float32
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         src = te.GroupedLinear(
             num_gemms=num_gemms,
             in_features=in_features,
@@ -1681,8 +2015,6 @@ class TestGroupedTensor:
 
     def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         num_gemms = 3
         in_features = 64
         out_features = 32

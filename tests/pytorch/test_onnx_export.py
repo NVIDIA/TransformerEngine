@@ -368,6 +368,11 @@ def validate_result(
     )
 
 
+def get_atol(precision: torch.dtype, default: float = 1e-3) -> float:
+    # ORT runs on CPU while TE runs on GPU; fp16 accumulation differences reach a few ULPs.
+    return 2e-2 if precision is torch.float16 else default
+
+
 def dtype2str(dtype: torch.dtype, fake_bf16_io=False):
     if fake_bf16_io:
         assert dtype == torch.bfloat16
@@ -402,6 +407,32 @@ def get_attn_mask_str(use_mask, attn_mask_type):
 """
 Test cases begin here.
 """
+
+
+def test_fp8_cs_quantize_fake_tensor_metadata():
+    x = torch.randn(16, 16, device="cuda", dtype=torch.float32)
+
+    torch.library.opcheck(
+        torch.ops.tex.fp8_cs_quantize.default,
+        (x,),
+        test_utils=("test_faketensor",),
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_layernorm_fake_tensor_metadata(dtype, transpose):
+    x = torch.randn(16, 32, device="cuda", dtype=dtype)
+    if transpose:
+        x = x.t()
+    weight = torch.randn(x.shape[-1], device="cuda", dtype=dtype)
+    bias = torch.randn_like(weight)
+
+    torch.library.opcheck(
+        torch.ops.tex.layernorm.default,
+        (x, weight, bias, 1e-5),
+        test_utils=("test_schema", "test_faketensor"),
+    )
 
 
 def _test_export_linear(
@@ -458,7 +489,7 @@ def _test_export_linear(
         if precision in (torch.bfloat16,):
             return
         if fp8_recipe is None:
-            validate_result(fname, inp, model, atol=1e-3, te_outputs=te_outputs)
+            validate_result(fname, inp, model, atol=get_atol(precision), te_outputs=te_outputs)
         else:
             validate_result(
                 fname, inp, model, atol=1e-2, is_fp8=fp8_recipe is not None, te_outputs=te_outputs
@@ -587,7 +618,7 @@ def _test_export_layernorm_linear(
             if precision in (torch.bfloat16,):
                 return
             if fp8_recipe is None:
-                validate_result(fname, inp, model, atol=1e-3, te_outputs=te_outputs)
+                validate_result(fname, inp, model, atol=get_atol(precision), te_outputs=te_outputs)
             elif precision != torch.bfloat16:
                 validate_result(
                     fname,
@@ -595,7 +626,11 @@ def _test_export_layernorm_linear(
                     model,
                     # For current scaling we use Float8Quantizer in tests + amax computed by hand,
                     # which has slightly different numerics than Float8CurrentScalingQuantizer.
-                    atol=1e-3 if fp8_recipe.__class__ is not recipe.Float8CurrentScaling else 2e-2,
+                    atol=(
+                        get_atol(precision)
+                        if fp8_recipe.__class__ is not recipe.Float8CurrentScaling
+                        else 2e-2
+                    ),
                     is_fp8=fp8_recipe is not None,
                     te_outputs=te_outputs,
                 )
@@ -673,7 +708,9 @@ def _test_export_layernorm_mlp(
         if precision in (torch.bfloat16,):
             return
         atol = (
-            2e-2 if fp8_recipe is not None else (5e-1 if activation == "swiglu" else 1e-3)
+            2e-2
+            if fp8_recipe is not None
+            else (5e-1 if activation == "swiglu" else get_atol(precision))
         )  # TODO(pgadzinski) - check 2e-2
         validate_result(
             fname, inp, model, atol=atol, is_fp8=fp8_recipe is not None, te_outputs=te_outputs

@@ -29,18 +29,21 @@ Each test exercises one MoE-block run and bundles every check that
 single run supports — shape, dtype,
 finiteness AND numerical parity vs a pure-JAX reference. Variations
 on the block are pytest parametrize values rather than separate test
-classes:
+classes. The module-scoped fusion parameter runs all unfused cases first,
+then tears down EP and runs all cuDNN cases in the same processes:
 
-* ``test_forward`` covers the forward across a curated set of
-  configurations (softmax/sigmoid scoring, optional non-zero
-  expert_bias). Each config asserts shape, dtype, finiteness and
-  numerical parity vs the reference in one run.
-* ``test_backward`` mirrors that for gradients.
+* ``test_forward`` covers BF16 and MXFP8 forward execution across a
+  curated set of configurations (softmax/sigmoid scoring, optional
+  non-zero expert_bias). Each config asserts shape, dtype, finiteness
+  and numerical parity vs the same BF16 reference in one run.
+* ``test_backward`` mirrors that for gradients. BF16 and MXFP8 share
+  the full test body and differ only in the grouped-GEMM quantizer sets.
 * ``TestTeEpMoeAuxLoss`` covers the second return value end-to-end
   (returned + parity + aux-only grad propagates to gate + combined
   main+aux grads stay finite) in two consolidated tests.
 """
 
+import importlib
 import os
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -54,7 +57,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jax.experimental import mesh_utils
+from jax.experimental import mesh_utils, multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from flax.linen import partitioning as nn_partitioning
 
@@ -118,10 +121,14 @@ if get_device_compute_capability(0) < 100:
     )
 
 from transformer_engine.jax.flax import _MoEBlock as MoEBlock
-from transformer_engine.jax.moe import _ALIGN_SIZE, moe, record_ep_bootstrap_signature_for_moe
-from transformer_engine.jax.ep import ep_bootstrap
+from transformer_engine.jax.moe import (
+    get_moe_recv_capacity_per_rank,
+    moe,
+    record_ep_bootstrap_signature_for_moe,
+)
+from transformer_engine.jax.ep import ep_bootstrap, ep_finalize
+from transformer_engine.common.recipe import Format, MXFP8BlockScaling
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
-
 
 # -----------------------------------------------------------------------------
 # Mesh / shape config
@@ -138,6 +145,8 @@ NUM_DEVICES_REQUIRED = EP_SIZE * FSDP_SIZE
 
 LOGICAL_AXIS_RULES = (
     ("exp", EP_AXIS),
+    ("expert_weight_fsdp", (EP_AXIS, FSDP_AXIS)),
+    ("gated_weight_fsdp", FSDP_AXIS),
     ("embed", FSDP_AXIS),
     ("mlp", None),
     ("batch", (FSDP_AXIS, EP_AXIS)),
@@ -148,31 +157,31 @@ LOGICAL_AXIS_RULES = (
 DTYPE = jnp.bfloat16
 BATCH = EP_SIZE * FSDP_SIZE * 2  # 8 on 4-GPU, 16 on 8-GPU
 SEQ = 32
-HIDDEN = 64
+HIDDEN = 128
 INTER = 128
 NUM_EXPERTS = 8
 TOPK = 2
 
-# bf16 grouped_gemm + softmax-topk + ep all-to-all stack drifts ~1e-1 vs a
-# fp32 numpy reference. Keep these tight enough to catch real bugs but
-# loose enough to absorb expected bf16 rounding.
-FWD_ATOL = 5e-2
-FWD_RTOL = 5e-2
-GRAD_FFN_ATOL = 1e-1
-GRAD_FFN_RTOL = 1e-1
-GRAD_GATE_ATOL = 5e-1
-GRAD_GATE_RTOL = 5e-1
-
-# Two TE EP runs that should be bitwise-equal modulo XLA fusion order
-# (slot alignment rounding, etc.).
-TE_TO_TE_ATOL = 5e-3
-TE_TO_TE_RTOL = 5e-3
+# MXFP8 grouped GEMMs have measurably more quantization drift than BF16.
+# These bounds are rounded slightly above the worst error observed across
+# the forward and backward configuration matrix.
+FWD_TOLERANCE = {
+    "bf16": {"atol": 5e-4, "rtol": 5e-4},
+    "mxfp8": {"atol": 7e-3, "rtol": 7e-3},
+}
+GRAD_FFN_TOLERANCE = {
+    "bf16": {"atol": 1e-7, "rtol": 1e-7},
+    "mxfp8": {"atol": 1.3e-6, "rtol": 1.3e-6},
+}
+GRAD_GATE_TOLERANCE = {
+    "bf16": {"atol": 7e-8, "rtol": 7e-8},
+    "mxfp8": {"atol": 8e-7, "rtol": 8e-7},
+}
 
 # Aux loss is computed in float32 from the SAME logits as the routing
 # path. Numerical drift between TE-EP and the reference is dominated by
 # the bf16-rounded softmax inside the topk kernel.
-AUX_ATOL = 1e-3
-AUX_RTOL = 1e-3
+AUX_TOLERANCE = {"atol": 1e-6, "rtol": 1e-6}
 
 
 # -----------------------------------------------------------------------------
@@ -180,30 +189,14 @@ AUX_RTOL = 1e-3
 # -----------------------------------------------------------------------------
 
 
-def _compute_worst_case_recv_pr():
-    """Per-rank recv buffer the bootstrap must reserve.
-
-    NCCL EP HT expert-major uses one flat recv buffer with variable
-    per-expert zones. Each non-empty expert zone is padded to
-    ``_ALIGN_SIZE`` slots, so the reserve must cover the worst-case
-    total assignments plus independent per-zone padding.
-    """
-    num_procs = jax.device_count()
-    num_local_experts = NUM_EXPERTS // EP_SIZE
-    max_tokens_per_rank = (BATCH // num_procs) * SEQ
-    tokens_per_ep_group = EP_SIZE * max_tokens_per_rank
-    max_local_assignments = tokens_per_ep_group * min(TOPK, num_local_experts)
-    max_nonempty_experts = min(num_local_experts, max_local_assignments)
-    padded_total_bound = max_local_assignments + (_ALIGN_SIZE - 1) * max_nonempty_experts
-    aligned_total_bound = ((padded_total_bound + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
-    per_expert_bound = (
-        num_local_experts * ((tokens_per_ep_group + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
-    )
-    return min(per_expert_bound, aligned_total_bound)
+@pytest.fixture(scope="module", params=[False, True], ids=["unfused", "cudnn"], autouse=True)
+def use_cudnn_fusion(request):
+    """Group every test by fusion mode before changing EP's cached alignment."""
+    return request.param
 
 
 @pytest.fixture(scope="module")
-def mesh():
+def mesh(use_cudnn_fusion):
     if jax.device_count() < NUM_DEVICES_REQUIRED:
         pytest.skip(
             f"Need >={NUM_DEVICES_REQUIRED} devices for ep={EP_SIZE} x fsdp={FSDP_SIZE};"
@@ -217,7 +210,16 @@ def mesh():
 
     num_procs = jax.process_count()
     max_tokens_per_rank = (BATCH // num_procs) * SEQ
-    recv_capacity_per_rank = _compute_worst_case_recv_pr()
+    # Worst-case recv capacity per rank
+    # TODO(jberchtold) support configurations other than worst-case by refactoring tests
+    # but if possible avoid bootstrap/teardown for each test
+    recv_capacity_per_rank = get_moe_recv_capacity_per_rank(
+        num_experts=NUM_EXPERTS,
+        num_experts_per_tok=TOPK,
+        max_tokens_per_rank=max_tokens_per_rank,
+        ep_size=EP_SIZE,
+        use_cudnn_fusion=use_cudnn_fusion,
+    )
 
     # Eager bootstrap: ep_bootstrap does a host-side NCCL UID allgather
     # and cannot run from inside jax.jit. Sized to the worst-case recv_pr
@@ -239,7 +241,15 @@ def mesh():
         hidden_dim=HIDDEN,
         ep_size=EP_SIZE,
     )
-    return mesh_obj
+    mode = "cudnn" if use_cudnn_fusion else "unfused"
+    try:
+        yield mesh_obj
+    finally:
+        # Every rank finishes the mode before releasing cached EP executables.
+        jax.effects_barrier()
+        multihost_utils.sync_global_devices(f"te_moe_{mode}_finished")
+        ep_finalize()
+        multihost_utils.sync_global_devices(f"te_moe_{mode}_finalized")
 
 
 # -----------------------------------------------------------------------------
@@ -275,8 +285,7 @@ def mesh():
 def _pure_jax_moe_reference(
     x,
     gate_kernel,
-    wi_0,
-    wi_1,
+    wi,
     wo,
     expert_bias=None,
     *,
@@ -317,6 +326,7 @@ def _pure_jax_moe_reference(
     # FFN. ``apply_topk_weights_early`` is a fusion knob that doesn't
     # change the math (wo is linear), so the reference is identical for
     # both placements.
+    wi_0, wi_1 = jnp.split(wi, 2, axis=-1)
     layer_w0 = jnp.einsum("th,ehm->tem", x_2d, wi_0)
     layer_w1 = jnp.einsum("th,ehm->tem", x_2d, wi_1)
     # Activation runs in x.dtype (typically bf16) to mirror the impl --
@@ -365,24 +375,38 @@ def _make_block(
     score_function="softmax",
     expert_bias_init=None,
     input_axes=("batch", None, None),
+    quantization_recipe=None,
+    dispatch_checkpoint_name=None,
+    quant_before_fsdp_ag=False,
+    mesh_resource=None,
+    use_cudnn_fusion,
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
         intermediate_size=INTER,
-        data_parallelism_axes=(FSDP_AXIS,),
+        mesh_resource=mesh_resource,
         apply_topk_weights_early=apply_topk_weights_early,
         aux_loss_coeff=aux_loss_coeff,
         use_expert_routing_bias=use_expert_routing_bias,
         score_function=score_function,
         dtype=DTYPE,
         input_axes=input_axes,
+        quantization_recipe=quantization_recipe,
+        dispatch_checkpoint_name=dispatch_checkpoint_name,
+        quant_before_fsdp_ag=quant_before_fsdp_ag,
+        use_cudnn_fusion=use_cudnn_fusion,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
     if expert_bias_init is not None:
         kwargs["expert_bias_init"] = expert_bias_init
     return MoEBlock(**kwargs)
+
+
+@pytest.fixture
+def make_block(use_cudnn_fusion):
+    return partial(_make_block, use_cudnn_fusion=use_cudnn_fusion)
 
 
 def _strong_expert_bias_init(key, shape, dtype):
@@ -436,7 +460,14 @@ def _init_apply(block, mesh, x, key):
     return variables, output, aux
 
 
-def _grad_step(block, variables, mesh, x, *, include_aux=False):
+def _grad_step(
+    block,
+    variables,
+    mesh,
+    x,
+    *,
+    include_aux=False,
+):
     """Run jax.grad of mean(out^2) [+ aux if include_aux] vs (params, x).
 
     Returns ``(grads_variables, grad_x)`` so callers can check both the
@@ -503,6 +534,13 @@ def _make_inputs(key):
     return jax.random.normal(key, (BATCH, SEQ, HIDDEN), dtype=DTYPE)
 
 
+def _quantization_recipe(quantization):
+    if quantization == "bf16":
+        return None
+    assert quantization == "mxfp8"
+    return MXFP8BlockScaling()
+
+
 # -----------------------------------------------------------------------------
 # Tests
 # -----------------------------------------------------------------------------
@@ -546,6 +584,128 @@ _CONFIGS = [
     ),
 ]
 
+_QUANTIZATION_CASES = [
+    pytest.param("bf16", id="bf16"),
+]
+
+if get_device_compute_capability(0) >= 100:
+    _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
+
+
+@pytest.mark.parametrize("native_weight_layout", [False, True])
+@pytest.mark.parametrize("fsdp_dimension", ["k", "gated", "expert"])
+def test_quantized_weight_gather_matches_full_precision_gather(
+    mesh, monkeypatch, native_weight_layout, fsdp_dimension, make_block
+):
+    """The FP8 weight gather retains forward and backward MoE semantics."""
+    if native_weight_layout or fsdp_dimension != "k":
+        from transformer_engine.jax import cpp_extensions as tex
+
+        flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
+        original_moe = flax_moe_module.moe
+
+        def layout_moe(*args, **kwargs):
+            args = list(args)
+            if native_weight_layout:
+                gate, up = jnp.split(args[2], 2, axis=-1)
+                args[2] = tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1)
+                kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+                kwargs["cudnn_native_weight_layout"] = True
+            if fsdp_dimension == "gated":
+                kwargs["wi_kernel_axes"] = (
+                    ("exp", "gated_weight_fsdp", None)
+                    if native_weight_layout
+                    else ("exp", None, "gated_weight_fsdp")
+                )
+                spec = (
+                    P(EP_AXIS, FSDP_AXIS, None)
+                    if native_weight_layout
+                    else P(EP_AXIS, None, FSDP_AXIS)
+                )
+                args[2] = jax.lax.with_sharding_constraint(args[2], NamedSharding(mesh, spec))
+            if fsdp_dimension == "expert":
+                kwargs["wi_kernel_axes"] = ("expert_weight_fsdp", None, None)
+                kwargs["wo_kernel_axes"] = ("expert_weight_fsdp", None, None)
+                spec = P((EP_AXIS, FSDP_AXIS), None, None)
+                args[2] = jax.lax.with_sharding_constraint(args[2], NamedSharding(mesh, spec))
+                args[3] = jax.lax.with_sharding_constraint(args[3], NamedSharding(mesh, spec))
+            return original_moe(*args, **kwargs)
+
+        monkeypatch.setattr(flax_moe_module, "moe", layout_moe)
+    x = _make_inputs(jax.random.PRNGKey(41))
+    baseline = make_block(quantization_recipe=MXFP8BlockScaling())
+    quantized_ag = make_block(quantization_recipe=MXFP8BlockScaling(), quant_before_fsdp_ag=True)
+    variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(42))
+    with _ctx(mesh):
+        x_sh = _shard_inputs(x, mesh)
+        quantized_out, _, _ = jax.jit(quantized_ag.apply)(variables, x_sh)
+        quantized_out.block_until_ready()
+    np.testing.assert_allclose(
+        _to_global_numpy(quantized_out, mesh).astype(np.float32),
+        _to_global_numpy(baseline_out, mesh).astype(np.float32),
+        **FWD_TOLERANCE["mxfp8"],
+    )
+    baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
+    quantized_grads, quantized_dx = _grad_step(quantized_ag, variables, mesh, x)
+    for name in ("wi", "wo"):
+        np.testing.assert_allclose(
+            _to_global_numpy(_unwrap(quantized_grads["params"][name]), mesh).astype(np.float32),
+            _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh).astype(np.float32),
+            **GRAD_FFN_TOLERANCE["mxfp8"],
+        )
+    np.testing.assert_allclose(
+        _to_global_numpy(quantized_dx, mesh).astype(np.float32),
+        _to_global_numpy(baseline_dx, mesh).astype(np.float32),
+        **GRAD_FFN_TOLERANCE["mxfp8"],
+    )
+
+
+@pytest.mark.parametrize("quant_before_fsdp_ag", [False, True])
+def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, make_block):
+    """Explicit and global resources give identical forward and backward results."""
+    baseline = make_block(
+        quantization_recipe=MXFP8BlockScaling(), quant_before_fsdp_ag=quant_before_fsdp_ag
+    )
+    candidate = baseline.clone(
+        mesh_resource=MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+    )
+    x = _make_inputs(jax.random.PRNGKey(51))
+    variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))
+    baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(LOGICAL_AXIS_RULES):
+        with global_shard_guard(None):
+            x_sh = _shard_inputs(x, mesh)
+            candidate_out, _, _ = jax.jit(candidate.apply)(variables, x_sh)
+
+            def loss_fn(variables, inputs):
+                output, _, _ = candidate.apply(variables, inputs)
+                return jnp.mean(output.astype(jnp.float32) ** 2)
+
+            candidate_grads, candidate_dx = jax.jit(jax.grad(loss_fn, argnums=(0, 1)))(
+                variables, x_sh
+            )
+            jax.block_until_ready((candidate_out, candidate_grads, candidate_dx))
+    np.testing.assert_allclose(
+        _to_global_numpy(candidate_out, mesh).astype(np.float32),
+        _to_global_numpy(baseline_out, mesh).astype(np.float32),
+        **FWD_TOLERANCE["mxfp8"],
+    )
+    for name in ("gate_kernel", "wi", "wo"):
+        np.testing.assert_allclose(
+            _to_global_numpy(_unwrap(candidate_grads["params"][name]), mesh).astype(np.float32),
+            _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh).astype(np.float32),
+            **(
+                GRAD_GATE_TOLERANCE["mxfp8"]
+                if name == "gate_kernel"
+                else GRAD_FFN_TOLERANCE["mxfp8"]
+            ),
+        )
+    np.testing.assert_allclose(
+        _to_global_numpy(candidate_dx, mesh).astype(np.float32),
+        _to_global_numpy(baseline_dx, mesh).astype(np.float32),
+        **GRAD_FFN_TOLERANCE["mxfp8"],
+    )
+
 
 def _reference_kwargs_from_config(config, params_np):
     """Pick out the reference-relevant pieces of a parametrize config."""
@@ -564,8 +724,9 @@ class TestTeEpMoeForward:
     finiteness AND numerical parity vs the pure-JAX reference."""
 
     @pytest.mark.parametrize("config", _CONFIGS)
-    def test_forward(self, mesh, config):
-        block = _make_block(**config)
+    @pytest.mark.parametrize("quantization", _QUANTIZATION_CASES)
+    def test_forward(self, mesh, config, quantization, make_block):
+        block = make_block(**config, quantization_recipe=_quantization_recipe(quantization))
         x = _make_inputs(jax.random.PRNGKey(0))
         variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(1))
 
@@ -584,8 +745,7 @@ class TestTeEpMoeForward:
         out_ref, _ = _pure_jax_moe_reference(
             jnp.asarray(x_np),
             jnp.asarray(params_np["gate_kernel"]),
-            jnp.asarray(params_np["wi_0"]),
-            jnp.asarray(params_np["wi_1"]),
+            jnp.asarray(params_np["wi"]),
             jnp.asarray(params_np["wo"]),
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
@@ -594,9 +754,8 @@ class TestTeEpMoeForward:
         np.testing.assert_allclose(
             out_te_np.astype(np.float32),
             np.asarray(jax.device_get(out_ref)).astype(np.float32),
-            atol=FWD_ATOL,
-            rtol=FWD_RTOL,
-            err_msg=f"forward parity breach for config={config}",
+            **FWD_TOLERANCE[quantization],
+            err_msg=f"forward parity breach for config={config}, quantization={quantization}",
         )
 
 
@@ -605,8 +764,9 @@ class TestTeEpMoeBackward:
     grads finite, non-zero AND parity vs the pure-JAX reference."""
 
     @pytest.mark.parametrize("config", _CONFIGS)
-    def test_backward(self, mesh, config):
-        block = _make_block(**config)
+    @pytest.mark.parametrize("quantization", _QUANTIZATION_CASES)
+    def test_backward(self, mesh, config, quantization, make_block):
+        block = make_block(**config, quantization_recipe=_quantization_recipe(quantization))
         x = _make_inputs(jax.random.PRNGKey(2))
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(3))
         grads_te, grad_x_te = _grad_step(block, variables, mesh, x)
@@ -623,8 +783,7 @@ class TestTeEpMoeBackward:
             out, _ = _pure_jax_moe_reference(
                 x,
                 params["gate_kernel"],
-                params["wi_0"],
-                params["wi_1"],
+                params["wi"],
                 params["wo"],
                 ref_expert_bias,
                 num_experts=NUM_EXPERTS,
@@ -640,22 +799,19 @@ class TestTeEpMoeBackward:
         grads_ref_np = {k: np.asarray(jax.device_get(v)) for k, v in grads_ref.items()}
         grad_x_ref_np = np.asarray(jax.device_get(grad_x_ref))
 
-        for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
+        for name in ("gate_kernel", "wi", "wo"):
             # Per-tensor: finite + non-zero + parity in one pass.
             g_te = _to_global_numpy(_unwrap(grads_te["params"][name]), mesh)
             assert np.all(np.isfinite(g_te)), f"{name} grad has NaN/Inf [config={config}]"
             assert np.any(g_te != 0.0), f"{name} grad identically zero [config={config}]"
-            atol, rtol = (
-                (GRAD_GATE_ATOL, GRAD_GATE_RTOL)
-                if name == "gate_kernel"
-                else (GRAD_FFN_ATOL, GRAD_FFN_RTOL)
-            )
+            tolerances = GRAD_GATE_TOLERANCE if name == "gate_kernel" else GRAD_FFN_TOLERANCE
             np.testing.assert_allclose(
                 g_te.astype(np.float32),
                 grads_ref_np[name].astype(np.float32),
-                atol=atol,
-                rtol=rtol,
-                err_msg=f"grad parity breach on {name} [config={config}]",
+                **tolerances[quantization],
+                err_msg=(
+                    f"grad parity breach on {name} [config={config}, quantization={quantization}]"
+                ),
             )
 
         # d_x: the gradient propagated back to the previous layer. Checks
@@ -675,10 +831,328 @@ class TestTeEpMoeBackward:
         np.testing.assert_allclose(
             grad_x_te_np.astype(np.float32),
             grad_x_ref_np.astype(np.float32),
-            atol=GRAD_FFN_ATOL,
-            rtol=GRAD_FFN_RTOL,
-            err_msg=f"d_x parity breach [config={config}]",
+            **GRAD_FFN_TOLERANCE[quantization],
+            err_msg=f"d_x parity breach [config={config}, quantization={quantization}]",
         )
+
+
+def test_ep_checkpoint_names(mesh, monkeypatch, make_block):
+    moe_module = importlib.import_module("transformer_engine.jax.moe")
+    named_values = {}
+    original_checkpoint_name = moe_module.checkpoint_name
+
+    def recorded_checkpoint_name(value, name):
+        named_values.setdefault(name, []).append(value)
+        return original_checkpoint_name(value, name)
+
+    monkeypatch.setattr(moe_module, "checkpoint_name", recorded_checkpoint_name)
+    block = make_block(
+        dispatch_checkpoint_name="saved_dispatch",
+    )
+    inputs = _make_inputs(jax.random.PRNGKey(34))
+    variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(35))
+    grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
+
+    assert len(named_values["saved_dispatch"]) >= 2
+    assert all(hasattr(value, "shape") for values in named_values.values() for value in values)
+    assert np.all(np.isfinite(_to_global_numpy(output, mesh)))
+    assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
+    for name in ("gate_kernel", "wi", "wo"):
+        assert np.all(np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh)))
+
+
+def test_explicitly_disabled_fusion_with_native_weights(
+    mesh, monkeypatch, make_block, use_cudnn_fusion
+):
+    """Disabling fusion bypasses dependency probing and preserves native gradients."""
+    if use_cudnn_fusion:
+        pytest.skip("Requires the ordinary 128-token EP bootstrap")
+    from transformer_engine.jax import cpp_extensions as tex
+
+    moe_module = importlib.import_module("transformer_engine.jax.moe")
+
+    def unexpected_selection(*args, **kwargs):
+        raise AssertionError("Explicitly disabled fusion must not probe cuDNN")
+
+    monkeypatch.setattr(moe_module, "_select_cudnn_jax_fusion", unexpected_selection)
+    block = make_block(quantization_recipe=MXFP8BlockScaling(), use_cudnn_fusion=False)
+    x = _make_inputs(jax.random.PRNGKey(53))
+    variables, baseline_output, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(54))
+    baseline_grads, baseline_dx = _grad_step(block, variables, mesh, x)
+    flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
+    original_moe = flax_moe.moe
+
+    def native_moe(*args, **kwargs):
+        args = list(args)
+        gate, up = jnp.split(args[2], 2, axis=-1)
+        args[2] = tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1)
+        kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+        kwargs["cudnn_native_weight_layout"] = True
+        return original_moe(*args, **kwargs)
+
+    monkeypatch.setattr(flax_moe, "moe", native_moe)
+    with _ctx(mesh):
+        output, _, _ = jax.jit(block.apply)(variables, _shard_inputs(x, mesh))
+        output.block_until_ready()
+    grads, dx = _grad_step(block, variables, mesh, x)
+    np.testing.assert_array_equal(
+        _to_global_numpy(output, mesh), _to_global_numpy(baseline_output, mesh)
+    )
+    np.testing.assert_array_equal(_to_global_numpy(dx, mesh), _to_global_numpy(baseline_dx, mesh))
+    for name in ("gate_kernel", "wi", "wo"):
+        np.testing.assert_array_equal(
+            _to_global_numpy(_unwrap(grads["params"][name]), mesh),
+            _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh),
+        )
+
+
+class TestTeEpMoeCudnnCutedslFusion:
+    """End-to-end MXFP8 coverage for cuDNN's grouped GLU JAX APIs."""
+
+    @pytest.mark.parametrize("fallback", ["missing_api", "old_version", "hybrid"])
+    @pytest.mark.parametrize("native_layout", [False, True])
+    def test_unsupported_fusion_unfused_forward_and_backward(
+        self, mesh, monkeypatch, native_layout, make_block, use_cudnn_fusion, fallback
+    ):
+        """Unfused fallback retains bootstrap capacity and native-layout gradients."""
+        if not use_cudnn_fusion:
+            pytest.skip("Requires fusion requested at bootstrap")
+        import cudnn
+        from transformer_engine.jax import cpp_extensions as tex
+
+        if fallback == "missing_api":
+            # Avoid triggering a lazy optional import just to disable the API.
+            monkeypatch.setitem(cudnn.__dict__, "grouped_gemm_glu_wrapper_sm100", None)
+        elif fallback == "old_version":
+            monkeypatch.setattr(cudnn, "__version__", "1.31.0")
+        recipe = MXFP8BlockScaling(
+            fp8_format=Format.HYBRID if fallback == "hybrid" else Format.E4M3
+        )
+
+        def unexpected_fused_kernel(*args, **kwargs):
+            raise AssertionError("Unsupported fusion must use unfused kernels")
+
+        monkeypatch.setattr(tex, "grouped_gemm_glu", unexpected_fused_kernel)
+        monkeypatch.setattr(tex, "grouped_gemm_dglu", unexpected_fused_kernel)
+        baseline = make_block(quantization_recipe=recipe)
+        block = make_block(quantization_recipe=recipe)
+        x = _make_inputs(jax.random.PRNGKey(51))
+        # Keep the fusion-requested EP alignment and bootstrap capacity while
+        # independently forcing the baseline to execute the unfused FFN.
+        moe_module = importlib.import_module("transformer_engine.jax.moe")
+        with monkeypatch.context() as baseline_patch:
+            baseline_patch.setattr(moe_module, "_select_cudnn_jax_fusion", lambda _: False)
+            variables, baseline_output, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))
+            baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
+
+        if native_layout:
+            flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
+            original_moe = flax_moe.moe
+
+            def native_moe(*args, **kwargs):
+                args = list(args)
+                gate, up = jnp.split(args[2], 2, axis=-1)
+                args[2] = tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1)
+                kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+                kwargs["cudnn_native_weight_layout"] = True
+                return original_moe(*args, **kwargs)
+
+            monkeypatch.setattr(flax_moe, "moe", native_moe)
+        with _ctx(mesh):
+            output, _, _ = jax.jit(block.apply)(variables, _shard_inputs(x, mesh))
+            output.block_until_ready()
+        grads, dx = _grad_step(block, variables, mesh, x)
+        np.testing.assert_array_equal(
+            _to_global_numpy(output, mesh), _to_global_numpy(baseline_output, mesh)
+        )
+        np.testing.assert_array_equal(
+            _to_global_numpy(dx, mesh), _to_global_numpy(baseline_dx, mesh)
+        )
+        for name in ("gate_kernel", "wi", "wo"):
+            np.testing.assert_array_equal(
+                _to_global_numpy(_unwrap(grads["params"][name]), mesh),
+                _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh),
+            )
+
+    @pytest.mark.parametrize("native_layout", [False, True])
+    @pytest.mark.parametrize("apply_topk_weights_early", [False, True])
+    def test_mxfp8_forward_and_backward(
+        self,
+        mesh,
+        apply_topk_weights_early,
+        monkeypatch,
+        make_block,
+        use_cudnn_fusion,
+        native_layout,
+    ):
+        if not use_cudnn_fusion:
+            pytest.skip("requires the cuDNN fusion fixture parameter")
+        from transformer_engine.jax import cpp_extensions as tex
+
+        available, reason = tex.grouped_gemm_glu_dependencies_available()
+        if not available:
+            pytest.skip(reason)
+
+        if native_layout:
+            flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
+            original_moe = flax_moe.moe
+
+            def native_moe(*args, **kwargs):
+                args = list(args)
+                gate, up = jnp.split(args[2], 2, axis=-1)
+                args[2] = tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1)
+                kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+                kwargs["cudnn_native_weight_layout"] = True
+                return original_moe(*args, **kwargs)
+
+            monkeypatch.setattr(flax_moe, "moe", native_moe)
+
+        shared_calls = []
+        original_glu = tex.grouped_gemm_glu
+        original_dglu = tex.grouped_gemm_dglu
+
+        def checked_glu(*args, **kwargs):
+            shared_calls.append("glu")
+            return original_glu(*args, **kwargs)
+
+        def checked_dglu(*args, **kwargs):
+            shared_calls.append("dglu")
+            return original_dglu(*args, **kwargs)
+
+        monkeypatch.setattr(tex, "grouped_gemm_glu", checked_glu)
+        monkeypatch.setattr(tex, "grouped_gemm_dglu", checked_dglu)
+        block = make_block(
+            apply_topk_weights_early=apply_topk_weights_early,
+            quantization_recipe=MXFP8BlockScaling(),
+        )
+        x = _make_inputs(jax.random.PRNGKey(30))
+        variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(31))
+        assert "glu" in shared_calls, "MoE did not select the shared cuDNN GLU JAX API"
+        grads, grad_x = _grad_step(block, variables, mesh, x)
+        assert "dglu" in shared_calls, "MoE VJP did not select the shared cuDNN dGLU JAX API"
+
+        assert output.shape == x.shape
+        assert output.dtype == x.dtype
+        assert aux is None
+        output_np = _to_global_numpy(output, mesh).astype(np.float32)
+        assert np.all(np.isfinite(output_np))
+        assert np.any(output_np != 0)
+
+        for name in ("gate_kernel", "wi", "wo"):
+            grad = _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32)
+            assert np.all(np.isfinite(grad)), f"{name} fused MXFP8 grad has NaN/Inf"
+            assert np.any(grad != 0), f"{name} fused MXFP8 grad is identically zero"
+        grad_x_np = _to_global_numpy(grad_x, mesh).astype(np.float32)
+        assert np.all(np.isfinite(grad_x_np))
+        assert np.any(grad_x_np != 0)
+
+        params_np = _params_global_numpy(variables, mesh)
+        x_np = np.asarray(jax.device_get(x))
+
+        def loss_fn(params, inputs):
+            out, _ = _pure_jax_moe_reference(
+                inputs,
+                params["gate_kernel"],
+                params["wi"],
+                params["wo"],
+                num_experts=NUM_EXPERTS,
+                num_experts_per_tok=TOPK,
+                score_function="softmax",
+                expert_bias=None,
+            )
+            return jnp.mean(out.astype(jnp.float32) ** 2)
+
+        grads_ref, grad_x_ref = jax.jit(jax.grad(loss_fn, argnums=(0, 1)))(
+            {k: jnp.asarray(v) for k, v in params_np.items() if k != "expert_bias"},
+            jnp.asarray(x_np),
+        )
+        for name in ("gate_kernel", "wi", "wo"):
+            np.testing.assert_allclose(
+                _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32),
+                np.asarray(jax.device_get(grads_ref[name])).astype(np.float32),
+                **(
+                    GRAD_GATE_TOLERANCE["mxfp8"]
+                    if name == "gate_kernel"
+                    else GRAD_FFN_TOLERANCE["mxfp8"]
+                ),
+                err_msg=f"{name} fused MXFP8 gradient parity breach",
+            )
+        grad_x_ref_np = np.asarray(jax.device_get(grad_x_ref)).astype(np.float32)
+        np.testing.assert_allclose(
+            grad_x_np,
+            grad_x_ref_np,
+            **GRAD_FFN_TOLERANCE["mxfp8"],
+            err_msg="d_x fused MXFP8 gradient parity breach",
+        )
+        # The mean-square loss makes dX smaller than the absolute tolerance.
+        # Also bound relative error to catch a wrong MXFP8 quantization axis.
+        relative_dx_error = np.linalg.norm(grad_x_np - grad_x_ref_np) / np.linalg.norm(
+            grad_x_ref_np
+        )
+        assert (
+            relative_dx_error < 0.1
+        ), f"d_x MXFP8 relative L2 error {relative_dx_error:.3%} >= 10%"
+
+    def test_cudnn_fused_with_checkpoint_names(
+        self, mesh, monkeypatch, make_block, use_cudnn_fusion
+    ):
+        if not use_cudnn_fusion:
+            pytest.skip("cuDNN grouped GEMM fusion is disabled")
+        from transformer_engine.jax import cpp_extensions as tex
+
+        available, reason = tex.grouped_gemm_glu_dependencies_available()
+        if not available:
+            pytest.skip(reason)
+
+        moe_module = importlib.import_module("transformer_engine.jax.moe")
+        flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
+        selected_calls = []
+        fused_op_name = "grouped_gemm_glu"
+        original_fused_op = getattr(tex, fused_op_name)
+
+        def checked_fused_op(*args, **kwargs):
+            selected_calls.append(True)
+            return original_fused_op(*args, **kwargs)
+
+        monkeypatch.setattr(tex, fused_op_name, checked_fused_op)
+        named_values = {}
+        original_checkpoint_name = moe_module.checkpoint_name
+
+        def recorded_checkpoint_name(value, name):
+            named_values.setdefault(name, []).append(value)
+            return original_checkpoint_name(value, name)
+
+        monkeypatch.setattr(moe_module, "checkpoint_name", recorded_checkpoint_name)
+        original_moe = flax_moe_module.moe
+
+        def checkpointed_moe(*args, **kwargs):
+            kwargs.update(
+                wi_0_checkpoint_name="moe_mlpwi_0",
+                wi_1_checkpoint_name="moe_mlpwi_1",
+                wo_checkpoint_name="moe_mlpwo",
+            )
+            return original_moe(*args, **kwargs)
+
+        monkeypatch.setattr(flax_moe_module, "moe", checkpointed_moe)
+        block = make_block(
+            quantization_recipe=MXFP8BlockScaling(),
+            dispatch_checkpoint_name="saved_dispatch",
+        )
+        inputs = _make_inputs(jax.random.PRNGKey(32))
+        variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(33))
+        grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
+
+        assert selected_calls, f"{fused_op_name} was not selected"
+        for label in ("moe_mlpwi_0", "moe_mlpwi_1"):
+            assert len(named_values[label]) == 5 * len(selected_calls)
+            assert all(hasattr(value, "shape") for value in named_values[label])
+        assert len(named_values["moe_mlpwo"]) == len(selected_calls)
+        assert all(hasattr(value, "shape") for value in named_values["moe_mlpwo"])
+        assert len(named_values["saved_dispatch"]) >= 2 * len(selected_calls)
+        assert np.all(np.isfinite(_to_global_numpy(output, mesh)))
+        assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
+        for name in ("gate_kernel", "wi", "wo"):
+            assert np.all(np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh)))
 
 
 class TestTeEpMoeAuxLoss:
@@ -690,9 +1164,9 @@ class TestTeEpMoeAuxLoss:
       finite + non-zero per tensor.
     """
 
-    def test_aux_loss(self, mesh):
+    def test_aux_loss(self, mesh, make_block):
         coeff = 1e-2
-        block = _make_block(aux_loss_coeff=coeff)
+        block = make_block(aux_loss_coeff=coeff)
         x = _make_inputs(jax.random.PRNGKey(20))
         variables, _, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(21))
 
@@ -710,8 +1184,7 @@ class TestTeEpMoeAuxLoss:
         _, aux_ref = _pure_jax_moe_reference(
             jnp.asarray(x_np),
             jnp.asarray(params_np["gate_kernel"]),
-            jnp.asarray(params_np["wi_0"]),
-            jnp.asarray(params_np["wi_1"]),
+            jnp.asarray(params_np["wi"]),
             jnp.asarray(params_np["wo"]),
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
@@ -720,8 +1193,7 @@ class TestTeEpMoeAuxLoss:
         np.testing.assert_allclose(
             float(aux_np),
             float(jax.device_get(aux_ref)),
-            atol=AUX_ATOL,
-            rtol=AUX_RTOL,
+            **AUX_TOLERANCE,
         )
 
         # Aux-only bwd must propagate to gate_kernel — proves the
@@ -734,14 +1206,14 @@ class TestTeEpMoeAuxLoss:
         assert np.all(np.isfinite(g_gate)), "gate grad NaN/Inf under aux-only loss"
         assert np.any(g_gate != 0.0), "aux bwd should propagate to gate_kernel"
 
-    def test_combined_loss_grads(self, mesh):
+    def test_combined_loss_grads(self, mesh, make_block):
         """Joint main + aux loss bwd: per-tensor finite + non-zero in
         one pass."""
-        block = _make_block(aux_loss_coeff=1e-2)
+        block = make_block(aux_loss_coeff=1e-2)
         x = _make_inputs(jax.random.PRNGKey(22))
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(23))
         grads, _ = _grad_step(block, variables, mesh, x, include_aux=True)
-        for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
+        for name in ("gate_kernel", "wi", "wo"):
             g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))
             assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf under main+aux"
             assert np.any(g_local != 0.0), f"{name} grad zero under main+aux"

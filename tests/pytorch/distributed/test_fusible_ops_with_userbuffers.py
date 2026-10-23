@@ -12,6 +12,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 import pytest
 import torch
@@ -107,7 +108,8 @@ def world_group() -> torch.distributed.ProcessGroup:
     torch.cuda.set_device(local_rank)
     group = torch.distributed.init_process_group(
         "nccl",
-        init_method="file:///tmp/rdzv",
+        # Each parallel job must use a fresh FileStore shared by only its ranks.
+        init_method=f"file://{os.environ['NVTE_TEST_RDZV_PATH']}",
         world_size=world_size,
         rank=rank,
         device_id=torch.device(f"cuda:{local_rank}"),
@@ -429,13 +431,18 @@ if torch.cuda.device_count() > 1:
 
 @pytest.mark.parametrize("world_size", _world_sizes)
 @pytest.mark.parametrize("quantization", quantization_list)
+@pytest.mark.parametrize("use_cublasmp", (False, True), ids=("userbuffers", "cublasmp"))
 def test_fuser_ops_with_userbuffers(
     *,
     world_size: int,
     dtype: torch.dtype = torch.bfloat16,
     quantization: Optional[str],
+    use_cublasmp: bool,
 ) -> None:
     """Launch parallel job and run tests"""
+
+    if use_cublasmp and not tex.nvte_built_with_cublasmp():
+        pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
 
     # Parallel job launcher
     command = []
@@ -460,6 +467,8 @@ def test_fuser_ops_with_userbuffers(
     )
     if quantization is not None:
         command.extend(("--quantization", quantization))
+    if use_cublasmp:
+        command.append("--use-cublasmp")
 
     # Environment
     env = dict(os.environ)
@@ -471,7 +480,9 @@ def test_fuser_ops_with_userbuffers(
     env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
 
     # Launch parallel job
-    run_distributed(command, env=env)
+    with tempfile.TemporaryDirectory(prefix="te-test-fusible-ops-userbuffers-") as temp_dir:
+        env["NVTE_TEST_RDZV_PATH"] = str(pathlib.Path(temp_dir) / "rdzv")
+        run_distributed(command, env=env)
 
 
 def main() -> None:

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 import abc
+import math
 from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
@@ -15,7 +16,7 @@ import transformer_engine_torch as tex
 from ...constants import DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
-from ...utils import clear_tensor_data
+from ...utils import _compile_safe_warn, clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
 
@@ -29,6 +30,7 @@ __all__ = [
     "ReGLU",
     "SReLU",
     "ScaledSReLU",
+    "ScaledTanhSReLU",
     "SReGLU",
     "SiLU",
 ]
@@ -402,23 +404,23 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         next_op_input_quantizer: Optional[Quantizer],  # pylint: disable=unused-argument
         basic_op_kwargs: list[dict[str, Any]],  # pylint: disable=unused-argument
     ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
-        if self.activation_recompute_in_mlp:
-            raise RuntimeError(
-                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
-                "fused grouped MLP path."
-            )
-
         extra_input = basic_op_extra_inputs[0][0]
+
+        if self.activation_recompute_in_mlp:
+            _compile_safe_warn(
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) is only supported "
+                "in the fused grouped MLP path."
+            )
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
-        elif isinstance(input_, torch.Tensor):
-            dtype = input_.dtype
+            extra_input_dtype = dtype
         else:
-            dtype = extra_input.dtype
+            dtype = input_.dtype
+            extra_input_dtype = extra_input.dtype
 
         x = maybe_dequantize(input_.contiguous(), dtype)
-        scales = maybe_dequantize(extra_input, dtype)
+        scales = maybe_dequantize(extra_input.contiguous(), extra_input_dtype)
         y = self._scaled_unary_forward(x, scales)
 
         ctx = basic_op_ctxs[0]
@@ -426,6 +428,7 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
             if is_cpu_offload_enabled():
                 mark_activation_offload(x)
             ctx.input_requires_grad = True
+            ctx.extra_input_dtype = extra_input_dtype
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.dtype = dtype
             ctx.save_for_backward(x, scales)
@@ -445,17 +448,17 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
     ]:
         del basic_op_grad_extra_outputs
 
-        if self.activation_recompute_in_mlp:
-            raise RuntimeError(
-                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
-                "fused grouped MLP path."
-            )
-
         ctx = basic_op_ctxs[0]
         x, scales = ctx.saved_tensors
         x = maybe_dequantize(x.contiguous(), ctx.dtype)
-        scales = maybe_dequantize(scales, ctx.dtype)
+        scales = maybe_dequantize(scales, ctx.extra_input_dtype)
         grad_output = maybe_dequantize(grad_output.contiguous(), ctx.dtype)
+
+        if self.activation_recompute_in_mlp:
+            _compile_safe_warn(
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) is only supported "
+                "in the fused grouped MLP path."
+            )
 
         grad_input, grad_extra_input = self._scaled_unary_backward(
             grad_output,
@@ -481,7 +484,9 @@ class ScaledSReLU(_ScaledUnary):
     ----------
     activation_recompute_in_mlp : bool, default = ``False``
         Enable fused grouped MLP kernels to recompute activation outputs
-        during backward when supported instead of saving them.
+        during backward when supported instead of saving them. Outside the
+        fused grouped MLP path this option has no effect and a warning is
+        emitted.
     """
 
     def _scaled_unary_forward(
@@ -506,6 +511,73 @@ class ScaledSReLU(_ScaledUnary):
             None,
             compute_scale_grad,
         )
+
+
+class ScaledTanhSReLU(_ScaledUnary):
+    r"""Tanh soft-clamped squared ReLU with per-row post-scaling.
+
+    Identical to :class:`ScaledSReLU` except that the ReLU output is soft-clamped
+    by a tanh before squaring, which bounds the activation by
+    ``tanh_clamp_scale ** 2``:
+
+    .. math::
+        y = \left( s \cdot \tanh\left( \frac{\mathrm{relu}(x)}{s} \right) \right)^2 \cdot \mathrm{scales}
+
+    Parameters
+    ----------
+    tanh_clamp_scale : float
+        Soft-clamp scale ``s``. Must be finite and positive.
+    activation_recompute_in_mlp : bool, default = ``False``
+        Enable fused grouped MLP kernels to recompute activation outputs
+        during backward when supported instead of saving them.
+    """
+
+    def __init__(
+        self,
+        *,
+        tanh_clamp_scale: float,
+        activation_recompute_in_mlp: bool = False,
+    ) -> None:
+        super().__init__(activation_recompute_in_mlp=activation_recompute_in_mlp)
+        self.tanh_clamp_scale: float = float(tanh_clamp_scale)
+        if not math.isfinite(self.tanh_clamp_scale) or self.tanh_clamp_scale <= 0.0:
+            raise ValueError(
+                f"tanh_clamp_scale must be finite and positive, got {tanh_clamp_scale}"
+            )
+
+    def _tanh_srelu_terms(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute ``b = s * tanh(relu(x) / s)`` and ``t = tanh(relu(x) / s)`` in FP32."""
+        s = self.tanh_clamp_scale
+        t = torch.tanh(torch.relu(input_.float()) / s)
+        return s * t, t
+
+    def _scaled_unary_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> torch.Tensor:
+        b, _ = self._tanh_srelu_terms(input_)
+        out = b.square() * scales.float().unsqueeze(-1)
+        return out.to(input_.dtype)
+
+    def _scaled_unary_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # d/dx b^2 = 2 * b * (1 - t^2)
+        b, t = self._tanh_srelu_terms(input_)
+        grad_output_f32 = grad_output.float()
+        grad_input = grad_output_f32 * scales.float().unsqueeze(-1) * (2.0 * b * (1.0 - t * t))
+
+        grad_scales = None
+        if compute_scale_grad:
+            grad_scales = (b.square() * grad_output_f32).sum(dim=-1).to(scales.dtype)
+
+        return grad_input.to(input_.dtype), grad_scales
 
 
 class SReGLU(_ActivationOperation):

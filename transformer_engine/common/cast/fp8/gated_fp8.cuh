@@ -17,6 +17,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../util/vectorized_pointwise.h"
@@ -165,10 +166,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       float act_elt = static_cast<float>(in_act_sh_curr[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh_curr[shmem_idx]);
-      bool dgate_elt = true;  // gating is ideally an identity function
+      float dgate_elt = 1.0f;  // gating is ideally an identity function
       if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-        dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+        if (gate_elt > p.limit || gate_elt < -p.limit) {
+          dgate_elt = 0.f;
+        }
         gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
+      } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+        dgate_elt = dsitu_up<float, float>(gate_elt, p);
+        gate_elt = situ_up<float, float>(gate_elt, p);
       }
 
       if constexpr (IS_BWD) {
@@ -186,6 +192,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           } else {
             dact_x = 0.0f;
           }
+        } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+          act_x = ActOP(x, p);
+          dact_x = DActOP(x, p);
         } else {
           if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
             const float s = sigmoidf(x);
@@ -197,7 +206,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
         }
         float after_dact = dact_x * grad_elt * gate_elt;
-        float after_dgate = dgate_elt ? act_x * grad_elt : 0.0f;
+        float after_dgate = dgate_elt * act_x * grad_elt;
 
         out_act_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dact);
         out_gate_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dgate);
@@ -239,8 +248,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // Wait for TMA transfer to have finished reading shared memory.
       ptx::cp_async_bulk_wait_group_read<BUFFERS_NUM - 1>();
     }
+    // The bulk async-group is owned by the issuing thread. Hand its completion
+    // off to all cooperative writers before the output ring can be reused.
+    if (next_it < ITERATIONS && next_it >= BUFFERS_NUM) {
+      __syncthreads();
+    }
   }
-  ptx::cp_async_bulk_wait_group_read<0>();
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
   __syncthreads();
 
   if (amax_ptr != nullptr) {
@@ -270,6 +286,45 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 }  // namespace kernel
+
+// Dynamic shared memory requested by cast_fp8_gated_kernel. Must match the
+// buffer layout inside the kernel.
+inline size_t cast_gated_tma_dynamic_shmem_size(const bool is_bwd, const DType itype,
+                                                const DType otype) {
+  using namespace kernel;
+  const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
+  const size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * typeToNumBits(itype) / 8, TMA_SHMEM_ALIGNMENT);
+  const size_t buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE(buff_elems_total * typeToNumBits(otype) / 8, TMA_SHMEM_ALIGNMENT);
+  const size_t grad_mem = (is_bwd ? buff_size_aligned_in : 0);
+  const size_t in_act_mem = buff_size_aligned_in;
+  const size_t in_gate_mem = buff_size_aligned_in;
+  const size_t out_act_mem = buff_size_aligned_out;
+  const size_t out_gate_mem = buff_size_aligned_out;
+  return grad_mem + (in_act_mem + in_gate_mem) + (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
+}
+
+// Whether cast_fp8_gated_kernel fits in the shared memory of the current device.
+// Devices with compute capability 10.0+ differ in shared memory per block
+// (e.g. SM 12.0 has much less than SM 10.0), so FP32 configurations may not fit.
+// The static shared memory is read from the compiled kernel so that __shared__
+// arrays in the device functions it calls (e.g. reduce_max) are included.
+template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &)>
+bool cast_gated_tma_fits_device(const DType itype, const DType otype) {
+  using namespace kernel;
+  size_t static_shmem_size = 0;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      itype, IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          otype, OType,
+          static_shmem_size = cuda::static_shared_memory_size(reinterpret_cast<const void *>(
+              &cast_fp8_gated_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType>));););
+  const size_t required =
+      cast_gated_tma_dynamic_shmem_size(IS_BWD, itype, otype) + static_shmem_size;
+  return required <= cuda::max_shared_memory_per_block_optin();
+}
 
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
@@ -321,19 +376,8 @@ void cast_gated_tma(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
                                SHMEM_DIM_X, tensor_stride_elems, cols,
                                typeToNumBits(output->dtype()));
 
-          const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
-          const size_t buff_size_aligned_in =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-          const size_t buff_size_aligned_out =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
-          const size_t grad_mem = (IS_BWD ? buff_size_aligned_in : 0);
-          const size_t in_act_mem = buff_size_aligned_in;
-          const size_t in_gate_mem = buff_size_aligned_in;
-          const size_t out_act_mem = buff_size_aligned_out;
-          const size_t out_gate_mem = buff_size_aligned_out;
-
-          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
-                                    (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
+          const size_t shmem_size =
+              cast_gated_tma_dynamic_shmem_size(IS_BWD, gated_input.dtype(), output->dtype());
 
           auto kernel = cast_fp8_gated_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType>;
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
