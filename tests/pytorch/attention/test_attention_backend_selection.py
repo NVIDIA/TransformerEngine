@@ -122,6 +122,53 @@ def test_fa4_d256_seqused_backend_selection(monkeypatch, version, backward, expe
     assert bool(available[0]) is expected
 
 
+@pytest.mark.parametrize(
+    "capability,head_dims,expect_flash",
+    [
+        pytest.param((10, 3), (256, 256), True, id="sm103-d256"),
+        pytest.param((10, 3), (224, 224), True, id="sm103-d224"),
+        pytest.param((10, 3), (192, 256), True, id="sm103-mla-padded-d256"),
+        pytest.param((10, 3), (192, 192), True, id="sm103-d192"),
+        pytest.param((10, 3), (264, 264), False, id="sm103-d264"),
+        pytest.param((10, 3), (252, 252), False, id="sm103-d252-unaligned"),
+        pytest.param((10, 0), (256, 256), True, id="sm100-d256"),
+    ],
+)
+def test_fa2_large_head_dim_backend_selection(monkeypatch, capability, head_dims, expect_flash):
+    """FA2 padded head_dim > 192 is selected on sm100-class GPUs, including sm103."""
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V2", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V4", "0")
+    monkeypatch.setattr(dpa_utils, "get_device_compute_capability", lambda device: capability)
+    monkeypatch.setattr(dpa_utils, "get_cudnn_version", lambda: (9, 26, 0))
+    fa2_version = PkgVersion("2.8.3")
+    monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "is_installed", True)
+    monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "version", fa2_version)
+    for flag in (
+        "v2_plus",
+        "v2_1_plus",
+        "v2_3_plus",
+        "v2_4_plus",
+        "v2_4_1_plus",
+        "v2_5_plus",
+        "v2_5_7_plus",
+        "v2_6_0_plus",
+        "v2_7_0_plus",
+    ):
+        monkeypatch.setattr(dpa_utils.FlashAttentionUtils, flag, True)
+    params = dpa_utils.AttentionParams(
+        device=torch.device("cuda:0"),
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="bshd_bshd_bshd",
+        head_dim_qk=head_dims[0],
+        head_dim_v=head_dims[1],
+        attn_mask_type="causal",
+    )
+    flash, selected_version, _, _, _, available = dpa_utils.get_attention_backend(params)
+    assert bool(flash) is expect_flash
+    assert selected_version == (fa2_version if expect_flash else None)
+    assert bool(available[0]) is expect_flash
+
+
 @pytest.mark.parametrize("changed_field", ["device", "requires_backward"])
 def test_thd_backend_cache_tracks_execution_context(monkeypatch, changed_field):
     selector = Mock(return_value=(False, None, False, None, True, [False, False, True]))
