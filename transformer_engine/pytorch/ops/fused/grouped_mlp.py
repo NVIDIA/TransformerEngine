@@ -1525,12 +1525,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
             fc1_weight_quantizers = _weight_quantizers(fc1_op, num_groups)
             # Distributed weights gather first (native-quantized shards gather quantized, BF16
-            # shards gather as BF16); anything still unquantized is quantized here.
+            # shards gather as BF16); anything still unquantized is quantized here. The
+            # gathered copy is not saved (backward re-gathers and quantizes columnwise
+            # itself), so its columnwise data would be thrown away: skip producing it.
             grouped_fc1_weight = _quantize_unquantized_weights(
                 materialize_weight_for_forward(fc1_weights) if fc1_is_dist else fc1_weights,
                 fc1_weight_quantizers,
                 rowwise=True,
-                columnwise=input_requires_grad,
+                columnwise=input_requires_grad and not fc1_is_dist,
             )
 
         # Prepare FC2 grouped weight tensor for fused kernels.
