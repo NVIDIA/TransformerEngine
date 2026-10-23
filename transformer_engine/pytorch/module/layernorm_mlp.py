@@ -1299,12 +1299,12 @@ def _layernorm_mlp_recompute(
             restore_first_module=True
         )
 
-    FP8GlobalStateManager.set_autocast_state(final_autocast_state)
     if (
         fwd_args.fp8
         and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling"
     ):
         FP8GlobalStateManager.restore_fp8_meta_tensors(fwd_args.fp8_meta)  # restore quantizers
+    FP8GlobalStateManager.set_autocast_state(final_autocast_state)
 
     # set rng state for fwd
     torch.set_rng_state(final_cpu_rng_state)
