@@ -10,6 +10,7 @@ from einops import rearrange
 
 import torch
 
+from transformer_engine import te_device_type
 from transformer_engine.pytorch.attention.custom_ops import (
     copy_to_kv_cache,
     QKV_FORMAT_VALUE,
@@ -631,7 +632,7 @@ class PagedKVCacheManager(KVCacheManager):
         self.allocated_pages = defaultdict(list)
         # page table, [batch_size, max_pages_per_seq]
         self.page_table = torch.zeros(
-            self.max_batch_size, self.max_pages_per_seq, dtype=torch.int32, device="cuda"
+            self.max_batch_size, self.max_pages_per_seq, dtype=torch.int32, device=te_device_type()
         )
 
     def reset(self):

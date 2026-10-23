@@ -8,6 +8,7 @@ from typing import List, Union, Tuple
 import torch
 import transformer_engine_torch as tex
 
+from transformer_engine import te_device_type
 from transformer_engine.pytorch.utils import (
     get_cudnn_version,
     nvtx_range_pop,
@@ -299,7 +300,9 @@ def get_thd_partitioned_indices(
             cp_size,
         )
         target_device = torch.device(device if device is not None else cu_seqlens_padded.device)
-        target_dtype = torch.int32 if target_device.type == "cuda" else cu_seqlens_padded.dtype
+        target_dtype = (
+            torch.int32 if target_device.type == te_device_type() else cu_seqlens_padded.dtype
+        )
         chunk_size = total_tokens // cp_size
         return torch.arange(
             cp_rank * chunk_size,

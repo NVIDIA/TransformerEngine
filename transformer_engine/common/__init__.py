@@ -231,6 +231,14 @@ def load_framework_extension(framework: str) -> None:
             # plugin module may import transformer_engine_torch_nv at top level.
             sys.modules[module_name + "_nv"] = solib
             _plugin = importlib.import_module(_nvte_plugin)
+            # Apply device patches before Transformer Engine's PyTorch submodules
+            # capture references to torch.cuda entry points. The submodule is
+            # optional: a plugin that needs no patches may omit it, and a
+            # single-file plugin has no submodules to search.
+            if hasattr(_plugin, "__path__") and (
+                importlib.util.find_spec(f"{_nvte_plugin}.patches") is not None
+            ):
+                importlib.import_module(f"{_nvte_plugin}.patches").apply_patches()
             _plugin.load_plugins()
         except Exception as e:  # pylint: disable=broad-exception-caught
             # Rollback to pre-plugin state if plugin failed to fully initialize
