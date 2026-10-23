@@ -102,9 +102,10 @@ class EpConfig:
     (an ``EpBuffer``'s receive capacity, alignment, payload dtype, zero-copy and
     overflow policy) is configured with them directly.
 
-    ``alignment`` defaults to 256 tokens per expert to support grouped MLP
-    fusion. Configure the backend with the same alignment and include padding
-    in ``recv_capacity_per_rank``.
+    When ``alignment`` is omitted, it is 0 for the local PyTorch backend
+    (``ep_group=None``) and 256 tokens per expert for a distributed group to
+    support grouped MLP fusion. Configure the communication backend with the
+    same alignment and include padding in ``recv_capacity_per_rank``.
     """
 
     top_k: int
@@ -112,8 +113,8 @@ class EpConfig:
     num_local_experts: int
     max_tokens_per_rank: int
     recv_capacity_per_rank: Optional[int]
-    ep_group: dist.ProcessGroup
-    alignment: int = 256
+    ep_group: Optional[dist.ProcessGroup]
+    alignment: Optional[int] = None
     payload_dtype: torch.dtype = torch.bfloat16
     zero_copy: bool = False
     drop_on_overflow: bool = False
@@ -121,6 +122,10 @@ class EpConfig:
     # combined gradient backward; ``None`` moves BF16 both ways.
     dispatch_fwd_quant_recipe: Optional["Recipe"] = None
     combine_bwd_quant_recipe: Optional["Recipe"] = None
+
+    def __post_init__(self) -> None:
+        if self.alignment is None:
+            object.__setattr__(self, "alignment", 0 if self.ep_group is None else 256)
 
 
 def _atexit_finalize() -> None:
