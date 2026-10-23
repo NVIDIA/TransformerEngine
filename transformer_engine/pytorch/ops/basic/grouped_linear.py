@@ -73,6 +73,7 @@ OUTPUT_BUFFER_KEY = "output"
 GRAD_INPUT_BUFFER_KEY = "grad_input"
 
 
+@functools.lru_cache(maxsize=None)
 def is_op_fuser_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,

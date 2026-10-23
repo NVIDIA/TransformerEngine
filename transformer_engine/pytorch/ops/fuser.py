@@ -51,7 +51,7 @@ OperationFusionFunction: TypeAlias = (
     "Callable[tuple[list[FusibleOperation], ...], list[FusibleOperation]]"
 )
 _FusedOpList: TypeAlias = list[tuple[FusibleOperation, list[int]]]
-_FusionParams: TypeAlias = tuple[type, int, Optional[str]]
+_FusionParams: TypeAlias = tuple[str, int]
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -575,9 +575,7 @@ class OperationFuser:
         self._fused_ops_cache: dict[_FusionParams, tuple[_FusedOpList, _FusedOpList]] = {}
 
         # Cache and detect change of state relevant for fusing operations
-        self.recipe_type = None
-        self.backward_override = None
-        self._last_amax_history_len = 0
+        self._recipe_repr: Optional[str] = None
 
         # Runtime backward boundary. Full activation recompute alternates this
         # between the checkpointed forward and the grad-enabled recomputation.
@@ -669,40 +667,28 @@ class OperationFuser:
         # paths that reuse a cached fused operation configuration.
         self.first_op_requiring_backward = first_op_requiring_backward
 
-        # Check if recipe parameters don't match cached values. In this case,
-        # the recipe state in the basic ops might be invalid, so reset it.
-        recipe_type = type(recipe)
-        need_to_reset_recipe_state = self.recipe_type != recipe_type
-
-        backward_override = recipe.backward_override if recipe is not None else None
-        if backward_override != self.backward_override:
-            self.backward_override = backward_override
-            need_to_reset_recipe_state = True
-
-        if (
-            recipe is not None
-            and recipe.delayed()
-            and self._last_amax_history_len != recipe.amax_history_len
-        ):
-            self._last_amax_history_len = recipe.amax_history_len
-            need_to_reset_recipe_state = True
+        # Recipes are mutable, so use their immutable string representation
+        # to detect changes and as a stable fusion-cache key.
+        recipe_repr = str(recipe) if recipe is not None else ""
+        need_to_reset_recipe_state = self._recipe_repr != recipe_repr
 
         if need_to_reset_recipe_state:
             for op in self._basic_ops:
                 op.reset_recipe_state(recipe=recipe)
 
             # Check if this is the first iteration
-            if self.recipe_type is None:
+            if self._recipe_repr is None:
                 for op in self._basic_ops:
                     op.pre_first_fuser_forward()
 
-            self.recipe_type = recipe_type
+            self._recipe_repr = recipe_repr
 
         # Training and inference may support different fusions. Keep the
         # backward boundary in the key, but pay construction cost only once for
         # each configuration. Full recompute therefore builds at most one
         # no-grad plan and one grad-enabled plan for a stable recipe.
-        fusion_params = (recipe_type, first_op_requiring_backward, backward_override)
+        recipe_options_key = recipe.options_key() if recipe is not None else ""
+        fusion_params = (recipe_options_key, first_op_requiring_backward)
         cached_ops = self._fused_ops_cache.get(fusion_params)
         if cached_ops is not None:
             self._forward_ops, self._backward_ops = cached_ops
