@@ -836,7 +836,7 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t 
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
-class CommOverlapHelper : torch::CustomClassHolder {
+class CommOverlapHelper {
  public:
   // Shared ownership of an ncclComm_t. The deleter calls ncclCommDestroy when
   // the last reference (held by the helper and/or any CommOverlap consumers)
@@ -873,7 +873,7 @@ class CommOverlapHelper : torch::CustomClassHolder {
   NcclCommSharedPtr get_nccl_comm(std::string comm_name);
 };
 
-class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
+class CommOverlap : public transformer_engine::CommOverlapBase {
  private:
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
@@ -913,7 +913,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
 };  // CommOverlap
 
-class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
+class CommOverlapP2P : public transformer_engine::CommOverlapP2PBase {
  private:
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
