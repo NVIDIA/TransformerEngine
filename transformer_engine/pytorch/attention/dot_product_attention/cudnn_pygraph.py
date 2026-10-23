@@ -1,0 +1,508 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+"""Helpers for driving cuDNN frontend's Python graph API from PyTorch.
+
+Shared by flex_attention.py and frost_attention.py: importing the frontend, holding a handle per
+device, describing tensors in cuDNN's BHSD form, building and planning the SDPA forward and
+backward graphs, and caching them. Anything specific to one backend, such as a mask, a score_mod
+or which engine to pin, is passed in by the caller.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from importlib.metadata import PackageNotFoundError, version as get_pkg_version
+import importlib
+import os
+from typing import Any, Dict, Optional, Sequence, Tuple
+
+import torch
+from packaging.version import InvalidVersion, Version as PkgVersion
+
+# The cuDNN FROST SDPA engines in (forward, backward) order, named once so that frost, which
+# pins one of them, and flex, which bars both, cannot drift apart.
+FROST_PLAN_TOKENS = ("sdpa_fwd_prefill_sm100", "sdpa_bwd_sm100")
+
+# Distinguishes "the caller said nothing" from "the caller asked for no exclusions at all".
+_BAR_FROST_BY_DEFAULT = object()
+
+_cudnn = None
+_frost_engines_enabled = False
+_CUDNN_HANDLES: Dict[Tuple[str, torch.device], Any] = {}
+_GRAPH_CACHE: Dict[Tuple[str, Any], Any] = {}
+
+
+def import_cudnn_frontend(enable_frost_engines: bool = False):
+    """Import cuDNN Frontend, enabling the FROST engines if this caller needs them."""
+    global _cudnn, _frost_engines_enabled  # pylint: disable=global-statement
+    if _cudnn is None:
+        try:
+            _cudnn = importlib.import_module("cudnn")
+        except ImportError as exc:
+            raise ImportError(
+                "cuDNN frontend Python package not found. "
+                "Install it with: pip install nvidia-cudnn-frontend"
+            ) from exc
+
+    if enable_frost_engines and not _frost_engines_enabled:
+        os.environ.setdefault("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1")
+        importlib.import_module("cudnn.sdpa")
+        _frost_engines_enabled = True
+
+    return _cudnn
+
+
+def get_cudnn_handle(device: torch.device, *, backend_name: str = "cuDNN attention"):
+    """A cuDNN handle for ``device``, rebound to PyTorch's current stream on every call.
+
+    Rebound per call, not per handle: the p2p context-parallel ring runs one cached plan from a
+    different stream per ring step, and without this cuDNN is not ordered against the tensors.
+    Keyed per backend because a handle is not thread-safe and ``set_stream`` mutates it.
+    """
+    if device.type != "cuda":
+        raise ValueError(f"{backend_name} only supports CUDA tensors, got device {device}.")
+    cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    key = (backend_name, device)
+    with torch.cuda.device(device):
+        handle = _CUDNN_HANDLES.get(key)
+        if handle is None:
+            handle = cudnn.create_handle()
+            _CUDNN_HANDLES[key] = handle
+        cudnn.set_stream(handle=handle, stream=torch.cuda.current_stream(device).cuda_stream)
+    return handle
+
+
+def io_data_type(cudnn, dtype: torch.dtype, *, backend_name: str = "cuDNN attention"):
+    """Map a torch dtype to the cuDNN enum these SDPA graphs are declared with.
+
+    Takes ``cudnn`` rather than importing it, so a dtype lookup cannot flip the FROST switch.
+    """
+    if dtype == torch.float16:
+        return cudnn.data_type.HALF
+    if dtype == torch.bfloat16:
+        return cudnn.data_type.BFLOAT16
+    raise ValueError(f"{backend_name} only supports FP16/BF16 tensors, got {dtype}.")
+
+
+def pkg_version(name: str, module=None) -> Tuple[Optional[PkgVersion], Optional[str]]:
+    """A package's version, or None when it is absent or unparseable, with the raw string."""
+    raw = None
+    for candidate in (lambda: get_pkg_version(name), lambda: getattr(module, "__version__", None)):
+        try:
+            raw = candidate()
+        except PackageNotFoundError:
+            raw = None
+        if isinstance(raw, str):
+            break
+        raw = None
+    if raw is None:
+        return None, None
+    try:
+        return PkgVersion(raw), raw
+    except InvalidVersion:
+        return None, raw
+
+
+def _diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -> Dict[str, Any]:
+    """cuDNN sdpa kwargs for a TE (mask type, window): a diagonal alignment plus a band."""
+    left, right = window
+    opts: Dict[str, Any] = {}
+    if attn_mask_type in ("causal", "causal_bottom_right") or right == 0:
+        opts["diagonal_alignment"] = (
+            cudnn.diagonal_alignment.BOTTOM_RIGHT
+            if attn_mask_type == "causal_bottom_right"
+            else cudnn.diagonal_alignment.TOP_LEFT
+        )
+        opts["diagonal_band_right_bound"] = 0
+    if left != -1:
+        # cuDNN's left bound counts the diagonal itself and TE's window_size does not, so a
+        # window of w is a left bound of w + 1. Unconverted it drops one token of context per
+        # layer, which no shape-level test would catch.
+        opts["diagonal_band_left_bound"] = left + 1
+    return opts
+
+
+def build_pygraph(
+    dtype: torch.dtype, device: torch.device, *, backend_name: str = "cuDNN attention"
+):
+    """A cuDNN frontend graph for F16/BF16 SDPA, bound to this device's stream-current handle."""
+    cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
+    return cudnn.pygraph(
+        io_data_type=io_data_type(cudnn, dtype, backend_name=backend_name),
+        intermediate_data_type=cudnn.data_type.FLOAT,
+        compute_data_type=cudnn.data_type.FLOAT,
+        handle=get_cudnn_handle(device, backend_name=backend_name),
+    )
+
+
+def bhsd_dim_stride(
+    tensor: torch.Tensor, tensor_format: str, *, backend_name: str = "cuDNN attention"
+) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    """Describe an SBHD/BSHD tensor as cuDNN frontend's logical BHSD format, without permuting."""
+    if tensor_format == "sbhd":
+        return (
+            (tensor.shape[1], tensor.shape[2], tensor.shape[0], tensor.shape[3]),
+            (tensor.stride(1), tensor.stride(2), tensor.stride(0), tensor.stride(3)),
+        )
+    if tensor_format == "bshd":
+        return (
+            (tensor.shape[0], tensor.shape[2], tensor.shape[1], tensor.shape[3]),
+            (tensor.stride(0), tensor.stride(2), tensor.stride(1), tensor.stride(3)),
+        )
+    raise ValueError(f"{backend_name} only supports SBHD/BSHD tensor formats, got {tensor_format}.")
+
+
+def device_key(device: torch.device) -> Tuple[Any, ...]:
+    """Normalize a device for a cache key, so ``cuda`` and ``cuda:0`` cannot key two entries."""
+    if device.type == "cuda" and device.index is None:
+        return ("cuda", torch.cuda.current_device())
+    return (device.type, device.index)
+
+
+def bhsd_tensor_spec(
+    tensor: torch.Tensor, tensor_format: str, *, backend_name: str = "cuDNN attention"
+) -> Tuple[Any, ...]:
+    """A tensor as the graph will see it: BHSD dims, BHSD strides, dtype.
+
+    Serves both roles this triple has: the descriptor :func:`build_fwd` and :func:`build_bwd`
+    declare a tensor from, and, being hashable, the per-tensor part of a plan cache key. Strides
+    belong in it because the graph is built for this exact layout, which is what lets bshd and
+    sbhd run without a transpose. The format name does not, provided every descriptor the graph
+    declares comes from a spec that is itself keyed: two formats giving the same description are
+    then the same graph.
+    """
+    dim, stride = bhsd_dim_stride(tensor, tensor_format, backend_name=backend_name)
+    return (tuple(dim), tuple(stride), tensor.dtype)
+
+
+def sdpa_cache_key(
+    direction: str,
+    device: torch.device,
+    specs: Sequence[Any],
+    *,
+    attn_scale: float,
+    deterministic: bool = False,
+    extras: Tuple[Any, ...] = (),
+) -> Tuple[Any, ...]:
+    """What identifies an SDPA plan: direction, device, each bound tensor's BHSD spec, the scale
+    and whether the backward is deterministic.
+
+    The device because a plan is built under whichever one was current, matching the C++
+    fused-attn cache. ``deterministic`` because that backward is a different algorithm, not a flag
+    on the same one. ``extras`` is whatever else the caller's graph depends on, such as a mask or
+    a score_mod identity; it is opaque here and must be hashable.
+    """
+    return (
+        direction,
+        device_key(device),
+        tuple(specs),
+        float(attn_scale),
+        bool(deterministic),
+    ) + tuple(extras)
+
+
+def cached_graph(backend_name: str, key: Optional[Any], build, *, device=None):
+    """Memoize a built graph. ``key=None`` means uncacheable: build, return, do not store.
+
+    Keyed by ``backend_name`` as well, so two backends' keys cannot collide in the one cache.
+    Built under ``device``, not merely with its handle: the plans are JIT-compiled and a compile
+    path may read the ambient CUDA context.
+    """
+    key = None if key is None else (backend_name, key)
+    entry = None if key is None else _GRAPH_CACHE.get(key)
+    if entry is None:
+        scope = (
+            torch.cuda.device(device)
+            if device is not None and device.type == "cuda"
+            else contextlib.nullcontext()
+        )
+        with scope:
+            entry = build()
+        if key is not None:
+            _GRAPH_CACHE[key] = entry
+    return entry
+
+
+def clear_graph_cache() -> None:
+    """Drop every cached graph, so a test can force a rebuild. Covers both backends."""
+    _GRAPH_CACHE.clear()
+
+
+def finalize_plans(
+    graph,
+    *,
+    backend_name: str = "cuDNN attention",
+    heuristics: Optional[Sequence[Any]] = None,
+    build_policy: Any = None,
+    require_plan_token: Optional[str] = None,
+    not_found_hint: Any = "",
+    exclude_plan_tokens: Any = _BAR_FROST_BY_DEFAULT,
+) -> Tuple[int, Optional[str]]:
+    """Create plans, optionally pin one by name, build, and return (workspace size, plan name).
+
+    ``require_plan_token`` makes the choice strict: a plan whose name lacks the token raises.
+    Unpinned, ``build_plans`` finalizes the first plan in the ranked list that builds, so a graph
+    the intended engine declines runs on whatever cuDNN ranked next with nothing saying so.
+    Matched as a substring, since cuDNN collapses per-head-dim engine names into one row. The pin
+    must precede ``check_support``, which is only fatal once ``select_plan`` has run.
+
+    ``exclude_plan_tokens`` is the opposite instruction, and defaults to barring the FROST
+    engines, which accept a score_mod graph and then compute without it. They are on offer
+    process-wide, so declining to ask is not enough. Drop the default once cuDNN declines these
+    graphs itself; the gate that should reads a key ``sdpa()`` never writes.
+    """
+    cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
+
+    graph.validate()
+    graph.build_operation_graph()
+
+    if heuristics is None:
+        heuristics = [cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]
+
+    if require_plan_token is None:
+        if exclude_plan_tokens is _BAR_FROST_BY_DEFAULT:
+            exclude_plan_tokens = FROST_PLAN_TOKENS
+        try:
+            graph.create_execution_plans(list(heuristics))
+            # Bar before the walk, so build_plans falls through to the first unbarred, buildable
+            # entry. getattr so a frontend predating deselect_engines degrades rather than raising.
+            deselect = getattr(graph, "deselect_engines", None)
+            if exclude_plan_tokens and deselect is not None:
+                deselect(list(exclude_plan_tokens))
+            graph.check_support()
+        except cudnn.cudnnGraphNotSupportedError as exc:
+            # Name the bar: if it removed the only viable plan, the graph was not the problem.
+            barred = (
+                f" (barred engines: {list(exclude_plan_tokens)})" if exclude_plan_tokens else ""
+            )
+            raise RuntimeError(
+                f"cuDNN {backend_name} SDPA graph is not supported: {exc}{barred}"
+            ) from exc
+        if build_policy is None:
+            build_policy = cudnn.build_plan_policy.HEURISTICS_CHOICE
+        graph.build_plans(build_policy)
+        return max(graph.get_workspace_size(), 1), None
+
+    graph.create_execution_plans(list(heuristics))
+    names = [graph.get_plan_name_at_index(i) for i in range(graph.get_execution_plan_count())]
+    hits = [i for i, n in enumerate(names) if require_plan_token in n]
+    if not hits:
+        # Resolved only here: a hint may look up package versions, off the success path.
+        hint = not_found_hint() if callable(not_found_hint) else not_found_hint
+        raise RuntimeError(
+            f"no cuDNN engine matching {require_plan_token!r} was offered."
+            f" Candidate plans: {names[:6]}.{(' ' + hint) if hint else ''}"
+        )
+    graph.select_plan(hits[0])
+    # Pinned, so a decline here is the engine's own verdict; surface cuDNN's reason for it.
+    try:
+        graph.check_support()
+        graph.build_plans()
+    except cudnn.cudnnGraphNotSupportedError as exc:
+        hint = not_found_hint() if callable(not_found_hint) else not_found_hint
+        raise RuntimeError(
+            f"cuDNN engine {names[hits[0]]!r} was offered but declined this graph:"
+            f" {exc}{(' ' + hint) if hint else ''}"
+        ) from exc
+    return max(graph.get_workspace_size(), 1), names[hits[0]]
+
+
+def _declare_tensor(graph, name: str, spec: Any):
+    """Declare one graph input.
+
+    ``spec`` is a ``torch.Tensor``, described with ``tensor_like``, or a ``(dim, stride)`` /
+    ``(dim, stride, data_type)`` descriptor. Omitting ``data_type`` inherits the graph's
+    ``io_data_type``.
+    """
+    if isinstance(spec, torch.Tensor):
+        return graph.tensor_like(spec)
+    kwargs: Dict[str, Any] = {"name": name, "dim": list(spec[0]), "stride": list(spec[1])}
+    if len(spec) > 2 and spec[2] is not None:
+        kwargs["data_type"] = spec[2]
+    return graph.tensor(**kwargs)
+
+
+def _mark_output(tensor, spec: Any):
+    """Mark a graph output and apply whichever of dim/stride/data_type ``spec`` supplies.
+
+    Each field is optional because the backends specify different subsets.
+    """
+    tensor.set_output(True)
+    if spec[0] is not None:
+        tensor.set_dim(list(spec[0]))
+    if spec[1] is not None:
+        tensor.set_stride(list(spec[1]))
+    if len(spec) > 2 and spec[2] is not None:
+        tensor.set_data_type(spec[2])
+    return tensor
+
+
+def _declare_aux(graph, aux_tensors):
+    """Declare the auxiliary runtime tensors an sdpa callback reads, grouped by role."""
+    return {
+        group: {name: graph.tensor_like(t) for name, t in tensors.items()}
+        for group, tensors in (aux_tensors or {}).items()
+    }
+
+
+def _resolve_sdpa_kwargs(sdpa_kwargs, aux, mask=None):
+    """Extra ``sdpa``/``sdpa_backward`` arguments: the caller's, plus ``mask``'s diagonal band.
+
+    ``sdpa_kwargs`` is a dict or a callable taking ``aux``; the callable form is for a score_mod,
+    which closes over graph tensors that do not exist yet.
+    """
+    opts = sdpa_kwargs(aux) if callable(sdpa_kwargs) else dict(sdpa_kwargs or {})
+    if mask is not None:
+        cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
+        opts.update(_diagonal_band_kwargs(cudnn, *mask))
+    return opts
+
+
+def build_fwd(
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+    backend_name: str,
+    name: str,
+    q: Any,
+    k: Any,
+    v: Any,
+    out: Any,
+    attn_scale: float,
+    stats: Any = None,
+    mask: Optional[Tuple[str, Tuple[int, int]]] = None,
+    aux_tensors: Optional[Dict[str, Dict[str, torch.Tensor]]] = None,
+    sdpa_kwargs: Any = None,
+    heuristics: Optional[Sequence[Any]] = None,
+    require_plan_token: Optional[str] = None,
+    not_found_hint: Any = "",
+    exclude_plan_tokens: Any = _BAR_FROST_BY_DEFAULT,
+) -> Dict[str, Any]:
+    """Build and plan an SDPA forward graph.
+
+    ``stats`` is the LSE output descriptor, or ``None`` to skip generating it. ``mask`` is a TE
+    ``(attn_mask_type, window)`` pair, declared as a diagonal band. The rest of what is specific
+    to one backend -- a score_mod, which engine to pin or bar -- arrives through ``sdpa_kwargs``
+    and the plan arguments passed on to :func:`finalize_plans`.
+    """
+    graph = build_pygraph(dtype, device, backend_name=backend_name)
+    tq = _declare_tensor(graph, "q", q)
+    tk = _declare_tensor(graph, "k", k)
+    tv = _declare_tensor(graph, "v", v)
+    aux = _declare_aux(graph, aux_tensors)
+    tout, tstats = graph.sdpa(
+        name=name,
+        q=tq,
+        k=tk,
+        v=tv,
+        generate_stats=stats is not None,
+        attn_scale=attn_scale,
+        **_resolve_sdpa_kwargs(sdpa_kwargs, aux, mask),
+    )
+    _mark_output(tout, out)
+    if stats is None:
+        tstats = None
+    else:
+        _mark_output(tstats, stats)
+    workspace, plan = finalize_plans(
+        graph,
+        backend_name=backend_name,
+        heuristics=heuristics,
+        require_plan_token=require_plan_token,
+        not_found_hint=not_found_hint,
+        exclude_plan_tokens=exclude_plan_tokens,
+    )
+    return {
+        "graph": graph,
+        "q": tq,
+        "k": tk,
+        "v": tv,
+        "out": tout,
+        "stats": tstats,
+        "aux": aux,
+        "workspace": workspace,
+        "plan": plan,
+    }
+
+
+def build_bwd(
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+    backend_name: str,
+    name: str,
+    q: Any,
+    k: Any,
+    v: Any,
+    o: Any,
+    do: Any,
+    stats: Any,
+    dq: Any,
+    dk: Any,
+    dv: Any,
+    attn_scale: float,
+    deterministic: bool = False,
+    mask: Optional[Tuple[str, Tuple[int, int]]] = None,
+    aux_tensors: Optional[Dict[str, Dict[str, torch.Tensor]]] = None,
+    sdpa_kwargs: Any = None,
+    heuristics: Optional[Sequence[Any]] = None,
+    require_plan_token: Optional[str] = None,
+    not_found_hint: Any = "",
+    exclude_plan_tokens: Any = _BAR_FROST_BY_DEFAULT,
+) -> Dict[str, Any]:
+    """Build and plan an SDPA backward graph. The counterpart of :func:`build_fwd`."""
+    graph = build_pygraph(dtype, device, backend_name=backend_name)
+    handles = {
+        n: _declare_tensor(graph, n, spec)
+        for n, spec in (("q", q), ("k", k), ("v", v), ("o", o), ("do", do), ("stats", stats))
+    }
+    aux = _declare_aux(graph, aux_tensors)
+    tdq, tdk, tdv = graph.sdpa_backward(
+        name=name,
+        q=handles["q"],
+        k=handles["k"],
+        v=handles["v"],
+        o=handles["o"],
+        dO=handles["do"],
+        stats=handles["stats"],
+        attn_scale=attn_scale,
+        use_deterministic_algorithm=deterministic,
+        **_resolve_sdpa_kwargs(sdpa_kwargs, aux, mask),
+    )
+    for handle, spec in ((tdq, dq), (tdk, dk), (tdv, dv)):
+        _mark_output(handle, spec)
+    workspace, plan = finalize_plans(
+        graph,
+        backend_name=backend_name,
+        heuristics=heuristics,
+        require_plan_token=require_plan_token,
+        not_found_hint=not_found_hint,
+        exclude_plan_tokens=exclude_plan_tokens,
+    )
+    handles.update({"dq": tdq, "dk": tdk, "dv": tdv})
+    return {"graph": graph, "aux": aux, "workspace": workspace, "plan": plan, **handles}
+
+
+def execute_graph(
+    graph,
+    variant_pack: Dict[Any, torch.Tensor],
+    workspace_size: int,
+    device: torch.device,
+    *,
+    backend_name: str,
+):
+    """Allocate a built graph's workspace and run it on the device's current stream.
+
+    The handle is resolved here so it is rebound immediately before ``execute``, which keeps
+    cuDNN on the same stream as the tensors.
+    """
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    workspace = torch.empty(workspace_size, device=device, dtype=torch.uint8)
+    graph.execute(
+        variant_pack, workspace, handle=get_cudnn_handle(device, backend_name=backend_name)
+    )

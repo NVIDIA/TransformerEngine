@@ -2087,9 +2087,12 @@ def _fused_attn_setup_ctx(
     bwd_args.softmax_type = fwd_args.softmax_type
     bwd_args.window_size = fwd_args.window_size
     bwd_args.bottom_right_diagonal = fwd_args.bottom_right_diagonal
-    bwd_args.fused_attention_backend = (
-        ctx_attrs["fused_attention_backend"] if fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
-    )
+    # TODO(cyanguwa): NVTE_FP8_DPA_BWD=0 runs an F16 backward under an FP8 forward. This assumes
+    # F16_arbitrary_seqlen is the only backward that can follow an FP8 forward; revisit when more
+    # combinations, e.g. (FP8 forward, FROST backward), become supported.
+    bwd_args.fused_attention_backend = ctx_attrs["fused_attention_backend"]
+    if fwd_args.fp8 and not fp8:
+        bwd_args.fused_attention_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
     bwd_args.use_FAv2_bwd = fwd_args.use_FAv2_bwd
     bwd_args.deterministic = fwd_args.deterministic
 
@@ -2832,8 +2835,9 @@ class FusedAttention(torch.nn.Module):
                         )
 
         if context_parallel:
-            assert (
-                fp8 or fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+            assert fp8 or fused_attention_backend in (
+                FusedAttnBackend["F16_arbitrary_seqlen"],
+                FusedAttnBackend["FROST"],
             ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [
                 "alibi"
@@ -2865,6 +2869,7 @@ class FusedAttention(torch.nn.Module):
                     attn_bias=core_attention_bias,
                     deterministic=self.deterministic,
                     use_fused_attention=True,
+                    fused_attention_backend=fused_attention_backend,
                     window_size=window_size,
                     fp8=fp8,
                     fp8_meta=fp8_meta,
