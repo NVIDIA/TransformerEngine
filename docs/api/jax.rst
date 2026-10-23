@@ -70,10 +70,6 @@ Router, routing kernels, and grouped dense for MoE layers. See
 
 .. autoapifunction:: transformer_engine.jax.router.fused_moe_aux_loss
 
-.. autoapifunction:: transformer_engine.jax.permutation.token_dispatch
-
-.. autoapifunction:: transformer_engine.jax.permutation.token_combine
-
 .. autoapifunction:: transformer_engine.jax.permutation.sort_chunks_by_index
 
 .. autoapifunction:: transformer_engine.jax.dense.grouped_dense

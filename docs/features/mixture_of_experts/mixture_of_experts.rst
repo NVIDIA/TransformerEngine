@@ -185,10 +185,10 @@ Token permutation
 Token dispatch moves the tokens into the expert-contiguous layout expected by
 the grouped GEMM, and token combine moves the expert outputs back.
 
-* All of these kernels are differentiable.
-* The snippets below use the mask-map routing variant. Other variants (for
-  example index-map routing) follow the same pattern, see the :doc:`PyTorch API
-  reference </api/pytorch>` and :doc:`JAX API reference </api/jax>`.
+* The PyTorch kernels shown below are differentiable.
+* The PyTorch snippets below use the mask-map routing variant. Other variants
+  (for example index-map routing) follow the same pattern, see the
+  :doc:`PyTorch API reference </api/pytorch>`.
 
 Token dispatch
 ~~~~~~~~~~~~~~
@@ -218,12 +218,10 @@ A typical call looks like:
 
    .. tab:: JAX
 
-      .. literalinclude:: moe_permute_jax.py
-         :language: python
-         :start-after: # START_MOE_PERMUTE_JAX
-         :end-before: # END_MOE_PERMUTE_JAX
+      Standalone token permutation is currently unavailable through the public
+      Transformer Engine JAX API.
 
-The call returns the permuted token buffer of shape
+The PyTorch call returns the permuted token buffer of shape
 ``[num_out_tokens, hidden_size]`` together with a ``row_id_map`` that token
 combine uses to restore the original token order after the experts have run.
 
@@ -264,10 +262,8 @@ A typical call looks like:
 
    .. tab:: JAX
 
-      .. literalinclude:: moe_unpermute_jax.py
-         :language: python
-         :start-after: # START_MOE_UNPERMUTE_JAX
-         :end-before: # END_MOE_UNPERMUTE_JAX
+      Standalone token unpermutation is currently unavailable through the public
+      Transformer Engine JAX API.
 
 Token probabilities
 ~~~~~~~~~~~~~~~~~~~
@@ -316,10 +312,8 @@ that token combine needs to remove the padding.
 
    .. tab:: JAX
 
-      .. literalinclude:: moe_permute_pad_jax.py
-         :language: python
-         :start-after: # START_MOE_PERMUTE_PAD_JAX
-         :end-before: # END_MOE_PERMUTE_PAD_JAX
+      Standalone token permutation with padding is currently unavailable through
+      the public Transformer Engine JAX API.
 
 Reordering expert chunks
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -481,9 +475,9 @@ Set ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` before importing
 Example: MoE layer on a single device
 -------------------------------------
 
-The runnable examples below wire the blocks together for top-k routing on a
-single supported NVIDIA GPU: route, dispatch, run the experts, combine. To keep
-them short, each expert is represented by one grouped linear layer; a full
+The runnable PyTorch example below wires the blocks together for top-k routing
+on a single supported NVIDIA GPU: route, dispatch, run the experts, combine.
+To keep the example short, each expert is represented by one grouped linear layer; a full
 expert MLP uses the same routing around two grouped linear layers and an
 activation.
 
@@ -498,10 +492,10 @@ activation.
 
    .. tab:: JAX
 
-      .. literalinclude:: moe_layer_jax.py
-         :language: python
-         :start-after: # START_MOE_LAYER_JAX
-         :end-before: # END_MOE_LAYER_JAX
+      This composition is currently unavailable through the public Transformer
+      Engine JAX API because standalone token permutation and unpermutation
+      are not exposed. For the integrated JAX MoE layer, see
+      :ref:`Expert parallelism <moe-expert-parallelism>`.
 
 The example uses dropless routing (``num_out_tokens = num_tokens * top_k``), so
 the dispatch buffer is sized statically rather than from a device-to-host sync.

@@ -18,8 +18,7 @@ probs, routing_map = fused_topk_with_score_function(
 )
 
 # probs:       [num_tokens, num_experts], non-zero only at the selected experts.
-#              Pass to token_combine as merging_probs.
-# routing_map: [num_tokens, num_experts] bool mask. Cast to int32 for token_dispatch.
+# routing_map: [num_tokens, num_experts] bool mask of the selected experts.
 # END_ROUTER_JAX
 
 
