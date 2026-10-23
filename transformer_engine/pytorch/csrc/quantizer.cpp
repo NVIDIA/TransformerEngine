@@ -2205,8 +2205,6 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 grouped quantization requires rowwise usage.");
-    NVTE_CHECK(!columnwise_usage,
-               "Row-scaled NVFP4 grouped quantization does not support columnwise usage.");
   }
 
   const int64_t total_data_elements = total_elements / 2;
@@ -2229,7 +2227,11 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
     columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
     if (!disable_second_level_scale) {
-      columnwise_amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+      const int64_t col_amax_elements =
+          row_scaled_nvfp4
+              ? static_cast<int64_t>(num_tensors) * static_cast<int64_t>(logical_last_dim)
+              : static_cast<int64_t>(num_tensors);
+      columnwise_amax = at::empty({col_amax_elements}, float_opts);
     }
   }
 
@@ -2264,6 +2266,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   }
 
   out_cpp.set_with_gemm_swizzled_scales(this->optimize_for_gemm);
+  out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
