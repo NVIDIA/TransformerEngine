@@ -1771,10 +1771,10 @@ void nvte_fused_topk_with_score_function_forward_qb_v2_unchecked(
     NVTETensor histogram, NVTETensor bin_bounds, NVTEQBHistogramMode histogram_mode,
     cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_forward_qb_v2_unchecked);
-  nvte_fused_topk_with_score_function_forward_qb_v2(
-      logits, num_tokens, num_experts, topk, scaling_factor, expert_bias, probs, routing_map,
-      routing_map_format, intermediate_output, cutoff, histogram, bin_bounds, histogram_mode,
-      stream);
+  nvte_fused_topk_with_score_function_forward_qb_v2(logits, num_tokens, num_experts, topk,
+                                                    scaling_factor, expert_bias, probs, routing_map,
+                                                    routing_map_format, intermediate_output, cutoff,
+                                                    histogram, bin_bounds, histogram_mode, stream);
 }
 
 void nvte_fused_topk_with_score_function_forward_qb_with_indices(
