@@ -6,14 +6,16 @@
 
 import dataclasses
 import queue
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..distributed import in_fp8_activation_recompute_phase
+from ..dynamo import TensorOrQuantized
 from ..export import is_in_onnx_export_mode
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage
 from ..quantization import FP8GlobalStateManager
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
@@ -237,6 +239,27 @@ def noop_cat(
     if is_in_onnx_export_mode():
         return torch.cat(tensors, dim=dim)
     return _NoopCatFunc.apply(dim, *tensors)
+
+
+def concat_input(
+    tensors: Sequence[TensorOrQuantized], *, defer: bool = False
+) -> Tuple[Optional[TensorOrQuantized], Optional[List[torch.Tensor]]]:
+    """Return a parameter operand or its deferred parts."""
+    if len(tensors) == 1:
+        return tensors[0], None
+    if (
+        defer
+        and tensors
+        and all(
+            isinstance(t, torch.Tensor)
+            and not isinstance(t, (QuantizedTensor, QuantizedTensorStorage))
+            for t in tensors
+        )
+    ):
+        return None, list(tensors)
+    if torch.compiler.is_compiling():
+        return torch.cat(tensors), None
+    return noop_cat(tensors), None
 
 
 @dataclasses.dataclass

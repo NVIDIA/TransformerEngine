@@ -37,6 +37,7 @@ on each call. The kinds -- and how each represents its field as op inputs:
   * ``TENSOR_OR_QUANTIZED`` -- a field that may be a plain tensor, a bare
     quantized storage, or ``None``: three slots (the tensor, its flat inner
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
+  * ``TENSOR_LIST`` -- a ``List[Tensor]`` field: one ``Tensor[]`` slot.
   * ``SIMPLE`` -- every remaining simple value (scalars, enums, sizes,
     quantizers -- value-opaque constants baked into the graph -- and nested
     collections of them), gathered into one shared ``OpaqueValueBundle`` slot.
@@ -396,6 +397,7 @@ class _FieldKind(Enum):
     """How one dataclass field crosses the custom-op boundary."""
 
     TENSOR = "tensor"  # one ``Tensor`` / ``Tensor?`` slot
+    TENSOR_LIST = "tensor_list"  # one ``Tensor[]`` / ``Tensor[]?`` slot
     TENSOR_OR_QUANTIZED = "tensor_or_quantized"  # 3 slots: tensor / inner / meta
     PROCESS_GROUP = "process_group"  # c10d group name inside the shared bundle
     SIMPLE = "simple"  # value carried verbatim inside the shared bundle
@@ -413,8 +415,7 @@ class _TensorOrQuantizedKind(Enum):
 _TQ_KIND_KEY = "__kind__"
 _SIMPLE_META_SLOT = "_simple_meta"
 
-# Matched by exact member set, so a bare quantized annotation or an accidental
-# extra union member is rejected rather than silently taken as tensor-or-quantized.
+# Tensor unions are matched by exact member sets.
 _TQ_MEMBERS = frozenset(get_args(TensorOrQuantized))
 
 
@@ -439,8 +440,13 @@ class _FieldPlan:
     slots: Tuple[_SlotSpec, ...]
 
 
+def _is_tensor_list_annot(annot: Any) -> bool:
+    """Whether an annotation is a list of tensors."""
+    return get_origin(annot) is list and get_args(annot) == (torch.Tensor,)
+
+
 def _is_tensor_storage_union(annot: Any) -> bool:
-    """Whether ``annot`` is exactly the tensor-or-quantized union."""
+    """Whether a tensor union can use the tensor / buffers / metadata slots."""
     if not _is_union(annot):
         return False
     members = frozenset(a for a in get_args(annot) if a is not type(None))
@@ -488,6 +494,9 @@ def _parse_field(name: str, annot: Any) -> _FieldPlan:
         )
         return _FieldPlan(name, _FieldKind.TENSOR_OR_QUANTIZED, slots)
     stripped, is_optional = _strip_optional(annot)
+    if _is_tensor_list_annot(stripped):
+        slot = _SlotSpec(name, "Tensor[]?" if is_optional else "Tensor[]")
+        return _FieldPlan(name, _FieldKind.TENSOR_LIST, (slot,))
     if stripped is torch.Tensor:
         slot = _SlotSpec(name, "Tensor?" if is_optional else "Tensor")
         return _FieldPlan(name, _FieldKind.TENSOR, (slot,))
@@ -582,7 +591,7 @@ class _ArgPlan:
         return tuple(
             f.name
             for f in self.fields
-            if f.kind in (_FieldKind.TENSOR, _FieldKind.TENSOR_OR_QUANTIZED)
+            if f.kind in (_FieldKind.TENSOR, _FieldKind.TENSOR_LIST, _FieldKind.TENSOR_OR_QUANTIZED)
         )
 
     def tensor_or_quantized_offsets(self) -> List[int]:
@@ -608,7 +617,11 @@ class _ArgPlan:
         index: Dict[str, int] = {}
         offset = 0
         for field in self.fields:
-            if field.kind in (_FieldKind.TENSOR, _FieldKind.TENSOR_OR_QUANTIZED):
+            if field.kind in (
+                _FieldKind.TENSOR,
+                _FieldKind.TENSOR_LIST,
+                _FieldKind.TENSOR_OR_QUANTIZED,
+            ):
                 # The gradient flows to the group's first slot -- for
                 # tensor-or-quantized that is the ``Tensor?`` slot, the one
                 # autograd sees the (subclass) tensor in.
@@ -631,7 +644,7 @@ class _ArgPlan:
         for field in self.fields:
             value = getattr(obj, field.name, None)
             match field.kind:
-                case _FieldKind.TENSOR:
+                case _FieldKind.TENSOR | _FieldKind.TENSOR_LIST:
                     slots[field.slots[0].name] = value
                 case _FieldKind.TENSOR_OR_QUANTIZED:
                     _pack_tensor_or_quantized(field, value, slots)
@@ -665,7 +678,7 @@ class _ArgPlan:
         bundle = slots.get(_SIMPLE_META_SLOT)
         for field in self.fields:
             match field.kind:
-                case _FieldKind.TENSOR:
+                case _FieldKind.TENSOR | _FieldKind.TENSOR_LIST:
                     kwargs[field.name] = slots[field.slots[0].name]
                 case _FieldKind.TENSOR_OR_QUANTIZED:
                     kwargs[field.name] = _unpack_tensor_or_quantized(field, slots)
@@ -741,7 +754,9 @@ def _spec_view(obj: Any, tensor_field_names: Sequence[str]) -> Any:
     overrides: Dict[str, Any] = {}
     for name in tensor_field_names:
         value = getattr(obj, name, None)
-        if value is not None and not isinstance(value, TensorSpec):
+        if isinstance(value, list):
+            overrides[name] = [to_tensor_spec(tensor) for tensor in value]
+        elif value is not None and not isinstance(value, TensorSpec):
             overrides[name] = to_tensor_spec(value)
     if not overrides:
         return obj
@@ -1066,6 +1081,10 @@ def _register_autograd_for_op(
         kwargs = bwd_plan.pack(bwd_obj)
         bwd_args_flat = [kwargs[name] for name in bwd_plan.slot_names]
         grads = [_decode_none(g) for g in bwd_op(*bwd_args_flat)]
+        if hasattr(bwd_obj, "postprocess_gradients"):
+            grads = bwd_obj.postprocess_gradients(grads)
+        if len(grads) != len(grad_targets):
+            raise RuntimeError("Expected one gradient per input_tensors_for_grad entry")
         ctx.backward_objects = None
         # One grad per input schema slot: default None, but a ``Tensor[]`` slot
         # (always recorded in ``fwd_tensor_list_lengths``) needs a
@@ -1074,6 +1093,12 @@ def _register_autograd_for_op(
         for pos, length in ctx.fwd_tensor_list_lengths.items():
             out[pos] = [None] * length
         for pos, g in zip(grad_targets, grads):
+            if pos in ctx.fwd_tensor_list_lengths:
+                if g is not None:
+                    if not isinstance(g, list) or len(g) != ctx.fwd_tensor_list_lengths[pos]:
+                        raise RuntimeError("Expected one gradient per tensor-list element")
+                    out[pos] = g
+                continue
             if g is not None:
                 shape = ctx.grad_input_shapes.get(pos)
                 if shape is not None and g.shape != shape:
@@ -1344,9 +1369,10 @@ def register_custom_op_with_autograd(
     * ``setup_context(bwd_obj, fwd_args, user_outputs, ctx_attrs, saved)
       -> tensors_to_save`` -- populate ``bwd_obj`` from forward state; return the
       tensors to persist across the boundary.
-    * ``bwd_impl(bwd_args) -> grads`` -- exactly one grad per
-      ``input_tensors_for_grad`` entry, in that order (``None`` for a
-      non-differentiable input).
+    * ``bwd_impl(bwd_args) -> grads`` -- flat tensor grads (or ``None``).
+      Without a ``bwd_arg_type.postprocess_gradients(grads)`` hook, return one
+      grad per ``input_tensors_for_grad`` entry. With the hook, it maps the
+      flat results to those entries outside the op, including tensor-list grads.
     * ``bwd_fake_impl(bwd_args)`` -- data-free twin of ``bwd_impl`` returning
       :class:`TensorSpec` grads.
     * ``bwd_arg_type.setup_saved_tensors(ctx)`` -- optional hook; skipped if
@@ -1420,7 +1446,9 @@ def _register_custom_op_with_autograd_impl(
         tags=fwd_tags,
     )
     bwd_qualname = f"{_TE_OP_NAMESPACE}::{op_name}_backward_base"
-    num_grad_inputs = len(input_tensors_for_grad)
+    num_grad_inputs = (
+        None if hasattr(bwd_arg_type, "postprocess_gradients") else len(input_tensors_for_grad)
+    )
     bwd_op = _register_op(
         name=f"{op_name}_backward",
         arg_type=bwd_arg_type,
