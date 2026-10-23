@@ -83,6 +83,7 @@ from transformer_engine.pytorch.cpu_offload_v1 import is_current_layer_offloaded
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
+from transformer_engine.pytorch.attention import deferred_qkv_rope
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
     combine_and_quantize,
@@ -1780,16 +1781,22 @@ def _fused_attn_forward_impl(
             if fp8_recipe.mxfp8():
                 qkv_scale_inv_format = "bhsd"  # Same as what combine_and_quantize would give
         else:
-            q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format = combine_and_quantize(
-                qkv_layout,
-                q,
-                k,
-                v,
-                QKV_quantizer,
-                used_in_backward=is_training,
-                combined_qkv=args.packed_qkv,
-                combined_kv=args.packed_kv,
-            )
+            # RoPE placeholders from apply_fused_qkv_rotary_pos_emb(defer_for_fp8_attention=True)
+            # are rotated and quantized together; None for ordinary tensors
+            deferred_qkv = deferred_qkv_rope.quantize_deferred(q, k, v, QKV_quantizer)
+            if deferred_qkv is not None:
+                q_fp8, k_fp8, v_fp8 = deferred_qkv
+            else:
+                q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format = combine_and_quantize(
+                    qkv_layout,
+                    q,
+                    k,
+                    v,
+                    QKV_quantizer,
+                    used_in_backward=is_training,
+                    combined_qkv=args.packed_qkv,
+                    combined_kv=args.packed_kv,
+                )
 
         # print quantizers
         print_quantizers(
