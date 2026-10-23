@@ -78,7 +78,30 @@ jobs:
               "torch-version": ["2.8.0"], 
               "cuda-version": ["12.9.1"], 
               "cudnn-version": ["9"], 
-              "cxx11_abi": ["TRUE"]
+              "cxx11_abi": ["TRUE"],
+              "smoke-test": ["false"],
+              "include": [
+                {
+                  "os": "ubuntu-22.04",
+                  "release-version": "${{ github.event.release.tag_name }}",
+                  "python-version": "3.12",
+                  "torch-version": "2.11.0",
+                  "cuda-version": "13.0.0",
+                  "cudnn-version": "9",
+                  "cxx11_abi": "TRUE",
+                  "smoke-test": "true"
+                },
+                {
+                  "os": "ubuntu-22.04-arm",
+                  "release-version": "${{ github.event.release.tag_name }}",
+                  "python-version": "3.12",
+                  "torch-version": "2.11.0",
+                  "cuda-version": "13.0.0",
+                  "cudnn-version": "9",
+                  "cxx11_abi": "TRUE",
+                  "smoke-test": "true"
+                }
+              ]
             }' | jq -rc)
           else
             MATRIX=$(echo '{
@@ -151,6 +174,7 @@ jobs:
           torch-version: ${{ matrix.torch-version }}
           cxx11_abi: ${{ matrix.cxx11_abi }}
           aarch: ${{ matrix.os == 'ubuntu-22.04' && 'x86_64' || 'sbsa' }}
+          smoke-test: ${{ matrix.smoke-test || 'false' }}
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
