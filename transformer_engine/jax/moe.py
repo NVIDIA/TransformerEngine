@@ -417,7 +417,6 @@ class _Ctx:
     expert_outputs: jnp.ndarray
     local_group_sizes: jnp.ndarray
     quantizer_sets: Any
-    aux_const_buf: Any = None
     aux_tokens_per_expert: Any = None
     aux_saved_scores: Any = None
 
@@ -1133,6 +1132,11 @@ def _ffn_bwd_per_shard(
 # =============================================================================
 
 
+def _aux_loss_scale(num_experts, topk, num_tokens, aux_loss_coeff):
+    """Coefficient of ``sum_e P_e * N_e`` in ``fused_moe_aux_loss``."""
+    return num_experts * aux_loss_coeff / (topk * num_tokens * num_tokens)
+
+
 def _moe_fwd_rule(
     x,
     gate_kernel,
@@ -1313,31 +1317,22 @@ def _moe_fwd_rule(
         )
         sparse_probs = sparse_probs.astype(dtype)
 
-        # ---------------- Aux loss (global view, replicated) ----------------
-        # ``fused_moe_aux_loss_fwd`` sums probs and tokens_per_expert across
-        # all tokens, which is wrong when T is sharded. Force-replicate the
-        # gate logits and recompute the routing map at global view so the
-        # kernel sees a complete [T_global, E] tensor. The replication is a
-        # single all-gather over (*dp, ep) and lives off the dispatch
-        # critical path.
+        # ---------------- Aux loss (token-sharded) ----------------
+        # aux_loss = coeff * E / (K * T^2) * sum_e P_e * N_e, where P_e (summed
+        # aux probs) and N_e (tokens routed to e) are both sums over tokens, so
+        # only these [E] partial sums are all-reduced across (*dp, ep). The topk
+        # kernels are row-wise, so the token-sharded routing_map equals the one a
+        # replicated recompute would produce. ``fused_moe_aux_loss_fwd`` is not
+        # used because its partition rule runs the kernel on the local shard only.
         if aux_loss_coeff > 0.0:
-            global_logits_2d = jax.lax.with_sharding_constraint(logits_2d, NamedSharding(mesh, P()))
-            _, global_routing_map, _ = tex.fused_topk_with_score_function_fwd(
-                global_logits_2d,
-                topk=K,
-                use_pre_softmax=use_pre_softmax,
-                num_groups=-1 if num_groups is None else num_groups,
-                group_topk=-1 if group_topk is None else group_topk,
-                scaling_factor=scaling_factor,
-                score_function=score_function,
-                expert_bias=eb_arg,
-                compute_aux_scores=False,
+            aux_logits_2d = jax.lax.with_sharding_constraint(
+                logits_2d, NamedSharding(mesh, ep2_spec)
             )
-            aux_tokens_per_expert = jnp.sum(global_routing_map.astype(jnp.int32), axis=0)
+            aux_tokens_per_expert = jnp.sum(routing_map.astype(jnp.int32), axis=0)
             # compute_aux_scores=True takes a separate kernel path: clean
             # per-expert softmax, no grouping / bias / scaling.
             aux_probs, _aux_rm, aux_saved_scores = tex.fused_topk_with_score_function_fwd(
-                global_logits_2d.astype(jnp.float32),
+                aux_logits_2d,
                 topk=K,
                 use_pre_softmax=False,
                 num_groups=-1,
@@ -1347,16 +1342,13 @@ def _moe_fwd_rule(
                 expert_bias=jnp.zeros((0,), dtype=jnp.float32),
                 compute_aux_scores=True,
             )
-            aux_loss, aux_const_buf = tex.fused_moe_aux_loss_fwd(
-                aux_probs.astype(jnp.float32),
-                aux_tokens_per_expert.astype(jnp.int32),
-                topk=K,
-                coeff=aux_loss_coeff,
-            )
+            aux_probs_per_expert = jnp.sum(aux_probs.astype(jnp.float32), axis=0)
+            aux_loss = _aux_loss_scale(
+                num_experts, K, logits_2d.shape[0], aux_loss_coeff
+            ) * jnp.sum(aux_probs_per_expert * aux_tokens_per_expert.astype(jnp.float32))
             aux_loss = aux_loss.astype(dtype)
         else:
             aux_loss = jnp.zeros((), dtype=dtype)
-            aux_const_buf = None
             aux_tokens_per_expert = None
             aux_saved_scores = None
 
@@ -1521,7 +1513,6 @@ def _moe_fwd_rule(
             expert_outputs=expert_outputs,
             local_group_sizes=local_group_sizes,
             quantizer_sets=quantizer_sets,
-            aux_const_buf=aux_const_buf,
             aux_tokens_per_expert=aux_tokens_per_expert,
             aux_saved_scores=aux_saved_scores,
         )
@@ -1761,25 +1752,26 @@ def _moe_bwd_rule(
             compute_aux_scores=False,
         )
 
-        # ---------------- Aux loss bwd (global view, replicated) ----------------
-        # Reverse the fwd's all-gather/aux pipeline: aux_loss_bwd produces
-        # d_aux_probs, then topk_bwd(compute_aux_scores=True) produces the
-        # extra d_logits contribution. The replicated tensor adds into the
-        # T-sharded routing-side d_logits via JAX's normal broadcast.
+        # ---------------- Aux loss bwd (token-sharded) ----------------
+        # d aux_loss / d aux_probs[t, e] = scale * N_e, identical for every token,
+        # so the cotangent is a broadcast of the all-reduced N_e onto the
+        # token-sharded layout of aux_saved_scores.
         if aux_loss_coeff > 0.0:
+            aux_sharding = NamedSharding(mesh, ep2_spec)
             T_global = ctx.logits_2d.shape[0]
-            d_aux_loss_scalar = d_aux_loss.reshape(()).astype(jnp.float32)
-            d_aux_probs = tex.fused_moe_aux_loss_bwd(
-                ctx.aux_const_buf,
-                ctx.aux_tokens_per_expert.astype(jnp.int32),
-                d_aux_loss_scalar,
-                num_tokens=int(T_global),
+            d_aux_per_expert = (
+                _aux_loss_scale(num_experts, K, T_global, aux_loss_coeff)
+                * d_aux_loss.reshape(()).astype(jnp.float32)
+                * ctx.aux_tokens_per_expert.astype(jnp.float32)
             )
-            # routing_map is ignored by the kernel when compute_aux_scores=True,
-            # so pass a zero placeholder of the right shape/dtype.
-            zero_routing_map = jnp.zeros(ctx.aux_saved_scores.shape, dtype=ctx.routing_map.dtype)
+            d_aux_probs = jax.lax.with_sharding_constraint(
+                jnp.broadcast_to(d_aux_per_expert[None, :], ctx.aux_saved_scores.shape),
+                aux_sharding,
+            )
+            # routing_map is ignored by the kernel when compute_aux_scores=True;
+            # the token-sharded routing-side map is passed for its shape/dtype.
             d_logits_aux = tex.fused_topk_with_score_function_bwd(
-                zero_routing_map,
+                jax.lax.with_sharding_constraint(ctx.routing_map, aux_sharding),
                 ctx.aux_saved_scores,
                 d_aux_probs.astype(ctx.aux_saved_scores.dtype),
                 topk=K,
@@ -1971,10 +1963,10 @@ def moe(
         it.
     aux_loss_coeff : float
         Per-step expert-load-balance loss coefficient. ``0.0`` (default)
-        disables the aux loss entirely. When non-zero, an extra
-        all-gather over the routing-side logits is inserted so the
-        ``fused_moe_aux_loss`` kernel sees a global ``[T_global, E]``
-        view; this lives off the dispatch critical path.
+        disables the aux loss entirely. When non-zero, the loss is computed
+        over the global batch from token-sharded routing scores; only the
+        ``[E]`` per-expert token counts and summed scores are all-reduced
+        across ``(*data_parallelism_axes, ep_axis)``.
     quantizer_sets : Tuple[QuantizerSet, QuantizerSet]
         Independent FC1 and FC2 quantizer sets describing the global logical
         operation. Token quantizers have ``dp_size * num_experts`` groups and
