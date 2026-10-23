@@ -99,6 +99,15 @@ target_link_libraries(test_comm_gemm PUBLIC ${test_comm_gemm_LINKER_LIBS})
 target_link_libraries(test_comm_gemm_stream_logging
                       PUBLIC ${test_comm_gemm_LINKER_LIBS})
 
+# CuTeDSL-enabled core libraries require standalone executables to provide CPython symbols.
+if(NVTE_WITH_CUTEDSL OR "$ENV{NVTE_WITH_CUTEDSL}")
+  find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
+  target_link_libraries(test_comm_gemm_stream_logging PRIVATE
+                        "-Wl,--no-as-needed"
+                        Python::Python
+                        "-Wl,--as-needed")
+endif()
+
 target_compile_options(test_comm_gemm PRIVATE -O2 -fopenmp)
 target_compile_options(test_comm_gemm_stream_logging PRIVATE -O2 -fopenmp)
 
