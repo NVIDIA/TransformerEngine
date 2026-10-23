@@ -10,6 +10,7 @@ import unittest
 from transformer_engine.pytorch import CPLoadBalancingStrategy
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     _zero_thd_padding,
+    cp_p2p_fwd_prepare_qkv,
     get_batch_on_this_cp_rank,
     get_no_load_balance_thd_causal_metadata,
     get_thd_partitioned_indices,
@@ -977,6 +978,19 @@ class TestTHDPaddingMask(unittest.TestCase):
             self.assertTrue(torch.all(tensor[~padding_mask] == 1))
 
 
+def _legacy_cp_p2p_fwd_prepare_qkv_thd(q, k, v, cu_seqlens, cp_size, section):
+    """q, k, v and cu_seqlens of a THD ring step without padding between sequences, as
+    cp_p2p_fwd_prepare_qkv computed them in every step before they were computed once per call."""
+    cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded = cu_seqlens
+    if section == "lower-triangle":
+        k, v = [tex.thd_read_half_tensor(x, cu_seqlens_kv_padded, 0) for x in [k, v]]
+        return q, k, v, cu_seqlens_q // cp_size, cu_seqlens_kv // (cp_size * 2)
+    if section == "upper-triangle":
+        q = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, 1)
+        return q, k, v, cu_seqlens_q // (cp_size * 2), cu_seqlens_kv // cp_size
+    return q, k, v, cu_seqlens_q // cp_size, cu_seqlens_kv // cp_size
+
+
 @unittest.skipIf(
     not torch.cuda.is_available() or tex is None,
     "THD kernel tests require CUDA and transformer_engine_torch",
@@ -1077,6 +1091,55 @@ class TestTHDKernels(unittest.TestCase):
         expected_packed = torch.cat([packed_lse[:, 4:8], packed_lse[:, 12:16]], dim=1)
         self.assertTrue(torch.equal(second_half_lse, expected))
         self.assertTrue(torch.equal(packed_second_half_lse, expected_packed))
+
+    def test_cp_p2p_fwd_prepare_qkv_with_step_invariant_inputs_matches_per_step(self):
+        cp_size = 4
+        # sequence lengths are multiples of 2 * cp_size; one sequence is empty
+        cu_seqlens_q = torch.tensor([0, 64, 64, 192, 320], dtype=torch.int32, device="cuda")
+        cu_seqlens_kv_cross = torch.tensor([0, 32, 96, 96, 256], dtype=torch.int32, device="cuda")
+        all_sections = ["diagonal", "lower-triangle", "upper-triangle", "all"]
+        for head_dim_v, cu_seqlens_kv, sections in [
+            (64, cu_seqlens_q, all_sections),
+            (32, cu_seqlens_q, all_sections[:3]),  # MLA: K and V shapes differ
+            (64, cu_seqlens_kv_cross, ["all"]),  # cross attention
+        ]:
+            cu_seqlens_q_padded = cu_seqlens_q // cp_size
+            cu_seqlens_kv_padded = cu_seqlens_kv // cp_size
+            t_q, t_kv = int(cu_seqlens_q_padded[-1]), int(cu_seqlens_kv_padded[-1])
+            q = torch.randn(t_q, 2, 64, dtype=torch.bfloat16, device="cuda")
+            # K and V of a ring step are views of one P2P buffer
+            kv = torch.randn(t_kv * 2 * (64 + head_dim_v), dtype=torch.bfloat16, device="cuda")
+            k = kv[: t_kv * 2 * 64].view(t_kv, 2, 64)
+            v = kv[t_kv * 2 * 64 :].view(t_kv, 2, head_dim_v)
+            kv_part = kv.view(2, *k.shape) if k.shape == v.shape else None
+            qkv = (q, k, v, "thd", False)
+            cu_seqlens = (cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded)
+            # computed once per forward call
+            cu_seqlens_once = (
+                cu_seqlens_q // cp_size,
+                cu_seqlens_kv // cp_size,
+                cu_seqlens_q_padded,
+                cu_seqlens_kv_padded,
+                cu_seqlens_q // (2 * cp_size),
+                cu_seqlens_kv // (2 * cp_size),
+            )
+            q_half = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, 1)
+            for section in sections:
+                expected = _legacy_cp_p2p_fwd_prepare_qkv_thd(q, k, v, cu_seqlens, cp_size, section)
+                # fused attention (no q_half, kv_part) and FlashAttention; rank 1, step 1: without
+                # padding between sequences, THD inputs do not depend on them
+                for kwargs in [{}, {"q_half": q_half, "kv_part": kv_part}]:
+                    outputs = cp_p2p_fwd_prepare_qkv(
+                        *qkv, *cu_seqlens_once, 1, 1, cp_size, section, **kwargs
+                    )
+                    for x, x_expected in zip(outputs, expected):
+                        self.assertTrue(torch.equal(x, x_expected))
+                if section == "lower-triangle" and kv_part is not None:
+                    # K and V halves read in one launch, into one tensor
+                    self.assertEqual(
+                        outputs[1].untyped_storage().data_ptr(),
+                        outputs[2].untyped_storage().data_ptr(),
+                    )
 
 
 if __name__ == "__main__":

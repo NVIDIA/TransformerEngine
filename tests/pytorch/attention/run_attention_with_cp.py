@@ -238,6 +238,7 @@ def run_dpa_with_cp(
     deterministic="False",
     load_balancing_strategy="DUAL_CHUNK_SWAP",
     softcap="0.0",
+    attn_mask_type=None,
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
@@ -276,6 +277,8 @@ def run_dpa_with_cp(
             config = copy.deepcopy(model_configs_fused_attn[model])
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
+    if attn_mask_type is not None:
+        config.attn_mask_type = attn_mask_type
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
