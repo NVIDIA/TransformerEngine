@@ -65,6 +65,20 @@ def test_ep_partitioning_retains_bind_time_resources():
     assert not ep._ep_spec_ok(P(("wrong", "ep"), None, None), 2, resource_axes=captured)
 
 
+def test_ep_partitioning_allows_omitted_singleton_ep_axis(monkeypatch):
+    from types import SimpleNamespace
+    from jax.sharding import PartitionSpec as P
+    from transformer_engine.jax.cpp_extensions import ep
+
+    captured = ("ep", ("fsdp",))
+    spec = P("fsdp", None, None)
+    monkeypatch.setattr(ep, "get_ep_config", lambda: SimpleNamespace(ep_size=1))
+    assert ep._leading_axis_ok(spec, captured) == (True, "ep", ("fsdp",))
+
+    monkeypatch.setattr(ep, "get_ep_config", lambda: SimpleNamespace(ep_size=2))
+    assert ep._leading_axis_ok(spec, captured) == (False, "ep", ("fsdp",))
+
+
 def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
     from types import SimpleNamespace
     from jax.sharding import NamedSharding, PartitionSpec as P
