@@ -16,6 +16,9 @@ Mixture of Experts
     blocks; consult the :doc:`PyTorch API reference </api/pytorch>` and
     :doc:`JAX API reference </api/jax>` for compatibility and input requirements.
 
+    The integrated JAX MoE layer currently requires multiple GPUs (at least
+    two). A single-GPU JAX MoE example is not available through the public API.
+
 Introduction
 ------------
 
@@ -477,9 +480,9 @@ Example: MoE layer on a single device
 
 The runnable PyTorch example below wires the blocks together for top-k routing
 on a single supported NVIDIA GPU: route, dispatch, run the experts, combine.
-To keep the example short, each expert is represented by one grouped linear layer; a full
-expert MLP uses the same routing around two grouped linear layers and an
-activation.
+To keep the example short, each expert is represented by one grouped linear
+layer; a full expert MLP uses the same routing around two grouped linear layers
+and an activation.
 
 .. tabs::
 
@@ -492,9 +495,9 @@ activation.
 
    .. tab:: JAX
 
-      This composition is currently unavailable through the public Transformer
-      Engine JAX API because standalone token permutation and unpermutation
-      are not exposed. For the integrated JAX MoE layer, see
+      The integrated JAX MoE layer currently requires at least two GPUs.
+      Standalone token permutation and unpermutation are not exposed through
+      the public JAX API, so a single-GPU example is currently unavailable. See
       :ref:`Expert parallelism <moe-expert-parallelism>`.
 
 The example uses dropless routing (``num_out_tokens = num_tokens * top_k``), so
@@ -669,6 +672,9 @@ same static capacity to ``ep_bootstrap``.
       alignment padding, and combine ignores slots without a routed token.
 
    .. tab:: JAX
+
+      The integrated JAX MoE layer currently supports multi-GPU execution only
+      and requires at least two GPUs.
 
       JAX EP sends BF16 tokens. Low-precision expert computation quantizes the
       received tokens after dispatch; it does not change communication precision.
