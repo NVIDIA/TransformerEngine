@@ -6,6 +6,8 @@
 
 #include "transformer_engine/cast.h"
 
+#include <c10/cuda/CUDAGuard.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -132,6 +134,45 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
     inplace_swizzle_scale_for_gemm(output_py);
   }
 
+  return output_py;
+}
+
+py::object quantize_mxfp8_segments(const std::vector<at::Tensor> &segments, py::handle quantizer,
+                                   const std::vector<size_t> &shape) {
+  init_extension();
+  NVTE_CHECK(segments.size() == 1 || segments.size() == 3,
+             "Expected one or three MXFP8 column segments.");
+  NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()), "Expected a native MXFP8 quantizer.");
+  const auto device = segments.front().device();
+  NVTE_CHECK(device.is_cuda(), "Segments must be CUDA tensors.");
+  c10::cuda::CUDAGuard guard(device);
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  auto *mxfp8 = static_cast<MXFP8Quantizer *>(quantizer_cpp.get());
+  NVTE_CHECK(!mxfp8->with_2d_quantization, "Segmented conversion requires 1D scaling.");
+  std::vector<TensorWrapper> wrappers;
+  std::vector<NVTETensor> inputs;
+  std::vector<int64_t> strides;
+  wrappers.reserve(segments.size());
+  inputs.reserve(segments.size());
+  for (const auto &segment : segments) {
+    NVTE_CHECK(segment.device() == device && segment.scalar_type() == at::kBFloat16 &&
+                   segment.dim() >= 2 && segment.stride(-1) == 1,
+               "Invalid segmented MXFP8 input layout.");
+    for (int dim = 1; dim < segment.dim() - 1; ++dim) {
+      NVTE_CHECK(segment.size(dim) == 1, "Only singleton batch dimensions are supported.");
+    }
+    wrappers.emplace_back(
+        makeTransformerEngineTensor(segment.data_ptr(),
+                                    std::vector<size_t>{static_cast<size_t>(segment.size(0)),
+                                                        static_cast<size_t>(segment.size(-1))},
+                                    DType::kBFloat16));
+    inputs.push_back(wrappers.back().data());
+    strides.push_back(segment.stride(0));
+  }
+  auto [output_cpp, output_py] = quantizer_cpp->create_tensor(shape, DType::kBFloat16, device);
+  output_cpp.set_with_gemm_swizzled_scales(quantizer_cpp->optimize_for_gemm);
+  nvte_quantize_mxfp8_segments(inputs.data(), inputs.size(), strides.data(), output_cpp.data(),
+                               at::cuda::getCurrentCUDAStream(device.index()));
   return output_py;
 }
 
