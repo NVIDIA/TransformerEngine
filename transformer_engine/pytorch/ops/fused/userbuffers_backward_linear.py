@@ -17,6 +17,7 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
     fill_userbuffers_buffer_for_all_gather,
+    get_cublasmp_all_gather_output,
     get_ub,
     using_cublasmp_backend,
 )
@@ -445,22 +446,32 @@ class UserbuffersBackwardLinear(FusedOperation):
 
             # Initialize grad output
             if is_cublasmp and tensor_parallel_mode == "row":
-                # cuBLASMp's AG+GEMM DGRAD does not preserve the gathered dy ensor. Re-gather
-                # dy_local for wgrad with the appropriate quantization direction for each recipe.
-                if grad_output_quantizer is not None:
-                    if isinstance(grad_output_quantizer, MXFP8Quantizer):
-                        # MXFP8 can't convert rowwise to columnwise, so gather
-                        # columnwise data directly.
-                        grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    else:
-                        # FP8 per-tensor: gather rowwise + create the columnwise
-                        # transpose during the gather.
-                        grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
-                dy, _ = gather_along_first_dim(
-                    dy_local,
+                # cuBLASMp's AG+GEMM DGRAD leaves the gathered dy at the start of its
+                # workspace, so wgrad reuses it for unquantized and per-tensor FP8 data.
+                # Otherwise, re-gather dy_local for wgrad with the appropriate quantization
+                # direction for each recipe.
+                dy_total = get_cublasmp_all_gather_output(
+                    ub_comm_dgrad,
+                    dy,
+                    grad_output_quantizer,
                     tensor_parallel_group,
-                    quantizer=grad_output_quantizer,
                 )
+                if dy_total is None:
+                    if grad_output_quantizer is not None:
+                        if isinstance(grad_output_quantizer, MXFP8Quantizer):
+                            # MXFP8 can't convert rowwise to columnwise, so gather
+                            # columnwise data directly.
+                            grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                        else:
+                            # FP8 per-tensor: gather rowwise + create the columnwise
+                            # transpose during the gather.
+                            grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+                    dy_total, _ = gather_along_first_dim(
+                        dy_local,
+                        tensor_parallel_group,
+                        quantizer=grad_output_quantizer,
+                    )
+                dy = dy_total
             elif tensor_parallel_mode == "row" and isinstance(
                 grad_output_quantizer, MXFP8Quantizer
             ):
