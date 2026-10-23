@@ -36,6 +36,7 @@ from .quantize import Quantize
 from .reduce_scatter import ReduceScatter
 from .reshape import Reshape
 from .rmsnorm import RMSNorm
+from .silu_gate import SiLUGate
 from .swiglu import (
     ClampedSwiGLU,
     ScaledClampedQGeGLU,
