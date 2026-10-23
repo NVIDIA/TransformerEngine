@@ -10,11 +10,11 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-from jax._src.lib import gpu_triton
 from jax.sharding import PartitionSpec
 from jax.experimental.custom_partitioning import SdyShardingRule
 import triton
 
+from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.jax.cpp_extensions.base import BasePrimitive, register_primitive
 from transformer_engine.jax.cpp_extensions.misc import get_padded_spec, NamedSharding
 from transformer_engine.common.triton.mhc import (
@@ -36,7 +36,6 @@ from transformer_engine.jax.version_utils import (
     TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION,
     jax_version_meet_requirement,
 )
-
 from .utils import triton_call_lowering
 
 __all__ = [
@@ -234,7 +233,7 @@ def _projection_fwd_use_tma(x_aval, phi_aval) -> bool:
         return mode == "1"
     if not jax_version_meet_requirement(TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION):
         return False
-    if gpu_triton.get_compute_capability(0) < 90:
+    if get_device_compute_capability(0) < 90:
         return False
     return all(
         (aval.shape[-1] * jnp.dtype(aval.dtype).itemsize) % 16 == 0 for aval in (x_aval, phi_aval)
