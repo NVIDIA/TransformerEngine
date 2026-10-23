@@ -66,7 +66,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
 )
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
-from transformer_engine.pytorch.dynamo.fake import fake_activation, fake_bgrad
+from transformer_engine.pytorch.dynamo.fake import fake_activation, fake_bgrad, fake_norm
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -1991,6 +1991,34 @@ def test_to_tensor_spec_quantized(factory, shape, swizzled):
         assert spec.quantizer.optimize_for_gemm == q.optimize_for_gemm == (not swizzled)
 
 
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize("with_2d_quantization", [False, True])
+@pytest.mark.parametrize("optimize_for_gemm", [False, True])
+@pytest.mark.parametrize(
+    "use_cudnn,shape,compact",
+    [
+        (True, (128, 128), True),
+        (True, (2, 64, 128), True),
+        (True, (64, 128), False),
+        (False, (128, 128), False),
+    ],
+)
+def test_fake_norm_mxfp8_scale_layout(
+    monkeypatch, normalization, with_2d_quantization, optimize_for_gemm, use_cudnn, shape, compact
+):
+    """RMSNorm's 2D MXFP8 fallback preserves the quantizer's scale layout."""
+    monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", str(int(use_cudnn)))
+    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3, with_2d_quantization=with_2d_quantization)
+    quantizer.optimize_for_gemm = optimize_for_gemm
+    inp = TensorSpec(shape=shape, dtype=torch.bfloat16, device=torch.device("cpu"))
+    out, _, _ = fake_norm(inp, quantizer, normalization=normalization)
+    compact = compact and (normalization == "LayerNorm" or not with_2d_quantization)
+    expected = optimize_for_gemm and not compact
+    assert out.create_metadata()["nontensor_kwargs"]["with_gemm_swizzled_scales"] == expected
+    assert out.create_tensor()._with_gemm_swizzled_scales == expected
+    assert quantizer.optimize_for_gemm == optimize_for_gemm
+
+
 @pytest.mark.parametrize(
     "activation, gated", [(tex.gelu, False), (tex.swiglu, True)], ids=["gelu", "swiglu"]
 )
@@ -2720,7 +2748,8 @@ def test_te_layernorm_mlp_compile_fp8_gemm_gelu(dtype, bias, compile_mode):
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize(
-    "quantization,disable_rht_fusion", [("mxfp8", False), ("nvfp4", False), ("nvfp4", True)]
+    "quantization,disable_rht_fusion",
+    [("mxfp8", False), ("mxfp8_2d", False), ("nvfp4", False), ("nvfp4", True)],
 )
 @pytest.mark.parametrize("module", ["LayerNormLinear", "LayerNormMLP"])
 @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
@@ -2745,7 +2774,7 @@ def test_te_layernorm_compile_scale_layout(
     disable_rht_fusion,
 ):
     """Saved normalization scales retain their layout through compiled backward."""
-    if quantization == "mxfp8" and not mxfp8_available:
+    if quantization.startswith("mxfp8") and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
     if quantization == "nvfp4" and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
@@ -2759,11 +2788,19 @@ def test_te_layernorm_compile_scale_layout(
         normalization=normalization,
         return_layernorm_output=return_layernorm_output,
     )
-    fp8_recipe = (
-        recipe.MXFP8BlockScaling()
-        if quantization == "mxfp8"
-        else recipe.NVFP4BlockScaling(disable_stochastic_rounding=True)
-    )
+    if quantization == "mxfp8_2d":
+
+        def qfactory(role):
+            return MXFP8Quantizer(
+                tex.DType.kFloat8E4M3,
+                with_2d_quantization=role is not None and role.tensor_type == "input",
+            )
+
+        fp8_recipe = recipe.CustomRecipe(qfactory=qfactory)
+    elif quantization == "mxfp8":
+        fp8_recipe = recipe.MXFP8BlockScaling()
+    else:
+        fp8_recipe = recipe.NVFP4BlockScaling(disable_stochastic_rounding=True)
 
     def fn(inp):
         with te.autocast(recipe=fp8_recipe):

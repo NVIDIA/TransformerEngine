@@ -131,7 +131,8 @@ def fake_norm(
         and rows % 128 == 0
         and cols % 128 == 0
     ):
-        out.with_gemm_swizzled_scales = False
+        if normalization == "LayerNorm" or not quantizer.with_2d_quantization:
+            out.with_gemm_swizzled_scales = False
     mean = (
         TensorSpec(shape=(rows,), dtype=torch.float32, device=input_.device)
         if normalization == "LayerNorm"
