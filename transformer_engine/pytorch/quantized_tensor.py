@@ -317,11 +317,12 @@ def prepare_for_saving(
             tensor_objects_list.append(None)
         elif isinstance(tensor, torch.Tensor):
             # Inline is_distributed_weight(): this runs for every saved tensor.
-            # Skipped under torch.compile so traced graphs are unchanged.
-            if (
-                getattr(tensor, "is_distributed_weight", False)
-                and not torch.compiler.is_compiling()
-            ):
+            if getattr(tensor, "is_distributed_weight", False):
+                if torch.compiler.is_compiling():
+                    raise RuntimeError(
+                        "Saving a DistributedWeight for backward is not supported under "
+                        "torch.compile."
+                    )
                 tensor_list.append(tensor)
                 tensor_objects_list.append(_SavedDistributedWeight(tensor))
             else:
