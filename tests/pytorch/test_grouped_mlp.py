@@ -1214,8 +1214,16 @@ class TestGroupedMLPFusedOp:
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
-        if single_grouped_weight and quantization != "mxfp8":
-            pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
+        # Unquantized packed weights run through the BF16 fused grouped MLP.
+        if single_grouped_weight and quantization not in ("mxfp8", None):
+            pytest.skip("single_grouped_weight is only supported for MXFP8 or BF16")
+        if (
+            single_grouped_weight
+            and quantization is None
+            and not is_op_fuser_grouped_tensor_path_supported(None, dtype)
+        ):
+            # Single grouped parameters have no split-quantize fallback.
+            pytest.skip("Single grouped parameters require the native grouped-tensor path")
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
@@ -1482,6 +1490,7 @@ class TestGroupedMLPFusedOp:
                 grouped_mlp_callbacks = {
                     grouped_mlp_module.fuse_glu_ops,
                     grouped_mlp_module.fuse_unary_activation_ops,
+                    grouped_mlp_module.fuse_bf16_ops,
                 }
                 fusion_patch.setattr(
                     OperationFuser,
@@ -1573,6 +1582,23 @@ class TestGroupedMLPFusedOp:
                     fused_cls,
                 )
                 assert backward_ops[0][0] is forward_ops[0][0]
+        # Unquantized BF16 must fuse on Blackwell (including FC1 bias and FC2
+        # scale_bias), so these cases cannot pass on the unfused path. Custom GeGLU
+        # constants have no BF16 kernel and decline.
+        bf16_fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLUBf16
+        if (
+            enable_fusion
+            and quantization is None
+            and split_alignment % 256 == 0
+            and dtype == torch.bfloat16
+            and activation in ("scaled_swiglu", "scaled_clamped_qgeglu")
+            and bf16_fused_cls.is_supported()
+        ):
+            forward_ops = module._module_groups[0]._forward_ops
+            backward_ops = module._module_groups[0]._backward_ops
+            assert len(forward_ops) == 1
+            assert isinstance(forward_ops[0][0], bf16_fused_cls)
+            assert backward_ops[0][0] is forward_ops[0][0]
         if strict_fusion is False:
             forward_ops = module._module_groups[0]._forward_ops
             backward_ops = module._module_groups[0]._backward_ops
@@ -3333,6 +3359,22 @@ class TestGroupedMLPDeterminism:
         torch.use_deterministic_algorithms(torch_flag)
         assert grouped_mlp_module._deterministic_algorithms_required() is expected
 
+    def test_bf16_refuses_determinism(self, monkeypatch) -> None:
+        """The BF16 dGLU reduces ``dprob`` with atomics, so a determinism request raises."""
+        if not grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16.is_supported():
+            pytest.skip("BF16 fused grouped MLP is not supported on this system")
+
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+        with pytest.raises(RuntimeError, match="dprob"):
+            TestGroupedMLPFusedOp().test_grouped_mlp(
+                enable_fusion=True,
+                bias=False,
+                hidden_size=128,
+                quantization=None,
+                single_grouped_weight=False,
+                activation="scaled_swiglu",
+            )
+
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     @pytest.mark.parametrize(
         "activation,fused_cls",
@@ -3639,3 +3681,781 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
         d_cute = d_cute.squeeze(-1)
     tols = dtype_tols(torch.bfloat16)
     assert_close(d_cute[:total_m].float(), ref, **tols)
+
+
+# ---------------------------------------------------------------------------
+# BF16 fused grouped MLP (GroupedMLP_CuTeGEMMGLUBf16)
+# ---------------------------------------------------------------------------
+#
+# Matcher and contract tests stub ``is_supported`` and run on any CUDA device; the
+# end-to-end ones need SM100. ``test_grouped_mlp`` covers numerics with
+# ``quantization=None``.
+
+
+def _bf16_mlp_ops(
+    *,
+    num_groups: int = 1,
+    in_features: int = 64,
+    ffn_hidden: int = 128,
+    activation=None,
+    bias: bool = False,
+    dtype: torch.dtype = torch.bfloat16,
+    fc1_scale_bias: bool = False,
+    fc2_scale_bias: bool = False,
+    **linear_kwargs,
+):
+    """Build a GroupedLinear + GLU + GroupedLinear triple."""
+    fc1 = te.ops.GroupedLinear(
+        num_groups,
+        in_features,
+        2 * ffn_hidden,
+        bias=bias,
+        device="cuda",
+        dtype=dtype,
+        split_alignment=256,
+        scale_bias=fc1_scale_bias,
+        **linear_kwargs,
+    )
+    if activation is None:
+        activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
+    fc2 = te.ops.GroupedLinear(
+        num_groups,
+        ffn_hidden,
+        in_features,
+        bias=bias,
+        device="cuda",
+        dtype=dtype,
+        split_alignment=256,
+        scale_bias=fc2_scale_bias,
+        **linear_kwargs,
+    )
+    return [fc1, activation, fc2]
+
+
+def _bf16_mlp_inputs(ops, num_groups: int, tokens_per_group: int = 256):
+    """Split sizes, input, and routing probs for ``_bf16_mlp_ops``."""
+    total_tokens = num_groups * tokens_per_group
+    split_sizes = torch.full((num_groups,), tokens_per_group, dtype=torch.int32, device="cuda")
+    x = torch.randn(total_tokens, ops[0].in_features, dtype=torch.bfloat16, device="cuda")
+    probs = torch.rand(total_tokens, dtype=torch.bfloat16, device="cuda")
+    return split_sizes, x, probs
+
+
+class _ShardedBf16Weight(torch.nn.Parameter):
+    """Single-process fake DistributedWeight leader over row-sharded expert weights.
+
+    Each parameter holds the first half of its rows (rank 0 of two). The leader gathers
+    the full weights (``_full``), and ``finalize_group_grads`` adds rank 0's rows of each
+    wgrad to ``main_grad``, like a reduce-scatter.
+    """
+
+    is_distributed_weight = True
+
+    def materialize_group_for_forward(self):
+        self.calls["fwd"] += 1
+        return [w.clone() for w in self._full]
+
+    def materialize_group_for_backward(self):
+        self.calls["bwd"] += 1
+        return [w.clone() for w in self._full]
+
+    def finalize_group_grads(self, wgrads):
+        self.calls["finalize"] += 1
+        wgrads = list(wgrads) if isinstance(wgrads, (list, tuple)) else [wgrads]
+        for shard, wgrad in zip(self._group, wgrads):
+            shard.main_grad.add_(wgrad[: shard.shape[0]].float())
+            shard.grad_added_to_main_grad = True
+        return [torch.zeros_like(shard) for shard in self._group]
+
+    def grad_buffer(self):
+        return self.data
+
+
+def _shard_grouped_linear(fc) -> _ShardedBf16Weight:
+    """Replace ``fc``'s per-expert weights with row shards led by a ``_ShardedBf16Weight``."""
+    full = [getattr(fc, f"weight{idx}").detach().clone() for idx in range(fc.num_groups)]
+    rows = fc.out_features // 2
+    shards = []
+    for idx, weight in enumerate(full):
+        cls = _ShardedBf16Weight if idx == 0 else torch.nn.Parameter
+        shard = cls(weight[:rows].clone())
+        shard.main_grad = torch.zeros(rows, fc.in_features, dtype=torch.float32, device="cuda")
+        shard.grad_added_to_main_grad = False
+        setattr(fc, f"weight{idx}", shard)
+        shards.append(shard)
+    leader = shards[0]
+    leader._full = full
+    leader._group = shards
+    leader.calls = {"fwd": 0, "bwd": 0, "finalize": 0}
+    return leader
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+class TestGroupedMLPBf16FusedOp:
+    """Tests for the BF16 fused grouped MLP."""
+
+    @staticmethod
+    def _fuse(monkeypatch, ops, recipe):
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        monkeypatch.setattr(fused_cls, "is_supported", classmethod(lambda cls: True))
+        return (
+            grouped_mlp_module.fuse_bf16_grouped_mlp_ops(
+                ops, recipe=recipe, fused_op_cls=fused_cls
+            ),
+            fused_cls,
+        )
+
+    @staticmethod
+    def _assert_declined(fused, ops, fused_cls, msg="") -> None:
+        """Same ops in the same order and nothing fused (the list itself may be new)."""
+        assert list(fused) == list(ops), msg
+        assert not any(isinstance(op, fused_cls) for op in fused), msg
+
+    @staticmethod
+    def _skip_unless_bf16_fusion() -> None:
+        if not grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16.is_supported():
+            pytest.skip("BF16 fused grouped MLP is not supported on this system")
+
+    @pytest.mark.parametrize(
+        "arch,version_ok,has_flag,expected",
+        (
+            ((10, 0), True, True, True),
+            ((10, 3), True, True, True),
+            ((10, 7), True, True, False),  # Rubin
+            ((10, 0), False, True, False),  # cuDNN frontend older than 1.32.0
+            ((10, 0), True, False, False),  # develop build reporting 1.32.0 before PR #1602
+        ),
+    )
+    def test_is_supported(self, monkeypatch, arch, version_ok, has_flag, expected) -> None:
+        """Support needs Blackwell, cuDNN frontend >= 1.32.0, and the canonical-layout flag."""
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        monkeypatch.setattr(grouped_mlp_module, "get_device_compute_capability", lambda: arch)
+        monkeypatch.setattr(
+            grouped_mlp_module,
+            "_cudnn_frontend_version_at_least",
+            lambda v: (
+                version_ok if v == grouped_mlp_module._BF16_MIN_CUDNN_FRONTEND_VERSION else True
+            ),
+        )
+
+        def wrapper(*args, **kwargs):
+            raise AssertionError("support detection must not launch a kernel")
+
+        if has_flag:
+            wrapper.supports_bf16_canonical_layouts = True
+        for getter in (
+            "grouped_gemm_kernel",
+            "grouped_gemm_activation_kernel",
+            "grouped_gemm_dactivation_kernel",
+            "grouped_gemm_wgrad_kernel",
+        ):
+            monkeypatch.setattr(fused_cls, getter, classmethod(lambda cls: wrapper))
+        fused_cls.is_supported.cache_clear()
+        try:
+            assert fused_cls.is_supported() is expected
+        finally:
+            # Computed under stubs; drop it so later tests re-detect.
+            fused_cls.is_supported.cache_clear()
+
+    def test_claims_unquantized_recipes_only(self, monkeypatch) -> None:
+        """BF16 fuses only without a recipe, so it never replaces a quantized fusion."""
+        from transformer_engine.common import recipe as te_recipe
+
+        ops = _bf16_mlp_ops()
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        assert len(fused) == 1 and isinstance(fused[0], fused_cls)
+        assert list(fused[0].basic_ops) == ops
+
+        custom = te_recipe.CustomRecipe(qfactory=lambda role: None)
+        custom.enable_cutedsl_fused_grouped_mlp = True
+        for recipe in (
+            te_recipe.MXFP8BlockScaling(fp8_format=te_recipe.Format.E4M3),
+            te_recipe.NVFP4BlockScaling(),
+            te_recipe.DelayedScaling(),
+            te_recipe.Float8CurrentScaling(),
+            te_recipe.Float8BlockScaling(),
+            custom,
+        ):
+            declined, _ = self._fuse(monkeypatch, ops, recipe)
+            assert declined is ops, f"BF16 matcher must decline {type(recipe).__name__}"
+            assert grouped_mlp_module.fuse_bf16_ops(ops, recipe=recipe) is ops
+
+    def test_declines_non_bf16_dtype(self, monkeypatch) -> None:
+        """FP16/FP32 weights have no BF16 kernel."""
+        for dtype in (torch.float16, torch.float32):
+            ops = _bf16_mlp_ops(dtype=dtype)
+            fused, fused_cls = self._fuse(monkeypatch, ops, None)
+            self._assert_declined(fused, ops, fused_cls, f"BF16 matcher must decline {dtype}")
+
+    @pytest.mark.parametrize(
+        "activation_factory,should_fuse",
+        (
+            (lambda: te.ops.ScaledSwiGLU(glu_interleave_size=32), True),
+            (lambda: te.ops.ScaledClampedQGeGLU(glu_interleave_size=32), True),
+            # The kernel fixes clamp=+/-7.0 and alpha=1.702.
+            (lambda: te.ops.ScaledClampedQGeGLU(glu_interleave_size=32, limit=5.0), False),
+            (lambda: te.ops.ScaledClampedQGeGLU(glu_interleave_size=32, alpha=1.0), False),
+            # No BF16 kernel.
+            (lambda: te.ops.ScaledSiTUGLU(glu_interleave_size=32), False),
+            (lambda: te.ops.ScaledSReLU(), False),
+        ),
+    )
+    def test_activation_coverage(self, monkeypatch, activation_factory, should_fuse) -> None:
+        """SwiGLU and default-constant GeGLU fuse; other activations decline."""
+        ops = _bf16_mlp_ops(activation=activation_factory())
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        if should_fuse:
+            assert len(fused) == 1 and isinstance(fused[0], fused_cls)
+        else:
+            self._assert_declined(fused, ops, fused_cls)
+
+    def test_act_func_mapping(self) -> None:
+        """Activations map to cuDNN act funcs; GeGLU's linear offset passes through."""
+        act_funcs = grouped_mlp_module._bf16_glu_act_funcs
+        assert act_funcs(te.ops.ScaledSwiGLU(glu_interleave_size=32)) == ("swiglu", "dswiglu", 0.0)
+        assert act_funcs(te.ops.ScaledClampedQGeGLU(glu_interleave_size=32)) == (
+            "geglu",
+            "dgeglu",
+            pytest.approx(1.0),
+        )
+        offset_geglu = te.ops.ScaledClampedQGeGLU(glu_interleave_size=32, glu_linear_offset=0.5)
+        assert act_funcs(offset_geglu) == ("geglu", "dgeglu", pytest.approx(0.5))
+
+    def test_declines_misaligned_dimensions(self, monkeypatch) -> None:
+        """Dimensions the constructor would reject (not 64-aligned) decline instead."""
+        for kwargs in ({"ffn_hidden": 96}, {"in_features": 96}):
+            ops = _bf16_mlp_ops(**kwargs)
+            fused, fused_cls = self._fuse(monkeypatch, ops, None)
+            self._assert_declined(fused, ops, fused_cls, str(kwargs))
+
+    def test_declines_wrong_glu_interleave_size(self, monkeypatch) -> None:
+        """The GLU epilogue only supports 32-wide gate/up interleaving."""
+        ops = _bf16_mlp_ops(activation=te.ops.ScaledSwiGLU(glu_interleave_size=64))
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        self._assert_declined(fused, ops, fused_cls)
+
+    def test_declines_split_alignment_below_256(self, monkeypatch) -> None:
+        """Both GroupedLinear ops must declare 256-aligned splits."""
+        ops = _bf16_mlp_ops()
+        ops[0].split_alignment = 128
+        with pytest.warns(UserWarning, match="split_alignment.*divisible by 256"):
+            fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        self._assert_declined(fused, ops, fused_cls)
+
+    def test_forward_rejects_unaligned_token_count(self, monkeypatch) -> None:
+        """A token count that is not 256-aligned raises."""
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        monkeypatch.setattr(fused_cls, "is_supported", classmethod(lambda cls: True))
+        op = fused_cls.__new__(fused_cls)
+        with pytest.raises(ValueError, match="256"):
+            op._check_token_alignment(300)
+        op._check_token_alignment(512)  # must not raise
+
+    @pytest.mark.parametrize("accumulate", (False, True))
+    def test_wgrad_passes_only_bf16_backend_kwargs(self, accumulate: bool) -> None:
+        """The wgrad sends BF16-backend kwargs only and forwards the accumulate flag.
+
+        cuDNN raises on ``descriptor_workspace`` for the BF16 backend, and scale factors
+        would select the block-scaled backend. A fake kernel records the call.
+        """
+        captured = {}
+
+        def fake_wgrad_kernel(**kwargs):
+            captured.update(kwargs)
+
+        num_groups, out_features, in_features, tokens = 2, 64, 32, 512
+        x = torch.randn(tokens, in_features, dtype=torch.bfloat16, device="cuda")
+        dy = torch.randn(tokens, out_features, dtype=torch.bfloat16, device="cuda")
+        wgrad = types.SimpleNamespace(
+            rowwise_data=torch.empty(
+                num_groups * out_features * in_features, dtype=torch.bfloat16, device="cuda"
+            )
+        )
+        offsets = torch.tensor([256, 512], dtype=torch.int32, device="cuda")
+        factory = grouped_mlp_module._bf16_wgrad_fn_factory(
+            weight_shape=(out_features, in_features),
+            offsets=offsets,
+            wgrad_kernel_fn=fake_wgrad_kernel,
+            single_grouped_weight=True,
+            num_groups=num_groups,
+            current_stream=0,
+        )
+        factory(accumulate)(x, dy, wgrad)
+
+        assert "descriptor_workspace" not in captured
+        assert captured["sfa_tensor"] is None and captured["sfb_tensor"] is None
+        assert captured["accumulate_on_output"] is accumulate
+        assert captured["output_mode"] == "dense"
+        assert tuple(captured["a_tensor"].shape) == (out_features, tokens)
+        assert tuple(captured["b_tensor"].shape) == (tokens, in_features)
+        assert tuple(captured["wgrad_tensor"].shape) == (num_groups, out_features, in_features)
+
+    @pytest.mark.parametrize("single_grouped_weight", (False, True))
+    @pytest.mark.parametrize("accumulate", (False, True))
+    def test_wgrad_zero_tokens(self, single_grouped_weight: bool, accumulate: bool) -> None:
+        """With no tokens the wgrad is zero: fresh outputs become zero, accumulated ones stay."""
+
+        def wgrad_kernel_must_not_run(**kwargs):
+            raise AssertionError("no wgrad kernel launch for zero tokens")
+
+        num_groups, out_features, in_features = 2, 64, 32
+        buffer = torch.full(
+            (num_groups, out_features, in_features), 3.0, dtype=torch.bfloat16, device="cuda"
+        )
+        if single_grouped_weight:
+            wgrad = types.SimpleNamespace(rowwise_data=buffer.view(-1))
+        else:
+            wgrad = [buffer[idx] for idx in range(num_groups)]
+        factory = grouped_mlp_module._bf16_wgrad_fn_factory(
+            weight_shape=(out_features, in_features),
+            offsets=torch.zeros(num_groups, dtype=torch.int32, device="cuda"),
+            wgrad_kernel_fn=wgrad_kernel_must_not_run,
+            single_grouped_weight=single_grouped_weight,
+            num_groups=num_groups,
+        )
+        x = torch.empty(0, in_features, dtype=torch.bfloat16, device="cuda")
+        dy = torch.empty(0, out_features, dtype=torch.bfloat16, device="cuda")
+        factory(accumulate)(x, dy, wgrad)
+        expected = torch.full_like(buffer, 3.0) if accumulate else torch.zeros_like(buffer)
+        torch.testing.assert_close(buffer, expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("single_grouped_weight", (False, True))
+    def test_dgrad_weight_is_n_major_without_copy(self, single_grouped_weight: bool) -> None:
+        """Dgrads read the stored weights N-major: packed as-is, per-expert via pointers."""
+        num_groups, in_features, out_features = 3, 64, 128
+        fc = te.ops.GroupedLinear(
+            num_groups,
+            in_features,
+            out_features,
+            bias=False,
+            device="cuda",
+            dtype=torch.bfloat16,
+            single_grouped_weight=single_grouped_weight,
+        )
+        kwargs = grouped_mlp_module._bf16_dgrad_weight_kwargs(fc, num_groups, torch.device("cuda"))
+        assert kwargs["b_major"] == "n"
+        if single_grouped_weight:
+            assert set(kwargs) == {"b_tensor", "b_major"}
+            b = kwargs["b_tensor"]
+            assert tuple(b.shape) == (num_groups, out_features, in_features)
+            assert b.is_contiguous()
+            assert b.data_ptr() == fc.weight.rowwise_data.data_ptr()
+        else:
+            assert "b_tensor" not in kwargs
+            assert kwargs["n"] == in_features
+            ptrs = kwargs["b_ptrs"].tolist()
+            assert ptrs == [getattr(fc, f"weight{idx}").data_ptr() for idx in range(num_groups)]
+
+    def test_distributed_weight_matching(self, monkeypatch) -> None:
+        """Distributed weights fuse unless only one of FC1/FC2 is distributed.
+
+        Packed distributed weights and delayed wgrad still fuse: the fused op and the
+        shared wgrad code raise for them, and delayed wgrad can be toggled at runtime.
+        """
+
+        def mark_distributed(*weights):
+            ids = {id(w) for w in weights}
+            monkeypatch.setattr(grouped_mlp_module, "is_distributed_weight", lambda w: id(w) in ids)
+
+        ops = _bf16_mlp_ops(num_groups=2)
+        mark_distributed(ops[0].weight0, ops[2].weight0)
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        assert len(fused) == 1 and isinstance(fused[0], fused_cls)
+
+        mark_distributed(ops[0].weight0)
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        self._assert_declined(fused, ops, fused_cls, "FC1/FC2 distributed mismatch")
+
+        ops = _bf16_mlp_ops(num_groups=2, delay_wgrad_compute=True)
+        mark_distributed(ops[0].weight0, ops[2].weight0)
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        assert len(fused) == 1 and isinstance(fused[0], fused_cls)
+
+        ops = _bf16_mlp_ops(num_groups=2, single_grouped_weight=True)
+        mark_distributed(ops[0].weight, ops[2].weight)
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        assert len(fused) == 1 and isinstance(fused[0], fused_cls)
+
+    def test_distributed_packed_weight_raises(self, monkeypatch) -> None:
+        """A packed distributed weight raises before any GEMM could read the shard."""
+        ops = _bf16_mlp_ops(num_groups=2, single_grouped_weight=True)
+        monkeypatch.setattr(
+            grouped_mlp_module, "is_distributed_weight", lambda w: w is ops[0].weight
+        )
+        with pytest.raises(RuntimeError, match="single_grouped_weight=False"):
+            grouped_mlp_module._bf16_materialize_distributed(ops[0], for_backward=False)
+        assert grouped_mlp_module._bf16_materialize_distributed(ops[2], for_backward=False) is None
+
+    def test_distributed_weight_dispatch(self) -> None:
+        """Every GEMM uses gathered weights and wgrads are finalized into main_grad.
+
+        Matches the fused op on full weights: y and dx bit-exact, dprob within atomics
+        noise, and each shard's ``main_grad`` equal to its rows of the full wgrad.
+        """
+        self._skip_unless_bf16_fusion()
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        torch.manual_seed(0)
+        num_groups = 2
+        ref_ops = _bf16_mlp_ops(num_groups=num_groups)
+        ops = _bf16_mlp_ops(num_groups=num_groups)
+        for fc, ref_fc in ((ops[0], ref_ops[0]), (ops[2], ref_ops[2])):
+            fc.load_state_dict(ref_fc.state_dict())
+        leaders = [_shard_grouped_linear(ops[0]), _shard_grouped_linear(ops[2])]
+        split_sizes, x_ref, probs_ref = _bf16_mlp_inputs(ops, num_groups)
+        dy = torch.randn(x_ref.shape[0], ops[2].out_features, dtype=torch.bfloat16, device="cuda")
+
+        outs = []
+        for m in (te.ops.Sequential(*ops), te.ops.Sequential(*ref_ops)):
+            x = x_ref.clone().requires_grad_(True)
+            probs = probs_ref.clone().requires_grad_(True)
+            y = m(x, split_sizes, probs, split_sizes)
+            y.backward(dy)
+            assert isinstance(m._module_groups[0]._forward_ops[0][0], fused_cls)
+            outs.append((y, x.grad, probs.grad))
+
+        for leader in leaders:
+            assert leader.calls == {"fwd": 1, "bwd": 1, "finalize": 1}
+        (y, dx, dprobs), (y_ref, dx_ref, dprobs_ref) = outs
+        torch.testing.assert_close(y, y_ref, rtol=0, atol=0)
+        torch.testing.assert_close(dx, dx_ref, rtol=0, atol=0)
+        torch.testing.assert_close(dprobs, dprobs_ref, **dtype_tols(torch.bfloat16))
+        for fc, ref_fc in ((ops[0], ref_ops[0]), (ops[2], ref_ops[2])):
+            for idx in range(num_groups):
+                shard = getattr(fc, f"weight{idx}")
+                ref_grad = getattr(ref_fc, f"weight{idx}").grad
+                assert shard.grad_added_to_main_grad is True
+                torch.testing.assert_close(
+                    shard.main_grad, ref_grad[: shard.shape[0]].float(), rtol=0, atol=0
+                )
+
+    @pytest.mark.parametrize(
+        "fc1_scale_bias,fc2_scale_bias,should_fuse",
+        ((False, True, True), (True, False, False), (True, True, False)),
+    )
+    def test_scale_bias_matching(
+        self, monkeypatch, fc1_scale_bias, fc2_scale_bias, should_fuse
+    ) -> None:
+        """FC2 scale_bias fuses; FC1 scale_bias (bias scaled before GLU) declines."""
+        ops = _bf16_mlp_ops(
+            num_groups=2, bias=True, fc1_scale_bias=fc1_scale_bias, fc2_scale_bias=fc2_scale_bias
+        )
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        if should_fuse:
+            assert len(fused) == 1 and isinstance(fused[0], fused_cls)
+        else:
+            self._assert_declined(fused, ops, fused_cls)
+
+    def test_scale_bias_separate_scales(self) -> None:
+        """FC2 scale_bias with scales distinct from the activation's probs.
+
+        Compared against the unfused ops. The large FC2 bias makes ``bias * scale``
+        dominate, so a mis-wired scale (ones, or the activation probs) fails.
+        """
+        self._skip_unless_bf16_fusion()
+        torch.manual_seed(0)
+        num_groups = 2
+        ops = _bf16_mlp_ops(num_groups=num_groups, bias=True, fc2_scale_bias=True)
+        ref_ops = _bf16_mlp_ops(num_groups=num_groups, bias=True, fc2_scale_bias=True)
+        with torch.no_grad():
+            for idx in range(num_groups):
+                getattr(ops[0], f"bias{idx}").normal_()
+                getattr(ops[2], f"bias{idx}").normal_(std=4.0)
+        for fc, ref_fc in ((ops[0], ref_ops[0]), (ops[2], ref_ops[2])):
+            ref_fc.load_state_dict(fc.state_dict())
+        split_sizes, x0, probs0 = _bf16_mlp_inputs(ops, num_groups)
+        fc2_scales0 = torch.rand(x0.shape[0], dtype=torch.bfloat16, device="cuda")
+        dy = torch.randn(x0.shape[0], ops[2].out_features, dtype=torch.bfloat16, device="cuda")
+
+        def run(model):
+            x = x0.clone().requires_grad_(True)
+            probs = probs0.clone().requires_grad_(True)
+            fc2_scales = fc2_scales0.clone().requires_grad_(True)
+            y = model(x, split_sizes, probs, split_sizes, fc2_scales)
+            y.backward(dy)
+            return model, (y, x.grad, probs.grad, fc2_scales.grad)
+
+        model, out = run(te.ops.Sequential(*ops))
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], fused_cls)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(
+                OperationFuser,
+                "forward_backward_fusion_functions",
+                [
+                    f
+                    for f in OperationFuser.forward_backward_fusion_functions
+                    if f is not grouped_mlp_module.fuse_bf16_ops
+                ],
+            )
+            ref_model, ref_out = run(te.ops.Sequential(*ref_ops))
+        assert not isinstance(ref_model._module_groups[0]._forward_ops[0][0], fused_cls)
+
+        tols = {"rtol": 0.125, "atol": 0.25}  # BF16 GEMMs, as in test_grouped_mlp
+        for name, value, ref in zip(("y", "dx", "dprobs", "dscales"), out, ref_out):
+            assert value is not None, f"{name} is missing"
+            assert_close(value, ref, **tols, msg=lambda m, n=name: f"{n}: {m}")
+        # FC2's dbias uses the same reduction kernel in both paths.
+        for fc, ref_fc, bias_tols in (
+            (ops[0], ref_ops[0], tols),
+            (ops[2], ref_ops[2], dtype_tols(torch.bfloat16)),
+        ):
+            for idx in range(num_groups):
+                assert_close(
+                    getattr(fc, f"bias{idx}").grad,
+                    getattr(ref_fc, f"bias{idx}").grad,
+                    **bias_tols,
+                )
+
+    def test_scale_bias_refuses_determinism(self, monkeypatch) -> None:
+        """FC2 scale_bias reduces dscales with atomics, even with a unit activation scale."""
+        self._skip_unless_bf16_fusion()
+        ops = _bf16_mlp_ops(num_groups=1, bias=True, fc2_scale_bias=True)
+        ops[1]._grouped_mlp_unit_activation_scale = True
+        model = te.ops.Sequential(*ops)
+        split_sizes, x, _ = _bf16_mlp_inputs(ops, num_groups=1)
+        probs = torch.ones(x.shape[0], dtype=torch.bfloat16, device="cuda")
+        fc2_scales = torch.rand(x.shape[0], dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        y = model(x.requires_grad_(True), split_sizes, probs, split_sizes, fc2_scales)
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], fused_cls)
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+        with pytest.raises(RuntimeError, match="dscales"):
+            y.backward(torch.ones_like(y))
+
+    def test_delayed_wgrad_runs_on_the_backward_dw_stream(self, monkeypatch) -> None:
+        """A delayed wgrad launches on the stream current at ``backward_dw()``."""
+        self._skip_unless_bf16_fusion()
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        wgrad_kernel = fused_cls.grouped_gemm_wgrad_kernel()
+        launch_streams = []
+
+        def recording_wgrad_kernel(**kwargs):
+            launch_streams.append(kwargs["current_stream"])
+            return wgrad_kernel(**kwargs)
+
+        monkeypatch.setattr(
+            fused_cls, "grouped_gemm_wgrad_kernel", classmethod(lambda cls: recording_wgrad_kernel)
+        )
+        ops = _bf16_mlp_ops(num_groups=2, delay_wgrad_compute=True)
+        model = te.ops.Sequential(*ops)
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups=2)
+        y = model(x.requires_grad_(True), split_sizes, probs, split_sizes)
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], fused_cls)
+        y.backward(torch.ones_like(y))
+        assert not launch_streams, "wgrad must be deferred until backward_dw()"
+
+        side_stream = torch.cuda.Stream()
+        side_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side_stream):
+            ops[0].backward_dw()
+            ops[2].backward_dw()
+        torch.cuda.current_stream().wait_stream(side_stream)
+        assert launch_streams == [side_stream.cuda_stream] * 2
+
+    @pytest.mark.parametrize(
+        "autocast_dtype,should_fuse",
+        ((None, True), (torch.bfloat16, True), (torch.float16, False)),
+        ids=("no_autocast", "bf16_autocast", "fp16_autocast"),
+    )
+    def test_autocast_dtype_matching(self, monkeypatch, autocast_dtype, should_fuse) -> None:
+        """BF16 weights fuse unless autocast computes in another dtype (fresh matcher)."""
+        ops = _bf16_mlp_ops(num_groups=2)
+        if autocast_dtype is None:
+            fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        else:
+            with torch.autocast("cuda", dtype=autocast_dtype):
+                fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        if should_fuse:
+            assert len(fused) == 1 and isinstance(fused[0], fused_cls)
+        else:
+            self._assert_declined(fused, ops, fused_cls)
+
+    def test_fp16_autocast_falls_back_on_first_selection(self) -> None:
+        """A module first run under FP16 autocast runs the unfused ops."""
+        self._skip_unless_bf16_fusion()
+        ops = _bf16_mlp_ops(num_groups=2)
+        model = te.ops.Sequential(*ops)
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups=2)
+        with torch.autocast("cuda", dtype=torch.float16):
+            y = model(x, split_sizes, probs, split_sizes)
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        assert not any(isinstance(op, fused_cls) for op, _ in model._module_groups[0]._forward_ops)
+        assert torch.isfinite(y).all()
+
+    def test_cached_fusion_raises_on_later_fp16_autocast(self) -> None:
+        """Fusion cached under BF16 autocast stays, so a later FP16 step hits the clear error."""
+        self._skip_unless_bf16_fusion()
+        ops = _bf16_mlp_ops(num_groups=2)
+        model = te.ops.Sequential(*ops)
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups=2)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            model(x, split_sizes, probs, split_sizes)
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], fused_cls)
+        with torch.autocast("cuda", dtype=torch.float16):
+            with pytest.raises(RuntimeError, match="autocast dtype changes"):
+                model(x, split_sizes, probs, split_sizes)
+
+    def test_strided_fp32_scales(self) -> None:
+        """Strided FP32 activation probs and FC2 scales match contiguous ones, fwd and bwd.
+
+        cuDNN needs contiguous canonical probs, and ``.to(float32)`` does not copy FP32
+        inputs, so a column of a ``[tokens, top_k]`` tensor must be made contiguous.
+        """
+        self._skip_unless_bf16_fusion()
+        torch.manual_seed(0)
+        num_groups = 2
+        ops = _bf16_mlp_ops(num_groups=num_groups, bias=True, fc2_scale_bias=True)
+        ref_ops = _bf16_mlp_ops(num_groups=num_groups, bias=True, fc2_scale_bias=True)
+        with torch.no_grad():
+            for idx in range(num_groups):
+                getattr(ops[0], f"bias{idx}").normal_()
+                getattr(ops[2], f"bias{idx}").normal_()
+        for fc, ref_fc in ((ops[0], ref_ops[0]), (ops[2], ref_ops[2])):
+            ref_fc.load_state_dict(fc.state_dict())
+        split_sizes, x0, _ = _bf16_mlp_inputs(ops, num_groups)
+        total_tokens = x0.shape[0]
+        probs_2d = torch.rand(total_tokens, 2, dtype=torch.float32, device="cuda")
+        scales_2d = torch.rand(total_tokens, 2, dtype=torch.float32, device="cuda")
+        dy = torch.randn(total_tokens, ops[2].out_features, dtype=torch.bfloat16, device="cuda")
+
+        def run(model, strided):
+            x = x0.clone().requires_grad_(True)
+            probs_base = probs_2d.clone().requires_grad_(True)
+            scales_base = scales_2d.clone().requires_grad_(True)
+            if strided:
+                probs, scales = probs_base[:, 0], scales_base[:, 1]
+                assert not probs.is_contiguous() and not scales.is_contiguous()
+            else:
+                probs = probs_base[:, 0].detach().clone().requires_grad_(True)
+                scales = scales_base[:, 1].detach().clone().requires_grad_(True)
+            y = model(x, split_sizes, probs, split_sizes, scales)
+            y.backward(dy)
+            dprobs = probs_base.grad[:, 0] if strided else probs.grad
+            dscales = scales_base.grad[:, 1] if strided else scales.grad
+            return model, (y, x.grad, dprobs, dscales)
+
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        model, out = run(te.ops.Sequential(*ops), strided=True)
+        ref_model, ref_out = run(te.ops.Sequential(*ref_ops), strided=False)
+        for m in (model, ref_model):
+            assert isinstance(m._module_groups[0]._forward_ops[0][0], fused_cls)
+
+        y, dx, dprobs, dscales = out
+        y_ref, dx_ref, dprobs_ref, dscales_ref = ref_out
+        torch.testing.assert_close(y, y_ref, rtol=0, atol=0)
+        torch.testing.assert_close(dx, dx_ref, rtol=0, atol=0)
+        # dprob and dscales are reduced with atomics.
+        torch.testing.assert_close(dprobs, dprobs_ref, **dtype_tols(torch.bfloat16))
+        torch.testing.assert_close(dscales, dscales_ref, **dtype_tols(torch.bfloat16))
+        for fc, ref_fc in ((ops[0], ref_ops[0]), (ops[2], ref_ops[2])):
+            for idx in range(num_groups):
+                for name in (f"weight{idx}", f"bias{idx}"):
+                    torch.testing.assert_close(
+                        getattr(fc, name).grad,
+                        getattr(ref_fc, name).grad,
+                        **dtype_tols(torch.bfloat16),
+                        msg=lambda m, n=name: f"{n}: {m}",
+                    )
+
+    def test_zero_token_batch(self, monkeypatch) -> None:
+        """An empty batch skips the cuDNN kernels: empty outputs and zero param grads.
+
+        An expert-parallel rank can receive no tokens; the unfused ops accept that.
+        """
+        self._skip_unless_bf16_fusion()
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        num_groups = 2
+        ops = _bf16_mlp_ops(num_groups=num_groups, bias=True, fc2_scale_bias=True)
+        model = te.ops.Sequential(*ops)
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups)
+        model(x, split_sizes, probs, split_sizes, probs)  # non-empty step selects the fusion
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], fused_cls)
+
+        def kernel_must_not_run(**kwargs):
+            raise AssertionError("no cuDNN launch for an empty batch")
+
+        for getter in (
+            "grouped_gemm_kernel",
+            "grouped_gemm_activation_kernel",
+            "grouped_gemm_dactivation_kernel",
+        ):
+            monkeypatch.setattr(fused_cls, getter, classmethod(lambda cls: kernel_must_not_run))
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups, tokens_per_group=0)
+        x.requires_grad_(True)
+        probs.requires_grad_(True)
+        fc2_scales = probs.detach().clone().requires_grad_(True)
+        for param in model.parameters():
+            param.grad = None
+        y = model(x, split_sizes, probs, split_sizes, fc2_scales)
+        assert tuple(y.shape) == (0, ops[2].out_features)
+        y.backward(torch.empty_like(y))
+        for tensor in (x, probs, fc2_scales):
+            assert tuple(tensor.grad.shape) == tuple(tensor.shape)
+        for fc in (ops[0], ops[2]):
+            for idx in range(num_groups):
+                for name in (f"weight{idx}", f"bias{idx}"):
+                    grad = getattr(fc, name).grad
+                    torch.testing.assert_close(grad, torch.zeros_like(grad), rtol=0, atol=0)
+
+    def test_zero_token_batch_allows_determinism(self, monkeypatch) -> None:
+        """An empty batch launches no atomic reduction, so a determinism request runs."""
+        self._skip_unless_bf16_fusion()
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        ops = _bf16_mlp_ops(num_groups=2, bias=True, fc2_scale_bias=True)
+        model = te.ops.Sequential(*ops)
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups=2)
+        model(x, split_sizes, probs, split_sizes, probs)  # non-empty step selects the fusion
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], fused_cls)
+
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups=2, tokens_per_group=0)
+        probs.requires_grad_(True)
+        fc2_scales = probs.detach().clone().requires_grad_(True)
+        y = model(x.requires_grad_(True), split_sizes, probs, split_sizes, fc2_scales)
+        y.backward(torch.empty_like(y))
+        assert tuple(probs.grad.shape) == (0,) and tuple(fc2_scales.grad.shape) == (0,)
+
+    def test_zero_token_batch_on_first_invocation(self) -> None:
+        """A module whose first call is an empty batch still fuses and runs."""
+        self._skip_unless_bf16_fusion()
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        ops = _bf16_mlp_ops(num_groups=2)
+        model = te.ops.Sequential(*ops)
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups=2, tokens_per_group=0)
+        y = model(x.requires_grad_(True), split_sizes, probs.requires_grad_(True), split_sizes)
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], fused_cls)
+        assert tuple(y.shape) == (0, ops[2].out_features)
+        y.backward(torch.empty_like(y))
+        assert tuple(x.grad.shape) == tuple(x.shape)
+
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups=2)  # then a normal step
+        y = model(x, split_sizes, probs, split_sizes)
+        assert tuple(y.shape) == (x.shape[0], ops[2].out_features)
+        assert torch.isfinite(y).all()
+
+    def test_zero_token_batch_distributed(self) -> None:
+        """An empty rank calls the distributed-weight hooks exactly as a non-empty one does.
+
+        Every rank must join the same gathers and reduce-scatters, or the collectives
+        hang. The empty batch contributes a zero wgrad, so main_grad is unchanged.
+        """
+        self._skip_unless_bf16_fusion()
+        num_groups = 2
+        ops = _bf16_mlp_ops(num_groups=num_groups)
+        leaders = [_shard_grouped_linear(ops[0]), _shard_grouped_linear(ops[2])]
+        model = te.ops.Sequential(*ops)
+        split_sizes, x, probs = _bf16_mlp_inputs(ops, num_groups, tokens_per_group=0)
+        y = model(x.requires_grad_(True), split_sizes, probs.requires_grad_(True), split_sizes)
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        assert isinstance(model._module_groups[0]._forward_ops[0][0], fused_cls)
+        y.backward(torch.empty_like(y))
+        for leader in leaders:
+            assert leader.calls == {"fwd": 1, "bwd": 1, "finalize": 1}
+        for fc in (ops[0], ops[2]):
+            for idx in range(num_groups):
+                shard = getattr(fc, f"weight{idx}")
+                assert shard.grad_added_to_main_grad is True
+                torch.testing.assert_close(
+                    shard.main_grad, torch.zeros_like(shard.main_grad), rtol=0, atol=0
+                )
