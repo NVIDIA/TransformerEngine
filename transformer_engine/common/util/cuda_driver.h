@@ -40,8 +40,8 @@ template <typename... ArgTs>
 inline CUresult call(const char *symbol, ArgTs... args) {
   using FuncT = CUresult(ArgTs...);
 
-  // Never destroyed. Static destructors may call into the driver during exit (rtc::KernelManager
-  // unloads its CUDA modules), and statics constructed after them are destroyed before them.
+  // Never destroyed, so a lookup never reads a destroyed map, whatever order statics are
+  // constructed and destroyed in.
   static auto &symbol_cache = *new std::unordered_map<std::string, void *>();
   static auto &cache_mutex = *new std::mutex();
   FuncT *func;
