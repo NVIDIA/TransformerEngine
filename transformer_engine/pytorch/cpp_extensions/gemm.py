@@ -40,34 +40,40 @@ __all__ = [
 _NUM_MAX_UB_STREAMS = 3
 
 
-def get_cublas_workspace_size_bytes() -> None:
-    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
+@functools.lru_cache(maxsize=None)
+def _get_cublas_workspace_size_bytes_for_device(device: int) -> int:
+    """Cached per-device workspace size; the device properties are fixed per process."""
+    if torch.cuda.get_device_properties(device).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
         return 32 * 1024 * 1024 + 1024
     return 4_194_304
 
 
-@functools.lru_cache(maxsize=None)
+def get_cublas_workspace_size_bytes() -> int:
+    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
+    return _get_cublas_workspace_size_bytes_for_device(torch.cuda.current_device())
+
+
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
-    """Returns workspace for cublas GEMM."""
+    """Allocate cuBLAS scratch for one invocation on the current CUDA stream.
+
+    The caching allocator safely reuses eager allocations on their stream. During
+    capture, the graph's private pool owns the allocation until the graph is
+    destroyed. Keeping the tensor in a Python cache would bypass that ownership
+    on later captures, including graphs replayed on different streams.
+    """
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
 
+    size = get_cublas_workspace_size_bytes()
     if ub:
-        return torch.empty(
-            get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS,
-            dtype=torch.uint8,
-            device=device,
-        )
+        return torch.empty(size * _NUM_MAX_UB_STREAMS, dtype=torch.uint8, device=device)
     if grouped_gemm:
-        _multi_stream_cublas_workspace = []
-        for _ in range(tex.get_num_cublas_streams()):
-            _multi_stream_cublas_workspace.append(
-                torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
-            )
-        return _multi_stream_cublas_workspace
+        return [
+            torch.empty(size, dtype=torch.uint8, device=device)
+            for _ in range(tex.get_num_cublas_streams())
+        ]
 
-    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+    return torch.empty(size, dtype=torch.uint8, device=device)
 
 
 def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
@@ -762,7 +768,6 @@ def general_gemm(
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
-    workspace = get_cublas_workspace(A.device.index, ub is not None, False)
 
     # Temporary hack to route NVFP4 GEMM with UE5M3 scale factors to
     # cuDNN Frontend kernels. UE5M3-specific logic should be removed
@@ -811,6 +816,7 @@ def general_gemm(
 
     # If A or B are custom tensors -> dispatch to quantizers's qgemm implementation
     if is_custom(A) or is_custom(B):
+        workspace = get_cublas_workspace(A.device.index, ub is not None, False)
         return custom_gemm(
             A,
             B,
@@ -836,6 +842,10 @@ def general_gemm(
         # FP8 block-scaling requires split accumulator
         use_split_accumulator = True
 
+    # Native GEMMs allocate scratch through the framework allocator in C++.
+    # Communication overlap still requires an explicit Tensor workspace.
+    workspace = get_cublas_workspace(A.device.index, True, False) if ub is not None else None
+
     args = (
         A,
         transa,  # transa
@@ -850,7 +860,7 @@ def general_gemm(
         gelu_in,
         grad,  # grad
         workspace,
-        workspace.shape[0],
+        workspace.shape[0] if workspace is not None else 0,
         accumulate,
         use_split_accumulator,
     )
@@ -979,7 +989,6 @@ def general_grouped_gemm(
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
     sm_count = get_sm_count()
-    workspaces = get_cublas_workspace(A[0].device.index, False, True)
 
     if grad and use_bias:
         grad_bias = [
@@ -1055,8 +1064,8 @@ def general_grouped_gemm(
         single_output,
         gelu_input,  # this is pre_gelu_out
         grad,  # grad
-        workspaces,
-        workspaces[0].shape[0],
+        None,  # Allocate invocation-local scratch in the native binding.
+        0,
         accumulate,
         use_split_accumulator,
         sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
