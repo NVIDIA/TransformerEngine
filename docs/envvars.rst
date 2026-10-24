@@ -460,6 +460,15 @@ GEMM Configuration
    :Default: Total SM count
    :Description: External SM margin for GEMM operations. Specifies the number of SMs to use for GEMM operations. The actual number of SMs used is ``sm_count - NVTE_EXT_MARGIN_SM``.
 
+.. envvar:: NVTE_LOG_COLLECTIVE_GEMM_STREAM_IDS
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Log the CUDA stream ID and distributed rank to standard output when Transformer
+                 Engine creates the internal CUDA stream for a collective GEMM context. The value
+                 is read and cached on first use, so changing the environment variable later does
+                 not affect that process.
+
 .. envvar:: NVTE_AG_P2P_MULTI_ATOMIC
 
    :Type: ``int`` (0 or 1)

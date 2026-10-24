@@ -28,8 +28,11 @@ if [[ $(nvidia-smi --list-gpus | wc -l) -ge 4 ]]; then
     # mask the other's results. Skip mpirun when the binary is missing.
     if [[ $configure_ok -eq 1 ]]; then
         comm_gemm_ok=1
+        comm_gemm_stream_logging_ok=1
         ep_ok=1
         cmake --build build --target test_comm_gemm || { test_fail "test_comm_gemm_build"; comm_gemm_ok=0; }
+        cmake --build build --target test_comm_gemm_stream_logging \
+            || { test_fail "test_comm_gemm_stream_logging_build"; comm_gemm_stream_logging_ok=0; }
         cmake --build build --target test_ep        || { test_fail "test_ep_build";        ep_ok=0; }
 
         if [[ $comm_gemm_ok -eq 1 ]]; then
@@ -37,6 +40,13 @@ if [[ $(nvidia-smi --list-gpus | wc -l) -ge 4 ]]; then
             mpirun --allow-run-as-root --np 4 --oversubscribe bash -c \
                 "exec ./build/test_comm_gemm --gtest_output=xml:$XML_LOG_DIR/cpp_distributed_test_comm_gemm.rank\${OMPI_COMM_WORLD_RANK}.xml" \
                 || test_fail "test_comm_gemm"
+        fi
+
+        if [[ $comm_gemm_stream_logging_ok -eq 1 ]]; then
+            # Run in a separate process because the logging setting is cached on first use.
+            mpirun --allow-run-as-root --np 4 --oversubscribe bash -c \
+                "exec ./build/test_comm_gemm_stream_logging --gtest_output=xml:$XML_LOG_DIR/cpp_distributed_test_comm_gemm_stream_logging.rank\${OMPI_COMM_WORLD_RANK}.xml" \
+                || test_fail "test_comm_gemm_stream_logging"
         fi
 
         if [[ $ep_ok -eq 1 ]]; then

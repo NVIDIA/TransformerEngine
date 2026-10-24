@@ -43,6 +43,9 @@ add_executable(test_comm_gemm
                test_comm_gemm.cu
                ../cpp/test_common.cu)
 
+add_executable(test_comm_gemm_stream_logging
+               test_comm_gemm_stream_logging.cu)
+
 list(APPEND test_comm_gemm_INCLUDES
      ${CMAKE_SOURCE_DIR}/../../transformer_engine/common/include
      ${CMAKE_SOURCE_DIR}/../../transformer_engine/common
@@ -51,6 +54,8 @@ list(APPEND test_comm_gemm_INCLUDES
      ${MPI_CXX_INCLUDE_PATH}
      $ENV{CUBLASMP_HOME}/include)
 target_include_directories(test_comm_gemm PRIVATE ${test_comm_gemm_INCLUDES})
+target_include_directories(test_comm_gemm_stream_logging
+                           PRIVATE ${test_comm_gemm_INCLUDES})
 
 find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP REQUIRED)
@@ -95,11 +100,25 @@ list(APPEND test_comm_gemm_LINKER_LIBS
      OpenMP::OpenMP_CXX
      MPI::MPI_CXX)
 target_link_libraries(test_comm_gemm PUBLIC ${test_comm_gemm_LINKER_LIBS})
+target_link_libraries(test_comm_gemm_stream_logging
+                      PUBLIC ${test_comm_gemm_LINKER_LIBS})
+
+# CuTeDSL-enabled core libraries require standalone executables to provide CPython symbols.
+if(NVTE_WITH_CUTEDSL OR "$ENV{NVTE_WITH_CUTEDSL}")
+  find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
+  target_link_libraries(test_comm_gemm_stream_logging PRIVATE
+                        "-Wl,--no-as-needed"
+                        Python::Python
+                        "-Wl,--as-needed")
+endif()
 
 target_compile_options(test_comm_gemm PRIVATE -O2 -fopenmp)
+target_compile_options(test_comm_gemm_stream_logging PRIVATE -O2 -fopenmp)
 
 include(GoogleTest)
 gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
+# This test must run in its own MPI-launched process because the environment
+# variable it exercises is cached for the lifetime of the process.
 
 # -- EP distributed tests ------------------------------------------------------
 # Launched via mpirun; ncclUniqueId exchange uses MPI_Bcast (see test_ep_common.h).
