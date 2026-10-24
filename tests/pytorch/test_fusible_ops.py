@@ -2349,8 +2349,11 @@ class TestBasicOps:
             test_dtype=dtype,
             test_device=device,
         )
+        # Signed gates cover SiLU's negative side, where its derivative changes sign
         g_ref, g_test = make_reference_and_test_tensors(
             in_shape,
+            min=-6.0,
+            max=4.0,
             test_dtype=dtype,
             test_device=device,
         )
@@ -2430,6 +2433,8 @@ class TestBasicOps:
         if gate_layout == "contiguous":
             g_ref, g_test = make_reference_and_test_tensors(
                 in_shape,
+                min=-6.0,
+                max=4.0,
                 test_dtype=dtype,
                 test_device=device,
             )
