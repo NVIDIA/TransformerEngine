@@ -73,7 +73,6 @@ OUTPUT_BUFFER_KEY = "output"
 GRAD_INPUT_BUFFER_KEY = "grad_input"
 
 
-@functools.lru_cache(maxsize=None)
 def is_op_fuser_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
@@ -105,6 +104,28 @@ def is_op_fuser_grouped_tensor_path_supported(
     * Single grouped parameters have no split-quantize fallback, so callers
       must reject them when this function returns ``False``.
     """
+    # recipe object is not hashable, so pass relevant attributes in the function
+    # so that the function can be cached.
+    return _is_op_fuser_grouped_tensor_path_supported(
+        type(recipe) if recipe is not None else None,
+        getattr(recipe, "disable_rht", None),
+        getattr(recipe, "row_scaled_activation", None),
+        getattr(recipe, "fp8_format", None),
+        dtype,
+        split_alignment,
+    )
+
+
+@functools.cache
+def _is_op_fuser_grouped_tensor_path_supported(
+    recipe_type: Optional[type[Recipe]],
+    disable_rht: Optional[bool],
+    row_scaled_activation: Optional[bool],
+    fp8_format: Optional[RecipeFormat],
+    dtype: torch.dtype,
+    split_alignment: int,
+) -> bool:
+    """Cache routing for an immutable recipe snapshot, dtype, and alignment."""
     if dtype not in (torch.bfloat16, torch.float16):
         return False
 
@@ -117,27 +138,27 @@ def is_op_fuser_grouped_tensor_path_supported(
     if device_capability < (10, 0) and cublaslt_version < 130400:
         return False
 
-    if recipe is None:
+    if recipe_type is None:
         return True
-    if recipe.custom():
+    if recipe_type.custom():
         return False
-    if recipe.float8_current_scaling():
+    if recipe_type.float8_current_scaling():
         return device_capability >= (10, 0) or cublaslt_version >= 130500
-    if recipe.float8_block_scaling():
+    if recipe_type.float8_block_scaling():
         # Blackwell and newer emulate FP8 block scaling with MXFP8 grouped GEMM, so it is
         # supported wherever MXFP8 is. On Hopper, cuBLASLt 13.6 fixes grouped GEMM algo
         # selection for block-scaled FP8.
         return (
             device_capability >= (10, 0) or cublaslt_version >= 130600
         ) and split_alignment % 128 == 0
-    if recipe.mxfp8():
+    if recipe_type.mxfp8():
         return device_capability >= (10, 0) and split_alignment % 128 == 0
-    if recipe.nvfp4():
+    if recipe_type.nvfp4():
         return (
             device_capability >= (10, 0)
-            and not recipe.disable_rht
-            and not recipe.row_scaled_activation
-            and recipe.fp8_format == RecipeFormat.E4M3
+            and not disable_rht
+            and not row_scaled_activation
+            and fp8_format == RecipeFormat.E4M3
             and split_alignment % 128 == 0
         )
     return False

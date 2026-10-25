@@ -116,13 +116,11 @@ class Recipe:
     # subclasses and invalidated by ``__setattr__`` whenever any attribute
     # changes. This makes repeated ``str(recipe)`` calls much cheaper
     _cached_repr: Optional[str] = None
-    _cached_options_key: Optional[str] = None
 
     def __setattr__(self, name: str, value: Any) -> None:
-        # Invalidate cached strings on any recipe option mutation.
-        if name not in ("_cached_repr", "_cached_options_key"):
+        # Invalidate the cached repr on any attribute mutation.
+        if name != "_cached_repr":
             object.__setattr__(self, "_cached_repr", None)
-            object.__setattr__(self, "_cached_options_key", None)
         object.__setattr__(self, name, value)
 
     @abc.abstractmethod
@@ -137,27 +135,6 @@ class Recipe:
         if self._cached_repr is None:
             self._cached_repr = self._make_repr()
         return self._cached_repr
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Recipe):
-            return NotImplemented
-        return str(self) == str(other)
-
-    def __hash__(self) -> int:
-        return hash(str(self))
-
-    def _make_options_key(self) -> str:
-        """Build the string representation of fusion-relevant options."""
-        return (
-            f"recipe_type={self.__class__.__name__}, "
-            f"backward_override={getattr(self, 'backward_override', None)}"
-        )
-
-    def options_key(self) -> str:
-        """Return a cached key containing options that can affect operation fusion."""
-        if self._cached_options_key is None:
-            self._cached_options_key = self._make_options_key()
-        return self._cached_options_key
 
     @classmethod
     def nvfp4(cls):
@@ -195,7 +172,7 @@ class Recipe:
         return issubclass(cls, CustomRecipe)
 
 
-@dataclass(repr=False, eq=False)
+@dataclass(repr=False)
 class DelayedScaling(Recipe):
     """
     Use the delayed scaling factor strategy. Use scale factor from previous
@@ -308,7 +285,7 @@ class DelayedScaling(Recipe):
         )
 
 
-@dataclass(repr=False, eq=False)
+@dataclass(repr=False)
 class Float8CurrentScaling(Recipe):
     """
     Use the per-tensor current scaling factor strategy.
@@ -364,7 +341,7 @@ class Float8CurrentScaling(Recipe):
         )
 
 
-@dataclass(repr=False, eq=False)
+@dataclass(repr=False)
 class MXFP8BlockScaling(Recipe):
     """
     Use the MXFP8 scaling factor strategy.
@@ -409,9 +386,6 @@ class MXFP8BlockScaling(Recipe):
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
-    def _make_options_key(self) -> str:
-        return f"{super()._make_options_key()}, fp8_format={self.fp8_format}"
-
     def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
@@ -422,7 +396,7 @@ class MXFP8BlockScaling(Recipe):
         )
 
 
-@dataclass(repr=False, eq=False)
+@dataclass(repr=False)
 class Float8BlockScaling(Recipe):
     """
     Use block-wise scaling for FP8 tensors.
@@ -525,7 +499,7 @@ class Float8BlockScaling(Recipe):
         )
 
 
-@dataclass(repr=False, eq=False)
+@dataclass(repr=False)
 class NVFP4BlockScaling(Recipe):
     """
     Use the NVFP4 scaling strategy.
@@ -651,15 +625,6 @@ class NVFP4BlockScaling(Recipe):
             fp4_2d_quantization=False,
         )
 
-    def _make_options_key(self) -> str:
-        return (
-            f"{super()._make_options_key()}, "
-            f"disable_rht={self.disable_rht}, "
-            f"row_scaled_activation={self.row_scaled_activation}, "
-            f"nvfp4_4over6={self.nvfp4_4over6}, "
-            f"fp8_format={self.fp8_format}"
-        )
-
     def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
@@ -678,7 +643,7 @@ class NVFP4BlockScaling(Recipe):
         )
 
 
-@dataclass(repr=False, eq=False)
+@dataclass(repr=False)
 class CustomRecipe(Recipe):
     """
     Custom recipe that allows users to provide quantizer factories.
@@ -756,13 +721,6 @@ class CustomRecipe(Recipe):
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
         if self.quantization_alignment <= 0:
             raise ValueError("CustomRecipe quantization_alignment must be positive.")
-
-    def _make_options_key(self) -> str:
-        return (
-            f"{super()._make_options_key()}, "
-            "enable_cutedsl_fused_grouped_mlp="
-            f"{getattr(self, 'enable_cutedsl_fused_grouped_mlp', False)}"
-        )
 
     def _make_repr(self) -> str:
         return (

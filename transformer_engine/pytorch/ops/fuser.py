@@ -12,7 +12,13 @@ from typing import Any, Optional, TypeAlias
 
 import torch
 
-from ..quantization import FP8GlobalStateManager, Recipe, _has_delayed_scaling_state
+from ..quantization import (
+    FP8GlobalStateManager,
+    MXFP8BlockScaling,
+    NVFP4BlockScaling,
+    Recipe,
+    _has_delayed_scaling_state,
+)
 from ..quantized_tensor import prepare_for_saving, restore_from_func_ctx
 from ..utils import warn_compile_eager_fallback
 from .op import (
@@ -51,7 +57,7 @@ OperationFusionFunction: TypeAlias = (
     "Callable[tuple[list[FusibleOperation], ...], list[FusibleOperation]]"
 )
 _FusedOpList: TypeAlias = list[tuple[FusibleOperation, list[int]]]
-_FusionParams: TypeAlias = tuple[str, int]
+_FusionParams: TypeAlias = tuple[object, ...]
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -575,7 +581,9 @@ class OperationFuser:
         self._fused_ops_cache: dict[_FusionParams, tuple[_FusedOpList, _FusedOpList]] = {}
 
         # Cache and detect change of state relevant for fusing operations
-        self._recipe_repr: Optional[str] = None
+        self.recipe_type = None
+        self.backward_override = None
+        self._last_amax_history_len = 0
 
         # Runtime backward boundary. Full activation recompute alternates this
         # between the checkpointed forward and the grad-enabled recomputation.
@@ -667,28 +675,53 @@ class OperationFuser:
         # paths that reuse a cached fused operation configuration.
         self.first_op_requiring_backward = first_op_requiring_backward
 
-        # Recipes are mutable, so use their immutable string representation
-        # to detect changes and as a stable fusion-cache key.
-        recipe_repr = str(recipe) if recipe is not None else ""
-        need_to_reset_recipe_state = self._recipe_repr != recipe_repr
+        # Preserve the existing recipe-state reset conditions. A fusion-plan
+        # change does not imply that the operation's quantizers need rebuilding.
+        recipe_type = type(recipe)
+        need_to_reset_recipe_state = self.recipe_type != recipe_type
+
+        backward_override = recipe.backward_override if recipe is not None else None
+        if backward_override != self.backward_override:
+            self.backward_override = backward_override
+            need_to_reset_recipe_state = True
+
+        if (
+            recipe is not None
+            and recipe.delayed()
+            and self._last_amax_history_len != recipe.amax_history_len
+        ):
+            self._last_amax_history_len = recipe.amax_history_len
+            need_to_reset_recipe_state = True
 
         if need_to_reset_recipe_state:
             for op in self._basic_ops:
                 op.reset_recipe_state(recipe=recipe)
 
             # Check if this is the first iteration
-            if self._recipe_repr is None:
+            if self.recipe_type is None:
                 for op in self._basic_ops:
                     op.pre_first_fuser_forward()
 
-            self._recipe_repr = recipe_repr
+            self.recipe_type = recipe_type
 
         # Training and inference may support different fusions. Keep the
         # backward boundary in the key, but pay construction cost only once for
         # each configuration. Full recompute therefore builds at most one
         # no-grad plan and one grad-enabled plan for a stable recipe.
-        recipe_options_key = recipe.options_key() if recipe is not None else ""
-        fusion_params = (recipe_options_key, first_op_requiring_backward)
+        fusion_params: _FusionParams = (
+            recipe_type,
+            first_op_requiring_backward,
+            backward_override,
+        )
+        if isinstance(recipe, MXFP8BlockScaling):
+            fusion_params += (recipe.fp8_format,)
+        elif isinstance(recipe, NVFP4BlockScaling):
+            fusion_params += (
+                recipe.disable_rht,
+                recipe.row_scaled_activation,
+                recipe.nvfp4_4over6,
+                recipe.fp8_format,
+            )
         cached_ops = self._fused_ops_cache.get(fusion_params)
         if cached_ops is not None:
             self._forward_ops, self._backward_ops = cached_ops

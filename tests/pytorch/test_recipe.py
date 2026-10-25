@@ -57,47 +57,6 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
 fp4_available, reason_for_no_fp4 = te.is_nvfp4_available(return_reason=True)
 
 
-@pytest.mark.parametrize(
-    "recipe_cls",
-    [
-        DelayedScaling,
-        Float8CurrentScaling,
-        MXFP8BlockScaling,
-        Float8BlockScaling,
-        NVFP4BlockScaling,
-    ],
-)
-def test_recipe_equality_and_hash_use_string_representation(recipe_cls):
-    recipe = recipe_cls()
-    equivalent_recipe = recipe_cls()
-
-    assert recipe == equivalent_recipe
-    assert hash(recipe) == hash(str(recipe))
-    assert hash(recipe) == hash(equivalent_recipe)
-
-    recipe.backward_override = "high_precision"
-    assert recipe != equivalent_recipe
-    assert hash(recipe) == hash(str(recipe))
-
-
-def test_recipe_options_key_excludes_state_only_options():
-    recipe = DelayedScaling(amax_history_len=8)
-    resized_recipe = DelayedScaling(amax_history_len=16)
-
-    assert recipe != resized_recipe
-    assert recipe.options_key() == resized_recipe.options_key()
-
-
-def test_recipe_options_key_is_cached_and_invalidated():
-    recipe = NVFP4BlockScaling()
-
-    options_key = recipe.options_key()
-    assert recipe.options_key() is options_key
-
-    recipe.row_scaled_activation = True
-    assert recipe.options_key() != options_key
-
-
 # FP8 per tensor delayed scaling
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 class TestFP8Recipe:
@@ -749,15 +708,6 @@ def test_fp4_dequantize(dtype, row_scaled_nvfp4, use_4over6, M, N):
 
 def _custom_recipe_qfactory(_role):
     return None
-
-
-def test_custom_recipe_equality_and_hash_use_string_representation():
-    recipe = CustomRecipe(qfactory=_custom_recipe_qfactory)
-    equivalent_recipe = CustomRecipe(qfactory=_custom_recipe_qfactory)
-
-    assert recipe == equivalent_recipe
-    assert hash(recipe) == hash(str(recipe))
-    assert hash(recipe) == hash(equivalent_recipe)
 
 
 def _recipe_subclasses(cls):
