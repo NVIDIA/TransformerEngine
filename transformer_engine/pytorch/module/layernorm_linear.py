@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """LayerNormLinear API"""
+
 import os
 import warnings
 import weakref
@@ -59,6 +60,8 @@ from ..distributed_weight import (
     materialize_weight_for_forward,
     materialize_weight_for_backward,
     finalize_weight_grads,
+    get_weight_gradient_scale,
+    mark_weight_gradient_scale,
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
@@ -180,6 +183,7 @@ class LayerNormLinearFwdArgs:
     # --- Misc ---
     cpu_offloading: bool
     is_grad_enabled: bool
+    materialize_norm_output_grads: bool = True
 
     def any_requires_grad(self) -> bool:
         """Whether any differentiable input requires a gradient."""
@@ -1321,6 +1325,10 @@ def _layernorm_linear_backward_impl(
                 "bulk_overlap": args.ub_bulk_wgrad,
             }
 
+            wgrad_scale = get_weight_gradient_scale(saved_weight, args)
+            if wgrad_scale != 1.0:
+                wgrad_gemm_kwargs["alpha"] = wgrad_scale
+
             def wgrad_gemm(
                 x: torch.Tensor,
                 dy: torch.Tensor,
@@ -1335,6 +1343,8 @@ def _layernorm_linear_backward_impl(
                 """
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
                 dw, db, *_ = general_gemm(x, dy, **wgrad_gemm_kwargs)
+                if wgrad_scale != 1.0:
+                    mark_weight_gradient_scale(dw, wgrad_scale)
                 nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
                 return dw, db
 
@@ -1404,7 +1414,11 @@ def _layernorm_linear_backward_impl(
             dgrad_work = None
 
         # Residual gradient
-        if args.return_layernorm_output and not args.return_layernorm_output_gathered:
+        if (
+            args.return_layernorm_output
+            and not args.return_layernorm_output_gathered
+            and args.grad_ln_out is not None
+        ):
             dgrad = dgrad + args.grad_ln_out
 
         # Norm gradient
@@ -1435,7 +1449,7 @@ def _layernorm_linear_backward_impl(
         clear_tensor_data(mu)
         clear_tensor_data(rsigma)
 
-    if args.requires_wgrad:
+    if args.requires_wgrad and not is_dist_weight:
         # Handle custom DDP from mcore.
         if args.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
             origin_weight.grad_added_to_main_grad = True
@@ -1453,7 +1467,7 @@ def _layernorm_linear_backward_impl(
                 )
         elif args.fuse_wgrad_accumulation:
             wgrad = None
-    else:
+    elif not args.requires_wgrad:
         wgrad = None
 
     return (
@@ -1513,6 +1527,14 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
             ctx.backward_objects = bwd_args
+            if (
+                not fwd_args.materialize_norm_output_grads
+                and fwd_args.is_grad_enabled
+                and fwd_args.return_layernorm_output
+                and not fwd_args.return_layernorm_output_gathered
+            ):
+                ctx.set_materialize_grads(False)
+                ctx.main_output_spec = (tuple(out.shape), out.dtype, out.device)
             if fwd_args.fp8 and fwd_args.any_requires_grad():
                 bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
             if fwd_args.backward_override is not None:
@@ -1529,6 +1551,9 @@ class _LayerNormLinear(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Backward pass: compute gradients and reduce FP8 scaling factors."""
         bwd_args: LayerNormLinearBwdArgs = ctx.backward_objects
+        if grad_output is None:
+            shape, dtype, device = ctx.main_output_spec
+            grad_output = torch.zeros(shape, dtype=dtype, device=device)
         bwd_args.grad_output = grad_output
         bwd_args.grad_ln_out = grad_ln_out
         bwd_args.setup_saved_tensors(ctx)
@@ -1639,6 +1664,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                  instead return the bias value during the forward pass together with the
                  output of the linear transformation :math:`y = xA^T`. This is useful when
                  the bias addition can be fused to subsequent operations.
+    materialize_norm_output_grads : bool, default = True
+                 Set to ``False`` to skip zero gradients for an unused, ungathered
+                 normalization output. Norm-only and combined consumers retain their gradients.
     params_dtype : torch.dtype, default = torch.get_default_dtype()
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
@@ -1684,6 +1712,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
+        materialize_norm_output_grads: bool = True,
     ) -> None:
         super().__init__(name)
 
@@ -1697,6 +1726,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_bias = return_bias
         self.apply_bias = self.use_bias and not return_bias
         self.return_layernorm_output = return_layernorm_output
+        self.materialize_norm_output_grads = materialize_norm_output_grads
         self.return_layernorm_output_gathered = (
             return_layernorm_output_gathered if return_layernorm_output else False
         )
@@ -2177,6 +2207,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 bwd_ln_sm_margin=self.bwd_ln_sm_margin,
                 return_layernorm_output=self.return_layernorm_output,
                 return_layernorm_output_gathered=self.return_layernorm_output_gathered,
+                materialize_norm_output_grads=self.materialize_norm_output_grads,
                 # numerical / dtype config
                 activation_dtype=self.activation_dtype,
                 fp8=self.fp8,

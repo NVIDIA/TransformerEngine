@@ -9,6 +9,7 @@ protocol on the weight and injects it at construction. Dispatchers are list-shap
 GroupedLinear -> N; leader is ``weights[0]``) and no-op on plain tensors.
 """
 
+import math
 from typing import Any, List, Protocol, runtime_checkable
 
 import torch
@@ -19,6 +20,8 @@ __all__ = [
     "materialize_weight_for_forward",
     "materialize_weight_for_backward",
     "finalize_weight_grads",
+    "get_weight_gradient_scale",
+    "mark_weight_gradient_scale",
 ]
 
 
@@ -66,6 +69,48 @@ def is_distributed_weight(weight: Any) -> bool:
             f"{type(weight).__name__}."
         )
     return flag
+
+
+def get_weight_gradient_scale(weight: Any, args: Any) -> float:
+    """Request an optional distributed-weight mean scale for an MXFP8 wgrad GEMM.
+
+    The weight opts in through ``fuse_wgrad_mean_scaling``. Its optional
+    ``get_weight_gradient_scale()`` callback owns the reduction
+    semantics. Its finalizer must consume the gradient's ``_te_wgrad_scale`` marker
+    exactly once. Existing implementers without the callback retain a scale of one.
+    """
+    if not getattr(weight, "fuse_wgrad_mean_scaling", False):
+        return 1.0
+    callback = getattr(weight, "get_weight_gradient_scale", None)
+    if callback is None or not is_distributed_weight(weight):
+        return 1.0
+    if not args.fp8 or args.debug or args.use_bias:
+        return 1.0
+    if args.backward_override is not None or args.activation_dtype != torch.bfloat16:
+        return 1.0
+    if args.grad_weight_quantizer is not None or args.cpu_offloading or args.ub_bulk_wgrad:
+        return 1.0
+    if args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute():
+        return 1.0
+    from .tensor.mxfp8_tensor import MXFP8Quantizer
+
+    if not isinstance(args.input_quantizer, MXFP8Quantizer):
+        return 1.0
+    if torch.cuda.is_current_stream_capturing():
+        return 1.0
+    scale = float(callback())
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError("Distributed weight gradient scale must be finite and positive")
+    return scale
+
+
+def mark_weight_gradient_scale(gradient: torch.Tensor, scale: float) -> None:
+    """Mark a freshly produced wgrad so its finalizer can avoid duplicate scaling."""
+    if gradient.dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError("Scaled weight gradients must use FP32 or BF16")
+    if hasattr(gradient, "_te_wgrad_scale"):
+        raise ValueError("Weight gradient already carries a scaling marker")
+    gradient._te_wgrad_scale = scale
 
 
 def materialize_weight_for_forward(weights: Any) -> List[Any]:

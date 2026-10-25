@@ -210,6 +210,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+  m.def("quantize_mxfp8_segments", &transformer_engine::pytorch::quantize_mxfp8_segments,
+        py::arg("segments"), py::arg("quantizer"), py::arg("shape"));
   m.def("nvfp4_gemm_swizzled_scales_alignment",
         &transformer_engine::pytorch::NVFP4Quantizer::gemm_swizzled_scales_alignment,
         py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
