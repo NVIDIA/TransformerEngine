@@ -12,13 +12,7 @@ from typing import Any, Optional, TypeAlias
 
 import torch
 
-from ..quantization import (
-    FP8GlobalStateManager,
-    MXFP8BlockScaling,
-    NVFP4BlockScaling,
-    Recipe,
-    _has_delayed_scaling_state,
-)
+from ..quantization import FP8GlobalStateManager, Recipe, _has_delayed_scaling_state
 from ..quantized_tensor import prepare_for_saving, restore_from_func_ctx
 from ..utils import warn_compile_eager_fallback
 from .op import (
@@ -57,7 +51,7 @@ OperationFusionFunction: TypeAlias = (
     "Callable[tuple[list[FusibleOperation], ...], list[FusibleOperation]]"
 )
 _FusedOpList: TypeAlias = list[tuple[FusibleOperation, list[int]]]
-_FusionParams: TypeAlias = tuple[object, ...]
+_FusionParams: TypeAlias = tuple[str, int]
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -709,19 +703,9 @@ class OperationFuser:
         # each configuration. Full recompute therefore builds at most one
         # no-grad plan and one grad-enabled plan for a stable recipe.
         fusion_params: _FusionParams = (
-            recipe_type,
+            str(recipe) if recipe is not None else "",
             first_op_requiring_backward,
-            backward_override,
         )
-        if isinstance(recipe, MXFP8BlockScaling):
-            fusion_params += (recipe.fp8_format,)
-        elif isinstance(recipe, NVFP4BlockScaling):
-            fusion_params += (
-                recipe.disable_rht,
-                recipe.row_scaled_activation,
-                recipe.nvfp4_4over6,
-                recipe.fp8_format,
-            )
         cached_ops = self._fused_ops_cache.get(fusion_params)
         if cached_ops is not None:
             self._forward_ops, self._backward_ops = cached_ops
