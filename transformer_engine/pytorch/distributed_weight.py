@@ -113,6 +113,10 @@ def weight_grad_dtype(weights: Any, compute_dtype: torch.dtype) -> torch.dtype:
     if not isinstance(weights, (list, tuple)):
         weights = [weights]
     leader = weights[0]
+    # When main_grad is attached in case of distributed weights,
+    # GEMM/GGEMM writes into unsharded scratch buffer.
+    # This is later reduce-scatterred into sharded main_grad.
+    # We want the unsharded weight buffer to have the same type as main_grad.
     if is_distributed_weight(leader):
         main_grad = getattr(leader, "main_grad", None)
         if main_grad is not None:
