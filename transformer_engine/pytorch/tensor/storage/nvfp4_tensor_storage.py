@@ -258,7 +258,9 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             byte_shape = list(self._rowwise_data.size())
             shape = byte_shape[:-1] + [byte_shape[-1] * 2]
         elif self._columnwise_data is not None:
-            warnings.warn("Attempting to get shape of NVFP4 tensor with only column-wise data.")
+            # Dynamo queries columnwise-only fake shapes; warning emission breaks fullgraph tracing.
+            if not torch.compiler.is_compiling():
+                warnings.warn("Attempting to get shape of NVFP4 tensor with only column-wise data.")
             byte_shape = list(self._columnwise_data.size())
             shape = byte_shape[1:-1] + [byte_shape[-1] * 2, byte_shape[0]]
         if shape is None:
