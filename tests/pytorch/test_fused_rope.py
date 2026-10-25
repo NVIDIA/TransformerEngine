@@ -497,3 +497,164 @@ def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_wi
         atol=1e-8,
         rtol=1e-8,
     )
+
+
+def _rmsnorm_per_head(
+    t: torch.Tensor, weight: torch.Tensor, eps: float, zero_centered_gamma: bool
+) -> torch.Tensor:
+    rstd = torch.rsqrt(t.pow(2).mean(dim=-1, keepdim=True) + eps)
+    scale = weight + 1.0 if zero_centered_gamma else weight
+    return t * rstd * scale
+
+
+def _check_fused_qkv_norm_rope(
+    dtype: torch.dtype,
+    hidden_size: int,
+    rotary_percent: float,
+    tensor_format: str,
+    cp_size: int,
+    interleaved: bool,
+    start_positions: bool,
+    zero_centered_gamma: bool,
+    norms: str,
+) -> None:
+    device = torch.device("cuda:0")
+    seq_length, margin, batch_size, head_num, eps = 2048, 10, 2, 8, 1e-6
+    split = [hidden_size * 4, hidden_size, hidden_size]
+    torch.manual_seed(0)
+
+    t = torch.randn(
+        (seq_length - margin, batch_size, head_num, hidden_size * 6), dtype=dtype, device=device
+    )
+    if tensor_format == "bshd":
+        t = t.transpose(0, 1).contiguous()
+    t.requires_grad = True
+
+    # Arbitrary offsets to be used with RoPE for all the sequences
+    start_positions = (
+        torch.randint(0, margin, (batch_size,), dtype=torch.int32, device=device)
+        if start_positions
+        else None
+    )
+
+    gen = torch.Generator(device=device).manual_seed(0)
+
+    def make_weight() -> torch.Tensor:
+        weight = 1.0 + 0.1 * torch.randn(hidden_size, generator=gen, device=device)
+        if zero_centered_gamma:
+            weight = weight - 1.0
+        return weight.to(dtype).requires_grad_(True)
+
+    q_weight = make_weight() if "q" in norms else None
+    k_weight = make_weight() if "k" in norms else None
+
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
+    emb_q = rotary_pos_emb(seq_length * cp_size)
+    # Different angles for K so that a mix-up of the Q and K tables is caught
+    emb_k = emb_q * 0.5
+
+    for cp_rank in range(cp_size):
+        # Reference: the same math in float32 end to end (per-head RMSNorm, then the fused
+        # single-tensor RoPE), rounded once to `dtype` for the comparison.
+        t_ref = t.detach().float().requires_grad_(True)
+        q_weight_ref = q_weight.detach().float().requires_grad_(True) if "q" in norms else None
+        k_weight_ref = k_weight.detach().float().requires_grad_(True) if "k" in norms else None
+        query, key, value = torch.split(t_ref, split, dim=3)
+        query = query.reshape(query.shape[0], query.shape[1], head_num * 4, hidden_size)
+        if q_weight_ref is not None:
+            query = _rmsnorm_per_head(query, q_weight_ref, eps, zero_centered_gamma)
+        if k_weight_ref is not None:
+            key = _rmsnorm_per_head(key, k_weight_ref, eps, zero_centered_gamma)
+        rope_kwargs = dict(
+            tensor_format=tensor_format,
+            start_positions=start_positions,
+            interleaved=interleaved,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+        )
+        query_ref = apply_rotary_pos_emb(query, emb_q, fused=True, **rope_kwargs)
+        key_ref = apply_rotary_pos_emb(key, emb_k, fused=True, **rope_kwargs)
+        value_ref = value
+
+        query_fused, key_fused, value_fused = apply_fused_qkv_rotary_pos_emb(
+            t,
+            emb_q,
+            emb_k,
+            qkv_split_arg_list=split,
+            q_norm_weight=q_weight,
+            k_norm_weight=k_weight,
+            norm_eps=eps,
+            norm_zero_centered_gamma=zero_centered_gamma,
+            **rope_kwargs,
+        )
+
+        torch.testing.assert_close(query_fused, query_ref.to(dtype))
+        torch.testing.assert_close(key_fused, key_ref.to(dtype))
+        assert torch.equal(value_fused, value_ref.to(dtype))
+
+        # The fused RoPE used by the reference has no backward with start_positions.
+        if start_positions is None:
+            _non_overlapping_grad([query_ref, key_ref, value_ref]).backward()
+            _non_overlapping_grad([query_fused, key_fused, value_fused]).backward()
+            torch.testing.assert_close(t.grad, t_ref.grad.to(dtype))
+            # The weight gradients sum ~1e5 terms of both signs; the reference and the kernel
+            # accumulate in fp32 in different orders, so the cancellation leaves ~1e-5
+            # relative noise, and the kernel then rounds to the weight dtype: allow one ulp of
+            # that dtype on top of the accumulation noise.
+            weight_rtol = max(torch.finfo(dtype).eps, 1e-4)
+            for weight, weight_ref in ((q_weight, q_weight_ref), (k_weight, k_weight_ref)):
+                if weight is not None:
+                    torch.testing.assert_close(
+                        weight.grad.float(), weight_ref.grad, rtol=weight_rtol, atol=1e-2
+                    )
+                    weight.grad = None
+            t.grad = None
+
+
+@pytest.mark.parametrize("start_positions", [True, False])
+@pytest.mark.parametrize("hidden_size", [64, 128])
+@pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
+@pytest.mark.parametrize("tensor_format", ["sbhd", "bshd"])
+@pytest.mark.parametrize("cp_size", [1, 2])
+@pytest.mark.parametrize("interleaved", [True, False])
+def test_fused_qkv_norm_rope(
+    hidden_size: int,
+    rotary_percent: float,
+    tensor_format: str,
+    cp_size: int,
+    interleaved: bool,
+    start_positions: bool,
+) -> None:
+    if start_positions and cp_size > 1:
+        # `start_positions` is only supported for `cp_size=1` and inference.
+        pytest.skip("Skipping test with cp_size>1 and start_positions=True")
+    _check_fused_qkv_norm_rope(
+        torch.bfloat16,
+        hidden_size,
+        rotary_percent,
+        tensor_format,
+        cp_size,
+        interleaved,
+        start_positions,
+        zero_centered_gamma=False,
+        norms="qk",
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
+@pytest.mark.parametrize("norms", ["qk", "q", "k"])
+def test_fused_qkv_norm_rope_variants(
+    dtype: torch.dtype, zero_centered_gamma: bool, norms: str
+) -> None:
+    _check_fused_qkv_norm_rope(
+        dtype,
+        hidden_size=64,
+        rotary_percent=1.0,
+        tensor_format="sbhd",
+        cp_size=1,
+        interleaved=False,
+        start_positions=False,
+        zero_centered_gamma=zero_centered_gamma,
+        norms=norms,
+    )
