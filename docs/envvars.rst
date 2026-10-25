@@ -431,7 +431,9 @@ LayerNorm/RMSNorm SM Margins
                  LayerNorm/RMSNorm output consumed by cuDNN MXFP8 block-scale quantization. This
                  enables cuDNN's fused MXFP8 normalization engine, which requires matching FP16 or
                  BF16 input and normalization-output datatypes. When set to ``0``, or with an
-                 earlier cuDNN version, the virtual normalization output uses FP32.
+                 earlier cuDNN version, the virtual normalization output uses FP32. On cuDNN 9.26,
+                 RMSNorm forward training at 2048x7168 also keeps the FP32 intermediate: the BF16
+                 intermediate crashes in cuDNN heuristics for that one shape.
 
 .. envvar:: NVTE_FWD_LAYERNORM_SM_MARGIN
 
