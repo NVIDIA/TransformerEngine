@@ -23,6 +23,70 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
 
 
+@pytest.mark.parametrize("topk", [1, 10, 32])
+@pytest.mark.parametrize("histogram_mode", [None, "two_kernel", "fused_atomic"])
+@pytest.mark.parametrize("layout", ["bytemap", "bitmap_u8", "dense"])
+@pytest.mark.parametrize("mixed_scores", [False, True])
+def test_sigmoid_bias_preserves_tiny_scores(topk, histogram_mode, layout, mixed_scores):
+    """Bias affects selection, but must not round away the selected raw scores."""
+    num_tokens, num_experts, num_bins = 17, 512, 1000
+    logits = torch.linspace(-8.0, -4.0, num_experts, device="cuda").repeat(num_tokens, 1)
+    logits[:, :topk] = -16.0 - torch.arange(topk, device="cuda") % 9
+    if mixed_scores:
+        logits[:, 0] = -1.0
+    logits.requires_grad_(True)
+    expert_bias = torch.zeros(num_experts, device="cuda")
+    expert_bias[:topk] = 0.75 + 0.001 * torch.arange(topk, device="cuda")
+    expert_bias -= expert_bias.mean()
+    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda")
+    histogram = torch.zeros(num_experts, num_bins, dtype=torch.int32, device="cuda")
+    reference_probs, reference_map = topk_score_function_pytorch(
+        logits, topk, scaling_factor=3.16, score_function="sigmoid", expert_bias=expert_bias
+    )
+    kwargs = {}
+    if histogram_mode is not None:
+        kwargs.update(
+            qb_histogram=histogram,
+            qb_bin_bounds=bin_bounds,
+            qb_histogram_mode=histogram_mode,
+        )
+    if layout == "dense":
+        kwargs["topk_indices"] = torch.empty(num_tokens, topk, dtype=torch.int16, device="cuda")
+    fused_logits = logits.detach().clone().requires_grad_(True)
+    probs, routing = fused_topk_with_score_function(
+        fused_logits,
+        topk,
+        False,
+        None,
+        None,
+        3.16,
+        "sigmoid",
+        expert_bias,
+        routing_map_format="bitmap_u8" if layout == "bitmap_u8" else "bytemap",
+        **kwargs,
+    )
+    if layout == "dense":
+        routing = topk_indices_to_routing_map(routing, num_experts)
+    elif layout == "bitmap_u8":
+        reference_map = _bytemap_to_bitmap_u8(reference_map)
+    torch.testing.assert_close(routing, reference_map)
+    # An absolute tolerance would hide precisely the tiny values under test.
+    torch.testing.assert_close(probs, reference_probs, atol=0, rtol=5e-6)
+    assert torch.all(probs[:, :topk] > 0)
+    if histogram_mode is not None:
+        reference = qb_topk_score_function_pytorch(logits, topk, expert_bias, bin_bounds, num_bins)
+        torch.testing.assert_close(histogram, reference["histogram"])
+    # Nonuniform upstream gradients exercise the normalization derivative.
+    upstream = torch.linspace(-0.7, 1.3, num_experts, device="cuda").expand_as(probs)
+    probs.backward(upstream)
+    reference_probs.backward(upstream)
+    torch.testing.assert_close(fused_logits.grad, logits.grad, atol=2e-7, rtol=2e-4)
+    if mixed_scores and topk > 1:
+        torch.testing.assert_close(
+            fused_logits.grad[:, 1:topk], logits.grad[:, 1:topk], atol=0, rtol=2e-4
+        )
+
+
 def _get_tolerances(dtype: torch.dtype, num_experts: int):
     """Return (atol, rtol) scaled by the number of experts.
 
