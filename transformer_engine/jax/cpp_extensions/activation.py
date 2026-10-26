@@ -1348,6 +1348,7 @@ def act_lu(
         amax_scope=amax_scope,
         transpose_batch_sequence=transpose_batch_sequence,
         output_amax_when_no_scaling=output_amax_when_no_scaling,
+        mesh_resource=mesh_resource,
     )
     if war_output is not None:
         return war_output
@@ -1552,6 +1553,7 @@ def quantize_dact_dbias(
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
+            mesh_resource=mesh_resource,
         )
         return _quantize_dbias_impl(
             out,
@@ -1579,6 +1581,7 @@ def quantize_dact_dbias(
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
+            mesh_resource=mesh_resource,
         )
         if war_output is not None:
             return war_output
@@ -1597,6 +1600,7 @@ def quantize_dact_dbias(
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=True,
+            mesh_resource=mesh_resource,
         )
         out, dbias = _quantize_dbias_impl(
             out,
@@ -1622,6 +1626,7 @@ def quantize_dact_dbias(
             act_params=act_params,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            mesh_resource=mesh_resource,
         )
         out, dbias = _quantize_dbias_impl(
             dgated,
@@ -1692,6 +1697,7 @@ def dact_lu(
     amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
     output_amax_when_no_scaling: bool = False,
+    mesh_resource=None,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """
     Backward pass for activation with optional quantization.
@@ -1716,5 +1722,6 @@ def dact_lu(
         amax_scope=amax_scope,
         transpose_batch_sequence=transpose_batch_sequence,
         output_amax_when_no_scaling=output_amax_when_no_scaling,
+        mesh_resource=mesh_resource,
     )
     return output
