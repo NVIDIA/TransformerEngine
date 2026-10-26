@@ -12,6 +12,9 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+#include <cstdint>
+#include <type_traits>
+
 #include "common/common.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
@@ -191,6 +194,35 @@ __device__ __forceinline__ uint32_t swizzle_128B_atom_32B(uint32_t gmem_row_idx,
   uint32_t xor_factor = (smem_row_idx * 2) % 8;
   uint32_t smem_col_idx = gmem_col_idx ^ xor_factor;
   return smem_row_idx * 8 + smem_col_idx;
+}
+
+template <typename FloatArray>
+__device__ __forceinline__ FloatArray mul_f32x2_by_scalar(const FloatArray &in, const float scale) {
+  static_assert(std::is_same_v<typename FloatArray::value_type, float>,
+                "mul_f32x2_by_scalar expects an array of floats.");
+  constexpr int kNumElts = sizeof(FloatArray) / sizeof(float);
+  FloatArray out;
+  const float *in_ptr = reinterpret_cast<const float *>(&in);
+  float *out_ptr = reinterpret_cast<float *>(&out);
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  const float2 scale_pair = {scale, scale};
+#pragma unroll
+  for (int i = 0; i < kNumElts / 2; ++i) {
+    asm("mul.rn.f32x2 %0, %1, %2;"
+        : "=l"(reinterpret_cast<uint64_t &>(out_ptr[2 * i]))
+        : "l"(reinterpret_cast<const uint64_t &>(in_ptr[2 * i])),
+          "l"(reinterpret_cast<const uint64_t &>(scale_pair)));
+  }
+  if constexpr (kNumElts % 2 != 0) {
+    out_ptr[kNumElts - 1] = in_ptr[kNumElts - 1] * scale;
+  }
+#else
+#pragma unroll
+  for (int i = 0; i < kNumElts; ++i) {
+    out_ptr[i] = in_ptr[i] * scale;
+  }
+#endif
+  return out;
 }
 
 }  // namespace transformer_engine

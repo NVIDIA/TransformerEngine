@@ -40,6 +40,7 @@
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/command_line.h"
 #include "cutlass/util/print_error.hpp"
+#include "hadamard_transform_utils.cuh"
 
 // clang-format off
 
@@ -188,7 +189,10 @@ __global__ static void row_col_rht_gemm_device(
     TiledMMA mma,
     float const* a_global_amax,
     float const* c_global_amax,
-    const size_t* rng_state) {
+    const size_t* rng_state,
+    int const k_tile_max_arg,
+    uint32_t const tiles_in_m_arg,
+    uint32_t const tiles_in_n_arg) {
   using namespace cute;
 
   // Abort immediately if compilation is not supported
@@ -251,7 +255,7 @@ __global__ static void row_col_rht_gemm_device(
   dim3 cluster_coord_in_grid = cluster_id_in_grid();
 
   // Total number of k-tiles
-  int const K_TILE_MAX = ceil_div(min(N, K), size<2>(epilogue_tiler));
+  int const K_TILE_MAX = k_tile_max_arg;
 
   struct TileScheduler {
     struct WorkTileInfo {
@@ -373,8 +377,8 @@ __global__ static void row_col_rht_gemm_device(
   extern __shared__ char shared_memory[];
   using SharedStorage = SharedStorage<TA, TB, ASmemLayout, BSmemLayout, ClusterShape, AccumulatorPipelineStageCount, EpilogueUnrollFactor, SchedulerPipelineStageCount>;
   SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(shared_memory);
-  uint32_t tiles_in_m = uint32_t(size(ceil_div(M, size<0>(cluster_tile))));
-  uint32_t tiles_in_n = uint32_t(size(ceil_div(N, size<2>(epilogue_tiler))));
+  uint32_t tiles_in_m = tiles_in_m_arg;
+  uint32_t tiles_in_n = tiles_in_n_arg;
   TileScheduler scheduler(tiles_in_m, tiles_in_n, K_TILE_MAX, shared_storage.clc_response);
 
   int block_rank_in_cluster = cute::block_rank_in_cluster();
@@ -769,53 +773,20 @@ __global__ static void row_col_rht_gemm_device(
           static int constexpr NumVecs = size(tDgD) / VectorSize;
           cute::Tensor tD_rRowSFD_frg = recast<cutlass::Array<TSFD, NumVecs>>(tDrSFD);
 
+          static constexpr int kNumAccChunks = decltype(size(tTR_rAcc_frag))::value;
+          static constexpr int kVecsPerChunk = NumVecs / kNumAccChunks;
+          static_assert(kVecsPerChunk * kNumAccChunks == NumVecs && kVecsPerChunk > 0,
+                        "Accumulator chunks must hold whole scaling vectors.");
+          static_assert(decltype(size<1>(tDtAcc))::value == kNumAccChunks &&
+                            decltype(size<1>(tTR_rAcc))::value == kNumAccChunks,
+                        "Expected one accumulator chunk per mode-1 slice.");
+          static_assert(decltype(size(tTR_rAcc(_, 0, _, _)))::value == FragmentSize &&
+                            decltype(stride<1>(tTR_rAcc))::value == FragmentSize,
+                        "Each mode-1 slice must be one contiguous register fragment.");
           cutlass::maximum_absolute_value_reduction<cutlass::Array<ElementAccumulator, VectorSize>, true> amax_reduction;
-          cutlass::Array<ElementAccumulator, NumVecs> vec_maxs;
-          cutlass::Array<ElementAccumulator, NumVecs> pvscales;
-          // TMEM_LOAD
-          copy(tiled_t2r, tDtAcc, tTR_rAcc);
-          cutlass::arch::fence_view_async_tmem_load();
-          accumulator_pipeline.consumer_release(accumulator_pipe_consumer_state);
-          ++accumulator_pipe_consumer_state;
-
-          if constexpr (!kUseFastMath) {
-            // Downcast to BF16 for bit-wise compatibility with
-            // unfused kernels
-            auto convert_accum_to_bf16 =
-                cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator,
-                                               FragmentSize>{};
-            auto convert_bf16_to_accum =
-                cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t,
-                                               FragmentSize>{};
-            tTR_rAcc_frag(_0{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
-            tTR_rAcc_frag(_1{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_1{})));
-          }
-
           auto compute_frgs = reinterpret_cast<cutlass::Array< ElementAccumulator, VectorSize> *>(tTR_rAcc_frag.data());
           auto output_frgs = reinterpret_cast<cutlass::Array< TD, VectorSize> *>(tDrD_frag.data());
-          CUTLASS_PRAGMA_UNROLL
-          for (int v = 0; v < NumVecs; v++) {
-            vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
-          }
-
-          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-            vec_maxs, global_encode_scale_multiplier);
-          auto pvscales_cvted = cutlass::NumericArrayConverter<TSFD, ElementAccumulator, NumVecs>{}(pvscales);
-
-          tD_rRowSFD_frg(_0{}) = pvscales_cvted;
-          auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFD, NumVecs>{}(tD_rRowSFD_frg(_0{}));
-          auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-            qpvscale_ups,
-            global_decode_scale);
-
-          cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
-          if constexpr (kUseFastMath) {
-            // fast math: use reciprocal approximate to replace div
-            acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
-          } else {
-            // regular path for slower math, use divide to replace div
-            acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
-          }
+          auto sfd_chunks = reinterpret_cast<cutlass::Array<TSFD, kVecsPerChunk> *>(tD_rRowSFD_frg.data());
 
           uint4 random_uint4 = uint4{0, 0, 0, 0};
           transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
@@ -824,21 +795,64 @@ __global__ static void row_col_rht_gemm_device(
             const size_t rng_sequence = global_thread_idx + k_tile * 512 + scheduler.get_linear_tile_idx() * K_TILE_MAX * 512;
             rng.init(rng_seed, rng_sequence, rng_offset);
           }
+
           CUTLASS_PRAGMA_UNROLL
-          for (int v = 0; v < NumVecs; v++) {
-            auto acc_scale = cutlass::minimum_with_nan_propagation<ElementAccumulator>{}(
-              acc_scales[v],
-              cutlass::platform::numeric_limits<ElementAccumulator>::max());
-            if constexpr (kEnableStochasticRounding) {
-              random_uint4 = rng.generate4();
-              output_frgs[v] = StochasticNumericConverter(cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(compute_frgs[v], acc_scale), *reinterpret_cast<cutlass::Array<uint32_t, 4>*>(&random_uint4));
-            } else {
-              output_frgs[v] = cutlass::NumericArrayConverter<TD, ElementAccumulator, VectorSize>{}(
-              cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
-                compute_frgs[v],
-                acc_scale));
+          for (int c = 0; c < kNumAccChunks; ++c) {
+            // TMEM_LOAD
+            copy(tiled_t2r, tDtAcc(_, c, _, _), tTR_rAcc(_, c, _, _));
+            cutlass::arch::fence_view_async_tmem_load();
+            if (c == kNumAccChunks - 1) {
+              accumulator_pipeline.consumer_release(accumulator_pipe_consumer_state);
+              ++accumulator_pipe_consumer_state;
             }
 
+            if constexpr (!kUseFastMath) {
+              // Downcast to BF16 for bit-wise compatibility with
+              // unfused kernels
+              auto convert_accum_to_bf16 =
+                  cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator,
+                                                 FragmentSize>{};
+              auto convert_bf16_to_accum =
+                  cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t,
+                                                 FragmentSize>{};
+              tTR_rAcc_frag(c) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(c)));
+            }
+
+            cutlass::Array<ElementAccumulator, kVecsPerChunk> vec_maxs;
+            CUTLASS_PRAGMA_UNROLL
+            for (int i = 0; i < kVecsPerChunk; i++) {
+              vec_maxs[i] = amax_reduction(ElementAccumulator(0), compute_frgs[c * kVecsPerChunk + i]);
+            }
+            auto pvscales = mul_f32x2_by_scalar(vec_maxs, global_encode_scale_multiplier);
+            sfd_chunks[c] = cutlass::NumericArrayConverter<TSFD, ElementAccumulator, kVecsPerChunk>{}(pvscales);
+            auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFD, kVecsPerChunk>{}(sfd_chunks[c]);
+            auto qpvscale_scaled = mul_f32x2_by_scalar(qpvscale_ups, global_decode_scale);
+
+            cutlass::Array<ElementAccumulator, kVecsPerChunk> acc_scales;
+            if constexpr (kUseFastMath) {
+              // fast math: use reciprocal approximate to replace div
+              acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
+            } else {
+              // regular path for slower math, use divide to replace div
+              acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, kVecsPerChunk>>{}(1.0, qpvscale_scaled);
+            }
+
+            CUTLASS_PRAGMA_UNROLL
+            for (int i = 0; i < kVecsPerChunk; i++) {
+              const int v = c * kVecsPerChunk + i;
+              auto acc_scale = cutlass::minimum_with_nan_propagation<ElementAccumulator>{}(
+                acc_scales[i],
+                cutlass::platform::numeric_limits<ElementAccumulator>::max());
+              if constexpr (kEnableStochasticRounding) {
+                random_uint4 = rng.generate4();
+                output_frgs[v] = StochasticNumericConverter(mul_f32x2_by_scalar(compute_frgs[v], acc_scale), *reinterpret_cast<cutlass::Array<uint32_t, 4>*>(&random_uint4));
+              } else {
+                output_frgs[v] = cutlass::NumericArrayConverter<TD, ElementAccumulator, VectorSize>{}(
+                mul_f32x2_by_scalar(
+                  compute_frgs[v],
+                  acc_scale));
+              }
+            }
           }
 
           cute::Tensor pred_pSrc = cute::lazy::transform(make_tensor(counting_iterator<int>{}, replace<0>(shape(dst), _1{})), [&](auto coord){
@@ -978,10 +992,10 @@ __global__ static void row_col_rht_gemm_device(
             uint4 random_uint4 = uint4{0, 0, 0, 0};
             if constexpr (kEnableStochasticRounding) {
               random_uint4 = rng.generate4();
-              output_frgs[v] = StochasticNumericConverter(cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(compute_frgs_up, acc_scale), *reinterpret_cast<cutlass::Array<uint32_t, 4>*>(&random_uint4));
+              output_frgs[v] = StochasticNumericConverter(mul_f32x2_by_scalar(compute_frgs_up, acc_scale), *reinterpret_cast<cutlass::Array<uint32_t, 4>*>(&random_uint4));
             } else {
               output_frgs[v] = cutlass::NumericArrayConverter<TQA, ElementAccumulator, VectorSize>{}(
-                cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
+                mul_f32x2_by_scalar(
                   compute_frgs_up,
                   acc_scale));
             }
@@ -1176,6 +1190,9 @@ void row_col_rht_gemm_ntt_w_sfc(
 
   dim3 dimBlock(512);
   dim3 dimCluster(size<0>(cluster_shape), size<1>(cluster_shape), size<2>(cluster_shape));
+  constexpr int kEpilogueTileN = 128;
+  int const k_tile_max = static_cast<int>(ceil_div(std::min<int>(N, k_tile_size), kEpilogueTileN));
+  uint32_t const sched_tiles_in_n = uint32_t(ceil_div(N, kEpilogueTileN));
   dim3 dimGrid(tiles_in_m, tiles_in_n, 1);
 
   int smem_size = sizeof(
@@ -1217,7 +1234,7 @@ void row_col_rht_gemm_ntt_w_sfc(
      tensorSFD.data(), sfd_layout,
      tensorQA.data(), dQA,
      tensorSFA.data(), sfa_layout,
-     mma, a_global_amax, d_global_amax, rng_state);
+     mma, a_global_amax, d_global_amax, rng_state, k_tile_max, tiles_in_m, sched_tiles_in_n);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
   NVTE_CHECK(status == cutlass::Status::kSuccess, "Kernel launch failed.");

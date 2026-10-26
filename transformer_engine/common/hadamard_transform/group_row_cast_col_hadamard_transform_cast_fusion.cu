@@ -38,6 +38,7 @@
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/command_line.h"
 #include "cutlass/util/print_error.hpp"
+#include "hadamard_transform_utils.cuh"
 
 namespace transformer_engine {
 namespace detail {
@@ -270,7 +271,6 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       uint32_t *atomic_tile_index_;
       uint32_t *smem_tile_counter;
       uint32_t atomic_offset;
-      cutlass::FastDivmodU64 divmod_tiles_in_m;
 
       CUTLASS_DEVICE TileScheduler(uint32_t tiles_m, uint32_t tiles_n, int kmax,
                                    uint32_t *atomic_tile_index, uint32_t *smem_tile_counter)
@@ -282,15 +282,13 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             k_tile_max(kmax),
             atomic_tile_index_(atomic_tile_index),
             smem_tile_counter(smem_tile_counter),
-            atomic_offset(gridDim.x),
-            divmod_tiles_in_m(uint64_t(tiles_m)) {
+            atomic_offset(gridDim.x) {
         update_tile_idx();
       }
       CUTLASS_DEVICE void update_tile_idx() {
-        uint64_t q, r;
-        divmod_tiles_in_m(q, r, uint64_t(linear_idx));
-        tile_m_idx = static_cast<uint32_t>(r);
-        tile_n_idx = static_cast<uint32_t>(q) * uint32_t(k_tile_max);
+        const uint32_t q = linear_idx / tiles_in_m;
+        tile_m_idx = linear_idx - q * tiles_in_m;
+        tile_n_idx = q * uint32_t(k_tile_max);
       }
       CUTLASS_DEVICE uint32_t tile_m() const { return tile_m_idx; }
       CUTLASS_DEVICE uint32_t tile_n_base() const { return tile_n_idx; }
@@ -544,18 +542,21 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       }
 
       do {
+        const uint32_t tile_m = scheduler.tile_m();
+        const uint32_t tile_n_base = scheduler.tile_n_base();
+        const uint32_t tiles_n = scheduler.tiles_n();
         // is_first_wave indicates whether this scheduler wave is the first among a group.
         bool is_first_wave = scheduler.is_first_wave();
         uint32_t skip_wait = is_first_wave;
-        auto tAgA_mk = tAgA(_, scheduler.tile_m(), _);
+        auto tAgA_mk = tAgA(_, tile_m, _);
         int k_tile = 0;
 
         sched_throttle_pipeline.producer_acquire(sched_pipeline_throttle_producer_state);
         sched_throttle_pipeline.producer_commit(sched_pipeline_throttle_producer_state);
         ++sched_pipeline_throttle_producer_state;
         CUTLASS_PRAGMA_NO_UNROLL
-        while (k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n()) {
-          int k_tile_idx_n = scheduler.tile_n_base() + k_tile;
+        while (k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n) {
+          int k_tile_idx_n = tile_n_base + k_tile;
           ++k_tile;
           skip_wait = (is_first_wave && k_tile < MainloopPipelineStageCount);
           mainloop_pipeline.producer_acquire(mainloop_pipe_producer_state);
@@ -602,6 +603,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
         // Wait until the B (Hadamard) tensor copy is complete
         cute::wait_barrier(shared_storage.tma_barrier[0], 0 /*tma_phase_bit*/);
         do {
+          const uint32_t tile_n_base = scheduler.tile_n_base();
+          const uint32_t tiles_n = scheduler.tiles_n();
           uint32_t skip_wait = K_TILE_MAX <= 0;
 
           auto barrier_token =
@@ -610,7 +613,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
           ++sched_pipeline_consumer_state;
           CUTLASS_PRAGMA_NO_UNROLL
           for (int k_tile = 0;
-               k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n();) {
+               k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n;) {
             mainloop_pipeline.consumer_wait(mainloop_pipe_consumer_state, barrier_token);
             int read_stage = mainloop_pipe_consumer_state.index();
             auto tCrA_mk = tCrA(_, _, _, read_stage);
@@ -744,13 +747,17 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
         float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
 
         do {
+          const uint32_t tile_m = scheduler.tile_m();
+          const uint32_t tile_n_base = scheduler.tile_n_base();
+          const uint32_t tiles_n = scheduler.tiles_n();
+          const uint32_t linear_tile_idx = scheduler.get_linear_tile_idx();
           scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
           ++sched_pipeline_consumer_state;
           CUTLASS_PRAGMA_NO_UNROLL
           for (int k_tile = 0;
-               k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n();
+               k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n;
                ++k_tile) {
-            int global_tile_n_offset = (scheduler.tile_n_base() + k_tile) * size<1>(epilogue_tiler);
+            int global_tile_n_offset = (tile_n_base + k_tile) * size<1>(epilogue_tiler);
 
             int cur_group_idx = GetGroupIdx(&args, global_tile_n_offset);
 
@@ -789,9 +796,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             int group_start_offset = args.split_sections_range[group_idx];
             int local_tile_n_idx =
                 (global_tile_n_offset - group_start_offset) / size<1>(epilogue_tiler);
-            Tensor tDgD_mn = gD_mn_view(_, _, _, scheduler.tile_m(), local_tile_n_idx);
+            Tensor tDgD_mn = gD_mn_view(_, _, _, tile_m, local_tile_n_idx);
 
-            Tensor tDgSFD_mn = gSFD_mn(_, _, scheduler.tile_m(), local_tile_n_idx);
+            Tensor tDgSFD_mn = gSFD_mn(_, _, tile_m, local_tile_n_idx);
             accumulator_pipeline.consumer_wait(accumulator_pipe_consumer_state);
 
             auto Acc = bulk_tmem_epilogue(_, _, _, accumulator_pipe_consumer_state.index());
@@ -852,7 +859,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
               vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
             }
 
-            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+            pvscales = mul_f32x2_by_scalar(
                 vec_maxs, global_encode_scale_multiplier);
             auto pvscales_cvted =
                 cutlass::NumericArrayConverter<TSFD, ElementAccumulator, NumVecs>{}(pvscales);
@@ -861,7 +868,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFD, NumVecs>{}(
                 tD_rRowSFD_frg(_0{}));
             auto qpvscale_scaled =
-                cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+                mul_f32x2_by_scalar(
                     qpvscale_ups, global_decode_scale);
             cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
             if constexpr (kUseFastMath) {
@@ -882,7 +889,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             // "Prefetch" a stochastic rounding state for the first tile
             if constexpr (kEnableStochasticRounding) {
               const size_t rng_sequence = global_thread_idx + k_tile * 512 +
-                                          scheduler.get_linear_tile_idx() * K_TILE_MAX * 512;
+                                          linear_tile_idx * K_TILE_MAX * 512;
               rng.init(rng_seed, rng_sequence, rng_offset);
             }
             CUTLASS_PRAGMA_UNROLL
@@ -893,13 +900,13 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
               if constexpr (kEnableStochasticRounding) {
                 random_uint4 = rng.generate4();
                 output_frgs[v] = StochasticNumericConverter(
-                    cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
+                    mul_f32x2_by_scalar(
                         compute_frgs[v], acc_scale),
                     *reinterpret_cast<cutlass::Array<uint32_t, 4> *>(&random_uint4));
               } else {
                 output_frgs[v] =
                     cutlass::NumericArrayConverter<TD, ElementAccumulator, VectorSize>{}(
-                        cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
+                        mul_f32x2_by_scalar(
                             compute_frgs[v], acc_scale));
               }
             }
@@ -948,16 +955,16 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                  sAlayout))));  // (BLOCK_M, BLOCK_M,PIPE)
 
         // Set up layouts for partitioning – tile-by-warp, with vector granularity
-        using S2RWarpLayout = Layout<Shape<_8, _4>>;
+        using S2RWarpLayout = Layout<Shape<_2, _16>>;
         using WarpGroupLayout = Layout<Shape<_1, _8>>;
         using S2RThreadLayout = decltype(blocked_product(S2RWarpLayout{}, WarpGroupLayout{}));
-        using S2RValLayout = Layout<Shape<Int<VectorSize>, _1>>;
+        using S2RValLayout = Layout<Shape<Int<64>, _1>>;
         using S2RAtomA = Copy_Atom<AutoVectorizingCopy, TA>;
-        using R2GAtomQA = Copy_Atom<AutoVectorizingCopy, TQA>;
+        using R2GAtomQA = Copy_Atom<SM100_STORE_256bit_CACHE_NOALLOCATION, TQA>;
         using R2GAtomSFA = Copy_Atom<AutoVectorizingCopy, TSFA>;
         auto tiled_s2r = make_tiled_copy(S2RAtomA{}, S2RThreadLayout{}, S2RValLayout{});
-        auto tiled_r2g_QA = make_tiled_copy(R2GAtomQA{}, S2RThreadLayout{}, S2RValLayout{});
-        auto tiled_r2g_SFA = make_tiled_copy(R2GAtomSFA{}, S2RThreadLayout{}, S2RValLayout{});
+        auto tiled_r2g_QA = make_tiled_copy_D(R2GAtomQA{}, tiled_s2r);
+        auto tiled_r2g_SFA = make_tiled_copy_D(R2GAtomSFA{}, tiled_s2r);
 
         auto thr_s2r = tiled_s2r.get_slice(local_thread_idx);
         auto thr_r2g_QA = tiled_r2g_QA.get_slice(local_thread_idx);
@@ -991,10 +998,14 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
         float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
         auto sfa_converter = cutlass::NumericConverter<TSFA, ElementAccumulator>{};
         do {
+          const uint32_t tile_m = scheduler.tile_m();
+          const uint32_t tile_n_base = scheduler.tile_n_base();
+          const uint32_t tiles_n = scheduler.tiles_n();
+          const uint32_t linear_tile_idx = scheduler.get_linear_tile_idx();
           CUTLASS_PRAGMA_NO_UNROLL
           for (int k_tile = 0;
-               k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n();) {
-            int global_tile_n_offset = (scheduler.tile_n_base() + k_tile) * size<1>(epilogue_tiler);
+               k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n;) {
+            int global_tile_n_offset = (tile_n_base + k_tile) * size<1>(epilogue_tiler);
 
             int cur_group_idx = GetGroupIdx(&args, global_tile_n_offset);
             if (cur_group_idx != group_idx) {
@@ -1009,8 +1020,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             }
 
             auto tQAgSFA_mn =
-                tQAgSFA(_, _, _, scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
-            auto tQAgQA_mn = tQAgQA(_, _, _, scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
+                tQAgSFA(_, _, _, tile_m, tile_n_base + k_tile);
+            auto tQAgQA_mn = tQAgQA(_, _, _, tile_m, tile_n_base + k_tile);
             auto barrier_token = mainloop_pipeline.consumer_try_wait(mainloop_pipe_consumer_state);
             mainloop_pipeline.consumer_wait(mainloop_pipe_consumer_state, barrier_token);
             copy(tiled_s2r, tQAsA(_, _, _, mainloop_pipe_consumer_state.index()), tQArA);
@@ -1026,29 +1037,24 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             auto compute_frgs = reinterpret_cast<cutlass::Array<TA, VectorSize> *>(tQArA.data());
             auto output_frgs = reinterpret_cast<cutlass::Array<TQA, VectorSize> *>(
                 raw_pointer_cast(tQArQA.data()));
-            Tensor amax =
-                make_tensor<ElementAccumulator>(prepend(take<1, rank(tQArA)>(tQArA.shape()), _1{}));
-            Tensor pvscales = make_tensor_like<ElementAccumulator>(amax);
             transformer_engine::curanddx::detail::philox4x32_native_state<
                 NVTE_BUILD_NUM_PHILOX_ROUNDS>
                 rng;
             if constexpr (kEnableStochasticRounding) {
               const size_t rng_sequence = global_thread_idx + k_tile * 512 +
-                                          scheduler.get_linear_tile_idx() * K_TILE_MAX * 512 +
+                                          linear_tile_idx * K_TILE_MAX * 512 +
                                           tiles_in_m * tiles_in_n * K_TILE_MAX * 512;
               rng.init(rng_seed, rng_sequence, rng_offset);
             }
             CUTLASS_PRAGMA_UNROLL
-            for (int v = 0; v < size<1>(group_modes<1, rank(tQArA)>(tQArA)); v++) {
-              auto amax_view = group_modes<1, rank(amax)>(amax);
-              auto pvscales_view = group_modes<1, rank(pvscales)>(pvscales);
+            for (int v = 0; v < size(tQArA) / VectorSize; v++) {
               auto compute_frgs_up =
                   cutlass::NumericArrayConverter<ElementAccumulator, TA, VectorSize>{}(
                       compute_frgs[v]);
-              amax_view(_0{}, v) = amax_reduction(ElementAccumulator(0), compute_frgs_up);
-              pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
-                  amax_view(_0{}, v), global_encode_scale_multiplier);
-              filter(tQArSFA)(v) = sfa_converter(pvscales_view(_0{}, v));
+              auto amax = amax_reduction(ElementAccumulator(0), compute_frgs_up);
+              auto pvscales =
+                  cutlass::multiplies<ElementAccumulator>{}(amax, global_encode_scale_multiplier);
+              filter(tQArSFA)(v) = sfa_converter(pvscales);
               auto qpvscale_ups =
                   cutlass::NumericConverter<ElementAccumulator, TSFA>{}(filter(tQArSFA)(v));
               auto qpvscale_scaled =
@@ -1068,13 +1074,13 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
               if constexpr (kEnableStochasticRounding) {
                 random_uint4 = rng.generate4();
                 output_frgs[v] = StochasticNumericConverter(
-                    cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
+                    mul_f32x2_by_scalar(
                         compute_frgs_up, acc_scale),
                     *reinterpret_cast<cutlass::Array<uint32_t, 4> *>(&random_uint4));
               } else {
                 output_frgs[v] =
                     cutlass::NumericArrayConverter<TQA, ElementAccumulator, VectorSize>{}(
-                        cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
+                        mul_f32x2_by_scalar(
                             compute_frgs_up, acc_scale));
               }
             }
