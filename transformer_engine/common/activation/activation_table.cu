@@ -72,19 +72,19 @@ void build(void *table, cudaStream_t stream) {
 void build(const Kind kind, void *table, cudaStream_t stream) {
   switch (kind) {
     case kGelu:
-      build<Table<kGelu>>(table, stream);
+      build<Table<__nv_bfloat16, kGelu>>(table, stream);
       break;
     case kSilu:
-      build<Table<kSilu>>(table, stream);
+      build<Table<__nv_bfloat16, kSilu>>(table, stream);
       break;
     case kDgelu:
-      build<Table<kDgelu>>(table, stream);
+      build<Table<__nv_bfloat16, kDgelu>>(table, stream);
       break;
     case kDsilu:
       if (use_exact_dsilu_table()) {
-        build<ExactDsiluTable>(table, stream);
+        build<ExactDsiluTable<__nv_bfloat16>>(table, stream);
       } else {
-        build<Table<kDsilu>>(table, stream);
+        build<Table<__nv_bfloat16, kDsilu>>(table, stream);
       }
       break;
     default:

@@ -27,6 +27,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "../test_common.h"
@@ -44,80 +45,72 @@ using transformer_engine::activation_table::kSilu;
 
 constexpr int kNumInputs = 1 << 16;
 
-// Below-window bounds and linear forms of the specification.
-constexpr uint32_t kDgeluWindowLow = 0x3980;       // 2^-12
-constexpr uint32_t kDsiluWindowLow = 0x3B00;       // 2^-9
-constexpr uint32_t kExactDsiluWindowLow = 0x3300;  // 2^-25
-
-bool exact_dsilu() {
-  const char *env = std::getenv("NVTE_ACTIVATION_TABLE_EXACT_DSILU");
-  return env != nullptr && std::string(env) == "1";
-}
-
-__device__ float spec(const Kind kind, const uint32_t bits,
-                      const uint32_t dsilu_window_low) {
-  const float x = __uint_as_float(bits << 16);
-  const uint32_t magnitude = bits & 0x7fffu;
-  switch (kind) {
-    case kGelu:
-      if (bits == 0xff80u) return -0.0f;
-      return __bfloat162float(__float2bfloat16_rn(transformer_engine::gelu<float, float>(x, {})));
-    case kSilu:
-      if (bits == 0xff80u) return -0.0f;
-      return __bfloat162float(__float2bfloat16_rn(transformer_engine::silu<float, float>(x, {})));
-    case kDgelu:
-      if (magnitude < kDgeluWindowLow) return fmaf(0.79788456f, x, 0.5f);
-      return transformer_engine::dgelu<float, float>(x, {});
-    default:
-      if (magnitude < dsilu_window_low) return fmaf(0.5f, x, 0.5f);
-      return transformer_engine::dsilu<float, float>(x, {});
-  }
-}
-
-__device__ float scalar_math(const Kind kind, const float x) {
-  switch (kind) {
-    case kDgelu:
-      return transformer_engine::dgelu<float, float>(x, {});
-    default:
-      return transformer_engine::dsilu<float, float>(x, {});
-  }
-}
-
+// The specification of each table, written out independently of util/activation_table.cuh: the
+// activation and, for derivatives, the first magnitude of the table window and the slope of the
+// linear term 0.5 + slope*x below it.
 template <Kind kKind>
-struct Op;
+struct Spec;
 template <>
-struct Op<kGelu> {
-  static constexpr float (*value)(float, const Empty &) = transformer_engine::gelu<float, float>;
+struct Spec<kGelu> {
+  static constexpr float (*op)(float, const Empty &) = transformer_engine::gelu<float, float>;
+  static constexpr bool kForward = true;
 };
 template <>
-struct Op<kSilu> {
-  static constexpr float (*value)(float, const Empty &) = transformer_engine::silu<float, float>;
+struct Spec<kSilu> {
+  static constexpr float (*op)(float, const Empty &) = transformer_engine::silu<float, float>;
+  static constexpr bool kForward = true;
 };
 template <>
-struct Op<kDgelu> {
-  static constexpr float (*value)(float, const Empty &) = transformer_engine::dgelu<float, float>;
+struct Spec<kDgelu> {
+  static constexpr float (*op)(float, const Empty &) = transformer_engine::dgelu<float, float>;
+  static constexpr bool kForward = false;
+  static constexpr float kSlope = 0.79788456f;  // sqrt(2/pi)
+  static uint32_t window_low() { return 0x3980; }  // 2^-12
 };
 template <>
-struct Op<kDsilu> {
-  static constexpr float (*value)(float, const Empty &) = transformer_engine::dsilu<float, float>;
+struct Spec<kDsilu> {
+  static constexpr float (*op)(float, const Empty &) = transformer_engine::dsilu<float, float>;
+  static constexpr bool kForward = false;
+  static constexpr float kSlope = 0.5f;
+  static constexpr uint32_t kExactWindowLow = 0x3300;  // 2^-25
+  // 2^-9, or kExactWindowLow for the exact table (NVTE_ACTIVATION_TABLE_EXACT_DSILU=1).
+  static uint32_t window_low() {
+    const char *env = std::getenv("NVTE_ACTIVATION_TABLE_EXACT_DSILU");
+    return env != nullptr && std::string(env) == "1" ? kExactWindowLow : 0x3B00;
+  }
 };
 
+// The table's value for the BF16 input bits. window_low is unused for forward tables.
+template <Kind kKind>
+__device__ float spec(const uint32_t bits, const uint32_t window_low) {
+  using S = Spec<kKind>;
+  const float x = __uint_as_float(bits << 16);
+  if constexpr (S::kForward) {
+    if (bits == 0xff80u) return -0.0f;
+    return __bfloat162float(__float2bfloat16_rn(S::op(x, {})));
+  } else {
+    if ((bits & 0x7fffu) < window_low) return fmaf(S::kSlope, x, 0.5f);
+    return S::op(x, {});
+  }
+}
+
+// For every BF16 input: the activation as evaluate() reads or computes it with kUse, the
+// specification, and (derivatives only) util/math.h.
 template <Kind kKind, int kUse>
-__global__ void lookup_kernel(const void *table, const uint32_t dsilu_window_low, float *looked_up,
+__global__ void lookup_kernel(const void *table, const uint32_t window_low, float *looked_up,
                               float *expected, float *math_h) {
   const uint32_t bits = blockIdx.x * blockDim.x + threadIdx.x;
   if (bits >= kNumInputs) return;
   namespace at = transformer_engine::activation_table;
+  using S = Spec<kKind>;
   const float x = __uint_as_float(bits << 16);
-  looked_up[bits] = at::evaluate<kUse, Empty, Op<kKind>::value>(x, table);
-  if constexpr (kUse == at::kComputedTable && (kKind == kGelu || kKind == kSilu)) {
+  looked_up[bits] = at::evaluate<kUse, Empty, S::op>(x, table);
+  if constexpr (kUse == at::kComputedTable && S::kForward) {
     // The computed forward is FP32; every caller rounds it to BF16, as the table already is.
     looked_up[bits] = __bfloat162float(__float2bfloat16_rn(looked_up[bits]));
   }
-  expected[bits] = spec(kKind, bits, dsilu_window_low);
-  math_h[bits] = (kKind == kDgelu || kKind == kDsilu)
-                     ? scalar_math(kKind, x)
-                     : 0.0f;
+  expected[bits] = spec<kKind>(bits, window_low);
+  math_h[bits] = S::kForward ? 0.0f : S::op(x, {});
 }
 
 uint32_t float_bits(const float f) {
@@ -135,27 +128,30 @@ int64_t ordered(const float f) {
 }
 
 // kComputed: check what the generic kernel computes in place of the table (kComputedTable, or
-// util/math.h itself for the exact dSiLU table) instead of the table lookup.
+// util/math.h itself for the exact table) instead of the table lookup.
 template <Kind kKind, bool kComputed = false>
 void check_table(const int max_ulp_below_window) {
   namespace at = transformer_engine::activation_table;
   const at::TableRef table = at::device_table(kKind);
-  const bool exact = kKind == kDsilu && exact_dsilu();
   ASSERT_NE(table.ptr, nullptr);
-  ASSERT_EQ(table.use, exact ? at::kExactDsiluTable : at::kDefaultTable);
+  uint32_t window_low = 0;
+  if constexpr (!Spec<kKind>::kForward) {
+    window_low = Spec<kKind>::window_low();
+  }
   float *d = nullptr;
   ASSERT_EQ(cudaMalloc(&d, 3 * kNumInputs * sizeof(float)), cudaSuccess);
-  const uint32_t dsilu_window_low = exact ? kExactDsiluWindowLow : kDsiluWindowLow;
-  if (exact) {
+  const auto launch = [&](auto use) {
+    lookup_kernel<kKind, decltype(use)::value><<<kNumInputs / 256, 256>>>(
+        table.ptr, window_low, d, d + kNumInputs, d + 2 * kNumInputs);
+  };
+  if (table.use == at::kExactDsiluTable) {
+    // The exact table's window ends where the linear term equals util/math.h.
     if constexpr (kKind == kDsilu) {
-      lookup_kernel<kKind, kComputed ? at::kNoTable : at::kExactDsiluTable>
-          <<<kNumInputs / 256, 256>>>(table.ptr, dsilu_window_low, d, d + kNumInputs,
-                                      d + 2 * kNumInputs);
+      launch(std::integral_constant<int, kComputed ? at::kNoTable : at::kExactDsiluTable>{});
     }
   } else {
-    lookup_kernel<kKind, kComputed ? at::kComputedTable : at::kDefaultTable>
-        <<<kNumInputs / 256, 256>>>(table.ptr, dsilu_window_low, d, d + kNumInputs,
-                                    d + 2 * kNumInputs);
+    ASSERT_EQ(table.use, at::kDefaultTable);
+    launch(std::integral_constant<int, kComputed ? at::kComputedTable : at::kDefaultTable>{});
   }
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   std::vector<float> h(3 * kNumInputs);
@@ -196,7 +192,7 @@ TEST(ActivationTableTest, DgeluMatchesSpecification) {
   check_table<kDgelu>(1);
 }
 TEST(ActivationTableTest, DsiluMatchesSpecification) {
-  check_table<kDsilu>(exact_dsilu() ? 0 : 2);
+  check_table<kDsilu>(Spec<kDsilu>::window_low() == Spec<kDsilu>::kExactWindowLow ? 0 : 2);
 }
 TEST(ActivationTableTest, ComputedGeluMatchesSpecification) {
   check_table<kGelu, true>(-1);
@@ -208,7 +204,7 @@ TEST(ActivationTableTest, ComputedDgeluMatchesSpecification) {
   check_table<kDgelu, true>(1);
 }
 TEST(ActivationTableTest, ComputedDsiluMatchesSpecification) {
-  check_table<kDsilu, true>(exact_dsilu() ? 0 : 2);
+  check_table<kDsilu, true>(Spec<kDsilu>::window_low() == Spec<kDsilu>::kExactWindowLow ? 0 : 2);
 }
 
 TEST(ActivationTableTest, OneTablePerDevice) {

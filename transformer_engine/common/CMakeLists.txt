@@ -770,10 +770,7 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
-  # activation_table.cu builds the activation tables from util/math.h, so it takes the same
-  # flags as the kernels that compute the activations. Fast-math builds are approximate: the
-  # compiler may build GeLU slightly differently in different kernels (even in the two passes of
-  # one kernel), so GeLU results can differ in a small fraction of values between kernels.
+  # activation_table.cu builds the tables from util/math.h, so it takes the kernels' flags.
   list(APPEND nvte_sources_with_fast_math activation/activation_table.cu
                                           activation/gelu.cu
                                           activation/gelu_dbias.cu

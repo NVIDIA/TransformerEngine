@@ -96,12 +96,12 @@ __device__ __forceinline__ unsigned amax_to_e8m0_2x(float amax_hi, float amax_lo
                                fmaxf(amax_lo * kMaxNormRcp, 0.0f));
 }
 
-/*! \brief Table<kind>'s activation computed with util/math.h instead of read from a table:
+/*! \brief Table<bf16, kind>'s activation computed with util/math.h instead of read from a table:
  *         the generic kernel's output without tables (NVTE_ACTIVATION_TABLE=0). No table is
  *         copied.
  */
 template <activation_table::Kind kKind>
-struct ComputedTable : activation_table::Table<kKind> {
+struct ComputedTable : activation_table::Table<bf16, kKind> {
   static constexpr bool kComputed = true;
   static constexpr size_t kBytes = 16;  // unused shared-memory slot
 };
@@ -905,7 +905,7 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP&)>
 constexpr bool kImplements =
     (!IS_DBIAS || IS_DACT) && (IS_ACT != IS_DACT) && activation_table::kHasTable<ParamOP, OP> &&
-    (IS_ACT == activation_table::Table<activation_table::kKindOf<ParamOP, OP>>::kForward);
+    (IS_ACT == activation_table::Table<bf16, activation_table::kKindOf<ParamOP, OP>>::kForward);
 
 //! Whether FP16 inputs of this request type take this kernel. FP16 always computes the
 //! activation and scales every value in FP32 (see Datapath<fp16>), about twice the
@@ -986,13 +986,13 @@ void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
     return;
   } else if constexpr (kKind == kDsilu) {
     if (table.use == kExactDsiluTable) {
-      run(std::common_type<ExactDsiluTable>{});
+      run(std::common_type<ExactDsiluTable<bf16>>{});
       NVTE_CHECK_CUDA(cudaGetLastError());
       return;
     }
   }
   if constexpr (std::is_same_v<IType, bf16>) {
-    run(std::common_type<Table<kKind>>{});
+    run(std::common_type<Table<bf16, kKind>>{});
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }

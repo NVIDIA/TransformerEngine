@@ -98,25 +98,31 @@ struct DerivativeLayout {
   static_assert(kStride == 2048 || kStride == 4096, "The packed lookup assumes these strides.");
 };
 
-template <Kind kKind>
+/*! \brief The table of kKind for inputs of type IType.
+ *
+ *  Only BF16 inputs have tables. The tables hold the activation, not its quantization, so the
+ *  same tables serve any output format. FP16 inputs also take 2^16 values; tables for them
+ *  would be specializations here, with a forward window of their own.
+ */
+template <typename IType, Kind kKind>
 struct Table;
 
 //! gelu(x) is RN(x/2) below 0x3b4b, x from 2.75 and -0 from -5.1875.
 template <>
-struct Table<kGelu> : ForwardLayout<0x3b4b, 0x40a5> {
+struct Table<__nv_bfloat16, kGelu> : ForwardLayout<0x3b4b, 0x40a5> {
   __device__ static float op(const float x) { return gelu<float, float>(x, {}); }
 };
 
 //! silu(x) is RN(x/2) below 0x3bb6, x from 5.96875 and -0 from -89.
 template <>
-struct Table<kSilu> : ForwardLayout<0x3bb6, 0x42b1> {
+struct Table<__nv_bfloat16, kSilu> : ForwardLayout<0x3bb6, 0x42b1> {
   __device__ static float op(const float x) { return silu<float, float>(x, {}); }
 };
 
 //! [2^-12, 8]. dgelu has saturated, to 1 and to +0, by |x| = 8, until 0.107*x*x overflows at
 //! 0x6044.
 template <>
-struct Table<kDgelu> : DerivativeLayout<0x3980, 0x4100, 0x6044> {
+struct Table<__nv_bfloat16, kDgelu> : DerivativeLayout<0x3980, 0x4100, 0x6044> {
   __device__ static float op(const float x) { return dgelu<float, float>(x, {}); }
   //! dgelu(x) = 0.5 + sqrt(2/pi)*x + O(x^3).
   __device__ static float below_window(const float x) { return fmaf(0.79788456f, x, 0.5f); }
@@ -124,7 +130,7 @@ struct Table<kDgelu> : DerivativeLayout<0x3980, 0x4100, 0x6044> {
 
 //! [2^-9, 89]. dsilu has saturated, to 1 and to +0, by |x| = 89, up to inf.
 template <>
-struct Table<kDsilu> : DerivativeLayout<0x3B00, 0x42B2, 0x7F80> {
+struct Table<__nv_bfloat16, kDsilu> : DerivativeLayout<0x3B00, 0x42B2, 0x7F80> {
   __device__ static float op(const float x) { return dsilu<float, float>(x, {}); }
   //! dsilu(x) = 0.5 + x/2 + O(x^3).
   __device__ static float below_window(const float x) { return fmaf(0.5f, x, 0.5f); }
@@ -132,22 +138,25 @@ struct Table<kDsilu> : DerivativeLayout<0x3B00, 0x42B2, 0x7F80> {
 
 //! dSiLU over [2^-25, 89]: below 2^-25 the linear term already equals util/math.h. Selected
 //! with NVTE_ACTIVATION_TABLE_EXACT_DSILU=1.
-struct ExactDsiluTable : DerivativeLayout<0x3300, 0x42B2, 0x7F80, 4096> {
+template <typename IType>
+struct ExactDsiluTable;
+template <>
+struct ExactDsiluTable<__nv_bfloat16> : DerivativeLayout<0x3300, 0x42B2, 0x7F80, 4096> {
   __device__ static float op(const float x) { return dsilu<float, float>(x, {}); }
   __device__ static float below_window(const float x) { return fmaf(0.5f, x, 0.5f); }
 };
 
-//! Table size in bytes, in the default layout.
+//! BF16 table size in bytes, in the default layout.
 constexpr size_t table_bytes(const Kind kind) {
   switch (kind) {
     case kGelu:
-      return Table<kGelu>::kBytes;
+      return Table<__nv_bfloat16, kGelu>::kBytes;
     case kSilu:
-      return Table<kSilu>::kBytes;
+      return Table<__nv_bfloat16, kSilu>::kBytes;
     case kDgelu:
-      return Table<kDgelu>::kBytes;
+      return Table<__nv_bfloat16, kDgelu>::kBytes;
     case kDsilu:
-      return Table<kDsilu>::kBytes;
+      return Table<__nv_bfloat16, kDsilu>::kBytes;
     default:
       return 0;
   }
@@ -162,7 +171,7 @@ inline bool use_exact_dsilu_table() {
 //! Size of the table that device_table builds for kind.
 inline size_t built_table_bytes(const Kind kind) {
   if (kind == kDsilu && use_exact_dsilu_table()) {
-    return ExactDsiluTable::kBytes;
+    return ExactDsiluTable<__nv_bfloat16>::kBytes;
   }
   return table_bytes(kind);
 }
@@ -170,9 +179,9 @@ inline size_t built_table_bytes(const Kind kind) {
 //! Which table layout a kernel reads.
 enum TableUse : int {
   kNoTable = 0,          //!< Compute OP with util/math.h.
-  kDefaultTable = 1,     //!< Table<kind>.
-  kExactDsiluTable = 2,  //!< ExactDsiluTable.
-  //! No table read: compute with util/math.h what Table<kind> holds. Gives the bytes of
+  kDefaultTable = 1,     //!< Table<bf16, kind>.
+  kExactDsiluTable = 2,  //!< ExactDsiluTable<bf16>.
+  //! No table read: compute with util/math.h what Table<bf16, kind> holds. Gives the bytes of
   //! kDefaultTable, without the memory latency of a lookup in global memory.
   kComputedTable = 3,
 };
@@ -183,7 +192,7 @@ struct TableRef {
   TableUse use = kNoTable;
 };
 
-/*! \brief The current device's table for kind, built on first use.
+/*! \brief The current device's BF16 table for kind, built on first use.
  *
  *  Each table is built once per device and process, then kept until the process exits
  *  (under 64 KB per device for all of them). The first call may come while the caller's
@@ -343,7 +352,7 @@ __device__ __forceinline__ float evaluate(const float x, const void *table) {
     // Branch-free on purpose: a branch around OP keeps the compiler from overlapping the
     // latency of OP across elements, which costs more than computing OP for every element.
     static_assert(kHasTable<ParamOP, OP>, "OP has no table.");
-    using T = Table<kKindOf<ParamOP, OP>>;
+    using T = Table<__nv_bfloat16, kKindOf<ParamOP, OP>>;
     if constexpr (T::kForward) {
       // Outside the window the table's closed forms equal util/math.h rounded to BF16,
       // except at -inf, where the formula gives NaN and the table -0. util/math.h gives -0
@@ -368,11 +377,11 @@ __device__ __forceinline__ float evaluate(const float x, const void *table) {
     constexpr Kind kKind = kKindOf<ParamOP, OP>;
     if constexpr (kUse == kExactDsiluTable) {
       static_assert(kKind == kDsilu, "Only dSiLU has an exact table.");
-      return derivative<ExactDsiluTable>(x, static_cast<const float *>(table));
-    } else if constexpr (Table<kKind>::kForward) {
-      return forward<Table<kKind>>(x, static_cast<const __nv_bfloat16 *>(table));
+      return derivative<ExactDsiluTable<__nv_bfloat16>>(x, static_cast<const float *>(table));
+    } else if constexpr (Table<__nv_bfloat16, kKind>::kForward) {
+      return forward<Table<__nv_bfloat16, kKind>>(x, static_cast<const __nv_bfloat16 *>(table));
     } else {
-      return derivative<Table<kKind>>(x, static_cast<const float *>(table));
+      return derivative<Table<__nv_bfloat16, kKind>>(x, static_cast<const float *>(table));
     }
   }
 }
