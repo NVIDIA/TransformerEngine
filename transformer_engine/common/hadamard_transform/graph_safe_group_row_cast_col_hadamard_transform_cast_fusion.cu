@@ -742,35 +742,6 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
             shape_rep, num_tensors, scheduler.tile_n_base() * size<1>(epilogue_tiler),
             /*cached_id=*/0, packed_N, M, shared_storage.group_offsets, tensor_range_cache);
 
-        // Determine quantization scale factor layouts/output splits for this group
-        TSFDLayout sfd_layout;
-        int cur_N = shared_storage.group_first_dims[group_idx];
-        if constexpr (kEnableSwizzleSFOutput) {
-          sfd_layout = tile_to_shape(SwizzledSFDLayoutAtom{}, make_shape(M, cur_N), Step<_2, _1>{});
-        } else {
-          sfd_layout = make_layout(make_shape(M, make_shape(Int<SFVecSize>{}, cur_N / SFVecSize)),
-                                   make_stride(cur_N / SFVecSize, make_stride(_0{}, _1{})));
-        }
-        // Build output tensors for columns and their quant scales
-        // TODO(zhongbo): double check the logic here
-        int64_t group_elem_offset = shared_storage.group_offsets[group_idx];
-        Tensor mD = make_tensor(cute::subbyte_iterator<TD>(reinterpret_cast<TD *>(
-                                    reinterpret_cast<char *>(QA_COLWISE) + group_elem_offset / 2)),
-                                make_shape(M, cur_N), DStride{});  // (M,packed_N)
-        Tensor gD_mn = local_tile(mD, epilogue_tiler, make_coord(_, _, _),
-                                  Step<_1, _1, X>{});  // (BLK_M,BLK_N)
-
-        // for every tensor [x, y] row major, x y both a multiple of 128
-        // both of its rowwise and colwise scaling factors will have exactly x * y / 16 elements in FP8 E4M3
-        Tensor mSFD = make_tensor(
-            make_gmem_ptr<TSFD>(reinterpret_cast<TSFD *>(reinterpret_cast<char *>(SFA_COLWISE) +
-                                                         group_elem_offset / kNVFP4BlockSize)),
-            sfd_layout);
-        Tensor gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_, _, _),
-                                    Step<_1, _1, X>{});  // (BLK_M,BLK_N)
-
-        Tensor gD_mn_view = tiled_divide(gD_mn, take<0, 2>(epilogue_tiler));
-
         // Setup tile-level TMEM (t2r) and global memory (r2g) copy descriptors
         auto tiled_t2r = make_tmem_copy(TMEM_LOAD_NEW{}, bulk_tmem_epilogue(_, _, _, _0{}));
         auto tiled_r2g =
@@ -819,32 +790,39 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
                       c_global_amax_val);
               global_decode_scale = 1.0f / global_encode_scale;
               global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-              // TODO(zhongbo): double check the logic here
-              cur_N = shared_storage.group_first_dims[group_idx];
-              if constexpr (kEnableSwizzleSFOutput) {
-                sfd_layout =
-                    tile_to_shape(SwizzledSFDLayoutAtom{}, make_shape(M, cur_N), Step<_2, _1>{});
-              } else {
-                sfd_layout =
-                    make_layout(make_shape(M, make_shape(Int<SFVecSize>{}, cur_N / SFVecSize)),
-                                make_stride(cur_N / SFVecSize, make_stride(_0{}, _1{})));
-              }
-              // update tensor
-              group_elem_offset = shared_storage.group_offsets[group_idx];
-              mD = make_tensor(cute::subbyte_iterator<TD>(reinterpret_cast<TD *>(
-                                   reinterpret_cast<char *>(QA_COLWISE) + group_elem_offset / 2)),
-                               make_shape(M, cur_N), DStride{});
-              gD_mn = local_tile(mD, epilogue_tiler, make_coord(_, _, _),
-                                 Step<_1, _1, X>{});  // (BLK_M,BLK_N)
-              mSFD = make_tensor(make_gmem_ptr<TSFD>(reinterpret_cast<TSFD *>(
-                                     reinterpret_cast<char *>(SFA_COLWISE) +
-                                     group_elem_offset / kNVFP4BlockSize)),
-                                 sfd_layout);
-              gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_, _, _),
-                                   Step<_1, _1, X>{});  // (BLK_M,BLK_N)
-
-              gD_mn_view = tiled_divide(gD_mn, take<0, 2>(epilogue_tiler));
             }
+            // Determine quantization scale factor layouts/output splits for this group
+            TSFDLayout sfd_layout;
+            const int cur_N = shared_storage.group_first_dims[group_idx];
+            if constexpr (kEnableSwizzleSFOutput) {
+              sfd_layout =
+                  tile_to_shape(SwizzledSFDLayoutAtom{}, make_shape(M, cur_N), Step<_2, _1>{});
+            } else {
+              sfd_layout =
+                  make_layout(make_shape(M, make_shape(Int<SFVecSize>{}, cur_N / SFVecSize)),
+                              make_stride(cur_N / SFVecSize, make_stride(_0{}, _1{})));
+            }
+            // Build output tensors for columns and their quant scales
+            // TODO(zhongbo): double check the logic here
+            const int64_t group_elem_offset = shared_storage.group_offsets[group_idx];
+            Tensor mD = make_tensor(
+                cute::subbyte_iterator<TD>(reinterpret_cast<TD *>(
+                    reinterpret_cast<char *>(QA_COLWISE) + group_elem_offset / 2)),
+                make_shape(M, cur_N), DStride{});  // (M,packed_N)
+            Tensor gD_mn = local_tile(mD, epilogue_tiler, make_coord(_, _, _),
+                                      Step<_1, _1, X>{});  // (BLK_M,BLK_N)
+
+            // for every tensor [x, y] row major, x y both a multiple of 128
+            // both of its rowwise and colwise scaling factors will have exactly x * y / 16 elements in FP8 E4M3
+            Tensor mSFD = make_tensor(
+                make_gmem_ptr<TSFD>(reinterpret_cast<TSFD *>(
+                    reinterpret_cast<char *>(SFA_COLWISE) + group_elem_offset / kNVFP4BlockSize)),
+                sfd_layout);
+            Tensor gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_, _, _),
+                                        Step<_1, _1, X>{});  // (BLK_M,BLK_N)
+
+            Tensor gD_mn_view = tiled_divide(gD_mn, take<0, 2>(epilogue_tiler));
+
             int local_tile_n_idx =
                 (global_tile_n_offset - tensor_range_cache.begin) / size<1>(epilogue_tiler);
             Tensor tDgD_mn = gD_mn_view(_, _, _, tile_m, local_tile_n_idx);

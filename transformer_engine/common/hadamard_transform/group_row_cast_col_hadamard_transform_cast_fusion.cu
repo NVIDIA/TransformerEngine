@@ -701,30 +701,6 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
         }
         int group_idx = GetGroupIdx(&args, scheduler.tile_n_base() * size<1>(epilogue_tiler));
 
-        // Determine quantization scale factor layouts/output splits for this group
-        TSFDLayout sfd_layout;
-        int cur_N = args.split_sections[group_idx];
-        if constexpr (kEnableSwizzleSFOutput) {
-          sfd_layout = tile_to_shape(SwizzledSFDLayoutAtom{}, make_shape(M, cur_N), Step<_2, _1>{});
-        } else {
-          sfd_layout = make_layout(make_shape(M, make_shape(Int<SFVecSize>{}, cur_N / SFVecSize)),
-                                   make_stride(cur_N / SFVecSize, make_stride(_0{}, _1{})));
-        }
-        // Build output tensors for columns and their quant scales
-        Tensor mD = make_tensor(
-            cute::subbyte_iterator<TD>(reinterpret_cast<TD *>(args.output_colwise_list[group_idx])),
-            make_shape(M, cur_N), DStride{});  // (M,packed_N)
-        Tensor gD_mn = local_tile(mD, epilogue_tiler, make_coord(_, _, _),
-                                  Step<_1, _1, X>{});  // (BLK_M,BLK_N)
-
-        Tensor mSFD = make_tensor(make_gmem_ptr<TSFD>(reinterpret_cast<TSFD *>(
-                                      args.output_colwise_scale_inv_list[group_idx])),
-                                  sfd_layout);
-        Tensor gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_, _, _),
-                                    Step<_1, _1, X>{});  // (BLK_M,BLK_N)
-
-        Tensor gD_mn_view = tiled_divide(gD_mn, take<0, 2>(epilogue_tiler));
-
         // Setup tile-level TMEM (t2r) and global memory (r2g) copy descriptors
         auto tiled_t2r = make_tmem_copy(TMEM_LOAD_NEW{}, bulk_tmem_epilogue(_, _, _, _0{}));
         auto tiled_r2g =
@@ -770,29 +746,34 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                       c_global_amax_val);
               global_decode_scale = 1.0f / global_encode_scale;
               global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-              cur_N = args.split_sections[group_idx];
-              if constexpr (kEnableSwizzleSFOutput) {
-                sfd_layout =
-                    tile_to_shape(SwizzledSFDLayoutAtom{}, make_shape(M, cur_N), Step<_2, _1>{});
-              } else {
-                sfd_layout =
-                    make_layout(make_shape(M, make_shape(Int<SFVecSize>{}, cur_N / SFVecSize)),
-                                make_stride(cur_N / SFVecSize, make_stride(_0{}, _1{})));
-              }
-              // update tensor
-              mD = make_tensor(cute::subbyte_iterator<TD>(
-                                   reinterpret_cast<TD *>(args.output_colwise_list[group_idx])),
-                               make_shape(M, cur_N), DStride{});
-              gD_mn = local_tile(mD, epilogue_tiler, make_coord(_, _, _),
-                                 Step<_1, _1, X>{});  // (BLK_M,BLK_N)
-              mSFD = make_tensor(make_gmem_ptr<TSFD>(reinterpret_cast<TSFD *>(
-                                     args.output_colwise_scale_inv_list[group_idx])),
-                                 sfd_layout);
-              gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_, _, _),
-                                   Step<_1, _1, X>{});  // (BLK_M,BLK_N)
-
-              gD_mn_view = tiled_divide(gD_mn, take<0, 2>(epilogue_tiler));
             }
+            // Determine quantization scale factor layouts/output splits for this group
+            TSFDLayout sfd_layout;
+            const int cur_N = args.split_sections[group_idx];
+            if constexpr (kEnableSwizzleSFOutput) {
+              sfd_layout =
+                  tile_to_shape(SwizzledSFDLayoutAtom{}, make_shape(M, cur_N), Step<_2, _1>{});
+            } else {
+              sfd_layout =
+                  make_layout(make_shape(M, make_shape(Int<SFVecSize>{}, cur_N / SFVecSize)),
+                              make_stride(cur_N / SFVecSize, make_stride(_0{}, _1{})));
+            }
+            // Build output tensors for columns and their quant scales
+            Tensor mD = make_tensor(
+                cute::subbyte_iterator<TD>(
+                    reinterpret_cast<TD *>(args.output_colwise_list[group_idx])),
+                make_shape(M, cur_N), DStride{});  // (M,packed_N)
+            Tensor gD_mn = local_tile(mD, epilogue_tiler, make_coord(_, _, _),
+                                      Step<_1, _1, X>{});  // (BLK_M,BLK_N)
+
+            Tensor mSFD = make_tensor(make_gmem_ptr<TSFD>(reinterpret_cast<TSFD *>(
+                                          args.output_colwise_scale_inv_list[group_idx])),
+                                      sfd_layout);
+            Tensor gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_, _, _),
+                                        Step<_1, _1, X>{});  // (BLK_M,BLK_N)
+
+            Tensor gD_mn_view = tiled_divide(gD_mn, take<0, 2>(epilogue_tiler));
+
             int group_start_offset = args.split_sections_range[group_idx];
             int local_tile_n_idx =
                 (global_tile_n_offset - group_start_offset) / size<1>(epilogue_tiler);
