@@ -25,7 +25,10 @@ extern "C" {
  *
  *  Requirements:
  *  - scale_inv is stored in row-major.
- *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - Output scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - MXFP8 and NVFP4 input scale_inv may omit padding on the outer dimension, while retaining
+ *    contiguous-dimension padding so each scale row is 4-byte aligned. Missing outer-dimension
+ *    padding is filled with zeros during swizzling.
  *  - Input and output scale_inv buffer pointers used by this operation must be 16-byte aligned.
  *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */
@@ -40,7 +43,9 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
  *
  *  Requirements:
  *  - scale_inv is stored in row-major.
- *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - Output scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - Input scale_inv may omit outer-dimension padding under the same conditions as
+ *    nvte_swizzle_scaling_factors.
  *  - Input and output scale_inv buffer pointers used by this operation must be 16-byte aligned.
  *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */

@@ -699,6 +699,49 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
       padding_m);
 }
 
+// True when unswizzled scales omit padding on the outer dimension only. The contiguous dimension
+// remains padded so each scale row is 4-byte aligned.
+bool column_padded_compact_scales(const Tensor& input, bool rowwise) {
+  if (input.with_gemm_swizzled_scales) return false;
+
+  const auto& scales = rowwise ? input.scale_inv : input.columnwise_scale_inv;
+  if (!scales.has_data()) return false;
+  const auto& shape = scales.shape;
+  if (shape.size() != 2) return false;
+
+  const auto [rows, cols] = input.flat_2d_dims();
+  if (input.scaling_mode == NVTE_MXFP8_1D_SCALING && rowwise) {
+    const size_t padded_cols =
+        round_up_to_multiple(DIVUP(cols, size_t{MXFP8_BLOCK_SIZE}), size_t{4});
+    return shape[0] == rows && shape[1] == padded_cols &&
+           rows != round_up_to_multiple(rows, size_t{128});
+  }
+  if (input.scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    const size_t scale_rows = DIVUP(rows, size_t{MXFP8_BLOCK_SIZE});
+    const size_t padded_cols = round_up_to_multiple(cols, size_t{128});
+    return shape[0] == scale_rows && shape[1] == padded_cols &&
+           scale_rows != round_up_to_multiple(scale_rows, size_t{4});
+  }
+  if (input.scaling_mode == NVTE_NVFP4_1D_SCALING && rowwise) {
+    const size_t padded_cols =
+        round_up_to_multiple(DIVUP(cols, size_t{NVFP4_BLOCK_SIZE}), size_t{4});
+    return shape[0] == rows && shape[1] == padded_cols &&
+           rows != round_up_to_multiple(rows, size_t{128});
+  }
+  if (input.scaling_mode == NVTE_NVFP4_1D_SCALING && has_columnwise) {
+    const size_t padded_cols =
+        round_up_to_multiple(DIVUP(rows, size_t{NVFP4_BLOCK_SIZE}), size_t{4});
+    return shape[0] == cols && shape[1] == padded_cols &&
+           cols != round_up_to_multiple(cols, size_t{128});
+  }
+  return false;
+}
+
+bool column_padded_compact_scales(const Tensor& input) {
+  return column_padded_compact_scales(input, true) ||
+         column_padded_compact_scales(input, false);
+}
+
 // Optimized scale swizzle for narrow scale widths. "Rowwise full width" means that a block stages
 // the entire padded K dimension for one or more 128-row tiles. "Columnwise chunk" means that a
 // block stages only 32 (or 128 for large grids) K rows for one 128-column M tile. Both paths use
@@ -742,17 +785,21 @@ inline uint32_t division_magic(int divisor) {
 // input and of the output. Shared-memory rows are padded to an odd number of words, so the column
 // gathers are free of bank conflicts. Requires num_tiles * 128 * padded_k / 4 < 2^16 (guaranteed
 // by the row-wise shared-memory limit = 30 KB).
-__device__ __forceinline__ void swizzle_rowwise_tiles(const uint8_t* __restrict__ input,
-                                                      uint8_t* __restrict__ output, int padded_k,
-                                                      uint32_t words_per_row_magic, int original_m,
-                                                      int original_k, int first_tile, int num_tiles,
-                                                      uint32_t* smem) {
+template <bool kCompactInput>
+__device__ __forceinline__ void swizzle_rowwise_tiles(
+    const uint8_t* __restrict__ input, uint8_t* __restrict__ output, int padded_k,
+    uint32_t words_per_row_magic, int original_m, int original_k, int first_tile, int num_tiles,
+    uint32_t* smem) {
   const int words_per_row = padded_k >> 2;
   const int smem_row_words = words_per_row | 1;
-  const int num_vectors =
-      num_tiles * 8 * padded_k;  // 16-byte vectors: num_tiles * 128 * padded_k / 16
   const size_t chunk_offset = static_cast<size_t>(first_tile) * 128 * padded_k;
-  const int4* input_vectors = reinterpret_cast<const int4*>(input + chunk_offset);
+  const uint32_t* input_words = reinterpret_cast<const uint32_t*>(input + chunk_offset);
+  const int4* input_vectors = reinterpret_cast<const int4*>(input_words);
+  const int valid_rows =
+      kCompactInput ? max(0, min(num_tiles * 128, original_m - first_tile * 128))
+                    : num_tiles * 128;
+  const int valid_words = valid_rows * words_per_row;
+  const int num_vectors = kCompactInput ? valid_words >> 2 : num_tiles * 8 * padded_k;
   for (int i = threadIdx.x; i < num_vectors; i += kRowwiseThreadsPerBlock) {
     const int4 vector = __ldg(input_vectors + i);
     const uint32_t words[4] = {static_cast<uint32_t>(vector.x), static_cast<uint32_t>(vector.y),
@@ -762,6 +809,14 @@ __device__ __forceinline__ void swizzle_rowwise_tiles(const uint8_t* __restrict_
       const uint32_t word_index = 4 * i + w;
       const uint32_t row = divide_by_magic(word_index, words_per_row_magic);
       smem[row * smem_row_words + (word_index - row * words_per_row)] = words[w];
+    }
+  }
+  if constexpr (kCompactInput) {
+    for (int word_index = 4 * num_vectors + threadIdx.x; word_index < valid_words;
+         word_index += kRowwiseThreadsPerBlock) {
+      const uint32_t row = divide_by_magic(word_index, words_per_row_magic);
+      smem[row * smem_row_words + (word_index - row * words_per_row)] =
+          __ldg(input_words + word_index);
     }
   }
   __syncthreads();
@@ -781,8 +836,15 @@ __device__ __forceinline__ void swizzle_rowwise_tiles(const uint8_t* __restrict_
 #pragma unroll
       for (int group = 0; group < 4; group++) {
         const int row = row_in_group + 32 * group;
-        uint32_t word = smem[(tile_first_row + row) * smem_row_words + k_block];
-        if (global_first_row + row >= original_m) word = 0u;
+        uint32_t word;
+        if constexpr (kCompactInput) {
+          word = global_first_row + row < original_m
+                     ? smem[(tile_first_row + row) * smem_row_words + k_block]
+                     : 0u;
+        } else {
+          word = smem[(tile_first_row + row) * smem_row_words + k_block];
+          if (global_first_row + row >= original_m) word = 0u;
+        }
         words[group] = zero_padding_columns(word, k_block * 4, original_k);
       }
       output_vectors[v] = make_int4(static_cast<int>(words[0]), static_cast<int>(words[1]),
@@ -794,15 +856,16 @@ __device__ __forceinline__ void swizzle_rowwise_tiles(const uint8_t* __restrict_
 // Column-wise: tile m_tile (128 columns), scale rows [first_k, first_k + kChunkRows) clipped to
 // padded_k. Each input row segment is 128 contiguous bytes; each output block of 4 scale rows is
 // 512 contiguous bytes.
-template <int kChunkRows>
+template <int kChunkRows, bool kCompactInput>
 __device__ __forceinline__ void swizzle_columnwise_chunk(const uint8_t* __restrict__ input,
                                                          uint8_t* __restrict__ output, int padded_m,
                                                          int padded_k, int original_m,
                                                          int original_k, int m_tile, int first_k,
                                                          int4* smem) {
   const int num_rows = min(kChunkRows, padded_k - first_k);  // multiple of 4
-  const int num_vectors = num_rows * 8;
-  for (int i = threadIdx.x; i < num_vectors; i += kColumnwiseThreadsPerBlock) {
+  const int num_input_vectors =
+      (kCompactInput ? max(0, min(num_rows, original_k - first_k)) : num_rows) * 8;
+  for (int i = threadIdx.x; i < num_input_vectors; i += kColumnwiseThreadsPerBlock) {
     const int row = i >> 3;
     const int vector_in_row = i & 7;
     smem[i] = __ldg(reinterpret_cast<const int4*>(
@@ -813,6 +876,7 @@ __device__ __forceinline__ void swizzle_columnwise_chunk(const uint8_t* __restri
 
   const uint8_t* smem_bytes = reinterpret_cast<const uint8_t*>(smem);
   const size_t first_output_block = static_cast<size_t>(m_tile) * (padded_k >> 2) + (first_k >> 2);
+  const int num_vectors = num_rows * 8;
   for (int v = threadIdx.x; v < num_vectors; v += kColumnwiseThreadsPerBlock) {
     const int k_block = v >> 5;
     const int column_in_group = v & 31;
@@ -838,22 +902,25 @@ __device__ __forceinline__ void swizzle_columnwise_chunk(const uint8_t* __restri
   }
 }
 
+template <bool kCompactInput>
 __global__ void __launch_bounds__(kRowwiseThreadsPerBlock)
     swizzle_rowwise_full_width_kernel(const uint8_t* __restrict__ input,
                                       uint8_t* __restrict__ output, int padded_k,
                                       uint32_t words_per_row_magic, int original_m,
                                       int original_k) {
   extern __shared__ uint32_t rowwise_smem[];
-  swizzle_rowwise_tiles(input, output, padded_k, words_per_row_magic, original_m, original_k,
-                        blockIdx.x, 1, rowwise_smem);
+  swizzle_rowwise_tiles<kCompactInput>(input, output, padded_k, words_per_row_magic, original_m,
+                                      original_k, blockIdx.x, 1, rowwise_smem);
 }
 
+template <bool kCompactInput>
 __global__ void __launch_bounds__(kColumnwiseThreadsPerBlock)
     swizzle_columnwise_chunk_kernel(const uint8_t* __restrict__ input, uint8_t* __restrict__ output,
                                     int padded_m, int padded_k, int original_m, int original_k) {
   __shared__ int4 columnwise_smem[32 * 8];
-  swizzle_columnwise_chunk<32>(input, output, padded_m, padded_k, original_m, original_k,
-                               blockIdx.x, blockIdx.y * 32, columnwise_smem);
+  swizzle_columnwise_chunk<32, kCompactInput>(input, output, padded_m, padded_k, original_m,
+                                              original_k, blockIdx.x, blockIdx.y * 32,
+                                              columnwise_smem);
 }
 
 // The scales of one tensor: padded_m (a multiple of 128) by padded_k (a multiple of 4) in
@@ -863,6 +930,7 @@ struct SwizzleTensorDescriptor {
   const uint8_t* input;
   uint8_t* output;
   int padded_m, padded_k, original_m, original_k;
+  bool compact_input;
 };
 
 struct MultiTensorSwizzleArgs {
@@ -879,6 +947,7 @@ __device__ __forceinline__ int tensor_of_block(const MultiTensorSwizzleArgs& arg
   return tensor;
 }
 
+template <bool kCompactInput>
 __global__ void __launch_bounds__(kRowwiseThreadsPerBlock)
     multi_tensor_swizzle_rowwise_full_width_kernel(const MultiTensorSwizzleArgs args) {
   extern __shared__ uint32_t rowwise_multi_smem[];
@@ -886,12 +955,13 @@ __global__ void __launch_bounds__(kRowwiseThreadsPerBlock)
   const int row_tiles_per_block = args.row_tiles_per_block;
   const int first_tile = (blockIdx.x - args.first_block[t]) * row_tiles_per_block;
   const int num_tiles = min(row_tiles_per_block, args.tensors[t].padded_m / 128 - first_tile);
-  swizzle_rowwise_tiles(args.tensors[t].input, args.tensors[t].output, args.tensors[t].padded_k,
-                        args.words_per_row_magic[t], args.tensors[t].original_m,
-                        args.tensors[t].original_k, first_tile, num_tiles, rowwise_multi_smem);
+  swizzle_rowwise_tiles<kCompactInput>(
+      args.tensors[t].input, args.tensors[t].output, args.tensors[t].padded_k,
+      args.words_per_row_magic[t], args.tensors[t].original_m, args.tensors[t].original_k,
+      first_tile, num_tiles, rowwise_multi_smem);
 }
 
-template <int kChunkRows>
+template <int kChunkRows, bool kCompactInput>
 __global__ void __launch_bounds__(kColumnwiseThreadsPerBlock)
     multi_tensor_swizzle_columnwise_chunk_kernel(const MultiTensorSwizzleArgs args) {
   __shared__ int4 columnwise_multi_smem[kChunkRows * 8];
@@ -900,10 +970,10 @@ __global__ void __launch_bounds__(kColumnwiseThreadsPerBlock)
   const int num_m_tiles = args.tensors[t].padded_m / 128;
   const int m_tile = block_in_tensor % num_m_tiles;
   const int first_k = (block_in_tensor / num_m_tiles) * kChunkRows;
-  swizzle_columnwise_chunk<kChunkRows>(args.tensors[t].input, args.tensors[t].output,
-                                       args.tensors[t].padded_m, args.tensors[t].padded_k,
-                                       args.tensors[t].original_m, args.tensors[t].original_k,
-                                       m_tile, first_k, columnwise_multi_smem);
+  swizzle_columnwise_chunk<kChunkRows, kCompactInput>(
+      args.tensors[t].input, args.tensors[t].output, args.tensors[t].padded_m,
+      args.tensors[t].padded_k, args.tensors[t].original_m, args.tensors[t].original_k, m_tile,
+      first_k, columnwise_multi_smem);
 }
 
 inline bool is_16_byte_aligned(const void* ptr) {
@@ -928,6 +998,7 @@ inline bool should_use_rowwise_full_width_swizzle(int padded_k, int64_t total_ro
 // Launches the rowwise full-width kernel, where each block stages the entire padded K dimension,
 // for up to kMaxTensorsPerLaunch tensors. The row tiles per block are the smallest power of two
 // that keeps the grid within kRowwiseMaxBlocks, subject to the shared-memory limit.
+template <bool kCompactInput>
 inline void launch_multi_tensor_rowwise_full_width_swizzle(const SwizzleTensorDescriptor* tensors,
                                                            int num_tensors, cudaStream_t stream) {
   MultiTensorSwizzleArgs args{};
@@ -958,7 +1029,7 @@ inline void launch_multi_tensor_rowwise_full_width_swizzle(const SwizzleTensorDe
   }
   const int grid = args.first_block[num_tensors];
   if (grid == 0) return;
-  multi_tensor_swizzle_rowwise_full_width_kernel<<<
+  multi_tensor_swizzle_rowwise_full_width_kernel<kCompactInput><<<
       grid, kRowwiseThreadsPerBlock, row_tiles_per_block * 128 * max_smem_row_words * 4, stream>>>(
       args);
   NVTE_CHECK_CUDA(cudaGetLastError());
@@ -967,6 +1038,7 @@ inline void launch_multi_tensor_rowwise_full_width_swizzle(const SwizzleTensorDe
 // Launches the columnwise chunk kernel, where each block stages part of K for one 128-column M
 // tile, for up to kMaxTensorsPerLaunch tensors. It uses 128-row K chunks once 32-row chunks would
 // exceed kColumnwiseMaxBlocksWith32RowChunks blocks.
+template <bool kCompactInput>
 inline void launch_multi_tensor_columnwise_chunk_swizzle(const SwizzleTensorDescriptor* tensors,
                                                          int num_tensors, cudaStream_t stream) {
   MultiTensorSwizzleArgs args{};
@@ -990,10 +1062,10 @@ inline void launch_multi_tensor_columnwise_chunk_swizzle(const SwizzleTensorDesc
   const int grid = args.first_block[num_tensors];
   if (grid == 0) return;
   if (chunk_rows == 128) {
-    multi_tensor_swizzle_columnwise_chunk_kernel<128>
+    multi_tensor_swizzle_columnwise_chunk_kernel<128, kCompactInput>
         <<<grid, kColumnwiseThreadsPerBlock, 0, stream>>>(args);
   } else {
-    multi_tensor_swizzle_columnwise_chunk_kernel<32>
+    multi_tensor_swizzle_columnwise_chunk_kernel<32, kCompactInput>
         <<<grid, kColumnwiseThreadsPerBlock, 0, stream>>>(args);
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
@@ -1004,9 +1076,15 @@ inline void launch_rowwise_full_width_swizzle(const SwizzleTensorDescriptor& ten
                                               cudaStream_t stream) {
   const int grid = tensor.padded_m / 128;
   const int smem = 128 * ((tensor.padded_k >> 2) | 1) * 4;
-  swizzle_rowwise_full_width_kernel<<<grid, kRowwiseThreadsPerBlock, smem, stream>>>(
-      tensor.input, tensor.output, tensor.padded_k, division_magic(tensor.padded_k >> 2),
-      tensor.original_m, tensor.original_k);
+  if (tensor.compact_input) {
+    swizzle_rowwise_full_width_kernel<true><<<grid, kRowwiseThreadsPerBlock, smem, stream>>>(
+        tensor.input, tensor.output, tensor.padded_k, division_magic(tensor.padded_k >> 2),
+        tensor.original_m, tensor.original_k);
+  } else {
+    swizzle_rowwise_full_width_kernel<false><<<grid, kRowwiseThreadsPerBlock, smem, stream>>>(
+        tensor.input, tensor.output, tensor.padded_k, division_magic(tensor.padded_k >> 2),
+        tensor.original_m, tensor.original_k);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -1014,9 +1092,15 @@ inline void launch_rowwise_full_width_swizzle(const SwizzleTensorDescriptor& ten
 inline void launch_columnwise_chunk_swizzle(const SwizzleTensorDescriptor& tensor,
                                             cudaStream_t stream) {
   dim3 grid(tensor.padded_m / 128, (tensor.padded_k + 31) / 32);
-  swizzle_columnwise_chunk_kernel<<<grid, kColumnwiseThreadsPerBlock, 0, stream>>>(
-      tensor.input, tensor.output, tensor.padded_m, tensor.padded_k, tensor.original_m,
-      tensor.original_k);
+  if (tensor.compact_input) {
+    swizzle_columnwise_chunk_kernel<true><<<grid, kColumnwiseThreadsPerBlock, 0, stream>>>(
+        tensor.input, tensor.output, tensor.padded_m, tensor.padded_k, tensor.original_m,
+        tensor.original_k);
+  } else {
+    swizzle_columnwise_chunk_kernel<false><<<grid, kColumnwiseThreadsPerBlock, 0, stream>>>(
+        tensor.input, tensor.output, tensor.padded_m, tensor.padded_k, tensor.original_m,
+        tensor.original_k);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -1028,8 +1112,12 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING,
              "Input tensor has invalid scaling mode (", to_string(input->scaling_mode), ").");
 
-  CheckInputTensor(*input, "scaling_factor_input");
+  const bool compact_input = column_padded_compact_scales(*input);
+  CheckInputTensor(*input, "scaling_factor_input", !compact_input);
   CheckInputTensor(*output, "scaling_factor_output");
+  NVTE_CHECK(output->scaling_mode == scaling_mode &&
+                 output->flat_2d_dims() == input->flat_2d_dims(),
+             "Input and output tensor layouts must match.");
   NVTE_CHECK(!input->with_gemm_swizzled_scales,
              "Expected input tensor with scales in compact format.");
   NVTE_CHECK(output->with_gemm_swizzled_scales,
@@ -1056,36 +1144,37 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
     return;
   }
 
-  // Deduce tensor dims
+  // Deduce padded swizzle dimensions from the output. A compact input may omit outer-dimension
+  // padding, while the output always has the full GEMM layout.
   int m{0}, k{0};
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
       if (has_rowwise_scale_inv) {
-        NVTE_CHECK(input->scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->scale_inv.shape, ".");
-        m = input->scale_inv.shape[0];
-        k = input->scale_inv.shape[1];
+        NVTE_CHECK(output->scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
+        m = output->scale_inv.shape[0];
+        k = output->scale_inv.shape[1];
       } else if (has_columnwise_scale_inv) {
-        NVTE_CHECK(input->columnwise_scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->columnwise_scale_inv.shape,
+        NVTE_CHECK(output->columnwise_scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->columnwise_scale_inv.shape,
                    ".");
-        m = input->columnwise_scale_inv.shape[1];
-        k = input->columnwise_scale_inv.shape[0];
+        m = output->columnwise_scale_inv.shape[1];
+        k = output->columnwise_scale_inv.shape[0];
       }
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
       if (has_rowwise_scale_inv) {
-        NVTE_CHECK(input->scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->scale_inv.shape, ".");
-        m = input->scale_inv.shape[0];
-        k = input->scale_inv.shape[1];
+        NVTE_CHECK(output->scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
+        m = output->scale_inv.shape[0];
+        k = output->scale_inv.shape[1];
       } else if (has_columnwise_scale_inv) {
-        NVTE_CHECK(input->columnwise_scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->columnwise_scale_inv.shape,
+        NVTE_CHECK(output->columnwise_scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->columnwise_scale_inv.shape,
                    ".");
-        m = input->columnwise_scale_inv.shape[0];
-        k = input->columnwise_scale_inv.shape[1];
+        m = output->columnwise_scale_inv.shape[0];
+        k = output->columnwise_scale_inv.shape[1];
       }
       break;
     }
@@ -1153,7 +1242,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
     switch (scaling_mode) {
       case NVTE_MXFP8_1D_SCALING: {
         original_M = input->flat_first_dim();
-        original_K = input->flat_last_dim() / MXFP8_BLOCK_SIZE;
+        original_K =
+            DIVUP(input->flat_last_dim(), static_cast<size_t>(MXFP8_BLOCK_SIZE));
         input_scale_inv_ptr = input->scale_inv.dptr;
         output_scale_inv_ptr = output->scale_inv.dptr;
         break;
@@ -1161,12 +1251,14 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
       case NVTE_NVFP4_1D_SCALING: {
         if (has_rowwise_scale_inv) {
           original_M = input->flat_first_dim();
-          original_K = input->flat_last_dim() / NVFP4_BLOCK_SIZE;
+          original_K =
+              DIVUP(input->flat_last_dim(), static_cast<size_t>(NVFP4_BLOCK_SIZE));
           input_scale_inv_ptr = input->scale_inv.dptr;
           output_scale_inv_ptr = output->scale_inv.dptr;
         } else if (has_columnwise_scale_inv) {
           original_M = input->flat_last_dim();
-          original_K = input->flat_first_dim() / NVFP4_BLOCK_SIZE;
+          original_K =
+              DIVUP(input->flat_first_dim(), static_cast<size_t>(NVFP4_BLOCK_SIZE));
           input_scale_inv_ptr = input->columnwise_scale_inv.dptr;
           output_scale_inv_ptr = output->columnwise_scale_inv.dptr;
         }
@@ -1185,11 +1277,16 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
                                              m,
                                              k,
                                              original_M,
-                                             original_K};
+                                             original_K,
+                                             compact_input};
     if (should_use_rowwise_full_width_swizzle(descriptor.padded_k,
                                               descriptor.padded_m / SF_TILE_DIM_M)) {
       if (m / SF_TILE_DIM_M > kRowwiseMaxBlocks) {
-        launch_multi_tensor_rowwise_full_width_swizzle(&descriptor, 1, stream);
+        if (compact_input) {
+          launch_multi_tensor_rowwise_full_width_swizzle<true>(&descriptor, 1, stream);
+        } else {
+          launch_multi_tensor_rowwise_full_width_swizzle<false>(&descriptor, 1, stream);
+        }
       } else {
         launch_rowwise_full_width_swizzle(descriptor, stream);
       }
@@ -1234,7 +1331,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   // Perform column-wise swizzle
   if (columnwise_swizzle) {
     const int original_M = input->flat_last_dim();
-    const int original_K = input->flat_first_dim() / MXFP8_BLOCK_SIZE;
+    const int original_K =
+        DIVUP(input->flat_first_dim(), static_cast<size_t>(MXFP8_BLOCK_SIZE));
 
     const SwizzleTensorDescriptor descriptor{
         static_cast<const uint8_t*>(input->columnwise_scale_inv.dptr),
@@ -1242,10 +1340,15 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
         m,
         k,
         original_M,
-        original_K};
+        original_K,
+        compact_input};
     const int64_t grid_size = static_cast<int64_t>(m / SF_TILE_DIM_M) * ((k + 31) / 32);
     if (grid_size > kColumnwiseMaxBlocksWith32RowChunks) {
-      launch_multi_tensor_columnwise_chunk_swizzle(&descriptor, 1, stream);
+      if (compact_input) {
+        launch_multi_tensor_columnwise_chunk_swizzle<true>(&descriptor, 1, stream);
+      } else {
+        launch_multi_tensor_columnwise_chunk_swizzle<false>(&descriptor, 1, stream);
+      }
     } else {
       launch_columnwise_chunk_swizzle(descriptor, stream);
     }
@@ -1393,7 +1496,7 @@ namespace {
 
 // Multi-tensor swizzle using rowwise full-width or columnwise chunk kernels with aligned int4
 // (16-byte) loads and stores.
-void int4_vectorized_multi_tensor_swizzle(const std::vector<Tensor*>& input,
+bool int4_vectorized_multi_tensor_swizzle(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, bool rowwise,
                                           cudaStream_t stream) {
   const size_t num_tensors = input.size();
@@ -1406,34 +1509,56 @@ void int4_vectorized_multi_tensor_swizzle(const std::vector<Tensor*>& input,
     const auto& out_scales =
         selected_rowwise ? output[i]->scale_inv : output[i]->columnwise_scale_inv;
     NVTE_CHECK(in_scales.shape.size() == 2, "Expected two-dimensional scaling factors.");
+    NVTE_CHECK(out_scales.shape.size() == 2, "Expected two-dimensional output scaling factors.");
     const int padded_m =
-        static_cast<int>((rowwise || nvfp4) ? in_scales.shape[0] : in_scales.shape[1]);
+        static_cast<int>((rowwise || nvfp4) ? out_scales.shape[0] : out_scales.shape[1]);
     const int padded_k =
-        static_cast<int>((rowwise || nvfp4) ? in_scales.shape[1] : in_scales.shape[0]);
+        static_cast<int>((rowwise || nvfp4) ? out_scales.shape[1] : out_scales.shape[0]);
     NVTE_CHECK(padded_m > 0 && padded_k > 0 && padded_m % 128 == 0 && padded_k % 4 == 0,
                "Invalid scaling-factor shape (", padded_m, ", ", padded_k, ").");
-    NVTE_CHECK(in_scales.numel() == static_cast<size_t>(padded_m) * padded_k &&
-                   out_scales.numel() == static_cast<size_t>(padded_m) * padded_k,
-               "Input and output scaling-factor shapes must match.");
+    NVTE_CHECK(out_scales.numel() == static_cast<size_t>(padded_m) * padded_k,
+               "Output scaling factors must use the padded GEMM layout.");
     const auto [first_dim, last_dim] = input[i]->flat_2d_dims();
     const int block_size = nvfp4 ? NVFP4_BLOCK_SIZE : MXFP8_BLOCK_SIZE;
     const int original_m = static_cast<int>(selected_rowwise ? first_dim : last_dim);
-    const int original_k = static_cast<int>((selected_rowwise ? last_dim : first_dim) / block_size);
+    const int original_k = static_cast<int>(
+        DIVUP(selected_rowwise ? last_dim : first_dim, static_cast<size_t>(block_size)));
+    const bool compact_input =
+        in_scales.numel() != static_cast<size_t>(padded_m) * padded_k;
+    NVTE_CHECK(!compact_input || column_padded_compact_scales(*input[i], selected_rowwise),
+               "Input scaling factors must either use the padded GEMM layout or omit only "
+               "outer-dimension padding.");
     tensors[i] = {static_cast<const uint8_t*>(in_scales.dptr),
                   static_cast<uint8_t*>(out_scales.dptr),
                   padded_m,
                   padded_k,
                   original_m,
-                  original_k};
+                  original_k,
+                  compact_input};
   }
-  for (size_t first = 0; first < num_tensors; first += kMaxTensorsPerLaunch) {
-    const int count = static_cast<int>(std::min<size_t>(kMaxTensorsPerLaunch, num_tensors - first));
-    if (rowwise) {
-      launch_multi_tensor_rowwise_full_width_swizzle(tensors.data() + first, count, stream);
-    } else {
-      launch_multi_tensor_columnwise_chunk_swizzle(tensors.data() + first, count, stream);
+  for (size_t first = 0; first < num_tensors;) {
+    size_t end = first + 1;
+    while (end < num_tensors && end - first < kMaxTensorsPerLaunch &&
+           tensors[end].compact_input == tensors[first].compact_input) {
+      ++end;
     }
+    const int count = static_cast<int>(end - first);
+    if (rowwise) {
+      if (tensors[first].compact_input) {
+        launch_multi_tensor_rowwise_full_width_swizzle<true>(tensors.data() + first, count, stream);
+      } else {
+        launch_multi_tensor_rowwise_full_width_swizzle<false>(tensors.data() + first, count, stream);
+      }
+    } else {
+      if (tensors[first].compact_input) {
+        launch_multi_tensor_columnwise_chunk_swizzle<true>(tensors.data() + first, count, stream);
+      } else {
+        launch_multi_tensor_columnwise_chunk_swizzle<false>(tensors.data() + first, count, stream);
+      }
+    }
+    first = end;
   }
+  return true;
 }
 
 }  // namespace
@@ -1459,8 +1584,13 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 
     // We don't allow empty tensors. They should be filtered out before calling this function.
     NVTE_CHECK(input[i]->numel() != 0, "Tensor input[", i, "] is empty.");
-    CheckInputTensor(*input[i], "scaling_factor_input", check_scale_inv_shapes);
+    const bool compact_input = column_padded_compact_scales(*input[i]);
+    CheckInputTensor(*input[i], "scaling_factor_input",
+                     check_scale_inv_shapes && !compact_input);
     CheckInputTensor(*output[i], "scaling_factor_output", check_scale_inv_shapes);
+    NVTE_CHECK(output[i]->scaling_mode == scaling_mode &&
+                   output[i]->flat_2d_dims() == input[i]->flat_2d_dims(),
+               "Input and output tensor ", i, " layouts must match.");
     all_has_data = all_has_data && input[i]->scale_inv.has_data();
     all_has_columnwise_data =
         (all_has_columnwise_data && input[i]->columnwise_scale_inv.has_data());
@@ -1479,22 +1609,23 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
     const bool use_rowwise_buffer = input[i]->scale_inv.has_data();
     const bool selected_rowwise = rowwise_swizzle && use_rowwise_buffer;
     const auto& in_scales = selected_rowwise ? input[i]->scale_inv : input[i]->columnwise_scale_inv;
+    const auto& out_scales =
+        selected_rowwise ? output[i]->scale_inv : output[i]->columnwise_scale_inv;
     check_scale_inv_alignment(input[i], "Input", selected_rowwise);
     check_scale_inv_alignment(output[i], "Output", selected_rowwise);
     if (rowwise_swizzle) {
-      NVTE_CHECK(in_scales.shape.size() == 2, "Expected two-dimensional scaling factors.");
-      max_rowwise_padded_k = std::max(max_rowwise_padded_k, static_cast<int>(in_scales.shape[1]));
-      total_rowwise_tiles += static_cast<int64_t>(in_scales.shape[0]) / 128;
+      NVTE_CHECK(in_scales.shape.size() == 2 && out_scales.shape.size() == 2,
+                 "Expected two-dimensional scaling factors.");
+      max_rowwise_padded_k = std::max(max_rowwise_padded_k, static_cast<int>(out_scales.shape[1]));
+      total_rowwise_tiles += static_cast<int64_t>(out_scales.shape[0]) / 128;
     }
   }
   if (rowwise_swizzle) {
     if (should_use_rowwise_full_width_swizzle(max_rowwise_padded_k, total_rowwise_tiles)) {
-      int4_vectorized_multi_tensor_swizzle(input, output, true, stream);
-      return;
+      if (int4_vectorized_multi_tensor_swizzle(input, output, true, stream)) return;
     }
   } else if (columnwise_swizzle) {
-    int4_vectorized_multi_tensor_swizzle(input, output, false, stream);
-    return;
+    if (int4_vectorized_multi_tensor_swizzle(input, output, false, stream)) return;
   }
   // Fallback to the generic rowwise swizzle kernel.
   constexpr int SF_TILE_DIM_M = 128;
@@ -1519,12 +1650,12 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       int m, k;
 
       if (all_has_data) {
-        m = input[i]->scale_inv.shape[0];
-        k = input[i]->scale_inv.shape[1];
+        m = output[i]->scale_inv.shape[0];
+        k = output[i]->scale_inv.shape[1];
       } else {
         NVTE_CHECK(all_nvfp4, "When doing rowwise swizzle with rowwise data, it has to be NVFP4");
-        m = input[i]->columnwise_scale_inv.shape[0];
-        k = input[i]->columnwise_scale_inv.shape[1];
+        m = output[i]->columnwise_scale_inv.shape[0];
+        k = output[i]->columnwise_scale_inv.shape[1];
       }
 
       NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Input should be padded in M/N dimension!");
@@ -1564,12 +1695,14 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
         kernel_args.input_list[pos] = const_cast<void*>(input[i]->scale_inv.dptr);
         kernel_args.output_list[pos] = output[i]->scale_inv.dptr;
         kernel_args.original_m_list[pos] = first_dim;
-        kernel_args.original_k_list[pos] = last_dim / block_scale_size;
+        kernel_args.original_k_list[pos] =
+            DIVUP(last_dim, static_cast<size_t>(block_scale_size));
       } else {
         kernel_args.input_list[pos] = const_cast<void*>(input[i]->columnwise_scale_inv.dptr);
         kernel_args.output_list[pos] = output[i]->columnwise_scale_inv.dptr;
         kernel_args.original_m_list[pos] = last_dim;
-        kernel_args.original_k_list[pos] = first_dim / NVFP4_BLOCK_SIZE;
+        kernel_args.original_k_list[pos] =
+            DIVUP(first_dim, static_cast<size_t>(NVFP4_BLOCK_SIZE));
       }
       kernel_args.num_tensors++;
     }
