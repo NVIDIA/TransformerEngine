@@ -241,23 +241,22 @@ void nvte_splits_to_offsets_2d(const NVTETensor first_dims, const NVTETensor las
 void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
                                   const int64_t *strides, const int *include_leading_zero,
                                   size_t num_outputs, cudaStream_t stream) {
-  nvte_splits_to_offsets_multi_with_alignment(split_sizes, outputs, strides, include_leading_zero,
-                                              num_outputs, 1, stream);
+  nvte_splits_to_offsets_multi_v2(split_sizes, 1, outputs, strides, include_leading_zero,
+                                  num_outputs, stream);
 }
 
-void nvte_splits_to_offsets_multi_with_alignment(NVTETensor split_sizes, NVTETensor *outputs,
-                                                 const int64_t *strides,
-                                                 const int *include_leading_zero,
-                                                 size_t num_outputs, size_t split_alignment,
-                                                 cudaStream_t stream) {
-  NVTE_API_CALL(nvte_splits_to_offsets_multi_with_alignment);
+void nvte_splits_to_offsets_multi_v2(NVTETensor split_sizes, size_t split_alignment,
+                                     NVTETensor *outputs, const int64_t *strides,
+                                     const int *include_leading_zero, size_t num_outputs,
+                                     cudaStream_t stream) {
+  NVTE_API_CALL(nvte_splits_to_offsets_multi_v2);
   using namespace transformer_engine;
   namespace s2o = transformer_engine::splits_to_offsets;
 
+  NVTE_CHECK(split_alignment > 0, "split_alignment must be positive.");
   if (num_outputs == 0) {
     return;
   }
-  NVTE_CHECK(split_alignment > 0, "split_alignment must be positive.");
   NVTE_CHECK(outputs != nullptr, "outputs is NULL.");
   NVTE_CHECK(strides != nullptr, "strides is NULL.");
   NVTE_CHECK(include_leading_zero != nullptr, "include_leading_zero is NULL.");

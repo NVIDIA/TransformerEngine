@@ -222,8 +222,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
-        py::arg("noop_flag") = py::none(), py::arg("output") = py::none(),
-        py::arg("split_alignment") = 1);
+        py::arg("noop_flag") = py::none(), py::arg("output") = py::none());
   m.def("group_scaled_swiglu", transformer_engine::pytorch::group_scaled_swiglu,
         "Grouped scaled SwiGLU recompute fused with columnwise MXFP8 quantization",
         py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),

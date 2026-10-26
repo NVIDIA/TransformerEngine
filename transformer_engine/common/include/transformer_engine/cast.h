@@ -102,18 +102,6 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                          const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
-/*! \brief Assert on the device that grouped row splits and element offsets satisfy an alignment.
- *
- * The grouped tensor must have a common last dimension. This call enqueues a kernel on stream
- * without reading split metadata on the host, so it can be captured in a CUDA graph.
- *
- * \param[in] tensor      Grouped tensor carrying device-side split metadata.
- * \param[in] alignment   Required row alignment (positive; 1 disables the check).
- * \param[in] stream      CUDA stream used for the assertion.
- */
-void nvte_group_validate_split_alignment(const NVTEGroupedTensor tensor, size_t alignment,
-                                         cudaStream_t stream);
-
 /*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
  *         The type of quantized tensor in the output depends on the scaling mode of the output

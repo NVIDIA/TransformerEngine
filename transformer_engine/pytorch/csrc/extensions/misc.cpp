@@ -95,10 +95,9 @@ std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
 
   auto split_sizes_nvte = makeTransformerEngineTensor(split_sizes_out);
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_splits_to_offsets_multi_with_alignment(split_sizes_nvte.data(), outputs_nvte.data(),
-                                                strides.data(), include_leading_zero_int.data(),
-                                                num_outputs, split_alignment,
-                                                at::cuda::getCurrentCUDAStream());
+    nvte_splits_to_offsets_multi_v2(split_sizes_nvte.data(), split_alignment, outputs_nvte.data(),
+                                    strides.data(), include_leading_zero_int.data(), num_outputs,
+                                    at::cuda::getCurrentCUDAStream());
   });
 
   return {split_sizes_out, std::move(outputs)};

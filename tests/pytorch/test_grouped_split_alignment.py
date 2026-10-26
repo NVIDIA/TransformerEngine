@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Device-side split checks used by graph-safe grouped quantization."""
+"""Device-side alignment checks in graph-safe grouped offset scans."""
 
 import os
 import subprocess
@@ -11,89 +11,31 @@ import sys
 import pytest
 import torch
 
-import transformer_engine.pytorch as te
+import transformer_engine.pytorch  # Load the common library before the extension.
 import transformer_engine_torch as tex
-from transformer_engine.pytorch import MXFP8Quantizer
 
 
-available, unavailable_reason = te.is_mxfp8_available(return_reason=True)
+STRIDES = [1, 1, 128, 256, 64, 512, 2, 4, 8]
 
 
-def _quantizer():
-    return MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False)
-
-
-@pytest.mark.skipif(not available, reason=unavailable_reason)
-def test_group_quantize_split_alignment_graph_replay():
-    """Changing device splits between replays keeps aligned calls graph-safe."""
-    x = torch.randn(512, 128, device="cuda", dtype=torch.bfloat16)
-    splits = torch.tensor([256, 256], device="cuda", dtype=torch.int64)
-    quantizer = _quantizer()
-
-    tex.group_quantize(x, quantizer, 2, splits, split_alignment=128)
-    torch.cuda.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        output = tex.group_quantize(x, quantizer, 2, splits, split_alignment=128)
-
-    for sizes in ([256, 256], [128, 384], [0, 512]):
-        splits.copy_(torch.tensor(sizes, device="cuda", dtype=torch.int64))
-        graph.replay()
-        torch.cuda.synchronize()
-    assert output is not None
-
-
-@pytest.mark.skipif(not available, reason=unavailable_reason)
-@pytest.mark.parametrize("bad_metadata", ["splits", "offsets"])
-def test_group_quantize_split_alignment_asserts_on_replay(bad_metadata):
-    """An invalid replay fails on device without poisoning the pytest CUDA context."""
-    script = """
-import torch
-import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
-from transformer_engine.pytorch import MXFP8Quantizer
-
-x = torch.randn(512, 128, device='cuda', dtype=torch.bfloat16)
-splits = torch.tensor([256, 256], device='cuda', dtype=torch.int64)
-offsets = torch.tensor([0, 256 * 128, 512 * 128], device='cuda', dtype=torch.int64)
-quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False)
-tex.group_quantize(x, quantizer, 2, splits, tensor_offsets=offsets, split_alignment=256)
-torch.cuda.synchronize()
-graph = torch.cuda.CUDAGraph()
-with torch.cuda.graph(graph):
-    output = tex.group_quantize(
-        x, quantizer, 2, splits, tensor_offsets=offsets, split_alignment=256
-    )
-if BAD_METADATA == 'splits':
-    splits.copy_(torch.tensor([128, 384], device='cuda', dtype=torch.int64))
-else:
-    offsets.copy_(torch.tensor([0, 128 * 128, 512 * 128], device='cuda', dtype=torch.int64))
-graph.replay()
-torch.cuda.synchronize()
-""".replace(
-        "BAD_METADATA", repr(bad_metadata)
-    )
-    env = os.environ.copy()
-    result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, env=env, check=False
-    )
-    assert result.returncode != 0
-    assert "split_alignment" in result.stdout + result.stderr
-
-
-def test_grouped_offset_scan_alignment_graph_replay():
-    """The offset scan validates dynamic splits without an additional kernel."""
+@pytest.mark.parametrize("num_outputs,alignment", [(1, 128), (4, 128), (6, 256), (9, 256)])
+def test_multi_offsets_alignment_graph_replay(num_outputs, alignment):
+    """Every scaled output follows dynamic aligned splits, including a second kernel chunk."""
     splits = torch.tensor([256, 256], device="cuda", dtype=torch.int64)
     device = torch.device("cuda")
+    strides = STRIDES[:num_outputs]
+    leading_zeros = [False] + [True] * (num_outputs - 1)
+    dtypes = [torch.int32] + [torch.int64] * (num_outputs - 1)
 
     def scan():
         return tex.splits_to_offsets_multi(
             splits,
             device,
-            strides=[1],
-            include_leading_zero=[True],
-            dtypes=[torch.int64],
-            split_alignment=128,
+            strides=strides,
+            include_leading_zero=leading_zeros,
+            dtypes=dtypes,
+            bulk_allocate=num_outputs > 1,
+            split_alignment=alignment,
         )
 
     scan()
@@ -102,43 +44,65 @@ def test_grouped_offset_scan_alignment_graph_replay():
     with torch.cuda.graph(graph):
         _, outputs = scan()
 
-    for sizes, expected in (([256, 256], [0, 256, 512]), ([128, 384], [0, 128, 512])):
+    sizes_to_replay = ([256, 256], [0, 512])
+    if alignment == 128:
+        sizes_to_replay += ([128, 384],)
+    for sizes in sizes_to_replay:
         splits.copy_(torch.tensor(sizes, device="cuda", dtype=torch.int64))
         graph.replay()
-        torch.testing.assert_close(
-            outputs[0], torch.tensor(expected, device="cuda", dtype=torch.int64)
-        )
+        for output, stride, leading_zero, dtype in zip(outputs, strides, leading_zeros, dtypes):
+            expected = [sizes[0], sum(sizes)]
+            if leading_zero:
+                expected.insert(0, 0)
+            torch.testing.assert_close(
+                output, torch.tensor(expected, device="cuda", dtype=dtype) * stride
+            )
 
 
-def test_grouped_offset_scan_alignment_asserts_on_replay():
-    """The shared grouped-linear offset kernel traps on an invalid graph replay."""
+@pytest.mark.parametrize(
+    "num_outputs,alignment,num_splits,bad_index,bad_value",
+    [(4, 128, 2, 0, 64), (6, 256, 2, 0, 128), (6, 256, 2, 0, -256), (6, 256, 257, 256, 128)],
+)
+def test_multi_offsets_alignment_asserts_on_replay(
+    num_outputs, alignment, num_splits, bad_index, bad_value
+):
+    """Invalid graph replays trap on device without poisoning the pytest CUDA context."""
     script = """
+import os
 import torch
 import transformer_engine.pytorch
 import transformer_engine_torch as tex
 
-splits = torch.tensor([256, 256], device='cuda', dtype=torch.int64)
-device = torch.device('cuda')
+num_outputs = int(os.environ['NUM_OUTPUTS'])
+alignment = int(os.environ['ALIGNMENT'])
+num_splits = int(os.environ['NUM_SPLITS'])
+bad_index = int(os.environ['BAD_INDEX'])
+bad_value = int(os.environ['BAD_VALUE'])
+splits = torch.full((num_splits,), 256, device='cuda', dtype=torch.int64)
+kwargs = dict(strides=[1] * num_outputs, include_leading_zero=[True] * num_outputs,
+              dtypes=[torch.int64] * num_outputs, bulk_allocate=True,
+              split_alignment=alignment)
 def scan():
-    return tex.splits_to_offsets_multi(
-        splits, device, strides=[1], include_leading_zero=[True],
-        dtypes=[torch.int64], split_alignment=256
-    )
+    return tex.splits_to_offsets_multi(splits, torch.device('cuda'), **kwargs)
 scan()
 torch.cuda.synchronize()
 graph = torch.cuda.CUDAGraph()
 with torch.cuda.graph(graph):
-    outputs = scan()
-splits.copy_(torch.tensor([128, 384], device='cuda', dtype=torch.int64))
+    captured = scan()
+splits[bad_index] = bad_value
 graph.replay()
 torch.cuda.synchronize()
 """
+    env = os.environ.copy()
+    env.update(
+        NUM_OUTPUTS=str(num_outputs),
+        ALIGNMENT=str(alignment),
+        NUM_SPLITS=str(num_splits),
+        BAD_INDEX=str(bad_index),
+        BAD_VALUE=str(bad_value),
+    )
     result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        env=os.environ.copy(),
-        check=False,
+        [sys.executable, "-c", script], capture_output=True, text=True, env=env, check=False
     )
     assert result.returncode != 0
     assert "split_alignment" in result.stdout + result.stderr
