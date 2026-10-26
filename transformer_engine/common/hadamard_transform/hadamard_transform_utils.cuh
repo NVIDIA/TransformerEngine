@@ -197,21 +197,21 @@ __device__ __forceinline__ uint32_t swizzle_128B_atom_32B(uint32_t gmem_row_idx,
 }
 
 template <typename FloatArray>
-__device__ __forceinline__ FloatArray mul_f32x2_by_scalar(const FloatArray &in, const float scale) {
+__device__ __forceinline__ FloatArray mul_f32x2_by_scalar(const FloatArray& in, const float scale) {
   static_assert(std::is_same_v<typename FloatArray::value_type, float>,
                 "mul_f32x2_by_scalar expects an array of floats.");
   constexpr int kNumElts = sizeof(FloatArray) / sizeof(float);
   FloatArray out;
-  const float *in_ptr = reinterpret_cast<const float *>(&in);
-  float *out_ptr = reinterpret_cast<float *>(&out);
+  const float* in_ptr = reinterpret_cast<const float*>(&in);
+  float* out_ptr = reinterpret_cast<float*>(&out);
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   const float2 scale_pair = {scale, scale};
 #pragma unroll
   for (int i = 0; i < kNumElts / 2; ++i) {
     asm("mul.rn.f32x2 %0, %1, %2;"
-        : "=l"(reinterpret_cast<uint64_t &>(out_ptr[2 * i]))
-        : "l"(reinterpret_cast<const uint64_t &>(in_ptr[2 * i])),
-          "l"(reinterpret_cast<const uint64_t &>(scale_pair)));
+        : "=l"(reinterpret_cast<uint64_t&>(out_ptr[2 * i]))
+        : "l"(reinterpret_cast<const uint64_t&>(in_ptr[2 * i])),
+          "l"(reinterpret_cast<const uint64_t&>(scale_pair)));
   }
   if constexpr (kNumElts % 2 != 0) {
     out_ptr[kNumElts - 1] = in_ptr[kNumElts - 1] * scale;

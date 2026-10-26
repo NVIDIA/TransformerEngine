@@ -59,12 +59,9 @@ enum ShapeRepresentation {
   VARYING_BOTH_DIMS = 3
 };
 
-__device__ __forceinline__ int get_current_tensor_id_from_smem(const ShapeRepresentation shape_rep,
-                                                               const int num_tensors,
-                                                               const int token,
-                                                               const int tokens_per_tensor,
-                                                               const int64_t hidden,
-                                                               const int64_t *const smem_offsets) {
+__device__ __forceinline__ int get_current_tensor_id_from_smem(
+    const ShapeRepresentation shape_rep, const int num_tensors, const int token,
+    const int tokens_per_tensor, const int64_t hidden, const int64_t *const smem_offsets) {
   if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
     return token / tokens_per_tensor;
   }
@@ -95,8 +92,8 @@ __device__ __forceinline__ int get_current_tensor_id_cached(
     return cached_id;
   }
   const int tokens_per_tensor = packed_tokens / num_tensors;
-  const int id = get_current_tensor_id_from_smem(shape_rep, num_tensors, token,
-                                                 tokens_per_tensor, hidden, smem_offsets);
+  const int id = get_current_tensor_id_from_smem(shape_rep, num_tensors, token, tokens_per_tensor,
+                                                 hidden, smem_offsets);
   if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
     cache.begin = id * tokens_per_tensor;
     cache.end = cache.begin + tokens_per_tensor;
@@ -650,8 +647,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
           scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
           ++sched_pipeline_consumer_state;
           CUTLASS_PRAGMA_NO_UNROLL
-          for (int k_tile = 0;
-               k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n;) {
+          for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n;) {
             mainloop_pipeline.consumer_wait(mainloop_pipe_consumer_state, barrier_token);
             int read_stage = mainloop_pipe_consumer_state.index();
             auto tCrA_mk = tCrA(_, _, _, read_stage);
@@ -771,9 +767,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
           scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
           ++sched_pipeline_consumer_state;
           CUTLASS_PRAGMA_NO_UNROLL
-          for (int k_tile = 0;
-               k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n;
-               ++k_tile) {
+          for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n; ++k_tile) {
             int global_tile_n_offset = (tile_n_base + k_tile) * size<1>(epilogue_tiler);
 
             // TODO(zhongbo): double check the logic here
@@ -805,18 +799,18 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
             // Build output tensors for columns and their quant scales
             // TODO(zhongbo): double check the logic here
             const int64_t group_elem_offset = shared_storage.group_offsets[group_idx];
-            Tensor mD = make_tensor(
-                cute::subbyte_iterator<TD>(reinterpret_cast<TD *>(
-                    reinterpret_cast<char *>(QA_COLWISE) + group_elem_offset / 2)),
-                make_shape(M, cur_N), DStride{});  // (M,packed_N)
+            Tensor mD =
+                make_tensor(cute::subbyte_iterator<TD>(reinterpret_cast<TD *>(
+                                reinterpret_cast<char *>(QA_COLWISE) + group_elem_offset / 2)),
+                            make_shape(M, cur_N), DStride{});  // (M,packed_N)
             Tensor gD_mn = local_tile(mD, epilogue_tiler, make_coord(_, _, _),
                                       Step<_1, _1, X>{});  // (BLK_M,BLK_N)
 
             // for every tensor [x, y] row major, x y both a multiple of 128
             // both of its rowwise and colwise scaling factors will have exactly x * y / 16 elements in FP8 E4M3
             Tensor mSFD = make_tensor(
-                make_gmem_ptr<TSFD>(reinterpret_cast<TSFD *>(
-                    reinterpret_cast<char *>(SFA_COLWISE) + group_elem_offset / kNVFP4BlockSize)),
+                make_gmem_ptr<TSFD>(reinterpret_cast<TSFD *>(reinterpret_cast<char *>(SFA_COLWISE) +
+                                                             group_elem_offset / kNVFP4BlockSize)),
                 sfd_layout);
             Tensor gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_, _, _),
                                         Step<_1, _1, X>{});  // (BLK_M,BLK_N)
@@ -879,8 +873,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
                 rng;
             // "Prefetch" a stochastic rounding state for the first tile
             if constexpr (kEnableStochasticRounding) {
-              const size_t rng_sequence = global_thread_idx + k_tile * 512 +
-                                          linear_tile_idx * K_TILE_MAX * 512;
+              const size_t rng_sequence =
+                  global_thread_idx + k_tile * 512 + linear_tile_idx * K_TILE_MAX * 512;
               rng.init(rng_seed, rng_sequence, rng_offset);
             }
 
@@ -1045,8 +1039,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
           const uint32_t tiles_n = scheduler.tiles_n();
           const uint32_t linear_tile_idx = scheduler.get_linear_tile_idx();
           CUTLASS_PRAGMA_NO_UNROLL
-          for (int k_tile = 0;
-               k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n;) {
+          for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n;) {
             int global_tile_n_offset = (tile_n_base + k_tile) * size<1>(epilogue_tiler);
 
             int cur_group_idx = get_current_tensor_id_cached(
@@ -1063,8 +1056,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
               global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
             }
 
-            auto tQAgSFA_mn =
-                tQAgSFA(_, _, _, tile_m, tile_n_base + k_tile);
+            auto tQAgSFA_mn = tQAgSFA(_, _, _, tile_m, tile_n_base + k_tile);
             auto tQAgQA_mn = tQAgQA(_, _, _, tile_m, tile_n_base + k_tile);
             auto barrier_token = mainloop_pipeline.consumer_try_wait(mainloop_pipe_consumer_state);
             mainloop_pipeline.consumer_wait(mainloop_pipe_consumer_state, barrier_token);
@@ -1118,14 +1110,12 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
               if constexpr (kEnableStochasticRounding) {
                 random_uint4 = rng.generate4();
                 output_frgs[v] = StochasticNumericConverter(
-                    mul_f32x2_by_scalar(
-                        compute_frgs_up, acc_scale),
+                    mul_f32x2_by_scalar(compute_frgs_up, acc_scale),
                     *reinterpret_cast<cutlass::Array<uint32_t, 4> *>(&random_uint4));
               } else {
                 output_frgs[v] =
                     cutlass::NumericArrayConverter<TQA, ElementAccumulator, VectorSize>{}(
-                        mul_f32x2_by_scalar(
-                            compute_frgs_up, acc_scale));
+                        mul_f32x2_by_scalar(compute_frgs_up, acc_scale));
               }
             }
             copy(tiled_r2g_QA, tQArQA, tQAgQA_mn);
