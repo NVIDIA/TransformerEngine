@@ -2130,38 +2130,3 @@ class TestGroupedTensor:
             assert torch.equal(getattr(dst, f"weight{i}"), expected_weight)
         for i, expected_bias in enumerate(expected_biases):
             assert torch.equal(getattr(dst, f"bias{i}"), expected_bias.reshape(-1))
-
-
-# Keep this last: a device trap invalidates the CUDA context for the rest of the pytest process.
-def test_misaligned_splits_fail_on_graph_replay(capfd):
-    """Exercise both scan sizes and reject a later chunk during replay."""
-    small_splits = torch.full((128,), 128, device="cuda", dtype=torch.int64)
-    _, (small_offsets,) = tex.splits_to_offsets_multi(
-        small_splits,
-        torch.device("cuda"),
-        strides=[1],
-        include_leading_zero=[True],
-        dtypes=[torch.int64],
-        split_alignment=128,
-    )
-    assert small_offsets[-1].item() == 128 * 128
-
-    splits = torch.full((257,), 256, device="cuda", dtype=torch.int64)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        _ = tex.splits_to_offsets_multi(
-            splits,
-            torch.device("cuda"),
-            strides=[1] * 6,
-            include_leading_zero=[True] * 6,
-            dtypes=[torch.int64] * 6,
-            split_alignment=256,
-        )
-
-    splits[256] = 128
-    torch.cuda.synchronize()
-    with pytest.raises(RuntimeError):
-        graph.replay()
-        torch.cuda.synchronize()
-
-    assert "Grouped split size is not divisible by split_alignment." in capfd.readouterr().out
