@@ -26,6 +26,7 @@ def make_row_id_map(
     routing_map: torch.Tensor,
     num_tokens: int,
     num_experts: int,
+    num_out_tokens: int,
 ):
     """
     Prepare the row_id_map for the permutation.
@@ -40,6 +41,9 @@ def make_row_id_map(
         Number of tokens in the input tensor.
     num_experts : int
         Number of experts in the input tensor.
+    num_out_tokens : int
+        Number of rows in the permuted output. Routing-map entries whose destination row falls at
+        or past this limit are dropped (marked -1), like the CUDA index-map path does.
 
     Returns
     -------
@@ -97,6 +101,7 @@ def make_row_id_map(
         row_id_map,
         workspace_tensor,
         num_tokens,
+        num_out_tokens,
         row_id_map.stride(0),
         row_id_map.stride(1),
         triton.next_power_of_2(num_experts * triton.cdiv(num_tokens, block_size)),
