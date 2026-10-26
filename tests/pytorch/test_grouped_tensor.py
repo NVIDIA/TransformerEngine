@@ -2134,7 +2134,18 @@ class TestGroupedTensor:
 
 # Keep this last: a device trap invalidates the CUDA context for the rest of the pytest process.
 def test_misaligned_splits_fail_on_graph_replay(capfd):
-    """A split in the second scan chunk is checked again on graph replay."""
+    """Exercise both scan sizes and reject a later chunk during replay."""
+    small_splits = torch.full((128,), 128, device="cuda", dtype=torch.int64)
+    _, (small_offsets,) = tex.splits_to_offsets_multi(
+        small_splits,
+        torch.device("cuda"),
+        strides=[1],
+        include_leading_zero=[True],
+        dtypes=[torch.int64],
+        split_alignment=128,
+    )
+    assert small_offsets[-1].item() == 128 * 128
+
     splits = torch.full((257,), 256, device="cuda", dtype=torch.int64)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
