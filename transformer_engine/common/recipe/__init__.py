@@ -335,6 +335,9 @@ class Float8CurrentScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    fp8_quant_fwd_inp: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_fwd_weight: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_bwd_grad: QParams = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         assert self.fp8_format in (Format.E4M3, Format.HYBRID), "Unsupported FP8 format."
@@ -472,6 +475,9 @@ class Float8BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    fp8_quant_fwd_inp: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_fwd_weight: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_bwd_grad: QParams = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
@@ -611,6 +617,9 @@ class NVFP4BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    fp4_quant_fwd_inp: QParams = field(init=False, repr=False, compare=False)
+    fp4_quant_fwd_weight: QParams = field(init=False, repr=False, compare=False)
+    fp4_quant_bwd_grad: QParams = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
