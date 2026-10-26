@@ -816,13 +816,13 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   if (is_nvfp4) {
     // The C++ grouped tensor carries neither the row-scaled flag nor the E4M3
     // max, so reject those variants here.
-    const auto *nvfp4_quantizer = static_cast<const NVFP4Quantizer *>(quantizer.get());
-    NVTE_CHECK(!nvfp4_quantizer->row_scaled_nvfp4,
-               "group_dequantize: row-scaled NVFP4 is not supported.");
+    const bool row_scaled_nvfp4 = input.attr("row_scaled_nvfp4").cast<bool>();
+    const int nvfp4_e4m3_max = input.attr("nvfp4_e4m3_max").cast<int>();
+    NVTE_CHECK(!row_scaled_nvfp4, "group_dequantize: row-scaled NVFP4 is not supported.");
     // Zero selects the scale dtype's maximum, which is 448 for E4M3.
-    NVTE_CHECK(nvfp4_quantizer->nvfp4_e4m3_max == 0 || nvfp4_quantizer->nvfp4_e4m3_max == 448,
-               "group_dequantize: NVFP4 requires E4M3 max 0 (default) or 448 (got ",
-               nvfp4_quantizer->nvfp4_e4m3_max, ").");
+    NVTE_CHECK(nvfp4_e4m3_max == 0 || nvfp4_e4m3_max == 448,
+               "group_dequantize: NVFP4 requires E4M3 max 0 (default) or 448 (got ", nvfp4_e4m3_max,
+               ").");
     auto amax = get_optional_tensor("amax");
     if (amax.has_value()) {
       input_cpp.set_amax(amax->data_ptr(), DType::kFloat32, getTensorShape(*amax));

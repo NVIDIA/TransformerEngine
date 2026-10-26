@@ -126,6 +126,7 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 
   NVTE_CHECK(input->has_data(),
              "Grouped NVFP4 dequantization reads rowwise data, but the input has none.");
+  NVTE_CHECK(output->has_data(), "Grouped NVFP4 dequantization requires rowwise output storage.");
   NVTE_CHECK(input->dtype() == DType::kFloat4E2M1, "Input must have FP4 type.");
   NVTE_CHECK(is_high_precision_dtype(output->dtype()), "Output must be in higher precision.");
   NVTE_CHECK(input->num_tensors == output->num_tensors,
