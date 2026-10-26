@@ -335,9 +335,8 @@ __global__ void __launch_bounds__(FA_THREADS_NUM)
 }  // namespace group_row_scaled_amax_kernel
 
 inline void group_row_amax(const Tensor &input, const Tensor *noop,
-                           std::vector<Tensor *> &output_list,
-                           const size_t *split_sections, size_t num_tensors,
-                           cudaStream_t stream) {
+                           std::vector<Tensor *> &output_list, const size_t *split_sections,
+                           size_t num_tensors, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   using namespace group_row_scaled_amax_kernel;
 
