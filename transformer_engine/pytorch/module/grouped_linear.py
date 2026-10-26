@@ -539,10 +539,12 @@ def _grouped_linear_setup_ctx(
         bwd_args.grad_output_quantizers = [None] * num_gemms
 
 
-def _finish_wgrad(weight, main_grad, wgrad, fuse_wgrad_accumulation):
+def _finish_wgrad(weight, main_grad, wgrad, fuse_wgrad_accumulation, delayed=False):
     """Return the gradient expected by autograd or MCore's main-grad hooks."""
     if not fuse_wgrad_accumulation:
-        return wgrad
+        # A delayed wgrad is written later by backward_dw(), which accumulates into
+        # ``.grad`` itself. Its buffer is still unfilled here, so autograd must not see it.
+        return None if delayed else wgrad
     if not hasattr(weight, "grad_added_to_main_grad"):
         return None
     weight.grad_added_to_main_grad = True
@@ -771,8 +773,9 @@ def _grouped_linear_backward_impl(
         if is_dist_weight:
             wgrad_list = finalize_weight_grads(origin_weights, wgrad_list)
         else:
+            delayed = args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute()
             wgrad_list = [
-                _finish_wgrad(weight, main_grad, wgrad, args.fuse_wgrad_accumulation)
+                _finish_wgrad(weight, main_grad, wgrad, args.fuse_wgrad_accumulation, delayed)
                 for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
             ]
     else:
@@ -1290,8 +1293,9 @@ def _grouped_linear_graph_safe_backward(
         if is_dist_weight:
             wgrad_list = finalize_weight_grads(origin_weights, wgrad_list)
         else:
+            delayed = args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute()
             wgrad_list = [
-                _finish_wgrad(weight, main_grad, wgrad, args.fuse_wgrad_accumulation)
+                _finish_wgrad(weight, main_grad, wgrad, args.fuse_wgrad_accumulation, delayed)
                 for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
             ]
     else:

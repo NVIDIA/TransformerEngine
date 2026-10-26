@@ -829,23 +829,37 @@ def test_make_graphed_callables_with_delayed_wgrad(with_order, set_to_none, bias
 @pytest.mark.parametrize("set_to_none", (False, True))
 @pytest.mark.parametrize("tied", (False, True))
 def test_graphed_delayed_wgrad_accumulates_microbatches(with_order, set_to_none, tied):
-    """Separate delayed graphs contribute to shared weights across microbatches."""
+    """Separate delayed graphs contribute to shared weights across microbatches.
+
+    Graph replay must match the same TE modules run eagerly bitwise. The independent PyTorch
+    FP32 reference gets a TF32 tolerance: TE computes FP32 GEMMs in TF32, so once SGD moves
+    the weights off TF32-representable values the two no longer agree bitwise.
+    """
     reset_rng_states()
     modules = tuple(
         Linear(16, 16, bias=False, params_dtype=torch.float32, delay_wgrad_compute=True)
         for _ in range(2)
     )
     reference = torch.nn.Sequential(
+        *(
+            Linear(16, 16, bias=False, params_dtype=torch.float32, delay_wgrad_compute=True)
+            for _ in range(2)
+        )
+    )
+    torch_reference = torch.nn.Sequential(
         torch.nn.Linear(16, 16, bias=False, device="cuda"),
         torch.nn.Linear(16, 16, bias=False, device="cuda"),
     )
     if tied:
         modules[1].weight = modules[0].weight
         reference[1].weight = reference[0].weight
+        torch_reference[1].weight = torch_reference[0].weight
     with torch.no_grad():
-        for module, reference_module in zip(modules, reference):
+        for module, reference_module, torch_module in zip(modules, reference, torch_reference):
             module.weight.fill_(0.25)
             reference_module.weight.copy_(module.weight)
+            torch_module.weight.copy_(module.weight)
+    tf32_tols = {"rtol": 1e-2, "atol": 1e-2}
     graph_options = {}
     if with_order:
         graph_options = {"_order": [1, 2, -2, -2.5, -1, -1.5], "_num_layers_per_chunk": [1, 1]}
@@ -855,33 +869,47 @@ def test_graphed_delayed_wgrad_accumulates_microbatches(with_order, set_to_none,
         **graph_options,
     )
     optimizer = torch.optim.SGD(reference.parameters(), lr=1 / 64)
+    torch_optimizer = torch.optim.SGD(torch_reference.parameters(), lr=1 / 64)
     parameters = tuple(dict.fromkeys(param for module in modules for param in module.parameters()))
     graph_optimizer = torch.optim.SGD(parameters, lr=1 / 64)
     try:
         for _ in range(3):
             optimizer.zero_grad(set_to_none=set_to_none)
             graph_optimizer.zero_grad(set_to_none=set_to_none)
+            torch_optimizer.zero_grad(set_to_none=set_to_none)
             for _ in range(2):
                 input_ = torch.randint(-2, 3, (8, 16), device="cuda").float() / 4
                 graph_input = input_.detach().requires_grad_(True)
                 reference_input = input_.detach().clone().requires_grad_(True)
+                torch_input = input_.detach().clone().requires_grad_(True)
                 output = graphed[1](graphed[0](graph_input))
                 expected = reference(reference_input)
+                torch_expected = torch_reference(torch_input)
                 torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                torch.testing.assert_close(output, torch_expected, **tf32_tols)
                 output.sum().backward()
                 expected.sum().backward()
+                torch_expected.sum().backward()
                 for callable_ in reversed(graphed):
                     callable_.backward_dw()
+                for reference_module in reversed(reference):
+                    reference_module.backward_dw()
                 torch.testing.assert_close(graph_input.grad, reference_input.grad, rtol=0, atol=0)
-            for module, reference_module in zip(modules, reference):
+                torch.testing.assert_close(graph_input.grad, torch_input.grad, **tf32_tols)
+            for module, reference_module, torch_module in zip(modules, reference, torch_reference):
                 assert module.weight.grad is not None
                 torch.testing.assert_close(
                     module.weight.grad, reference_module.weight.grad, rtol=0, atol=0
                 )
+                torch.testing.assert_close(
+                    module.weight.grad, torch_module.weight.grad, **tf32_tols
+                )
             graph_optimizer.step()
             optimizer.step()
-            for module, reference_module in zip(modules, reference):
+            torch_optimizer.step()
+            for module, reference_module, torch_module in zip(modules, reference, torch_reference):
                 torch.testing.assert_close(module.weight, reference_module.weight, rtol=0, atol=0)
+                torch.testing.assert_close(module.weight, torch_module.weight, **tf32_tols)
     finally:
         reset_graphs(graphed)
 

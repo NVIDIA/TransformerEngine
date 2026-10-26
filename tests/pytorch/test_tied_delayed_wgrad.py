@@ -16,6 +16,17 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
 from transformer_engine.pytorch.quantization import is_fp8_block_scaling_available
 
 
+def _assert_accumulated_close(actual, expected):
+    """Compare delayed and regular BF16 gradients that sum several contributions.
+
+    Both paths add the same per-use and per-microbatch terms, but in a different order, and
+    each BF16 addition rounds by up to half an ulp of its result. Allow a few such roundings
+    at the gradient's magnitude; a dropped or duplicated contribution is far larger.
+    """
+    atol = max(1e-2, 4 * torch.finfo(torch.bfloat16).eps * expected.abs().max().item())
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=atol)
+
+
 def _build_two_linears(delay, *, bias=False, device="cuda"):
     """Build two BF16 Linear layers with independent parameters."""
     hidden_size = 16
@@ -178,11 +189,8 @@ def test_tied_layernorm_mlp_gradients(
             for index in backward_dw_order:
                 delayed[index].backward_dw()
         for name in names:
-            torch.testing.assert_close(
-                getattr(delayed[0], name).grad,
-                getattr(regular[0], name).grad,
-                rtol=1e-2,
-                atol=1e-2,
+            _assert_accumulated_close(
+                getattr(delayed[0], name).grad, getattr(regular[0], name).grad
             )
         assert torch.count_nonzero(delayed[0].fc1_weight.grad) > 0
         assert torch.count_nonzero(delayed[0].fc2_weight.grad) > 0
@@ -255,11 +263,8 @@ def test_tied_grouped_linear_gradients(set_to_none, backward_dw_order, packed, m
             for index in backward_dw_order:
                 delayed[index].backward_dw()
         for name in names:
-            torch.testing.assert_close(
-                getattr(delayed[0], name).grad,
-                getattr(regular[0], name).grad,
-                rtol=1e-2,
-                atol=1e-2,
+            _assert_accumulated_close(
+                getattr(delayed[0], name).grad, getattr(regular[0], name).grad
             )
         assert torch.count_nonzero(getattr(delayed[0], names[0]).grad) > 0
 
@@ -325,10 +330,7 @@ def test_tied_grouped_linear_ops_gradients(set_to_none, backward_dw_order, packe
             for index in backward_dw_order:
                 delayed[index].backward_dw()
         for name in names:
-            torch.testing.assert_close(
-                getattr(delayed[0], name).grad,
-                getattr(regular[0], name).grad,
-                rtol=1e-2,
-                atol=1e-2,
+            _assert_accumulated_close(
+                getattr(delayed[0], name).grad, getattr(regular[0], name).grad
             )
         assert torch.count_nonzero(getattr(delayed[0], names[0]).grad) > 0
