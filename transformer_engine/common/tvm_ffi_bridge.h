@@ -240,10 +240,6 @@ class TVMFFICentral {
                   "`bool retrieve_func_from_python(const std::string&) const`, "
                   "and `std::optional<tvm::ffi::Function> get_kernel() const`.");
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
-      report_not_chosen(
-          "the CuTeDSL backend is disabled, so no kernel is available for "
-          "config `",
-          cfg.to_key(), "`. Set NVTE_ENABLE_CUTEDSL_BACKEND=1 to enable it.");
       return std::nullopt;
     }
     // Only check if libtvm_ffi.so is loaded if user enables the CuTeDSL backend.
@@ -308,7 +304,11 @@ class TVMFFICentral {
 
   // Optionally warn or fail when CuTeDSL kernels are not chosen based on NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN.
   template <typename... Args>
+  // No-op while the CuTeDSL backend is disabled, since falling back is then expected.
   void report_not_chosen(const Args &...reason) const {
+    if (!get_cutedsl_backend_enabled()) {
+      return;
+    }
     switch (report_not_chosen_level_) {
       case ReportNotChosenLevel::kSilent:
         break;
@@ -412,9 +412,9 @@ class TVMFFIConfigCache {
   std::optional<tvm::ffi::Function> get_or_load(const Config &cfg) {
     TVMFFICentral &central = TVMFFICentral::getInstance();
     // Checked ahead of the cache so that toggling the backend off still disables
-    // already-resolved configs; load_tvm_ffi_function reports the "disabled" reason.
+    // already-resolved configs.
     if (!central.get_cutedsl_backend_enabled()) {
-      return central.load_tvm_ffi_function(cfg);
+      return std::nullopt;
     }
     // Otherwise try the cache first, and ask Python to compile/register the kernel if not found.
     const uint32_t id = cfg.to_id();

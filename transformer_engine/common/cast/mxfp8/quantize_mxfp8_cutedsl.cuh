@@ -229,7 +229,6 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
                             Tensor *workspace_tensor, const bool use_2d_quantization,
                             cudaStream_t stream) {
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
-    report_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
     return false;
   }
   // TODO(kainingz): port 2D quantization to CuTeDSL

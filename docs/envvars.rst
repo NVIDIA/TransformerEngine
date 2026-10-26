@@ -159,7 +159,7 @@ General
    :Default: None
    :Description: Control what happens when TE fails dispatch to a CuTeDSL kernel and would fall back to the CUDA C++ kernel.
                  ``WARN`` emits a warning explaining why CuTeDSL kernels are unavailable and falls back to CUDA kernels. ``ERROR`` raises an error and fails instead.
-                 This includes the case where the CuTeDSL backend is disabled (see :envvar:`NVTE_ENABLE_CUTEDSL_BACKEND`).
+                 Only effective when the CuTeDSL backend is enabled (see :envvar:`NVTE_ENABLE_CUTEDSL_BACKEND`).
 
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 

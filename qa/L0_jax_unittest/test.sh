@@ -21,6 +21,7 @@ FAILED_CASES=""
 
 export NVTE_JAX_TEST_TIMING=1
 
+# If CuTeDSL backend is not enabled, this will be ignored
 export NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN=ERROR
 
 pip3 install "nltk>=3.8.2,!=3.10.1" || error_exit "Failed to install nltk"
