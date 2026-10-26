@@ -17,7 +17,7 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
-#include <transformer_engine/cast.h>
+#include <transformer_engine/multi_tensor.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
 
