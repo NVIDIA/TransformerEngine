@@ -9,6 +9,7 @@
 #include <mpi.h>
 #include <nccl.h>
 #include <transformer_engine/comm_gemm.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 
 #include <cstdlib>
 #include <string>
@@ -41,6 +42,11 @@ int main(int argc, char* argv[]) {
 }
 
 TEST(CommGemmStreamLogging, LogsStreamIdToStdout) {
+  if (!nvte_built_with_cublasmp()) {
+    GTEST_SKIP() << "test_comm_gemm_stream_logging requires TE/Common to be built with "
+                    "NVTE_WITH_CUBLASMP=1.";
+  }
+
   int nranks{};
   int rank{};
   CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &nranks));
