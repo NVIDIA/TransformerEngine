@@ -6,10 +6,11 @@
 
 // The fused MXFP8 activation quantize must round exactly as if the activation were computed per
 // element, truncated to the input type, and then quantized on its own. This compares the fused
-// kernels bit for bit against that composition: the activation is computed on the GPU, and the
-// result is quantized by the generic cast-only kernel (a noop tensor keeps the call off the
-// specialized cast kernels). dbias is compared against a host sum in the order the kernel
-// accumulates it.
+// kernels (the register-tiled kernel where it applies, the generic kernel elsewhere) bit for bit
+// against that composition: the activation is computed on the GPU, and the result is quantized by
+// the generic cast-only kernel (a noop tensor keeps the call off the specialized cast kernels).
+// dbias is compared against a host sum in the order the kernels accumulate it, and the tensor amax
+// against the largest magnitude of the activation.
 //
 // Without the tables (NVTE_ACTIVATION_TABLE=0, the default) the activation is the scalar util/math.h
 // function. With NVTE_ACTIVATION_TABLE=1, BF16 inputs follow the table specification (see util/activation_table.cuh): -inf
@@ -270,9 +271,9 @@ size_t count_byte_mismatches(const uint8_t *a, const uint8_t *b, const size_t n)
 
 template <typename IType>
 void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t cols,
-              const bool rowwise, const bool colwise, const bool swizzled, const bool use_table) {
+              const bool rowwise, const bool colwise, const bool swizzled, const bool use_table,
+              const DType otype, const bool with_amax) {
   const DType itype = TypeInfo<IType>::dtype;
-  const DType otype = DType::kFloat8E4M3;
   const std::vector<size_t> shape{rows, cols};
   const size_t n = rows * cols;
 
@@ -309,6 +310,14 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
   // Fused.
   Tensor out("out", shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
   out.set_with_gemm_swizzled_scales(swizzled);
+  float *amax_dev = nullptr;
+  if (with_amax) {
+    ASSERT_EQ(cudaMalloc(&amax_dev, sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(amax_dev, 0, sizeof(float)), cudaSuccess);
+    const size_t one = 1;
+    const NVTEBasicTensor amax = {amax_dev, kNVTEFloat32, nvte_make_shape(&one, 1)};
+    nvte_set_tensor_param_v2(out.data(), kNVTEAmax, &amax, sizeof(amax));
+  }
   Tensor dbias("dbias", std::vector<size_t>{cols}, itype);
   Tensor workspace;
   {
@@ -340,11 +349,30 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
 
   out.to_cpu();
   ref.to_cpu();
+  // The FP8 data as raw bytes, whichever FP8 type the output holds.
+  const auto rowwise_bytes = [&](Tensor &t) {
+    return otype == DType::kFloat8E5M2
+               ? reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp8e5m2>())
+               : reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp8e4m3>());
+  };
+  const auto columnwise_bytes = [&](Tensor &t) {
+    return otype == DType::kFloat8E5M2
+               ? reinterpret_cast<const uint8_t *>(t.columnwise_cpu_dptr<fp8e5m2>())
+               : reinterpret_cast<const uint8_t *>(t.columnwise_cpu_dptr<fp8e4m3>());
+  };
+  if (with_amax) {
+    // The largest magnitude of the activation as quantized (rounded to IType), ignoring NaN.
+    y.to_cpu();
+    const IType *act = y.rowwise_cpu_dptr<IType>();
+    float expected = 0.0f;
+    for (size_t i = 0; i < n; ++i) expected = std::fmax(expected, std::fabs(static_cast<float>(act[i])));
+    float got;
+    ASSERT_EQ(cudaMemcpy(&got, amax_dev, sizeof(float), cudaMemcpyDeviceToHost), cudaSuccess);
+    cudaFree(amax_dev);
+    EXPECT_EQ(std::memcmp(&got, &expected, sizeof(float)), 0) << "amax " << got << " vs " << expected;
+  }
   if (rowwise) {
-    EXPECT_EQ(count_byte_mismatches(
-                  reinterpret_cast<const uint8_t *>(out.rowwise_cpu_dptr<fp8e4m3>()),
-                  reinterpret_cast<const uint8_t *>(ref.rowwise_cpu_dptr<fp8e4m3>()), n),
-              0u)
+    EXPECT_EQ(count_byte_mismatches(rowwise_bytes(out), rowwise_bytes(ref), n), 0u)
         << "rowwise data";
     const size_t s = product(out.rowwise_scale_inv_shape());
     EXPECT_EQ(count_byte_mismatches(out.rowwise_cpu_scale_inv_ptr<uint8_t>(),
@@ -353,10 +381,7 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
         << "rowwise scales";
   }
   if (colwise) {
-    EXPECT_EQ(count_byte_mismatches(
-                  reinterpret_cast<const uint8_t *>(out.columnwise_cpu_dptr<fp8e4m3>()),
-                  reinterpret_cast<const uint8_t *>(ref.columnwise_cpu_dptr<fp8e4m3>()), n),
-              0u)
+    EXPECT_EQ(count_byte_mismatches(columnwise_bytes(out), columnwise_bytes(ref), n), 0u)
         << "colwise data";
     const size_t s = product(out.columnwise_scale_inv_shape());
     EXPECT_EQ(count_byte_mismatches(out.columnwise_cpu_scale_inv_ptr<uint8_t>(),
@@ -379,141 +404,9 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
   }
 }
 
-// With a table, the register-resident kernel and the generic kernel must write the same bytes.
-// The first call takes the default dispatch, which picks the register-resident kernel for these
-// shapes; NVTE_MXFP8_REGTILE=0 keeps the second call on the generic kernel. With with_amax, both
-// also reduce the tensor amax, which must match bit for bit.
-void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows, const size_t cols,
-                            const bool swizzled, const bool use_table, const DType otype,
-                            const bool with_amax, const DType itype = DType::kBFloat16) {
-  const std::vector<size_t> shape{rows, cols};
-  const size_t n = rows * cols;
-  Tensor x("x", shape, itype);
-  Tensor grad("grad", shape, itype);
-  if (itype == DType::kFloat16) {
-    fill_inputs<fp16>(fill, &x, &grad);
-  } else if (itype == DType::kFloat32) {
-    fill_inputs<fp32>(fill, &x, &grad);
-  } else {
-    fill_inputs<bf16>(fill, &x, &grad);
-  }
-  Tensor outs[2] = {Tensor("default", shape, otype, true, true, NVTE_MXFP8_1D_SCALING),
-                    Tensor("generic", shape, otype, true, true, NVTE_MXFP8_1D_SCALING)};
-  Tensor dbias[2] = {Tensor("dbias_default", std::vector<size_t>{cols}, itype),
-                     Tensor("dbias_generic", std::vector<size_t>{cols}, itype)};
-  Tensor workspace[2];
-  float *amax_dev = nullptr;
-  if (with_amax) {
-    ASSERT_EQ(cudaMalloc(&amax_dev, 2 * sizeof(float)), cudaSuccess);
-    ASSERT_EQ(cudaMemset(amax_dev, 0, 2 * sizeof(float)), cudaSuccess);
-  }
-  for (int i = 0; i < 2; ++i) {
-    outs[i].set_with_gemm_swizzled_scales(swizzled);
-    if (with_amax) {
-      const size_t one = 1;
-      const NVTEBasicTensor amax = {amax_dev + i, kNVTEFloat32, nvte_make_shape(&one, 1)};
-      nvte_set_tensor_param_v2(outs[i].data(), kNVTEAmax, &amax, sizeof(amax));
-    }
-    // Fill every output byte, padding included, with a marker, so the two kernels must write the
-    // same set of bytes, not just the same values.
-    for (const auto param : {kNVTERowwiseData, kNVTEColumnwiseData, kNVTERowwiseScaleInv,
-                             kNVTEColumnwiseScaleInv}) {
-      const NVTEBasicTensor b = nvte_get_tensor_param(outs[i].data(), param);
-      size_t bytes = b.data_ptr == nullptr ? 0 : 1;
-      for (size_t d = 0; d < b.shape.ndim; ++d) bytes *= b.shape.data[d];
-      if (bytes != 0) ASSERT_EQ(cudaMemset(b.data_ptr, 0xA5, bytes), cudaSuccess);
-    }
-    const ScopedEnv tables("NVTE_ACTIVATION_TABLE", use_table ? "1" : "0");
-    const ScopedEnv regtile("NVTE_MXFP8_REGTILE", i == 0 ? "1" : "0");
-    switch (mode) {
-      case Mode::GeLU:
-        nvte_gelu(x.data(), outs[i].data(), 0);
-        break;
-      case Mode::SiLU:
-        nvte_silu(x.data(), outs[i].data(), 0);
-        break;
-      case Mode::DGeLU:
-        nvte_dgelu(grad.data(), x.data(), outs[i].data(), 0);
-        break;
-      case Mode::DSiLU:
-        nvte_dsilu(grad.data(), x.data(), outs[i].data(), 0);
-        break;
-      default: {
-        auto fn =
-            mode == Mode::DBiasDGeLU ? &nvte_quantize_dbias_dgelu : &nvte_quantize_dbias_dsilu;
-        fn(grad.data(), x.data(), outs[i].data(), dbias[i].data(), workspace[i].data(), 0);
-        workspace[i] = Tensor("workspace", workspace[i].rowwise_shape(), workspace[i].dtype());
-        // The per-chunk column sums must match too, not just the BF16 dbias they reduce to.
-        ASSERT_EQ(cudaMemset(workspace[i].rowwise_dptr(), 0xA5,
-                             product(workspace[i].rowwise_shape()) * sizeof(float)),
-                  cudaSuccess);
-        fn(grad.data(), x.data(), outs[i].data(), dbias[i].data(), workspace[i].data(), 0);
-      }
-    }
-  }
-  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-  if (with_amax) {
-    float amax[2];
-    ASSERT_EQ(cudaMemcpy(amax, amax_dev, sizeof(amax), cudaMemcpyDeviceToHost), cudaSuccess);
-    cudaFree(amax_dev);
-    uint32_t bits[2];
-    std::memcpy(bits, amax, sizeof(bits));
-    EXPECT_EQ(bits[0], bits[1]) << "amax " << amax[0] << " vs " << amax[1];
-  }
-  for (auto &out : outs) out.to_cpu();
-  if (is_dbias(mode)) {
-    for (int i = 0; i < 2; ++i) {
-      dbias[i].to_cpu();
-      workspace[i].to_cpu();
-    }
-    EXPECT_EQ(count_byte_mismatches(
-                  reinterpret_cast<const uint8_t *>(workspace[0].rowwise_cpu_dptr<float>()),
-                  reinterpret_cast<const uint8_t *>(workspace[1].rowwise_cpu_dptr<float>()),
-                  product(workspace[0].rowwise_shape()) * sizeof(float)),
-              0u)
-        << "dbias workspace";
-    const auto dbias_bytes = [&](Tensor &t) {
-      return itype == DType::kFloat16
-                 ? reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp16>())
-             : itype == DType::kFloat32
-                 ? reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp32>())
-                 : reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<bf16>());
-    };
-    const size_t dbias_elt_bytes = itype == DType::kFloat32 ? 4 : 2;
-    EXPECT_EQ(count_byte_mismatches(dbias_bytes(dbias[0]), dbias_bytes(dbias[1]),
-                                    cols * dbias_elt_bytes),
-              0u)
-        << "dbias";
-  }
-  // The FP8 data as raw bytes, whichever FP8 type the output holds.
-  const auto rowwise_bytes = [&](Tensor &t) {
-    return otype == DType::kFloat8E5M2
-               ? reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp8e5m2>())
-               : reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp8e4m3>());
-  };
-  const auto columnwise_bytes = [&](Tensor &t) {
-    return otype == DType::kFloat8E5M2
-               ? reinterpret_cast<const uint8_t *>(t.columnwise_cpu_dptr<fp8e5m2>())
-               : reinterpret_cast<const uint8_t *>(t.columnwise_cpu_dptr<fp8e4m3>());
-  };
-  EXPECT_EQ(count_byte_mismatches(rowwise_bytes(outs[0]), rowwise_bytes(outs[1]), n), 0u)
-      << "rowwise data";
-  EXPECT_EQ(count_byte_mismatches(columnwise_bytes(outs[0]), columnwise_bytes(outs[1]), n), 0u)
-      << "colwise data";
-  EXPECT_EQ(count_byte_mismatches(outs[0].rowwise_cpu_scale_inv_ptr<uint8_t>(),
-                                  outs[1].rowwise_cpu_scale_inv_ptr<uint8_t>(),
-                                  product(outs[0].rowwise_scale_inv_shape())),
-            0u)
-      << "rowwise scales";
-  EXPECT_EQ(count_byte_mismatches(outs[0].columnwise_cpu_scale_inv_ptr<uint8_t>(),
-                                  outs[1].columnwise_cpu_scale_inv_ptr<uint8_t>(),
-                                  product(outs[0].columnwise_scale_inv_shape())),
-            0u)
-      << "colwise scales";
-}
-
-using Params = std::tuple<Mode, Fill, DType, int /*layout: 0 row, 1 col, 2 both*/,
-                          bool /*swizzled*/, std::pair<size_t, size_t>, bool /*use_table*/>;
+using Params =
+    std::tuple<Mode, Fill, DType, int /*layout: 0 row, 1 col, 2 both*/, bool /*swizzled*/,
+               std::pair<size_t, size_t>, bool /*use_table*/, DType /*output*/, bool /*amax*/>;
 
 class CastMXFP8ActExactTestSuite : public ::testing::TestWithParam<Params> {};
 
@@ -525,25 +418,26 @@ TEST_P(CastMXFP8ActExactTestSuite, MatchesScalarActivationThenCast) {
   if (prop.major < 10) {
     GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
   }
-  const auto [mode, fill, itype, layout, swizzled, dims, use_table] = GetParam();
+  const auto [mode, fill, itype, layout, swizzled, dims, use_table, otype, with_amax] = GetParam();
   const bool rowwise = layout != 1;
   const bool colwise = layout != 0;
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(
       itype, IType,
-      run_case<IType>(mode, fill, dims.first, dims.second, rowwise, colwise, swizzled,
-                      use_table););
+      run_case<IType>(mode, fill, dims.first, dims.second, rowwise, colwise, swizzled, use_table,
+                      otype, with_amax););
 }
 
 namespace {
 
 std::string case_name(const testing::TestParamInfo<Params> &info) {
   const char *layouts[] = {"Rowwise", "Colwise", "Both"};
-  const auto [mode, fill, itype, layout, swizzled, dims, use_table] = info.param;
+  const auto [mode, fill, itype, layout, swizzled, dims, use_table, otype, with_amax] = info.param;
   const char *fills[] = {"XTypical", "XOrderedInputs", "XSpecials", "XTinyGradients"};
   return std::string(mode_name(mode)) + fills[static_cast<int>(fill)] + "X" +
          test::typeName(itype) + "X" + layouts[layout] + (swizzled ? "XSwizzled" : "XCompact") +
          "X" + std::to_string(dims.first) + "X" + std::to_string(dims.second) +
-         (use_table ? "XTable" : "XNoTable");
+         (use_table ? "XTable" : "XNoTable") + (otype == DType::kFloat8E5M2 ? "XE5M2" : "") +
+         (with_amax ? "XAmax" : "");
 }
 
 }  // namespace
@@ -556,8 +450,30 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
                        ::testing::Values(0, 1, 2), ::testing::Bool(),
                        ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
-                                         std::pair<size_t, size_t>{544, 2080}),
-                       ::testing::Bool()),
+                                         std::pair<size_t, size_t>{544, 2080},
+                                         // At least 2^23 elements (the register-tiled forward
+                                         // without tables), with a row and a column tail.
+                                         std::pair<size_t, size_t>{4127, 2064},
+                                         // A dbias workspace of 130 rows, past the dbias
+                                         // reduction's 128-row pipeline.
+                                         std::pair<size_t, size_t>{8257, 544}),
+                       ::testing::Bool(), ::testing::Values(DType::kFloat8E4M3),
+                       ::testing::Values(false)),
+    case_name);
+
+// E5M2 output and the tensor amax, both directions.
+INSTANTIATE_TEST_SUITE_P(
+    OutputTypeAndAmax, CastMXFP8ActExactTestSuite,
+    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
+                                         Mode::DSiLU, Mode::DBiasDSiLU),
+                       ::testing::Values(Fill::Typical, Fill::Specials),
+                       ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
+                       ::testing::Values(2), ::testing::Bool(),
+                       ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
+                                         std::pair<size_t, size_t>{4127, 2064}),
+                       ::testing::Bool(),
+                       ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+                       ::testing::Values(true)),
     case_name);
 
 INSTANTIATE_TEST_SUITE_P(
@@ -567,7 +483,8 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(Fill::Specials),
                        ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
                        ::testing::Values(0, 1, 2), ::testing::Bool(),
-                       ::testing::Values(std::pair<size_t, size_t>{64, 128}), ::testing::Bool()),
+                       ::testing::Values(std::pair<size_t, size_t>{64, 128}), ::testing::Bool(),
+                       ::testing::Values(DType::kFloat8E4M3), ::testing::Values(false)),
     case_name);
 
 INSTANTIATE_TEST_SUITE_P(TinyGradients, CastMXFP8ActExactTestSuite,
@@ -578,121 +495,6 @@ INSTANTIATE_TEST_SUITE_P(TinyGradients, CastMXFP8ActExactTestSuite,
                                                               DType::kFloat32),
                                             ::testing::Values(0, 1, 2), ::testing::Bool(),
                                             ::testing::Values(std::pair<size_t, size_t>{64, 128}),
-                                            ::testing::Bool()),
+                                            ::testing::Bool(), ::testing::Values(DType::kFloat8E4M3),
+                                            ::testing::Values(false)),
                          case_name);
-
-namespace {
-
-using RegtileParams =
-    std::tuple<Mode, Fill, bool /*swizzled*/, std::pair<size_t, size_t>, bool /*use_table*/,
-               DType /*output*/, bool /*amax*/>;
-
-class CastMXFP8ActRegtileTestSuite : public ::testing::TestWithParam<RegtileParams> {};
-
-std::string regtile_case_name(const testing::TestParamInfo<RegtileParams> &info) {
-  const char *fills[] = {"Typical", "OrderedInputs", "Specials", "TinyGradients"};
-  const auto [mode, fill, swizzled, dims, use_table, otype, with_amax] = info.param;
-  return std::string(mode_name(mode)) + "X" + fills[static_cast<int>(fill)] +
-         (swizzled ? "XSwizzled" : "XCompact") + "X" + std::to_string(dims.first) + "X" +
-         std::to_string(dims.second) + (use_table ? "XTable" : "XComputed") +
-         (otype == DType::kFloat8E5M2 ? "XE5M2" : "XE4M3") + (with_amax ? "XAmax" : "");
-}
-
-}  // namespace
-
-TEST_P(CastMXFP8ActRegtileTestSuite, MatchesGenericKernel) {
-  cudaDeviceProp prop;
-  ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
-  if (prop.major < 10) {
-    GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
-  }
-  const auto [mode, fill, swizzled, dims, use_table, otype, with_amax] = GetParam();
-  run_regtile_vs_generic(mode, fill, dims.first, dims.second, swizzled, use_table, otype,
-                         with_amax);
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    OperatorTest, CastMXFP8ActRegtileTestSuite,
-    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
-                                         Mode::DSiLU, Mode::DBiasDSiLU),
-                       ::testing::Values(Fill::Typical, Fill::OrderedInputs, Fill::Specials),
-                       ::testing::Bool(),
-                       ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
-                                         std::pair<size_t, size_t>{4160, 2048},
-                                         std::pair<size_t, size_t>{128, 256},
-                                         // Row and column tails; the last column tile ends
-                                         // 32 or 16 columns into the tile, mid MX group for 16.
-                                         std::pair<size_t, size_t>{993, 7200},
-                                         std::pair<size_t, size_t>{1, 16},
-                                         std::pair<size_t, size_t>{33, 272},
-                                         std::pair<size_t, size_t>{100, 2064},
-                                         std::pair<size_t, size_t>{4127, 528},
-                                         // Large enough for the computed forward path (2^23
-                                         // elements), with a row and a column tail.
-                                         std::pair<size_t, size_t>{4127, 2064}),
-                       // With a table, or computed from util/math.h without one.
-                       ::testing::Bool(),
-                       ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-                       ::testing::Bool()),
-    regtile_case_name);
-
-// FP16 inputs take the register-tiled kernel too, always computing the activation (the tables
-// hold BF16 inputs). The table setting must not matter for them.
-class CastMXFP8ActRegtileFP16TestSuite : public ::testing::TestWithParam<RegtileParams> {};
-
-TEST_P(CastMXFP8ActRegtileFP16TestSuite, MatchesGenericKernel) {
-  cudaDeviceProp prop;
-  ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
-  if (prop.major < 10) {
-    GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
-  }
-  const auto [mode, fill, swizzled, dims, use_table, otype, with_amax] = GetParam();
-  run_regtile_vs_generic(mode, fill, dims.first, dims.second, swizzled, use_table, otype,
-                         with_amax, DType::kFloat16);
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    OperatorTest, CastMXFP8ActRegtileFP16TestSuite,
-    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
-                                         Mode::DSiLU, Mode::DBiasDSiLU),
-                       ::testing::Values(Fill::Typical, Fill::OrderedInputs, Fill::Specials),
-                       ::testing::Bool(),
-                       ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
-                                         std::pair<size_t, size_t>{993, 7200},
-                                         std::pair<size_t, size_t>{33, 272},
-                                         // Large enough for the computed forward path.
-                                         std::pair<size_t, size_t>{4127, 2064}),
-                       ::testing::Bool(),
-                       ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-                       ::testing::Bool()),
-    regtile_case_name);
-
-// FP32 inputs: no table, twice the threads per CTA (see regtile::TileConfig).
-class CastMXFP8ActRegtileFP32TestSuite : public ::testing::TestWithParam<RegtileParams> {};
-
-TEST_P(CastMXFP8ActRegtileFP32TestSuite, MatchesGenericKernel) {
-  cudaDeviceProp prop;
-  ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
-  if (prop.major < 10) {
-    GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
-  }
-  const auto [mode, fill, swizzled, dims, use_table, otype, with_amax] = GetParam();
-  run_regtile_vs_generic(mode, fill, dims.first, dims.second, swizzled, use_table, otype,
-                         with_amax, DType::kFloat32);
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    OperatorTest, CastMXFP8ActRegtileFP32TestSuite,
-    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
-                                         Mode::DSiLU, Mode::DBiasDSiLU),
-                       ::testing::Values(Fill::Typical, Fill::OrderedInputs, Fill::Specials),
-                       ::testing::Bool(),
-                       ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
-                                         std::pair<size_t, size_t>{993, 7200},
-                                         std::pair<size_t, size_t>{33, 272},
-                                         // Large enough for the computed forward path.
-                                         std::pair<size_t, size_t>{4127, 2064}),
-                       ::testing::Bool(),
-                       ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-                       ::testing::Bool()),
-    regtile_case_name);

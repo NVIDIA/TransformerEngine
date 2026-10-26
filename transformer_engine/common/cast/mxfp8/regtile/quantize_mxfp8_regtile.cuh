@@ -921,13 +921,11 @@ constexpr bool kTakesFP16 =
 // dGeLU 1.29-1.48x, dSiLU 1.48-2.37x, dbias_dGeLU 1.16-1.32x, dbias_dSiLU 1.35-2.00x.
 //
 // Whether this kernel takes a request of a type in kImplements, with BF16, FP16 or FP32 input and E4M3 or
-// E5M2 output.  Anything else takes the generic kernel, as does every request with
-// NVTE_MXFP8_REGTILE=0.  A noop tensor is ignored, as the generic kernel ignores it for every
-// request that computes an activation.
+// E5M2 output.  Anything else takes the generic kernel.  A noop tensor is ignored, as the generic
+// kernel ignores it for every request that computes an activation.
 template <bool IS_DACT, bool IS_ACT, bool IS_DBIAS = false>
 bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output, const Tensor& noop,
              bool use_2d_quantization, const activation_table::TableRef& table) {
-  if (!getenv<bool>("NVTE_MXFP8_REGTILE", true)) return false;
   const auto [rows, cols] = input.flat_2d_dims();
   // Without a table the forward activation is compute-bound here, and on small tensors too
   // few CTAs hide its latency: GB200, 993x7200 GeLU is 0.93x of the generic kernel, 4160x2048

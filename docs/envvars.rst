@@ -354,12 +354,6 @@ Kernel Configuration
    :Default: ``0``
    :Description: Experimental. Choose the SiLU-derivative lookup table (see :envvar:`NVTE_ACTIVATION_TABLE`). By default the 16 KB table covers ``|x| >= 2^-9`` and smaller inputs use the linear term ``0.5 + x/2``, which is within 2 ulp of the computed derivative. When set to ``1``, a 32 KB table covers ``|x| >= 2^-25``, and the derivative matches the computed one for every input. Read once per process, when the table is built.
 
-.. envvar:: NVTE_MXFP8_REGTILE
-
-   :Type: ``int`` (0 or 1)
-   :Default: ``1``
-   :Description: Allow the register-tiled MXFP8 kernel for activations read from lookup tables (see :envvar:`NVTE_ACTIVATION_TABLE`). When set to ``0``, those requests use the generic MXFP8 kernel, which gives the same results.
-
 .. envvar:: NVTE_USE_CUTLASS_GROUPED_GEMM
 
    :Type: ``int`` (0 or 1)

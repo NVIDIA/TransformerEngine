@@ -269,7 +269,6 @@ __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
 //! K % 32 == 0 (the generic gated kernel's requirement), aligned buffers.
 inline bool can_use(const Tensor& input, const Tensor& grad, const Tensor& output,
                     const bool is_bwd) {
-  if (!getenv<bool>("NVTE_MXFP8_REGTILE", true)) return false;
   if (transformer_engine::cuda::sm_arch() < 100) return false;
   if (input.dtype() != DType::kBFloat16 ||
       (output.dtype() != DType::kFloat8E4M3 && output.dtype() != DType::kFloat8E5M2)) {
