@@ -1450,6 +1450,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     torch.int64,
                 ],
                 bulk_allocate=True,
+                split_alignment=256,
             )
 
         # Prepare FC1 grouped weight tensor for fused kernels.

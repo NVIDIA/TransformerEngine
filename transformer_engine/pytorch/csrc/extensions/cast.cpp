@@ -279,7 +279,8 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
                           std::optional<at::Tensor> tensor_offsets,
-                          std::optional<at::Tensor> noop_flag, const py::object &output) {
+                          std::optional<at::Tensor> noop_flag, const py::object &output,
+                          size_t split_alignment) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -336,6 +337,13 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     grouped_output_py = std::move(result.second);
     return std::move(result.first);
   }();
+
+  if (split_alignment != 1) {
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_group_validate_split_alignment(grouped_output_tensor_cpp.data(), split_alignment,
+                                          at::cuda::getCurrentCUDAStream());
+    });
+  }
 
   // dispatch to scaling methods
   enum class GroupedQuantizationMode {

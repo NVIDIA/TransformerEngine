@@ -222,7 +222,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
-        py::arg("noop_flag") = py::none(), py::arg("output") = py::none());
+        py::arg("noop_flag") = py::none(), py::arg("output") = py::none(),
+        py::arg("split_alignment") = 1);
   m.def("group_scaled_swiglu", transformer_engine::pytorch::group_scaled_swiglu,
         "Grouped scaled SwiGLU recompute fused with columnwise MXFP8 quantization",
         py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
@@ -625,7 +626,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("splits_to_offsets_multi", &transformer_engine::pytorch::splits_to_offsets_multi,
         "Compute multiple scaled inclusive-scan offsets from a split-sizes vector",
         py::arg("split_sizes"), py::arg("device"), py::kw_only(), py::arg("strides"),
-        py::arg("include_leading_zero"), py::arg("dtypes"), py::arg("bulk_allocate") = false);
+        py::arg("include_leading_zero"), py::arg("dtypes"), py::arg("bulk_allocate") = false,
+        py::arg("split_alignment") = 1);
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
 

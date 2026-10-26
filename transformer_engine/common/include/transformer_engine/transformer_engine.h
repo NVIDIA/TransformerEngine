@@ -546,6 +546,20 @@ void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
                                   const int64_t *strides, const int *include_leading_zero,
                                   size_t num_outputs, cudaStream_t stream);
 
+/*! \brief Compute multiple scaled offsets and assert row split alignment on the device.
+ *
+ * This uses the same prefix-sum kernel as nvte_splits_to_offsets_multi and does not synchronize
+ * the host, so the validation remains active during CUDA graph replay.
+ *
+ * \param[in] split_alignment Positive required divisor of every split size.
+ * \see nvte_splits_to_offsets_multi for the remaining parameters.
+ */
+void nvte_splits_to_offsets_multi_with_alignment(NVTETensor split_sizes, NVTETensor *outputs,
+                                                 const int64_t *strides,
+                                                 const int *include_leading_zero,
+                                                 size_t num_outputs, size_t split_alignment,
+                                                 cudaStream_t stream);
+
 /*! \brief TE Grouped Tensor type
  *
  * NVTEGroupedTensor is a collection of tensors with potentially different shapes

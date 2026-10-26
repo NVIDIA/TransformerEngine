@@ -13,9 +13,63 @@
 #include <vector>
 
 #include "../common.h"
+#include "../utils.cuh"
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
 #include "fp8/group_amax_fp8.cuh"
+
+namespace {
+
+__global__ void validate_grouped_split_alignment_kernel(const int64_t *first_dims,
+                                                        const int64_t *offsets, size_t num_tensors,
+                                                        size_t total_rows, size_t cols,
+                                                        size_t alignment) {
+  const size_t tensor_id = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tensor_id >= num_tensors) return;
+
+  if (first_dims == nullptr && total_rows % num_tensors != 0) {
+    NVTE_DEVICE_ERROR("Uniform grouped split sizes do not divide the total row count.");
+    __trap();  // NVTE_DEVICE_ERROR's assert is compiled out of release builds.
+  }
+  const int64_t rows = first_dims == nullptr ? total_rows / num_tensors : first_dims[tensor_id];
+  if (rows < 0 || static_cast<size_t>(rows) % alignment != 0) {
+    NVTE_DEVICE_ERROR("Grouped split size is not divisible by split_alignment.");
+    __trap();
+  }
+  if (offsets != nullptr) {
+    const int64_t offset = offsets[tensor_id];
+    if (offset < 0 || offset % cols != 0 || static_cast<size_t>(offset / cols) % alignment != 0) {
+      NVTE_DEVICE_ERROR("Grouped row offset is not divisible by split_alignment.");
+      __trap();
+    }
+  }
+}
+
+}  // namespace
+
+void nvte_group_validate_split_alignment(const NVTEGroupedTensor tensor, size_t alignment,
+                                         cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_validate_split_alignment);
+  using namespace transformer_engine;
+  NVTE_CHECK(alignment > 0, "split_alignment must be positive.");
+  if (alignment == 1) return;
+
+  const GroupedTensor *grouped = convertNVTEGroupedTensorCheck(tensor);
+  NVTE_CHECK(grouped->last_dims.dptr == nullptr,
+             "split_alignment requires a common grouped last dimension.");
+  const size_t num_tensors = grouped->num_tensors;
+  if (num_tensors == 0) return;
+  const size_t cols = grouped->logical_shape.data[1];
+  NVTE_CHECK(cols > 0, "Grouped last dimension must be positive.");
+
+  constexpr size_t THREADS = 128;
+  validate_grouped_split_alignment_kernel<<<(num_tensors + THREADS - 1) / THREADS, THREADS, 0,
+                                            stream>>>(
+      static_cast<const int64_t *>(grouped->first_dims.dptr),
+      static_cast<const int64_t *>(grouped->tensor_offsets.dptr), num_tensors,
+      grouped->logical_shape.data[0], cols, alignment);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                          const NVTEQuantizationConfig quant_config, cudaStream_t stream) {

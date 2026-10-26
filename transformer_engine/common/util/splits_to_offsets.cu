@@ -29,6 +29,7 @@ struct KernelArgs {
   int64_t strides[kMaxNumOutputs] = {};
   bool include_leading_zero[kMaxNumOutputs] = {};
   size_t num_outputs = 0;
+  size_t split_alignment = 1;
 };
 
 __device__ __forceinline__ int64_t load_split_size(const void *__restrict__ split_sizes,
@@ -84,12 +85,22 @@ __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
   for (size_t chunk_start = 0; chunk_start < args.num_splits; chunk_start += kThreadsPerBlock) {
     const size_t idx = chunk_start + tid;
 
-    // Load input from global memory into shared memory
-    if (idx < args.num_splits) {
-      block_scan[tid] = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
-    } else {
-      block_scan[tid] = 0;
+    // Validate before the scan. All threads leave together so no thread waits at a barrier
+    // after another thread has trapped on invalid split metadata.
+    const int64_t split =
+        idx < args.num_splits ? load_split_size(args.split_sizes, args.split_sizes_dtype, idx) : 0;
+    if (args.split_alignment > 1) {
+      const bool invalid = idx < args.num_splits &&
+                           (split < 0 || static_cast<size_t>(split) % args.split_alignment != 0);
+      if (__syncthreads_or(invalid)) {
+        if (tid == 0) {
+          NVTE_DEVICE_ERROR("Grouped split size is not divisible by split_alignment.");
+          __trap();  // NVTE_DEVICE_ERROR's assert is compiled out of release builds.
+        }
+        return;
+      }
     }
+    block_scan[tid] = split;
     __syncthreads();
 
     // Prefix sum in shared memory
@@ -230,13 +241,23 @@ void nvte_splits_to_offsets_2d(const NVTETensor first_dims, const NVTETensor las
 void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
                                   const int64_t *strides, const int *include_leading_zero,
                                   size_t num_outputs, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_splits_to_offsets_multi);
+  nvte_splits_to_offsets_multi_with_alignment(split_sizes, outputs, strides, include_leading_zero,
+                                              num_outputs, 1, stream);
+}
+
+void nvte_splits_to_offsets_multi_with_alignment(NVTETensor split_sizes, NVTETensor *outputs,
+                                                 const int64_t *strides,
+                                                 const int *include_leading_zero,
+                                                 size_t num_outputs, size_t split_alignment,
+                                                 cudaStream_t stream) {
+  NVTE_API_CALL(nvte_splits_to_offsets_multi_with_alignment);
   using namespace transformer_engine;
   namespace s2o = transformer_engine::splits_to_offsets;
 
   if (num_outputs == 0) {
     return;
   }
+  NVTE_CHECK(split_alignment > 0, "split_alignment must be positive.");
   NVTE_CHECK(outputs != nullptr, "outputs is NULL.");
   NVTE_CHECK(strides != nullptr, "strides is NULL.");
   NVTE_CHECK(include_leading_zero != nullptr, "include_leading_zero is NULL.");
@@ -279,6 +300,7 @@ void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
     args.split_sizes_dtype = split_sizes_dtype;
     args.num_splits = num_splits;
     args.num_outputs = chunk_size;
+    args.split_alignment = split_alignment;
     for (size_t i = 0; i < chunk_size; ++i) {
       const size_t out_idx = chunk_start + i;
       args.outputs[i] = output_tensors[out_idx]->data.dptr;

@@ -155,8 +155,9 @@ class GroupedLinear(BasicOperation):
     The grouped-tensor path is selected automatically where it is
     supported (see ``is_op_fuser_grouped_tensor_path_supported``). With
     MXFP8 or FP8 block scaling, it relies on every split size being a
-    multiple of 128, as ``split_alignment`` declares. This is checked only
-    on the device, so other split sizes can produce incorrect results.
+    multiple of 128, as ``split_alignment`` declares. The grouped-tensor path
+    checks the declared alignment in its device-side offset scan, including
+    during CUDA graph replay.
 
     Parameters
     ----------
@@ -201,7 +202,8 @@ class GroupedLinear(BasicOperation):
         in the forward pass. The scale tensor has shape
         ``(total_tokens,)`` and is split according to the split sizes.
     split_alignment : int, default = ``128``
-        Guaranteed alignment of each input split size.
+        Required alignment of each input split size on the grouped-tensor path.
+        Device-side validation also runs during CUDA graph replay.
     """
 
     # Operation expects input split sizes (and optionally scales tensor)
@@ -1363,6 +1365,7 @@ class GroupedLinear(BasicOperation):
             include_leading_zero=[False, True, True, True],
             dtypes=[torch.int32, torch.int64, torch.int64, torch.int64],
             bulk_allocate=True,
+            split_alignment=self.split_alignment,
         )
         split_points = grouped_tensor_offsets[0]
         base_split_offsets = grouped_tensor_offsets[1]
