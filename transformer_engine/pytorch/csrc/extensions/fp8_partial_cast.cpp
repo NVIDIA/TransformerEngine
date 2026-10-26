@@ -74,13 +74,14 @@ void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwi
   TORCH_CHECK(output_rowwise.is_contiguous(), "output_rowwise must be contiguous");
   TORCH_CHECK(output_colwise.is_contiguous(), "output_colwise must be contiguous");
   TORCH_CHECK(scale_inv_rowwise.is_contiguous(), "scale_inv_rowwise must be contiguous");
-  TORCH_CHECK(scale_inv_colwise.is_contiguous(), "scale_inv_colwise must be contiguous");
 
   const TensorWrapper input_cu = makeTransformerEngineTensor(input);
   TensorWrapper output_rowwise_cu = makeTransformerEngineTensor(output_rowwise);
-  const bool with_columnwise = scale_inv_colwise.numel() != 0;
-  TORCH_CHECK(with_columnwise || output_colwise.numel() == 0,
-              "Omitted columnwise scales require an empty columnwise output");
+  const bool with_columnwise = output_colwise.numel() != 0;
+  if (with_columnwise) {
+    TORCH_CHECK(scale_inv_colwise.numel() != 0, "Columnwise output requires columnwise scales");
+    TORCH_CHECK(scale_inv_colwise.is_contiguous(), "scale_inv_colwise must be contiguous");
+  }
   TensorWrapper output_colwise_cu =
       with_columnwise ? makeTransformerEngineTensor(output_colwise) : TensorWrapper();
   const TensorWrapper scale_inv_rowwise_cu = makeTransformerEngineTensor(scale_inv_rowwise);

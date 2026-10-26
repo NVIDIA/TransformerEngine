@@ -198,15 +198,14 @@ void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tenso
 
   NVTE_CHECK(output_rowwise.dtype() == DType::kFloat8E4M3 || output_rowwise.dtype() == DType::kByte,
              "output_rowwise should be e4m3 or uint8");
-  const bool with_columnwise = scale_inv_colwise.has_data();
-  NVTE_CHECK(with_columnwise || !output_colwise.has_data(),
-             "Omitted columnwise scales require an empty columnwise output");
+  const bool with_columnwise = output_colwise.has_data();
   if (with_columnwise) {
+    NVTE_CHECK(scale_inv_colwise.has_data(), "Columnwise output requires columnwise scales");
     NVTE_CHECK(output_colwise.data.shape.size() == 1, "output_colwise must be a 1D tensor");
     NVTE_CHECK(output_colwise.data.shape[0] == input.data.shape[0],
                "Size of input and output_colwise mismatch");
     NVTE_CHECK(input.data.shape[0] == 0 || output_colwise.data.dptr != nullptr,
-               "Columnwise scales require columnwise output");
+               "Columnwise output must have a data pointer");
     NVTE_CHECK(
         output_colwise.dtype() == DType::kFloat8E4M3 || output_colwise.dtype() == DType::kByte,
         "output_colwise should be e4m3 or uint8");
