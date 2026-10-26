@@ -153,11 +153,13 @@ General
                  It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
                  If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
 
-.. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
+.. envvar:: NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN
 
-   :Type: ``int`` (0 or 1)
-   :Default: ``0``
-   :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to available CuTeDSL kernels. Useful to verify if the CuTeDSL path is taken.
+   :Type: ``str`` (``WARN`` or ``ERROR``)
+   :Default: None
+   :Description: Control what happens when TE fails dispatch to a CuTeDSL kernel and would fall back to the CUDA C++ kernel.
+                 ``WARN`` emits a warning explaining why CuTeDSL kernels are unavailable and falls back to CUDA kernels. ``ERROR`` raises an error and fails instead.
+                 This includes the case where the CuTeDSL backend is disabled (see :envvar:`NVTE_ENABLE_CUTEDSL_BACKEND`).
 
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 

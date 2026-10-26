@@ -240,7 +240,7 @@ class TVMFFICentral {
                   "`bool retrieve_func_from_python(const std::string&) const`, "
                   "and `std::optional<tvm::ffi::Function> get_kernel() const`.");
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
-      maybe_warn_not_chosen(
+      report_not_chosen(
           "the CuTeDSL backend is disabled, so no kernel is available for "
           "config `",
           cfg.to_key(), "`. Set NVTE_ENABLE_CUTEDSL_BACKEND=1 to enable it.");
@@ -252,7 +252,7 @@ class TVMFFICentral {
       // Warn once rather than spamming every quantize call while TVM-FFI is unavailable.
       static std::once_flag warned;
       std::call_once(warned, [this] {
-        maybe_warn_not_chosen(
+        report_not_chosen(
             "Failed to load tvm-ffi function because libtvm_ffi.so is not successfully loaded.");
       });
       return std::nullopt;
@@ -261,7 +261,7 @@ class TVMFFICentral {
     std::optional<tvm::ffi::Function> fn =
         cfg.retrieve_func_from_python(key) ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
     if (!fn) {
-      maybe_warn_not_chosen("no TVM-FFI kernel is registered for config `", key, "`.");
+      report_not_chosen("no TVM-FFI kernel is registered for config `", key, "`.");
     }
     return fn;
   }
@@ -292,7 +292,11 @@ class TVMFFICentral {
     return cutedsl_backend_enabled_.load(std::memory_order_relaxed);
   }
 
-  bool get_warn_cutedsl_backend_not_chosen() const { return warn_cutedsl_backend_not_chosen_; }
+  // Behavior when a CuTeDSL kernel is not chosen and TE falls back to the CUDA C++ kernel,
+  // controlled by NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN.
+  enum class ReportNotChosenLevel { kSilent, kWarn, kError };
+
+  ReportNotChosenLevel get_report_not_chosen_level() const { return report_not_chosen_level_; }
 
   // These are C ABI calls: TVM reports failures through its return code and thread-local error,
   // not C++ exceptions. noexcept prevents an unexpected exception from crossing that ABI boundary.
@@ -302,11 +306,17 @@ class TVMFFICentral {
 
   void move_error(TVMFFIObjectHandle *result) const noexcept { move_error_(result); }
 
-  // Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
+  // Optionally warn or fail when CuTeDSL kernels are not chosen based on NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN.
   template <typename... Args>
-  void maybe_warn_not_chosen(const Args &...reason) const {
-    if (warn_cutedsl_backend_not_chosen_) {
-      NVTE_WARN("The CuTeDSL kernel is not chosen because ", reason...);
+  void report_not_chosen(const Args &...reason) const {
+    switch (report_not_chosen_level_) {
+      case ReportNotChosenLevel::kSilent:
+        break;
+      case ReportNotChosenLevel::kWarn:
+        NVTE_WARN("The CuTeDSL kernel is not chosen because ", reason...);
+        break;
+      case ReportNotChosenLevel::kError:
+        NVTE_ERROR("The CuTeDSL kernel is not chosen because ", reason...);
     }
   }
 
@@ -315,7 +325,7 @@ class TVMFFICentral {
   TVMFFICentral()
       : tvm_ffi_available_(false),
         cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
-        warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {
+        report_not_chosen_level_(read_report_not_chosen_level()) {
     set_tvm_ffi_available(prepare_tvm_ffi());
   }
 
@@ -356,14 +366,26 @@ class TVMFFICentral {
     return transformer_engine::getenv<bool>("NVTE_ENABLE_CUTEDSL_BACKEND");
   }
 
-  static bool warn_if_cutedsl_backend_not_chosen() {
-    return transformer_engine::getenv<bool>("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
+  static ReportNotChosenLevel read_report_not_chosen_level() {
+    const std::string value =
+        transformer_engine::getenv<std::string>("NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
+    if (value.empty()) {
+      return ReportNotChosenLevel::kSilent;
+    }
+    if (value == "WARN") {
+      return ReportNotChosenLevel::kWarn;
+    }
+    if (value == "ERROR") {
+      return ReportNotChosenLevel::kError;
+    }
+    NVTE_ERROR("Invalid value `", value,
+               "` for NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN. Expected WARN or ERROR.");
   }
 
   std::atomic<bool> tvm_ffi_available_;  // libtvm_ffi.so loaded; false disables the backend
   std::mutex tvm_ffi_init_mutex_;
   std::atomic<bool> cutedsl_backend_enabled_;
-  const bool warn_cutedsl_backend_not_chosen_;
+  const ReportNotChosenLevel report_not_chosen_level_;
   void *tvm_ffi_handle_ = nullptr;
 
   // These are symbols dynamically loaded from TVM-FFI
@@ -390,7 +412,7 @@ class TVMFFIConfigCache {
   std::optional<tvm::ffi::Function> get_or_load(const Config &cfg) {
     TVMFFICentral &central = TVMFFICentral::getInstance();
     // Checked ahead of the cache so that toggling the backend off still disables
-    // already-resolved configs; load_tvm_ffi_function emits the "disabled" warning.
+    // already-resolved configs; load_tvm_ffi_function reports the "disabled" reason.
     if (!central.get_cutedsl_backend_enabled()) {
       return central.load_tvm_ffi_function(cfg);
     }
@@ -426,10 +448,10 @@ class TVMFFIConfigCache {
   std::unordered_map<uint32_t, std::optional<tvm::ffi::Function>> map_;
 };
 
-// Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
+// Optionally warn or fail when CuTeDSL kernels are not chosen based on NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN.
 template <typename... Args>
-inline void maybe_warn_cutedsl_not_chosen(const Args &...reason) {
-  TVMFFICentral::getInstance().maybe_warn_not_chosen(reason...);
+inline void report_cutedsl_not_chosen(const Args &...reason) {
+  TVMFFICentral::getInstance().report_not_chosen(reason...);
 }
 
 }  // namespace tvm_ffi_bridge
