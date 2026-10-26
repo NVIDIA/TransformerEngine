@@ -2133,12 +2133,12 @@ class TestGroupedTensor:
 
 
 # Keep this last: a device trap invalidates the CUDA context for the rest of the pytest process.
-def test_misaligned_splits_fail(capfd):
-    """The multi-output scan rejects a split that is not 256-row aligned."""
-    splits = torch.tensor([256, 128], device="cuda", dtype=torch.int64)
-
-    with pytest.raises(RuntimeError):
-        tex.splits_to_offsets_multi(
+def test_misaligned_splits_fail_on_graph_replay(capfd):
+    """A split in the second scan chunk is checked again on graph replay."""
+    splits = torch.full((257,), 256, device="cuda", dtype=torch.int64)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _ = tex.splits_to_offsets_multi(
             splits,
             torch.device("cuda"),
             strides=[1] * 6,
@@ -2146,6 +2146,11 @@ def test_misaligned_splits_fail(capfd):
             dtypes=[torch.int64] * 6,
             split_alignment=256,
         )
+
+    splits[256] = 128
+    torch.cuda.synchronize()
+    with pytest.raises(RuntimeError):
+        graph.replay()
         torch.cuda.synchronize()
 
     assert "Grouped split size is not divisible by split_alignment." in capfd.readouterr().out
