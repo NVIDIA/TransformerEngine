@@ -454,13 +454,12 @@ def _reorder_tpsp_leading(tensor, original_shape, mesh_resource=None):
     """Reorder tensor so the tpsp axis is leading: reshape (dp, n, tpsp, m, ...), transpose (2, 0, 1, 3, ...)."""
     dp_size = dp_or_fsdp_axis_size(mesh_resource)
     sp_size = tpsp_axis_size(mesh_resource)
-    assert original_shape[0] % dp_size == 0 or original_shape[0] == 1, (
-        f"Original_shape[0]={original_shape[0]} is not divisible by"
-        f" dp_or_fsdp_axis_size()={dp_size}"
-    )
-    assert original_shape[1] % sp_size == 0 or original_shape[1] == 1, (
-        f"Original_shape[1]={original_shape[1]} is not divisible by" f" tpsp_axis_size()={sp_size}"
-    )
+    assert (
+        original_shape[0] % dp_size == 0 or original_shape[0] == 1
+    ), f"Original_shape[0]={original_shape[0]} is not divisible by dp_or_fsdp_axis_size()={dp_size}"
+    assert (
+        original_shape[1] % sp_size == 0 or original_shape[1] == 1
+    ), f"Original_shape[1]={original_shape[1]} is not divisible by tpsp_axis_size()={sp_size}"
     reshaped = tensor.reshape(
         dp_size,
         int(original_shape[0] / dp_size),
@@ -476,13 +475,12 @@ def _reorder_dp_leading(tensor, original_shape, mesh_resource=None):
     """Reorder tensor so the dp axis is leading: reshape (tpsp, dp, n, m, ...), transpose (1, 2, 0, 3, ...)."""
     dp_size = dp_or_fsdp_axis_size(mesh_resource)
     sp_size = tpsp_axis_size(mesh_resource)
-    assert original_shape[0] % dp_size == 0 or original_shape[0] == 1, (
-        f"Original_shape[0]={original_shape[0]} is not divisible by"
-        f" dp_or_fsdp_axis_size()={dp_size}"
-    )
-    assert original_shape[1] % sp_size == 0 or original_shape[1] == 1, (
-        f"Original_shape[1]={original_shape[1]} is not divisible by" f" tpsp_axis_size()={sp_size}"
-    )
+    assert (
+        original_shape[0] % dp_size == 0 or original_shape[0] == 1
+    ), f"Original_shape[0]={original_shape[0]} is not divisible by dp_or_fsdp_axis_size()={dp_size}"
+    assert (
+        original_shape[1] % sp_size == 0 or original_shape[1] == 1
+    ), f"Original_shape[1]={original_shape[1]} is not divisible by tpsp_axis_size()={sp_size}"
     reshaped = tensor.reshape(
         sp_size,
         dp_size,
