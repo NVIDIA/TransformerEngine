@@ -473,6 +473,7 @@ def apply_fused_qkv_rotary_pos_emb(
     cu_seqlens: Union[torch.Tensor, None] = None,  # pylint: disable=unused-argument
     cp_size: int = 1,
     cp_rank: int = 0,
+    defer_for_fp8_attention: bool = False,
 ) -> torch.Tensor:
     """
     Apply rotary positional embedding tensor to the input qkv tensor.
@@ -519,6 +520,14 @@ def apply_fused_qkv_rotary_pos_emb(
         Context parallel world size.
     cp_rank : int, default = 0.
         Context parallel rank.
+    defer_for_fp8_attention : bool, default = False
+        Return placeholder Q, K, V that must be passed straight to a
+        :class:`DotProductAttention`. With FP8 current-scaling fused attention, RoPE and the
+        FP8 quantization of Q, K, V then run as one fused kernel from ``qkv``; in every other
+        case DotProductAttention applies the regular fused RoPE to them first. Falls back to
+        the regular RoPE for unsupported inputs (bf16 sbhd, head dim 128, ``cp_size == 1``,
+        no ``start_positions``, non-interleaved). The placeholders cannot be reused after
+        attention consumed them (e.g. attention recompute).
     """
 
     # `start_positions` is only supported for `cp_size=1` and inference.
@@ -527,6 +536,23 @@ def apply_fused_qkv_rotary_pos_emb(
     ), """start_positions != None with CP SIZE > 1 is not supported!"""
 
     assert tensor_format != "thd", "'thd' tensor_format not supported currently."
+
+    if defer_for_fp8_attention:
+        # pylint: disable=import-outside-toplevel
+        from .deferred_qkv_rope import defer_fused_qkv_rope
+
+        deferred = defer_fused_qkv_rope(
+            qkv,
+            q_freqs,
+            k_freqs,
+            qkv_split_arg_list,
+            start_positions,
+            tensor_format,
+            interleaved,
+            cp_size,
+        )
+        if deferred is not None:
+            return deferred
 
     return FusedQKVRoPEFunc.apply(
         qkv,
