@@ -334,10 +334,10 @@ __global__ void __launch_bounds__(FA_THREADS_NUM)
 
 }  // namespace group_row_scaled_amax_kernel
 
-inline void group_compute_fused_amax(const Tensor &input, const Tensor *noop,
-                                     std::vector<Tensor *> &output_list,
-                                     const size_t *split_sections, size_t num_tensors,
-                                     cudaStream_t stream) {
+inline void group_row_amax(const Tensor &input, const Tensor *noop,
+                           std::vector<Tensor *> &output_list,
+                           const size_t *split_sections, size_t num_tensors,
+                           cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   using namespace group_row_scaled_amax_kernel;
 
@@ -417,11 +417,11 @@ inline void group_compute_fused_amax(const Tensor &input, const Tensor *noop,
 #endif  // FP4_TYPE_SUPPORTED
 }
 
-// Graph-safe counterpart of group_compute_fused_amax: routing comes from device
+// Graph-safe calculation of amaxes for row-scaled NVFP4: routing comes from device
 // output->tensor_offsets, amax goes to the contiguous rowwise [sum_M] / columnwise
 // [num_tensors * K] buffers. BF16-only, VARYING_FIRST_DIM.
-inline void group_compute_fused_amax_graph_safe(const GroupedTensor *input, const Tensor *noop,
-                                                GroupedTensor *output, cudaStream_t stream) {
+inline void group_row_amax_graph_safe(const GroupedTensor *input, const Tensor *noop,
+                                      GroupedTensor *output, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   using namespace group_row_scaled_amax_kernel;
 

@@ -2171,21 +2171,16 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                            [](const py::handle &quantizer) -> bool {
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
-      allocation_method = AllocationMethod::BULK_NVFP4;
-      auto is_row_scaled = [](const std::unique_ptr<Quantizer> &quantizer) {
-        return static_cast<NVFP4Quantizer *>(quantizer.get())->row_scaled_nvfp4;
-      };
-      const bool all_row_scaled =
-          std::all_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(), is_row_scaled);
-      const bool any_row_scaled =
-          std::any_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(), is_row_scaled);
-      if (any_row_scaled && !all_row_scaled) {
-        // Bulk NVFP4 allocation sizes amax from the first quantizer.
+      const bool has_row_scaled_nvfp4 =
+          std::any_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
+                      [](const std::unique_ptr<Quantizer> &quantizer) {
+                        return static_cast<NVFP4Quantizer *>(quantizer.get())->row_scaled_nvfp4;
+                      });
+      if (has_row_scaled_nvfp4) {
         allocation_method = AllocationMethod::UNFUSED;
         quantization_method = QuantizationMethod::UNFUSED;
-      } else if (all_row_scaled) {
-        quantization_method = QuantizationMethod::UNFUSED;
       } else {
+        allocation_method = AllocationMethod::BULK_NVFP4;
         quantization_method = QuantizationMethod::FUSED_NVFP4;
       }
     }
