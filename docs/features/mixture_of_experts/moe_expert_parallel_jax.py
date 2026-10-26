@@ -46,10 +46,10 @@ record_ep_bootstrap_signature_for_moe(
 )
 
 # mesh:        jax.sharding.Mesh with an "ep" axis and one device per process
-# x:           [batch, seq, hidden_size], BF16 and sharded over the mesh
-# gate_kernel: [hidden_size, num_experts]          router projection
-# wi:          [num_experts, hidden_size, 2 * ffn]  gated FC1 (gate and value)
-# wo:          [num_experts, ffn, hidden_size]      FC2
+# x:           [batch, seq, 256], BF16 and sharded over the mesh
+# gate_kernel: [256, num_experts]        router projection
+# wi:          [num_experts, 256, 1024]   gated FC1, ffn = 512
+# wo:          [num_experts, 512, 256]    FC2
 with mesh, global_shard_guard(mesh_resource):
     output, aux_loss, total_recv_tokens = moe(
         x,
