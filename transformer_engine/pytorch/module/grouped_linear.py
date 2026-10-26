@@ -90,6 +90,7 @@ __all__ = ["GroupedLinear", "is_module_grouped_tensor_path_supported"]
 def is_module_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
+    device: Optional[torch.device] = None,
 ) -> bool:
     """Whether the module grouped-tensor path supports this recipe and dtype.
 
@@ -119,9 +120,14 @@ def is_module_grouped_tensor_path_supported(
     Runtime-only restrictions such as debug mode, CPU offloading, calibration,
     output quantization, and backend selection are checked separately by
     ``GroupedLinear``.
+
+    If device is omitted, the current CUDA device is used.
     """
-    # recipe object is not hashable, so pass relevant attributes in the function
-    # so that the function can be cached.
+    # Recipe objects are not hashable. Resolve the device before the cached call so
+    # support results from different GPUs cannot share a cache entry.
+    device_index = device.index if device is not None else None
+    if device_index is None:
+        device_index = torch.cuda.current_device()
     return _is_module_grouped_tensor_path_supported(
         type(recipe) if recipe is not None else None,
         getattr(recipe, "backward_override", None),
@@ -129,6 +135,7 @@ def is_module_grouped_tensor_path_supported(
         getattr(recipe, "row_scaled_activation", None),
         getattr(recipe, "fp8_format", None),
         dtype,
+        device_index,
     )
 
 
@@ -140,15 +147,16 @@ def _is_module_grouped_tensor_path_supported(
     row_scaled_activation: Optional[bool],
     fp8_format: Optional[RecipeFormat],
     dtype: torch.dtype,
+    device_index: int,
 ) -> bool:
-    """Cache routing for an immutable recipe snapshot and dtype."""
+    """Cache routing for an immutable recipe snapshot, dtype, and CUDA device."""
     if tex.get_cublasLt_build_version() < 130300:
         return False
 
     if dtype not in (torch.bfloat16, torch.float16):
         return False
 
-    device_capability = get_device_compute_capability()
+    device_capability = get_device_compute_capability(torch.device("cuda", device_index))
     if not (9, 0) <= device_capability <= (11, 0):
         return False
     cublaslt_version = tex.get_cublasLt_version()
@@ -2425,6 +2433,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 use_grouped_tensor_path = is_module_grouped_tensor_path_supported(
                     _recipe,
                     self.activation_dtype,
+                    device=inp.device,
                 )
             if (
                 self.use_grouped_tensor

@@ -77,6 +77,7 @@ def is_op_fuser_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
     split_alignment: int = 128,
+    device: Optional[torch.device] = None,
 ) -> bool:
     """Whether the op-fuser grouped-tensor path supports this recipe and dtype.
 
@@ -103,9 +104,14 @@ def is_op_fuser_grouped_tensor_path_supported(
       is excluded because cuBLASLt grouped GEMM does not support it.
     * Single grouped parameters have no split-quantize fallback, so callers
       must reject them when this function returns ``False``.
+
+    If device is omitted, the current CUDA device is used.
     """
-    # recipe object is not hashable, so pass relevant attributes in the function
-    # so that the function can be cached.
+    # Recipe objects are not hashable. Resolve the device before the cached call so
+    # support results from different GPUs cannot share a cache entry.
+    device_index = device.index if device is not None else None
+    if device_index is None:
+        device_index = torch.cuda.current_device()
     return _is_op_fuser_grouped_tensor_path_supported(
         type(recipe) if recipe is not None else None,
         getattr(recipe, "disable_rht", None),
@@ -113,6 +119,7 @@ def is_op_fuser_grouped_tensor_path_supported(
         getattr(recipe, "fp8_format", None),
         dtype,
         split_alignment,
+        device_index,
     )
 
 
@@ -124,12 +131,13 @@ def _is_op_fuser_grouped_tensor_path_supported(
     fp8_format: Optional[RecipeFormat],
     dtype: torch.dtype,
     split_alignment: int,
+    device_index: int,
 ) -> bool:
-    """Cache routing for an immutable recipe snapshot, dtype, and alignment."""
+    """Cache routing for a recipe snapshot, dtype, alignment, and CUDA device."""
     if dtype not in (torch.bfloat16, torch.float16):
         return False
 
-    device_capability = get_device_compute_capability()
+    device_capability = get_device_compute_capability(torch.device("cuda", device_index))
     if not (9, 0) <= device_capability <= (11, 0):
         return False
     cublaslt_version = tex.get_cublasLt_version()
@@ -1108,6 +1116,7 @@ class GroupedLinear(BasicOperation):
             recipe,
             dtype,
             self.split_alignment,
+            device=device,
         )
         if (self.single_grouped_weight or self.single_grouped_bias) and not use_grouped_tensor_path:
             raise RuntimeError(
