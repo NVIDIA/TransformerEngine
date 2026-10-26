@@ -456,6 +456,12 @@ where :math:`h` is the activation output and :math:`p` is the routing weight.
 Set ``scale_bias=True`` on FC2 and pass the same routing weights to both the
 activation and FC2. With ``bias=False`` on FC2, bias scaling is unnecessary.
 
+For grouped MLP fusion, set ``split_alignment=256`` on both ``GroupedLinear``
+operations. Pad each expert's input token block to a multiple of 256 and pass
+the corresponding padded counts as ``m_splits`` to both operations. For example,
+``moe_permute_and_pad_with_probs`` with ``align_size=256`` produces the padded
+input and counts; setting ``split_alignment`` alone does not pad them.
+
 .. tabs::
 
    .. tab:: PyTorch
@@ -465,13 +471,10 @@ activation and FC2. With ``bias=False`` on FC2, bias scaling is unnecessary.
          :start-after: # START_GROUPED_MLP_PYTORCH
          :end-before: # END_GROUPED_MLP_PYTORCH
 
-The arguments after ``permuted`` are consumed in operation order: FC1 takes the
-per-expert token counts, the activation takes the routing weights, and FC2 takes
-the counts and the same weights for its bias. ``expert_out`` is already weighted;
-the subsequent combine must not apply the routing weights again.
-
-Set ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` before importing
-``transformer_engine.pytorch`` to enable fusion for eligible configurations.
+The arguments after ``padded`` are consumed in operation order: FC1 takes the
+padded per-expert token counts, the activation takes the routing weights, and
+FC2 takes the counts and the same weights for its bias. ``expert_out`` is already
+weighted; the subsequent combine must not apply the routing weights again.
 
 .. _moe-putting-it-together:
 

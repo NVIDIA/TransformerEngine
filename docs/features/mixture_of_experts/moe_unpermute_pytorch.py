@@ -6,11 +6,12 @@
 from transformer_engine.pytorch import moe_unpermute
 
 # expert_out:    [num_out_tokens, hidden_size], expert-contiguous,
-#                produced by GroupedLinear (or a grouped MLP).
+#                produced by an unweighted GroupedLinear or expert MLP.
 # row_id_map:    returned by moe_permute.
 # merging_probs: [num_tokens, num_experts]; routing probabilities used to
 #                weight the per-expert contributions to each token. They may
-#                be omitted only when every selected routing weight is one.
+#                be omitted when every selected routing weight is one or the
+#                expert outputs are already weighted, as in the scaled grouped MLP.
 # restore_shape: the original [num_tokens, hidden_size]. Required when the
 #                permuted buffer has more rows than the input (top-k routing);
 #                for top-1 it can be omitted and is inferred from expert_out.
