@@ -311,9 +311,9 @@ def get_thd_partitioned_indices(
             device=target_device,
         )
     cu_seqlens_padded = _get_thd_partition_cu_seqlens(cu_seqlens_padded, device)
-    assert cu_seqlens_padded.is_cuda, (
-        "Per-document THD partitioning requires CUDA cu_seqlens; pass device='cuda' "
-        "when the source metadata is on CPU."
+    assert cu_seqlens_padded.device.type == te_device_type(), (
+        f"Per-document THD partitioning requires {te_device_type()} cu_seqlens; pass"
+        f" device='{te_device_type()}' when the source metadata is on CPU."
     )
     if cu_seqlens_padded.dtype != torch.int32:
         cu_seqlens_padded = cu_seqlens_padded.to(torch.int32)

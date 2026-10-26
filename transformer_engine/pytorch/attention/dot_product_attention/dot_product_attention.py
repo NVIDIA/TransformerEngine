@@ -2356,9 +2356,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_output = False
 
             # checks for q/k/v shapes
-            assert (
-                query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-            ), "DotProductAttention only supports CUDA tensors."
+            assert all(
+                x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+            ), f"DotProductAttention only supports {te_device_type()} tensors."
             assert (
                 query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
             ), "Queries, keys and values must have the same data type!"
@@ -2519,7 +2519,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                             "Mixed THD policy sequence_ids must be one-dimensional int32 or "
                             "int64 tensors."
                         )
-                    if not sequence_ids.is_cuda or sequence_ids.device != query_layer.device:
+                    if sequence_ids.device != query_layer.device:
                         raise ValueError(
                             "Mixed THD policy sequence_ids must be on the Q/K/V device."
                         )

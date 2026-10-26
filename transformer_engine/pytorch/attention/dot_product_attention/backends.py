@@ -1040,9 +1040,9 @@ class FlashAttention(torch.nn.Module):
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor)
             for x in [query_layer, key_layer, value_layer]
         ), "FlashAttention only supports FP16 and BF16 data types, or Float8Tensors."
-        assert (
-            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-        ), "FlashAttention currently only supports CUDA tensors."
+        assert all(
+            x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+        ), f"FlashAttention currently only supports {te_device_type()} tensors."
         assert (
             qkv_layout in QKVLayouts
         ), f"FlashAttention does not support qkv_layout = {qkv_layout}!"
@@ -2720,9 +2720,9 @@ class FusedAttention(torch.nn.Module):
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, QuantizedTensorStorage)
             for x in [query_layer, key_layer, value_layer]
         ), "FusedAttention only supports FP16 and BF16 data types, or QuantizedTensors."
-        assert (
-            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-        ), "FusedAttention only supports CUDA tensors."
+        assert all(
+            x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+        ), f"FusedAttention only supports {te_device_type()} tensors."
         assert (
             qkv_layout in QKVLayouts
         ), f"FusedAttention does not support qkv_layout = {qkv_layout}!"
