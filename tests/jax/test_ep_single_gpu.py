@@ -1,4 +1,4 @@
-# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
+from transformer_engine.jax.cpp_extensions import ep as ep_extensions
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.ep import (
     EpLayerConfig,
@@ -20,9 +21,43 @@ from transformer_engine.jax.ep import (
 )
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
-pytestmark = pytest.mark.skipif(
-    jax.device_count() != 1, reason="run with exactly one visible GPU"
-)
+pytestmark = pytest.mark.skipif(jax.device_count() != 1, reason="run with exactly one visible GPU")
+
+
+@pytest.mark.parametrize("ep_size", [None, 1, 2])
+def test_ep_finalize_is_idempotent(monkeypatch, ep_size):
+    """Finalize tolerates absent state and releases only initialized NCCL EP."""
+    config = None
+    if ep_size is not None:
+        config = ep_extensions.EpConfig(
+            world_size=ep_size,
+            rank=0,
+            ep_size=ep_size,
+            num_ep_groups=1,
+            num_experts=4,
+            num_local_experts=4 // ep_size,
+            max_tokens_per_rank=8,
+            recv_capacity_per_rank=16,
+            hidden_dim=8,
+        )
+    monkeypatch.setattr(ep_extensions, "_ep_config", config)
+    calls = []
+    monkeypatch.setattr(jax, "clear_caches", lambda: calls.append("clear_caches"))
+    monkeypatch.setattr(
+        "transformer_engine_jax.release_ep_resources",
+        lambda: calls.append("release_ep_resources"),
+    )
+
+    ep_finalize()
+    ep_finalize()
+
+    expected = [] if ep_size is None else ["clear_caches"]
+    if ep_size is not None and ep_size > 1:
+        expected.append("release_ep_resources")
+    assert calls == expected
+    # Other EP APIs must continue to reject use before bootstrap.
+    with pytest.raises(RuntimeError, match="EpConfig has not been set"):
+        ep_extensions.get_ep_config()
 
 
 def test_ep1_bootstrap_dispatch_combine_and_gradients():
@@ -61,6 +96,8 @@ def test_ep1_bootstrap_dispatch_combine_and_gradients():
     )
 
     with mesh, global_shard_guard(resource):
+        ep_finalize()
+        ep_finalize()
         # world_size=1 used to fail before any EP configuration was installed.
         ep_bootstrap(
             world_size=1,
@@ -89,9 +126,7 @@ def test_ep1_bootstrap_dispatch_combine_and_gradients():
             expected = tokens * jnp.sum(topk_weights, axis=-1, keepdims=True)
             np.testing.assert_allclose(output, expected, rtol=1e-6, atol=1e-6)
             np.testing.assert_array_equal(jnp.sum(counts), recv_capacity)
-            np.testing.assert_array_equal(
-                total, jnp.asarray([[recv_capacity]], jnp.int32)
-            )
+            np.testing.assert_array_equal(total, jnp.asarray([[recv_capacity]], jnp.int32))
 
             def loss(x, weights):
                 return jnp.sum(run(x, weights)[0])
@@ -111,8 +146,7 @@ def test_ep1_bootstrap_dispatch_combine_and_gradients():
             expected_weight_grad = jnp.repeat(
                 jnp.sum(tokens, axis=-1, keepdims=True), top_k, axis=-1
             )
-            np.testing.assert_allclose(
-                grad_weights, expected_weight_grad, rtol=1e-6, atol=1e-6
-            )
+            np.testing.assert_allclose(grad_weights, expected_weight_grad, rtol=1e-6, atol=1e-6)
         finally:
+            ep_finalize()
             ep_finalize()

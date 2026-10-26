@@ -83,10 +83,7 @@ __all__ = [
 def is_ep_borrowed_comm_built() -> bool:
     """Return True if transformer_engine_jax was compiled with the borrowed-comm FFI."""
     try:
-        return (
-            "te_ep_bootstrap_borrowed_comm_ffi"
-            in transformer_engine_jax.registrations()
-        )
+        return "te_ep_bootstrap_borrowed_comm_ffi" in transformer_engine_jax.registrations()
     except Exception:  # pylint: disable=broad-except
         return False
 
@@ -157,9 +154,9 @@ def run_borrowed_comm_bootstrap(
 
     def _body(x):
         out_type = jax.ShapeDtypeStruct(x.shape, x.dtype)
-        return ffi.ffi_call(
-            "te_ep_bootstrap_borrowed_comm_ffi", out_type, has_side_effect=True
-        )(x, replica_groups=rg, group_size=gs, communication_id=cid)
+        return ffi.ffi_call("te_ep_bootstrap_borrowed_comm_ffi", out_type, has_side_effect=True)(
+            x, replica_groups=rg, group_size=gs, communication_id=cid
+        )
 
     dummy = jnp.zeros((world,), dtype=jnp.uint8)
     fn = jax.jit(shard_map(_body, mesh=mesh, in_specs=spec, out_specs=spec))
@@ -364,9 +361,7 @@ class EpPreparePrimitive(BasePrimitive):
             )
         )
         leading = _ep_leading_dims(is_outer)
-        token_counts_aval = jax.core.ShapedArray(
-            leading + (num_local_experts,), jnp.int32
-        )
+        token_counts_aval = jax.core.ShapedArray(leading + (num_local_experts,), jnp.int32)
         # Per-rank pre-drop recv-slot total (includes tokens dropped on overflow).
         total_recv_tokens_aval = jax.core.ShapedArray(leading + (1,), jnp.int32)
         handle_mem_aval = jax.core.ShapedArray(leading + (handle_mem_size,), jnp.uint8)
@@ -375,9 +370,7 @@ class EpPreparePrimitive(BasePrimitive):
     @staticmethod
     def outer_abstract(*args, **kwargs):
         kwargs["is_outer"] = True
-        return EpPreparePrimitive.abstract(
-            *args, **kwargs
-        )  # pylint: disable=missing-kwoa
+        return EpPreparePrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
 
     @staticmethod
     def lowering(
@@ -396,9 +389,7 @@ class EpPreparePrimitive(BasePrimitive):
             ctx,
             topk_idx,
             top_k=int(top_k),
-            dispatch_output_per_expert_alignment=int(
-                dispatch_output_per_expert_alignment
-            ),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
             topk_idx_dtype=int(topk_idx_dtype),
         )
 
@@ -412,15 +403,13 @@ class EpPreparePrimitive(BasePrimitive):
         resource_axes,
     ):
         assert EpPreparePrimitive.inner_primitive is not None
-        token_counts, total_recv_tokens, handle_mem = (
-            EpPreparePrimitive.inner_primitive.bind(
-                topk_idx,
-                top_k=top_k,
-                dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
-                topk_idx_dtype=topk_idx_dtype,
-                is_outer=is_outer,
-                resource_axes=resource_axes,
-            )
+        token_counts, total_recv_tokens, handle_mem = EpPreparePrimitive.inner_primitive.bind(
+            topk_idx,
+            top_k=top_k,
+            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
+            topk_idx_dtype=topk_idx_dtype,
+            is_outer=is_outer,
+            resource_axes=resource_axes,
         )
         return token_counts, total_recv_tokens, handle_mem
 
@@ -549,9 +538,7 @@ class EpDispatchPrimitive(BasePrimitive):
     @staticmethod
     def outer_abstract(*args, **kwargs):
         kwargs["is_outer"] = True
-        return EpDispatchPrimitive.abstract(
-            *args, **kwargs
-        )  # pylint: disable=missing-kwoa
+        return EpDispatchPrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
 
     @staticmethod
     def lowering(
@@ -582,9 +569,7 @@ class EpDispatchPrimitive(BasePrimitive):
             tokens_scale_inv,
             topk_weights,
             top_k=int(top_k),
-            dispatch_output_per_expert_alignment=int(
-                dispatch_output_per_expert_alignment
-            ),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
             topk_idx_dtype=int(topk_idx_dtype),
         )
 
@@ -766,9 +751,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         recv_topk_weights_aval = jax.core.ShapedArray(
             leading + (recv_capacity_per_rank,), jnp.float32
         )
-        token_counts_aval = jax.core.ShapedArray(
-            leading + (cfg.num_local_experts,), jnp.int32
-        )
+        token_counts_aval = jax.core.ShapedArray(leading + (cfg.num_local_experts,), jnp.int32)
         total_recv_tokens_aval = jax.core.ShapedArray(leading + (1,), jnp.int32)
         handle_mem_aval = jax.core.ShapedArray(leading + (handle_mem_size,), jnp.uint8)
         return (
@@ -811,9 +794,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
             tokens_scale_inv,
             topk_weights,
             top_k=int(top_k),
-            dispatch_output_per_expert_alignment=int(
-                dispatch_output_per_expert_alignment
-            ),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
             topk_idx_dtype=int(topk_idx_dtype),
         )
 
@@ -1019,9 +1000,7 @@ class EpCombinePrimitive(BasePrimitive):
             handle_mem,
             expert_out,
             top_k=int(top_k),
-            dispatch_output_per_expert_alignment=int(
-                dispatch_output_per_expert_alignment
-            ),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
             topk_idx_dtype=int(topk_idx_dtype),
         )
 
@@ -1083,9 +1062,7 @@ class EpCombinePrimitive(BasePrimitive):
                 f" over [num_procs, recv_pr, H]; got spec={eo_spec}."
             )
         if out_partition_spec is not None:
-            per_shard_leading = _leading_per_shard(
-                out_leading_shape, out_partition_spec[0], mesh
-            )
+            per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
             out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
         else:
             per_shard_leading = out_leading_shape
@@ -1160,9 +1137,7 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         ), f"grad must be 3D [num_procs, recv_pr, H], got shape {grad_aval.shape}"
         g_dtype = dtypes.canonicalize_dtype(grad_aval.dtype)
         hidden_dim = grad_aval.shape[-1]
-        result_aval = jax.core.ShapedArray(
-            tuple(out_leading_shape) + (hidden_dim,), g_dtype
-        )
+        result_aval = jax.core.ShapedArray(tuple(out_leading_shape) + (hidden_dim,), g_dtype)
         grad_topk_weights_aval = jax.core.ShapedArray(
             tuple(out_leading_shape) + (top_k,), jnp.float32
         )
@@ -1190,9 +1165,7 @@ class EpDispatchBwdPrimitive(BasePrimitive):
             grad,
             g_recv_topk_weights,
             top_k=int(top_k),
-            dispatch_output_per_expert_alignment=int(
-                dispatch_output_per_expert_alignment
-            ),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
             topk_idx_dtype=int(topk_idx_dtype),
         )
 
@@ -1268,9 +1241,7 @@ class EpDispatchBwdPrimitive(BasePrimitive):
                 f" axis; got grad={g_spec}, g_recv_topk_weights={gw_spec}."
             )
         if out_partition_spec is not None:
-            per_shard_leading = _leading_per_shard(
-                out_leading_shape, out_partition_spec[0], mesh
-            )
+            per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
             out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
         else:
             per_shard_leading = out_leading_shape
@@ -1348,16 +1319,12 @@ class EpCombineBwdPrimitive(BasePrimitive):
         g_dtype = dtypes.canonicalize_dtype(grad_aval.dtype)
         hidden_dim = grad_aval.shape[-1]
         leading = _ep_leading_dims(is_outer)
-        return jax.core.ShapedArray(
-            leading + (recv_capacity_per_rank, hidden_dim), g_dtype
-        )
+        return jax.core.ShapedArray(leading + (recv_capacity_per_rank, hidden_dim), g_dtype)
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         kwargs["is_outer"] = True
-        return EpCombineBwdPrimitive.abstract(
-            *args, **kwargs
-        )  # pylint: disable=missing-kwoa
+        return EpCombineBwdPrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
 
     @staticmethod
     def lowering(
@@ -1379,9 +1346,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
             handle_mem,
             grad,
             top_k=int(top_k),
-            dispatch_output_per_expert_alignment=int(
-                dispatch_output_per_expert_alignment
-            ),
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
             topk_idx_dtype=int(topk_idx_dtype),
         )
 
@@ -1480,9 +1445,7 @@ def _ep_prepare(cfg: EpLayerConfig, topk_idx):
     return EpPreparePrimitive.outer_primitive.bind(
         topk_idx,
         top_k=int(cfg.top_k),
-        dispatch_output_per_expert_alignment=int(
-            cfg.dispatch_output_per_expert_alignment
-        ),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         is_outer=True,
         resource_axes=_capture_ep_resource_axes(),
@@ -1508,9 +1471,7 @@ def _ep_dispatch_fwd(
         tokens_scale_inv,
         topk_weights,
         top_k=int(cfg.top_k),
-        dispatch_output_per_expert_alignment=int(
-            cfg.dispatch_output_per_expert_alignment
-        ),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
@@ -1625,9 +1586,9 @@ def _ep1_local_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_r
             padded_positions,
         )
 
-    recv_tokens, recv_weights, token_counts, sorted_indices, padded_positions = (
-        jax.vmap(dispatch_one)(grouped_tokens, grouped_experts, grouped_weights)
-    )
+    recv_tokens, recv_weights, token_counts, sorted_indices, padded_positions = jax.vmap(
+        dispatch_one
+    )(grouped_tokens, grouped_experts, grouped_weights)
     total_recv_tokens = jnp.full(
         (num_groups, 1), grouped_experts.shape[1] * cfg.top_k, dtype=jnp.int32
     )
@@ -1643,9 +1604,7 @@ def _ep1_local_combine(cfg, handle, expert_out, num_local_tokens):
     output_leading = _normalize_leading_shape(num_local_tokens)
     local_tokens = int(np.prod(output_leading)) // num_groups
     num_real_tokens = local_tokens * cfg.top_k
-    grouped_output = expert_out.reshape(
-        num_groups, expert_out.shape[-2], expert_out.shape[-1]
-    )
+    grouped_output = expert_out.reshape(num_groups, expert_out.shape[-2], expert_out.shape[-1])
     weights = jnp.ones((local_tokens, cfg.top_k), dtype=expert_out.dtype)
 
     def combine_one(local_output, sorted_indices, padded_positions):
@@ -1659,9 +1618,7 @@ def _ep1_local_combine(cfg, handle, expert_out, num_local_tokens):
             sequence_length=1,
         ).reshape(local_tokens, expert_out.shape[-1])
 
-    output = jax.vmap(combine_one)(
-        grouped_output, handle.sorted_indices, handle.padded_positions
-    )
+    output = jax.vmap(combine_one)(grouped_output, handle.sorted_indices, handle.padded_positions)
     return output.reshape(*output_leading, expert_out.shape[-1])
 
 
@@ -1683,12 +1640,8 @@ def _ep1_local_combine_bwd(cfg, handle, grad, recv_capacity_per_rank):
         return permuted
 
     compact = jax.vmap(dispatch_one)(grouped_grad, handle.selected_experts)
-    output = jnp.zeros(
-        (num_groups, recv_capacity_per_rank, grad.shape[-1]), dtype=grad.dtype
-    )
-    return output.at[jnp.arange(num_groups)[:, None], handle.padded_positions].set(
-        compact
-    )
+    output = jnp.zeros((num_groups, recv_capacity_per_rank, grad.shape[-1]), dtype=grad.dtype)
+    return output.at[jnp.arange(num_groups)[:, None], handle.padded_positions].set(compact)
 
 
 def _ep1_local_dispatch_bwd(cfg, handle, grad, grad_weights, num_local_tokens):
@@ -1740,9 +1693,7 @@ def _fused_prepare_dispatch_enabled():
     """
     global _fused_prepare_dispatch
     if _fused_prepare_dispatch is None:
-        _fused_prepare_dispatch = (
-            os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
-        )
+        _fused_prepare_dispatch = os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
     return _fused_prepare_dispatch
 
 
@@ -1759,9 +1710,7 @@ def _ep_fused_prepare_and_dispatch_fwd(
         tokens_scale_inv,
         topk_weights,
         top_k=int(cfg.top_k),
-        dispatch_output_per_expert_alignment=int(
-            cfg.dispatch_output_per_expert_alignment
-        ),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
@@ -1816,9 +1765,7 @@ def _ep_prepare_and_dispatch_fwd(
     Fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH.
     """
     if get_ep_config().ep_size == 1:
-        return _ep1_local_dispatch(
-            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
-        )
+        return _ep1_local_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
     if _fused_prepare_dispatch_enabled():
         return _ep_fused_prepare_and_dispatch_fwd(
             cfg, topk_idx, tokens, tokens_scale_inv, topk_weights, recv_capacity_per_rank
@@ -1853,9 +1800,7 @@ def ep_combine_fwd(
     """Gather expert outputs back to home ranks. expert_out is pre-weighted."""
     if get_ep_config().ep_size == 1:
         return _ep1_local_combine(cfg, handle_mem, expert_out, num_local_tokens)
-    return _ep_combine_fwd_nccl(
-        cfg, handle_mem, expert_out, num_local_tokens, out_partition_spec
-    )
+    return _ep_combine_fwd_nccl(cfg, handle_mem, expert_out, num_local_tokens, out_partition_spec)
 
 
 @_on_collective_stream
@@ -1871,9 +1816,7 @@ def _ep_combine_fwd_nccl(
         handle_mem,
         expert_out,
         top_k=int(cfg.top_k),
-        dispatch_output_per_expert_alignment=int(
-            cfg.dispatch_output_per_expert_alignment
-        ),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         out_leading_shape=out_leading,
         out_partition_spec=out_partition_spec,
@@ -1891,9 +1834,7 @@ def ep_dispatch_bwd(
 ):
     """Backward of dispatch; returns (grad_tokens, grad_topk_weights)."""
     if get_ep_config().ep_size == 1:
-        return _ep1_local_dispatch_bwd(
-            cfg, handle_mem, grad, g_recv_topk_weights, num_local_tokens
-        )
+        return _ep1_local_dispatch_bwd(cfg, handle_mem, grad, g_recv_topk_weights, num_local_tokens)
     return _ep_dispatch_bwd_nccl(
         cfg,
         handle_mem,
@@ -1919,9 +1860,7 @@ def _ep_dispatch_bwd_nccl(
         grad,
         g_recv_topk_weights,
         top_k=int(cfg.top_k),
-        dispatch_output_per_expert_alignment=int(
-            cfg.dispatch_output_per_expert_alignment
-        ),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         out_leading_shape=out_leading,
         out_partition_spec=out_partition_spec,
@@ -1942,9 +1881,7 @@ def _ep_combine_bwd_nccl(cfg, handle_mem, grad, recv_capacity_per_rank):
         handle_mem,
         grad,
         top_k=int(cfg.top_k),
-        dispatch_output_per_expert_alignment=int(
-            cfg.dispatch_output_per_expert_alignment
-        ),
+        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
