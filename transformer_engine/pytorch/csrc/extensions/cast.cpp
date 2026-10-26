@@ -825,7 +825,8 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
                ").");
     auto amax = get_optional_tensor("amax");
     if (amax.has_value()) {
-      input_cpp.set_amax(amax->data_ptr(), DType::kFloat32, getTensorShape(*amax));
+      input_cpp.set_amax(amax->data_ptr(), GetTransformerEngineDType(amax->scalar_type()),
+                         getTensorShape(*amax));
     }
     input_cpp.set_with_gemm_swizzled_scales(input.attr("_with_gemm_swizzled_scales").cast<bool>());
   }

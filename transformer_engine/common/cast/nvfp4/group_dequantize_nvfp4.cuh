@@ -59,10 +59,14 @@ __global__ void __launch_bounds__(512)
                                 const int64_t *const first_dims) {
   if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
     // The dense scale indexing below needs each tensor's first dimension to be a multiple of
-    // 128. Validate every tensor once, in the first block, as group_quantize_mxfp8.cuh does.
+    // 128. Validate every tensor once, in the first block.
     if (blockIdx.x == 0) {
       for (size_t t = threadIdx.x; t < num_tensors; t += blockDim.x) {
-        common::get_tensor_rows_num<SHAPE_REP>(t, num_rows, first_dims, num_tensors);
+        if (first_dims[t] % 128 != 0) {
+          NVTE_DEVICE_ERROR("First dimension of each tensor in a group must be divisible by 128.");
+          // NVTE_DEVICE_ERROR uses assert, so also trap when NDEBUG is defined.
+          __trap();
+        }
       }
     }
   }
@@ -155,8 +159,7 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
   // so only a shared last dimension is supported. Every group's first
   // dimension must be a multiple of 128, which makes the padded per-tensor
   // scale layout identical to one dense [rows, cols / 16] array. This is
-  // checked here for equal shapes; for a varying first dimension the kernel
-  // reports it through common::get_tensor_rows_num.
+  // checked here for equal shapes and on device for a varying first dimension.
   ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
   if (input->all_same_shape()) {
     shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
