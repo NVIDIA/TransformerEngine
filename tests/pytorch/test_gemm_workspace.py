@@ -227,6 +227,101 @@ def test_grouped_gemms_match_exact_reference(dtype, execution):
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
+def test_grouped_gemm_exception_joins_helper_streams(monkeypatch):
+    """A later native rejection must join earlier work before releasing scratch."""
+    monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0")
+    dtype = torch.bfloat16
+    reduction, hidden, experts = 8192, 512, 64
+    inputs = [torch.ones((reduction, hidden), dtype=dtype, device="cuda") for _ in range(2)]
+    gradients = [
+        torch.full((reduction, experts), value, dtype=dtype, device="cuda") for value in (1, 2)
+    ]
+    outputs = [torch.empty((experts, hidden), dtype=dtype, device="cuda") for _ in range(2)]
+    biases = [
+        torch.empty(0, dtype=dtype, device="cuda"),
+        torch.zeros(hidden, dtype=dtype, device="cuda"),
+    ]
+    invalid_biases = [biases[0], torch.zeros(hidden, dtype=torch.float32, device="cuda")]
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+
+    def run(bias):
+        general_grouped_gemm(
+            inputs,
+            gradients,
+            outputs,
+            [None, None],
+            dtype,
+            layout="NT",
+            m_splits=[experts, experts],
+            bias=bias,
+            use_bias=True,
+        )
+
+    def reject_and_churn():
+        for output in outputs:
+            output.fill_(-1)
+        # Incompatible input shapes are rejected by getGemmOutputShape for ALL
+        # groups before any launch. A mismatched second bias instead reaches
+        # cublas_gemm's native check AFTER the first GEMM has been submitted.
+        with pytest.raises(
+            RuntimeError, match="Non-FP8/FP4 GEMM bias dtype must match output dtype"
+        ):
+            run(invalid_biases)
+        scratch = get_cublas_workspace(torch.cuda.current_device(), False, True)
+        for tensor in scratch:
+            tensor.fill_(0)
+        del tensor, scratch
+        # These caller-stream consumers must follow the first helper's GEMM.
+        return [output.clone() for output in outputs]
+
+    # Initialize cuBLAS and all used helper streams before capture.
+    with torch.cuda.stream(stream):
+        run(biases)
+    stream.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    try:
+        # The outer context restores the stream even if capture_end raises.
+        with torch.cuda.stream(stream):
+            with torch.cuda.graph(graph, stream=stream):
+                observed = reject_and_churn()
+        # Without exception-path joins, capture_end fails with
+        # cudaErrorStreamCaptureUnjoined. No sleep or allocator reuse luck is
+        # needed to detect the missing dependency. Resetting outputs in the
+        # graph and changing inputs also prevents warmup results from passing.
+        for value in (1, 2):
+            with torch.cuda.stream(stream):
+                inputs[0].fill_(value)
+                graph.replay()
+            stream.synchronize()
+            torch.testing.assert_close(
+                observed[0], torch.full_like(observed[0], reduction * value), rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                observed[1], torch.full_like(observed[1], -1), rtol=0, atol=0
+            )
+
+        # Exercise eager unwinding too, then recover with a valid grouped call.
+        with torch.cuda.stream(stream):
+            inputs[0].fill_(3)
+            observed = reject_and_churn()
+        stream.synchronize()
+        torch.testing.assert_close(
+            observed[0], torch.full_like(observed[0], reduction * 3), rtol=0, atol=0
+        )
+        torch.testing.assert_close(observed[1], torch.full_like(observed[1], -1), rtol=0, atol=0)
+        with torch.cuda.stream(stream):
+            run(biases)
+        stream.synchronize()
+        for output, value in zip(outputs, (3, 2)):
+            torch.testing.assert_close(
+                output, torch.full_like(output, reduction * value), rtol=0, atol=0
+            )
+    finally:
+        graph.reset()
+
+
 @pytest.mark.skipif(
     not hasattr(torch.library, "custom_op")
     or not hasattr(torch.compiler, "cudagraph_mark_step_begin"),
