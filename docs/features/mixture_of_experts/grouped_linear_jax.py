@@ -9,8 +9,9 @@ from transformer_engine.jax import dense as te_dense
 # x:           [sum(group_sizes), hidden_size], expert-contiguous tokens
 # kernel:      [num_experts, hidden_size, ffn_hidden_size], stacked per-expert weights
 # bias:        [num_experts, ffn_hidden_size], stacked per-expert biases
-# group_sizes: [num_experts] int array; group_sizes[i] is the number of routed
+# group_sizes: [num_experts] int32 array; group_sizes[i] is the number of routed
 #              tokens for expert i
+group_sizes = jnp.asarray(group_sizes, dtype=jnp.int32)
 split_indices = jnp.cumsum(group_sizes)[:-1]
 x_by_expert = jnp.split(x, split_indices, axis=0)
 
