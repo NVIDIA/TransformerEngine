@@ -280,6 +280,13 @@ ncclResult_t init_handle(ncclEpHandle_t* handle, ncclEpGroup_t ep_group, ncclEpL
                                         num_topk, handle_mem);
 }
 
+ncclResult_t import_handle(ncclEpHandle_t* handle, ncclEpGroup_t ep_group, ncclEpLayout_t layout,
+                           const ncclEpHandleConfig_t* config, const ncclEpHandleState_t* state,
+                           const ncclEpTensor_t* handle_mem) {
+  return call_symbol<&ncclEpImportHandle>("ncclEpImportHandle", handle, ep_group, layout, config,
+                                          state, handle_mem);
+}
+
 ncclResult_t handle_mem_size(ncclEpGroup_t ep_group, ncclEpLayout_t layout,
                              const ncclEpHandleConfig_t* config, size_t* size_out, int num_topk) {
   return call_symbol<&ncclEpHandleMemSize>("ncclEpHandleMemSize", ep_group, layout, config,

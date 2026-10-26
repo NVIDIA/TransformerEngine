@@ -2794,6 +2794,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "cp_size_a2a": cp_size_a2a,
                 "deterministic": self.deterministic,
                 "is_training": self.training,
+                "device": query_layer.device,
+                "requires_backward": torch.is_grad_enabled()
+                and any(t.requires_grad for t in (query_layer, key_layer, value_layer)),
                 "fp8": self.fp8,
                 "fp8_meta": self.fp8_meta,
                 "inference_params": inference_params,

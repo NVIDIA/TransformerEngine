@@ -208,6 +208,14 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 
 
 def _get_nvfp4_tensor_scale_inv(amax):
+    # NOTE: SCALE_DTYPE_MAX is hardcoded to the E4M3 block-scale bound (448). JAX sets
+    # kNVTEMatmulConfigAlphaBetaOnDevice for NVFP4, so the C++ GEMM skips
+    # nvte_nvfp4_compute_per_tensor_scale entirely and consumes this alpha as-is -- meaning
+    # this is the only place the block-scale bound is applied. The C++ equivalent,
+    # Tensor::get_nvfp4_scale_max() in common/common.h, instead deduces the bound from the
+    # scale-inverse dtype and returns 114688 for kFloat8UE5M3. So once UE5M3 block scales are
+    # wired into the JAX path, this must deduce SCALE_DTYPE_MAX from the scale dtype to match;
+    # leaving it at 448 would scale alpha wrong by 256x per operand.
     DATA_DTYPE_MAX = jnp.finfo(jnp.float4_e2m1fn.dtype).max.astype(jnp.float32)
     SCALE_DTYPE_MAX = jnp.finfo(jnp.float8_e4m3fn.dtype).max.astype(jnp.float32)
     return amax / (DATA_DTYPE_MAX * SCALE_DTYPE_MAX)

@@ -325,6 +325,7 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
   transformer_engine::MatmulConfigWrapper matmul_config;
   matmul_config.set_use_split_accumulator(config.use_split_accumulator);
   matmul_config.set_sm_count(num_math_sm);
+  matmul_config.set_alpha_beta_on_device(is_nvfp4_scaling(config.scaling_mode));
   if (fuse_bias) matmul_config.set_bias_tensor(bias_.data());
 
   if (config.collective_op == JAXX_Collective_Op::NONE) {

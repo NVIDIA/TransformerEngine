@@ -4,6 +4,8 @@
 """End-to-end MoE example: dispatch -> batched expert linear -> combine, fwd + bwd.
 
 One process per GPU. Run via run_test_ep.sh.
+Use ``python ep_moe.py --single-process`` for all local GPUs; this requires
+XLA borrowed communicator support.
 """
 
 import argparse
@@ -23,9 +25,19 @@ from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 def _parse_args():
     p = argparse.ArgumentParser(description="TE-JAX EP MoE example (fwd + bwd)")
-    p.add_argument("--coordinator-address", required=True)
-    p.add_argument("--process-id", type=int, required=True)
-    p.add_argument("--num-processes", type=int, required=True)
+    p.add_argument(
+        "--single-process",
+        action="store_true",
+        help=(
+            "Single-controller mode: one process drives every local GPU via the"
+            " XLA-borrowed-comm EP path; no jax.distributed.initialize, no coordinator."
+            " --coordinator-address/--process-id/--num-processes become optional (and are"
+            " ignored) when this is set."
+        ),
+    )
+    p.add_argument("--coordinator-address", default=None)
+    p.add_argument("--process-id", type=int, default=None)
+    p.add_argument("--num-processes", type=int, default=None)
     p.add_argument("--num-tokens", type=int, default=8, help="Per-rank token count.")
     p.add_argument("--top-k", type=int, default=2)
     p.add_argument("--hidden", type=int, default=32)
@@ -55,10 +67,30 @@ def _parse_args():
         default=3,
         help="Number of fwd+bwd iterations to run (same compiled jit, same handle_mem).",
     )
-    return p.parse_args()
+    args = p.parse_args()
+    if not args.single_process:
+        missing = [
+            name
+            for name, val in (
+                ("--coordinator-address", args.coordinator_address),
+                ("--process-id", args.process_id),
+                ("--num-processes", args.num_processes),
+            )
+            if val is None
+        ]
+        if missing:
+            p.error(f"{', '.join(missing)} required unless --single-process is set")
+    return args
 
 
 def _distributed_init(args):
+    if args.single_process:
+        assert (
+            jax.process_count() == 1
+        ), f"--single-process requires jax.process_count() == 1; got {jax.process_count()}"
+        args.process_id = 0
+        args.num_processes = jax.device_count()
+        return
     jax.distributed.initialize(
         coordinator_address=args.coordinator_address,
         num_processes=args.num_processes,
@@ -126,13 +158,14 @@ def _make_inputs(args):
     dp_size = args.dp_size
     ep_size = args.ep_size
     num_procs = args.num_processes
-    dp_color = args.process_id // ep_size
     NLE = args.num_local_experts
 
-    rng_dp = np.random.default_rng(seed=42 + dp_color)
-    tokens_np = (rng_dp.standard_normal((T, H), dtype=np.float32) * 0.5).astype(np.float32)
-    w_np = np.full((T, K), 1.0 / K, dtype=np.float32)
-    idx_np_list = [_make_routing(dp_color, T, K, E, NLE, offset=i) for i in range(L)]
+    if not args.single_process:
+        dp_color = args.process_id // ep_size
+        rng_dp = np.random.default_rng(seed=42 + dp_color)
+        tokens_np = (rng_dp.standard_normal((T, H), dtype=np.float32) * 0.5).astype(np.float32)
+        w_np = np.full((T, K), 1.0 / K, dtype=np.float32)
+        idx_np_list = [_make_routing(dp_color, T, K, E, NLE, offset=i) for i in range(L)]
 
     tokens_global_np = np.concatenate(
         [
@@ -165,14 +198,31 @@ def _make_inputs(args):
     # [num_procs, T, ...] sharded on the first dim across (dp, ep).
     mesh = args.mesh
     dpep_spec = NamedSharding(mesh, PartitionSpec(("dp", "ep"), None, None))
+    if args.single_process:
+        tokens_local = np.broadcast_to(
+            tokens_global_np.reshape(dp_size, T, H)[:, None], (dp_size, ep_size, T, H)
+        ).reshape(num_procs, T, H)
+        idx_local_list = [
+            np.broadcast_to(
+                idx_g.reshape(dp_size, T, K)[:, None], (dp_size, ep_size, T, K)
+            ).reshape(num_procs, T, K)
+            for idx_g in idx_global_np_list
+        ]
+        w_local = np.broadcast_to(
+            w_global_np.reshape(dp_size, T, K)[:, None], (dp_size, ep_size, T, K)
+        ).reshape(num_procs, T, K)
+    else:
+        tokens_local = tokens_np[None, :, :]
+        idx_local_list = [idx_np[None, :, :] for idx_np in idx_np_list]
+        w_local = w_np[None, :, :]
     tokens = jax.make_array_from_process_local_data(
-        dpep_spec, tokens_np[None, :, :].astype(np.float32), (num_procs, T, H)
+        dpep_spec, tokens_local.astype(np.float32), (num_procs, T, H)
     ).astype(jnp.bfloat16)
     topk_idx_list = [
-        jax.make_array_from_process_local_data(dpep_spec, idx_np[None, :, :], (num_procs, T, K))
-        for idx_np in idx_np_list
+        jax.make_array_from_process_local_data(dpep_spec, idx_local, (num_procs, T, K))
+        for idx_local in idx_local_list
     ]
-    topk_w = jax.make_array_from_process_local_data(dpep_spec, w_np[None, :, :], (num_procs, T, K))
+    topk_w = jax.make_array_from_process_local_data(dpep_spec, w_local, (num_procs, T, K))
     kernels_list = [jnp.asarray(k, dtype=jnp.bfloat16) for k in kernels_np_list]
     return (
         tokens_global_np,
@@ -331,6 +381,17 @@ def main():
         major, minor = (int(x) for x in str(cap).split("."))
         if major * 10 + minor < 90:
             print(f"[ep_moe] SKIPPED: NCCL EP requires SM>=90 (got SM{major}{minor})")
+            return
+
+    if args.single_process and jax.local_device_count() > 1:
+        from transformer_engine.jax.cpp_extensions.ep import use_nccl_comm_from_xla
+
+        if not use_nccl_comm_from_xla():
+            print(
+                "[ep_moe] SKIPPED: --single-process needs the XLA-borrowed-comm EP path"
+                " (unavailable: build TE with the XLA collectives FFI headers and a"
+                " supporting JAX/jaxlib)"
+            )
             return
 
     args.mesh, args.mr = _build_mesh_and_resource(args)

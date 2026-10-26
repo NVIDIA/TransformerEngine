@@ -12,6 +12,7 @@ import threading
 import pathlib
 import logging
 import copy
+from collections.abc import Callable
 from collections import deque
 import pytest
 import torch
@@ -60,6 +61,7 @@ model_configs_flash_attn = {
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(2, 4096, 32, 128, attn_mask_type="causal", window_size=(128, 0)),  # GQA
     "cp_2_3": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, window_size=(512, 512)),  # GQA
+    "cp_2_4": ModelConfig(2, 4096, 32, 256, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
     "cp_3_0": ModelConfig(2, 4096, 128, 192, attn_mask_type="causal", head_dim_v=128),  # MLA
     "cp_3_1": ModelConfig(2, 4096, 12, 192, head_dim_v=128),  # MLA
     "cp_3_2": ModelConfig(
@@ -104,8 +106,9 @@ class PoolWorker:
     _STDERR_BUFFER_LINES = 200  # ring cap (~40 KB ceiling)
     _STDERR_TAIL_CHARS = 4000  # how much to attach to the AssertionError
 
-    def __init__(self, world_size: int):
+    def __init__(self, world_size: int, reset_all_pools: Callable[[], None]):
         self.world_size = world_size
+        self._reset_all_pools = reset_all_pools
         self.proc: subprocess.Popen | None = None
         self._stderr_buf: deque[str] = deque(maxlen=self._STDERR_BUFFER_LINES)
 
@@ -221,10 +224,13 @@ class PoolWorker:
                         sys.stderr.flush()
                     raise
                 first_err = e
+                # Pools with different world sizes can occupy the same GPUs. Reset
+                # all pools so the retry starts without leftover CUDA/NCCL state.
+                self._reset_all_pools()
                 sys.stderr.write(
                     f"[POOL-RETRY] status=retrying test={test_id!r} "
                     f"world_size={self.world_size} attempt={attempt + 1} "
-                    f"error={msg_head!r}; respawning pool and retrying\n"
+                    f"error={msg_head!r}; reset all pools and retrying\n"
                 )
                 sys.stderr.flush()
         raise first_err  # unreachable; loop either returns or raises
@@ -297,11 +303,15 @@ def cp_pool():
     """Returns a callable: cp_pool(world_size) -> PoolWorker."""
     pools: dict[int, PoolWorker] = {}
 
+    def _reset_all_pools() -> None:
+        for pool in pools.values():
+            pool.shutdown()
+
     def _get(world_size: int) -> PoolWorker:
         if world_size > torch.cuda.device_count():
             pytest.skip(f"Test requires {world_size} GPUs, but found {torch.cuda.device_count()}")
         if world_size not in pools:
-            pools[world_size] = PoolWorker(world_size)
+            pools[world_size] = PoolWorker(world_size, _reset_all_pools)
         return pools[world_size]
 
     yield _get
@@ -319,9 +329,10 @@ def _submit(pool: PoolWorker, **kwargs) -> None:
 dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+essential_model_configs_flash_attn = model_configs_flash_attn
 if test_essential:
     configs = ["cp_2_0", "cp_2_2", "cp_3_0", "cp_3_3"]
-    model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
+    essential_model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
 
@@ -336,7 +347,7 @@ if test_essential:
 )
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model", model_configs_flash_attn.keys())
+@pytest.mark.parametrize("model", essential_model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("pad_between_seqs", [False, True])
@@ -552,6 +563,7 @@ model_configs_fused_attn = {
 dtypes = ["bf16", "fp16", "fp8"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+essential_model_configs_fused_attn = model_configs_fused_attn
 if test_essential:
     configs = [
         "cp_1_0",
@@ -567,15 +579,14 @@ if test_essential:
         "cp_5_0",
         "cp_5_1",
     ]
-    model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
+    essential_model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model", model_configs_fused_attn.keys())
+@pytest.mark.parametrize("model", essential_model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("fp8_bwd", [True, False])
@@ -748,7 +759,6 @@ def test_cp_with_fused_attention(
     )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
 )
@@ -781,13 +791,22 @@ def test_cp_with_fused_attention_no_load_balance(cp_pool):
     )
 
 
-def test_cp_with_flash_attention_no_load_balance(cp_pool):
+@pytest.mark.parametrize("model", ("cp_2_0", "cp_2_4"))
+def test_cp_with_flash_attention_no_load_balance(cp_pool, model):
     """Check the supported unpadded FlashAttention path."""
-    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config = copy.deepcopy(model_configs_flash_attn[model])
+    fa4_expected = (
+        config.head_dim_qk == 256
+        and (10, 0) <= get_device_compute_capability() < (12, 0)
+        and fa4_enabled
+        and FlashAttentionUtils.v4_is_installed
+        and FlashAttentionUtils.fa4_version >= FlashAttentionUtils.v4_0_0_beta33
+        and not _deterministic
+    )
     config.context_parallel = True
     config.cp_comm_type = "all_gather"
     config.attn_mask_type = "padding_causal"
-    available_backends, _, _ = get_available_attention_backends(
+    available_backends, flash_backend, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.bfloat16,
         qkv_layout="thd_thd_thd",
@@ -795,12 +814,16 @@ def test_cp_with_flash_attention_no_load_balance(cp_pool):
         is_training=True,
         deterministic=_deterministic,
     )
+    if fa4_expected:
+        assert available_backends[0] and flash_backend is not None and flash_backend.major == 4
+    elif config.head_dim_qk == 256:
+        pytest.skip("D=256 THD all-gather requires SM100/SM110 FA4 b33+ non-deterministic.")
     if not available_backends[0]:
         pytest.skip("FlashAttention is unavailable.")
     _submit(
         cp_pool(2),
         dtype="bf16",
-        model="cp_2_0",
+        model=model,
         qkv_format="thd",
         kernel_backend="FlashAttention",
         cp_comm_type="all_gather",

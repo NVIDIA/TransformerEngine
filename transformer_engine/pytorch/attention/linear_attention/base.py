@@ -4,19 +4,24 @@
 
 """Shared infrastructure for the cuDNN frontend linear-attention variants.
 
-Every variant (Gated DeltaNet, Gated DeltaNet v2, ...) differs only in its gate
-tensors and in the cuDNN frontend op it calls. Everything else -- the TE layout
-contract, the Q/K/V validation, the THD conversion, the ``cu_seqlens`` handling,
-the recurrent-state contract, and the TransformerEngine module lifecycle -- is
-shared and lives here.
+Variants (Gated DeltaNet, Gated DeltaNet v2, Gated DeltaProduct, ...) differ in
+their gate tensors, in the cuDNN frontend op they call, and in how their K/V
+rows line up with the query tokens. Everything else -- the TE layout contract,
+the THD conversion, the ``cu_seqlens`` handling, the head geometry behind the
+module's output width, the recurrent-state contract, and the TransformerEngine
+module lifecycle -- is shared and lives here.
+
+Q/K/V layout validation is declared by the variant rather than assumed here:
+:class:`AlignedTimelineKernelAdapter` supplies the common "one K/V row per query
+token" rules that Gated DeltaNet and Gated DeltaNet v2 share, and variants that
+expand the K/V timeline -- Gated DeltaProduct runs ``num_householder`` rows per
+token -- implement their own.
 
 This module is **experimental** and subject to change.
 """
 
-import importlib
 import math
 from contextlib import contextmanager
-from functools import lru_cache
 from typing import Any, Callable, Dict, Generator, Optional, Tuple, Union
 
 import torch
@@ -24,20 +29,6 @@ import torch
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.distributed import get_distributed_world_size, checkpoint
 from transformer_engine.pytorch.utils import nvtx_range_pop, nvtx_range_push
-
-
-@lru_cache(maxsize=None)
-def _import_linear_attention_op(op_name: str, variant: str) -> Callable:
-    """Import a cuDNN frontend linear-attention custom op lazily."""
-    try:
-        ops = importlib.import_module("cudnn.linear_attention.ops")
-        return getattr(ops, op_name)
-    except (AttributeError, ImportError) as exc:
-        raise ImportError(
-            f"{variant} attention requires a nvidia-cudnn-frontend installation that provides "
-            f"cudnn.linear_attention.ops.{op_name} and its kernel runtime. Install "
-            "cuDNN frontend from the matching source revision with the 'cutedsl' extra."
-        ) from exc
 
 
 def _to_thd(tensor: torch.Tensor, qkv_format: str) -> torch.Tensor:
@@ -82,9 +73,10 @@ def _needs_eager_linear_attention(call: Dict[str, Any]) -> Optional[str]:
 class LinearAttentionKernelAdapter(torch.nn.Module):
     """Adapter from TransformerEngine attention layouts to the cuDNN frontend.
 
-    Subclasses name their variant, validate their gate tensors, and call their
-    cuDNN frontend op on THD inputs; this class owns everything the variants
-    share.
+    Subclasses name their variant, declare their Q/K/V layout, validate their
+    gate tensors, and call their cuDNN frontend op on THD inputs; this class owns
+    everything the variants share and takes no position on any one variant's
+    layout.
 
     The cuDNN frontend linear-attention ops are differentiated through
     ``torch.autograd`` (they register their own backward internally), so this
@@ -112,6 +104,78 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         self.v_head_dim = v_head_dim
         self._dense_cu_seqlens_key: Optional[Tuple[torch.device, int, int]] = None
         self._dense_cu_seqlens: Optional[torch.Tensor] = None
+        # Resolved here when the cuDNN frontend is available so that the op is a plain
+        # attribute during `torch.compile` tracing. A missing runtime is only reported
+        # when the module is first run, so constructing it does not require cuDNN
+        # frontend.
+        self._op: Optional[Callable] = None
+        try:
+            self._op = self._resolve_op()
+        except ImportError:
+            pass
+
+    def _resolve_op(self) -> Callable:
+        """Import the cuDNN frontend custom op backing this variant."""
+        try:
+            from cudnn.linear_attention import ops
+
+            return getattr(ops, self.op_name)
+        except (AttributeError, ImportError) as exc:
+            raise ImportError(
+                f"{self.variant} attention requires a nvidia-cudnn-frontend installation that "
+                f"provides cudnn.linear_attention.ops.{self.op_name} and its kernel runtime. "
+                "Install cuDNN frontend from the matching source revision with the 'cutedsl' extra."
+            ) from exc
+
+    def _validate_qkv_shapes(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        qkv_format: str,
+    ) -> None:
+        """Check the variant's Q/K/V layout.
+
+        There is no default: how many K/V rows a query token owns is part of the
+        variant's definition, so each one says so rather than inheriting another
+        variant's answer. Implementations should finish by calling
+        :meth:`_validate_head_geometry`, which is the part every variant shares.
+        """
+        raise NotImplementedError
+
+    def _validate_head_geometry(
+        self,
+        query_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+    ) -> None:
+        """Check the Q/V head counts and head sizes against the output contract."""
+        if query_layer.shape[-2] != self.num_q_heads:
+            raise ValueError(
+                f"{self.variant} Q and K must have {self.num_q_heads} heads, "
+                f"got {query_layer.shape[-2]}."
+            )
+        # The underlying ops support grouped value heads, but the module's output
+        # contract is fixed at construction time. Integrations that use more V
+        # heads must expand Q/K before the module.
+        # TODO(KshitijLakhani/cyanguwa): the cuDNN frontend linear-attention ops accept
+        # distinct Q/K/V head counts; plumb that through the modules' output contract so
+        # the wrappers stop requiring them to be equal.
+        if value_layer.shape[-2] != self.num_q_heads:
+            raise ValueError(
+                f"{self.variant} V must have {self.num_q_heads} heads, "
+                f"got {value_layer.shape[-2]}. {self.module_name} requires its output "
+                "width to match num_attention_heads * v_head_dim."
+            )
+        if query_layer.shape[-1] != self.qk_head_dim:
+            raise ValueError(
+                f"{self.variant} Q and K head dimension must match kv_channels; expected "
+                f"{self.qk_head_dim}, got {query_layer.shape[-1]}."
+            )
+        if value_layer.shape[-1] != self.v_head_dim:
+            raise ValueError(
+                f"{self.variant} V head dimension must match kv_channels; expected "
+                f"{self.v_head_dim}, got {value_layer.shape[-1]}."
+            )
 
     def _validate_gates(
         self,
@@ -123,7 +187,6 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
 
     def _call_op(
         self,
-        op: Callable,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
@@ -236,55 +299,7 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         if initial_state is not None and not isinstance(initial_state, torch.Tensor):
             raise TypeError(f"{self.variant} initial_state must be a torch.Tensor when provided.")
 
-        # The checks below encode GDN/GDN-2's layout: aligned Q/K/V token dimensions,
-        # identical Q/K shapes, equal Q/V head counts, and state heads derived from Q
-        # heads. These do not describe linear attention generally -- GDP uses T rows for
-        # Q/g but T * num_householder rows for K/V/beta, and KDA allows HK in {H, HV}
-        # with HO = max(H, HV) for its output and state heads.
-        # TODO(KshitijLakhani/cyanguwa): when KDA/GDP land, move these into the
-        # flavor-specific adapters rather than relaxing them here, so GDN/GDN-2 keep
-        # strict validation.
-        expected_rank = 3 if qkv_format == "thd" else 4
-        if any(tensor.dim() != expected_rank for tensor in qkv):
-            raise ValueError(
-                f"Q, K, and V must be {expected_rank}D tensors for qkv_format={qkv_format!r}."
-            )
-        if query_layer.shape != key_layer.shape:
-            raise ValueError(
-                f"{self.variant} requires Q and K to have the same shape; got "
-                f"{tuple(query_layer.shape)} and {tuple(key_layer.shape)}."
-            )
-        if query_layer.shape[:-2] != value_layer.shape[:-2]:
-            raise ValueError(
-                f"{self.variant} requires Q, K, and V to have the same token dimensions."
-            )
-        if query_layer.shape[-2] != self.num_q_heads:
-            raise ValueError(
-                f"{self.variant} Q and K must have {self.num_q_heads} heads, "
-                f"got {query_layer.shape[-2]}."
-            )
-        # The underlying ops support grouped value heads, but the module's output
-        # contract is fixed at construction time. Integrations that use more V
-        # heads must expand Q/K before the module.
-        # TODO(KshitijLakhani/cyanguwa): cuDNN's GDN-2 op accepts distinct Q/K/V head
-        # counts; plumb that through the module's output contract so the wrapper stops
-        # requiring them to be equal.
-        if value_layer.shape[-2] != self.num_q_heads:
-            raise ValueError(
-                f"{self.variant} V must have {self.num_q_heads} heads, "
-                f"got {value_layer.shape[-2]}. {self.module_name} requires its output "
-                "width to match num_attention_heads * v_head_dim."
-            )
-        if query_layer.shape[-1] != self.qk_head_dim:
-            raise ValueError(
-                f"{self.variant} Q and K head dimension must match kv_channels; expected "
-                f"{self.qk_head_dim}, got {query_layer.shape[-1]}."
-            )
-        if value_layer.shape[-1] != self.v_head_dim:
-            raise ValueError(
-                f"{self.variant} V head dimension must match kv_channels; expected "
-                f"{self.v_head_dim}, got {value_layer.shape[-1]}."
-            )
+        self._validate_qkv_shapes(query_layer, key_layer, value_layer, qkv_format)
 
         device = query_layer.device
         if any(not tensor.is_cuda for tensor in qkv):
@@ -307,10 +322,10 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         batch_size = cu_seqlens.shape[0] - 1
         self._validate_initial_state(initial_state, batch_size=batch_size, device=device)
 
-        op = _import_linear_attention_op(self.op_name, self.variant)
+        if self._op is None:
+            self._op = self._resolve_op()
         try:
             output, final_state = self._call_op(
-                op,
                 _to_thd(query_layer, qkv_format),
                 _to_thd(key_layer, qkv_format),
                 _to_thd(value_layer, qkv_format),
@@ -336,6 +351,43 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         if output_final_state:
             return output, final_state
         return output
+
+
+class AlignedTimelineKernelAdapter(LinearAttentionKernelAdapter):
+    """Adapter for variants whose K and V carry exactly one row per query token.
+
+    Gated DeltaNet and Gated DeltaNet v2 both have this layout, so the rules live
+    here rather than in either one: Q, K, and V share their token dimensions, Q
+    and K have identical shapes, and the head geometry follows the module's
+    output contract. Variants that expand the K/V timeline -- Gated DeltaProduct
+    -- derive from :class:`LinearAttentionKernelAdapter` directly and write their
+    own :meth:`_validate_qkv_shapes`.
+    """
+
+    def _validate_qkv_shapes(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        qkv_format: str,
+    ) -> None:
+        """Check that Q, K, and V agree on a single shared token timeline."""
+        expected_rank = 3 if qkv_format == "thd" else 4
+        qkv = (query_layer, key_layer, value_layer)
+        if any(tensor.dim() != expected_rank for tensor in qkv):
+            raise ValueError(
+                f"Q, K, and V must be {expected_rank}D tensors for qkv_format={qkv_format!r}."
+            )
+        if query_layer.shape != key_layer.shape:
+            raise ValueError(
+                f"{self.variant} requires Q and K to have the same shape; got "
+                f"{tuple(query_layer.shape)} and {tuple(key_layer.shape)}."
+            )
+        if query_layer.shape[:-2] != value_layer.shape[:-2]:
+            raise ValueError(
+                f"{self.variant} requires Q, K, and V to have the same token dimensions."
+            )
+        self._validate_head_geometry(query_layer, value_layer)
 
 
 class LinearAttentionBase(torch.nn.Module):

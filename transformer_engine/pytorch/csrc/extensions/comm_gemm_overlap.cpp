@@ -307,6 +307,33 @@ void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOve
   cudaFree(d_ptr);
 }
 
+// cuBLASMp has no communication buffer: its all-gather GEMM leaves the gathered input at the
+// start of its workspace, the local input of every rank in rank order. Like a Userbuffers
+// buffer, the view is valid until the next communicator operation on any rank overwrites it.
+at::Tensor cublasmp_get_buffer(NVTECommGemmCtx *ctx, int tp_rank, int tp_size,
+                               const std::vector<size_t> &buffer_shape, at::ScalarType dtype,
+                               bool local_chunk, std::optional<std::vector<int64_t>> shape) {
+  if (!shape) {
+    NVTE_CHECK(buffer_shape.size() == 2, "cuBLASMp buffer shape must be 2-dimensional");
+    int64_t dim0 = static_cast<int64_t>(buffer_shape[0]);
+    if (local_chunk) {
+      dim0 /= tp_size;
+    }
+    shape = {dim0, static_cast<int64_t>(buffer_shape[1])};
+  }
+  const size_t bytes = transformer_engine::pytorch::product(*shape) * at::elementSize(dtype);
+  const size_t offset = local_chunk ? bytes * tp_rank : 0;
+  size_t workspace_size = 0;
+  char *workspace = static_cast<char *>(nvte_comm_gemm_workspace(ctx, &workspace_size));
+  NVTE_CHECK(workspace != nullptr,
+             "No gathered input in the cuBLASMp workspace (requires cuBLASMp 0.11.0 or newer and a "
+             "previous all-gather GEMM)");
+  NVTE_CHECK(offset + bytes <= workspace_size, "Requested buffer (shape=", *shape,
+             ", local_chunk=", local_chunk, ") exceeds the cuBLASMp workspace (", workspace_size,
+             " bytes)");
+  return torch::from_blob(workspace + offset, *shape, at::dtype(dtype).device(torch::kCUDA));
+}
+
 }  // namespace
 
 CommOverlap::CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
@@ -314,10 +341,10 @@ CommOverlap::CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
                          at::ScalarType buffer_dtype, int num_comm_sm, bool atomic_gemm)
     : te::CommOverlapBase(helper->get_nccl_comm("intra").get(), tp_rank, tp_size, num_comm_sm,
                           atomic_gemm),
-      _nccl_comm(helper->get_nccl_comm("intra")) {
-  // buffer_dtype is unused on this path (the warmup runs in BF16); kept in
-  // the signature for API symmetry with the non-cuBLASMp ctor.
-  (void)buffer_dtype;
+      _nccl_comm(helper->get_nccl_comm("intra")),
+      _cublasmp_buffer_shape(buffer_shape),
+      _cublasmp_buffer_dtype(buffer_dtype) {
+  // The warmup runs in BF16; buffer_dtype is the dtype of get_buffer() views.
   cublasmp_capture_warmup(this, tp_size, comm_type, buffer_shape);
 }
 
@@ -362,6 +389,11 @@ void CommOverlap::copy_into_buffer(const at::Tensor &input, bool local_chunk) {
 }
 
 at::Tensor CommOverlap::get_buffer(bool local_chunk, std::optional<std::vector<int64_t>> shape) {
+  if (_with_cublasmp) {
+    return cublasmp_get_buffer(_cublasmp_ctx, _tp_id, _tp_size, _cublasmp_buffer_shape,
+                               _cublasmp_buffer_dtype, local_chunk, shape);
+  }
+
   // Check buffer shape
   const size_t ubuf_size = _ubuf.numel();
   if (shape) {
@@ -426,9 +458,10 @@ CommOverlapP2P::CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_si
                                int num_comm_sm, bool atomic_gemm)
     : te::CommOverlapP2PBase(helper->get_nccl_comm("intra").get(), tp_rank, tp_size, num_comm_sm,
                              atomic_gemm),
-      _nccl_comm(helper->get_nccl_comm("intra")) {
-  // See CommOverlap constructor for the buffer_dtype rationale.
-  (void)buffer_dtype;
+      _nccl_comm(helper->get_nccl_comm("intra")),
+      _cublasmp_buffer_shape(buffer_shape),
+      _cublasmp_buffer_dtype(buffer_dtype) {
+  // The warmup runs in BF16; buffer_dtype is the dtype of get_buffer() views.
   cublasmp_capture_warmup(this, tp_size, comm_type, buffer_shape);
 }
 
@@ -470,6 +503,11 @@ void CommOverlapP2P::copy_into_buffer(const at::Tensor &input, bool local_chunk)
 }
 
 at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vector<int64_t>> shape) {
+  if (_with_cublasmp) {
+    return cublasmp_get_buffer(_cublasmp_ctx, _tp_id, _tp_size, _cublasmp_buffer_shape,
+                               _cublasmp_buffer_dtype, local_chunk, shape);
+  }
+
   // Check buffer shape
   if (shape) {
     const size_t requested_size = transformer_engine::pytorch::product(*shape);

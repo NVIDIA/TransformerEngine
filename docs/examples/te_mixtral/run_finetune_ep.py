@@ -19,18 +19,6 @@ Improvements (``--ep-size 2`` => 4 experts/rank on 8 GPUs, DP=4):
 
 import argparse
 import os
-import sys
-
-# Improvement 3 needs ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` set before TE is imported,
-# because the fused-grouped-MLP fusion is registered at module-import time
-# inside ``if ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported(): ...``.
-for _i, _arg in enumerate(sys.argv[1:]):
-    if _arg == "--improvement" and _i + 2 < len(sys.argv) and sys.argv[_i + 2] == "3":
-        os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
-        break
-    if _arg == "--improvement=3":
-        os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
-        break
 
 from utils import HyperParameters, run_hf_baseline_finetune, run_te_mixtral_finetune
 

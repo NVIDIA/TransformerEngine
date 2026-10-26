@@ -28,6 +28,10 @@ TRITON_EXTENSION_MIN_JAX_VERSION = "0.8.0"
 # Minimum JAX version for non-legacy Triton kernel FFI (supports CUDA graph capture).
 TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION = "0.10.1"
 
+# Minimum JAX version whose TritonKernel accepts global_scratch_size/global_scratch_align and
+# allocates that scratch at launch (needed for device-side TMA descriptors).
+TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION = "0.11.1"
+
 # Nightly and stable floors for safe input_output_aliases in TritonAutotunedKernelCall.
 # jaxlib/gpu/triton_kernels.cc had a bug in the autotuning save/restore loop:
 # it iterated over all declared aliases unconditionally, but input_copies only
@@ -122,5 +126,6 @@ __all__ = [
     "is_triton_extension_supported",
     "TRITON_EXTENSION_MIN_JAX_VERSION",
     "TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION",
+    "TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION",
     "TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION",
 ]

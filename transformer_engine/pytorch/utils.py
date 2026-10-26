@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from .torch_version import torch_version
+from ..common import decode_cudnn_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
@@ -157,9 +158,11 @@ def _get_device_compute_capability(device: torch.device) -> Tuple[int, int]:
 
 
 @torch.compiler.assume_constant_result
-def get_device_compute_capability() -> Tuple[int, int]:
-    """CUDA compute capability of current GPU"""
-    return _get_device_compute_capability(torch.cuda.current_device())
+def get_device_compute_capability(device: Optional[torch.device] = None) -> Tuple[int, int]:
+    """CUDA compute capability of ``device`` (the current GPU when unspecified)."""
+    if device is None or device.index is None:
+        device = torch.cuda.current_device()
+    return _get_device_compute_capability(device)
 
 
 def deinterleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:
@@ -259,25 +262,13 @@ def interleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.T
     return x.reshape(shape)
 
 
-def resolve_grouped_linear_single_param_flags(
+def warn_if_single_grouped_parameters(
     single_grouped_weight: bool,
     single_grouped_bias: bool,
-) -> Tuple[bool, bool]:
-    """Gate ``single_grouped_weight`` / ``single_grouped_bias`` on ``NVTE_GROUPED_LINEAR_SINGLE_PARAM``."""
+) -> None:
+    """Warn when a caller selects the experimental single grouped parameter layout."""
     if not (single_grouped_weight or single_grouped_bias):
-        return single_grouped_weight, single_grouped_bias
-
-    env_enabled = int(os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")) > 0
-    if not env_enabled:
-        warnings.warn(
-            f"GroupedLinear was constructed with single_grouped_weight={single_grouped_weight} "
-            f"and single_grouped_bias={single_grouped_bias}, but the "
-            "NVTE_GROUPED_LINEAR_SINGLE_PARAM environment variable is not set. "
-            "Disabling single grouped weight/bias and falling back to per-expert parameters.",
-            UserWarning,
-            stacklevel=3,
-        )
-        return False, False
+        return
 
     warnings.warn(
         "GroupedLinear is using single_grouped_weight/single_grouped_bias. "
@@ -286,7 +277,6 @@ def resolve_grouped_linear_single_param_flags(
         UserWarning,
         stacklevel=3,
     )
-    return single_grouped_weight, single_grouped_bias
 
 
 def attention_mask_func(
@@ -781,11 +771,7 @@ def _get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
     import transformer_engine.pytorch.cpp_extensions as ext
 
-    encoded_version = ext.get_cudnn_version()
-    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
-    major, encoded_version = divmod(encoded_version, major_version_magnitude)
-    minor, patch = divmod(encoded_version, 100)
-    return (major, minor, patch)
+    return decode_cudnn_version(ext.get_cudnn_version())
 
 
 @torch.compiler.assume_constant_result

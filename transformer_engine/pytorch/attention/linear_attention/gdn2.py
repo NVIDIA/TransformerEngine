@@ -22,7 +22,7 @@ scale the state's columns.
 This module is **experimental** and subject to change.
 """
 
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 
@@ -30,13 +30,13 @@ from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.jit import no_torch_dynamo
 
 from .base import (
+    AlignedTimelineKernelAdapter,
     LinearAttentionBase,
-    LinearAttentionKernelAdapter,
     _needs_eager_linear_attention,
 )
 
 
-class _GDN2KernelAdapter(LinearAttentionKernelAdapter):
+class _GDN2KernelAdapter(AlignedTimelineKernelAdapter):
     """Adapter from TransformerEngine attention layouts to cuDNN frontend GDN-2.
 
     GDN-2's gates are channel-wise: ``g`` and ``beta`` carry one value per
@@ -85,7 +85,6 @@ class _GDN2KernelAdapter(LinearAttentionKernelAdapter):
 
     def _call_op(
         self,
-        op: Callable,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
@@ -99,7 +98,7 @@ class _GDN2KernelAdapter(LinearAttentionKernelAdapter):
         allow_neg_eigval: bool = False,
         beta_guard: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return op(
+        return self._op(
             query_layer,
             key_layer,
             value_layer,

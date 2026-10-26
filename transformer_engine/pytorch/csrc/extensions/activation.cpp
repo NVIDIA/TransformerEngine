@@ -46,6 +46,9 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
         (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
       // Amax is handled within NVFP4 quantizer
       impl = Impl::UNFUSED;
+    } else if (nvfp4_quantizer_cpp->disable_second_level_scale) {
+      // No need for amax
+      impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
     }
@@ -158,6 +161,9 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
     if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
         (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
       // Amax is handled within NVFP4 quantizer
+      impl = Impl::UNFUSED;
+    } else if (nvfp4_quantizer_cpp->disable_second_level_scale) {
+      // No need for amax
       impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;

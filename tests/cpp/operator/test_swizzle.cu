@@ -308,7 +308,17 @@ void performTestGroupedSwizzleMXFP8(const int num_tensors, const size_t M, const
                  num_tensors * col_numel);
 }
 
-class SwizzleTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool>> {};
+// Sets NVTE_MXFP8_PER_TILE_SWIZZLE while it lives, so that MXFP8 swizzles use the per-tile
+// kernels (enable) or the default ones.
+class PerTileSwizzle {
+ public:
+  explicit PerTileSwizzle(bool enable) {
+    setenv("NVTE_MXFP8_PER_TILE_SWIZZLE", enable ? "1" : "0", 1);
+  }
+  ~PerTileSwizzle() { unsetenv("NVTE_MXFP8_PER_TILE_SWIZZLE"); }
+};
+
+class SwizzleTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool, bool>> {};
 
 
 TEST_P(SwizzleTestSuite, TestSwizzle) {
@@ -318,6 +328,7 @@ TEST_P(SwizzleTestSuite, TestSwizzle) {
   const auto num_tiles = std::get<0>(GetParam());
   const auto scaling_mode = std::get<1>(GetParam());
   const auto transa = std::get<2>(GetParam());
+  const PerTileSwizzle per_tile_swizzle(std::get<3>(GetParam()));
 
   performTestSwizzle1D(num_tiles.first, num_tiles.second,
                        scaling_mode.first, scaling_mode.second,
@@ -1004,6 +1015,7 @@ std::vector<std::pair<int, int>> num_tiles = {
   {8, 1},     // narrow_m with 8 M-tiles
   {31, 1},    // narrow_m at boundary (31 < TB_DIM=32)
   {1, 31},    // narrow_k at boundary (31 < TB_DIM=32)
+  {1600, 1},  // MXFP8: more row-wise tiles than one CTA per tile allows
 };
 
 // Raw {M, K} data shapes for unswizzle tests. Includes aligned cases (scale dims
@@ -1039,7 +1051,8 @@ INSTANTIATE_TEST_SUITE_P(
   ::testing::Combine(
     ::testing::ValuesIn(num_tiles),
     ::testing::ValuesIn(scaling_mode),
-    ::testing::ValuesIn(transa)
+    ::testing::ValuesIn(transa),
+    ::testing::Values(false, true)
   ),
   [](const testing::TestParamInfo<SwizzleTestSuite::ParamType>& info) {
     std::string name = "ntiles" +
@@ -1047,7 +1060,8 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<0>(info.param).second) + "smode" +
       std::to_string(std::get<1>(info.param).first) + "X"+
       std::to_string(std::get<1>(info.param).second) + "trans" +
-      std::to_string(std::get<2>(info.param));
+      std::to_string(std::get<2>(info.param)) +
+      (std::get<3>(info.param) ? "PerTile" : "");
     return name;
     });
 

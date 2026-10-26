@@ -140,9 +140,11 @@ def ep_bootstrap(
     ``tex.ep.use_nccl_comm_from_xla``).
 
     Args:
-        world_size: Total number of processes (product of all mesh axes).
+        world_size: Total number of devices (product of all mesh axes).
+            Pass None to use the active mesh size; an explicit value must match it.
         rank: Global rank of the calling process. Unused on the borrowed-comm
             path, where each device's identity comes from its mesh position.
+            Pass None to use jax.process_index().
         num_experts: Total experts across the EP group.
         max_tokens_per_rank: Max tokens one rank dispatches per step (sizes send buffers).
         recv_capacity_per_rank: Max tokens one rank receives per step; set to
@@ -156,21 +158,18 @@ def ep_bootstrap(
         ep_axes: Physical mesh axis name or ordered tuple of names. Defaults to
             ``MeshResource.ep_resource``.
     """
+    if rank is None:
+        rank = jax.process_index()
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
         raise NotImplementedError(
             "ep_bootstrap: only max_token_dtype=jnp.bfloat16 is supported today, got"
             f" {jnp.dtype(max_token_dtype)}."
         )
-    if world_size < 2:
-        raise ValueError(
-            f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
-            " at least 2 ranks to form a group."
-        )
-    if jax.local_device_count() != 1:
-        raise ValueError(
-            "ep_bootstrap requires one local device per process (got"
-            f" jax.local_device_count() = {jax.local_device_count()}); NCCL EP does not"
-            " support single-process multi-device setups."
+    if jax.local_device_count() != 1 and not tex.ep.use_nccl_comm_from_xla():
+        raise RuntimeError(
+            "ep_bootstrap: multiple local devices require the XLA-borrowed-comm EP path"
+            " (tex.ep.use_nccl_comm_from_xla), which is unavailable here -- rebuild TE with"
+            " XLA collectives FFI support, or launch one process per GPU instead."
         )
 
     explicit_ep_axes = ep_axes
@@ -185,6 +184,13 @@ def ep_bootstrap(
             "ep_bootstrap must run inside an active jax.sharding.Mesh; enter"
             " `with mesh:` (or jax.set_mesh(mesh)) before calling it."
         )
+    if world_size is None:
+        world_size = get_num_devices_in_mesh(mesh)
+    if world_size < 2:
+        raise ValueError(
+            f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
+            " at least 2 ranks to form a group."
+        )
     if get_num_devices_in_mesh(mesh) != world_size:
         raise ValueError(
             f"ep_bootstrap: mesh device count ({get_num_devices_in_mesh(mesh)}) must equal"
@@ -194,8 +200,15 @@ def ep_bootstrap(
     ep_size = int(np.prod([mesh.shape[axis] for axis in ep_axes]))
     # num_ep_groups counts only the distinct-token (dp/fsdp) axes; replicated
     # axes (tp, pp, ...) do not create distinct EP-output slabs.
-    outer_axis = _ep_outer_axis(None if explicit_ep_axes is None else ep_axes)
-    num_ep_groups = 1 if outer_axis is None else get_mesh_axis_size(outer_axis)
+    resource = global_mesh_resource()
+    outer_axes = tuple(
+        dict.fromkeys(
+            a
+            for a in (resource.dp_resource, resource.fsdp_resource)
+            if a is not None and a not in ep_axes
+        )
+    )
+    num_ep_groups = int(np.prod([get_mesh_axis_size(a) for a in outer_axes]))
     if num_experts % ep_size != 0:
         raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
 
@@ -288,6 +301,9 @@ def ep_finalize():
     ``jax.clear_caches()`` so every cached executable releases the NCCL comm
     it pins, then frees the EP resources. Call outside any active EP
     computation.
+
+    Reinitialization must use the same communicator mode; switching modes
+    requires a process restart.
     """
     jax.clear_caches()
     transformer_engine_jax.release_ep_resources()
@@ -311,7 +327,7 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_
     """Scatter tokens and weights to expert ranks.
 
     ``cfg`` is a per-layer ``EpLayerConfig``; distinct layers may share a
-    ``cfg`` (the pointer-keyed C++ cache keys on handle_mem, not on cfg).
+    ``cfg``. ``handle_mem`` may be relocated between calls (e.g. under ``lax.scan``).
     Inputs are ``[..., H]`` with only the leading dim sharded as ``ep`` or
     ``(dp, ep)``. Returns
     ``(recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)``;
@@ -334,9 +350,10 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, e
         raise TypeError(
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
-    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx, ep_axes=ep_axes)
-    recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=ep_axes
+    recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
+        tex.ep_prepare_and_dispatch_fwd(
+            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=ep_axes
+        )
     )
     out_leading = tuple(tokens.shape[:-1])
     primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)

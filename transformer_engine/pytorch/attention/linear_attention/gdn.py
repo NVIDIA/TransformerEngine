@@ -7,7 +7,7 @@
 This module is **experimental** and subject to change.
 """
 
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 
@@ -15,13 +15,13 @@ from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.jit import no_torch_dynamo
 
 from .base import (
+    AlignedTimelineKernelAdapter,
     LinearAttentionBase,
-    LinearAttentionKernelAdapter,
     _needs_eager_linear_attention,
 )
 
 
-class _GDNKernelAdapter(LinearAttentionKernelAdapter):
+class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
     """Adapter from TransformerEngine attention layouts to cuDNN frontend GDN.
 
     GDN gates the recurrence with one scalar per token and head: a log decay
@@ -51,7 +51,6 @@ class _GDNKernelAdapter(LinearAttentionKernelAdapter):
 
     def _call_op(
         self,
-        op: Callable,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
@@ -62,7 +61,7 @@ class _GDNKernelAdapter(LinearAttentionKernelAdapter):
         output_final_state: bool,
         use_qk_l2norm_in_kernel: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return op(
+        return self._op(
             query_layer,
             key_layer,
             value_layer,
