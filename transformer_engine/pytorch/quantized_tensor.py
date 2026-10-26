@@ -288,7 +288,7 @@ class _SavedQuantizedTensor(NamedTuple):
     metadata: Dict[str, Any]
 
 
-class _SavedDistributedWeight(NamedTuple):
+class _SavedTensorRef(NamedTuple):
     """A DistributedWeight's original object, restored in place of its saved tensor."""
 
     weight: torch.Tensor
@@ -298,7 +298,7 @@ def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorStorage],
 ) -> Tuple[
     list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
-    list[Optional[Union[QuantizedTensorStorage, _SavedQuantizedTensor, _SavedDistributedWeight]]],
+    list[Optional[Union[QuantizedTensorStorage, _SavedQuantizedTensor, _SavedTensorRef]]],
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
@@ -324,7 +324,7 @@ def prepare_for_saving(
                         "torch.compile."
                     )
                 tensor_list.append(tensor)
-                tensor_objects_list.append(_SavedDistributedWeight(tensor))
+                tensor_objects_list.append(_SavedTensorRef(tensor))
             else:
                 tensor_list.append(tensor)
                 tensor_objects_list.append(None)
@@ -343,9 +343,7 @@ def prepare_for_saving(
 def restore_from_saved(
     tensors: list[
         Optional[
-            Union[
-                torch.Tensor, QuantizedTensorStorage, _SavedQuantizedTensor, _SavedDistributedWeight
-            ]
+            Union[torch.Tensor, QuantizedTensorStorage, _SavedQuantizedTensor, _SavedTensorRef]
         ]
     ],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
@@ -365,7 +363,7 @@ def restore_from_saved(
         if tensor is None or isinstance(tensor, torch.Tensor):
             tensor_objects.append(saved_tensors[0])
             saved_tensors = saved_tensors[1:]
-        elif isinstance(tensor, _SavedDistributedWeight):
+        elif isinstance(tensor, _SavedTensorRef):
             # The saved tensor was unpacked (running autograd's version check), but
             # may have lost its subclass under hooks; use the original object.
             tensor_objects.append(tensor.weight)

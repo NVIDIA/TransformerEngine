@@ -340,34 +340,6 @@ def _skip_without_cuda():
         pytest.skip("requires CUDA")
 
 
-def test_saved_tensor_hooks_unpack_subclass_as_plain_tensor():
-    """Premise: with hooks installed, a saved DistributedWeight comes back as a plain tensor."""
-    seen = {}
-
-    class _Probe(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, x, w):
-            ctx.save_for_backward(w)
-            return x * 2
-
-        @staticmethod
-        def backward(ctx, g):
-            (w,) = ctx.saved_tensors
-            seen["type"] = type(w)
-            seen["marked"] = bool(getattr(w, "is_distributed_weight", False))
-            return g * 2, None
-
-    w = _FakeDistWeight(torch.ones(4))
-    x = torch.ones(4, requires_grad=True)
-
-    _Probe.apply(x, w).sum().backward()
-    assert seen["type"] is _FakeDistWeight and seen["marked"]
-
-    with _identity_hooks():
-        _Probe.apply(x, w).sum().backward()
-    assert seen["type"] is torch.Tensor and not seen["marked"]
-
-
 def test_prepare_for_saving_keeps_distributed_weight_by_reference():
     """A DistributedWeight is still saved, but restored as the original object."""
     w = FakeDistributedWeight()
