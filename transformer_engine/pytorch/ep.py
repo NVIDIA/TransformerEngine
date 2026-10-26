@@ -15,7 +15,6 @@ import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
-from transformer_engine import te_device_type
 from .constants import DType
 from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
@@ -350,7 +349,7 @@ class EpBuffer:
         if not _BOOTSTRAPPED:
             raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
         if device is None:
-            device = torch.device(te_device_type(), torch.cuda.current_device())
+            device = torch.device("cuda", torch.cuda.current_device())
         alignment = int(alignment)
         if alignment > 1 and (alignment & (alignment - 1)) != 0:
             raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
