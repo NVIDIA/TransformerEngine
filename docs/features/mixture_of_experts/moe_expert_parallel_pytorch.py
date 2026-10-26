@@ -14,13 +14,12 @@ from transformer_engine.pytorch.ep import EpBuffer, EpConfig, ep_bootstrap
 # topk_w:    [num_tokens, top_k] fp32 routing weights from the router
 ep_size = dist.get_world_size(ep_group)
 num_local_experts = num_experts // ep_size
-recv_capacity = ep_size * max_tokens_per_rank * top_k  # alignment=0
 config = EpConfig(
     top_k=top_k,
     hidden_dim=hidden_size,
     num_local_experts=num_local_experts,
     max_tokens_per_rank=max_tokens_per_rank,
-    recv_capacity_per_rank=recv_capacity,
+    recv_capacity_per_rank=None,
     ep_group=ep_group,
     alignment=0,
 )
@@ -32,7 +31,7 @@ ep_bootstrap(
     max_tokens_per_rank=config.max_tokens_per_rank,
     hidden_dim=hidden_size,
     num_topk=top_k,
-    recv_capacity_per_rank=recv_capacity,
+    recv_capacity_per_rank=config.recv_capacity_per_rank,
 )
 # One buffer per in-flight layer call (e.g. per pipeline microbatch).
 buffer = EpBuffer(

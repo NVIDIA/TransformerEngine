@@ -638,6 +638,10 @@ same static capacity to ``ep_bootstrap``.
       ``max_tokens_per_rank`` must bound each rank's input token count. The
       expert MLP uses BF16 without bias or per-expert padding.
 
+      The example uses eager sizing (``recv_capacity_per_rank=None``) so the
+      receive buffer matches the actual per-expert counts. This synchronizes
+      with the host each step and prevents CUDA graph capture.
+
       .. literalinclude:: moe_expert_parallel_pytorch.py
          :language: python
          :start-after: # START_MOE_EXPERT_PARALLEL_PYTORCH
