@@ -5,11 +5,13 @@
 """Unit tests for context parallel utils."""
 
 import itertools
+import pytest
 import torch
 import unittest
 from transformer_engine.pytorch import CPLoadBalancingStrategy
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     _zero_thd_padding,
+    _cp_a2a_contiguous,
     get_batch_on_this_cp_rank,
     get_no_load_balance_thd_causal_metadata,
     get_thd_partitioned_indices,
@@ -1081,3 +1083,54 @@ class TestTHDKernels(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("heads,dim", [(2, 128), (2, 256), (8, 128), (8, 256)])
+@pytest.mark.parametrize("unpack", [False, True])
+def test_cp_a2a_vector_copy_graph_replay(monkeypatch, heads, dim, unpack):
+    """The existing transpose API must copy current data on graph replay."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
+        pytest.skip("The experimental copy is limited to SM100")
+    monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_A2A_PACK16", "1")
+    shape = (4, 131072, heads, dim) if unpack else (131072, 4, heads, dim)
+    bits = torch.randint(-32768, 32767, shape, dtype=torch.int16, device="cuda")
+    source = bits.view(torch.bfloat16)
+    view = source.transpose(0, 1)
+    expected = bits.transpose(0, 1).contiguous()
+    output = _cp_a2a_contiguous(view)
+    assert torch.equal(output.view(torch.int16), expected)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        tex.swap_first_dims(source, out=output)
+    bits.bitwise_xor_(0x1234)
+    output.view(torch.int16).fill_(-123)
+    graph.replay()
+    expected.copy_(bits.transpose(0, 1))
+    assert torch.equal(output.view(torch.int16), expected)
+    rebound = bits.clone().bitwise_xor_(0x4321).view(torch.bfloat16)
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        tex.swap_first_dims(rebound, out=output)
+    torch.cuda.current_stream().wait_stream(stream)
+    expected.copy_(rebound.view(torch.int16).transpose(0, 1))
+    assert torch.equal(output.view(torch.int16), expected)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cp_a2a_vector_copy_ineligible_fallback(monkeypatch, enabled):
+    """CPU and non-admitted dimensions must not call the native copy."""
+    monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_A2A_PACK16", "1" if enabled else "0")
+
+    def unexpected_native_call(*args, **kwargs):
+        raise AssertionError("Ineligible tensor reached native copy")
+
+    monkeypatch.setattr(tex, "swap_first_dims", unexpected_native_call)
+    devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+    for device in devices:
+        source = torch.arange(128 * 4 * 2 * 8, device=device).reshape(128, 4, 2, 8)
+        view = source.transpose(0, 1)
+        result = _cp_a2a_contiguous(view)
+        assert result.is_contiguous()
+        assert torch.equal(result, view)

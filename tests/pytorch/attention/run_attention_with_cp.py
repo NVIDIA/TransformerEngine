@@ -19,6 +19,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
+    first_dkv_model_config,
+    native_head_model_configs,
     model_configs_flash_attn,
     model_configs_fused_attn,
 )
@@ -57,6 +59,7 @@ def generate_input_shapes(
     kernel_backend: str,
     fa_pad_between_seqs: str = "False",
     load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+    uniform_thd=False,
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -115,7 +118,12 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
+        if uniform_thd:
+            assert load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
+            assert config.max_seqlen_q % (2 * world_size) == 0
+            seqlens_q = torch.full([config.batch_size], config.max_seqlen_q, dtype=torch.int32)
+            seqlens_q_padded = seqlens_q
+        elif load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
             assert config.batch_size == 2
             if kernel_backend == "FlashAttention" and fa_pad_between_seqs == "False":
                 seqlens_q = torch.tensor(
@@ -250,6 +258,8 @@ def run_dpa_with_cp(
         # Keep this in sync with generate_input_shapes so DPA gets the explicit
         # padding state without a GPU-to-CPU sync.
         pad_between_seqs = kernel_backend == "FusedAttention" or fa_pad_between_seqs == "True"
+        if model in native_head_model_configs:
+            pad_between_seqs = False
 
     # set up environment variables and config
     if deterministic == "True":
@@ -269,10 +279,16 @@ def run_dpa_with_cp(
         # Deep-copy: the module-level dict is shared across pool cases; the
         # THD branch below rewrites attn_mask_type in place, which would
         # otherwise leak into subsequent cases reusing the same model key.
-        config = copy.deepcopy(model_configs_flash_attn[model])
+        config = copy.deepcopy(
+            first_dkv_model_config if model == "first_dkv" else model_configs_flash_attn[model]
+        )
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        if model in model_configs_fused_attn:
+        if model in native_head_model_configs:
+            config = copy.deepcopy(native_head_model_configs[model])
+        elif model == "first_dkv":
+            config = copy.deepcopy(first_dkv_model_config)
+        elif model in model_configs_fused_attn:
             config = copy.deepcopy(model_configs_fused_attn[model])
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
@@ -373,6 +389,7 @@ def run_dpa_with_cp(
         kernel_backend,
         fa_pad_between_seqs,
         load_balancing_strategy,
+        uniform_thd=model in native_head_model_configs,
     )
     q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()

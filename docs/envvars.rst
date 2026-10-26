@@ -647,3 +647,99 @@ JAX Custom Calls Control
    # Disable specific primitives
    export NVTE_JAX_CUSTOM_CALLS="GemmPrimitive=false,DBiasQuantizePrimitive=false"
    python train_jax.py
+
+Experimental Context Parallel Attention
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following switches are disabled by default and are intended for evaluating
+uniform context parallel attention workloads. Set them before starting the process.
+They are experimental implementation controls, not a general ragged-input policy.
+
+* ``NVTE_CP_EXPERIMENTAL_A2A_PACK16=1`` selects a 16-byte vector copy for the
+  two THD All-to-All pack/unpack sites through the existing ``swap_first_dims``
+  API. It applies equally to cuDNN and Flash Attention. Eligibility is limited
+  to SM100, BF16, CP4, 131072 local tokens, 2 or 8 local heads, head dimension
+  128 or 256, compact underlying storage and 16-byte-aligned pointers. Other
+  cases retain the existing contiguous-copy path. This switch defaults to 0;
+  it does not change attention mathematics or collective calls.
+
+* ``NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_FWD=1`` and
+  ``NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_BWD=1`` allow eligible BF16 THD calls with
+  head dimension 128 or 256 to use dense cuDNN descriptors without repacking Q/K/V.
+  The caller promises equal sequence lengths and compact physical sequence offsets.
+  Device-side validation checks this promise on every execution. A violation raises
+  a CUDA device error; it does not trigger a host-side fallback. Packed Stats are
+  converted to and from the dense graph's Stats layout on the supplied stream.
+* ``NVTE_CP_EXPERIMENTAL_UNIFORM_NO_ZERO_WIDE=1`` additionally omits redundant
+  output and gradient initialization for the bounded BF16 D128, separate-Q/K/V,
+  GQA4 subset selected in the PyTorch binding. Both dense switches must also be
+  enabled. This switch does not change initialization for general ragged batches.
+* ``NVTE_CP_EXPERIMENTAL_STRIDED_DENSE_BWD=1`` evaluates a separate, bounded
+  AllGather backward path. Its graph cache retains the physical sequence pitches
+  and its device checks validate the expected sequence origins. This path does
+  not imply support for arbitrary strided THD storage.
+
+
+* ``NVTE_CP_EXPERIMENTAL_AG_FIRST_DKV=1`` reuses the first AllGather backward
+  dK/dV contribution as the accumulator, avoiding separate zero-filled buffers
+  and the first add into zero. This opt-in experiment is limited to BF16 THD,
+  CP4 or CP8, D256 and the cuDNN or Flash Attention 4 paths. Other configurations keep
+  the existing allocation behavior. The second contribution, stream events,
+  final reorder and reduce-scatter remain unchanged. It does not enable a new
+  attention backend or change communication. General ragged layouts and stream
+  lifetime beyond the documented focused validation are not qualified.
+
+* ``NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS=4``, ``8`` or ``16`` partitions an eligible
+  cuDNN AllGather backward call into whole GQA groups. The partitions execute
+  serially on that call's stream and reuse its workspace. This can reduce
+  workspace allocation at the cost of more kernel launches; it does not select
+  a different backend compute kernel or change communication.
+  The default is ``0`` (disabled). Set it before process startup, together with
+  ``NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_BWD=1`` and
+  ``NVTE_CP_EXPERIMENTAL_STRIDED_DENSE_BWD=1``. Changing it within a process is
+  not supported. Other values raise an error.
+
+  The ``4``-head mode executes one complete GQA group per partition. Smaller
+  partitions reduce workspace but add kernel launches; select a partition size
+  using workload-specific memory and latency measurements. Qualification for
+  ``4``/``8``/``16`` covers the PyTorch CP4 AllGather path on SM100; other
+  architectures and frontends are not qualified by this experiment.
+  This experiment is deliberately bounded to nondeterministic BF16, vanilla
+  bottom-right causal attention, Hq32/Hkv8 and D256. It accepts physical Q/KV
+  sequence pitches of ``2*Sq``/``8*Sq``, ``Sk`` in ``Sq, 2*Sq, ..., 8*Sq``,
+  and either ``B=2, Sq=64`` or ``B=64, Sq=1024``. The physical head strides and
+  the full Hq32 Stats batch stride are preserved. Unsupported geometry retains
+  the original dispatch; a violation of the uniform-layout promise follows
+  the existing device-side validation behavior. Query origin validation and
+  Stats conversion run once per full call, outside the head-partition loop.
+  Qualification keeps ``NVTE_CP_EXPERIMENTAL_AG_FIRST_DKV=0``.
+  Forward, dropout, bias, deterministic backward and general ragged layouts
+  are not enabled by this switch. Per-call workspace savings do not imply the
+  same reduction in full-model peak memory or an improvement in latency.
+
+
+Declarations outside each switch's eligibility checks retain the existing cuDNN
+path. These experiments do not change context parallel communication.
+
+Experimental compact D256 backward initialization
+-------------------------------------------------
+
+``NVTE_CP_EXPERIMENTAL_D256_BWD_NO_ZERO=1`` is a private, default-off
+qualification experiment for native cuDNN backward on SM100. It requires
+the existing checked uniform dense backward route and disables only the three
+framework gradient fills for compact BF16 THD with separate Q/K/V, no bias or
+dropout, vanilla softmax, scale 1/16 and non-deterministic backward. The initial
+scope is the B64/H32/Hkv8 local P2P shapes (2048,2048 causal), (2048,1024) and
+(1024,2048), plus B2/H8/Hkv2 checks with local length256. Physical gaps,
+strided dense mode, other geometries and attributes keep initialization.
+
+``NVTE_CP_EXPERIMENTAL_D256_BWD_POISON_GRAD=1`` is a qualification-only NaN
+fill before candidate execution. It is disabled in timing and has no effect
+outside the candidate. Forward and the existing D128 controls are unchanged.
+The initial validation uses cuDNN 9.29 and NVRTC 13.5 on B200. This is a
+bounded opt-in experiment; the existing dense route still checks every device
+length and physical offset. The switch does not change attention kernels,
+gradient allocation sizes, or context parallel communication. The focused
+``test_cp_uniform_d256_initialization.py`` regression checks small causal and
+rectangular shapes with random inputs, changed gradients and CUDA Graph replay.
+Full context parallel performance is qualified separately from that test.

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 
 #include "../common.h"
@@ -20,6 +21,44 @@
 namespace transformer_engine {
 
 namespace {
+
+// Bounded CP4 copy. Constant 32-bit indexing and a capped grid avoid the
+// per-element 64-bit divisions and oversized grid of the generic transpose.
+constexpr uint32_t kTokens = 131072;
+constexpr uint32_t kCp = 4;
+
+template <uint32_t VectorsPerHeadGroup, bool Unpack>
+__global__ void cp_a2a_pack16_kernel(const uint4 *__restrict__ src, uint4 *__restrict__ dst) {
+  constexpr uint32_t kRankVectors = kTokens * VectorsPerHeadGroup;
+  constexpr uint32_t kTotalVectors = kCp * kRankVectors;
+  for (uint32_t out = blockIdx.x * blockDim.x + threadIdx.x; out < kTotalVectors;
+       out += gridDim.x * blockDim.x) {
+    uint32_t in;
+    if constexpr (Unpack) {
+      const uint32_t token = out / (kCp * VectorsPerHeadGroup);
+      const uint32_t rank = (out / VectorsPerHeadGroup) % kCp;
+      in = rank * kRankVectors + token * VectorsPerHeadGroup + out % VectorsPerHeadGroup;
+    } else {
+      const uint32_t rank = out / kRankVectors;
+      const uint32_t token = (out % kRankVectors) / VectorsPerHeadGroup;
+      in = token * kCp * VectorsPerHeadGroup + rank * VectorsPerHeadGroup +
+           out % VectorsPerHeadGroup;
+    }
+    dst[out] = src[in];
+  }
+}
+
+template <uint32_t VectorsPerHeadGroup>
+void launch_cp_a2a_pack16(const void *src, void *dst, int unpack, uint32_t blocks,
+                          cudaStream_t stream) {
+  if (unpack) {
+    cp_a2a_pack16_kernel<VectorsPerHeadGroup, true>
+        <<<blocks, 256, 0, stream>>>(static_cast<const uint4 *>(src), static_cast<uint4 *>(dst));
+  } else {
+    cp_a2a_pack16_kernel<VectorsPerHeadGroup, false>
+        <<<blocks, 256, 0, stream>>>(static_cast<const uint4 *>(src), static_cast<uint4 *>(dst));
+  }
+}
 
 // String with RTC kernel implementation
 #include "string_code_transpose_rtc_swap_first_dims_cu.h"
@@ -153,6 +192,43 @@ void swap_first_dims(const Tensor &input, Tensor &output, cudaStream_t stream) {
     dim2 *= output_shape[i];
   }
   dim2 = get_buffer_size_bytes(dim2, output.dtype());
+
+  // The CP opt-in applies to both attention backends through this existing API.
+  // Keep every other shape, dtype, architecture and pointer layout on the generic path.
+  const char *cp_pack16 = std::getenv("NVTE_CP_EXPERIMENTAL_A2A_PACK16");
+  const uintptr_t src = reinterpret_cast<uintptr_t>(input.data.dptr);
+  const uintptr_t dst = reinterpret_cast<uintptr_t>(output.data.dptr);
+  const bool cp_shape = input_shape.size() == 4 &&
+                        ((dim0 == kCp && dim1 == kTokens) || (dim0 == kTokens && dim1 == kCp)) &&
+                        (input_shape[2] == 2 || input_shape[2] == 8) &&
+                        (input_shape[3] == 128 || input_shape[3] == 256);
+  if (cp_pack16 != nullptr && std::string(cp_pack16) == "1" && cp_shape &&
+      input.dtype() == DType::kBFloat16 && (src | dst) % 16 == 0 && cuda::sm_arch() == 100) {
+    const size_t bytes = dim0 * dim1 * dim2;
+    if (src <= UINTPTR_MAX - bytes && dst <= UINTPTR_MAX - bytes &&
+        (src + bytes <= dst || dst + bytes <= src)) {
+      constexpr uint32_t blocks = 16384;
+      const bool unpack = dim0 == kTokens;
+      switch (dim2) {
+        case 512:
+          launch_cp_a2a_pack16<32>(input.data.dptr, output.data.dptr, unpack, blocks, stream);
+          break;
+        case 1024:
+          launch_cp_a2a_pack16<64>(input.data.dptr, output.data.dptr, unpack, blocks, stream);
+          break;
+        case 2048:
+          launch_cp_a2a_pack16<128>(input.data.dptr, output.data.dptr, unpack, blocks, stream);
+          break;
+        case 4096:
+          launch_cp_a2a_pack16<256>(input.data.dptr, output.data.dptr, unpack, blocks, stream);
+          break;
+        default:
+          NVTE_ERROR("Unexpected bounded CP copy width: ", dim2);
+      }
+      NVTE_CHECK_CUDA(cudaGetLastError());
+      return;
+    }
+  }
 
   // Choose kernel config with performance heuristics
   const size_t sm_count = static_cast<size_t>(cuda::sm_count());
