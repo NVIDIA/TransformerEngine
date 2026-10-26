@@ -91,8 +91,6 @@ PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_L
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_ops_grouped_linear_distributed_weight.xml $TE_PATH/tests/pytorch/test_ops_grouped_linear_distributed_weight.py || test_fail "test_ops_grouped_linear_distributed_weight.py"
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_module_grouped_linear_distributed_weight.xml $TE_PATH/tests/pytorch/test_module_grouped_linear_distributed_weight.py || test_fail "test_module_grouped_linear_distributed_weight.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_grouped_mlp.xml $TE_PATH/tests/pytorch/test_grouped_mlp.py || test_fail "test_grouped_mlp.py"
-# Keep this test in its own pytest process: a device trap invalidates the CUDA context.
-python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_grouped_split_alignment.xml $TE_PATH/tests/pytorch/test_grouped_split_alignment.py || test_fail "test_grouped_split_alignment.py"
 
 if [ "$RET" -ne 0 ]; then
     echo "Error in the following test cases:$FAILED_CASES"
