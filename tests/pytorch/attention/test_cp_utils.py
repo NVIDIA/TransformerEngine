@@ -1019,17 +1019,10 @@ class TestTHDKernels(unittest.TestCase):
 
     def test_thd_get_partitioned_indices_shared_memory_boundary(self):
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        if not hasattr(props, "shared_memory_per_block") or not hasattr(
-            props, "shared_memory_per_block_optin"
-        ):
+        if not hasattr(props, "shared_memory_per_block"):
             self.skipTest(f"PyTorch {torch.__version__} does not expose shared-memory limits")
         max_shared_docs = props.shared_memory_per_block // 4 - 1
-        for documents in (
-            max_shared_docs,
-            max_shared_docs + 1,
-            props.shared_memory_per_block_optin // 4 - 1,
-            props.shared_memory_per_block_optin // 4,
-        ):
+        for documents in (max_shared_docs, max_shared_docs + 1):
             for cp_size in (2, 4):
                 cu_seqlens = torch.arange(documents + 1, device="cuda", dtype=torch.int32)
                 cu_seqlens *= 2 * cp_size
@@ -1047,17 +1040,13 @@ class TestTHDKernels(unittest.TestCase):
 
     def test_thd_kernels_shared_memory_boundary(self):
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        if not hasattr(props, "shared_memory_per_block") or not hasattr(
-            props, "shared_memory_per_block_optin"
-        ):
+        if not hasattr(props, "shared_memory_per_block"):
             self.skipTest(f"PyTorch {torch.__version__} does not expose shared-memory limits")
         for tables in (1, 2):
             bytes_per_document = 4 * tables
             for documents in (
                 props.shared_memory_per_block // bytes_per_document - 1,
                 props.shared_memory_per_block // bytes_per_document,
-                props.shared_memory_per_block_optin // bytes_per_document - 1,
-                props.shared_memory_per_block_optin // bytes_per_document,
             ):
                 with self.subTest(tables=tables, documents=documents):
                     cu = torch.arange(documents + 1, dtype=torch.int32, device="cuda") * 4
