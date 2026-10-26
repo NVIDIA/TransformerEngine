@@ -241,7 +241,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             if not isinstance(src, GroupedTensor):
                 raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
             for tensor in src.get_data_tensors():
-                if tensor is not None and tensor.is_cuda:
+                if tensor is not None and tensor.device.type == te_device_type():
                     tensor.record_stream(stream)
             return None
 
