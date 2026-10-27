@@ -16,6 +16,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 
+from transformer_engine import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_cublasmp_all_gather_output,
@@ -2034,7 +2035,7 @@ class Linear(TransformerEngineBaseModule):
                       stripped from any provided names. Under ``torch.compile``, adjacent
                       parts sharing storage are consumed without a concatenation copy.
                       Disjoint parts and returned split biases still require concatenation.
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -2110,7 +2111,7 @@ class Linear(TransformerEngineBaseModule):
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,
@@ -2421,7 +2422,7 @@ class Linear(TransformerEngineBaseModule):
         from torch._subclasses.fake_tensor import is_fake
 
         weight = getattr(self, self.weight_names[0], None)
-        if weight is None or weight.device.type != "cuda":
+        if weight is None or weight.device.type != te_device_type():
             return
         if is_fake(weight) or detect_fake_mode():
             return
