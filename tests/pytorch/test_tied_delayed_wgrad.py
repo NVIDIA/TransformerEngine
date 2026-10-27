@@ -100,10 +100,10 @@ def test_non_tied_linear_gradients():
     x = torch.randn(2, 16, device="cuda", dtype=torch.bfloat16)
     for model in (delayed, regular):
         model(x.detach().clone().requires_grad_(True)).float().sum().backward()
-    for index in (0, 1):
-        delayed[index].backward_dw()
+    for delayed_linear, regular_linear in zip(delayed, regular):
+        delayed_linear.backward_dw()
         torch.testing.assert_close(
-            delayed[index].weight.grad, regular[index].weight.grad, rtol=0, atol=0
+            delayed_linear.weight.grad, regular_linear.weight.grad, rtol=0, atol=0
         )
 
 
