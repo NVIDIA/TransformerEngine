@@ -1246,23 +1246,17 @@ def test_sanity_shared_fused_wgrad_returns_none(module, zero_out_wgrad):
     inputs = [torch.randn(tokens, hidden, dtype=dtype, device="cuda") for _ in range(2)]
     grad_outputs = [torch.randn(tokens, hidden, dtype=dtype, device="cuda") for _ in range(2)]
 
-    main_grads = {}
-    for legacy_zero_tensor_flag in (False, True):
-        for p in weights:
-            p.main_grad = torch.zeros(p.shape, dtype=torch.float32, device="cuda")
-            p.grad_added_to_main_grad = False
-            p.zero_out_wgrad = zero_out_wgrad
-            p.zero_tensor_dummy_wgrad = legacy_zero_tensor_flag
-            p.grad = None
-        outputs = [forward(x) for x in inputs]
-        torch.autograd.backward(outputs, grad_outputs)
-        main_grads[legacy_zero_tensor_flag] = [p.main_grad.clone() for p in weights]
-        for p in weights:
-            assert p.grad_added_to_main_grad
-            assert p.grad is None
-    for reference, main_grad in zip(main_grads[False], main_grads[True]):
-        assert torch.count_nonzero(reference) > 0
-        torch.testing.assert_close(main_grad, reference, rtol=0, atol=0)
+    for p in weights:
+        p.main_grad = torch.zeros(p.shape, dtype=torch.float32, device="cuda")
+        p.grad_added_to_main_grad = False
+        p.zero_out_wgrad = zero_out_wgrad
+        p.grad = None
+    outputs = [forward(x) for x in inputs]
+    torch.autograd.backward(outputs, grad_outputs)
+    for p in weights:
+        assert p.grad_added_to_main_grad
+        assert p.grad is None
+        assert torch.count_nonzero(p.main_grad) > 0
 
 
 def test_model_multiple_cast():
