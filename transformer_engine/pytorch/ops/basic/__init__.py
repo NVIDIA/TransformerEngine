@@ -18,6 +18,7 @@ from .activation import (
     SReGLU,
     SiLU,
 )
+from .adaptive_layer_norm import AdaptiveLayerNorm
 from .add_extra_input import AddExtraInput
 from .all_gather import AllGather
 from .all_reduce import AllReduce
