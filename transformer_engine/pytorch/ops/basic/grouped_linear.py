@@ -124,7 +124,7 @@ def is_op_fuser_grouped_tensor_path_supported(
     )
 
 
-@functools.cache
+@functools.lru_cache
 def _is_op_fuser_grouped_tensor_path_supported(
     recipe_type: Optional[type[Recipe]],
     disable_rht: Optional[bool],
