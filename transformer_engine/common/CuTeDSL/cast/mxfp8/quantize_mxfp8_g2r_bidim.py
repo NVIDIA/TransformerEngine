@@ -801,9 +801,9 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
 
     @staticmethod
     def takes_row_tails(cfg: MXFP8QuantizeConfig) -> bool:
-        """Whether this config takes any row count: the requests with a table, dbias or amax, as
-        the CUDA register-tiled kernel does. The others keep whole 32-row tiles."""
-        return cfg.ACTIVATION_TABLE != "none" or cfg.WITH_DBIAS or cfg.WITH_AMAX
+        """Whether this config takes any row count: the derivatives and the requests with a table
+        or amax, as the CUDA register-tiled kernel does. The others keep whole 32-row tiles."""
+        return cfg.ACTIVATION_TABLE != "none" or cfg.WITH_DACT or cfg.WITH_AMAX
 
     def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
@@ -836,12 +836,10 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         M, N = mX.shape
         TILE_ROWS = self._CTA_THREADS_Y * self._ELEMENTS_Y_PER_THREAD
         WIDE_TILE_COLS = self._CTA_THREADS_X * 16
-        # A derivative read from a table holds the gradient and the activation input in registers:
-        # 256-column tiles keep it under the register budget, and clusters do not help it.
+        # A derivative holds the gradient and the activation input in registers: 256-column tiles
+        # keep it under the register budget (wider tiles spill), and clusters do not help it.
         # With dbias, the staged FP32 products of a 256-column tile take 32 KB of shared memory.
-        if cutlass.const_expr(
-            self.cfg.WITH_DACT and (self.cfg.ACTIVATION_TABLE != "none" or self.cfg.WITH_DBIAS)
-        ):
+        if cutlass.const_expr(self.cfg.WITH_DACT):
             self._launch(
                 mX,
                 mDActInput,
@@ -1371,10 +1369,10 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         TILER = (TILE_ROWS, TILE_COLS)
         ROW_SCALE_TILER = (TILE_ROWS, TILE_COLS // 32)
         COL_SCALE_TILER = (TILE_ROWS // 32, TILE_COLS)
-        # With a table and a row stride known only at run time, index each data tile from its own
-        # base address with 32-bit offsets (see _data_tile).
+        # With a table or a derivative and a row stride known only at run time, index each data
+        # tile from its own base address with 32-bit offsets (see _data_tile).
         DYNAMIC_STRIDE = (
-            self.cfg.ACTIVATION_TABLE != "none" or self.cfg.WITH_DBIAS
+            self.cfg.ACTIVATION_TABLE != "none" or self.cfg.WITH_DACT
         ) and not cute.is_static(mX.layout.stride[0])
         cta_coord = (row_tile, cta_col)
         gX_tile = self._data_tile(mX, row_tile, cta_col, TILER, DYNAMIC_STRIDE, 32)
