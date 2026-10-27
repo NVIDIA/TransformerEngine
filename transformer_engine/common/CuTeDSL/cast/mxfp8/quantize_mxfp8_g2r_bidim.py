@@ -414,6 +414,7 @@ def quantize_mxfp8_gmem_tile_bidimensional(
     ACTIVATION: cutlass.Constexpr[Optional[str]],
     ACTIVATION_TABLE: cutlass.Constexpr[str],
     sTable: Optional[cute.Tensor],
+    sDbias: Optional[cute.Tensor],
     WITH_ACT: cutlass.Constexpr[bool],
     WITH_DACT: cutlass.Constexpr[bool],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
@@ -503,10 +504,15 @@ def quantize_mxfp8_gmem_tile_bidimensional(
                     rA[None, row_idx],
                     cache_policy=cache_policy,
                 )
+        # With dbias, the FP32 products are staged for the column sums (see _kernel_main).
+        if cutlass.const_expr(sDbias is not None):
+            sDbias_thread = cute.composition(sDbias, tv_layout)[tidx, None]
         # Apply activation row by row
         for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
             rX_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
             rA_i32 = cute.recast_tensor(rA[None, row_idx], Int32)
+            if cutlass.const_expr(sDbias is not None):
+                rProducts = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), Float32)
             for i in cutlass.range_constexpr(ELEMENTS_X_PER_THREAD // 2):
                 if cutlass.const_expr(ACTIVATION_TABLE != "none"):
                     # Read the activation from the table, as the CUDA register-tiled kernel does.
@@ -523,9 +529,12 @@ def quantize_mxfp8_gmem_tile_bidimensional(
                             STRIDE=stride,
                             SLOPE=DERIVATIVE_SLOPES[ACTIVATION],
                         )
-                        rX_i32[i] = cvt_f32x2_to_bf16x2(
-                            x2_lo_to_f32_bf16(rX_i32[i]) * d_lo, x2_hi_to_f32_bf16(rX_i32[i]) * d_hi
-                        )
+                        lo = x2_lo_to_f32_bf16(rX_i32[i]) * d_lo
+                        hi = x2_hi_to_f32_bf16(rX_i32[i]) * d_hi
+                        if cutlass.const_expr(sDbias is not None):
+                            rProducts[2 * i] = lo
+                            rProducts[2 * i + 1] = hi
+                        rX_i32[i] = cvt_f32x2_to_bf16x2(lo, hi)
                     else:
                         low, high = FORWARD_TABLE_WINDOWS[ACTIVATION]
                         rX_i32[i] = table_forward_2x(
@@ -541,11 +550,16 @@ def quantize_mxfp8_gmem_tile_bidimensional(
                         dop = dactivation_op(ACTIVATION, ACTIVATION_TABLE)
                         lo = lo * dop(x2_lo_to_f32_bf16(rA_i32[i]))
                         hi = hi * dop(x2_hi_to_f32_bf16(rA_i32[i]))
+                        if cutlass.const_expr(sDbias is not None):
+                            rProducts[2 * i] = lo
+                            rProducts[2 * i + 1] = hi
                     else:
                         op = activation_op(ACTIVATION, ACTIVATION_TABLE)
                         lo = op(lo)
                         hi = op(hi)
                     rX_i32[i] = cvt_f32x2_to_bf16x2(lo, hi)
+            if cutlass.const_expr(sDbias is not None):
+                cute.autovec_copy(rProducts, sDbias_thread[(None, row_idx),])
 
     if cutlass.const_expr(ROWWISE):
         gO_row_thread = cute.composition(gO_row_tile, tv_layout)[tidx, None]
@@ -649,9 +663,10 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
     @staticmethod
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
         # BF16 packed math.
+        # dbias only fused with an activation derivative, like the CUDA register-tiled kernel.
         return (
             not cfg.WITH_AMAX
-            and not cfg.WITH_DBIAS
+            and (not cfg.WITH_DBIAS or cfg.WITH_DACT)
             and cfg.DTYPE is cutlass.BFloat16
             and cfg.COLWISE
         )
@@ -674,8 +689,10 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
             act_input_aligned = mDActInput.iterator.toint() % 32 == 0
         # Whole 32-row by 256-column tiles, grid.y within limits, and aligned input and
         # colwise-scale pointers.
+        # With dbias a CTA sums whole 64-row chunks.
+        rows_per_chunk = 64 if cutlass.const_expr(cfg.WITH_DBIAS) else 32
         return (
-            M % 32 == 0
+            M % rows_per_chunk == 0
             and N % 256 == 0
             and M // 32 <= 65535
             and mX.iterator.toint() % 32 == 0
@@ -688,9 +705,9 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         self.cfg = cfg
         # One CTA only quantize one columnwise MXFP8 block at a time
         self._ELEMENTS_Y_PER_THREAD = MXFP8_BLOCK_SCALING_SIZE // self._CTA_THREADS_Y  # 4
-        # SMs of the device compiled for, which sets the table path's walk length.
+        # SMs of the device compiled for, which set the walk length with a table or dbias.
         self._sm_count = 0
-        if cfg.ACTIVATION_TABLE != "none":
+        if cfg.ACTIVATION_TABLE != "none" or cfg.WITH_DBIAS:
             from cuda.core import (
                 Device,
             )  # pylint: disable=import-outside-toplevel,no-name-in-module
@@ -717,7 +734,10 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         WIDE_TILE_COLS = self._CTA_THREADS_X * 16
         # A derivative read from a table holds the gradient and the activation input in registers:
         # 256-column tiles keep it under the register budget, and clusters do not help it.
-        if cutlass.const_expr(self.cfg.WITH_DACT and self.cfg.ACTIVATION_TABLE != "none"):
+        # With dbias, the staged FP32 products of a 256-column tile take 32 KB of shared memory.
+        if cutlass.const_expr(
+            self.cfg.WITH_DACT and (self.cfg.ACTIVATION_TABLE != "none" or self.cfg.WITH_DBIAS)
+        ):
             self._launch(
                 mX,
                 mDActInput,
@@ -726,6 +746,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 mO_col,
                 mS_col,
                 mActTable,
+                mWorkspace,
                 stream,
                 ELEMENTS_X_PER_THREAD=8,
                 CLUSTER_WIDTH=1,
@@ -740,6 +761,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                     mO_col,
                     mS_col,
                     mActTable,
+                    mWorkspace,
                     stream,
                     ELEMENTS_X_PER_THREAD=16,
                     CLUSTER_WIDTH=4,
@@ -753,6 +775,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                     mO_col,
                     mS_col,
                     mActTable,
+                    mWorkspace,
                     stream,
                     ELEMENTS_X_PER_THREAD=16,
                     CLUSTER_WIDTH=1,
@@ -766,6 +789,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 mO_col,
                 mS_col,
                 mActTable,
+                mWorkspace,
                 stream,
                 ELEMENTS_X_PER_THREAD=8,
                 CLUSTER_WIDTH=8,
@@ -781,6 +805,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         mO_col: cute.Tensor,
         mS_col: cute.Tensor,
         mActTable: cute.Pointer,
+        mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
         CLUSTER_WIDTH: cutlass.Constexpr[int],
@@ -808,7 +833,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         # more than _WALK_TARGET_COLS / TILE_COLS CTAs and the row tiles divide evenly, and
         # walk at least two tiles unless that leaves fewer than two CTAs per SM.
         walk = Int32(1)
-        if cutlass.const_expr(self.cfg.ACTIVATION_TABLE != "none"):
+        if cutlass.const_expr(self.cfg.ACTIVATION_TABLE != "none" or self.cfg.WITH_DBIAS):
             while (grid_rows // walk) % 2 == 0 and grid_cols * (grid_rows // walk) > (
                 self._WALK_TARGET_COLS // TILE_COLS
             ):
@@ -819,6 +844,12 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 and grid_cols * (grid_rows // 2) >= 2 * self._sm_count
             ):
                 walk = Int32(2)
+        # With dbias the grid and the walk count 64-row chunks, whose two row tiles a CTA takes
+        # back to back: a CTA walks at least one chunk.
+        if cutlass.const_expr(self.cfg.WITH_DBIAS):
+            grid_rows = grid_rows // 2
+            if walk > 1:
+                walk = walk // 2
         # Keep column CTAs on grid.x so clusters read adjacent column tiles.
         grid = [grid_cols, grid_rows // walk]
         block = [THREADS_PER_CTA]
@@ -865,6 +896,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 gS_col,
                 mActTable,
                 walk,
+                mWorkspace,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
         elif N == 4096:
@@ -907,6 +939,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 gS_col,
                 mActTable,
                 walk,
+                mWorkspace,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
         else:
@@ -925,6 +958,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 gS_col,
                 mActTable,
                 walk,
+                mWorkspace,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
 
@@ -939,6 +973,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         mS_col: cute.Tensor,
         mActTable: cute.Pointer,
         walk: Int32,
+        mWorkspace: Optional[cute.Tensor],
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     ):
         """Run the kernel body. Like the CUDA specialized cast kernels it does not consume the
@@ -952,6 +987,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
             mS_col,
             mActTable,
             walk,
+            mWorkspace,
             ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
         )
 
@@ -988,6 +1024,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         mS_col: cute.Tensor,
         mActTable: cute.Pointer,
         walk: Int32,
+        mWorkspace: Optional[cute.Tensor],
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     ):
         """Run bidimensional quantization on the CTA's row tiles: blockIdx.y, and with a table
@@ -1020,7 +1057,47 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 cute.autovec_copy(gTable[None, piece], sTable_pieces[None, piece])
             cute.arch.sync_threads()
 
-        if cutlass.const_expr(self.cfg.ACTIVATION_TABLE == "none"):
+        if cutlass.const_expr(self.cfg.WITH_DBIAS):
+            # dbias in the CUDA kernels' order: each 64-row chunk's FP32 products summed down the
+            # column in row order, one workspace row per chunk (reduced by the caller). The CTA
+            # takes the chunk's two row tiles back to back; each stages its products in shared
+            # memory, and one thread per column adds them to the column's running sum.
+            TILE_ROWS = self._CTA_THREADS_Y * self._ELEMENTS_Y_PER_THREAD
+            TILE_COLS = self._CTA_THREADS_X * ELEMENTS_X_PER_THREAD
+            tidx, _, _ = cute.arch.thread_idx()
+            sDbias = cutlass.memory.SmemAllocator().allocate_tensor(
+                Float32,
+                cute.make_layout((TILE_ROWS, TILE_COLS), stride=(TILE_COLS, 1)),
+                byte_alignment=16,
+            )
+            for step in cutlass.range(walk, unroll=1):
+                chunk = step * grid_rows + first_cta_row
+                column_sum = Float32(0.0)
+                # A run-time loop, so the tile body (and its shared memory) is emitted once.
+                for half in cutlass.range(2, unroll=1):
+                    self._quantize_row_tile(
+                        mX,
+                        mA,
+                        mO_row,
+                        mS_row,
+                        mO_col,
+                        mS_col,
+                        sTable,
+                        2 * chunk + half,
+                        cta_col,
+                        cache_policy,
+                        sDbias=sDbias,
+                        ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+                    )
+                    cute.arch.sync_threads()
+                    if tidx < TILE_COLS:
+                        for row in cutlass.range_constexpr(TILE_ROWS):
+                            column_sum = column_sum + sDbias[row, tidx]
+                    # The next tile overwrites the staged products.
+                    cute.arch.sync_threads()
+                if tidx < TILE_COLS:
+                    mWorkspace[chunk, cta_col * TILE_COLS + tidx] = column_sum
+        elif cutlass.const_expr(self.cfg.ACTIVATION_TABLE == "none"):
             self._quantize_row_tile(
                 mX,
                 mA,
@@ -1064,6 +1141,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         cta_col: Int32,
         cache_policy: Int64,
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
+        sDbias: Optional[cute.Tensor] = None,
     ):
         """Quantize the (row_tile, cta_col) tile."""
         TILE_ROWS = self._CTA_THREADS_Y * self._ELEMENTS_Y_PER_THREAD
@@ -1073,9 +1151,9 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         COL_SCALE_TILER = (TILE_ROWS // 32, TILE_COLS)
         # With a table and a row stride known only at run time, index each data tile from its own
         # base address with 32-bit offsets (see _data_tile).
-        DYNAMIC_STRIDE = self.cfg.ACTIVATION_TABLE != "none" and not cute.is_static(
-            mX.layout.stride[0]
-        )
+        DYNAMIC_STRIDE = (
+            self.cfg.ACTIVATION_TABLE != "none" or self.cfg.WITH_DBIAS
+        ) and not cute.is_static(mX.layout.stride[0])
         cta_coord = (row_tile, cta_col)
         gX_tile = self._data_tile(mX, row_tile, cta_col, TILER, DYNAMIC_STRIDE, 32)
         gA_tile = None
@@ -1101,6 +1179,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
             ACTIVATION=self.cfg.ACTIVATION,
             ACTIVATION_TABLE=self.cfg.ACTIVATION_TABLE,
             sTable=sTable,
+            sDbias=sDbias,
             WITH_ACT=self.cfg.WITH_ACT,
             WITH_DACT=self.cfg.WITH_DACT,
             DTYPE=self.cfg.DTYPE,
