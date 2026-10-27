@@ -1055,7 +1055,9 @@ class GroupedTensorStorage:
             if buffer is None:
                 return None
             if not buffer.is_contiguous():
-                raise ValueError("GroupedTensor buffers must be contiguous to split without copying")
+                raise ValueError(
+                    "GroupedTensor buffers must be contiguous to split without copying"
+                )
             return buffer if buffer.ndim == 1 else buffer.flatten()
 
         rowwise_data_buffer = flattened_buffer(self.rowwise_data)
@@ -1078,7 +1080,9 @@ class GroupedTensorStorage:
                     end_offset = start_offset + numel
 
                     if self.has_data():
-                        tensor_data = rowwise_data_buffer[start_offset:end_offset].view(tensor_shape)
+                        tensor_data = rowwise_data_buffer[start_offset:end_offset].view(
+                            tensor_shape
+                        )
                         result.append(tensor_data)
                     elif self.has_columnwise_data():
                         tensor_data = columnwise_data_buffer[start_offset:end_offset].view(
@@ -1094,7 +1098,9 @@ class GroupedTensorStorage:
                     end_offset = start_offset + numel
 
                     if self.has_data():
-                        tensor_data = rowwise_data_buffer[start_offset:end_offset].view(tensor_shape)
+                        tensor_data = rowwise_data_buffer[start_offset:end_offset].view(
+                            tensor_shape
+                        )
                         result.append(tensor_data)
                     elif self.has_columnwise_data():
                         tensor_data = columnwise_data_buffer[start_offset:end_offset].view(
@@ -1208,9 +1214,9 @@ class GroupedTensorStorage:
                     cscale_end = self.columnwise_scale_inv_offsets[i + 1]
 
                     cscale_shape = quantizer.get_scale_shape(tensor_shape, True)
-                    columnwise_scale_inv = columnwise_scale_inv_buffer[cscale_start:cscale_end].view(
-                        cscale_shape
-                    )
+                    columnwise_scale_inv = columnwise_scale_inv_buffer[
+                        cscale_start:cscale_end
+                    ].view(cscale_shape)
 
                 if quantizer.internal:
                     mxfp8_tensor_class = MXFP8TensorStorage
@@ -1279,9 +1285,9 @@ class GroupedTensorStorage:
 
                     # Get columnwise scale shape from quantizer
                     cscale_shape = quantizer.get_scale_shape(tensor_shape, True)
-                    columnwise_scale_inv = columnwise_scale_inv_buffer[cscale_start:cscale_end].view(
-                        cscale_shape
-                    )
+                    columnwise_scale_inv = columnwise_scale_inv_buffer[
+                        cscale_start:cscale_end
+                    ].view(cscale_shape)
 
                 # Compute is_2D_scaled and data_format from quantizer attributes
                 is_2D_scaled = quantizer.block_scaling_dim == 2
@@ -1331,9 +1337,9 @@ class GroupedTensorStorage:
 
                     # Get columnwise scale shape from quantizer
                     cscale_shape = quantizer.get_scale_shape(tensor_shape, True)
-                    columnwise_scale_inv = columnwise_scale_inv_buffer[cscale_start:cscale_end].view(
-                        cscale_shape
-                    )
+                    columnwise_scale_inv = columnwise_scale_inv_buffer[
+                        cscale_start:cscale_end
+                    ].view(cscale_shape)
 
                 if self.amax is not None:
                     if nvfp4_rowwise_amax_offsets is not None:
