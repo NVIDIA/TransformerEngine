@@ -25,9 +25,10 @@ and target device or architecture. Support queries select supported plans withou
 compiling their kernels. PyTorch compiles on first execution and uses its CUDA
 generator for dropout, including CUDA graph capture and replay. JAX compiles
 during tracing when workspace sizes are needed, then serializes plans for its
-native FFI executor. The JAX extension and the frontend Python package must use
-matching cuDNN frontend versions; rebuild the extension after upgrading that
-package.
+native FFI executor. The executor requires a serialized precompiled execution
+plan and reports an error if it cannot be restored. The JAX extension and the
+frontend Python package must use matching cuDNN frontend versions; rebuild the
+extension after upgrading that package.
 
 Automatic ``score_mod`` graph caching includes the callback's code and snapshots
 of builtin scalar and container defaults, including keyword-only defaults.

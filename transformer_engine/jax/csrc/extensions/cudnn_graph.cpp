@@ -81,7 +81,8 @@ std::shared_ptr<Graph> GetGraph(cudnnHandle_t handle, ffi::Dictionary &attrs) {
   if (!graph) {
     const auto data = Attribute<std::string_view>(attrs, "serialized_graph");
     auto candidate = std::make_shared<Graph>();
-    auto status = candidate->deserialize(handle, std::vector<uint8_t>(data.begin(), data.end()));
+    auto status = candidate->deserialize(handle, std::vector<uint8_t>(data.begin(), data.end()),
+                                         /*enforce_precompiled=*/true);
     if (!status.is_good()) throw std::runtime_error(status.get_message());
     graph = std::move(candidate);
   }
