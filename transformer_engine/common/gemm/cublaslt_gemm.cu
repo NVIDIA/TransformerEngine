@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <mutex>
 #include <vector>
 
@@ -1028,31 +1029,38 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
         cudaStreamWaitEvent(detail::get_compute_stream(s), detail::get_compute_stream_event(0)));
   }
 
-  for (int i = 0; i < num_gemms; i++) {
-    // Check whether GELU or dGELU epilogue is requested
-    Tensor *pre_gelu_tensor = convertNVTETensor(pre_gelu_out[i]);
-    bool with_gelu_dgelu_epilogue =
-        (pre_gelu_tensor != nullptr && pre_gelu_tensor->data.dptr != nullptr);
+  std::exception_ptr launch_error;
+  try {
+    for (int i = 0; i < num_gemms; i++) {
+      // Check whether GELU or dGELU epilogue is requested
+      Tensor *pre_gelu_tensor = convertNVTETensor(pre_gelu_out[i]);
+      bool with_gelu_dgelu_epilogue =
+          (pre_gelu_tensor != nullptr && pre_gelu_tensor->data.dptr != nullptr);
 
-    // Construct config
-    MatmulConfig config;
-    if (grad) {
-      config.dbias_tensor = bias[i];
-      config.with_dgelu_epilogue = with_gelu_dgelu_epilogue;
-    } else {
-      config.bias_tensor = bias[i];
-      config.with_gelu_epilogue = with_gelu_dgelu_epilogue;
+      // Construct config
+      MatmulConfig config;
+      if (grad) {
+        config.dbias_tensor = bias[i];
+        config.with_dgelu_epilogue = with_gelu_dgelu_epilogue;
+      } else {
+        config.bias_tensor = bias[i];
+        config.with_gelu_epilogue = with_gelu_dgelu_epilogue;
+      }
+      config.epilogue_aux_tensor = pre_gelu_out[i];
+      config.use_split_accumulator = use_split_accumulator;
+      config.sm_count = math_sm_count;
+
+      // Launch GEMM
+      const float alpha = 1.f;
+      const float beta = accumulate ? 1.f : 0.f;
+      nvte_cublas_gemm_v2(transa, transb, &alpha, A[i], B[i], &beta, D[i], D[i],
+                          workspace[i % num_streams], &config,
+                          detail::get_compute_stream(i % num_streams));
     }
-    config.epilogue_aux_tensor = pre_gelu_out[i];
-    config.use_split_accumulator = use_split_accumulator;
-    config.sm_count = math_sm_count;
-
-    // Launch GEMM
-    const float alpha = 1.f;
-    const float beta = accumulate ? 1.f : 0.f;
-    nvte_cublas_gemm_v2(transa, transb, &alpha, A[i], B[i], &beta, D[i], D[i],
-                        workspace[i % num_streams], &config,
-                        detail::get_compute_stream(i % num_streams));
+  } catch (...) {
+    // Earlier GEMMs may still use caller-owned inputs, outputs, and scratch.
+    // Rejoin the helper streams before propagating the failure to the caller.
+    launch_error = std::current_exception();
   }
 
   // record events on compute streams
@@ -1063,6 +1071,9 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
   // wait for all compute streams to finish
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
+  }
+  if (launch_error) {
+    std::rethrow_exception(launch_error);
   }
 }
 
