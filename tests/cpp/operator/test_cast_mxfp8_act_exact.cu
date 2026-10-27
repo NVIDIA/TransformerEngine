@@ -453,6 +453,9 @@ INSTANTIATE_TEST_SUITE_P(
                                          // Enough row tiles that the register-resident kernels
                                          // walk several per CTA.
                                          std::pair<size_t, size_t>{4096, 2048},
+                                         // A row tail on 256-column tiles: 31 row tiles, the
+                                         // last of 16 rows, and an odd number for dbias.
+                                         std::pair<size_t, size_t>{976, 2048},
                                          std::pair<size_t, size_t>{544, 2080},
                                          // At least 2^23 elements (the register-tiled forward
                                          // without tables), with a row and a column tail.
