@@ -2887,10 +2887,8 @@ class TestGroupedMLPFusedOp:
         accumulation), so ``main_grad`` after backward equals ``wgrad``
         regardless of the prior contents.
 
-        Also exercises the MegatronFSDP ``zero_out_wgrad`` flag, which is
-        independent of ``main_grad`` and only controls whether the dummy
-        ``param.grad`` returned to autograd is zeroed (so downstream hooks
-        that read ``.grad`` don't see stale bytes from the cached dummy).
+        Also checks both values of the legacy ``zero_out_wgrad`` flag.
+        Neither changes ``main_grad``; autograd receives None in both cases.
         """
 
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
@@ -3467,7 +3465,7 @@ class _FakeDistWeight(torch.nn.Parameter):
         for w, g in zip(self._group, wl):
             w.main_grad.add_(g.to(w.main_grad.dtype))
             w.grad_added_to_main_grad = True
-        return [torch.zeros_like(g) for g in wl]
+        return None  # real gradients are already in main_grad
 
     def grad_buffer(self):
         return torch.empty_like(self.data)
@@ -3646,7 +3644,7 @@ class TestGroupedMLPDistributedWeight:
             )
             for w in (fc1_w, fc2_w):
                 assert w.grad_added_to_main_grad is True
-                assert w.grad is not None, "distributed weights receive a dummy .grad"
+                assert w.grad is None, "distributed weights leave .grad unset"
 
     def test_quantize_unquantized_weights_passes_through_quantized(
         self,

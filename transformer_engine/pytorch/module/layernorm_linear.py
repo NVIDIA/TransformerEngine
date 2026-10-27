@@ -26,7 +26,6 @@ from .base import (
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
-    get_dummy_wgrad,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
@@ -1439,18 +1438,7 @@ def _layernorm_linear_backward_impl(
         # Handle custom DDP from mcore.
         if args.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
             origin_weight.grad_added_to_main_grad = True
-            if getattr(origin_weight, "zero_out_wgrad", False):
-                wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
-                    origin_weight.dtype,
-                    zero=True,
-                )
-            else:
-                wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
-                    origin_weight.dtype,
-                    zero_tensor=getattr(origin_weight, "zero_tensor_dummy_wgrad", False),
-                )
+            wgrad = None
         elif args.fuse_wgrad_accumulation:
             wgrad = None
     else:

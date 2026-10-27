@@ -85,7 +85,6 @@ __all__ = [
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
-_dummy_wgrads = {}
 _ub_communicators = None
 _ub_initialized = False
 _ub_with_cublasmp = False
@@ -131,36 +130,6 @@ class UserBufferQuantizationMode(Enum):
 
     NONE = "none"
     FP8 = "fp8"
-
-
-def get_dummy_wgrad(
-    shape: list, dtype: torch.dtype, zero: bool = False, zero_tensor: bool = False
-) -> torch.Tensor:
-    """Returns a dummy tensor of given shape.
-
-    With ``zero=True`` the cached dummy is filled with zeros. Otherwise, with
-    ``zero_tensor=True`` the dummy is a ZeroTensor: it has no storage and adding it costs
-    nothing, e.g. when autograd sums the dummy weight gradients of a weight used more than
-    once in one backward pass.
-    """
-
-    # The dummy goes on the current device (the one the backward pass runs on), and the cache
-    # is keyed by it so that a dummy is never returned for a weight on another device.
-    device = torch.device("cuda", torch.cuda.current_device())
-    if zero_tensor and not zero:
-        return torch._efficientzerotensor(shape, dtype=dtype, device=device)
-    key = (*shape, dtype, device)
-    global _dummy_wgrads
-    if key not in _dummy_wgrads:
-        _dummy_wgrads[key] = torch.empty(
-            shape,
-            dtype=dtype,
-            device=device,
-            requires_grad=False,
-        )
-    if zero:
-        _dummy_wgrads[key].fill_(0)
-    return _dummy_wgrads[key].detach()
 
 
 def initialize_ub(

@@ -46,8 +46,8 @@ class DistributedWeight(Protocol):
         """Post-process freshly computed weight grad(s) (e.g. reduce-scatter).
 
         May consume ``wgrads`` in-place -- reduce-scatter into ``main_grad`` and set
-        ``grad_added_to_main_grad`` -- returning a dummy grad (or ``None`` for an async collective)
-        that callers use as the parameter grad(s) or discard.
+        ``grad_added_to_main_grad``. TE discards the returned grad when accumulation
+        has completed, allowing autograd to receive ``None``.
         """
 
     def grad_buffer(self) -> torch.Tensor:
@@ -128,7 +128,7 @@ def finalize_weight_grads(weights: Any, wgrads: List[Any]) -> List[Any]:
     """Finalize a weight group's grad(s), mirroring :func:`materialize_weight_for_backward`.
 
     Delegates to the leader's :meth:`DistributedWeight.finalize_group_grads` (which defines the
-    in-place / dummy / async-``None`` return contract); returns ``wgrads`` unchanged when not
+    in-place / ``None`` return contract); returns ``wgrads`` unchanged when not
     distributed.
     """
     if not isinstance(weights, (list, tuple)):
@@ -136,5 +136,7 @@ def finalize_weight_grads(weights: Any, wgrads: List[Any]) -> List[Any]:
     leader = weights[0]
     if is_distributed_weight(leader):
         out = leader.finalize_group_grads(wgrads if len(wgrads) > 1 else wgrads[0])
+        if out is None:
+            return [None] * len(wgrads)
         return list(out) if isinstance(out, (list, tuple)) else [out]
     return list(wgrads)

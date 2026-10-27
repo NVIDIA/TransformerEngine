@@ -27,7 +27,7 @@ from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter
 from .._common import (
     get_accumulate_flag_in_param,
-    get_dummy_wgrads_for_params,
+    mark_wgrads_accumulated,
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
@@ -637,9 +637,9 @@ class UserbuffersBackwardLinear(FusedOperation):
         clear_tensor_data(x_local)
 
         # Megatron-LM wgrad fusion
-        # Note: Return dummy tensor for grad weight if needed.
+        # Return None for the weight grad once main_grad is updated.
         if accumulate_into_main_grad:
-            grad_weight = get_dummy_wgrads_for_params([linear_op.weight])[0]
+            grad_weight = mark_wgrads_accumulated([linear_op.weight])[0]
 
         # Return gradients
         grad_params = [() for _ in range(len(self.basic_ops))]

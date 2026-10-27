@@ -77,7 +77,7 @@ class _FakeDistWeight(torch.nn.Parameter):
         for w, g in zip(self._group, wl):
             w.main_grad.add_(g.to(w.main_grad.dtype))  # stands in for the reduce-scatter
             w.grad_added_to_main_grad = True
-        return [torch.zeros_like(g) for g in wl]  # real grad is in main_grad; these are discarded
+        return None  # real gradients are already in main_grad
 
     def grad_buffer(self):
         # Scratch for the wgrad GEMM. Must not alias main_grad, which finalize adds into after.
@@ -181,6 +181,7 @@ def test_module_grouped_linear_distributed_weight_dispatch(
         # Both modules use fuse_wgrad_accumulation, so main_grad is the grad of record.
         torch.testing.assert_close(w.main_grad, ref_w.main_grad, **tols)
         assert w.grad_added_to_main_grad is True
+        assert w.grad is None
 
 
 @PATHS
@@ -230,7 +231,7 @@ def test_unfused_wgrad_returns_grads_through_finalize(use_grouped_tensor):
     for i in range(num_gemms):
         w, ref_w = getattr(module, f"weight{i}"), getattr(reference, f"weight{i}")
         assert w.grad is not None, "finalize's return value never reached .grad"
-        assert torch.count_nonzero(w.grad) > 0, "grad is all zeros -- the dummy, not the wgrad"
+        assert torch.count_nonzero(w.grad) > 0, "grad is all zeros"
         # wgrad is x summed per group, independent of the weight values, so it matches exactly.
         torch.testing.assert_close(w.grad.float(), ref_w.grad.float(), rtol=1e-5, atol=1e-5)
         assert torch.count_nonzero(w.main_grad) == 0, "main_grad was written without fusion"
