@@ -1004,6 +1004,12 @@ def cp_p2p_fwd_fused_attn(
     section,
 ):
     """Per-tile forward call of CP P2P with FusedAttention backend"""
+    # cuDNN counts the sink as one more softmax column, so a tile's softmax stats include
+    # it, and merging the tiles' stats would add it once per tile that a query row visits.
+    # Step 0 (the local KV block) covers every local query row, so only that tile carries
+    # the sink and the other tiles run a plain softmax.
+    if step != 0:
+        softmax_type, softmax_offset = "vanilla", None
     attn_bias_inputs = None
     max_seqlen_q_ = None
     max_seqlen_kv_ = None
@@ -1358,6 +1364,11 @@ def cp_p2p_bwd_fused_attn(
     section,
 ):
     """Per-tile backward call of CP P2P with FusedAttention backend"""
+    # Only the tile that carried the sink in the forward (forward step 0, backward step
+    # cp_size - 1) passes it back and returns a sink gradient. The other tiles use the merged
+    # softmax stats, which already include the sink, so their dq/dk/dv stay exact.
+    if step != cp_size - 1:
+        softmax_type, softmax_offset = "vanilla", None
     aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
 
     max_seqlen_q_ = max_seqlen_q
@@ -2542,8 +2553,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias = None
             attn_dbias_ = None
 
-        # Sink gradient accumulator. The offset is replicated on every rank and every
-        # per-tile fused call sees the same tensor, so tile contributions sum.
+        # Sink gradient accumulator. Only the diagonal (or local "all") tile returns one.
         d_softmax_offset = (
             torch.zeros_like(ctx.softmax_offset) if ctx.softmax_offset is not None else None
         )
@@ -2916,10 +2926,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         section,
                     )
 
-            # Accumulate this tile's sink gradient. Every rank computes all query rows,
-            # so each already holds the full gradient for this replicated parameter and
-            # the outer framework's DDP average reproduces it; reducing here as well
-            # would double-count.
+            # This tile's sink gradient covers this rank's query rows only.
             if d_sink_ is not None:
                 d_softmax_offset += d_sink_
 
@@ -3218,6 +3225,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if attn_dbias is not None:
             # [b, h, sq, 2*cp, sk//(2*cp)] -> [b, h, sq, sk]
             attn_dbias = attn_dbias.view(*attn_dbias.shape[:-2], -1)
+
+        if d_softmax_offset is not None:
+            # Each rank holds the sink gradient of its own query rows. Sum them so that every
+            # rank returns the gradient of the full sequence, as the a2a path does.
+            torch.distributed.all_reduce(d_softmax_offset, group=ctx.cp_group)
 
         nvtx_range_pop(f"{nvtx_label}")
 
