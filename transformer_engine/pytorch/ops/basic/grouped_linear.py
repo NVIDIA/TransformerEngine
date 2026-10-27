@@ -67,7 +67,6 @@ from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias_dscales,
 )
 
-
 # Keys for passing caller-provided output and grad-input buffers to a grouped
 # linear (or fused grouped MLP) through Sequential's ``op_kwargs``.
 OUTPUT_BUFFER_KEY = "output"
@@ -1416,7 +1415,7 @@ class GroupedLinear(BasicOperation):
                 dtype=dtype,
                 num_tensors=num_groups,
                 quantizer=None,
-                data=x.reshape(-1),
+                data=x,
                 first_dims=split_sizes,
                 tensor_offsets=input_tensor_offsets,
             )
@@ -1453,7 +1452,7 @@ class GroupedLinear(BasicOperation):
             dtype=dtype,
             num_tensors=num_groups,
             quantizer=None,
-            data=out.reshape(-1),
+            data=out,
             first_dims=split_sizes,
             tensor_offsets=output_tensor_offsets,
         )
@@ -1837,7 +1836,7 @@ class GroupedLinear(BasicOperation):
                 dtype=dtype,
                 num_tensors=num_groups,
                 quantizer=None,
-                data=dy_2d.reshape(-1),
+                data=dy_2d,
                 first_dims=split_sizes,
                 tensor_offsets=output_tensor_offsets,
             )
@@ -1875,7 +1874,7 @@ class GroupedLinear(BasicOperation):
                 dtype=dtype,
                 num_tensors=num_groups,
                 quantizer=None,
-                data=grad_input.reshape(-1),
+                data=grad_input,
                 first_dims=split_sizes,
                 tensor_offsets=input_tensor_offsets,
             )

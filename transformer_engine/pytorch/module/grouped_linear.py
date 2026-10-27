@@ -1303,7 +1303,7 @@ class _GroupedLinear(torch.autograd.Function):
             dtype=dtype,
             num_tensors=num_gemms,
             quantizer=None,
-            data=data.reshape(-1),
+            data=data,
             first_dims=split_sizes,
             tensor_offsets=tensor_offsets,
         )
