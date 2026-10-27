@@ -2511,8 +2511,14 @@ def _fused_attn_forward_fake(
     return out, max_logit, tensors_to_save, ctx_attrs
 
 
-def _fused_attn_pack_grad(grad, dim, count):
-    """Recover the packed allocation produced by native attention backward."""
+def _fused_attn_pack_grad(grads, dim, count):
+    """Recover the packed allocation produced by native attention backward.
+
+    FROST allocates each gradient separately, so stack them when they do not share storage.
+    """
+    grad = grads[0]
+    if any(g.untyped_storage().data_ptr() != grad.untyped_storage().data_ptr() for g in grads):
+        return torch.stack(grads, dim=dim)
     shape, strides = list(grad.shape), list(grad.stride())
     packed_stride = shape[dim + 1] * strides[dim + 1]
     shape.insert(dim + 1, count)
@@ -2527,11 +2533,11 @@ def _fused_attn_backward_op_impl(
     dqkv, dkv = None, None
     if args.packed_qkv is not None:
         dim = -2 if "h3d" in args.dqkv_layout else -3
-        dqkv = _fused_attn_pack_grad(dq, dim, 3)
+        dqkv = _fused_attn_pack_grad((dq, dk, dv), dim, 3)
         dq, dk, dv = None, None, None
     elif args.packed_kv is not None:
         dim = -2 if "h2d" in args.dqkv_layout else -3
-        dkv = _fused_attn_pack_grad(dk, dim, 2)
+        dkv = _fused_attn_pack_grad((dk, dv), dim, 2)
         dk, dv = None, None
     return dq, dk, dv, d_bias, d_softmax_offset, dqkv, dkv
 

@@ -451,6 +451,33 @@ def test_frost_mask_spec_rejects_malformed_windows():
             _mask_spec("causal", window), why
 
 
+def test_packed_grad_accepts_separately_allocated_grads():
+    """FROST allocates dq, dk and dv separately, so the compiled packed path cannot as_strided.
+
+    The native backward hands back three views of one packed allocation; FROST does not, and a
+    view strided over the first of three separate buffers runs off the end of its storage.
+    """
+    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+        _fused_attn_pack_grad,
+    )
+
+    packed = torch.arange(2 * 3 * 4 * 3 * 8, dtype=torch.float32).reshape(2, 3, 4, 3, 8)
+    shared = [packed[:, :, :, i, :] for i in range(3)]
+    separate = [t.contiguous() for t in shared]
+
+    from_shared = _fused_attn_pack_grad(shared, -2, 3)
+    from_separate = _fused_attn_pack_grad(separate, -2, 3)
+    assert from_shared.shape == packed.shape
+    assert from_separate.shape == packed.shape
+    torch.testing.assert_close(from_shared, packed)
+    torch.testing.assert_close(from_separate, packed)
+
+    packed_hd = packed.transpose(2, 3).contiguous()
+    separate_hd = [packed_hd[:, :, i, :, :].contiguous() for i in range(3)]
+    assert _fused_attn_pack_grad(separate_hd, -3, 3).shape == packed_hd.shape
+    torch.testing.assert_close(_fused_attn_pack_grad(separate_hd, -3, 3), packed_hd)
+
+
 def test_frost_plan_key_round_trips_through_the_builders(monkeypatch):
     """The plan key is also the build recipe, so the builders must destructure what _key packs.
 
