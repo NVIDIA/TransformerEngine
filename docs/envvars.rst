@@ -375,6 +375,12 @@ Kernel Configuration
    :Default: ``0``
    :Description: Enable row-scaled NVFP4 tensors for forward activation quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row instead of a single scalar.
 
+.. envvar:: NVTE_NVFP4_FC1_DY_AMAX_FROM_DGLU
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: In the fused grouped MLP backward with NVFP4 and a GLU activation, derive the per-expert amaxes for quantizing the FC1 grad output from the amax that the FC2 dGLU epilogue already computes, instead of a separate amax pass over the FC1 grad output. The rowwise amax is exact. With RHT, the columnwise (wgrad) amax is replaced by the upper bound ``4 * rowwise amax`` on the post-RHT amax (the 16-point RHT is normalized by 1/4), which is looser than the exact post-RHT amax (8-13x on DeepSeek-V3 gradients, i.e. up to about 3.7 binades of FP8 scale range left unused in the wgrad operand). The bound can never overflow; it only reduces the precision headroom of the columnwise quantization.
+
 .. envvar:: NVTE_NVFP4_4OVER6
 
    :Type: ``str`` (``none``, ``weights``, ``activations``, or ``all``)

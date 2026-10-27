@@ -37,6 +37,7 @@ from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ...tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ...triton.grouped_dbias_dscales import compute_grouped_dbias, compute_grouped_dbias_dscales
+from ...triton.nvfp4_dglu_amax import nvfp4_amax_from_dglu_amax
 from ...utils import (
     ceil_div,
     clear_tensor_data,
@@ -588,6 +589,25 @@ def _grouped_gemm_dsrelu_backward_supported() -> bool:
     except ImportError:
         return False
     return grouped_gemm_dsrelu_wrapper_sm100 is not None
+
+
+@functools.lru_cache(maxsize=1)
+def _use_fc1_dy_amax_from_dglu() -> bool:
+    """Whether FC1 grad output NVFP4 amaxes come from the FC2 dGLU epilogue amax."""
+    return os.environ.get("NVTE_NVFP4_FC1_DY_AMAX_FROM_DGLU", "0") == "1"
+
+
+def _can_quantize_with_dglu_amax(
+    dglu_amax: Optional[torch.Tensor], quantizer: Quantizer, num_groups: int
+) -> bool:
+    """Whether the dGLU epilogue amax can provide the NVFP4 amaxes of its output."""
+    return (
+        dglu_amax is not None
+        and dglu_amax.dtype == torch.float32
+        and dglu_amax.numel() == 2 * num_groups
+        and isinstance(quantizer, NVFP4Quantizer)
+        and not quantizer.row_scaled_nvfp4
+    )
 
 
 @functools.lru_cache(maxsize=1)
@@ -2866,14 +2886,35 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 columnwise=fc1_ctx.weight_requires_grad,
             )
             fc1_grad_output_quantizer.optimize_for_gemm = True
-            grouped_fc1_dy = _group_quantize_for_grouped_mlp(
-                fc1_dy_bf16,
-                fc1_grad_output_quantizer,
-                num_groups,
-                split_sizes,
-                tensor_offsets=fc1_dy_tensor_offsets,
-                use_dense_single_group=use_dense_single_group,
-            )
+            dglu_amax = fc2_dgrad_kernel_out.get("amax_tensor")
+            if _use_fc1_dy_amax_from_dglu() and _can_quantize_with_dglu_amax(
+                dglu_amax, fc1_grad_output_quantizer, num_groups
+            ):
+                # The dGLU epilogue already reduced |dy| per expert. Reuse it as the exact
+                # rowwise amax and bound the post-RHT columnwise amax by it, skipping the
+                # separate grouped amax pass over dy.
+                fc1_dy_rowwise_amax, fc1_dy_columnwise_amax = nvfp4_amax_from_dglu_amax(
+                    dglu_amax, num_groups, fc1_grad_output_quantizer.with_rht
+                )
+                grouped_fc1_dy = _group_quantize_with_amax_for_grouped_mlp(
+                    fc1_dy_bf16,
+                    fc1_grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
+                    fc1_dy_rowwise_amax,
+                    fc1_dy_columnwise_amax,
+                    tensor_offsets=fc1_dy_tensor_offsets,
+                    use_dense_single_group=use_dense_single_group,
+                )
+            else:
+                grouped_fc1_dy = _group_quantize_for_grouped_mlp(
+                    fc1_dy_bf16,
+                    fc1_grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
+                    tensor_offsets=fc1_dy_tensor_offsets,
+                    use_dense_single_group=use_dense_single_group,
+                )
         else:
             grouped_fc1_dy = GroupedTensor(
                 shape=(out_shape[0], fc1_weight_shape[0]),
