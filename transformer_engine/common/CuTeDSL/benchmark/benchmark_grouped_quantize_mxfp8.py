@@ -5,8 +5,10 @@
 """Kernel-only benchmark of the grouped MXFP8 quantize kernels (CUPTI kernel timing, cold
 L2), e.g. the per-expert activations of an MoE layer.
 
-A group is G members (experts) holding M rows of hidden size N in total; --layout picks how
-the member shapes vary. Uneven splits are random but seeded from the shape, so every run and
+A group is G members (experts) in a buffer of M rows of hidden size N; --layout picks how the
+member shapes vary. As with CUDA graphs, where the buffer is sized ahead of time and the member
+sizes are only known on device, varying members fill a random 50-100% of the buffer and the
+kernels skip the rest. Member sizes are random but seeded from the shape, so every run and
 both sides of --compare see the same group. CuTeDSL kernels come from this source tree (no
 rebuild needed); CUDA kernels come from the installed TE (set PYTHONPATH=<repo> to use your own
 build). The CUDA time includes its separate TMA-descriptor update kernel, which CuTeDSL does
@@ -38,56 +40,55 @@ DEBUG_EXPERTS = [4]
 FUSIONS = ("none", "dbias")  # grouped quantization has no PyTorch binding for (d)activations
 # --layout name -> shape representation of the CuTeDSL config (ShapeRepresentation in C++)
 LAYOUTS = {
-    "same": "sbd",  # every member M/G x N
-    "varying_first": "vfd",  # members m_i x N, sum m_i = M: uneven tokens per expert
-    "varying_last": "vld",  # members M/G x n_i, mean n_i ~ N
-    "varying_both": "vbd",  # members m_i x n_i
+    "same": "sbd",  # every member M/G x N, filling the buffer
+    "varying_first": "vfd",  # members m_i x N, sum m_i <= M: uneven tokens per expert
+    "varying_last": "vld",  # members M/G x n_i, sum n_i <= G x N
+    "varying_both": "vbd",  # members m_i x n_i, sum m_i x n_i <= M x N
 }
 SINGLE_TENSOR_LAYOUTS = ("same", "varying_first")  # dbias needs a common last dim
 ROW_BLOCK = 128  # every member's first dim (and varying last dims) must be a multiple of it
+FILL = (0.5, 1.0)  # range of the buffer fraction varying members fill
 CONFIG = ["M", "N", "experts", "layout", "direction", "fusion", "swizzle", "input"]
 
 
-def _split(total, parts, block, rng):
-    """`parts` random multiples of `block` summing to `total` (some may be 0, as for an expert
-    no token routes to)."""
-    weights = [rng.lognormvariate(0, 0.6) for _ in range(parts)]
-    units = total // block
-    shares = [w / sum(weights) * units for w in weights]
-    counts = [int(s) for s in shares]
-    for i in sorted(range(parts), key=lambda i: shares[i] - counts[i], reverse=True)[
-        : units - sum(counts)
-    ]:
-        counts[i] += 1
-    return [c * block for c in counts]
+def _split(budget, costs, rng):
+    """Random block counts c_i with sum c_i x costs[i] <= budget (some may be 0, as for an
+    expert no token routes to)."""
+    weights = [rng.lognormvariate(0, 0.6) for _ in costs]
+    return [int(w / sum(weights) * budget // c) for w, c in zip(weights, costs)]
 
 
 def members(m, n, experts, layout):
     """Member shapes [(m_i, n_i)] of the group; deterministic for a given shape."""
     rng = random.Random(f"{m}x{n}x{experts}x{layout}")
-    if layout in ("same", "varying_last"):
-        firsts = [m // experts] * experts
-    else:
-        firsts = _split(m, experts, ROW_BLOCK, rng)
-    if layout in ("same", "varying_first"):
+    if layout == "same":
+        return [(m // experts, n)] * experts
+    fill = rng.uniform(*FILL)
+    if layout == "varying_last":
+        # Every member is at least one block wide: a zero-width member has no last dim.
+        spare = max(int(fill * capacity(m, n, experts, layout)[1]) - experts * ROW_BLOCK, 0)
+        extra = _split(spare, [ROW_BLOCK] * experts, rng)
+        return [(m // experts, (1 + c) * ROW_BLOCK) for c in extra]
+    if layout == "varying_first":
         lasts = [n] * experts
     else:
-        lasts = _split(_round_up(n * experts, ROW_BLOCK), experts, ROW_BLOCK, rng)
-        lasts = [max(v, ROW_BLOCK) for v in lasts]  # a zero-width member has no last dim
-    return list(zip(firsts, lasts))
+        lasts = [(1 + c) * ROW_BLOCK for c in _split(n * experts, [ROW_BLOCK] * experts, rng)]
+    blocks = _split(fill * m * n, [ROW_BLOCK * v for v in lasts], rng)
+    return [(c * ROW_BLOCK, v) for c, v in zip(blocks, lasts)]
 
 
 def _round_up(x, y):
     return (x + y - 1) // y * y
 
 
-def logical_shape(group, layout):
-    """The 2D view the grouped kernels take, as in tests/pytorch/mxfp8 group_dims()."""
+def capacity(m, n, experts, layout):
+    """The buffer's 2D shape, the logical shape the grouped kernels take (as in
+    tests/pytorch/mxfp8 group_dims()); the members may fill only part of it."""
     if layout in ("same", "varying_first"):
-        return sum(m for m, _ in group), group[0][1]
+        return m, n
     if layout == "varying_last":
-        return group[0][0], sum(n for _, n in group)
-    return 1, sum(m * n for m, n in group)
+        return m // experts, max(_round_up(n * experts, ROW_BLOCK), experts * ROW_BLOCK)
+    return 1, m * n
 
 
 def _dims_tensors(group, layout):
@@ -176,16 +177,21 @@ def _cutedsl_launcher():
 
     def setup(x, group, layout, direction, fusion, swizzle):
         # Allocated here rather than by a TE grouped quantize call, so setting up a buffer set
-        # runs no kernel. Sizes and offsets are those of TE's GroupedTensor: per member, scales
-        # padded to 128 x 4 (rowwise) / 4 x 128 (colwise) blocks, element offsets of the data.
+        # runs no kernel. Sizes and offsets are those of TE's GroupedTensor
+        # (MXFP8Quantizer::create_grouped_tensor): scales sized for the whole buffer, element
+        # offsets of the members' data.
         rowwise, colwise = common.DIRECTIONS[direction]
         shape = tuple(x.shape)
         empty = functools.partial(torch.empty, device="cuda")
         fp8, e8m0 = torch.float8_e4m3fn, torch.float8_e8m0fnu
         o_row = empty(shape, dtype=fp8) if rowwise else None
         o_col = empty(shape, dtype=fp8) if colwise else None
-        row_scales = sum(_round_up(m, 128) * _round_up(-(-n // 32), 4) for m, n in group)
-        col_scales = sum(_round_up(-(-m // 32), 4) * _round_up(n, 128) for m, n in group)
+        rows, cols = shape
+        if layout == "varying_both":
+            row_scales = col_scales = rows * cols // 32
+        else:
+            row_scales = _round_up(rows, 128) * _round_up(-(-cols // 32), 4)
+            col_scales = _round_up(-(-rows // 32), 4) * _round_up(cols, 128)
         s_row = empty(row_scales, dtype=e8m0) if rowwise else None
         s_col = empty(col_scales, dtype=e8m0) if colwise else None
         # As the C++ bridge does: a missing direction's scale slot takes the other's buffer.
@@ -255,9 +261,10 @@ def run(args, impl):
         (
             common.mxfp8_bytes(sum(a * b for a, b in grp), inp, d),
             functools.partial(
-                lambda grp, lay, d, f, sw, inp: setup(
-                    make_input(logical_shape(grp, lay), inp), grp, lay, d, f, sw
+                lambda shape, grp, lay, d, f, sw, inp: setup(
+                    make_input(shape, inp), grp, lay, d, f, sw
                 ),
+                capacity(m, n, g, lay),
                 grp,
                 lay,
                 d,
@@ -266,7 +273,7 @@ def run(args, impl):
                 inp,
             ),
         )
-        for _, _, _, lay, d, f, sw, inp, grp in configs
+        for m, n, g, lay, d, f, sw, inp, grp in configs
     )
     timed = common.time_kernels(factories, args.runs, args.warmup, keep)
     rows = []
@@ -287,7 +294,7 @@ def add_arguments(parser):
         "--shapes",
         metavar='"MxN;..."',
         help=(
-            "total rows M (a multiple of 128) x hidden size N (a multiple of 32), for --mode manual"
+            "buffer rows M (a multiple of 128) x hidden size N (a multiple of 32), for --mode manual"
         ),
     )
     parser.add_argument(
