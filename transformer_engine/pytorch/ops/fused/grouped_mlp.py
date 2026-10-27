@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable, Sequence
 import functools
 import inspect
 import os
+import warnings
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Any, Literal, Optional
 
@@ -27,6 +28,7 @@ from ...distributed_weight import (
     materialize_weight_for_forward,
     materialize_weight_for_backward,
     finalize_weight_grads,
+    weight_grad_dtype,
 )
 from ...module.base import _2X_ACC_WGRAD
 from ...quantization import Recipe, get_fp8_torch_dtype
@@ -381,6 +383,43 @@ def _group_quantize_with_amax_for_grouped_mlp(
     )
 
 
+def _weight_quantizers(op: GroupedLinear, num_groups: int) -> list[Quantizer]:
+    """Per-expert weight quantizers of ``op``.
+
+    Only built where they are consumed (discrete or distributed weights), so the single grouped
+    weight path does not pay for ``num_groups`` lookups it never uses.
+    """
+    return [op.get_quantizer("forward", 2 * idx + 1) for idx in range(num_groups)]
+
+
+def _quantize_unquantized_weights(
+    weights: Iterable[Any],
+    quantizers: Sequence[Quantizer],
+    *,
+    rowwise: bool,
+    columnwise: bool,
+) -> list:
+    """Quantize plain weights with the given per-expert weight quantizers.
+
+    Quantized entries (native-quantized params, incl. native GTP shards gathered as quantized
+    tensors) pass through. A distributed (e.g. GTP) BF16 weight gathers as BF16 and must be
+    quantized with the layer's own quantizer, mirroring ``module/linear.py``'s handling of a
+    re-gathered BF16 distributed weight.
+
+    ``quantizers`` must be the ones saved on the forward context, not read from the live op:
+    a later forward under a different (or no) recipe replaces or clears the op's quantizers
+    before an earlier backward runs.
+    """
+    out = []
+    for weight, quantizer in zip(weights, quantizers):
+        if is_quantized_tensor(weight):
+            out.append(weight)
+            continue
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        out.append(quantizer(weight))
+    return out
+
+
 def _nvfp4_amax(
     tensors: GroupedTensor | Iterable[NVFP4TensorStorage],
     *,
@@ -538,8 +577,6 @@ def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[to
 @functools.lru_cache(maxsize=1)
 def _grouped_gemm_dsrelu_backward_supported() -> bool:
     """Whether the cuDNN FE grouped GEMM dSReLU backward wrapper is available."""
-    if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-        return False
     if get_device_compute_capability()[0] != 10:
         return False
     if not _cudnn_frontend_supports_grouped_gemm_srelu():
@@ -874,7 +911,7 @@ def _compute_grad_params(
                     shapes=[weight_shape] * num_groups,
                     quantizer=None,
                     device=device,
-                    dtype=dtype,
+                    dtype=weight_grad_dtype(weights, dtype),
                 )
             wgrad_output = grouped_wgrad
             w_list = [grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)]
@@ -890,7 +927,7 @@ def _compute_grad_params(
                 wgrad_packed = torch.empty(
                     num_groups,
                     *weight_shape,
-                    dtype=dtype,
+                    dtype=weight_grad_dtype(weights, dtype),
                     device=device,
                 )
                 w_list = [wgrad_packed[i] for i in range(num_groups)]
@@ -1005,6 +1042,34 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
         )
 
 
+def _is_grouped_mlp_fusion_candidate(
+    ops: list[FusibleOperation],
+    recipe: Optional[Recipe],
+    activation_op_types: tuple[type[FusibleOperation]],
+) -> bool:
+    """Check whether the recipe and operation pattern support grouped MLP fusion."""
+    if len(ops) < 3 or recipe is None:
+        return False
+    if recipe.custom():
+        if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
+            return False
+    elif not (recipe.mxfp8() or recipe.nvfp4()):
+        return False
+    # NVFP4 graph-safe grouped quantize currently requires RHT.
+    if recipe.nvfp4() and recipe.disable_rht:
+        return False
+    # The fused MXFP8 backward reinterprets grad-output storage as E4M3. It
+    # cannot consume E5M2 gradients from Format.HYBRID. NVFP4 has separate formats.
+    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
+        return False
+    return any(
+        isinstance(fc1, GroupedLinear)
+        and isinstance(activation, activation_op_types)
+        and isinstance(fc2, GroupedLinear)
+        for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
+    )
+
+
 def fuse_grouped_mlp_ops(
     ops: list[FusibleOperation],
     *,
@@ -1030,20 +1095,6 @@ def fuse_grouped_mlp_ops(
         Updated operations with matched triples replaced by fused ops.
     """
     if not fused_op_cls.is_supported():
-        return ops
-
-    # Fused kernels are only supported for MXFP8 and NVFP4
-    if recipe is None:
-        return ops
-    if recipe.custom():
-        # Check if custom recipe explicitly enables fusion
-        if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
-            return ops
-    elif not (recipe.mxfp8() or recipe.nvfp4()):
-        return ops
-
-    # MXFP8 kernel assumes E4M3 data, so reject hybrid E4M3/E5M2 data
-    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
         return ops
 
     # Check for unsupported NVFP4 recipe configs
@@ -1089,6 +1140,17 @@ def fuse_grouped_mlp_ops(
                 validate_grouped_mlp_dims(window[0], window[1], window[2])
             except (TypeError, ValueError):
                 matches_pattern = False
+
+        if matches_pattern and (
+            window[0].split_alignment % 256 != 0 or window[2].split_alignment % 256 != 0
+        ):
+            warnings.warn(
+                "Grouped MLP fusion was skipped because both GroupedLinear operations "
+                "require split_alignment to be divisible by 256 "
+                f"(got {window[0].split_alignment} and {window[2].split_alignment}).",
+                stacklevel=2,
+            )
+            matches_pattern = False
 
         if matches_pattern:
             op = fused_op_cls(
@@ -1179,8 +1241,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
         """Whether this fused operation is supported on the current system."""
-        if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-            return False
         if get_device_compute_capability()[0] != 10:
             return False
         if not _cudnn_frontend_version_supported():
@@ -1340,6 +1400,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_input_quantizer = fc2_op.get_quantizer("forward", 0)
         fc2_weight_quantizer = fc2_op.get_quantizer("forward", 1)
         fc2_grad_output_quantizer = fc2_op.get_quantizer("backward", 0)
+        # Per-expert weight quantizer lists are built lazily, only on the discrete-weight and
+        # distributed-weight paths that consume them.
+        fc1_weight_quantizers = None
+        fc2_weight_quantizers = None
 
         # Extract split sizes from extra input
         fc1_split_sizes = basic_op_extra_inputs[0][0]
@@ -1460,17 +1524,17 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 )
         else:
             fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
-            quantized_fc1_weights = []
-            for idx, weight in enumerate(fc1_weights):
-                quantizer = fc1_op.get_quantizer("forward", 2 * idx + 1)
-                if not is_quantized_tensor(weight):
-                    quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                    quantized_fc1_weights.append(quantizer(weight))
-                else:
-                    quantized_fc1_weights.append(weight)
-            grouped_fc1_weight = quantized_fc1_weights
-        if fc1_is_dist:
-            grouped_fc1_weight = materialize_weight_for_forward(grouped_fc1_weight)
+            fc1_weight_quantizers = _weight_quantizers(fc1_op, num_groups)
+            # Distributed weights gather first (native-quantized shards gather quantized, BF16
+            # shards gather as BF16); anything still unquantized is quantized here. The
+            # gathered copy is not saved (backward re-gathers and quantizes columnwise
+            # itself), so its columnwise data would be thrown away: skip producing it.
+            grouped_fc1_weight = _quantize_unquantized_weights(
+                materialize_weight_for_forward(fc1_weights) if fc1_is_dist else fc1_weights,
+                fc1_weight_quantizers,
+                rowwise=True,
+                columnwise=input_requires_grad and not fc1_is_dist,
+            )
 
         # Prepare FC2 grouped weight tensor for fused kernels.
         if fc2_op.single_grouped_weight:
@@ -1498,15 +1562,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 )
         else:
             fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
-            quantized_fc2_weights = []
-            for idx, weight in enumerate(fc2_weights):
-                quantizer = fc2_op.get_quantizer("forward", 2 * idx + 1)
-                if not is_quantized_tensor(weight):
-                    quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                    quantized_fc2_weights.append(quantizer(weight))
-                else:
-                    quantized_fc2_weights.append(weight)
-            grouped_fc2_weight = quantized_fc2_weights
+            # Distributed weights are gathered (and quantized if needed) after the FC1 kernel so
+            # the gather overlaps FC1 compute.
+            if fc2_is_dist:
+                grouped_fc2_weight = fc2_weights
+            else:
+                fc2_weight_quantizers = _weight_quantizers(fc2_op, num_groups)
+                grouped_fc2_weight = _quantize_unquantized_weights(
+                    fc2_weights, fc2_weight_quantizers, rowwise=True, columnwise=input_requires_grad
+                )
 
         # Some wrapper-copy paths may drop grouped storage metadata; enforce defaults.
         if isinstance(grouped_fc1_weight, GroupedTensor) and not hasattr(
@@ -1835,7 +1899,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         activation_in = activation_in.view(in_shape[0], fc1_weight_shape[0])
 
         if fc2_is_dist:
-            grouped_fc2_weight = materialize_weight_for_forward(grouped_fc2_weight)
+            fc2_weight_quantizers = _weight_quantizers(fc2_op, num_groups)
+            grouped_fc2_weight = _quantize_unquantized_weights(
+                materialize_weight_for_forward(grouped_fc2_weight),
+                fc2_weight_quantizers,
+                rowwise=True,
+                columnwise=False,
+            )
         if isinstance(grouped_fc2_weight, GroupedTensor) and not hasattr(
             grouped_fc2_weight, "_with_gemm_swizzled_scales"
         ):
@@ -1933,10 +2003,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc2_bias_scale = fc2_bias_scale.to(dtype=torch.float32)
 
             fc2_out_buf = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
-            if (
-                use_dense_single_group
-                and grouped_fc2_x.columnwise_data is not None
-                and grouped_fc2_x.columnwise_scale_inv is not None
+            if use_dense_single_group and (
+                not weight_requires_grad
+                or (
+                    grouped_fc2_x.columnwise_data is not None
+                    and grouped_fc2_x.columnwise_scale_inv is not None
+                )
             ):
                 fc2_out_buf = _single_group_fc2_gemm(
                     grouped_fc2_x,
@@ -2176,13 +2248,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
             saved_grouped_fc2_x = None if recompute_srelu_fc2_x else grouped_fc2_x
 
-            # MXFP8 wgrad only needs columnwise tiles. NVFP4 generic GEMM fallbacks
-            # need the full grouped tensor state, including rowwise data and amax.
-            if not use_nvfp4:
-                for grouped_fc_x in (saved_fc1_x, saved_grouped_fc2_x):
-                    if isinstance(grouped_fc_x, (GroupedTensor, GroupedTensorStorage)):
-                        grouped_fc_x.rowwise_data = None
-                        grouped_fc_x.scale_inv = None
+            # wgrad only needs column-wise data, so clear row-wise data
+            for grouped_fc_x in (saved_fc1_x, saved_grouped_fc2_x):
+                if isinstance(grouped_fc_x, (GroupedTensor, GroupedTensorStorage)):
+                    grouped_fc_x.rowwise_data = None
+                    grouped_fc_x.scale_inv = None
 
             if cpu_offloading:
                 activation_tensors = [
@@ -2221,7 +2291,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
 
             fc1_ctx.input_quantizers = [fc1_input_quantizer]
-            fc1_ctx.weight_quantizers = [fc1_weight_quantizer]
+            # Backward re-quantizes re-gathered distributed weights with the quantizers saved
+            # here; other paths only read the first expert's quantizer.
+            fc1_ctx.weight_quantizers = (
+                fc1_weight_quantizers if fc1_is_dist else [fc1_weight_quantizer]
+            )
             fc1_ctx.grad_output_quantizers = [fc1_grad_output_quantizer]
             fc1_ctx.dtype = dtype
             fc1_ctx.input_requires_grad = input_requires_grad
@@ -2230,7 +2304,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
             fc2_ctx.input_quantizers = [fc2_input_quantizer]
             fc2_ctx.grad_output_quantizers = [fc2_grad_output_quantizer]
-            fc2_ctx.weight_quantizers = [fc2_weight_quantizer]
+            fc2_ctx.weight_quantizers = (
+                fc2_weight_quantizers if fc2_is_dist else [fc2_weight_quantizer]
+            )
             fc2_ctx.dtype = dtype
             fc2_ctx.input_requires_grad = input_requires_grad
             fc2_ctx.weight_requires_grad = weight_requires_grad
@@ -2481,6 +2557,18 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             scales_tensor = scales_f32.reshape(-1, 1, 1)
             dscales_tensor = torch.zeros_like(scales_tensor)
 
+        # Distributed weight (e.g. GTP): re-gather before any use (the NVFP4 global scale below
+        # reads the weights). BF16 shards gather as BF16 and are quantized with the weight
+        # quantizers saved in forward (the live op's may have been replaced or cleared since).
+        fc2_leader = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
+        if is_distributed_weight(fc2_leader):
+            grouped_fc2_weight = _quantize_unquantized_weights(
+                materialize_weight_for_backward(fc2_leader),
+                fc2_ctx.weight_quantizers,
+                rowwise=False,
+                columnwise=True,
+            )
+
         fc2_d_dtype = torch.bfloat16 if use_nvfp4 else torch.float8_e4m3fn
         if use_nvfp4:
             fc2_dy_global_scale = _nvfp4_global_scale(
@@ -2563,10 +2651,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
         if self._pass_srelu_tanh_params:
             fc2_dactivation_kwargs.update(tanh_clamp_scale=self._cudnn_tanh_clamp_scale)
-
-        fc2_leader = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
-        if is_distributed_weight(fc2_leader):
-            grouped_fc2_weight = materialize_weight_for_backward(fc2_leader)
 
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
@@ -2852,7 +2936,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
             fc1_leader = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
             if is_distributed_weight(fc1_leader):
-                grouped_fc1_weight = materialize_weight_for_backward(fc1_leader)
+                # BF16 GTP shards gather as BF16: quantize with the weight quantizers saved in
+                # forward (the live op's may have been replaced or cleared since).
+                grouped_fc1_weight = _quantize_unquantized_weights(
+                    materialize_weight_for_backward(fc1_leader),
+                    fc1_ctx.weight_quantizers,
+                    rowwise=False,
+                    columnwise=True,
+                )
 
             fc1_dgrad_sf_override = _nvfp4_sf_dtype_override(fc1_grad_output_quantizer)
 
@@ -3216,6 +3307,12 @@ def fuse_glu_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
+    # Keep capability probes out of tracing for unrelated operation sequences.
+    if not _is_grouped_mlp_fusion_candidate(
+        ops, recipe, (ScaledSwiGLU, ScaledClampedQGeGLU, ScaledSiTUGLU)
+    ):
+        return ops
+
     # Determine supported activations
     activation_op_types = []
     device_arch = get_device_compute_capability()
@@ -3247,6 +3344,13 @@ def fuse_unary_activation_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
 
+    # Keep capability probes out of tracing for unrelated operation sequences.
+    if not _is_grouped_mlp_fusion_candidate(ops, recipe, (ScaledSReLU, ScaledTanhSReLU)):
+        return ops
+
+    if not GroupedMLP_CuTeGEMMUnary.is_supported():
+        return ops
+
     # Determine supported activations
     activation_op_types = [ScaledSReLU]
     if _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
@@ -3260,8 +3364,5 @@ def fuse_unary_activation_ops(
     )
 
 
-# Register joint fusions if available.
-if GroupedMLP_CuTeGEMMGLU.is_supported():
-    register_forward_backward_fusion(fuse_glu_ops, prepend=True)
-if GroupedMLP_CuTeGEMMUnary.is_supported():
-    register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)
+register_forward_backward_fusion(fuse_glu_ops, prepend=True)
+register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)

@@ -229,6 +229,7 @@ pybind11::capsule GetEpInstanceStateTypeInfoCapsule();
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpInstantiateHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpPrepareHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpPrepareAndDispatchHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchBwdHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineBwdHandler);

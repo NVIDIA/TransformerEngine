@@ -409,6 +409,32 @@ Test cases begin here.
 """
 
 
+def test_fp8_cs_quantize_fake_tensor_metadata():
+    x = torch.randn(16, 16, device="cuda", dtype=torch.float32)
+
+    torch.library.opcheck(
+        torch.ops.tex.fp8_cs_quantize.default,
+        (x,),
+        test_utils=("test_faketensor",),
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_layernorm_fake_tensor_metadata(dtype, transpose):
+    x = torch.randn(16, 32, device="cuda", dtype=dtype)
+    if transpose:
+        x = x.t()
+    weight = torch.randn(x.shape[-1], device="cuda", dtype=dtype)
+    bias = torch.randn_like(weight)
+
+    torch.library.opcheck(
+        torch.ops.tex.layernorm.default,
+        (x, weight, bias, 1e-5),
+        test_utils=("test_schema", "test_faketensor"),
+    )
+
+
 def _test_export_linear(
     fp8_recipe: recipe.Recipe = fp8_recipes[0],
     use_bias: bool = True,

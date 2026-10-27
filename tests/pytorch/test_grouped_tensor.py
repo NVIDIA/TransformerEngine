@@ -4,7 +4,6 @@
 
 """Tests for GroupedTensor class"""
 
-import os
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
@@ -34,20 +33,16 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
-# The fused grouped FP8 block-scaling quantize/dequantize kernels are Hopper-only: they gate on
-# SM90-SM99 (NVTE_CHECK(sm >= 90 && sm < 100)). FP8 block scaling is still reported "available" on
-# Blackwell (SM100+) for the emulated/non-grouped paths, so ``fp8_block_scaling_available`` alone
-# does not exclude SM100 — add the Hopper arch bound for the grouped tests.
+# Grouped FP8 block-scaling quantize/dequantize kernels need TMA (SM90+). On Blackwell and newer
+# the FP8 block-scaling recipe is emulated with MXFP8, which only supports power-of-2 scales.
 _device_cc = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
-fp8_block_scaling_grouped_available = fp8_block_scaling_available and (9, 0) <= _device_cc < (10, 0)
+fp8_block_scaling_grouped_available = fp8_block_scaling_available and _device_cc >= (9, 0)
 reason_for_no_fp8_block_scaling_grouped = (
     reason_for_no_fp8_block_scaling
     if not fp8_block_scaling_available
-    else (
-        "Fused grouped FP8 block-scaling quantize/dequantize is only supported on Hopper"
-        " (SM90-SM99)."
-    )
+    else "Grouped FP8 block-scaling quantize/dequantize requires SM90 or newer."
 )
+_fp8bs_pow2_required = _device_cc >= (10, 0)
 
 
 def test_mark_grouped_tensor_supports_plain_tensor():
@@ -303,6 +298,76 @@ class TestGroupedTensor:
         seed = 1234
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
+
+    def test_autograd_identity_view_preserves_grouped_storage_and_gradient(self) -> None:
+        """Autograd's identity view keeps grouped metadata and passes back a dense gradient."""
+
+        class Identity(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, tensor):
+                return tensor
+
+            @staticmethod
+            def backward(ctx, grad):
+                return grad
+
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        source = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            first_dims=first_dims,
+            tensor_offsets=tensor_offsets,
+            requires_grad=True,
+        )
+
+        view = Identity.apply(source)
+        assert isinstance(view, GroupedTensor)
+        assert view is not source
+        assert view._base is source
+        assert view.rowwise_data is source.rowwise_data
+        assert view.first_dims is first_dims
+        assert view.tensor_offsets is tensor_offsets
+
+        expected = torch.arange(1, 13, dtype=torch.float32, device="cuda").reshape(3, 4)
+        (grad,) = torch.autograd.grad(view, source, grad_outputs=expected)
+        assert type(grad) is torch.Tensor
+        torch.testing.assert_close(grad, expected)
+
+    def test_record_stream_tracks_grouped_buffers(self, monkeypatch) -> None:
+        """record_stream should reach every allocation owned by the wrapper."""
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        last_dims = torch.tensor([4, 4], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        grouped_tensor = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            columnwise_data=torch.randn(12, device="cuda"),
+            scale_inv=torch.ones(2, device="cuda"),
+            columnwise_scale_inv=torch.ones(2, device="cuda"),
+            amax=torch.zeros(2, device="cuda"),
+            columnwise_amax=torch.zeros(2, device="cuda"),
+            scale=torch.ones(2, device="cuda"),
+            first_dims=first_dims,
+            last_dims=last_dims,
+            tensor_offsets=tensor_offsets,
+        )
+        buffers = grouped_tensor.get_data_tensors()
+        recorded = []
+        original_record_stream = torch.Tensor.record_stream
+
+        def record_stream(tensor, stream):
+            recorded.append(tensor)
+            return original_record_stream(tensor, stream)
+
+        monkeypatch.setattr(torch.Tensor, "record_stream", record_stream)
+        grouped_tensor.record_stream(torch.cuda.Stream())
+
+        assert all(any(record is buffer for record in recorded) for buffer in buffers)
 
     def test_basic_construction_all_same_shape(self) -> None:
         """Test GroupedTensor construction with all tensors having same shape"""
@@ -1103,7 +1168,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=True,
             columnwise=False,
-            force_pow_2_scales=False,
+            force_pow_2_scales=_fp8bs_pow2_required,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -1164,7 +1229,7 @@ class TestGroupedTensor:
                 fp8_dtype=tex.DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=True,
-                force_pow_2_scales=False,
+                force_pow_2_scales=_fp8bs_pow2_required,
                 amax_epsilon=0.0,
                 block_scaling_dim=1,
             )
@@ -1507,6 +1572,21 @@ class TestGroupedTensor:
         (``varying_first``); ``varying_last``/``varying_both`` are rejected at the kernel level.
         Per-tensor first dim must be a multiple of 128 (kernel tile size).
         """
+        if not force_pow_2_scales and _fp8bs_pow2_required:
+            # Non-power-of-2 FP8 block scales cannot be emulated with MXFP8 on Blackwell+.
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
+                block_scaling_dim=block_scaling_dim,
+            )
+            x = torch.randn(256, 256, dtype=torch.bfloat16, device="cuda")
+            with pytest.raises(RuntimeError, match="power of two scaling factors"):
+                tex.group_quantize(x, quantizer, 2, None)
+            return
+
         rowwise = direction in ("rowwise", "both")
         columnwise = direction in ("columnwise", "both")
 
@@ -1837,7 +1917,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
-            force_pow_2_scales=False,
+            force_pow_2_scales=_fp8bs_pow2_required,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -1907,7 +1987,7 @@ class TestGroupedTensor:
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=rowwise,
             columnwise=columnwise,
-            force_pow_2_scales=False,
+            force_pow_2_scales=_fp8bs_pow2_required,
             amax_epsilon=0.0,
             block_scaling_dim=block_scaling_dim,
         )
@@ -1955,8 +2035,6 @@ class TestGroupedTensor:
         in_features = 64
         out_features = 32
         dtype = torch.float32
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         src = te.GroupedLinear(
             num_gemms=num_gemms,
             in_features=in_features,
@@ -2007,8 +2085,6 @@ class TestGroupedTensor:
 
     def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         num_gemms = 3
         in_features = 64
         out_features = 32
