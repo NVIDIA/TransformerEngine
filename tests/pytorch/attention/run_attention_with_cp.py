@@ -352,6 +352,15 @@ def run_dpa_with_cp(
         core_attn.eval()
     if is_training and config.softmax_type != "vanilla":
         core_attn.softmax_offset.requires_grad = True
+    if config.softmax_type == "learnable":
+        # A zero offset is almost invisible next to thousands of keys. Offsets around the
+        # scale of the attention logsumexp make the sink change both the output and its
+        # gradient. A fixed CPU generator gives every CP rank the same offsets.
+        with torch.no_grad():
+            generator = torch.Generator().manual_seed(1234)
+            core_attn.softmax_offset.copy_(
+                torch.randn(core_attn.softmax_offset.shape, generator=generator) * 5
+            )
 
     # generate attention inputs
     (
@@ -474,8 +483,9 @@ def run_dpa_with_cp(
                 out.backward(dout)
     if is_training:
         dq, dk, dv, dbias = q.grad, k.grad, v.grad, bias.grad if bias is not None else None
+        # Clone: the grad is zeroed below and the CP run accumulates into the same tensor.
         d_softmax_offset = (
-            core_attn.softmax_offset.grad if config.softmax_type != "vanilla" else None
+            core_attn.softmax_offset.grad.clone() if config.softmax_type != "vanilla" else None
         )
     else:
         dq, dk, dv, dbias = None, None, None, None

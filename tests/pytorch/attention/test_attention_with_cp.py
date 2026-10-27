@@ -655,7 +655,7 @@ def test_cp_with_fused_attention(
             f" num_gqa_groups ({config.num_gqa_groups}) divisible by 2!"
         )
 
-    if config.softmax_type != "vanilla" and cp_comm_type != "a2a":
+    if config.softmax_type != "vanilla" and cp_comm_type not in ["a2a", "p2p"]:
         pytest.skip(f"No support for non-vanilla softmax with cp_comm_type={cp_comm_type}!")
     if (
         config.softmax_type != "vanilla"
