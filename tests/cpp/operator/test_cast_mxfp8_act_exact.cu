@@ -450,6 +450,9 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
                        ::testing::Values(0, 1, 2), ::testing::Bool(),
                        ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
+                                         // Enough row tiles that the register-resident kernels
+                                         // walk several per CTA.
+                                         std::pair<size_t, size_t>{4096, 2048},
                                          std::pair<size_t, size_t>{544, 2080},
                                          // At least 2^23 elements (the register-tiled forward
                                          // without tables), with a row and a column tail.

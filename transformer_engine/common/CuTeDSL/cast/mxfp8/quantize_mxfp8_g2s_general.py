@@ -66,8 +66,8 @@ from .quantize_mxfp8_common import (
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
     MXFP8_BLOCK_SCALING_SIZE,
-    SUPPORTED_ACTIVATIONS,
-    SUPPORTED_DACTIVATIONS,
+    activation_op,
+    dactivation_op,
     SYM_N_DIVISIBILITY,
     THREADS_PER_WARP,
     derive_swizzled_scale_layout,
@@ -87,6 +87,7 @@ def _quantize_rowwise_mxfp8(
     M: Int32,
     N: Int32,
     ACTIVATION: cutlass.Constexpr[str | None],
+    ACTIVATION_TABLE: cutlass.Constexpr[str],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     TILE_X: cutlass.Constexpr[int],
@@ -208,14 +209,14 @@ def _quantize_rowwise_mxfp8(
 
         if cutlass.const_expr(WITH_DACT):
             # Backward: out = grad · act'(act_input). sX is grad, sA is act_input.
-            dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+            dop = dactivation_op(ACTIVATION, ACTIVATION_TABLE)
             sA_thread = cute.composition(sActInput_tile, tv_layout)[tidx, None]
             sA_thread_rw = cute.make_tensor(
                 sA_thread.iterator,
                 cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(0, 1)),
             )
         elif cutlass.const_expr(WITH_ACT):
-            op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+            op = activation_op(ACTIVATION, ACTIVATION_TABLE)
 
         if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
             truncate_f32 = truncate_f32_f16 if DTYPE is cutlass.Float16 else truncate_f32_bf16
@@ -339,6 +340,7 @@ def _quantize_colwise_mxfp8(
     M: Int32,
     N: Int32,
     ACTIVATION: cutlass.Constexpr[str | None],
+    ACTIVATION_TABLE: cutlass.Constexpr[str],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     SWIZZLE: cutlass.Constexpr[bool],
@@ -410,12 +412,12 @@ def _quantize_colwise_mxfp8(
             rX_thread_f32[i] = Float32(sX_thread[i])
         # Apply activation (fwd) or grad·act'(act_input) (bwd dact) in f32.
         if cutlass.const_expr(WITH_DACT):
-            dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+            dop = dactivation_op(ACTIVATION, ACTIVATION_TABLE)
             sA_thread = cute.composition(sActInput_tile, tv_layout)[tidx, None]
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 rX_thread_f32[i] = rX_thread_f32[i] * dop(Float32(sA_thread[i]))
         elif cutlass.const_expr(WITH_ACT):
-            op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+            op = activation_op(ACTIVATION, ACTIVATION_TABLE)
             # Don't repeat these OOB masking computation in the loop
             thread_col_start = tile_col_start + tidx
             thread_col_oob = thread_col_start >= N
@@ -507,6 +509,7 @@ def _dbias_reduction_colwise(
     sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16/fp32 smem view, post-TMA
     sA_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
     ACTIVATION: cutlass.Constexpr[str | None],
+    ACTIVATION_TABLE: cutlass.Constexpr[str],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     TILE_X: cutlass.Constexpr[int],
     WITH_DACT: cutlass.Constexpr[bool] = False,
@@ -524,7 +527,7 @@ def _dbias_reduction_colwise(
 
     dbias_partial = Float32(0.0)
     if cutlass.const_expr(WITH_DACT):
-        dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+        dop = dactivation_op(ACTIVATION, ACTIVATION_TABLE)
         sA_thread = cute.composition(sA_tile, tv_layout)[tidx, None]
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
             x = Float32(sX_thread[i]) * dop(Float32(sA_thread[i]))
@@ -556,6 +559,7 @@ def quantize_mxfp8_smem_tile_general(
     WITH_ACT: cutlass.Constexpr[bool],
     WITH_DACT: cutlass.Constexpr[bool],
     ACTIVATION: cutlass.Constexpr[str | None],
+    ACTIVATION_TABLE: cutlass.Constexpr[str],
     MAX_NORM_RCP: cutlass.Constexpr[float],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
@@ -589,6 +593,7 @@ def quantize_mxfp8_smem_tile_general(
             M,
             N,
             ACTIVATION=ACTIVATION,
+            ACTIVATION_TABLE=ACTIVATION_TABLE,
             DTYPE=DTYPE,
             FP8_DTYPE=FP8_DTYPE,
             SWIZZLE=WITH_GEMM_SWIZZLED_SCALES,
@@ -613,6 +618,7 @@ def quantize_mxfp8_smem_tile_general(
             sX_tile,
             sActInput_tile,
             ACTIVATION=ACTIVATION,
+            ACTIVATION_TABLE=ACTIVATION_TABLE,
             DTYPE=DTYPE,
             TILE_X=TILE_X,
             WITH_DACT=WITH_DACT,
@@ -634,6 +640,7 @@ def quantize_mxfp8_smem_tile_general(
             M,
             N,
             ACTIVATION=None if CACHE_ACTIVATION else ACTIVATION,
+            ACTIVATION_TABLE=ACTIVATION_TABLE,
             DTYPE=DTYPE,
             FP8_DTYPE=FP8_DTYPE,
             TILE_X=TILE_X,
@@ -734,6 +741,7 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         mWorkspace: Optional[
             cute.Tensor
         ],  # Workspace for the dbias reduction, only used when WITH_DBIAS is True
+        mActTable: cute.Pointer,  # activation table; null without one
         stream: CUstream,
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
@@ -1227,6 +1235,7 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
                 WITH_ACT=self.cfg.WITH_ACT,
                 WITH_DACT=self.cfg.WITH_DACT,
                 ACTIVATION=self.cfg.ACTIVATION,
+                ACTIVATION_TABLE=self.cfg.ACTIVATION_TABLE,
                 MAX_NORM_RCP=self.cfg.MAX_NORM_RCP,
                 DTYPE=self.cfg.DTYPE,
                 FP8_DTYPE=self.cfg.FP8_DTYPE,

@@ -259,6 +259,7 @@ class MXFP8QuantizeRowwise1LaneG2RKernel(MXFP8QuantizeKernelBase):
         mNoop: cute.Pointer,  # Unused: the dispatcher routes noop calls to the general kernel
         mDActInput: Optional[cute.Tensor],  # Unused, kept for API compatibility
         mWorkspace: Optional[cute.Tensor],  # Unused, kept for API compatibility
+        mActTable: cute.Pointer,  # activation table; null without one
         stream: CUstream,
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
