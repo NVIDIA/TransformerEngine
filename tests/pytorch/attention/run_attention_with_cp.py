@@ -20,6 +20,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
     model_configs_flash_attn,
+    model_configs_frost_attn,
     model_configs_fused_attn,
 )
 from transformer_engine.pytorch import (
@@ -276,6 +277,15 @@ def run_dpa_with_cp(
             config = copy.deepcopy(model_configs_fused_attn[model])
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
+    if kernel_backend == "FrostAttention":
+        # FROST is a sub-backend of FusedAttention, so NVTE_FUSED_ATTN has to stay on. Flash is
+        # left off; nothing else serves head_dim > 256, so the selector reaches FROST on its own.
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_FROST_ATTN"] = "1"
+        if model in model_configs_frost_attn:
+            config = copy.deepcopy(model_configs_frost_attn[model])
+        else:
+            assert False, f"{model=} is not a known FrostAttention CP config!"
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
@@ -596,6 +606,19 @@ def run_dpa_with_cp(
             pad_between_seqs=pad_between_seqs,
             fp8_output=fp8_mha,
         )
+        if kernel_backend == "FrostAttention":
+            # Assert the sub-backend actually used, not the one requested, so this stops
+            # passing if a silent substitution ever becomes possible.
+            from transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention import (  # pylint: disable=import-outside-toplevel
+                _attention_backends,
+            )
+
+            # pylint: disable-next=import-outside-toplevel
+            from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
+
+            assert (
+                _attention_backends["fused_attention_backend"] == FusedAttnBackend.FROST
+            ), "expected the FROST sub-backend to be selected, got %s" % (_attention_backends,)
         if config.return_max_logit:
             out_, max_logit_ = out_
         if is_training:

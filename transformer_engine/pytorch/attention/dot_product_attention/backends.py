@@ -2089,9 +2089,12 @@ def _fused_attn_setup_ctx(
     bwd_args.softmax_type = fwd_args.softmax_type
     bwd_args.window_size = fwd_args.window_size
     bwd_args.bottom_right_diagonal = fwd_args.bottom_right_diagonal
-    bwd_args.fused_attention_backend = (
-        ctx_attrs["fused_attention_backend"] if fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
-    )
+    # TODO(cyanguwa): NVTE_FP8_DPA_BWD=0 runs an F16 backward under an FP8 forward. This assumes
+    # F16_arbitrary_seqlen is the only backward that can follow an FP8 forward; revisit when more
+    # combinations, e.g. (FP8 forward, FROST backward), become supported.
+    bwd_args.fused_attention_backend = ctx_attrs["fused_attention_backend"]
+    if fwd_args.fp8 and not fp8:
+        bwd_args.fused_attention_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
     bwd_args.use_FAv2_bwd = fwd_args.use_FAv2_bwd
     bwd_args.deterministic = fwd_args.deterministic
 
@@ -2510,8 +2513,14 @@ def _fused_attn_forward_fake(
     return out, max_logit, tensors_to_save, ctx_attrs
 
 
-def _fused_attn_pack_grad(grad, dim, count):
-    """Recover the packed allocation produced by native attention backward."""
+def _fused_attn_pack_grad(grads, dim, count):
+    """Recover the packed allocation produced by native attention backward.
+
+    FROST allocates each gradient separately, so stack them when they do not share storage.
+    """
+    grad = grads[0]
+    if any(g.untyped_storage().data_ptr() != grad.untyped_storage().data_ptr() for g in grads):
+        return torch.stack(grads, dim=dim)
     shape, strides = list(grad.shape), list(grad.stride())
     packed_stride = shape[dim + 1] * strides[dim + 1]
     shape.insert(dim + 1, count)
@@ -2526,11 +2535,11 @@ def _fused_attn_backward_op_impl(
     dqkv, dkv = None, None
     if args.packed_qkv is not None:
         dim = -2 if "h3d" in args.dqkv_layout else -3
-        dqkv = _fused_attn_pack_grad(dq, dim, 3)
+        dqkv = _fused_attn_pack_grad((dq, dk, dv), dim, 3)
         dq, dk, dv = None, None, None
     elif args.packed_kv is not None:
         dim = -2 if "h2d" in args.dqkv_layout else -3
-        dkv = _fused_attn_pack_grad(dk, dim, 2)
+        dkv = _fused_attn_pack_grad((dk, dv), dim, 2)
         dk, dv = None, None
     return dq, dk, dv, d_bias, d_softmax_offset, dqkv, dkv
 
@@ -2834,8 +2843,9 @@ class FusedAttention(torch.nn.Module):
                         )
 
         if context_parallel:
-            assert (
-                fp8 or fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+            assert fp8 or fused_attention_backend in (
+                FusedAttnBackend["F16_arbitrary_seqlen"],
+                FusedAttnBackend["FROST"],
             ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [
                 "alibi"
@@ -2867,6 +2877,7 @@ class FusedAttention(torch.nn.Module):
                     attn_bias=core_attention_bias,
                     deterministic=self.deterministic,
                     use_fused_attention=True,
+                    fused_attention_backend=fused_attention_backend,
                     window_size=window_size,
                     fp8=fp8,
                     fp8_meta=fp8_meta,
