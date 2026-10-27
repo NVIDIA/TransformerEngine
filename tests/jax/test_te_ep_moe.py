@@ -7,7 +7,7 @@
 The launcher ``tests/jax/run_te_ep_moe.sh`` forks one pytest process per
 visible GPU. Each process binds to exactly one device via
 ``jax.distributed.initialize(..., local_device_ids=process_id)``; the
-participating processes form a global ``(ep, fsdp)`` mesh through JAX's
+participating processes form a global ``(fsdp, expert, tensor)`` mesh through JAX's
 distributed runtime.
 
 How to run
@@ -43,6 +43,7 @@ then tears down EP and runs all cuDNN cases in the same processes:
   main+aux grads stay finite) in two consolidated tests.
 """
 
+import math
 import importlib
 import os
 
@@ -111,12 +112,11 @@ if not _MP_ACTIVE:
 
 from transformer_engine_jax import get_device_compute_capability
 
-# Grouped GEMM in the MoE custom_vjp requires Blackwell (sm_100+). The
-# TE EP NCCL primitives themselves need SM>=90, but the FFN body uses
-# grouped_gemm, so the file as a whole gates on sm_100+.
-if get_device_compute_capability(0) < 100:
+# The TE EP NCCL primitives and the grouped-GEMM fallback used by the MoE
+# custom_vjp are supported on Hopper (sm_90+) and newer GPUs.
+if get_device_compute_capability(0) < 90:
     pytest.skip(
-        "MoE TE EP tests require Blackwell (sm_100+) for grouped GEMM",
+        "MoE TE EP tests require Hopper (sm_90+) or newer",
         allow_module_level=True,
     )
 
@@ -134,28 +134,40 @@ from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 # Mesh / shape config
 # -----------------------------------------------------------------------------
 
-EP_AXIS = "ep"
+EXPERT_AXIS = "expert"
+TENSOR_AXIS = "tensor"
 FSDP_AXIS = "fsdp"
 EP_SIZE = 2
-assert (
-    jax.device_count() % EP_SIZE == 0
-), f"device_count {jax.device_count()} must be divisible by EP_SIZE={EP_SIZE}"
-FSDP_SIZE = jax.device_count() // EP_SIZE
-NUM_DEVICES_REQUIRED = EP_SIZE * FSDP_SIZE
+TP_SIZE = int(os.environ.get("TE_EP_MOE_TP_SIZE", "2"))
+INPUT_RANK = int(os.environ.get("TE_EP_MOE_INPUT_RANK", "2" if TP_SIZE > 1 else "3"))
+FSDP_SIZE = jax.device_count() // (EP_SIZE * TP_SIZE)
+assert TP_SIZE in (1, 2), f"TE_EP_MOE_TP_SIZE must be 1 or 2, got {TP_SIZE}"
+assert INPUT_RANK in (2, 3), f"TE_EP_MOE_INPUT_RANK must be 2 or 3, got {INPUT_RANK}"
+EP_AXIS = EXPERT_AXIS if TP_SIZE == 1 else (EXPERT_AXIS, TENSOR_AXIS)
+EP_AXES = (EP_AXIS,) if isinstance(EP_AXIS, str) else EP_AXIS
+EXPLICIT_EP_AXIS = None if TP_SIZE == 1 else EP_AXIS
+MESH_SHAPE = (FSDP_SIZE, EP_SIZE) if TP_SIZE == 1 else (FSDP_SIZE, EP_SIZE, TP_SIZE)
+MESH_AXES = (FSDP_AXIS, *EP_AXES)
+COMBINED_EP_SIZE = EP_SIZE * TP_SIZE
+NUM_DEVICES_REQUIRED = FSDP_SIZE * EP_SIZE * TP_SIZE
+assert jax.device_count() == NUM_DEVICES_REQUIRED, (
+    f"device_count {jax.device_count()} must equal {NUM_DEVICES_REQUIRED} for "
+    f"expert={EP_SIZE} x fsdp={FSDP_SIZE} x tensor={TP_SIZE}"
+)
 
 LOGICAL_AXIS_RULES = (
-    ("exp", EP_AXIS),
-    ("expert_weight_fsdp", (EP_AXIS, FSDP_AXIS)),
+    ("exp", EP_AXES),
+    ("expert_weight_fsdp", (*EP_AXES, FSDP_AXIS)),
     ("gated_weight_fsdp", FSDP_AXIS),
     ("embed", FSDP_AXIS),
     ("mlp", None),
-    ("batch", (FSDP_AXIS, EP_AXIS)),
+    ("batch", (FSDP_AXIS, *EP_AXES)),
 )
 
 # Small shapes so the parity tests stay tight on bf16. The block still
-# has all four ranks participating in dispatch/combine.
+# has all eight ranks participating in dispatch/combine.
 DTYPE = jnp.bfloat16
-BATCH = EP_SIZE * FSDP_SIZE * 2  # 8 on 4-GPU, 16 on 8-GPU
+BATCH = NUM_DEVICES_REQUIRED * 2
 SEQ = 32
 HIDDEN = 128
 INTER = 128
@@ -199,14 +211,14 @@ def use_cudnn_fusion(request):
 def mesh(use_cudnn_fusion):
     if jax.device_count() < NUM_DEVICES_REQUIRED:
         pytest.skip(
-            f"Need >={NUM_DEVICES_REQUIRED} devices for ep={EP_SIZE} x fsdp={FSDP_SIZE};"
+            f"Need {NUM_DEVICES_REQUIRED} devices for expert={EP_SIZE} x "
+            f"fsdp={FSDP_SIZE} x tensor={TP_SIZE};"
             f" have {jax.device_count()}"
         )
-    # ``ep`` must be the inner axis: ``ep_bootstrap`` forms NCCL EP groups
-    # from consecutive global ranks via ``dp_color = rank // ep_size``, so
-    # only an (outer_fsdp, inner_ep) device layout groups ranks correctly.
-    devices = mesh_utils.create_device_mesh((FSDP_SIZE, EP_SIZE))
-    mesh_obj = Mesh(devices, axis_names=(FSDP_AXIS, EP_AXIS))
+    # Both ``expert`` and ``tensor`` act as EP axes. Keep the compound EP
+    # axes innermost so each FSDP replica owns one consecutive NCCL EP group.
+    devices = mesh_utils.create_device_mesh(MESH_SHAPE)
+    mesh_obj = Mesh(devices, axis_names=MESH_AXES)
 
     num_procs = jax.process_count()
     max_tokens_per_rank = (BATCH // num_procs) * SEQ
@@ -217,14 +229,16 @@ def mesh(use_cudnn_fusion):
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
         max_tokens_per_rank=max_tokens_per_rank,
-        ep_size=EP_SIZE,
+        ep_size=COMBINED_EP_SIZE,
         use_cudnn_fusion=use_cudnn_fusion,
     )
 
     # Eager bootstrap: ep_bootstrap does a host-side NCCL UID allgather
     # and cannot run from inside jax.jit. Sized to the worst-case recv_pr
     # across _CONFIGS so every parametrized config is bootstrap-compatible.
-    with mesh_obj, global_shard_guard(MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)):
+    with mesh_obj, global_shard_guard(
+        MeshResource(ep_resource=EXPERT_AXIS, fsdp_resource=FSDP_AXIS)
+    ):
         ep_bootstrap(
             world_size=num_procs,
             rank=jax.process_index(),
@@ -233,13 +247,14 @@ def mesh(use_cudnn_fusion):
             recv_capacity_per_rank=recv_capacity_per_rank,
             hidden_dim=HIDDEN,
             max_token_dtype=DTYPE,
+            ep_axes=EXPLICIT_EP_AXIS,
         )
     record_ep_bootstrap_signature_for_moe(
         num_experts=NUM_EXPERTS,
         max_tokens_per_rank=max_tokens_per_rank,
         recv_capacity_per_rank=recv_capacity_per_rank,
         hidden_dim=HIDDEN,
-        ep_size=EP_SIZE,
+        ep_size=COMBINED_EP_SIZE,
     )
     mode = "cudnn" if use_cudnn_fusion else "unfused"
     try:
@@ -294,8 +309,9 @@ def _pure_jax_moe_reference(
     aux_loss_coeff: float = 0.0,
     score_function: str = "softmax",
 ):
-    B, S, H = x.shape
-    T = B * S
+    original_shape = x.shape
+    H = original_shape[-1]
+    T = math.prod(original_shape[:-1])
     K = num_experts_per_tok
     x_2d = x.reshape(T, H)
 
@@ -335,7 +351,7 @@ def _pure_jax_moe_reference(
     intermediate = jax.nn.silu(layer_w0) * layer_w1
     expert_out = jnp.einsum("tem,emh->teh", intermediate, wo)  # [T, E, H]
     output_2d = jnp.einsum("te,teh->th", routing_weights_full.astype(x.dtype), expert_out)
-    output = output_2d.reshape(B, S, H).astype(x.dtype)
+    output = output_2d.reshape(original_shape).astype(x.dtype)
 
     if aux_loss_coeff > 0.0:
         # tex.fused_moe_aux_loss formula (matches the same
@@ -374,17 +390,20 @@ def _make_block(
     use_expert_routing_bias=False,
     score_function="softmax",
     expert_bias_init=None,
-    input_axes=("batch", None, None),
+    input_axes=None,
     quantization_recipe=None,
     dispatch_checkpoint_name=None,
     quant_before_fsdp_ag=False,
     mesh_resource=None,
     use_cudnn_fusion,
 ):
+    if input_axes is None:
+        input_axes = ("batch", *([None] * (INPUT_RANK - 1)))
     kwargs = dict(
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
         intermediate_size=INTER,
+        ep_axis=EXPLICIT_EP_AXIS,
         mesh_resource=mesh_resource,
         apply_topk_weights_early=apply_topk_weights_early,
         aux_loss_coeff=aux_loss_coeff,
@@ -423,9 +442,8 @@ def _strong_expert_bias_init(key, shape, dtype):
 
 def _shard_inputs(x, mesh):
     # Match the layout moe.py re-pins to: outer dp axes, then ep innermost.
-    return jax.lax.with_sharding_constraint(
-        x, NamedSharding(mesh, P((FSDP_AXIS, EP_AXIS), None, None))
-    )
+    spec = P((FSDP_AXIS, *EP_AXES), *([None] * (x.ndim - 1)))
+    return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, spec))
 
 
 def _ctx(mesh):
@@ -435,7 +453,7 @@ def _ctx(mesh):
         def __enter__(self_inner):
             self_inner._m = mesh.__enter__()
             self_inner._gs = global_shard_guard(
-                MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+                MeshResource(ep_resource=EXPERT_AXIS, fsdp_resource=FSDP_AXIS)
             )
             self_inner._gs.__enter__()
             self_inner._ar = nn_partitioning.axis_rules(LOGICAL_AXIS_RULES)
@@ -531,7 +549,8 @@ def _params_global_numpy(variables, mesh):
 
 def _make_inputs(key):
     """Generate a globally-identical input tensor on every process."""
-    return jax.random.normal(key, (BATCH, SEQ, HIDDEN), dtype=DTYPE)
+    shape = (BATCH * SEQ, HIDDEN) if INPUT_RANK == 2 else (BATCH, SEQ, HIDDEN)
+    return jax.random.normal(key, shape, dtype=DTYPE)
 
 
 def _quantization_recipe(quantization):
@@ -588,7 +607,10 @@ _QUANTIZATION_CASES = [
     pytest.param("bf16", id="bf16"),
 ]
 
-if get_device_compute_capability(0) >= 100:
+if (
+    get_device_compute_capability(0) >= 90
+    and os.environ.get("NVTE_JAX_ENFORCE_V2_GROUPED_GEMM", "0") != "1"
+):
     _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
 
 
@@ -626,7 +648,7 @@ def test_quantized_weight_gather_matches_full_precision_gather(
             if fsdp_dimension == "expert":
                 kwargs["wi_kernel_axes"] = ("expert_weight_fsdp", None, None)
                 kwargs["wo_kernel_axes"] = ("expert_weight_fsdp", None, None)
-                spec = P((EP_AXIS, FSDP_AXIS), None, None)
+                spec = P((*EP_AXES, FSDP_AXIS), None, None)
                 args[2] = jax.lax.with_sharding_constraint(args[2], NamedSharding(mesh, spec))
                 args[3] = jax.lax.with_sharding_constraint(args[3], NamedSharding(mesh, spec))
             return original_moe(*args, **kwargs)

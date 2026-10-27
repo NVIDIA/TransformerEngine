@@ -14,6 +14,8 @@ Sharding model:
     compound ``(dp, ep)`` axis on the leading dim.
 """
 
+from typing import Tuple, Union
+
 import functools
 import os
 import warnings
@@ -201,21 +203,55 @@ def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
     )
 
 
-def _capture_ep_resource_axes():
+def _normalize_ep_axes(ep_axis: Union[str, Tuple[str, ...]]) -> Tuple[str, ...]:
+    """Normalize a physical EP mesh axis or axis tuple."""
+    axes = (ep_axis,) if isinstance(ep_axis, str) else ep_axis
+    if not isinstance(axes, tuple):
+        raise ValueError(f"ep_axis must be a mesh axis name or tuple of names, got {ep_axis!r}")
+    if not axes or any(not isinstance(axis, str) or not axis for axis in axes):
+        raise ValueError(
+            f"ep_axis must be a mesh axis name or non-empty tuple of names, got {ep_axis!r}"
+        )
+    if len(set(axes)) != len(axes):
+        raise ValueError(f"ep_axis must not contain duplicate mesh axes, got {ep_axis!r}")
+    return axes
+
+
+def _ep_axis_entry(ep_axes: Tuple[str, ...]):
+    """Return the PartitionSpec entry for normalized EP axes."""
+    return ep_axes[0] if len(ep_axes) == 1 else ep_axes
+
+
+def _resolve_ep_axes(ep_axes=None) -> Tuple[str, ...]:
+    """Resolve explicit EP axes, falling back to MeshResource for compatibility."""
+    if ep_axes is None:
+        ep_axes = global_mesh_resource().ep_resource
+    if ep_axes is None:
+        raise ValueError("EP mesh axes must be passed explicitly or set as ep_resource.")
+    return _normalize_ep_axes(ep_axes)
+
+
+def _capture_ep_resource_axes(ep_axes=None):
     """Capture physical axes at bind time for asynchronous SPMD partitioning."""
-    resource = global_mesh_resource()
+    try:
+        resource = global_mesh_resource()
+    except AssertionError:
+        if ep_axes is None:
+            raise
+        return _ep_axis_entry(_normalize_ep_axes(ep_axes)), ()
     outer_axes = tuple(
         dict.fromkeys(
             axis for axis in (resource.dp_resource, resource.fsdp_resource) if axis is not None
         )
     )
-    return resource.ep_resource, outer_axes
+    ep_axes = _resolve_ep_axes(ep_axes)
+    return _ep_axis_entry(ep_axes), tuple(a for a in outer_axes if a not in ep_axes)
 
 
-def _leading_axis_ok(spec, resource_axes=None):
+def _leading_axis_ok(spec, resource_axes=None, *, ep_axes=None):
     """Validate replicated trailing dimensions and EP plus optional outer axes."""
     ep_axis, outer_axes = (
-        resource_axes if resource_axes is not None else _capture_ep_resource_axes()
+        resource_axes if resource_axes is not None else _capture_ep_resource_axes(ep_axes)
     )
     if len(spec) < 2 or ep_axis is None:
         return False, ep_axis, outer_axes
@@ -223,20 +259,36 @@ def _leading_axis_ok(spec, resource_axes=None):
         return False, ep_axis, outer_axes
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
-    if ep_axis not in elts:
+    if not all(axis in elts for axis in _normalize_ep_axes(ep_axis)):
         return False, ep_axis, outer_axes
-    allowed = set(outer_axes) | {ep_axis}
+    allowed = set(outer_axes) | set(_normalize_ep_axes(ep_axis))
     return all(a in allowed for a in elts), ep_axis, outer_axes
 
 
-def _ep_outer_axis():
+def _ep_outer_axis(ep_axes=None):
     """Legacy single outer axis used by the standalone EP custom VJP wrapper."""
     resource = global_mesh_resource()
-    if resource.dp_resource is not None and get_mesh_axis_size(resource.dp_resource) > 1:
+    ep_axes = _resolve_ep_axes(ep_axes)
+    if (
+        resource.dp_resource not in ep_axes
+        and resource.dp_resource is not None
+        and get_mesh_axis_size(resource.dp_resource) > 1
+    ):
         return resource.dp_resource
-    if resource.fsdp_resource is not None and get_mesh_axis_size(resource.fsdp_resource) > 1:
+    if (
+        resource.fsdp_resource not in ep_axes
+        and resource.fsdp_resource is not None
+        and get_mesh_axis_size(resource.fsdp_resource) > 1
+    ):
         return resource.fsdp_resource
-    return resource.dp_resource or resource.fsdp_resource
+    return next(
+        (
+            a
+            for a in (resource.dp_resource, resource.fsdp_resource)
+            if a is not None and a not in ep_axes
+        ),
+        None,
+    )
 
 
 def _ep_leading_dims(is_outer):
@@ -253,14 +305,14 @@ def _ep_output_spec(*trailing, resource_axes=None):
     ep_axis, outer_axes = (
         resource_axes if resource_axes is not None else _capture_ep_resource_axes()
     )
-    leading = (*outer_axes, ep_axis) if outer_axes else ep_axis
+    leading = (*outer_axes, *_normalize_ep_axes(ep_axis)) if outer_axes else ep_axis
     return PartitionSpec(leading, *trailing)
 
 
-def _ep_spec_ok(spec, trailing_count, resource_axes=None):
+def _ep_spec_ok(spec, trailing_count, resource_axes=None, *, ep_axes=None):
     """Validate EP-output axes, allowing JAX to drop size-one mesh axes."""
     ep_axis, outer_axes = (
-        resource_axes if resource_axes is not None else _capture_ep_resource_axes()
+        resource_axes if resource_axes is not None else _capture_ep_resource_axes(ep_axes)
     )
     if len(spec) != 1 + trailing_count:
         return False
@@ -269,7 +321,7 @@ def _ep_spec_ok(spec, trailing_count, resource_axes=None):
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
     actual = frozenset(a for a in elts if a is not None)
-    return actual <= set((*outer_axes, ep_axis))
+    return actual <= set((*outer_axes, *_normalize_ep_axes(ep_axis)))
 
 
 # ── ep_prepare ──────────────────────────────────────────────────────────────
@@ -1319,7 +1371,7 @@ register_primitive(EpCombineBwdPrimitive)
 
 
 @_on_collective_stream
-def _ep_prepare(cfg: EpLayerConfig, topk_idx):
+def _ep_prepare(cfg: EpLayerConfig, topk_idx, ep_axes=None):
     """Exchange routing metadata for ``cfg``; return
     ``(token_counts, total_recv_tokens, handle_mem)``. ``total_recv_tokens`` is
     the per-rank pre-drop recv-slot total (includes tokens dropped on overflow)."""
@@ -1333,13 +1385,19 @@ def _ep_prepare(cfg: EpLayerConfig, topk_idx):
         dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         is_outer=True,
-        resource_axes=_capture_ep_resource_axes(),
+        resource_axes=_capture_ep_resource_axes(ep_axes),
     )
 
 
 @_on_collective_stream
 def _ep_dispatch_fwd(
-    cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig,
+    handle_mem,
+    topk_idx,
+    tokens,
+    topk_weights,
+    recv_capacity_per_rank,
+    ep_axes=None,
 ):
     """Scatter tokens and weights to expert ranks; returns
     ``(recv_tokens, recv_topk_weights, handle_mem)``."""
@@ -1353,11 +1411,11 @@ def _ep_dispatch_fwd(
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
-        resource_axes=_capture_ep_resource_axes(),
+        resource_axes=_capture_ep_resource_axes(ep_axes),
     )
 
 
-def ep_prepare(cfg: EpLayerConfig, topk_idx):
+def ep_prepare(cfg: EpLayerConfig, topk_idx, ep_axes=None):
     """Deprecated: use ``ep_prepare_and_dispatch_fwd``. Planned for removal in January 2027."""
     warnings.warn(
         "ep_prepare is deprecated and planned to be removed in January 2027. Use"
@@ -1365,11 +1423,17 @@ def ep_prepare(cfg: EpLayerConfig, topk_idx):
         DeprecationWarning,
         stacklevel=2,
     )
-    return _ep_prepare(cfg, topk_idx)
+    return _ep_prepare(cfg, topk_idx, ep_axes=ep_axes)
 
 
 def ep_dispatch_fwd(
-    cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig,
+    handle_mem,
+    topk_idx,
+    tokens,
+    topk_weights,
+    recv_capacity_per_rank,
+    ep_axes=None,
 ):
     """Deprecated: use ``ep_prepare_and_dispatch_fwd``. Planned for removal in January 2027."""
     warnings.warn(
@@ -1378,7 +1442,9 @@ def ep_dispatch_fwd(
         DeprecationWarning,
         stacklevel=2,
     )
-    return _ep_dispatch_fwd(cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
+    return _ep_dispatch_fwd(
+        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=ep_axes
+    )
 
 
 _fused_prepare_dispatch = None
@@ -1398,7 +1464,7 @@ def _fused_prepare_dispatch_enabled():
 
 @_on_collective_stream
 def _ep_fused_prepare_and_dispatch_fwd(
-    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=None
 ):
     """Fused prepare + dispatch; returns
     ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``."""
@@ -1411,12 +1477,12 @@ def _ep_fused_prepare_and_dispatch_fwd(
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
-        resource_axes=_capture_ep_resource_axes(),
+        resource_axes=_capture_ep_resource_axes(ep_axes),
     )
 
 
 def ep_prepare_and_dispatch_fwd(
-    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=None
 ):
     """Prepare + dispatch; returns
     ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``.
@@ -1425,18 +1491,23 @@ def ep_prepare_and_dispatch_fwd(
     """
     if _fused_prepare_dispatch_enabled():
         return _ep_fused_prepare_and_dispatch_fwd(
-            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=ep_axes
         )
-    token_counts, total_recv_tokens, handle_mem = _ep_prepare(cfg, topk_idx)
+    token_counts, total_recv_tokens, handle_mem = _ep_prepare(cfg, topk_idx, ep_axes=ep_axes)
     recv_tokens, recv_topk_weights, handle_mem = _ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=ep_axes
     )
     return recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem
 
 
 @_on_collective_stream
 def ep_combine_fwd(
-    cfg: EpLayerConfig, handle_mem, expert_out, num_local_tokens, out_partition_spec=None
+    cfg: EpLayerConfig,
+    handle_mem,
+    expert_out,
+    num_local_tokens,
+    out_partition_spec=None,
+    ep_axes=None,
 ):
     """Gather expert outputs back to home ranks. expert_out is pre-weighted."""
     out_leading = _normalize_leading_shape(num_local_tokens)
@@ -1448,7 +1519,7 @@ def ep_combine_fwd(
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         out_leading_shape=out_leading,
         out_partition_spec=out_partition_spec,
-        resource_axes=_capture_ep_resource_axes(),
+        resource_axes=_capture_ep_resource_axes(ep_axes),
     )
 
 
@@ -1460,6 +1531,7 @@ def ep_dispatch_bwd(
     g_recv_topk_weights,
     num_local_tokens,
     out_partition_spec=None,
+    ep_axes=None,
 ):
     """Backward of dispatch; returns (grad_tokens, grad_topk_weights)."""
     out_leading = _normalize_leading_shape(num_local_tokens)
@@ -1472,12 +1544,12 @@ def ep_dispatch_bwd(
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         out_leading_shape=out_leading,
         out_partition_spec=out_partition_spec,
-        resource_axes=_capture_ep_resource_axes(),
+        resource_axes=_capture_ep_resource_axes(ep_axes),
     )
 
 
 @_on_collective_stream
-def ep_combine_bwd(cfg: EpLayerConfig, handle_mem, grad, recv_capacity_per_rank):
+def ep_combine_bwd(cfg: EpLayerConfig, handle_mem, grad, recv_capacity_per_rank, ep_axes=None):
     """Backward of combine; returns grad_expert_out [num_procs, recv_capacity_per_rank, H]."""
     return EpCombineBwdPrimitive.outer_primitive.bind(
         handle_mem,
@@ -1487,5 +1559,5 @@ def ep_combine_bwd(cfg: EpLayerConfig, handle_mem, grad, recv_capacity_per_rank)
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
-        resource_axes=_capture_ep_resource_axes(),
+        resource_axes=_capture_ep_resource_axes(ep_axes),
     )
