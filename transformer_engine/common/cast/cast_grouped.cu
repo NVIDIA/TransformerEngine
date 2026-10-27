@@ -8,6 +8,7 @@
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/recipe.h>
 
 #include <vector>
