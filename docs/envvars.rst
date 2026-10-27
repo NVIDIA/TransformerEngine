@@ -466,6 +466,12 @@ GEMM Configuration
    :Default: ``0``
    :Description: Enable multi-atomic mode for AllGather with atomic GEMM using P2P communication. When set to ``1``, uses ``userbuffers_sendrecv_multiatomic`` for communication during atomic GEMM overlap with AllGather operations. This disables copy engine (CE) usage and enables push mode for userbuffers. This is an advanced optimization for tensor-parallel communication-computation overlap.
 
+.. envvar:: NVTE_NVFP4_WEIGHT_SWIZZLE_CACHE
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Cache GEMM-swizzled scale factors of NVFP4 primary weights that are refreshed by ``post_all_gather_processing`` (e.g. Megatron-Core's distributed optimizer with FP4 parameter all-gather). These weights keep compact scales, so without the cache every GEMM that reads them swizzles the weight scales again, once per microbatch. With the cache, the scales are swizzled once per all-gather into persistent buffers that ``general_gemm``, the grouped GEMM with discrete weights and the fused grouped MLP reuse; CUDA graphs keep reading valid scales on replay. The cache assumes such weights change only through ``post_all_gather_processing``: a weight modified in any other way keeps using stale scales until the next call.
+
 CPU Offloading
 ^^^^^^^^^^^^^^
 

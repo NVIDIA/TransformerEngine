@@ -18,14 +18,14 @@ from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor.nvfp4_tensor import NVFP4Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer, NVFP4Tensor
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
-from ..tensor.utils import is_custom
+from ..tensor.utils import is_custom, nvfp4_weight_swizzle_cache_enabled
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
 
@@ -726,6 +726,22 @@ def _cudnn_grouped_gemm_nvfp4_ue5m3(
     return out, None, None, None
 
 
+def _nvfp4_weight_swizzle_view(tensor):
+    """Use the GEMM-swizzled scales cached for a primary NVFP4 weight, if any.
+
+    The cache is filled by ``refresh_nvfp4_weight_gemm_swizzle_cache`` after each parameter
+    all-gather; until then the weight is marked so the next refresh builds it. Plain
+    ``NVFP4TensorStorage`` (activations, gradients) is returned unchanged.
+    """
+    if not isinstance(tensor, NVFP4Tensor) or tensor._with_gemm_swizzled_scales:
+        return tensor
+    view = getattr(tensor, "_gsw_view", None)
+    if view is not None:
+        return view
+    tensor._gsw_wanted = True
+    return tensor
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -759,6 +775,9 @@ def general_gemm(
 
     A = _unwrap_tensor(A, "rowwise" if transa else "columnwise")
     B = _unwrap_tensor(B, "columnwise" if transb else "rowwise")
+    if nvfp4_weight_swizzle_cache_enabled():
+        A = _nvfp4_weight_swizzle_view(A)
+        B = _nvfp4_weight_swizzle_view(B)
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
@@ -1136,6 +1155,9 @@ def general_grouped_gemm_for_grouped_tensor(
     transb = layout[1] == "T"
     is_discrete_out = isinstance(out, list)
     is_discrete_in = isinstance(A, list)
+    if is_discrete_in and nvfp4_weight_swizzle_cache_enabled():
+        # Discrete expert weights would otherwise be swizzled inside every grouped GEMM.
+        A = [_nvfp4_weight_swizzle_view(a) for a in A]
     if is_discrete_in and is_discrete_out:
         raise ValueError("Both A and out are discrete. This is not supported yet.")
 
