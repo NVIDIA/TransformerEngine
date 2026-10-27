@@ -14,6 +14,7 @@ from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
     abs_max_x2_bf16,
+    fabs_f32,
     bf16_pair_magnitude,
     bf16_mx_scale_reciprocal,
     bf16_mx_scale_reciprocal_pair,
@@ -415,6 +416,7 @@ def quantize_mxfp8_gmem_tile_bidimensional(
     ACTIVATION_TABLE: cutlass.Constexpr[str],
     sTable: Optional[cute.Tensor],
     sDbias: Optional[cute.Tensor],
+    WITH_AMAX: cutlass.Constexpr[bool],
     WITH_ACT: cutlass.Constexpr[bool],
     WITH_DACT: cutlass.Constexpr[bool],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
@@ -561,6 +563,19 @@ def quantize_mxfp8_gmem_tile_bidimensional(
             if cutlass.const_expr(sDbias is not None):
                 cute.autovec_copy(rProducts, sDbias_thread[(None, row_idx),])
 
+    # The thread's amax of the values it quantizes (the activation rounded to BF16). Like the
+    # CUDA kernels' fmaxf, it ignores NaN: the BF16 max returns the other operand of a NaN, and
+    # the FP32 fmax drops a pair of NaNs.
+    thread_amax = Float32(0.0)
+    if cutlass.const_expr(WITH_AMAX):
+        rX_all_i32 = cute.recast_tensor(rX, Int32)
+        pair_amax = rX_all_i32[0]
+        for word in cutlass.range_constexpr(1, cute.size(rX_all_i32)):
+            pair_amax = abs_max_x2_bf16(pair_amax, rX_all_i32[word])
+        thread_amax = cute.arch.fmax(
+            fabs_f32(x2_lo_to_f32_bf16(pair_amax)), fabs_f32(x2_hi_to_f32_bf16(pair_amax))
+        )
+
     if cutlass.const_expr(ROWWISE):
         gO_row_thread = cute.composition(gO_row_tile, tv_layout)[tidx, None]
 
@@ -642,6 +657,8 @@ def quantize_mxfp8_gmem_tile_bidimensional(
             FP8_DTYPE=FP8_DTYPE,
         )
 
+    return thread_amax
+
 
 class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
     """Load one CTA tile into registers and quantize it along both axes.
@@ -663,9 +680,10 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
     @staticmethod
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
         # BF16 packed math.
-        # dbias only fused with an activation derivative, like the CUDA register-tiled kernel.
+        # dbias only fused with an activation derivative, like the CUDA register-tiled kernel;
+        # amax only with a fused activation; plain casts with amax take the general kernel.
         return (
-            not cfg.WITH_AMAX
+            (not cfg.WITH_AMAX or cfg.WITH_ACT or cfg.WITH_DACT)
             and (not cfg.WITH_DBIAS or cfg.WITH_DACT)
             and cfg.DTYPE is cutlass.BFloat16
             and cfg.COLWISE
@@ -747,6 +765,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 mS_col,
                 mActTable,
                 mWorkspace,
+                mAmax,
                 stream,
                 ELEMENTS_X_PER_THREAD=8,
                 CLUSTER_WIDTH=1,
@@ -762,6 +781,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                     mS_col,
                     mActTable,
                     mWorkspace,
+                    mAmax,
                     stream,
                     ELEMENTS_X_PER_THREAD=16,
                     CLUSTER_WIDTH=4,
@@ -776,6 +796,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                     mS_col,
                     mActTable,
                     mWorkspace,
+                    mAmax,
                     stream,
                     ELEMENTS_X_PER_THREAD=16,
                     CLUSTER_WIDTH=1,
@@ -790,6 +811,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 mS_col,
                 mActTable,
                 mWorkspace,
+                mAmax,
                 stream,
                 ELEMENTS_X_PER_THREAD=8,
                 CLUSTER_WIDTH=8,
@@ -806,6 +828,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         mS_col: cute.Tensor,
         mActTable: cute.Pointer,
         mWorkspace: Optional[cute.Tensor],
+        mAmax: Optional[cute.Tensor],
         stream: CUstream,
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
         CLUSTER_WIDTH: cutlass.Constexpr[int],
@@ -897,6 +920,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 mActTable,
                 walk,
                 mWorkspace,
+                mAmax,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
         elif N == 4096:
@@ -940,6 +964,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 mActTable,
                 walk,
                 mWorkspace,
+                mAmax,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
         else:
@@ -959,6 +984,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 mActTable,
                 walk,
                 mWorkspace,
+                mAmax,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
 
@@ -974,6 +1000,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         mActTable: cute.Pointer,
         walk: Int32,
         mWorkspace: Optional[cute.Tensor],
+        mAmax: Optional[cute.Tensor],
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     ):
         """Run the kernel body. Like the CUDA specialized cast kernels it does not consume the
@@ -988,6 +1015,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
             mActTable,
             walk,
             mWorkspace,
+            mAmax,
             ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
         )
 
@@ -1025,6 +1053,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         mActTable: cute.Pointer,
         walk: Int32,
         mWorkspace: Optional[cute.Tensor],
+        mAmax: Optional[cute.Tensor],
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     ):
         """Run bidimensional quantization on the CTA's row tiles: blockIdx.y, and with a table
@@ -1057,6 +1086,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 cute.autovec_copy(gTable[None, piece], sTable_pieces[None, piece])
             cute.arch.sync_threads()
 
+        thread_amax = Float32(0.0)
         if cutlass.const_expr(self.cfg.WITH_DBIAS):
             # dbias in the CUDA kernels' order: each 64-row chunk's FP32 products summed down the
             # column in row order, one workspace row per chunk (reduced by the caller). The CTA
@@ -1075,7 +1105,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 column_sum = Float32(0.0)
                 # A run-time loop, so the tile body (and its shared memory) is emitted once.
                 for half in cutlass.range(2, unroll=1):
-                    self._quantize_row_tile(
+                    tile_amax = self._quantize_row_tile(
                         mX,
                         mA,
                         mO_row,
@@ -1089,6 +1119,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                         sDbias=sDbias,
                         ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
                     )
+                    thread_amax = cute.arch.fmax(thread_amax, tile_amax)
                     cute.arch.sync_threads()
                     if tidx < TILE_COLS:
                         for row in cutlass.range_constexpr(TILE_ROWS):
@@ -1098,7 +1129,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 if tidx < TILE_COLS:
                     mWorkspace[chunk, cta_col * TILE_COLS + tidx] = column_sum
         elif cutlass.const_expr(self.cfg.ACTIVATION_TABLE == "none"):
-            self._quantize_row_tile(
+            tile_amax = self._quantize_row_tile(
                 mX,
                 mA,
                 mO_row,
@@ -1111,9 +1142,10 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                 cache_policy,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             )
+            thread_amax = cute.arch.fmax(thread_amax, tile_amax)
         else:
             for step in cutlass.range(walk, unroll=1):
-                self._quantize_row_tile(
+                tile_amax = self._quantize_row_tile(
                     mX,
                     mA,
                     mO_row,
@@ -1125,6 +1157,27 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
                     cta_col,
                     cache_policy,
                     ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+                )
+                thread_amax = cute.arch.fmax(thread_amax, tile_amax)
+
+        if cutlass.const_expr(self.cfg.WITH_AMAX):
+            # The CTA's amax, then an atomic max on the float's bits (amaxes are not negative),
+            # as the general kernel does.
+            tidx, _, _ = cute.arch.thread_idx()
+            warp_amax = cute.arch.warp_redux_sync(thread_amax, kind="fmax")
+            NUM_WARPS = self._CTA_THREADS_Y * self._CTA_THREADS_X // 32
+            sAmax = cutlass.memory.SmemAllocator().allocate_tensor(
+                Float32, cute.make_layout((NUM_WARPS,)), byte_alignment=4
+            )
+            if tidx % 32 == 0:
+                sAmax[tidx // 32] = warp_amax
+            cute.arch.sync_threads()
+            if tidx == 0:
+                cta_amax = Float32(0.0)
+                for w in cutlass.range_constexpr(NUM_WARPS):
+                    cta_amax = cute.arch.fmax(cta_amax, sAmax[w])
+                cute.arch.atomic_max(
+                    cute.recast_ptr(mAmax.iterator, dtype=Int32), cta_amax.bitcast(Int32)
                 )
 
     @cute.jit
@@ -1142,8 +1195,9 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         cache_policy: Int64,
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
         sDbias: Optional[cute.Tensor] = None,
-    ):
-        """Quantize the (row_tile, cta_col) tile."""
+    ) -> Float32:
+        """Quantize the (row_tile, cta_col) tile; return the thread's amax of it (0 without
+        WITH_AMAX)."""
         TILE_ROWS = self._CTA_THREADS_Y * self._ELEMENTS_Y_PER_THREAD
         TILE_COLS = self._CTA_THREADS_X * ELEMENTS_X_PER_THREAD
         TILER = (TILE_ROWS, TILE_COLS)
@@ -1167,7 +1221,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         gO_col_tile = self._data_tile(mO_col, row_tile, cta_col, TILER, DYNAMIC_STRIDE, 16)
         gS_col_tile = cute.local_tile(mS_col, COL_SCALE_TILER, cta_coord)
 
-        quantize_mxfp8_gmem_tile_bidimensional(
+        return quantize_mxfp8_gmem_tile_bidimensional(
             gX_tile,
             gA_tile,
             gO_row_tile,
@@ -1180,6 +1234,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
             ACTIVATION_TABLE=self.cfg.ACTIVATION_TABLE,
             sTable=sTable,
             sDbias=sDbias,
+            WITH_AMAX=self.cfg.WITH_AMAX,
             WITH_ACT=self.cfg.WITH_ACT,
             WITH_DACT=self.cfg.WITH_DACT,
             DTYPE=self.cfg.DTYPE,
