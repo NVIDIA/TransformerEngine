@@ -288,21 +288,46 @@ class _SavedQuantizedTensor(NamedTuple):
     metadata: Dict[str, Any]
 
 
+class _SavedTensorRef(NamedTuple):
+    """A DistributedWeight's original object, restored in place of its saved tensor."""
+
+    weight: torch.Tensor
+
+
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorStorage],
 ) -> Tuple[
     list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
-    list[Optional[Union[QuantizedTensorStorage, _SavedQuantizedTensor]]],
+    list[Optional[Union[QuantizedTensorStorage, _SavedQuantizedTensor, _SavedTensorRef]]],
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
-    the internal TensorStorage types too."""
+    the internal TensorStorage types too.
+
+    A DistributedWeight is still saved through autograd (which keeps autograd's
+    in-place modification check), but its original object is also kept by
+    reference and restored in place of the saved tensor: saved-tensor hooks
+    (e.g. activation offloading) unpack saved tensors as plain tensors, which
+    drops the subclass and its distributed-weight hooks."""
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
-        if tensor is None or isinstance(tensor, torch.Tensor):
-            tensor_list.append(tensor)
+        if tensor is None:
+            tensor_list.append(None)
             tensor_objects_list.append(None)
+        elif isinstance(tensor, torch.Tensor):
+            # Inline is_distributed_weight(): this runs for every saved tensor.
+            if getattr(tensor, "is_distributed_weight", False):
+                if torch.compiler.is_compiling():
+                    raise RuntimeError(
+                        "Saving a DistributedWeight for backward is not supported under "
+                        "torch.compile."
+                    )
+                tensor_list.append(tensor)
+                tensor_objects_list.append(_SavedTensorRef(tensor))
+            else:
+                tensor_list.append(tensor)
+                tensor_objects_list.append(None)
         elif torch.compiler.is_compiling():
             inner_names, metadata = tensor.__tensor_flatten__()
             tensor_list.extend(getattr(tensor, name) for name in inner_names)
@@ -316,7 +341,11 @@ def prepare_for_saving(
 
 
 def restore_from_saved(
-    tensors: list[Optional[Union[torch.Tensor, QuantizedTensorStorage, _SavedQuantizedTensor]]],
+    tensors: list[
+        Optional[
+            Union[torch.Tensor, QuantizedTensorStorage, _SavedQuantizedTensor, _SavedTensorRef]
+        ]
+    ],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
     return_saved_tensors: bool = False,
 ) -> (
@@ -333,6 +362,11 @@ def restore_from_saved(
     for tensor in tensors:
         if tensor is None or isinstance(tensor, torch.Tensor):
             tensor_objects.append(saved_tensors[0])
+            saved_tensors = saved_tensors[1:]
+        elif isinstance(tensor, _SavedTensorRef):
+            # The saved tensor was unpacked (running autograd's version check), but
+            # may have lost its subclass under hooks; use the original object.
+            tensor_objects.append(tensor.weight)
             saved_tensors = saved_tensors[1:]
         elif isinstance(tensor, _SavedQuantizedTensor):
             count = len(tensor.inner_names)
