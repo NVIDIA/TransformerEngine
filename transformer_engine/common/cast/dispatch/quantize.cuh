@@ -573,7 +573,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
       if (input_tensor->num_tensors == 0) {
         break;
       }
-      nvfp4::group_compute_fused_amax_graph_safe(input_tensor, noop_tensor, output_tensor, stream);
+      nvfp4::group_row_amax_graph_safe(input_tensor, noop_tensor, output_tensor, stream);
       const DType scale_dtype = output_tensor->scale_inv.has_data()
                                     ? output_tensor->scale_inv.dtype
                                     : output_tensor->columnwise_scale_inv.dtype;

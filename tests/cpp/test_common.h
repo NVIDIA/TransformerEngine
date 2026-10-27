@@ -108,7 +108,6 @@ struct TypeInfo {
     struct Helper {
         constexpr static DType getType() {
             constexpr int i = static_cast<int>(current);
-            // fp8ue5m3 is only in types on CUDA >= 13.4.
             if constexpr (i < static_cast<int>(std::tuple_size<types>::value)) {
                 if (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
                     return current;
