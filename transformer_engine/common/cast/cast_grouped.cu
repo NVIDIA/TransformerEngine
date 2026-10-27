@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../common.h"
+#include "core/workspace.h"
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
 #include "fp8/group_amax_fp8.cuh"
@@ -27,13 +28,58 @@ void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
+namespace {
+
+size_t grouped_workspace_bytes(const NVTEGroupedTensor input, const NVTEGroupedTensor output) {
+  using namespace transformer_engine;
+  const auto *in = convertNVTEGroupedTensorCheck(input);
+  const auto *out = convertNVTEGroupedTensorCheck(output);
+  NVTE_CHECK(in->num_tensors == out->num_tensors,
+             "Number of input and output tensors must be same.");
+  if (out->scaling_mode != NVTE_MXFP8_1D_SCALING || out->all_same_shape() ||
+      out->all_same_last_dim()) {
+    return 0;
+  }
+  return dispatch::common::get_grouped_tma_workspace_size(out->num_tensors);
+}
+
+}  // namespace
+
 void nvte_group_quantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                             NVTETensor workspace, const NVTEQuantizationConfig quant_config,
                             cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize_v2);
   using namespace transformer_engine;
 
-  convertNVTETensorCheck(workspace);
+  auto *tensor = convertNVTETensorCheck(workspace);
+  if (tensor->data.dptr == nullptr) {
+    TensorWrapper requirement;
+    constexpr bool IS_ACT = false;
+    dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream,
+                                                                requirement.data());
+    const size_t bytes = grouped_workspace_bytes(input, output);
+    requirement.set_rowwise_data(nullptr, DType::kByte,
+                                 std::vector<size_t>{std::max(size_t{1}, bytes)});
+    dispatch::common::query_workspace(workspace, dispatch::common::kGroupedTmaWorkspaceRegion,
+                                      bytes, requirement);
+    return;
+  }
+  if (tensor->workspace && tensor->workspace->planned()) {
+    auto &storage = *tensor->workspace;
+    const size_t bytes = grouped_workspace_bytes(input, output);
+    const auto region =
+        storage.require_planned(dispatch::common::kGroupedTmaWorkspaceRegion, bytes);
+    dispatch::common::begin_workspace_use(storage, stream);
+    if (bytes == 0) {
+      nvte_group_quantize(input, output, quant_config, stream);
+      return;
+    }
+    TensorWrapper adapter(storage.data(region), std::vector<size_t>{bytes}, DType::kByte);
+    constexpr bool IS_ACT = false;
+    dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream,
+                                                                adapter.data());
+    return;
+  }
   constexpr bool IS_ACT = false;
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream,
                                                               workspace);

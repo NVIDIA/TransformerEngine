@@ -111,8 +111,13 @@ void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output
  *  Supports the same scaling modes as nvte_group_quantize. Calling with an empty workspace
  *  tensor (a tensor with a NULL data pointer) sets its required shape and dtype without
  *  performing quantization. Allocate that workspace and call again to execute the operation.
+ *  The query prepares the internal region layout and includes any persistent reservations.
+ *  Reusing the tensor handle preserves that catalog; execution uses its reserved scratch
+ *  regions without overwriting persistent contents.
  *  The workspace is a one-dimensional byte tensor and requires at least one byte even when
  *  the selected kernel does not need temporary storage.
+ *  The caller must supply an allocation satisfying the queried requirements. Execution
+ *  does not validate the workspace capacity, tensor metadata, or base alignment.
  *
  *  MXFP8 groups with varying last dimensions use the workspace for TMA descriptors and
  *  metadata, removing the legacy 64-group limit. Its data pointer must be 128-byte aligned.

@@ -527,9 +527,6 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
       workspace_tensor->data.dtype = DType::kByte;
       return;
     }
-    NVTE_CHECK(workspace_tensor->data.dtype == DType::kByte &&
-                   workspace_tensor->data.shape.size() == 1 && workspace_tensor->data.shape[0] >= 1,
-               "Workspace must be a nonempty one-dimensional byte tensor.");
   }
 
   // Quantization config

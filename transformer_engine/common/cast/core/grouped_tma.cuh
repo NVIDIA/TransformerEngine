@@ -23,10 +23,10 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
-#include <limits>
 
 #include "../../common.h"
 #include "../../util/ptx.cuh"
+#include "../../util/workspace.h"
 #include "../../utils.cuh"
 #include "grouped_layout.cuh"
 
@@ -39,17 +39,6 @@ constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
 // Non-owning workspace view passed by value to the updater and consumer kernels.
 // Null pointers select the original per-translation-unit device symbols.
 struct GroupedTmaStorageView {
-  GroupedTmaStorageView() = default;
-
-  GroupedTmaStorageView(char *base, size_t map_bytes, size_t metadata_bytes)
-      : input(reinterpret_cast<CUtensorMap *>(base)),
-        act_input(reinterpret_cast<CUtensorMap *>(base + map_bytes)),
-        output_rowwise(reinterpret_cast<CUtensorMap *>(base + 2 * map_bytes)),
-        output_colwise(reinterpret_cast<CUtensorMap *>(base + 3 * map_bytes)),
-        rows(reinterpret_cast<size_t *>(base + 4 * map_bytes)),
-        cols(reinterpret_cast<size_t *>(base + 4 * map_bytes + metadata_bytes)),
-        offsets(reinterpret_cast<size_t *>(base + 4 * map_bytes + 2 * metadata_bytes)) {}
-
   CUtensorMap *input = nullptr;
   CUtensorMap *act_input = nullptr;
   CUtensorMap *output_rowwise = nullptr;
@@ -59,30 +48,45 @@ struct GroupedTmaStorageView {
   size_t *offsets = nullptr;
 };
 
+// Each region, including metadata arrays with odd element counts, starts on
+// its own 128-byte boundary. Query and execution share this layout definition.
+struct GroupedTmaWorkspaceLayout {
+  explicit GroupedTmaWorkspaceLayout(size_t num_tensors) {
+    input = layout.add<CUtensorMap>(num_tensors);
+    act_input = layout.add<CUtensorMap>(num_tensors);
+    output_rowwise = layout.add<CUtensorMap>(num_tensors);
+    output_colwise = layout.add<CUtensorMap>(num_tensors);
+    rows = layout.add<size_t>(num_tensors);
+    cols = layout.add<size_t>(num_tensors);
+    offsets = layout.add<size_t>(num_tensors);
+  }
+
+  WorkspaceLayout layout;
+  WorkspaceBlock input, act_input, output_rowwise, output_colwise;
+  WorkspaceBlock rows, cols, offsets;
+};
+
 inline size_t get_grouped_tma_workspace_size(size_t num_tensors) {
-  // Tensor maps occupy 128 bytes, so every map region remains 128-byte aligned.
-  static_assert(sizeof(CUtensorMap) == 128);
-  constexpr size_t bytes_per_group = 4 * sizeof(CUtensorMap) + 3 * sizeof(size_t);
-  NVTE_CHECK(num_tensors <= std::numeric_limits<size_t>::max() / bytes_per_group,
-             "Grouped TMA descriptor count is too large.");
+  const GroupedTmaWorkspaceLayout workspace_layout(num_tensors);
   // A nonempty allocation distinguishes execution from a workspace size query,
   // including layouts that do not use descriptors.
-  return num_tensors == 0 ? 1 : num_tensors * bytes_per_group;
+  return std::max(size_t{1}, workspace_layout.layout.size());
 }
 
 inline GroupedTmaStorageView get_grouped_tma_storage(Tensor *workspace, size_t num_tensors) {
-  const size_t required_bytes = get_grouped_tma_workspace_size(num_tensors);
-  NVTE_CHECK(workspace->data.dtype == DType::kByte && workspace->data.shape.size() == 1,
-             "Workspace must be a one-dimensional byte tensor.");
-  NVTE_CHECK(workspace->data.shape[0] >= required_bytes,
-             "Workspace is too small: expected at least ", required_bytes, " bytes.");
   if (num_tensors == 0) {
     return {};
   }
-  NVTE_CHECK(is_aligned_tensor_data(*workspace, 128),
-             "Grouped TMA workspace must be 128-byte aligned.");
-  return {static_cast<char *>(workspace->data.dptr), num_tensors * sizeof(CUtensorMap),
-          num_tensors * sizeof(size_t)};
+  // The caller is responsible for the allocation size and alignment returned by the query.
+  const GroupedTmaWorkspaceLayout workspace_layout(num_tensors);
+  const WorkspaceView view(workspace->data.dptr, workspace_layout.layout);
+  return {view.get<CUtensorMap>(workspace_layout.input),
+          view.get<CUtensorMap>(workspace_layout.act_input),
+          view.get<CUtensorMap>(workspace_layout.output_rowwise),
+          view.get<CUtensorMap>(workspace_layout.output_colwise),
+          view.get<size_t>(workspace_layout.rows),
+          view.get<size_t>(workspace_layout.cols),
+          view.get<size_t>(workspace_layout.offsets)};
 }
 
 struct alignas(128) TensorMapStorage {

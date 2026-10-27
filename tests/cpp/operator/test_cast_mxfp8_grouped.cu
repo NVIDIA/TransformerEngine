@@ -12,6 +12,7 @@
 #include <stdexcept>
 
 #include <transformer_engine/cast.h>
+#include <transformer_engine/workspace.h>
 #include <transformer_engine/activation.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
@@ -268,7 +269,8 @@ void performTest(const ProcessingMethod processing_method,
                  const bool use_2d_quantization = false,
                  const bool use_workspace = false,
                  const bool capture_with_workspace = false,
-                 const bool validate_workspace = false) {
+                 const bool check_workspace_contract = false,
+                 const bool use_workspace_descriptor = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -531,56 +533,98 @@ void performTest(const ProcessingMethod processing_method,
 
     // GPU
     Tensor workspace;
+    TensorWrapper descriptor;
+    NVTEWorkspaceRegion persistent_region = 0;
+    cudaStream_t workspace_stream = nullptr;
+    auto prepare_descriptor = [&](auto query) {
+        WorkspacePlanWrapper plan(descriptor.data());
+        persistent_region = plan.require("test.activation", 257, kNVTEWorkspacePersistent);
+        nvte_workspace_commit_plan(descriptor.data(), plan.data());
+        query(descriptor.data());
+        const auto bytes = nvte_workspace_size(descriptor.data());
+        const auto regions = nvte_workspace_num_regions(descriptor.data());
+        // Repeated empty-tensor queries reuse the same layout and write no outputs.
+        query(descriptor.data());
+        EXPECT_EQ(nvte_workspace_size(descriptor.data()), bytes);
+        EXPECT_EQ(nvte_workspace_num_regions(descriptor.data()), regions);
+        workspace = Tensor("workspace", descriptor.shape(), descriptor.dtype());
+        descriptor.set_rowwise_data(workspace.rowwise_dptr(), descriptor.dtype(), descriptor.shape());
+        EXPECT_EQ(cudaMemsetAsync(
+                      nvte_workspace_get_region_data(descriptor.data(), persistent_region),
+                      0x5a, 257, workspace_stream), cudaSuccess);
+        nvte_workspace_mark_region_initialized(descriptor.data(), persistent_region, workspace_stream);
+    };
     switch (processing_method) {
         case ProcessingMethod::CAST_ONLY: {
             if (use_workspace) {
                 auto quantize = [&](NVTETensor ws, cudaStream_t stream) {
+                    if (use_workspace_descriptor) {
+                        nvte_group_quantize_v2(in_group_tensor, out_group_tensor, descriptor.data(),
+                                               quant_config, stream);
+                        return;
+                    }
                     nvte_group_quantize_v2(in_group_tensor, out_group_tensor, ws, quant_config,
                                            stream);
                 };
-                quantize(workspace.data(), 0);
-                ASSERT_EQ(workspace.dtype(), DType::kByte);
-                ASSERT_EQ(workspace.rowwise_shape().ndim, 1);
-                ASSERT_GT(workspace.rowwise_shape().data[0], 0);
-                if (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM) {
-                    EXPECT_EQ(workspace.rowwise_shape().data[0], 1);
-                }
-                // A size query must leave both quantized outputs untouched.
-                if (rowwise) {
-                    ASSERT_EQ(cudaMemcpy(out_data_rowwise_h.data(), out_data_rowwise_d,
-                                         out_data_size, cudaMemcpyDeviceToHost), cudaSuccess);
-                    EXPECT_TRUE(std::all_of(out_data_rowwise_h.begin(), out_data_rowwise_h.end(),
-                                            [](OutputType x) { return static_cast<float>(x) == 0.f; }));
-                }
-                if (colwise) {
-                    ASSERT_EQ(cudaMemcpy(out_data_colwise_h.data(), out_data_colwise_d,
-                                         out_data_size, cudaMemcpyDeviceToHost), cudaSuccess);
-                    EXPECT_TRUE(std::all_of(out_data_colwise_h.begin(), out_data_colwise_h.end(),
-                                            [](OutputType x) { return static_cast<float>(x) == 0.f; }));
-                }
-                workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-                if (validate_workspace) {
-                    EXPECT_THROW(quantize(nullptr, 0), std::runtime_error);
-                    const auto bytes = workspace.rowwise_shape().data[0];
-                    TensorWrapper invalid;
-                    invalid.set_rowwise_data(workspace.rowwise_dptr(), DType::kByte,
-                                              std::vector<size_t>{bytes - 1});
-                    EXPECT_THROW(quantize(invalid.data(), 0), std::runtime_error);
-                    invalid.set_rowwise_data(workspace.rowwise_dptr(), DType::kFloat32,
-                                              std::vector<size_t>{bytes});
-                    EXPECT_THROW(quantize(invalid.data(), 0), std::runtime_error);
-                    invalid.set_rowwise_data(workspace.rowwise_dptr(), DType::kByte,
-                                              std::vector<size_t>{1, bytes});
-                    EXPECT_THROW(quantize(invalid.data(), 0), std::runtime_error);
-                    invalid.set_rowwise_data(static_cast<char*>(workspace.rowwise_dptr()) + 1,
-                                              DType::kByte, std::vector<size_t>{bytes});
-                    EXPECT_THROW(quantize(invalid.data(), 0), std::runtime_error);
-                    EXPECT_THROW(nvte_group_quantize(in_group_tensor, out_group_tensor,
-                                                       quant_config, 0), std::runtime_error);
+                if (use_workspace_descriptor) {
+                    if (capture_with_workspace) {
+                        ASSERT_EQ(cudaStreamCreateWithFlags(&workspace_stream, cudaStreamNonBlocking),
+                                  cudaSuccess);
+                    }
+                    prepare_descriptor([&](NVTETensor ws) {
+                        nvte_group_quantize_v2(in_group_tensor, out_group_tensor, ws, quant_config,
+                                               workspace_stream);
+                    });
+                } else {
+                    // Discarded planning must preserve the legacy empty-tensor query.
+                    {
+                        WorkspacePlanWrapper discarded(workspace.data());
+                        discarded.require("uncommitted", 128);
+                    }
+                    quantize(workspace.data(), 0);
+                    ASSERT_EQ(workspace.dtype(), DType::kByte);
+                    const auto tma_region = nvte_workspace_find_region(
+                        workspace.data(), "te.grouped_tma", nullptr, 0);
+                    EXPECT_EQ(tma_region == 0,
+                              shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
+                    ASSERT_EQ(workspace.rowwise_shape().ndim, 1);
+                    ASSERT_GT(workspace.rowwise_shape().data[0], 0);
+                    if (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM) {
+                        EXPECT_EQ(workspace.rowwise_shape().data[0], 1);
+                    } else {
+                        EXPECT_EQ(workspace.rowwise_shape().data[0] % 128, 0);
+                    }
+                    // A size query must leave both quantized outputs untouched.
+                    if (rowwise) {
+                        ASSERT_EQ(cudaMemcpy(out_data_rowwise_h.data(), out_data_rowwise_d,
+                                             out_data_size, cudaMemcpyDeviceToHost), cudaSuccess);
+                        EXPECT_TRUE(std::all_of(out_data_rowwise_h.begin(), out_data_rowwise_h.end(),
+                                                [](OutputType x) { return static_cast<float>(x) == 0.f; }));
+                    }
+                    if (colwise) {
+                        ASSERT_EQ(cudaMemcpy(out_data_colwise_h.data(), out_data_colwise_d,
+                                             out_data_size, cudaMemcpyDeviceToHost), cudaSuccess);
+                        EXPECT_TRUE(std::all_of(out_data_colwise_h.begin(), out_data_colwise_h.end(),
+                                                [](OutputType x) { return static_cast<float>(x) == 0.f; }));
+                    }
+                    workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+                    if (check_workspace_contract) {
+                        EXPECT_THROW(quantize(nullptr, 0), std::runtime_error);
+                        // Execution trusts the allocation supplied by the caller, without checking
+                        // the tensor's declared capacity. The actual allocation still meets the query.
+                        TensorWrapper opaque_workspace;
+                        opaque_workspace.set_rowwise_data(workspace.rowwise_dptr(), DType::kByte,
+                                                          std::vector<size_t>{1});
+                        quantize(opaque_workspace.data(), 0);
+                        EXPECT_THROW(nvte_group_quantize(in_group_tensor, out_group_tensor,
+                                                           quant_config, 0), std::runtime_error);
+                    }
                 }
                 if (capture_with_workspace) {
-                    cudaStream_t stream;
-                    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+                    cudaStream_t stream = workspace_stream;
+                    if (!use_workspace_descriptor) {
+                        ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+                    }
                     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
                     cudaGraph_t graph;
                     ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed), cudaSuccess);
@@ -598,8 +642,10 @@ void performTest(const ProcessingMethod processing_method,
                 } else {
                     // Contents are scratch space and are rebuilt on each invocation.
                     for (int repeat = 0; repeat < 3; ++repeat) {
-                        ASSERT_EQ(cudaMemset(workspace.rowwise_dptr(), 0xa5,
-                                             workspace.rowwise_shape().data[0]), cudaSuccess);
+                        if (!use_workspace_descriptor) {
+                            ASSERT_EQ(cudaMemset(workspace.rowwise_dptr(), 0xa5,
+                                                 workspace.rowwise_shape().data[0]), cudaSuccess);
+                        }
                         quantize(workspace.data(), 0);
                     }
                 }
@@ -609,6 +655,15 @@ void performTest(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
+            if (use_workspace_descriptor) {
+                prepare_descriptor([&](NVTETensor ws) {
+                    nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor,
+                                              output_dbias_tensor, ws, nullptr, 0);
+                });
+                nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor,
+                    output_dbias_tensor, descriptor.data(), nullptr, 0);
+                break;
+            }
             nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), nullptr, 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
             nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), nullptr, 0);
@@ -650,6 +705,15 @@ void performTest(const ProcessingMethod processing_method,
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    if (persistent_region != 0) {
+        std::vector<unsigned char> table(257);
+        ASSERT_EQ(cudaMemcpy(table.data(),
+                             nvte_workspace_get_region_data(descriptor.data(), persistent_region),
+                             table.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_TRUE(std::all_of(table.begin(), table.end(), [](unsigned char x) { return x == 0x5a; }));
+        EXPECT_TRUE(nvte_workspace_region_initialized(descriptor.data(), persistent_region));
+    }
 
     auto [atol, rtol] = getTolerances(otype);
     const size_t scale_diff_abs_tolerance = 0;
@@ -1037,7 +1101,42 @@ TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceMoreThan64Descriptors) {
         num_tensors, {1, offsets.back()}, first_dims, last_dims, offsets,
         /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/false,
         /*use_workspace=*/true, /*capture_with_workspace=*/false,
-        /*validate_workspace=*/true);
+        /*check_workspace_contract=*/true);
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceDescriptorAndPersistentRegion) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    constexpr size_t num_tensors = 65;
+    std::vector<size_t> first_dims(num_tensors, 128), last_dims(num_tensors, 128);
+    first_dims.front() = 256;
+    last_dims.back() = 256;
+    std::vector<size_t> offsets(num_tensors + 1, 0);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+    }
+    for (bool capture : {false, true}) {
+        performTest<bf16, fp8e4m3>(
+            ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_BOTH_DIMS,
+            num_tensors, {1, offsets.back()}, first_dims, last_dims, offsets,
+            /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/false,
+            /*use_workspace=*/true, /*capture_with_workspace=*/capture,
+            /*check_workspace_contract=*/false, /*use_workspace_descriptor=*/true);
+    }
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceDescriptorDBiasPreservesPersistentRegion) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_DBIAS, &identity, ShapeRepresentation::VARYING_FIRST_DIM,
+        3, {512, 128}, {128, 256, 128}, {128, 128, 128},
+        {0, 128 * 128, 384 * 128, 512 * 128},
+        /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/false,
+        /*use_workspace=*/true, /*capture_with_workspace=*/false,
+        /*check_workspace_contract=*/false, /*use_workspace_descriptor=*/true);
 }
 
 TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceVaryingLastDimGraphCapture) {

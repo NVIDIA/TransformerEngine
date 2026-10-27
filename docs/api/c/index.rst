@@ -28,3 +28,8 @@ directly from C/C++, without Python.
    softmax.h <softmax>
    swizzle.h <swizzle>
    transpose.h <transpose>
+
+.. toctree::
+   :caption: Memory
+
+   workspace

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "../extensions.h"
+#include "../workspace.h"
 #include "common.h"
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
@@ -308,7 +309,8 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
 py::object group_quantize(const at::Tensor &input, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
                           std::optional<at::Tensor> tensor_offsets,
-                          std::optional<at::Tensor> noop_flag, const py::object &output) {
+                          std::optional<at::Tensor> noop_flag, const py::object &output,
+                          const std::shared_ptr<WorkspaceOwner> &workspace) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -407,6 +409,10 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
     grouped_quantization_mode = GroupedQuantizationMode::FP8_BLOCKWISE_GROUPED_QUANTIZE;
   }
 
+  NVTE_CHECK(
+      !workspace || grouped_quantization_mode == GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE,
+      "Explicit Workspace currently supports grouped MXFP8 quantization.");
+
   if (empty_input_buffer) {
     // early return for empty input buffer
     // just return the output tensor as is
@@ -454,15 +460,21 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
       }
       quant_config_cpp.set_mxfp8_2d_quantization(mxfp8_quantizer_cpp->with_2d_quantization);
       NVTE_SCOPED_GIL_RELEASE({
-        const auto stream = at::cuda::getCurrentCUDAStream();
-        TensorWrapper workspace_nvte;
-        nvte_group_quantize_v2(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                               workspace_nvte.data(), quant_config_cpp, stream);
-        at::Tensor workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
-        workspace_nvte.set_rowwise_data(workspace_torch.data_ptr(), workspace_nvte.dtype(),
-                                        workspace_nvte.shape());
-        nvte_group_quantize_v2(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                               workspace_nvte.data(), quant_config_cpp, stream);
+        const auto stream = at::cuda::getCurrentCUDAStream(tensor.get_device());
+        if (workspace) {
+          workspace->quantize_grouped(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                                      quant_config_cpp, tensor.get_device(), stream);
+        } else {
+          TensorWrapper workspace_nvte;
+          nvte_group_quantize_v2(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                                 workspace_nvte.data(), quant_config_cpp, stream);
+          at::Tensor workspace_torch =
+              allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+          workspace_nvte.set_rowwise_data(workspace_torch.data_ptr(), workspace_nvte.dtype(),
+                                          workspace_nvte.shape());
+          nvte_group_quantize_v2(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                                 workspace_nvte.data(), quant_config_cpp, stream);
+        }
       });
       break;
     }
