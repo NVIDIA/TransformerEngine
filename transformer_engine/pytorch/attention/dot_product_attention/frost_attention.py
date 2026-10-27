@@ -257,8 +257,8 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     # backward on SM100/SM103 and leaves dqk_ge_dv unset, which cuDNN reads as requiring
     # d_qk == d_v at every head dim. The forward engine would serve 192/128, so only it binds.
     if params.head_dim_qk != params.head_dim_v:
-        # Declined for both directions, since is_training follows module.training and eval()
-        # leaves autograd on, so an eval-mode call is no promise that no backward follows.
+        # Declined for both directions: only the backward binds the rule, but a forward that
+        # the backward cannot follow is of no use here.
         return (
             no_backend,
             (
@@ -282,7 +282,9 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
         return no_backend, "FROST does not return max_logit"
     if params.cuda_graph:
         return no_backend, "FROST graphs are built lazily and cannot be captured"
-    if params.deterministic and params.is_training:
+    # is_training as well as requires_backward: activation recompute replays the same forward
+    # under no_grad and then under enable_grad, and both passes must decide alike.
+    if params.deterministic and (params.is_training or params.requires_backward):
         return no_backend, "FROST does not support a deterministic backward"
 
     qkv_layout = _name_for(QKVLayout, params.qkv_layout)

@@ -382,6 +382,13 @@ def test_frost_declines_unsupported_configs():
         == FusedAttnBackend.FROST
     ), "an unambiguous window on a non-causal mask must be served"
 
+    assert (
+        is_frost_attention_supported(
+            _frost_params(deterministic=True, is_training=False, requires_backward=False)
+        )[0]
+        == FusedAttnBackend.FROST
+    ), "a deterministic inference-only call must be served"
+
     for override, why in (
         (dict(head_dim_qk=256, head_dim_v=256), "head_dim at the exclusive lower bound"),
         (dict(head_dim_v=256), "head_dim_v below the range"),
@@ -397,7 +404,8 @@ def test_frost_declines_unsupported_configs():
         (dict(num_pages_k=4, num_pages_v=4), "paged KV"),
         (dict(return_max_logit=True), "max_logit"),
         (dict(cuda_graph=True), "CUDA graph capture"),
-        (dict(deterministic=True, is_training=True), "a deterministic backward"),
+        (dict(deterministic=True, is_training=False), "a deterministic backward under eval"),
+        (dict(deterministic=True, requires_backward=False), "a deterministic recompute pass"),
         # window_size reaches _mask_spec through the selector, so its validation is part of the
         # selector contract rather than an internal detail.
         (dict(window_size_right=5), "a right window past the diagonal"),

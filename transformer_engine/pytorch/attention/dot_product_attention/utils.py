@@ -371,6 +371,7 @@ class FusedAttentionParams:
 
     # basic attention settings
     is_training: bool = True
+    requires_backward: bool = True
     deterministic: bool = False
     cuda_graph: bool = False
     return_max_logit: bool = False
@@ -1655,6 +1656,7 @@ def get_attention_backend(
             )
         base_fused_attn_kwargs = {
             "is_training": is_training,
+            "requires_backward": attention_params.requires_backward,
             "deterministic": deterministic,
             "cuda_graph": cuda_graph,
             "return_max_logit": return_max_logit,
