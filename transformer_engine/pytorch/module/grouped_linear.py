@@ -92,6 +92,7 @@ __all__ = ["GroupedLinear", "is_module_grouped_tensor_path_supported"]
 def is_module_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
+    device: Optional[torch.device] = None,
 ) -> bool:
     """Whether the module grouped-tensor path supports this recipe and dtype.
 
@@ -121,14 +122,43 @@ def is_module_grouped_tensor_path_supported(
     Runtime-only restrictions such as debug mode, CPU offloading, calibration,
     output quantization, and backend selection are checked separately by
     ``GroupedLinear``.
+
+    If device is omitted, the current CUDA device is used.
     """
+    # Recipe objects are not hashable. Resolve the device before the cached call so
+    # support results from different GPUs cannot share a cache entry.
+    device_index = device.index if device is not None else None
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    return _is_module_grouped_tensor_path_supported(
+        type(recipe) if recipe is not None else None,
+        getattr(recipe, "backward_override", None),
+        getattr(recipe, "disable_rht", None),
+        getattr(recipe, "row_scaled_activation", None),
+        getattr(recipe, "fp8_format", None),
+        dtype,
+        device_index,
+    )
+
+
+@functools.lru_cache
+def _is_module_grouped_tensor_path_supported(
+    recipe_type: Optional[type[Recipe]],
+    backward_override: Optional[str],
+    disable_rht: Optional[bool],
+    row_scaled_activation: Optional[bool],
+    fp8_format: Optional[RecipeFormat],
+    dtype: torch.dtype,
+    device_index: int,
+) -> bool:
+    """Cache routing for an immutable recipe snapshot, dtype, and CUDA device."""
     if tex.get_cublasLt_build_version() < 130300:
         return False
 
     if dtype not in (torch.bfloat16, torch.float16):
         return False
 
-    device_capability = get_device_compute_capability()
+    device_capability = get_device_compute_capability(torch.device("cuda", device_index))
     if not (9, 0) <= device_capability <= (11, 0):
         return False
     cublaslt_version = tex.get_cublasLt_version()
@@ -137,27 +167,27 @@ def is_module_grouped_tensor_path_supported(
     if device_capability < (10, 0) and cublaslt_version < 130400:
         return False
 
-    if recipe is None:
+    if recipe_type is None:
         return True
-    if recipe.custom():
+    if recipe_type.custom():
         return False
-    if recipe.backward_override is not None:
+    if backward_override is not None:
         return False
-    if recipe.float8_current_scaling():
+    if recipe_type.float8_current_scaling():
         return device_capability >= (10, 0) or cublaslt_version >= 130500
-    if recipe.float8_block_scaling():
+    if recipe_type.float8_block_scaling():
         # Blackwell and newer emulate FP8 block scaling with MXFP8 grouped GEMM, so it is
         # supported wherever MXFP8 is. On Hopper, cuBLASLt 13.6 fixes grouped GEMM algo
         # selection for block-scaled FP8.
         return device_capability >= (10, 0) or cublaslt_version >= 130600
-    if recipe.mxfp8():
+    if recipe_type.mxfp8():
         return device_capability >= (10, 0)
-    if recipe.nvfp4():
+    if recipe_type.nvfp4():
         return (
             device_capability >= (10, 0)
-            and not recipe.disable_rht
-            and not recipe.row_scaled_activation
-            and recipe.fp8_format == RecipeFormat.E4M3
+            and not disable_rht
+            and not row_scaled_activation
+            and fp8_format == RecipeFormat.E4M3
         )
     return False
 
@@ -2406,6 +2436,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 use_grouped_tensor_path = is_module_grouped_tensor_path_supported(
                     _recipe,
                     self.activation_dtype,
+                    device=inp.device,
                 )
             if (
                 self.use_grouped_tensor
