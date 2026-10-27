@@ -1932,7 +1932,9 @@ def get_attention_backend(
             is_frost_attention_available,
         )
 
-        frost_is_available, frost_unavailable_reason = is_frost_attention_available()
+        frost_is_available, frost_unavailable_reason = is_frost_attention_available(
+            attention_params.device
+        )
         if not frost_is_available:
             logger.debug("Disabling FusedAttention: %s", frost_unavailable_reason)
             use_fused_attention = False

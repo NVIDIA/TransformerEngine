@@ -21,6 +21,8 @@ from typing import Optional, Sequence, Tuple
 import torch
 from packaging.version import Version as PkgVersion
 
+from transformer_engine.pytorch.utils import get_device_compute_capability
+
 from . import cudnn_pygraph
 
 __all__ = [
@@ -52,31 +54,43 @@ _MIN_HEAD_DIM = 257
 _HEAD_DIM_MULTIPLE = 8
 
 _BACKEND_NAME = "FrostAttention"
-_availability: Optional[Tuple[bool, str]] = None
+_package_availability: Optional[Tuple[bool, str]] = None
 
 
-def is_frost_attention_available() -> Tuple[bool, str]:
-    """Whether the FROST kernels can be used at all, with a reason when they cannot.
+def is_frost_attention_available(device: Optional[torch.device] = None) -> Tuple[bool, str]:
+    """Whether the FROST kernels can be used on ``device``, with a reason when they cannot.
+
+    The architecture is read per device, since one process can hold GPUs of more than one
+    architecture. The rest does not vary by device and is cached.
+    """
+    if not torch.cuda.is_available():
+        return False, "no CUDA device"
+    major, minor = get_device_compute_capability(device)
+    if (major, minor) not in _SUPPORTED_ARCHS:
+        return (
+            False,
+            f"cuDNN FROST head_dim>256 kernels are SM100/SM103 only; found sm{major}{minor}",
+        )
+    return _packages_available()
+
+
+def _packages_available() -> Tuple[bool, str]:
+    """Whether the FROST engines are enabled and their packages are new enough.
 
     Cached, because selection consults it for every config that resolves to FROST.
     """
-    global _availability
-    if _availability is not None:
-        return _availability
+    global _package_availability
+    if _package_availability is not None:
+        return _package_availability
 
     def _no(reason):
-        global _availability
-        _availability = (False, reason)
-        return _availability
+        global _package_availability
+        _package_availability = (False, reason)
+        return _package_availability
 
-    if not torch.cuda.is_available():
-        return _no("no CUDA device")
     if os.environ.get("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1") == "0":
         # Decline here, or finalize_plans raises later with no FROST plan on offer.
         return _no("CUDNN_FRONTEND_ENABLE_FROST_ENGINES=0 disables the FROST engines")
-    if torch.cuda.get_device_capability() not in _SUPPORTED_ARCHS:
-        major, minor = torch.cuda.get_device_capability()
-        return _no(f"cuDNN FROST head_dim>256 kernels are SM100/SM103 only; found sm{major}{minor}")
     try:
         # Without the engines: this only reads a version, and enabling reorders plan selection
         # process-wide even when the checks below decline. The use sites enable it.
@@ -103,8 +117,8 @@ def is_frost_attention_available() -> Tuple[bool, str]:
             " engines would be silently skipped in favour of ordinary cuDNN backend plans"
         )
 
-    _availability = (True, "")
-    return _availability
+    _package_availability = (True, "")
+    return _package_availability
 
 
 # Both alignments are needed: the p2p ring produces square tiles where top-left and bottom-right
