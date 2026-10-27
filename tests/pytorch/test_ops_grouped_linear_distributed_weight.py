@@ -55,6 +55,9 @@ class _FakeDistWeight(torch.nn.Parameter):
     def finalize_group_grads(self, wgrads, **kwargs):
         self.calls["finalize"] += 1
         wl = list(wgrads) if isinstance(wgrads, (list, tuple)) else [wgrads]
+        # A real implementer reduce-scatters these as handed over, so their dtype is the
+        # reduction dtype -- record it before the cast below papers over it.
+        self.wgrad_dtypes = [g.dtype for g in wl]
         for w, g in zip(self._group, wl):
             w.main_grad.add_(g.to(w.main_grad.dtype))  # in-place accumulate into main_grad
             w.grad_added_to_main_grad = True
@@ -64,11 +67,12 @@ class _FakeDistWeight(torch.nn.Parameter):
         return self.data
 
 
-def _make_fake_dist_leader(op, num_gemms):
+def _make_fake_dist_leader(op, num_gemms, cls=_FakeDistWeight):
     """Replace ``op.weight0`` with a fake distributed leader referencing the whole group."""
     w0 = op.weight0
-    leader = _FakeDistWeight(w0.data)
+    leader = cls(w0.data)
     leader.calls = {"fwd": 0, "bwd": 0, "finalize": 0}
+    leader.wgrad_dtypes = []
     leader._group = [leader] + [getattr(op, f"weight{i}") for i in range(1, num_gemms)]
     op.weight0 = leader
     return leader
@@ -129,3 +133,71 @@ def test_ops_grouped_linear_distributed_weight_dispatch(num_gemms):
         # lives in main_grad). Nobody writes the real grad into op.weight.grad by design.
         assert w.grad_added_to_main_grad is True
         assert w.grad is not None, f"weight{i} should receive a dummy .grad"
+
+
+class _FakeDistWeightPlain(_FakeDistWeight):
+    """``_FakeDistWeight`` without the observability scales.
+
+    ``module.GroupedLinear`` reads ``requires_grad`` off the MATERIALIZED weight, and a tensor
+    built inside ``autograd.Function.forward`` (grad mode off) has none -- so a scaling hook makes
+    it skip the wgrad GEMM entirely. Hand back the group itself to keep both paths in play.
+    """
+
+    def materialize_group_for_forward(self):
+        self.calls["fwd"] += 1
+        return list(self._group)
+
+    def materialize_group_for_backward(self, **kwargs):
+        self.calls["bwd"] += 1
+        return list(self._group)
+
+
+@pytest.mark.parametrize("num_gemms", [2, 4])
+@pytest.mark.parametrize("fused_ops", [True, False], ids=["ops", "module"])
+def test_grouped_linear_distributed_weight_wgrad_dtype(num_gemms, fused_ops):
+    """The wgrad handed to finalize must already carry ``main_grad``'s dtype.
+
+    A distributed weight reduces its wgrad across the sharding axis BEFORE accumulating, so a
+    compute-dtype wgrad rounds on every rank -- silently defeating fp32 grad accumulation. The
+    weight cannot accumulate into a sharded ``main_grad``, so the GEMM epilogue is the only place
+    to widen. Runs the module in bf16 while ``main_grad`` stays fp32, so the two dtypes differ.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    torch.manual_seed(0)
+    in_f, out_f, total_tokens = 32, 64, num_gemms * 8
+    dtype, device = torch.bfloat16, "cuda"
+
+    if fused_ops:
+        op = te.ops.GroupedLinear(num_gemms, in_f, out_f, bias=False, device=device, dtype=dtype)
+    else:
+        # fuse_wgrad_accumulation=False is the branch with no grad_buffer to take the dtype from.
+        op = te.GroupedLinear(
+            num_gemms,
+            in_f,
+            out_f,
+            bias=False,
+            device=device,
+            params_dtype=dtype,
+            fuse_wgrad_accumulation=False,
+        )
+
+    leader = _make_fake_dist_leader(op, num_gemms, cls=_FakeDistWeightPlain)
+    for i in range(num_gemms):
+        w = getattr(op, f"weight{i}")
+        w.main_grad = torch.zeros((out_f, in_f), dtype=torch.float32, device=device)
+        w.grad_added_to_main_grad = False
+
+    m_splits = [total_tokens // num_gemms] * num_gemms
+    m_splits[-1] += total_tokens - sum(m_splits)
+    split_sizes = torch.tensor(m_splits, dtype=torch.int64, device=device)
+
+    x = torch.randn(total_tokens, in_f, dtype=dtype, device=device, requires_grad=True)
+    op(x, split_sizes).sum().backward()
+
+    assert leader.calls["finalize"] > 0, "finalize_group_grads never fired"
+    assert leader.wgrad_dtypes, "no wgrads were handed to finalize"
+    assert set(leader.wgrad_dtypes) == {torch.float32}, (
+        f"wgrad reduced in {set(leader.wgrad_dtypes)}, expected main_grad's torch.float32; "
+        "the reduce-scatter would round on every rank"
+    )
