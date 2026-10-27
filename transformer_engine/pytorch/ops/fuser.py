@@ -669,8 +669,7 @@ class OperationFuser:
         # paths that reuse a cached fused operation configuration.
         self.first_op_requiring_backward = first_op_requiring_backward
 
-        # Preserve the existing recipe-state reset conditions. A fusion-plan
-        # change does not imply that the operation's quantizers need rebuilding.
+        # Check for changes in recipe parameters that might have invalidated recipe state in basic ops
         recipe_type = type(recipe)
         need_to_reset_recipe_state = self.recipe_type != recipe_type
 
