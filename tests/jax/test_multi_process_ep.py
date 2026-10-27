@@ -519,13 +519,15 @@ class TestEP(unittest.TestCase):
             # Allgather so the rank-0 numpy comparison sees the full global tensor.
             out_global = jmu.process_allgather(out, tiled=True)
 
-        # Identity expert + uniform weights → out ≈ tokens (rank-0 check).
+        # Identity expert + uniform weights → out ≈ tokens (rank-0 check). fp32 is held tight so a
+        # payload narrowed to bf16 in flight fails.
+        tol = {jnp.float32: 1e-5, jnp.float16: 3e-3}.get(dtype, 5e-2)
         if self.rank == 0:
             np.testing.assert_allclose(
                 np.asarray(out_global.astype(jnp.float32)),
                 np.asarray(tokens.astype(jnp.float32)),
-                atol=5e-2,
-                rtol=5e-2,
+                atol=tol,
+                rtol=tol,
             )
 
     def test_primitive_dispatch_combine_identity_uniform(self):

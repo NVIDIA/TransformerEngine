@@ -242,6 +242,7 @@ def mesh(use_cudnn_fusion):
         recv_capacity_per_rank=recv_capacity_per_rank,
         hidden_dim=HIDDEN,
         ep_size=EP_SIZE,
+        max_token_dtype=DTYPE,
     )
     mode = "cudnn" if use_cudnn_fusion else "unfused"
     try:
