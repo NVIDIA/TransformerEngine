@@ -34,7 +34,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     check_set_window_size,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-from transformer_engine.pytorch.module.base import get_dummy_wgrad
 
 
 # NVFP4 recipe names
@@ -660,13 +659,7 @@ class MegatronTrainingHelper:
         rtol: float = 0.0,
         atol: float = 0.0,
     ) -> None:
-        """Check that backward produced what the Megatron wrapper expects:
-        each ``main_grad`` matches ``expected_main_grads``,
-        ``grad_added_to_main_grad`` was flipped to ``True`` so the wrapper's
-        post-backward hooks won't double-accumulate, and ``param.grad`` was
-        replaced by the cached dummy tensor (so a wrapper hook that did
-        ``main_grad += grad`` would be a no-op rather than double-counting).
-        """
+        """Check fused wgrad accumulation writes main_grad without a tensor .grad."""
         for wp, expected in zip(weight_params, expected_main_grads):
             torch.testing.assert_close(wp.main_grad.to(expected), expected, rtol=rtol, atol=atol)
 
@@ -675,19 +668,4 @@ class MegatronTrainingHelper:
                 "the Megatron DDP/FSDP wrapper hook will double-accumulate."
             )
 
-            # ``.grad`` should be the cached dummy tensor returned by
-            # ``get_dummy_wgrad`` -- shared storage, not the real wgrad.
-            expected_dummy = get_dummy_wgrad(list(wp.size()), wp.dtype)
-            assert (
-                wp.grad is not None
-            ), "weight.grad is None; the Megatron protocol expects a dummy tensor stand-in here."
-            assert wp.grad.data_ptr() == expected_dummy.data_ptr(), (
-                "weight.grad does not share storage with the cached dummy "
-                "wgrad; downstream wrapper hooks risk double-accumulating."
-            )
-            if getattr(wp, "zero_out_wgrad", False):
-                assert torch.all(wp.grad == 0), (
-                    "weight.zero_out_wgrad=True but the dummy weight.grad "
-                    "was not zeroed; downstream hooks reading .grad would "
-                    "see stale bytes from the previous step."
-                )
+            assert wp.grad is None, "Fused wgrad must not materialize a parameter .grad"

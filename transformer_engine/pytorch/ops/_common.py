@@ -278,33 +278,11 @@ def view_main_grad_as_grouped_buffer(
         ) from e
 
 
-def get_dummy_wgrads_for_params(
+def mark_wgrads_accumulated(
     weight_params: list[torch.nn.Parameter],
 ) -> list[Optional[torch.Tensor]]:
-    """Build dummy ``.grad`` placeholders for Megatron-LM wgrad-fusion params.
-
-    For each parameter that exposes ``grad_added_to_main_grad``, set the flag
-    to ``True`` and return a dummy wgrad tensor (zeroed if
-    ``zero_out_wgrad`` is also set on the parameter, otherwise a ZeroTensor if
-    ``zero_tensor_dummy_wgrad`` is set). For parameters without
-    the flag, the corresponding entry is ``None``.
-
-    The returned list has the same length and order as ``weight_params``.
-    """
-    from ..module.base import get_dummy_wgrad  # pylint: disable=import-outside-toplevel
-
-    out: list[Optional[torch.Tensor]] = []
-    for wp in weight_params:
-        if hasattr(wp, "grad_added_to_main_grad"):
-            wp.grad_added_to_main_grad = True
-            out.append(
-                get_dummy_wgrad(
-                    list(wp.size()),
-                    wp.dtype,
-                    zero=getattr(wp, "zero_out_wgrad", False),
-                    zero_tensor=getattr(wp, "zero_tensor_dummy_wgrad", False),
-                )
-            )
-        else:
-            out.append(None)
-    return out
+    """Mark fused wgrads as written to main_grad and return autograd placeholders."""
+    for weight in weight_params:
+        if hasattr(weight, "grad_added_to_main_grad"):
+            weight.grad_added_to_main_grad = True
+    return [None] * len(weight_params)

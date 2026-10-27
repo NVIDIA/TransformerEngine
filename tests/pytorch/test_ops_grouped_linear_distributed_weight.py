@@ -14,8 +14,8 @@ assertion:
   * ``materialize_group_for_backward`` scales by ``BWD_SCALE``            -> dgrad must use the
     re-materialized weights, so ``dgrad == BWD_SCALE * plain_dgrad``.
   * ``finalize_group_grads`` reduce-scatters the wgrads into ``main_grad`` in-place and returns a
-    dummy -> the real wgrad lands in ``main_grad`` and the ops path returns a throwaway ``.grad``
-    (it discards finalize's return; see DistributedWeight.finalize_group_grads).
+    None -> the real wgrad lands in ``main_grad`` and autograd leaves ``.grad`` unset
+    (the ops path discards finalize's return; see DistributedWeight.finalize_group_grads).
 
 Real all-gather / reduce-scatter math is exercised by the caller's distributed tests; here the fake
 is single-process and only proves the ops.GroupedLinear integration routes weights/grads through
@@ -39,7 +39,7 @@ class _FakeDistWeight(torch.nn.Parameter):
     Each materialize hook applies its own scale (see module docstring) so fwd/bwd routing is
     observable; ``finalize_group_grads`` models the real main-grad contract -- reduce-scatter (here
     an identity accumulate) the wgrads into each shard's ``main_grad`` in-place, flag
-    ``grad_added_to_main_grad``, and return a dummy that the ops path discards.
+    ``grad_added_to_main_grad``, and return None.
     """
 
     is_distributed_weight = True
@@ -61,7 +61,7 @@ class _FakeDistWeight(torch.nn.Parameter):
         for w, g in zip(self._group, wl):
             w.main_grad.add_(g.to(w.main_grad.dtype))  # in-place accumulate into main_grad
             w.grad_added_to_main_grad = True
-        return [torch.zeros_like(g) for g in wl]  # dummy grads (real value is now in main_grad)
+        return None  # real gradients are already in main_grad
 
     def grad_buffer(self):
         return self.data
@@ -83,7 +83,7 @@ def test_ops_grouped_linear_distributed_weight_dispatch(num_gemms):
     """Every DistributedWeight hook must be routed through the GEMM flow (and not bypassed).
 
     fwd/bwd use the scaled materialized weights; finalize reduce-scatters the wgrad into
-    ``main_grad`` in-place, and the ops path returns a throwaway dummy ``.grad``.
+    ``main_grad`` in-place, and autograd leaves ``.grad`` unset.
     """
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
@@ -129,10 +129,9 @@ def test_ops_grouped_linear_distributed_weight_dispatch(num_gemms):
         # The distributed op's grad of record is main_grad (finalize reduce-scattered the identity
         # wgrad there); compare it to the plain reference module's ordinary autograd .grad.
         torch.testing.assert_close(w.main_grad.to(dtype), ref_w.grad, **tols)
-        # main_grad is flagged, and op's own .grad is a discarded dummy (not the real grad, which
-        # lives in main_grad). Nobody writes the real grad into op.weight.grad by design.
+        # The real grad is in main_grad; autograd must leave .grad unset.
         assert w.grad_added_to_main_grad is True
-        assert w.grad is not None, f"weight{i} should receive a dummy .grad"
+        assert w.grad is None, f"weight{i} should not materialize .grad"
 
 
 class _FakeDistWeightPlain(_FakeDistWeight):

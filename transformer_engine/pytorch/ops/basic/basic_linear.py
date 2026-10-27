@@ -40,7 +40,7 @@ from ...utils import (
 from ..op import BasicOperation
 from .._common import (
     get_accumulate_flag_in_param,
-    get_dummy_wgrads_for_params,
+    mark_wgrads_accumulated,
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
@@ -91,7 +91,7 @@ class BasicLinearBwdArgs:
     sequence_parallel: bool
     grad_weight: Optional[torch.Tensor]
     accumulate_into_grad_weight: bool
-    # Original parameter for eager-only main_grad flags and dummy wgrad.
+    # Original parameter for eager-only main_grad accumulation flags.
     weight_param: Optional[torch.Tensor] = None
 
 
@@ -1270,7 +1270,7 @@ class BasicLinear(BasicOperation):
         if not in_custom_op:
             clear_tensor_data(args.input_)
             if args.accumulate_into_grad_weight:
-                dw = get_dummy_wgrads_for_params([args.weight_param])[0]
+                dw = mark_wgrads_accumulated([args.weight_param])[0]
         return dx, [(dw,)], [()]
 
     @classmethod

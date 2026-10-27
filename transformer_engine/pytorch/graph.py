@@ -469,10 +469,9 @@ def _make_graphed_callables(
             return (False,) * len(static_grad_inputs)
         module_param_start = len(static_grad_inputs) - len(module_params)
         # `skip_backward_post_hook` marks parameters whose gradient lifetime is
-        # managed by the delayed-wgrad module hook. With fused accumulation, the
-        # returned weight grad is only a dummy and does not carry the actual wgrad,
-        # which is written directly to `main_grad`. Therefore, these slots do not
-        # need to be cloned.
+        # managed by the delayed-wgrad module hook. With fused accumulation,
+        # the actual wgrad is written directly to `main_grad` and no weight grad
+        # is returned. These slots do not need clones.
         return tuple(
             idx >= module_param_start
             and not getattr(

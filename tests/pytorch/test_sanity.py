@@ -1208,9 +1208,8 @@ def _wgrad_fusion_module(module: str, hidden: int, dtype: torch.dtype):
 # it runs on, so its forward pass fails on a second device before any weight gradient.
 @pytest.mark.parametrize("module", ["Linear", "LayerNormLinear", "LayerNormMLP", "ops.Linear"])
 @pytest.mark.parametrize("zero_out_wgrad", all_boolean)
-def test_sanity_dummy_wgrad_device(module, zero_out_wgrad):
-    """The cached dummy weight gradient is on the weight's device when the same module shape
-    runs backward on one GPU and then on another."""
+def test_sanity_fused_wgrad_none_on_multiple_devices(module, zero_out_wgrad):
+    """Fused wgrad writes main_grad and returns None on each device."""
     dtype, hidden, tokens = torch.bfloat16, 128, 64
     for device in (0, 1):
         with torch.cuda.device(device):
@@ -1227,20 +1226,17 @@ def test_sanity_dummy_wgrad_device(module, zero_out_wgrad):
             x = torch.randn(tokens, hidden, dtype=dtype, device="cuda")
             forward(x).backward(torch.randn(tokens, hidden, dtype=dtype, device="cuda"))
             for p in weights:
-                assert p.grad is not None and p.grad.device == p.device
+                assert p.grad is None
+                assert p.grad_added_to_main_grad
+                assert torch.count_nonzero(p.main_grad) > 0
 
 
 @pytest.mark.parametrize(
     "module", ["Linear", "LayerNormLinear", "LayerNormMLP", "GroupedLinear", "ops.Linear"]
 )
 @pytest.mark.parametrize("zero_out_wgrad", all_boolean)
-def test_sanity_zero_tensor_dummy_wgrad(module, zero_out_wgrad):
-    """``zero_tensor_dummy_wgrad`` makes the dummy weight gradient a ZeroTensor.
-
-    The module runs twice before one backward pass, as an LM head shared by the main and MTP
-    heads does, so autograd adds the two dummy weight gradients. ``main_grad`` must not
-    change, and ``zero_out_wgrad`` keeps its zero-filled dummy.
-    """
+def test_sanity_shared_fused_wgrad_returns_none(module, zero_out_wgrad):
+    """Two uses of a weight accumulate in main_grad without a tensor .grad."""
     dtype, hidden, tokens = torch.bfloat16, 128, 64
     torch.manual_seed(seed)
     block, forward = _wgrad_fusion_module(module, hidden, dtype)
@@ -1250,28 +1246,17 @@ def test_sanity_zero_tensor_dummy_wgrad(module, zero_out_wgrad):
     inputs = [torch.randn(tokens, hidden, dtype=dtype, device="cuda") for _ in range(2)]
     grad_outputs = [torch.randn(tokens, hidden, dtype=dtype, device="cuda") for _ in range(2)]
 
-    main_grads = {}
-    for zero_tensor_dummy_wgrad in (False, True):
-        for p in weights:
-            p.main_grad = torch.zeros(p.shape, dtype=torch.float32, device="cuda")
-            p.grad_added_to_main_grad = False
-            p.zero_out_wgrad = zero_out_wgrad
-            p.zero_tensor_dummy_wgrad = zero_tensor_dummy_wgrad
-            p.grad = None
-        outputs = [forward(x) for x in inputs]
-        torch.autograd.backward(outputs, grad_outputs)
-        main_grads[zero_tensor_dummy_wgrad] = [p.main_grad for p in weights]
-        for p in weights:
-            assert p.grad_added_to_main_grad
-            assert p.grad is not None
-            if zero_tensor_dummy_wgrad and not zero_out_wgrad:
-                assert p.grad._is_zerotensor()
-            elif zero_out_wgrad:
-                assert not p.grad._is_zerotensor()
-                assert torch.count_nonzero(p.grad) == 0
-    for reference, main_grad in zip(main_grads[False], main_grads[True]):
-        assert torch.count_nonzero(reference) > 0
-        torch.testing.assert_close(main_grad, reference, rtol=0, atol=0)
+    for p in weights:
+        p.main_grad = torch.zeros(p.shape, dtype=torch.float32, device="cuda")
+        p.grad_added_to_main_grad = False
+        p.zero_out_wgrad = zero_out_wgrad
+        p.grad = None
+    outputs = [forward(x) for x in inputs]
+    torch.autograd.backward(outputs, grad_outputs)
+    for p in weights:
+        assert p.grad_added_to_main_grad
+        assert p.grad is None
+        assert torch.count_nonzero(p.main_grad) > 0
 
 
 def test_model_multiple_cast():

@@ -19,7 +19,6 @@ from transformer_engine.pytorch.torch_version import torch_version
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_cublasmp_all_gather_output,
-    get_dummy_wgrad,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -1711,24 +1710,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             origin_weight_python_object, "grad_added_to_main_grad"
         ):
             origin_weight_python_object.grad_added_to_main_grad = True
-            # Use the param's local shape (sharded under GTP) so the dummy wgrad
-            # matches the saved weight shape; main_grad_func() under GTP returns
-            # an unsharded scratch and would otherwise mismatch.
-            wgrad_shape = list(origin_weight_python_object.shape)
-            if getattr(origin_weight_python_object, "zero_out_wgrad", False):
-                wgrad = get_dummy_wgrad(
-                    wgrad_shape,
-                    origin_weight_python_object.dtype,
-                    zero=True,
-                )
-            else:
-                wgrad = get_dummy_wgrad(
-                    wgrad_shape,
-                    origin_weight_python_object.dtype,
-                    zero_tensor=getattr(
-                        origin_weight_python_object, "zero_tensor_dummy_wgrad", False
-                    ),
-                )
+            wgrad = None
         elif bwd_args.fuse_wgrad_accumulation:
             wgrad = None
     else:

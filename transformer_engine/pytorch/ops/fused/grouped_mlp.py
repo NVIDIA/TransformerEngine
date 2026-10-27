@@ -57,7 +57,7 @@ from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     get_accumulate_flag_in_param,
-    get_dummy_wgrads_for_params,
+    mark_wgrads_accumulated,
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
@@ -980,14 +980,14 @@ def _compute_grad_params(
         else:
             gemm_fn(grouped_x, grouped_dy, wgrad_output)
             # Distributed weight: reduce-scatter the wgrads into main_grad.
-            # Return discarded (see finalize_weight_grads); dummy wgrads returned below.
+            # The returned grads are discarded after finalization writes main_grad.
             if is_dist_weight:
                 finalize_weight_grads(weights, w_list)
 
-        # Need to return dummy wgrads for Megatron-LM wgrad fusion if grad is already added
-        # (wgrad fusion, or the distributed-weight reduce-scatter above) so it doesn't double-add.
+        # Return None after wgrad fusion or distributed-weight reduce-scatter has
+        # written main_grad, so autograd does not accumulate a second grad.
         if fc_op._accumulate_into_main_grad or is_dist_weight:
-            w_list = get_dummy_wgrads_for_params(weights)
+            w_list = mark_wgrads_accumulated(weights)
         elif delay_wgrad:
             w_list = [None] if fc_op.single_grouped_weight else [None] * num_groups
 

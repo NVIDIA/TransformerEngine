@@ -22,7 +22,6 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_cublasmp_all_gather_output,
     _ub_communicators,
-    get_dummy_wgrad,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -2023,12 +2022,7 @@ def _layernorm_mlp_backward_impl(
             fc1_weight_python_object, "grad_added_to_main_grad"
         ):
             fc1_weight_python_object.grad_added_to_main_grad = True
-            fc1_wgrad = get_dummy_wgrad(
-                list(fc1_weight_main_grad.shape),
-                fc1_weight_python_object.dtype,
-                zero=getattr(fc1_weight_python_object, "zero_out_wgrad", False),
-                zero_tensor=getattr(fc1_weight_python_object, "zero_tensor_dummy_wgrad", False),
-            )
+            fc1_wgrad = None
         elif args.fuse_wgrad_accumulation:
             fc1_wgrad = None
     else:
@@ -2040,12 +2034,7 @@ def _layernorm_mlp_backward_impl(
             fc2_weight_python_object, "grad_added_to_main_grad"
         ):
             fc2_weight_python_object.grad_added_to_main_grad = True
-            fc2_wgrad = get_dummy_wgrad(
-                list(fc2_weight_main_grad.shape),
-                fc2_weight_python_object.dtype,
-                zero=getattr(fc2_weight_python_object, "zero_out_wgrad", False),
-                zero_tensor=getattr(fc2_weight_python_object, "zero_tensor_dummy_wgrad", False),
-            )
+            fc2_wgrad = None
         elif args.fuse_wgrad_accumulation:
             fc2_wgrad = None
     else:
