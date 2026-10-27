@@ -140,7 +140,7 @@ def is_module_grouped_tensor_path_supported(
     )
 
 
-@functools.cache
+@functools.lru_cache
 def _is_module_grouped_tensor_path_supported(
     recipe_type: Optional[type[Recipe]],
     backward_override: Optional[str],
