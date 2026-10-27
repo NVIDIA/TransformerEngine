@@ -337,6 +337,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     UNFUSED,
     // Compute norm directly
     FULLY_FUSED,
+    // Compute norm directly, with quantization scales in compact format
+    FUSED_NORM_QUANT_UNSWIZZLED,
     // Compute norm and amax in high precision, then quantize to FP8
     FUSED_NORM_AMAX_FP8,
     // Compute norm and amax in high precision, then quantize to NVFP4
@@ -346,10 +348,17 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   if (quantizer.is_none() || IsFloat8Quantizers(quantizer.ptr())) {
     impl = Impl::FULLY_FUSED;
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
-    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
+    auto mxfp8_quantizer_cpp = dynamic_cast<MXFP8Quantizer *>(quantizer_cpp.get());
+    NVTE_CHECK(mxfp8_quantizer_cpp != nullptr, "Could not cast to MXFP8 quantizer");
+    // The fused MXFP8 kernels quantize 1D blocks and require full 128x128 tiles
+    if (!mxfp8_quantizer_cpp->with_2d_quantization && outer_size % 128 == 0 &&
         inner_size % 128 == 0) {
-      // cuDNN MXFP8 kernel requires full 128x128 tiles
-      impl = Impl::FULLY_FUSED;
+      if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
+        impl = Impl::FUSED_NORM_QUANT_UNSWIZZLED;
+      } else {
+        // Transformer Engine's fused RMSNorm + MXFP8 kernel
+        impl = Impl::FULLY_FUSED;
+      }
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
              !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
@@ -375,9 +384,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   // Output tensor
   TensorWrapper out_nvte;
   if (out.is_none()) {
-    if (impl == Impl::FULLY_FUSED) {
-      // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
-      // kernel does not support GEMM swizzled scales
+    if (impl == Impl::FUSED_NORM_QUANT_UNSWIZZLED) {
       quantizer_cpp->optimize_for_gemm = false;
     }
     std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);

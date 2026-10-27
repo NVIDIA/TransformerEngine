@@ -363,6 +363,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
      cast/fused_group_requantize.cu
+     fused_rope/fused_mla_kv_rope_mxfp8.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu
@@ -373,6 +374,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
      hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
      multi_tensor/compute_scale.cu
+     normalization/rmsnorm/rmsnorm_fwd_mxfp8.cu
      recipe/mxfp8_scaling.cu
      recipe/nvfp4.cu
      transpose/quantize_transpose_square_blockwise.cu
