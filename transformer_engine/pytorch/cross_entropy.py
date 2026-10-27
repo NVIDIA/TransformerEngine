@@ -230,8 +230,9 @@ def parallel_cross_entropy(
         it itself. With an ``MXFP8Quantizer`` (E4M3 or E5M2, compact scales), a BF16 ``inp``
         without ``dist_process_group`` (or with a single rank), a row count that is a multiple
         of 128 and a vocabulary that is a multiple of 128, backward writes the MXFP8 gradient
-        directly, bit-identical to quantizing the BF16 gradient with ``grad_quantizer``. In
-        all other cases the gradient is computed as usual and then quantized.
+        directly, bit-identical to quantizing the BF16 gradient with ``grad_quantizer``
+        (for finite gradients). In all other cases the gradient is computed as usual and
+        then quantized.
 
     Returns
     -------

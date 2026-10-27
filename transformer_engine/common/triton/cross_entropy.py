@@ -316,24 +316,21 @@ def cross_entropy_backward_kernel(
 
 
 @triton.jit
-def _mxfp8_scale_exponent(amax, MAX_NORM: tl.constexpr):
-    """E8M0 block scale of TE's MXFP8 cast: amax / MAX_NORM in FP32, rounded up to a power of
-    two (saturating to 0xFE), with 0xFF for NaN."""
-    val = amax * (1.0 / MAX_NORM)
+def _mxfp8_scale_exponent(amax, MAX_NORM_RCP: tl.constexpr):
+    """E8M0 block scale of TE's MXFP8 cast: amax * (1 / max_norm) in FP32, rounded up to a power
+    of two. Finite gradients give the bytes of TE's cast; non-finite ones are not special-cased."""
+    val = amax * MAX_NORM_RCP
     bits = val.to(tl.int32, bitcast=True)
     exponent = (bits >> 23) & 0xFF
     mantissa = bits & 0x7FFFFF
-    round_up = (mantissa > 0) & (exponent < 0xFE) & ~((exponent == 0) & (mantissa <= 0x400000))
-    exponent = tl.where(round_up, exponent + 1, exponent)
-    exponent = tl.where(exponent == 0xFF, tl.where(mantissa == 0, 0xFE, 0xFF), exponent)
-    return exponent
+    round_up = (mantissa > 0) & (exponent != 0xFE) & ~((exponent == 0) & (mantissa <= 0x400000))
+    return tl.where(round_up, exponent + 1, exponent)
 
 
 @triton.jit
 def _mxfp8_scale_reciprocal(exponent):
-    """2^-(exponent - 127) as FP32 (NaN for 0xFF), as TE's exp2f_rcp<float>."""
+    """2^-(exponent - 127) as FP32, as TE's exp2f_rcp<float> for finite scales."""
     bits = tl.where(exponent == 254, 0x00400000, (254 - exponent) << 23)
-    bits = tl.where(exponent == 255, 0x7FFFFFFF, bits)
     return bits.to(tl.float32, bitcast=True)
 
 
@@ -388,14 +385,14 @@ def cross_entropy_backward_mxfp8_kernel(
     grad_abs = tl.abs(grad)
 
     if FP8_E5M2:
-        MAX_NORM: tl.constexpr = 57344.0
+        MAX_NORM_RCP: tl.constexpr = 1.0 / 57344.0
     else:
-        MAX_NORM: tl.constexpr = 448.0
+        MAX_NORM_RCP: tl.constexpr = 1.0 / 448.0
 
     if ROWWISE:
         N_BLOCKS: tl.constexpr = BLOCK_COLS // 32
         amax = tl.max(tl.reshape(grad_abs, (32, N_BLOCKS, 32)), axis=2)
-        exponent = _mxfp8_scale_exponent(amax, MAX_NORM)
+        exponent = _mxfp8_scale_exponent(amax, MAX_NORM_RCP)
         scaled = tl.reshape(
             tl.reshape(grad, (32, N_BLOCKS, 32)) * _mxfp8_scale_reciprocal(exponent)[:, :, None],
             (32, BLOCK_COLS),
@@ -412,7 +409,7 @@ def cross_entropy_backward_mxfp8_kernel(
         )
 
     if COLUMNWISE:
-        exponent = _mxfp8_scale_exponent(tl.max(grad_abs, axis=0), MAX_NORM)
+        exponent = _mxfp8_scale_exponent(tl.max(grad_abs, axis=0), MAX_NORM_RCP)
         scaled = grad * _mxfp8_scale_reciprocal(exponent)[None, :]
         if FP8_E5M2:
             data = scaled.to(tl.float8e5)
