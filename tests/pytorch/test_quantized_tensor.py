@@ -3,7 +3,9 @@
 # See LICENSE for license information.
 
 from collections.abc import Iterable
+import ctypes
 import io
+import os
 from typing import Any, Dict, List, Tuple, Union, Optional
 
 import pytest
@@ -11,6 +13,7 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+from transformer_engine.common import _get_shared_object_file
 from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -1013,6 +1016,17 @@ class TestQuantizedTensor:
         ), "Gradient did not flow back to the input through quantize -> dequantize"
 
 
+@pytest.fixture
+def cuda_quantization_backend():
+    """Keep the scale-stride regression on CUDA regardless of the backend default."""
+    core = ctypes.CDLL(str(_get_shared_object_file("core")))
+    flag = os.getenv("NVTE_ENABLE_CUTEDSL_BACKEND")
+    core.nvte_set_cutedsl_backend(0)
+    yield
+    core.nvte_set_cutedsl_backend(flag is not None and not flag.startswith("0"))
+
+
+@pytest.mark.usefixtures("cuda_quantization_backend")
 @pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10,
     reason="Register-resident MXFP8 quantization requires Blackwell or newer",
