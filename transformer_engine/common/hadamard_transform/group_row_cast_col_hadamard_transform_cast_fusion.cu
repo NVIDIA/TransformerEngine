@@ -174,7 +174,7 @@ template <class MShape, class NShape, class KShape, class ClusterShape, class Cl
           bool kEnableStochasticRounding_ = false, bool kEnableRHTColQuant_ = true,
           bool kEnableRowQuant_ = true, bool kEnableSwizzleSFOutput_ = false,
           bool kUseFastMath_ = false>
-__launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
+__launch_bounds__(640, 1) __global__ static void group_row_col_rht_gemm_device(
     MShape M, NShape packed_N, KShape K, ClusterShape cluster_shape, ClusterTileShape cluster_tile,
     TA const *A, AStride dA, ASmemLayout sAlayout, CUTE_GRID_CONSTANT TmaLoadA const tma_load_a,
     TB const *B, BStride dB, BSmemLayout sBlayout, CUTE_GRID_CONSTANT TmaLoadB const tma_load_b,
@@ -379,7 +379,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
     auto bulk_tmem_mma = TiledMMA::make_fragment_C(acc_mainloop_pipelined_shape);
 
     // Number of threads assigned for various epilogue roles depending on quantization settings
-    static int constexpr NumEpilogueColQuantThreadCount = kEnableRHTColQuant ? 128 : 0;
+    static int constexpr NumEpilogueColQuantThreadCount = kEnableRHTColQuant ? 256 : 0;
     static int constexpr NumEpilogueRowQuantThreadCount = kEnableRowQuant ? 256 : 0;
     static int constexpr NumMmaThreadCount = kEnableRHTColQuant ? 32 : 0;
     static int constexpr NumMmaIssueThreadCount = kEnableRHTColQuant ? 1 : 0;
@@ -399,8 +399,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
     bool is_mma_warp = (warp_idx == 0);
     bool is_dma_warp = (warp_idx == 1);
     bool is_sched_warp = (warp_idx == 2);
-    bool is_epilogue_col_quant_warp = (warp_idx >= 4 && warp_idx <= 7);
-    bool is_epilogue_row_quant_warp = (warp_idx >= 8 && warp_idx <= 15);
+    bool is_epilogue_col_quant_warp = (warp_idx >= 4 && warp_idx <= 11);
+    bool is_epilogue_row_quant_warp = (warp_idx >= 12 && warp_idx <= 19);
 
     typename MainloopPipeline::Params mainloop_pipeline_params;
     if (is_dma_warp) {
@@ -662,16 +662,22 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
     } else if (is_epilogue_col_quant_warp) {
       // Warp responsible for quantizing output of Hadamard transform to FP4 for columnwise usage,
       // and writing result tensors/scales to global memory.
-      cutlass::arch::warpgroup_reg_alloc<192>();
       if constexpr (kEnableRHTColQuant) {
-        using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b64x;
+        cutlass::arch::warpgroup_reg_alloc<112>();
+        using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b32x;
+        const int col_half = warp_idx >= 8 ? 1 : 0;
+        auto col_tiler = Shape<_128, _64, _128>{};
 
+        auto acc_shape_col = make_shape(take<0, 2>(col_tiler), _1{}, _1{});
         auto acc_epilogue_pipelined_shape =
-            append(acc_shape_epilogue, Int<AccumulatorPipelineStageCount / EpilogueUnrollFactor>{});
+            append(acc_shape_col, Int<AccumulatorPipelineStageCount / EpilogueUnrollFactor>{});
         auto bulk_tmem_epilogue_layout = make_layout(
             acc_epilogue_pipelined_shape,
             make_stride(stride<0>(bulk_tmem_mma), Int<0>{}, Int<0>{}, size<1>(epilogue_tiler)));
         auto bulk_tmem_epilogue = make_tensor(make_tmem_ptr<uint32_t>(), bulk_tmem_epilogue_layout);
+        const uint32_t col_half_tmem_offset =
+            col_half * static_cast<uint32_t>(bulk_tmem_epilogue_layout(
+                           make_coord(make_coord(0, size<1>(col_tiler)), 0, 0, 0)));
 
         // Use 256-bit fragments for aligned bulk stores
         static int constexpr FragmentSize = 256 / sizeof_bits_v<TD>;
@@ -679,12 +685,13 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
         // Wait for TMEM allocation for this pipeline to finish
         tmem_allocation_result_barrier.arrive_and_wait();
         uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
-        bulk_tmem_epilogue.data() = tmem_base_ptr;
-        int global_thread_idx = threadIdx.x;
-        int local_thread_idx = global_thread_idx % cutlass::NumThreadsPerWarpGroup;
+        bulk_tmem_epilogue.data() = tmem_base_ptr + col_half_tmem_offset;
+        int local_thread_idx = threadIdx.x % cutlass::NumThreadsPerWarpGroup;
+        int global_thread_idx = cutlass::NumThreadsPerWarpGroup + local_thread_idx;
+        int col_thread_idx = local_thread_idx + col_half * cutlass::NumThreadsPerWarpGroup;
         // g2s load all global_d_amax
         CUTLASS_PRAGMA_NO_UNROLL
-        for (int g = local_thread_idx; g < args.num_tensors; g += NumEpilogueColQuantThreadCount) {
+        for (int g = col_thread_idx; g < args.num_tensors; g += NumEpilogueColQuantThreadCount) {
           const auto *amax_ptr = reinterpret_cast<float *>(args.global_d_amax_list[g]);
           shared_storage.global_d_amax[g] = amax_ptr == nullptr
                                                 ? TypeExtrema<TSFD>::max * TypeExtrema<fp4e2m1>::max
@@ -702,8 +709,11 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
 
         // Setup tile-level TMEM (t2r) and global memory (r2g) copy descriptors
         auto tiled_t2r = make_tmem_copy(TMEM_LOAD_NEW{}, bulk_tmem_epilogue(_, _, _, _0{}));
-        auto tiled_r2g =
-            make_tiled_copy_D(Copy_Atom<SM100_STORE_256bit_CACHE_NOALLOCATION, TD>{}, tiled_t2r);
+        auto tiled_t2r_store_layout =
+            make_tmem_copy(cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b64x{},
+                           bulk_tmem_epilogue(_, _, _, _0{}));
+        auto tiled_r2g = make_tiled_copy_D(Copy_Atom<SM100_STORE_256bit_CACHE_NOALLOCATION, TD>{},
+                                           tiled_t2r_store_layout);
         auto thr_t2r = tiled_t2r.get_slice(local_thread_idx);
         auto thr_r2g = tiled_r2g.get_slice(local_thread_idx);
 
@@ -759,20 +769,21 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             Tensor mD = make_tensor(cute::subbyte_iterator<TD>(reinterpret_cast<TD *>(
                                         args.output_colwise_list[group_idx])),
                                     make_shape(M, cur_N), DStride{});  // (M,packed_N)
-            Tensor gD_mn = local_tile(mD, epilogue_tiler, make_coord(_, _, _),
-                                      Step<_1, _1, X>{});  // (BLK_M,BLK_N)
+            Tensor gD_mn =
+                local_tile(mD, col_tiler, make_coord(_, _, _), Step<_1, _1, X>{});  // (BLK_M,BLK_N)
 
             Tensor mSFD = make_tensor(make_gmem_ptr<TSFD>(reinterpret_cast<TSFD *>(
                                           args.output_colwise_scale_inv_list[group_idx])),
                                       sfd_layout);
-            Tensor gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_, _, _),
+            Tensor gSFD_mn = local_tile(mSFD, col_tiler, make_coord(_, _, _),
                                         Step<_1, _1, X>{});  // (BLK_M,BLK_N)
 
-            Tensor gD_mn_view = tiled_divide(gD_mn, take<0, 2>(epilogue_tiler));
+            Tensor gD_mn_view = tiled_divide(gD_mn, take<0, 2>(col_tiler));
 
             int group_start_offset = args.split_sections_range[group_idx];
             int local_tile_n_idx =
-                (global_tile_n_offset - group_start_offset) / size<1>(epilogue_tiler);
+                (global_tile_n_offset - group_start_offset) / size<1>(epilogue_tiler) * 2 +
+                col_half;
             Tensor tDgD_mn = gD_mn_view(_, _, _, tile_m, local_tile_n_idx);
 
             Tensor tDgSFD_mn = gSFD_mn(_, _, tile_m, local_tile_n_idx);
@@ -816,16 +827,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             if constexpr (!kUseFastMath) {
               // Downcast to BF16 for bit-wise compatibility with
               // unfused kernels
-              auto convert_accum_to_bf16 =
-                  cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator,
-                                                 FragmentSize>{};
-              auto convert_bf16_to_accum =
-                  cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t,
-                                                 FragmentSize>{};
-              tTR_rAcc_frag(_0{}) =
-                  convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
-              tTR_rAcc_frag(_1{}) =
-                  convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_1{})));
+              CUTLASS_PRAGMA_UNROLL
+              for (int f = 0; f < size(tTR_rAcc_frag); ++f) {
+                tTR_rAcc_frag(f) = round_to_bf16_precision(tTR_rAcc_frag(f));
+              }
             }
 
             auto compute_frgs = reinterpret_cast<cutlass::Array<ElementAccumulator, VectorSize> *>(
@@ -864,7 +869,11 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             if constexpr (kEnableStochasticRounding) {
               const size_t rng_sequence =
                   global_thread_idx + k_tile * 512 + linear_tile_idx * K_TILE_MAX * 512;
-              rng.init(rng_seed, rng_sequence, rng_offset);
+              rng.init(rng_seed, rng_sequence, rng_offset + col_half * NumVecs);
+            }
+            uint4 tile_random[NumVecs];
+            if constexpr (kEnableStochasticRounding) {
+              philox_generate4_batch(rng, tile_random);
             }
             CUTLASS_PRAGMA_UNROLL
             // Apply round/quantize to each fragment, with or without stochastic rounding
@@ -872,7 +881,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
               auto acc_scale = cutlass::minimum_with_nan_propagation<ElementAccumulator>{}(
                   acc_scales[v], cutlass::platform::numeric_limits<ElementAccumulator>::max());
               if constexpr (kEnableStochasticRounding) {
-                random_uint4 = rng.generate4();
+                random_uint4 = tile_random[v];
                 output_frgs[v] = StochasticNumericConverter(
                     mul_f32x2_by_scalar(compute_frgs[v], acc_scale),
                     *reinterpret_cast<cutlass::Array<uint32_t, 4> *>(&random_uint4));
@@ -889,14 +898,16 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
           }
           scheduler.update_work_tile_info();
         } while (scheduler.is_valid());
+      } else {
+        cutlass::arch::warpgroup_reg_dealloc<32>();
       }
     } else if (is_epilogue_row_quant_warp) {
       // Warp responsible for quantizing the input (before Hadamard transform) to FP4 for row-wise usage.
-      cutlass::arch::warpgroup_reg_alloc<136>();
       if constexpr (kEnableRowQuant) {
+        cutlass::arch::warpgroup_reg_alloc<(kEnableRHTColQuant ? 112 : 136)>();
         using S2RVectorType = uint128_t;
 
-        int global_thread_idx = threadIdx.x;
+        int global_thread_idx = threadIdx.x - cutlass::NumThreadsPerWarpGroup;
         int local_thread_idx = global_thread_idx % 256;
         size_t rng_seed = 0;
         size_t rng_offset = 0;
@@ -1016,8 +1027,17 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                           tiles_in_m * tiles_in_n * K_TILE_MAX * 512;
               rng.init(rng_seed, rng_sequence, rng_offset);
             }
+            static constexpr int kRowVecs = decltype(size(tQArA))::value / VectorSize;
+            static constexpr int kRowRngBatch = kRowVecs < 4 ? kRowVecs : 4;
+            static_assert(kRowVecs % kRowRngBatch == 0, "Row vectors must split into RNG batches.");
+            uint4 row_random[kRowRngBatch];
             CUTLASS_PRAGMA_UNROLL
-            for (int v = 0; v < size(tQArA) / VectorSize; v++) {
+            for (int v = 0; v < kRowVecs; v++) {
+              if constexpr (kEnableStochasticRounding && !kUseFastMath) {
+                if (v % kRowRngBatch == 0) {
+                  philox_generate4_batch(rng, row_random);
+                }
+              }
               auto compute_frgs_up =
                   cutlass::NumericArrayConverter<ElementAccumulator, TA, VectorSize>{}(
                       compute_frgs[v]);
@@ -1042,7 +1062,11 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                   acc_scales, cutlass::platform::numeric_limits<ElementAccumulator>::max());
               uint4 random_uint4 = uint4{0, 0, 0, 0};
               if constexpr (kEnableStochasticRounding) {
-                random_uint4 = rng.generate4();
+                if constexpr (kUseFastMath) {
+                  random_uint4 = rng.generate4();
+                } else {
+                  random_uint4 = row_random[v % kRowRngBatch];
+                }
                 output_frgs[v] = StochasticNumericConverter(
                     mul_f32x2_by_scalar(compute_frgs_up, acc_scale),
                     *reinterpret_cast<cutlass::Array<uint32_t, 4> *>(&random_uint4));
@@ -1060,6 +1084,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
           ++sched_pipeline_consumer_state;
           scheduler.update_work_tile_info();
         } while (scheduler.is_valid());
+      } else {
+        cutlass::arch::warpgroup_reg_dealloc<32>();
       }
 
     } else {
@@ -1226,7 +1252,7 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
   assert(M % size<0>(cluster_tile_shape) == 0);
   assert(N % size<1>(cluster_tile_shape) == 0);
 
-  dim3 dimBlock(512);
+  dim3 dimBlock(640);
   dim3 dimCluster(size<0>(cluster_shape), size<1>(cluster_shape), size<2>(cluster_shape));
   dim3 dimGrid(sm_count, 1, 1);
 

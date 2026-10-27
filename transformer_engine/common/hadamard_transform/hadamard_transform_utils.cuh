@@ -16,6 +16,7 @@
 #include <type_traits>
 
 #include "common/common.h"
+#include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
 
@@ -223,6 +224,41 @@ __device__ __forceinline__ FloatArray mul_f32x2_by_scalar(const FloatArray& in, 
   }
 #endif
   return out;
+}
+
+template <typename FloatArray>
+__device__ __forceinline__ FloatArray round_to_bf16_precision(const FloatArray& in) {
+  static_assert(std::is_same_v<typename FloatArray::value_type, float>,
+                "round_to_bf16_precision expects an array of floats.");
+  constexpr int kNumElts = sizeof(FloatArray) / sizeof(float);
+  FloatArray out;
+  const float* in_ptr = reinterpret_cast<const float*>(&in);
+  float* out_ptr = reinterpret_cast<float*>(&out);
+#pragma unroll
+  for (int i = 0; i < kNumElts; ++i) {
+    uint32_t packed;
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(packed) : "f"(in_ptr[i]), "f"(0.0f));
+    out_ptr[i] = __uint_as_float(packed);
+  }
+  return out;
+}
+
+template <int N, typename PhiloxState>
+__device__ __forceinline__ void philox_generate4_batch(PhiloxState& rng, uint4 (&out)[N]) {
+  const uint64_t ctr_lo = (static_cast<uint64_t>(rng.ctr.y) << 32) | rng.ctr.x;
+  const uint64_t ctr_hi = (static_cast<uint64_t>(rng.ctr.w) << 32) | rng.ctr.z;
+#pragma unroll
+  for (int j = 0; j < N; ++j) {
+    const uint64_t lo = ctr_lo + static_cast<uint64_t>(j);
+    const uint64_t hi = ctr_hi + static_cast<uint64_t>(lo < ctr_lo);
+    const uint4 ctr = make_uint4(static_cast<uint32_t>(lo), static_cast<uint32_t>(lo >> 32),
+                                 static_cast<uint32_t>(hi), static_cast<uint32_t>(hi >> 32));
+    out[j] = curanddx::detail::multiple_rounds<PhiloxState::rounds>(ctr, rng.key);
+  }
+  const uint64_t lo = ctr_lo + static_cast<uint64_t>(N);
+  const uint64_t hi = ctr_hi + static_cast<uint64_t>(lo < ctr_lo);
+  rng.ctr = make_uint4(static_cast<uint32_t>(lo), static_cast<uint32_t>(lo >> 32),
+                       static_cast<uint32_t>(hi), static_cast<uint32_t>(hi >> 32));
 }
 
 }  // namespace transformer_engine
