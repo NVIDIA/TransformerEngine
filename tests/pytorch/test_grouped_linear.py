@@ -1728,13 +1728,14 @@ def _run_fp8bs_grouped_gemm(
         (2, 256, 2880, 2944),
     ],
 )
+@pytest.mark.parametrize("splits", ["uniform", "varying", "zero_experts"])
 @pytest.mark.parametrize("weight_block_dim", [1, 2], ids=["w1D", "w2D"])
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("case", ["no_discrete", "discrete_in", "discrete_out"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_grouped_gemm_grouped_tensor_fp8_block_scaling(
-    shape, weight_block_dim, accumulate, layout, case, dtype
+    shape, splits, weight_block_dim, accumulate, layout, case, dtype
 ) -> None:
     if not _fp8bs_grouped_gemm_available():
         pytest.skip("Grouped GEMM with FP8 block scaling is unavailable on this system.")
@@ -1742,9 +1743,19 @@ def test_grouped_gemm_grouped_tensor_fp8_block_scaling(
         pytest.skip("bfloat16 is required for grouped GEMM test.")
     if layout == "NT" and weight_block_dim == 2:
         pytest.skip("NT (wgrad) has no weight operand.")
-    torch.manual_seed(0)
     z, m, k, n = shape
-    m_sizes = [m // z] * z
+    if splits != "uniform" and z == 1:
+        pytest.skip("Non-uniform splits need more than one expert.")
+    torch.manual_seed(0)
+    if splits == "uniform":
+        m_sizes = [m // z] * z
+    elif splits == "varying":
+        m_sizes = [128 * (i % 3 + 1) for i in range(z)]
+    else:  # Empty experts first, in the middle and, for z=16, last.
+        m_sizes = [128 * (i % 3) for i in range(z)]
+    # Grouped FP8 block-scaling quantize requires every expert's token count to be a multiple of
+    # 128 (its per-expert check is a device assert that release builds strip).
+    assert all(ms % 128 == 0 for ms in m_sizes)
     _run_fp8bs_grouped_gemm(z, m_sizes, k, n, layout, case, weight_block_dim, accumulate, dtype)
 
 
