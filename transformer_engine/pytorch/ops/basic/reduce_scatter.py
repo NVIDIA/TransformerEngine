@@ -9,7 +9,11 @@ from typing import Optional
 
 import torch
 
-from ...distributed import gather_along_first_dim
+from ...distributed import (
+    gather_along_first_dim,
+    reduce_scatter_along_first_dim,
+    _validate_reduction_dtype,
+)
 from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
 from ...tensor import Quantizer
@@ -25,16 +29,22 @@ class ReduceScatter(BasicOperation):
     ----------
     process_group : torch.distributed.ProcessGroup, default = world group
         Process group for communication
+    reduction_dtype : torch.dtype, default = None
+        Forward communication dtype: float16, bfloat16, float32 or float64.
+        Output dtype and backward behavior are unchanged.
 
     """
 
     def __init__(
         self,
         process_group: Optional[torch.distributed.ProcessGroup] = None,
+        reduction_dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self.process_group_size: int = torch.distributed.get_world_size(process_group)
+        _validate_reduction_dtype(reduction_dtype)
+        self.reduction_dtype = reduction_dtype
 
     def op_forward(
         self,
@@ -64,7 +74,9 @@ class ReduceScatter(BasicOperation):
 
         # Perform reduce-scatter
         y = torch.empty(output_dims, dtype=x.dtype, device=x.device)
-        torch.distributed.reduce_scatter_tensor(y, x, group=self.process_group)
+        reduce_scatter_along_first_dim(
+            x, self.process_group, output=y, reduction_dtype=self.reduction_dtype
+        )
         return y
 
     def op_backward(
