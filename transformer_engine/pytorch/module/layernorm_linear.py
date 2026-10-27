@@ -1440,15 +1440,17 @@ def _layernorm_linear_backward_impl(
         # Handle custom DDP from mcore.
         if args.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
             origin_weight.grad_added_to_main_grad = True
+            # Distributed weights may use a full-sized GEMM gradient buffer, but
+            # autograd requires the placeholder to match the original parameter shard.
             if getattr(origin_weight, "zero_out_wgrad", False):
                 wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
+                    list(origin_weight.shape),
                     origin_weight.dtype,
                     zero=True,
                 )
             else:
                 wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
+                    list(origin_weight.shape),
                     origin_weight.dtype,
                     zero_tensor=getattr(origin_weight, "zero_tensor_dummy_wgrad", False),
                 )
