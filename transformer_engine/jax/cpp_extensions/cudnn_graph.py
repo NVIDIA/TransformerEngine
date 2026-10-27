@@ -107,9 +107,22 @@ def serialize_graph(
     )
 
 
+def deselect_frost_plans(graph):
+    """Temporarily exclude FROST SDPA plans from the JAX C++ serialization path."""
+    # cuDNN cannot currently serialize FROST SDPA plans for C++ execution.
+    # Remove this workaround once cuDNN fixes its serialization path.
+    plan_names = [
+        graph.get_plan_name_at_index(index) for index in range(graph.get_execution_plan_count())
+    ]
+    graph.deselect_engines(
+        [name for name in plan_names if name.startswith(("sdpa_fwd_", "sdpa_bwd_"))]
+    )
+
+
 def finalize_graph(cudnn, graph):
     """Validate, select and compile a supported execution plan."""
     check_graph_support(cudnn, graph)
+    deselect_frost_plans(graph)
     workspace_size = compile_graph(cudnn, graph)
     return workspace_size, bytes(graph.serialize()), check_frontend_version(cudnn)
 
