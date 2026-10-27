@@ -306,6 +306,7 @@ class _EpTestCase(unittest.TestCase):
         top_k=TOP_K,
         dispatch_fwd_quant_recipe=None,
         combine_bwd_quant_recipe=None,
+        payload_dtype=torch.bfloat16,
     ):
         # Primitive/count/overflow tests explicitly cover the unpadded path.
         # The MXFP8 pass overrides this with alignment=256 for grouped MLP fusion.
@@ -317,6 +318,7 @@ class _EpTestCase(unittest.TestCase):
             recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
             ep_group=self.ep_group,
             alignment=alignment,
+            payload_dtype=payload_dtype,
             zero_copy=ZERO_COPY,
             drop_on_overflow=OVERFLOW,
             dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
