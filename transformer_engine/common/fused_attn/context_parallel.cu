@@ -117,12 +117,11 @@ __forceinline__ __device__ int thd_partition_src_index(int token_id, const int *
 /***************************************************************************************************
  * Support THD format for Context Parallel: Generate partitioned indices for input tokens
  **************************************************************************************************/
+template <bool use_shared>
 __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int batch,
-                                             int total_tokens, int world_size, int rank,
-                                             bool use_shared) {
+                                             int total_tokens, int world_size, int rank) {
   extern __shared__ int boundary_storage[];
-  // The launch-uniform flag makes the shared-memory barrier uniform across the block.
-  if (use_shared) {
+  if constexpr (use_shared) {
     for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
       int seqlen = cu_seqlens[i];
       assert(seqlen % (world_size * 2) == 0);
@@ -151,11 +150,12 @@ __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int b
  * cp_rank_to_sequence_order=false: out[gi]=inp[src(gi)].
  * cp_rank_to_sequence_order=true: out[src(gi)]=inp[gi].
  **************************************************************************************************/
+template <bool use_shared>
 __global__ void thd_reorder_between_sequence_and_cp_rank_order_kernel(
     void *out, void *inp, int *cu_seqlens, int batch, int total_tokens, int world_size,
-    int hidden_size_in_bytes, bool cp_rank_to_sequence_order, bool use_shared) {
+    int hidden_size_in_bytes, bool cp_rank_to_sequence_order) {
   extern __shared__ int boundary_storage[];
-  if (use_shared) {
+  if constexpr (use_shared) {
     for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
       boundary_storage[i] = cu_seqlens[i] / world_size;
     }
@@ -189,12 +189,13 @@ __global__ void thd_reorder_between_sequence_and_cp_rank_order_kernel(
  * Copy valid token entries from a per-split THD tensor into a rank-local accumulator.
  * cu_seqlens_padded gives padded THD token offsets; cu_seqlens gives valid lengths.
  **************************************************************************************************/
+template <bool use_shared>
 __global__ void thd_copy_valid_tokens_from_per_split_to_rank_local_kernel(
     void *out, void *inp, int *cu_seqlens_padded, int *cu_seqlens, int batch, int total_tokens,
-    int hidden_size_in_bytes, bool use_shared) {
+    int hidden_size_in_bytes) {
   extern __shared__ int boundary_storage[];
   int *valid_storage = use_shared ? boundary_storage + (batch + 1) : cu_seqlens;
-  if (use_shared) {
+  if constexpr (use_shared) {
     for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
       boundary_storage[i] = cu_seqlens_padded[i];
       valid_storage[i] = cu_seqlens[i];
@@ -229,11 +230,12 @@ __global__ void thd_copy_valid_tokens_from_per_split_to_rank_local_kernel(
  * Support THD format for Context Parallel: Read the half of a THD tensor
  **************************************************************************************************/
 
+template <bool use_shared>
 __global__ void thd_read_half_tensor_kernel(void *half, void *tensor, int *cu_seqlens, int batch,
                                             int hidden_size_in_bytes, int half_idx,
-                                            int dim_size_of_token, bool use_shared) {
+                                            int dim_size_of_token) {
   extern __shared__ int boundary_storage[];
-  if (use_shared) {
+  if constexpr (use_shared) {
     for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
       boundary_storage[i] = cu_seqlens[i] / 2;
     }
@@ -275,12 +277,11 @@ __global__ void thd_read_half_tensor_kernel(void *half, void *tensor, int *cu_se
  * Support THD format for Context Parallel: softmax_lse related operations
  **************************************************************************************************/
 
-template <bool lse_packed, typename Functor>
+template <bool lse_packed, typename Functor, bool use_shared>
 __global__ void thd_lse_kernel(float *lse, float *half_lse, int *cu_seqlens, int batch,
-                               int num_heads, int lse_seqlen, int second_half_lse_seqlen,
-                               bool use_shared) {
+                               int num_heads, int lse_seqlen, int second_half_lse_seqlen) {
   extern __shared__ int boundary_storage[];
-  if (use_shared) {
+  if constexpr (use_shared) {
     for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
       boundary_storage[i] = cu_seqlens[i] / 2;
     }
@@ -318,14 +319,13 @@ __global__ void thd_lse_kernel(float *lse, float *half_lse, int *cu_seqlens, int
  * Support THD format for Context Parallel: Out correction in forward
  **************************************************************************************************/
 
-template <typename dtype, int only_second_half, int tile_size, bool lse_packed>
+template <typename dtype, int only_second_half, int tile_size, bool lse_packed, bool use_shared>
 __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *old_lse,
                                           float *lse, float *lse_per_step, int *cu_seqlens,
                                           int batch, int num_heads, int dim_per_head,
-                                          int lse_seqlen, int lse_per_step_seqlen,
-                                          bool use_shared) {
+                                          int lse_seqlen, int lse_per_step_seqlen) {
   extern __shared__ int boundary_storage[];
-  if (use_shared) {
+  if constexpr (use_shared) {
     for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
       boundary_storage[i] = cu_seqlens[i] / (only_second_half + 1);
     }
@@ -389,12 +389,12 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
  * Support THD format for Context Parallel: Gradients correction in backward
  **************************************************************************************************/
 
-template <typename dtype, typename Functor_0, typename Functor_1, int functor_idx, int group_size>
+template <typename dtype, typename Functor_0, typename Functor_1, int functor_idx, int group_size,
+          bool use_shared>
 __global__ void thd_grad_correction_kernel(dtype *grad, dtype *grad_per_step, int *cu_seqlens,
-                                           int batch, int hidden_size, int dim_size_of_token,
-                                           bool use_shared) {
+                                           int batch, int hidden_size, int dim_size_of_token) {
   extern __shared__ int boundary_storage[];
-  if (use_shared) {
+  if constexpr (use_shared) {
     for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
       boundary_storage[i] = cu_seqlens[i] / (functor_idx < 2 ? 2 : 1);
     }
@@ -483,9 +483,11 @@ void thd_read_half_tensor(const Tensor &tensor, const Tensor &cu_seqlens, Tensor
   }
   dim3 grid = {grid_x, grid_y};
   const size_t shared_bytes = thd_boundary_shared_bytes(sizeof(int) * (batch + 1));
-  thd_read_half_tensor_kernel<<<grid, block, shared_bytes, stream>>>(
-      half.data.dptr, tensor.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
-      hidden_size_in_bytes, half_idx, tensor_shape[seq_dim], shared_bytes != 0);
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      shared_bytes != 0, use_shared,
+      thd_read_half_tensor_kernel<use_shared><<<grid, block, shared_bytes, stream>>>(
+          half.data.dptr, tensor.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
+          hidden_size_in_bytes, half_idx, tensor_shape[seq_dim]););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -541,11 +543,13 @@ void thd_second_half_lse_correction(Tensor lse, const Tensor &lse_per_step,
   const size_t shared_bytes = thd_boundary_shared_bytes(sizeof(int) * (batch + 1));
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       lse_packed, packed,
-      thd_lse_kernel<packed, LseCorrectionFunctor><<<grid, block, shared_bytes, stream>>>(
-          reinterpret_cast<float *>(lse.data.dptr),
-          reinterpret_cast<float *>(lse_per_step.data.dptr),
-          reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
-          second_half_lse_seqlen, shared_bytes != 0););
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(shared_bytes != 0, use_shared,
+                                          thd_lse_kernel<packed, LseCorrectionFunctor, use_shared>
+                                          <<<grid, block, shared_bytes, stream>>>(
+                                              reinterpret_cast<float *>(lse.data.dptr),
+                                              reinterpret_cast<float *>(lse_per_step.data.dptr),
+                                              reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
+                                              num_heads, lse_seqlen, second_half_lse_seqlen);););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -588,10 +592,13 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
   const size_t shared_bytes = thd_boundary_shared_bytes(sizeof(int) * (batch + 1));
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       lse_packed, packed,
-      thd_lse_kernel<packed, ReadLseFunctor><<<grid, block, shared_bytes, stream>>>(
-          reinterpret_cast<float *>(lse.data.dptr), reinterpret_cast<float *>(half_lse.data.dptr),
-          reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
-          second_half_lse_seqlen, shared_bytes != 0););
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(shared_bytes != 0, use_shared,
+                                          thd_lse_kernel<packed, ReadLseFunctor, use_shared>
+                                          <<<grid, block, shared_bytes, stream>>>(
+                                              reinterpret_cast<float *>(lse.data.dptr),
+                                              reinterpret_cast<float *>(half_lse.data.dptr),
+                                              reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
+                                              num_heads, lse_seqlen, second_half_lse_seqlen);););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -659,14 +666,17 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
   const size_t shared_bytes = thd_boundary_shared_bytes(sizeof(int) * (batch + 1));
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       lse_packed, packed,
-      thd_out_correction_kernel<dtype, only_second_half, tile, packed>
-      <<<grid, block, shared_bytes, stream>>>(
-          reinterpret_cast<dtype *>(out.data.dptr),
-          reinterpret_cast<dtype *>(out_per_step.data.dptr),
-          reinterpret_cast<float *>(old_lse.data.dptr), reinterpret_cast<float *>(lse.data.dptr),
-          reinterpret_cast<float *>(lse_per_step.data.dptr),
-          reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head, lse_seqlen,
-          lse_per_step_seqlen, shared_bytes != 0););
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          shared_bytes != 0, use_shared,
+          thd_out_correction_kernel<dtype, only_second_half, tile, packed, use_shared>
+          <<<grid, block, shared_bytes, stream>>>(reinterpret_cast<dtype *>(out.data.dptr),
+                                                  reinterpret_cast<dtype *>(out_per_step.data.dptr),
+                                                  reinterpret_cast<float *>(old_lse.data.dptr),
+                                                  reinterpret_cast<float *>(lse.data.dptr),
+                                                  reinterpret_cast<float *>(lse_per_step.data.dptr),
+                                                  reinterpret_cast<int *>(cu_seqlens.data.dptr),
+                                                  batch, num_heads, dim_per_head, lse_seqlen,
+                                                  lse_per_step_seqlen);););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -737,11 +747,13 @@ static void thd_grad_correction_helper(Tensor grad, const Tensor &grad_per_step,
   dim3 grid = {grid_x, grid_y};
 
   const size_t shared_bytes = thd_boundary_shared_bytes(sizeof(int) * (batch + 1));
-  thd_grad_correction_kernel<dtype, Functor_0, Functor_1, functor_idx, 32>
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      shared_bytes != 0, use_shared,
+      thd_grad_correction_kernel<dtype, Functor_0, Functor_1, functor_idx, 32, use_shared>
       <<<grid, block, shared_bytes, stream>>>(reinterpret_cast<dtype *>(grad.data.dptr),
                                               reinterpret_cast<dtype *>(grad_per_step.data.dptr),
                                               reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
-                                              hidden_size, total_tokens, shared_bytes != 0);
+                                              hidden_size, total_tokens););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -825,9 +837,11 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
   constexpr unsigned int block = 256;
   unsigned int grid = (output_shape[0] + block - 1) / block;
   const size_t shared_bytes = thd_boundary_shared_bytes(sizeof(int) * (batch + 1));
-  thd_partition_indices_kernel<<<grid, block, shared_bytes, stream>>>(
-      reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
-      batch, total_tokens, world_size, rank, shared_bytes != 0);
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      shared_bytes != 0, use_shared,
+      thd_partition_indices_kernel<use_shared><<<grid, block, shared_bytes, stream>>>(
+          reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
+          batch, total_tokens, world_size, rank););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -853,9 +867,12 @@ void thd_reorder_between_sequence_and_cp_rank_order(const Tensor &inp, const Ten
   constexpr unsigned int block = 256;
   unsigned int grid = (static_cast<unsigned int>(total_tokens) * 32 + block - 1) / block;
   const size_t shared_bytes = thd_boundary_shared_bytes(sizeof(int) * (batch + 1));
-  thd_reorder_between_sequence_and_cp_rank_order_kernel<<<grid, block, shared_bytes, stream>>>(
-      out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
-      total_tokens, world_size, hidden_size_in_bytes, cp_rank_to_sequence_order, shared_bytes != 0);
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      shared_bytes != 0, use_shared,
+      thd_reorder_between_sequence_and_cp_rank_order_kernel<use_shared>
+      <<<grid, block, shared_bytes, stream>>>(
+          out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
+          total_tokens, world_size, hidden_size_in_bytes, cp_rank_to_sequence_order););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -882,10 +899,13 @@ void thd_copy_valid_tokens_from_per_split_to_rank_local(const Tensor &inp,
   constexpr unsigned int block = 256;
   unsigned int grid = (static_cast<unsigned int>(total_tokens) * 32 + block - 1) / block;
   const size_t shared_bytes = thd_boundary_shared_bytes(sizeof(int) * 2 * (batch + 1));
-  thd_copy_valid_tokens_from_per_split_to_rank_local_kernel<<<grid, block, shared_bytes, stream>>>(
-      out.data.dptr, inp.data.dptr, reinterpret_cast<int *>(cu_seqlens_padded.data.dptr),
-      reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, total_tokens, hidden_size_in_bytes,
-      shared_bytes != 0);
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      shared_bytes != 0, use_shared,
+      thd_copy_valid_tokens_from_per_split_to_rank_local_kernel<use_shared>
+      <<<grid, block, shared_bytes, stream>>>(out.data.dptr, inp.data.dptr,
+                                              reinterpret_cast<int *>(cu_seqlens_padded.data.dptr),
+                                              reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
+                                              total_tokens, hidden_size_in_bytes););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
