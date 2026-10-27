@@ -21,6 +21,8 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import torch
 from packaging.version import InvalidVersion, Version as PkgVersion
 
+from transformer_engine import te_device_type
+
 # The cuDNN FROST SDPA engines in (forward, backward) order, named once so that frost, which
 # pins one of them, and flex, which bars both, cannot drift apart.
 FROST_PLAN_TOKENS = ("sdpa_fwd_prefill_sm100", "sdpa_bwd_sm100")
@@ -61,11 +63,11 @@ def get_cudnn_handle(device: torch.device, *, backend_name: str = "cuDNN attenti
     different stream per ring step, and without this cuDNN is not ordered against the tensors.
     Keyed per backend because a handle is not thread-safe and ``set_stream`` mutates it.
     """
-    if device.type != "cuda":
+    if device.type != te_device_type():
         raise ValueError(f"{backend_name} only supports CUDA tensors, got device {device}.")
     cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
     if device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     key = (backend_name, device)
     with torch.cuda.device(device):
         handle = _CUDNN_HANDLES.get(key)
@@ -158,8 +160,8 @@ def bhsd_dim_stride(
 
 def device_key(device: torch.device) -> Tuple[Any, ...]:
     """Normalize a device for a cache key, so ``cuda`` and ``cuda:0`` cannot key two entries."""
-    if device.type == "cuda" and device.index is None:
-        return ("cuda", torch.cuda.current_device())
+    if device.type == te_device_type() and device.index is None:
+        return (te_device_type(), torch.cuda.current_device())
     return (device.type, device.index)
 
 
@@ -217,7 +219,7 @@ def cached_graph(backend_name: str, key: Optional[Any], build, *, device=None):
     if entry is None:
         scope = (
             torch.cuda.device(device)
-            if device is not None and device.type == "cuda"
+            if device is not None and device.type == te_device_type()
             else contextlib.nullcontext()
         )
         with scope:
@@ -500,8 +502,8 @@ def execute_graph(
     The handle is resolved here so it is rebound immediately before ``execute``, which keeps
     cuDNN on the same stream as the tensors.
     """
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+    if device.type == te_device_type() and device.index is None:
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     workspace = torch.empty(workspace_size, device=device, dtype=torch.uint8)
     graph.execute(
         variant_pack, workspace, handle=get_cudnn_handle(device, backend_name=backend_name)
