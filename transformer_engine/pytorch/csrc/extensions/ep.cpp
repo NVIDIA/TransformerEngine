@@ -129,12 +129,17 @@ void check_symm_mem_required(const at::Tensor& t, const char* name) {
 #endif
 }
 
-// Validates topk_idx is int32 or int64 and returns the matching TE dtype.
+// Validates a topk_idx dtype is int32 or int64 and returns the matching TE dtype.
+DType check_topk_idx_scalar_type(at::ScalarType dtype) {
+  NVTE_CHECK(dtype == at::kLong || dtype == at::kInt,
+             "topk_idx must be int32 or int64; got dtype=", c10::toString(dtype));
+  return GetTransformerEngineDType(dtype);
+}
+
+// Validates topk_idx is a contiguous int32 or int64 tensor and returns the matching TE dtype.
 DType check_topk_idx_dtype(at::Tensor topk_idx) {
   NVTE_CHECK(topk_idx.is_contiguous(), "topk_idx must be contiguous");
-  NVTE_CHECK(topk_idx.scalar_type() == at::kLong || topk_idx.scalar_type() == at::kInt,
-             "topk_idx must be int32 or int64; got dtype=", c10::toString(topk_idx.scalar_type()));
-  return GetTransformerEngineDType(topk_idx.scalar_type());
+  return check_topk_idx_scalar_type(topk_idx.scalar_type());
 }
 
 using Shape = std::vector<size_t>;
@@ -208,6 +213,9 @@ void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t nu
       .num_topk = static_cast<int>(num_topk),
       .drop_on_overflow = drop_on_overflow ? 1 : 0,
   };
+  // PyTorch uses the *_v2 ops, which rebind a handle from handle_mem on every call, so the handle
+  // cache is not needed. Must precede nvte_ep_initialize; the cap is read on first use.
+  setenv("NVTE_EP_HANDLE_CACHE_SIZE", "0", 1);
   // Release the GIL only around the native init. It must stay held while pybind11 casts
   // the ``max_token_dtype`` object above and destroys the by-value ``pybind11::object``
   // parameter on return; releasing it across those trips pybind11's dec_ref GIL assertion.
@@ -231,12 +239,14 @@ void ep_finalize() {
 
 namespace {
 
-NVTEEpLayerConfig make_layer_cfg(int64_t top_k, int64_t dispatch_output_per_expert_alignment) {
+NVTEEpLayerConfig make_layer_cfg(int64_t top_k, int64_t dispatch_output_per_expert_alignment,
+                                 DType topk_idx_dtype = DType::kInt32) {
   return NVTEEpLayerConfig{
       .struct_size = sizeof(NVTEEpLayerConfig),
       .top_k = static_cast<int>(top_k),
       .dispatch_output_per_expert_alignment =
           static_cast<size_t>(dispatch_output_per_expert_alignment),
+      .topk_idx_dtype = static_cast<NVTEDType>(topk_idx_dtype),
   };
 }
 
@@ -274,7 +284,7 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
       total_recv_tokens.data_ptr(), Shape{static_cast<size_t>(total_recv_tokens.numel())},
       DType::kInt64);
 
-  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment);
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment, idx_dtype);
   nvte_ep_prepare(handle_mem_te.data(), topk_idx_te.data(), tokens_per_expert_te.data(),
                   total_recv_tokens_te.data(), &layer_cfg, stream);
 }
@@ -284,6 +294,7 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
 // unswizzled e8m0 scale-inverses [T, H/block]. Both null => bf16/fp16/fp32.
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
+                 int64_t top_k, int64_t dispatch_output_per_expert_alignment,
                  std::optional<at::Tensor> tokens_scale_inv,
                  std::optional<at::Tensor> recv_scale_inv) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -352,8 +363,7 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   auto recv_topk_w_te =
       makeTransformerEngineTensor(recv_topk_weights.data_ptr(), Shape{recv_pr}, DType::kFloat32);
 
-  // top_k / alignment are carried by the cached layer_cfg seeded at ep_prepare;
-  // per-step ops look them up by handle_mem pointer in the backend.
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment, idx_dtype);
   NVTECommWindow tokens_win = maybe_make_window(tokens);
   NVTECommWindow topk_w_win = maybe_make_window(topk_weights);
   NVTECommWindow recv_tokens_win = maybe_make_window(recv_tokens);
@@ -369,9 +379,9 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
     recv_tokens_win.scale_window = rsi_win.window;
     recv_tokens_win.scale_offset = rsi_win.offset;
   }
-  nvte_ep_dispatch(handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(), tokens_win,
-                   topk_w_te.data(), topk_w_win, recv_tokens_te.data(), recv_tokens_win,
-                   recv_topk_w_te.data(), recv_topk_w_win, stream);
+  nvte_ep_dispatch_v2(handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(), tokens_win,
+                      topk_w_te.data(), topk_w_win, recv_tokens_te.data(), recv_tokens_win,
+                      recv_topk_w_te.data(), recv_topk_w_win, &layer_cfg, stream);
 }
 
 namespace {
@@ -477,7 +487,7 @@ void ep_prepare_and_dispatch_fused(at::Tensor handle_mem, at::Tensor topk_idx, a
     recv_tokens_win.scale_window = rsi_win.window;
     recv_tokens_win.scale_offset = rsi_win.offset;
   }
-  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment);
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment, idx_dtype);
   nvte_ep_prepare_and_dispatch(
       handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(), tokens_win, topk_w_te.data(),
       topk_w_win, recv_tokens_te.data(), recv_tokens_win, recv_topk_w_te.data(), recv_topk_w_win,
@@ -547,14 +557,16 @@ std::vector<at::Tensor> ep_prepare_and_dispatch(
     }
   }
 
-  ep_dispatch(handle_mem, topk_idx, tokens, topk_weights, rt, rw, tokens_scale_inv,
+  ep_dispatch(handle_mem, topk_idx, tokens, topk_weights, rt, rw, top_k,
+              dispatch_output_per_expert_alignment, tokens_scale_inv,
               is_scaled ? std::optional<at::Tensor>(rsi) : std::nullopt);
   if (!caller_omitted_recv) return {};  // caller buffers were mutated in place
   if (is_scaled) return {rt, rw, rsi};
   return {rt, rw};
 }
 
-void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result) {
+void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result, int64_t top_k,
+                int64_t dispatch_output_per_expert_alignment, at::ScalarType topk_idx_dtype) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(expert_out.dim() >= 2, "expert_out must be at least 2D [..., recv_pr, H]");
   NVTE_CHECK(result.dim() >= 2, "result must be at least 2D [..., H]");
@@ -578,12 +590,15 @@ void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result)
   auto result_te = makeTransformerEngineTensor(result.data_ptr(), Shape{T_flat, H}, eo_dtype);
 
   NVTECommWindow expert_out_win = maybe_make_window(expert_out);
-  nvte_ep_combine(handle_mem_te.data(), expert_out_te.data(), expert_out_win, result_te.data(),
-                  stream);
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
+                                  check_topk_idx_scalar_type(topk_idx_dtype));
+  nvte_ep_combine_v2(handle_mem_te.data(), expert_out_te.data(), expert_out_win, result_te.data(),
+                     &layer_cfg, stream);
 }
 
 void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,
-                     at::Tensor grad_tokens, at::Tensor grad_topk_weights) {
+                     at::Tensor grad_tokens, at::Tensor grad_topk_weights, int64_t top_k,
+                     int64_t dispatch_output_per_expert_alignment, at::ScalarType topk_idx_dtype) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(grad.dim() >= 2, "grad must be at least 2D [..., recv_pr, H]");
   NVTE_CHECK(grad_tokens.dim() >= 2, "grad_tokens must be at least 2D [..., H]");
@@ -620,12 +635,16 @@ void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_t
 
   NVTECommWindow grad_win = maybe_make_window(grad);
   NVTECommWindow g_recv_w_win = maybe_make_window(g_recv_topk_weights);
-  nvte_ep_dispatch_bwd(handle_mem_te.data(), grad_te.data(), grad_win, g_recv_w_te.data(),
-                       g_recv_w_win, grad_tokens_te.data(), grad_topk_w_te.data(), stream);
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
+                                  check_topk_idx_scalar_type(topk_idx_dtype));
+  nvte_ep_dispatch_bwd_v2(handle_mem_te.data(), grad_te.data(), grad_win, g_recv_w_te.data(),
+                          g_recv_w_win, grad_tokens_te.data(), grad_topk_w_te.data(), &layer_cfg,
+                          stream);
 }
 
 void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expert_out,
-                    std::optional<at::Tensor> grad_scale_inv,
+                    int64_t top_k, int64_t dispatch_output_per_expert_alignment,
+                    at::ScalarType topk_idx_dtype, std::optional<at::Tensor> grad_scale_inv,
                     std::optional<at::Tensor> grad_expert_out_scale_inv) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(grad.dim() >= 2, "grad must be at least 2D [..., H]");
@@ -690,8 +709,10 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
     grad_expert_out_win.scale_window = gesi_win.window;
     grad_expert_out_win.scale_offset = gesi_win.offset;
   }
-  nvte_ep_combine_bwd(handle_mem_te.data(), grad_te.data(), grad_win, grad_expert_out_te.data(),
-                      grad_expert_out_win, stream);
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
+                                  check_topk_idx_scalar_type(topk_idx_dtype));
+  nvte_ep_combine_bwd_v2(handle_mem_te.data(), grad_te.data(), grad_win, grad_expert_out_te.data(),
+                         grad_expert_out_win, &layer_cfg, stream);
 }
 
 void register_ep_bindings(pybind11::module_& m) {
@@ -716,7 +737,8 @@ void register_ep_bindings(pybind11::module_& m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch", &ep_dispatch, "EP dispatch", py::arg("handle_mem"), py::arg("topk_idx"),
         py::arg("tokens"), py::arg("topk_weights"), py::arg("recv_tokens"),
-        py::arg("recv_topk_weights"), py::arg("tokens_scale_inv") = std::nullopt,
+        py::arg("recv_topk_weights"), py::arg("top_k"),
+        py::arg("dispatch_output_per_expert_alignment"), py::arg("tokens_scale_inv") = std::nullopt,
         py::arg("recv_scale_inv") = std::nullopt, py::call_guard<py::gil_scoped_release>());
   m.def("ep_prepare_and_dispatch", &ep_prepare_and_dispatch, "Fused EP prepare + dispatch",
         py::arg("handle_mem"), py::arg("topk_idx"), py::arg("tokens"), py::arg("topk_weights"),
@@ -724,11 +746,18 @@ void register_ep_bindings(pybind11::module_& m) {
         py::arg("dispatch_output_per_expert_alignment"), py::arg("recv_tokens") = std::nullopt,
         py::arg("recv_topk_weights") = std::nullopt, py::arg("recv_scale_inv") = std::nullopt,
         py::arg("tokens_scale_inv") = std::nullopt, py::call_guard<py::gil_scoped_release>());
-  m.def("ep_combine", &ep_combine, "EP combine", py::call_guard<py::gil_scoped_release>());
-  m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward",
+  m.def("ep_combine", &ep_combine, "EP combine", py::arg("handle_mem"), py::arg("expert_out"),
+        py::arg("result"), py::arg("top_k"), py::arg("dispatch_output_per_expert_alignment"),
+        py::arg("topk_idx_dtype"), py::call_guard<py::gil_scoped_release>());
+  m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward", py::arg("handle_mem"),
+        py::arg("grad"), py::arg("g_recv_topk_weights"), py::arg("grad_tokens"),
+        py::arg("grad_topk_weights"), py::arg("top_k"),
+        py::arg("dispatch_output_per_expert_alignment"), py::arg("topk_idx_dtype"),
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_combine_bwd", &ep_combine_bwd, "EP combine backward", py::arg("handle_mem"),
-        py::arg("grad"), py::arg("grad_expert_out"), py::arg("grad_scale_inv") = std::nullopt,
+        py::arg("grad"), py::arg("grad_expert_out"), py::arg("top_k"),
+        py::arg("dispatch_output_per_expert_alignment"), py::arg("topk_idx_dtype"),
+        py::arg("grad_scale_inv") = std::nullopt,
         py::arg("grad_expert_out_scale_inv") = std::nullopt,
         py::call_guard<py::gil_scoped_release>());
 }
