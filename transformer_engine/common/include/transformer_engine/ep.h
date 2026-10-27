@@ -297,6 +297,75 @@ void nvte_ep_combine_bwd_v2(NVTETensor handle_mem, NVTETensor grad, NVTECommWind
                             NVTETensor grad_expert_out, NVTECommWindow grad_expert_out_win,
                             const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
+/* -- NVFP4 token rows ------------------------------------------------------ */
+/* Pack, decode and receive kernels for moving NVFP4 tokens through the
+ * unscaled EP dispatch / combine-backward path. They do not need NCCL EP and
+ * are available in every build. Pack and receive need Blackwell (SM 10.0+).
+ *
+ * Packed row layout, row_bytes per token (a multiple of 16 and at least
+ * H/2 + H/16 + 4): [H/2 bytes of E2M1 pairs (low nibble first) | H/16 E4M3
+ * block scales (one per 16 elements) | FP32 token decode scale | zero pad].
+ * The token decode scale is a power of two: the smallest 2^e with
+ * amax <= 6 * 448 * 2^e (0 for an all-zero token). */
+
+/*! \brief Quantize BF16 tokens to packed NVFP4 rows.
+ *
+ *  \param[in]     input          BF16 tokens [T, H]; H % 512 == 0 and H <= 16384.
+ *  \param[out]    packed         Packed rows, kByte [T, row_bytes].
+ *  \param[in]     rng_state      Optional (may be NULL) int64 [2] (seed, offset) on device.
+ *                                When given, E2M1 values are stochastically rounded; else RN.
+ *  \param[in]     use_fast_math  Use the approximate reciprocal, as NVTE_USE_FAST_MATH does for
+ *                                TE's NVFP4 casts.
+ *  \param[in]     stream         CUDA stream.
+ */
+void nvte_ep_nvfp4_pack(const NVTETensor input, NVTETensor packed, const NVTETensor rng_state,
+                        int use_fast_math, cudaStream_t stream);
+
+/*! \brief Decode packed NVFP4 rows to BF16.
+ *
+ *  \param[in]     packed         Packed rows, kByte [R, row_bytes].
+ *  \param[in]     counts         Optional (may be NULL) int64 [G] on device. When given, only the
+ *                                first min(sum(counts), R) rows are decoded and the rest of
+ *                                ``output`` is left untouched (CUDA-graph safe).
+ *  \param[out]    output         BF16 [R, H]; H % 64 == 0.
+ *  \param[in]     stream         CUDA stream.
+ */
+void nvte_ep_nvfp4_unpack(const NVTETensor packed, const NVTETensor counts, NVTETensor output,
+                          cudaStream_t stream);
+
+/*! \brief Build the per-expert NVFP4 grouped-GEMM operands straight from packed rows.
+ *
+ *  Rows are grouped by expert: group g owns counts[g] consecutive rows, each count a multiple
+ *  of 128. The rowwise operand reuses the sender's E2M1 codes; its block scales are re-expressed
+ *  against the group scale G = max token decode scale of the group (exact while they stay in
+ *  E4M3's normal range). The columnwise operand is the 16-point random Hadamard transform along
+ *  tokens, quantized in the same pass. Second-level amaxes are row_amax[g] = 6 * 448 * G and
+ *  col_amax[g] = 4 * 6 * 448 * G (a bound of the post-RHT amax, so no amax pass is needed).
+ *  Scales use the GEMM-swizzled layout. Bounded on device by ``counts`` (CUDA-graph safe).
+ *
+ *  \param[in]     packed         Packed rows (see above), kByte [R, row_bytes]; R % 128 == 0.
+ *  \param[in]     counts         int64 [G] on device, 1 <= G <= 128.
+ *  \param[in,out] workspace      int32 [G] scratch.
+ *  \param[in]     sign_mask      RHT random signs: bit i set when sign i is -1.
+ *  \param[out]    row_data       kByte [R * H / 2].
+ *  \param[out]    row_scale      kByte [R * H / 16].
+ *  \param[out]    col_data       kByte [R * H / 2]; group g is [H, counts[g]].
+ *  \param[out]    col_scale      kByte [R * H / 16].
+ *  \param[out]    row_amax       float32 [G].
+ *  \param[out]    col_amax       float32 [G].
+ *  \param[in]     rng_state      Optional (may be NULL) int64 [2] (seed, offset) on device:
+ *                                stochastic rounding of the columnwise operand when given.
+ *  \param[in]     hidden         H; H % 256 == 0.
+ *  \param[in]     use_fast_math  Use the approximate reciprocal.
+ *  \param[in]     stream         CUDA stream.
+ */
+void nvte_ep_nvfp4_direct_receive(const NVTETensor packed, const NVTETensor counts,
+                                  NVTETensor workspace, uint32_t sign_mask, NVTETensor row_data,
+                                  NVTETensor row_scale, NVTETensor col_data, NVTETensor col_scale,
+                                  NVTETensor row_amax, NVTETensor col_amax,
+                                  const NVTETensor rng_state, size_t hidden, int use_fast_math,
+                                  cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

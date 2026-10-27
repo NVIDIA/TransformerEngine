@@ -364,6 +364,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef NVTE_WITH_NCCL_EP
   transformer_engine::pytorch::register_ep_bindings(m);
 #endif  // NVTE_WITH_NCCL_EP
+  m.def("ep_nvfp4_pack", &transformer_engine::pytorch::ep_nvfp4_pack,
+        "Pack BF16 tokens into NVFP4 EP rows (power-of-two token scales)", py::arg("tokens"),
+        py::arg("stochastic"));
+  m.def("ep_nvfp4_unpack", &transformer_engine::pytorch::ep_nvfp4_unpack,
+        "Decode NVFP4 EP rows to BF16", py::arg("packed"), py::arg("hidden"),
+        py::arg("counts") = std::nullopt, py::arg("out") = std::nullopt);
+  m.def("ep_nvfp4_direct_receive", &transformer_engine::pytorch::ep_nvfp4_direct_receive,
+        "Build per-expert NVFP4 GEMM operands from NVFP4 EP rows", py::arg("packed"),
+        py::arg("hidden"), py::arg("counts"), py::arg("sign_mask"), py::arg("stochastic"));
 
   // Permutation functions
   m.def("moe_permute_fwd", transformer_engine::pytorch::moe_permute_fwd, "MOE permute FWD",
