@@ -11,6 +11,7 @@ import torch
 
 import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
 from transformer_engine.pytorch.jit import no_torch_dynamo
+from transformer_engine.pytorch.quantized_tensor import Quantizer
 
 __all__ = ["parallel_cross_entropy"]
 
@@ -33,6 +34,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         ignore_idx=-100,
         overwrite_input=False,
         return_argmax=False,
+        grad_quantizer=None,
     ):
         """Compute the loss and save the input and softmax statistics for backward."""
 
@@ -65,6 +67,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         ctx.world_size = world_size
         ctx.ignore_idx = ignore_idx
         ctx.overwrite_input = overwrite_input
+        ctx.grad_quantizer = grad_quantizer
         ctx.did_backward = False
         if return_argmax:
             ctx.mark_non_differentiable(argmax)
@@ -94,10 +97,11 @@ class CrossEntropyFunction(torch.autograd.Function):
             ctx.rank,
             ctx.world_size,
             ctx.ignore_idx,
+            ctx.grad_quantizer,
         )
         if ctx.overwrite_input:
             torch.autograd.graph.increment_version(saved_input)
-        return grad_input, None, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None, None, None
 
 
 def _validate_inputs(
@@ -105,6 +109,7 @@ def _validate_inputs(
     target: torch.Tensor,
     label_smoothing: float,
     overwrite_input: bool,
+    grad_quantizer: Optional[Quantizer] = None,
 ) -> None:
     """Validate assumptions made by the cross entropy Triton kernels."""
 
@@ -129,6 +134,11 @@ def _validate_inputs(
         raise ValueError(f"label_smoothing must be in [0, 1], but got {label_smoothing}")
     if overwrite_input and not inp.is_contiguous():
         raise ValueError("overwrite_input=True requires a contiguous input")
+    if grad_quantizer is not None:
+        if not isinstance(grad_quantizer, Quantizer):
+            raise TypeError(f"grad_quantizer must be a Quantizer, but got {type(grad_quantizer)}")
+        if grad_quantizer.internal:
+            raise ValueError("grad_quantizer must create QuantizedTensors (internal=False)")
 
 
 @no_torch_dynamo()
@@ -140,6 +150,7 @@ def _parallel_cross_entropy_overwrite_input(
     dist_process_group: Optional[torch.distributed.ProcessGroup],
     ignore_idx: int,
     return_argmax: bool,
+    grad_quantizer: Optional[Quantizer],
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """Run destructive cross entropy outside Torch Dynamo's compiled graph."""
 
@@ -152,6 +163,7 @@ def _parallel_cross_entropy_overwrite_input(
         ignore_idx,
         True,
         return_argmax,
+        grad_quantizer,
     )
 
 
@@ -166,6 +178,7 @@ def parallel_cross_entropy(
     *,
     overwrite_input: bool = False,
     return_argmax: bool = False,
+    grad_quantizer: Optional[Quantizer] = None,
     _input: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """Cross entropy loss with optional distributed reduction.
@@ -211,6 +224,14 @@ def parallel_cross_entropy(
         if several logits are equal. Rows with an ignored target get one too.
         As with ``torch.argmax``, a NaN logit counts as the maximum: a row with
         NaN logits gets the index of its first NaN (and a NaN loss).
+    grad_quantizer : Quantizer, default = None
+        Return the gradient of ``inp`` quantized with this quantizer, for a following
+        quantized linear layer (for example an MXFP8 LM head) that would otherwise quantize
+        it itself. With an ``MXFP8Quantizer`` (E4M3 or E5M2, compact scales), a BF16 ``inp``
+        without ``dist_process_group`` (or with a single rank), a row count that is a multiple
+        of 128 and a vocabulary that is a multiple of 128, backward writes the MXFP8 gradient
+        directly, bit-identical to quantizing the BF16 gradient with ``grad_quantizer``. In
+        all other cases the gradient is computed as usual and then quantized.
 
     Returns
     -------
@@ -233,7 +254,7 @@ def parallel_cross_entropy(
             FutureWarning,
         )
 
-    _validate_inputs(inp, target, label_smoothing, overwrite_input)
+    _validate_inputs(inp, target, label_smoothing, overwrite_input, grad_quantizer)
     if overwrite_input:
         return _parallel_cross_entropy_overwrite_input(
             inp,
@@ -243,6 +264,7 @@ def parallel_cross_entropy(
             dist_process_group,
             ignore_idx,
             return_argmax,
+            grad_quantizer,
         )
     return CrossEntropyFunction.apply(
         inp,
@@ -253,4 +275,5 @@ def parallel_cross_entropy(
         ignore_idx,
         overwrite_input,
         return_argmax,
+        grad_quantizer,
     )

@@ -15,10 +15,25 @@ from transformer_engine.common.triton.cross_entropy import (
     cross_entropy_tp_pre_kernel,
     cross_entropy_tp_post_kernel,
     cross_entropy_backward_kernel,
+    cross_entropy_backward_mxfp8_kernel,
 )
 
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
+
+# Launch configuration of the single-rank forward kernel and of the backward kernel, which run
+# one program per row. Small blocks with few warps keep more rows in flight per SM: one
+# 1024-thread program per row reaches well under half of the HBM bandwidth at a 129k
+# vocabulary. Only the order in which the softmax statistics are accumulated changes. The
+# forward uses one block size with and without the argmax so that the loss does not depend on
+# return_argmax.
+_FWD_BLOCK_SIZE = 4096
+_FWD_NUM_WARPS = 4
+_BWD_BLOCK_SIZE = 4096
+_BWD_NUM_WARPS = 8
+# Tile width and warps of the backward that writes an MXFP8 gradient (32-row tiles).
+_MXFP8_BWD_BLOCK_COLS = 256
+_MXFP8_BWD_NUM_WARPS = 4
 
 
 def cross_entropy_forward(
@@ -76,8 +91,8 @@ def cross_entropy_forward(
             COUNT_NON_IGNORE=reduce_loss,
             COPY_INPUT=not overwrite_input,
             COMPUTE_ARGMAX=compute_argmax,
-            BLOCK_SIZE=BLOCK_SIZE,
-            num_warps=32,
+            BLOCK_SIZE=min(_FWD_BLOCK_SIZE, BLOCK_SIZE),
+            num_warps=_FWD_NUM_WARPS,
         )
     else:
         # Per row and rank: max, sum of exponentials, target logit, logit sum, and with
@@ -137,6 +152,33 @@ def cross_entropy_forward(
     return loss, saved_input, stats, target, n_non_ignore, rank, world_size, argmax
 
 
+def _mxfp8_backward_block_cols(
+    saved_input: torch.Tensor, world_size: int, grad_quantizer
+) -> Optional[int]:
+    """Tile width of the fused MXFP8 backward, or None if it cannot write this gradient."""
+    # pylint: disable=import-outside-toplevel
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+    import transformer_engine_torch as tex
+
+    if not isinstance(grad_quantizer, MXFP8Quantizer):
+        return None
+    if grad_quantizer.dtype not in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2):
+        return None
+    # 2D blocks and GEMM-swizzled scales are left to the quantizer.
+    if grad_quantizer.with_2d_quantization or grad_quantizer.optimize_for_gemm:
+        return None
+    if not (grad_quantizer.rowwise_usage or grad_quantizer.columnwise_usage):
+        return None
+    if world_size != 1 or saved_input.dtype != torch.bfloat16 or not saved_input.is_contiguous():
+        return None
+    B, SQ, V = saved_input.shape
+    # Unpadded scale-inverse layouts: 128 rows x 4 blocks of the row-wise scales and
+    # 4 x 128 columns of the column-wise scales.
+    if (B * SQ) % 128 != 0 or V % 128 != 0:
+        return None
+    return _MXFP8_BWD_BLOCK_COLS if V % _MXFP8_BWD_BLOCK_COLS == 0 else 128
+
+
 def cross_entropy_backward(
     saved_input: torch.Tensor,
     stats: torch.Tensor,
@@ -148,13 +190,59 @@ def cross_entropy_backward(
     rank: int,
     world_size: int,
     ignore_idx: int,
+    grad_quantizer=None,
 ):
-    """Reconstruct the derivative in FP32 and overwrite the saved input buffer."""
+    """Reconstruct the derivative in FP32.
+
+    Without ``grad_quantizer``, the derivative overwrites the saved input buffer, which is
+    returned. With it, the derivative is returned quantized by ``grad_quantizer``: a BF16 input
+    with an MXFP8 quantizer is written as MXFP8 directly by one kernel, and anything else is
+    computed in the saved input buffer and then quantized.
+    """
 
     B, SQ, V = saved_input.shape
     n_rows = B * SQ
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
     grad_output = grad_output.contiguous()
+
+    if grad_quantizer is not None:
+        block_cols = _mxfp8_backward_block_cols(saved_input, world_size, grad_quantizer)
+        if block_cols is not None:
+            import transformer_engine_torch as tex  # pylint: disable=import-outside-toplevel
+
+            grad_input = grad_quantizer.make_empty(
+                saved_input.shape, dtype=saved_input.dtype, device=saved_input.device
+            )
+            rowwise, columnwise = (
+                grad_quantizer.rowwise_usage,
+                grad_quantizer.columnwise_usage,
+            )
+            rowwise_scale = grad_input._rowwise_scale_inv if rowwise else None
+            columnwise_scale = grad_input._columnwise_scale_inv if columnwise else None
+            cross_entropy_backward_mxfp8_kernel[(n_rows // 32, V // block_cols)](
+                saved_input_ptr=saved_input,
+                Y_ptr=target,
+                stats_ptr=stats,
+                n_non_ignore_ptr=n_non_ignore if n_non_ignore is not None else stats,
+                grad_output_ptr=grad_output,
+                grad_output_stride=0 if reduce_loss else 1,
+                rowwise_data_ptr=grad_input._rowwise_data if rowwise else saved_input,
+                rowwise_scale_ptr=rowwise_scale if rowwise else saved_input,
+                rowwise_scale_stride=rowwise_scale.shape[-1] if rowwise else 0,
+                columnwise_data_ptr=(grad_input._columnwise_data if columnwise else saved_input),
+                columnwise_scale_ptr=columnwise_scale if columnwise else saved_input,
+                columnwise_scale_stride=columnwise_scale.shape[-1] if columnwise else 0,
+                n_cols=V,
+                ignore_idx=ignore_idx,
+                reduce_loss=reduce_loss,
+                label_smoothing=label_smoothing,
+                ROWWISE=rowwise,
+                COLUMNWISE=columnwise,
+                FP8_E5M2=grad_quantizer.dtype == tex.DType.kFloat8E5M2,
+                BLOCK_COLS=block_cols,
+                num_warps=_MXFP8_BWD_NUM_WARPS,
+            )
+            return grad_input
 
     cross_entropy_backward_kernel[(n_rows,)](
         saved_input_ptr=saved_input,
@@ -169,7 +257,9 @@ def cross_entropy_backward(
         ignore_idx=ignore_idx,
         reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=32,
+        BLOCK_SIZE=min(_BWD_BLOCK_SIZE, BLOCK_SIZE),
+        num_warps=_BWD_NUM_WARPS,
     )
+    if grad_quantizer is not None:
+        return grad_quantizer(saved_input)
     return saved_input
