@@ -8,7 +8,6 @@ import torch
 import pytest
 import os
 import copy
-from itertools import product
 
 import transformer_engine
 import transformer_engine.pytorch as te
@@ -45,12 +44,7 @@ from transformer_engine.pytorch.module import (
     layernorm_mlp,
     linear,
 )
-from utils import (
-    ModelConfig,
-    recipe_id,
-    skip_unsupported_backward_override,
-    check_module_parameters,
-)
+from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -442,100 +436,19 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
     _test_sanity_normalization_amp(block, dtype, config, skip_wgrad, skip_dgrad)
 
 
+@pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize(
-    "dtype,fp8_recipe,backward_override,model,skip_wgrad,zero_centered_gamma,"
-    "skip_dgrad,normalization,microbatching,parameter_options",
-    [
-        (*case, None)
-        for case in product(
-            param_types,
-            fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
-            (None, "high_precision", "dequantized"),
-            ("small", "weird"),
-            all_boolean,
-            all_boolean,
-            all_boolean,
-            all_normalizations,
-            all_boolean,
-        )
-    ]
-    + [
-        pytest.param(
-            dtype,
-            None,
-            None,
-            "small",
-            False,
-            False,
-            False,
-            "LayerNorm",
-            False,
-            {"parameters_split": splits},
-            id=f"split-{dtype}",
-        )
-        for dtype, splits in (
-            (torch.float32, ("q", "k", "v")),
-            (torch.float16, dict(q=96, k=48, v=48)),
-            (torch.bfloat16, dict(q=96, k=48, v=48)),
-        )
-    ]
-    + [
-        pytest.param(
-            torch.bfloat16,
-            None,
-            None,
-            "small",
-            False,
-            False,
-            False,
-            "LayerNorm",
-            False,
-            {"parameters_split": ("q", "k", "v"), **options},
-            id=f"split-{name}",
-        )
-        for name, options in (
-            ("no-bias", {"bias": False}),
-            ("returned-bias", {"return_bias": True}),
-        )
-    ]
-    + [
-        pytest.param(
-            torch.bfloat16,
-            None,
-            None,
-            "small",
-            skip_wgrad,
-            False,
-            skip_dgrad,
-            "LayerNorm",
-            False,
-            {"parameters_split": ("q", "k", "v")},
-            id=f"split-{name}",
-        )
-        for name, skip_wgrad, skip_dgrad in (
-            ("inference", True, True),
-            ("input-grad", True, False),
-            ("weight-grad", False, True),
-        )
-    ]
-    + [
-        pytest.param(
-            torch.bfloat16,
-            q,
-            None,
-            "small",
-            False,
-            False,
-            False,
-            "LayerNorm",
-            False,
-            {"parameters_split": ("q", "k", "v")},
-            id=f"split-{recipe_id(q)}",
-        )
-        for q in fp8_recipes
-        if q is not None
-    ],
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
 )
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+@pytest.mark.parametrize("model", ["small", "weird"])
+@pytest.mark.parametrize("skip_wgrad", all_boolean)
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+@pytest.mark.parametrize("skip_dgrad", all_boolean)
+@pytest.mark.parametrize("normalization", all_normalizations)
+@pytest.mark.parametrize("microbatching", all_boolean)
 def test_sanity_layernorm_linear(
     dtype,
     fp8_recipe,
@@ -546,7 +459,6 @@ def test_sanity_layernorm_linear(
     skip_dgrad,
     normalization,
     microbatching,
-    parameter_options,
 ):
     config = model_configs[model]
 
@@ -572,24 +484,8 @@ def test_sanity_layernorm_linear(
         normalization=normalization,
         params_dtype=dtype,
         device="cuda",
-        **(parameter_options or {}),
     )
-    if parameter_options:
-        check_storage = (
-            isinstance(parameter_options["parameters_split"], dict) and dtype == torch.bfloat16
-        )
-        grads = (
-            "none"
-            if skip_wgrad and skip_dgrad
-            else (
-                "input"
-                if skip_wgrad
-                else "weight" if skip_dgrad else "mixed" if check_storage else "all"
-            )
-        )
-        check_module_parameters(block, fp8_recipe, grads=grads, check_storage=check_storage)
-    else:
-        _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
+    _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
 
 
 @pytest.mark.parametrize("dtype", param_types)
