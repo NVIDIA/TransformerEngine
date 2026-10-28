@@ -225,6 +225,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def(py::init<>())
       .def_property_readonly("size", &transformer_engine::pytorch::WorkspaceOwner::size)
       .def_property_readonly("capacity", &transformer_engine::pytorch::WorkspaceOwner::capacity)
+      .def_property_readonly_static("max_stream_slots",
+                                    [](py::object) { return nvte_workspace_max_stream_slots(); })
       .def_property_readonly("generation",
                              &transformer_engine::pytorch::WorkspaceOwner::generation);
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),

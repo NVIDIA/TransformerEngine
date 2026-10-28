@@ -61,28 +61,22 @@ void nvte_group_quantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor out
     requirement.set_rowwise_data(nullptr, DType::kByte,
                                  std::vector<size_t>{std::max(size_t{1}, bytes)});
     dispatch::common::query_workspace(workspace, dispatch::common::kGroupedTmaWorkspaceRegion,
-                                      bytes, requirement);
+                                      bytes, requirement, kNVTEWorkspaceStreamPersistent);
     return;
   }
-  if (tensor->workspace && tensor->workspace->planned()) {
-    auto &storage = *tensor->workspace;
-    const size_t bytes = grouped_workspace_bytes(input, output);
-    const auto region =
-        storage.require_planned(dispatch::common::kGroupedTmaWorkspaceRegion, bytes);
-    dispatch::common::begin_workspace_use(storage, stream);
-    if (bytes == 0) {
-      nvte_group_quantize(input, output, quant_config, stream);
-      return;
-    }
-    TensorWrapper adapter(storage.data(region), std::vector<size_t>{bytes}, DType::kByte);
-    constexpr bool IS_ACT = false;
-    dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream,
-                                                                adapter.data());
+  const size_t bytes = grouped_workspace_bytes(input, output);
+  auto &storage =
+      dispatch::common::execution_workspace(workspace, dispatch::common::kGroupedTmaWorkspaceRegion,
+                                            bytes, stream, kNVTEWorkspaceStreamPersistent);
+  if (bytes == 0) {
+    nvte_group_quantize(input, output, quant_config, stream);
     return;
   }
+  const auto region = storage.require_planned(dispatch::common::kGroupedTmaWorkspaceRegion, bytes);
+  TensorWrapper adapter(storage.data(region, stream), std::vector<size_t>{bytes}, DType::kByte);
   constexpr bool IS_ACT = false;
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream,
-                                                              workspace);
+                                                              adapter.data());
 }
 
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,

@@ -37,12 +37,13 @@ inline size_t workspace_requirement_bytes(const TensorWrapper &requirement) {
 // reservations remain in place, so several operations can query the same empty
 // tensor before the caller allocates its final buffer.
 inline void query_workspace(NVTETensor workspace, const char *name, size_t bytes,
-                            const TensorWrapper &requirement) {
+                            const TensorWrapper &requirement,
+                            NVTEWorkspaceLifetime lifetime = kNVTEWorkspaceScratch) {
   auto &storage = convertNVTETensorToWorkspace(workspace);
   const auto region = storage.find(name);
   if (!storage.planned() || (bytes != 0 && (region == 0 || storage.info(region).size < bytes))) {
     WorkspacePlan plan(storage);
-    plan.require(name, nullptr, 0, bytes, 128, kNVTEWorkspaceScratch);
+    plan.require(name, nullptr, 0, bytes, 128, lifetime);
     storage.commit(plan);
   }
   auto &data = convertNVTETensorCheck(workspace)->data;
@@ -59,21 +60,35 @@ inline void query_workspace(NVTETensor workspace, const char *name, size_t bytes
   }
 }
 
-inline void begin_workspace_use(Workspace &workspace, cudaStream_t stream) {
-  // Plain temporary scratch retains the caller's explicit stream ordering.
-  // Persistent initialization additionally requires one stream per generation.
-  for (NVTEWorkspaceRegion region = 1; region <= workspace.num_regions(); ++region) {
-    if (workspace.info(region).lifetime == kNVTEWorkspacePersistent) {
-      workspace.begin_use(stream);
-      return;
-    }
+// A fresh tensor over a scratch-only allocation can reconstruct the operation's
+// layout. Multi-stream reuse must retain the tensor/catalog so stream slots are
+// shared by all calls, including calls from different host threads.
+inline Workspace &execution_workspace(NVTETensor workspace, const char *name, size_t bytes,
+                                      cudaStream_t stream,
+                                      NVTEWorkspaceLifetime lifetime = kNVTEWorkspaceScratch) {
+  const auto *tensor = convertNVTETensorCheck(workspace);
+  auto &storage = convertNVTETensorToWorkspace(workspace);
+  if (!storage.planned()) {
+    WorkspacePlan plan(storage);
+    plan.require(name, nullptr, 0, bytes, 128, lifetime);
+    storage.commit(plan);
   }
+  storage.require_planned(name, bytes);
+  NVTE_CHECK(tensor->data.buffer_size_bytes() >= storage.size(),
+             "Workspace tensor is smaller than the queried allocation requirement.");
+  NVTE_CHECK(reinterpret_cast<uintptr_t>(tensor->data.dptr) % storage.alignment() == 0,
+             "Workspace allocation does not satisfy the queried base alignment.");
+  // Nonempty regions register/resolve the stream once in data(region, stream).
+  if (bytes == 0) storage.begin_use(stream);
+  return storage;
 }
 
-inline void bind_dbias_workspace(Workspace &workspace, TensorWrapper *requirement) {
+inline void bind_dbias_workspace(Workspace &workspace, TensorWrapper *requirement,
+                                 cudaStream_t stream) {
   const auto region =
       workspace.require_planned(kDBiasWorkspaceRegion, workspace_requirement_bytes(*requirement));
-  requirement->set_rowwise_data(workspace.data(region), requirement->dtype(), requirement->shape());
+  requirement->set_rowwise_data(workspace.data(region, stream), requirement->dtype(),
+                                requirement->shape());
 }
 
 template <typename Launch>
@@ -91,13 +106,9 @@ void dispatch_dbias_workspace(NVTETensor workspace, cudaStream_t stream, Launch 
   // may include final alignment padding and have a different shape.
   TensorWrapper adapter;
   launch(adapter.data());
-  if (tensor->workspace && tensor->workspace->planned()) {
-    auto &storage = *tensor->workspace;
-    bind_dbias_workspace(storage, &adapter);
-    begin_workspace_use(storage, stream);
-  } else {
-    adapter.set_rowwise_data(tensor->data.dptr, adapter.dtype(), adapter.shape());
-  }
+  auto &storage = execution_workspace(workspace, kDBiasWorkspaceRegion,
+                                      workspace_requirement_bytes(adapter), stream);
+  bind_dbias_workspace(storage, &adapter, stream);
   launch(adapter.data());
 }
 

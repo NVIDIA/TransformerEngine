@@ -31,8 +31,9 @@ distinguish execution from a query. MXFP8 groups with varying last dimensions
 store their tensor-map descriptors and metadata in the workspace and support
 more than 64 groups. No initialization is needed, and a sufficiently large
 workspace can be reused for subsequent calls.
-The caller must provide the queried allocation size and required alignment;
-execution does not validate the supplied buffer or its tensor metadata.
+The query reserves private descriptor/metadata storage for every supported stream
+slot. Execution validates the tensor's declared byte capacity and base alignment;
+the caller is responsible for the actual allocation behind the pointer.
 
 Each descriptor and metadata array starts on a 128-byte boundary. Workspace size
 and offsets are calculated with the common layout utility; callers should query
@@ -40,8 +41,14 @@ requirements rather than hard-code sizes. See :doc:`workspace` for layout,
 persistent table, growth, and CUDA Graph lifetime contracts.
 
 Allocate before CUDA graph capture. Keep the workspace alive until all uses
-complete, including captured graph executions. Concurrent calls must use
-separate workspaces or explicit CUDA synchronization. The original
+complete, including captured graph executions. Keep the same tensor/catalog to
+share one allocation across streams: streams receive distinct slots in first-use
+order, up to ``nvte_workspace_max_stream_slots()`` (currently four). Slot exhaustion
+raises an error without waiting or sharing mutable storage. Serialize host
+submission of each complete operation; kernels in distinct slots remain
+independent on the GPU. Independent graph executions require distinct mutable
+slots or separate workspaces, including graphs captured on the same stream.
+The original
 ``nvte_group_quantize`` remains available; its shared descriptor storage limits
 MXFP8 groups with varying last dimensions to 64 and requires serialized use.
 

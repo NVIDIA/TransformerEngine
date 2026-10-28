@@ -7,8 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_WORKSPACE_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_WORKSPACE_H_
 
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/workspace.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -22,7 +25,8 @@
 namespace transformer_engine::pytorch {
 
 // Framework owner for callers that keep a workspace across operations. Each
-// instance belongs to one device/stream. Retired tensors remain alive for graphs
+// instance belongs to one device, with private common-layer slots per stream.
+// Retired tensors remain alive for graphs
 // that captured earlier bindings; keep the owner alive for those graphs too.
 class WorkspaceOwner {
  public:
@@ -38,8 +42,8 @@ class WorkspaceOwner {
     // Called with the GIL released. Release this lock before reacquiring the GIL.
     std::lock_guard<std::mutex> lock(mutex_);
     const c10::cuda::CUDAGuard device_guard(device);
-    NVTE_CHECK(!has_context_ || (device_ == device && stream_ == stream),
-               "A PyTorch Workspace must be used on one CUDA device and stream.");
+    NVTE_CHECK(!has_context_ || device_ == device,
+               "A PyTorch Workspace must be used on one CUDA device.");
     TensorWrapper requirement;
     operation(requirement.data());
     const auto shape = requirement.shape();
@@ -52,7 +56,9 @@ class WorkspaceOwner {
       NVTE_CHECK_CUDA(cudaStreamIsCapturing(stream, &capture_status));
       NVTE_CHECK(capture_status == cudaStreamCaptureStatusNone,
                  "Prepare Workspace with the required shapes before CUDA graph capture.");
-      if (bytes > capacity) {
+      // A changed layout needs fresh storage even when spare capacity exists:
+      // old streams/graphs can still be using the previous slot addresses.
+      if (bytes > reserved_bytes_ || !storage_.defined()) {
         constexpr size_t max_bytes = std::numeric_limits<int64_t>::max();
         NVTE_CHECK(bytes <= max_bytes, "Workspace is too large for a PyTorch tensor.");
         const size_t allocation_bytes =
@@ -70,8 +76,9 @@ class WorkspaceOwner {
       workspace_.set_rowwise_data(storage_.data_ptr(), workspace_.dtype(), workspace_.shape());
     }
     device_ = device;
-    stream_ = stream;
     has_context_ = true;
+    c10::cuda::CUDACachingAllocator::recordStream(storage_.storage().data_ptr(),
+                                                  c10::cuda::getStreamFromExternal(stream, device));
     operation(workspace_.data());
   }
 
@@ -97,7 +104,6 @@ class WorkspaceOwner {
   std::vector<at::Tensor> retired_;
   bool has_context_ = false;
   int device_ = -1;
-  cudaStream_t stream_ = nullptr;
 };
 
 }  // namespace transformer_engine::pytorch

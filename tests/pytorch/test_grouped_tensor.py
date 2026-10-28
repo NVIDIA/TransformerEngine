@@ -696,7 +696,9 @@ class TestGroupedTensor:
     )
     @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
     @pytest.mark.parametrize("optimize_for_gemm", [False, True])
-    @pytest.mark.parametrize("output_dbias", [False, True])
+    @pytest.mark.parametrize(
+        "output_dbias, use_workspace", [(False, False), (False, True), (True, False)]
+    )
     @pytest.mark.parametrize("num_tensors", [3, 65])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_quantize_grouped_mxfp8(
@@ -705,10 +707,11 @@ class TestGroupedTensor:
         usage: str,
         optimize_for_gemm: bool,
         output_dbias: bool,
+        use_workspace: bool,
         num_tensors: int,
     ) -> None:
         """Test grouped MXFP8 quantization against per-tensor quantization for
-        varying first/last/both dimensions and compact or GEMM-swizzled scales."""
+        varying dimensions, compact or GEMM-swizzled scales, and optional Workspace."""
         if output_dbias and shape_case != "varying_first":
             pytest.skip("bgrad_group_quantize requires constant last dimension")
 
@@ -773,8 +776,9 @@ class TestGroupedTensor:
                 grouped_input, quantizer, num_tensors, first_dims, last_dims
             )
         else:
+            workspace = tex.Workspace() if use_workspace else None
             grouped_output = tex.group_quantize(
-                grouped_input, quantizer, num_tensors, first_dims, last_dims
+                grouped_input, quantizer, num_tensors, first_dims, last_dims, workspace=workspace
             )
 
         # Reference: quantize each tensor independently and concatenate the
@@ -880,6 +884,116 @@ class TestGroupedTensor:
         for name in ("rowwise_data", "columnwise_data", "scale_inv", "columnwise_scale_inv"):
             assert torch.equal(getattr(actual, name), getattr(expected, name))
             assert torch.equal(getattr(captured, name), getattr(expected, name))
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_group_quantize_workspace_owner_multiple_streams(self, capture: bool) -> None:
+        """One allocation isolates every stream's mutable descriptors and metadata."""
+        workspace = tex.Workspace()
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=True)
+        streams = [torch.cuda.Stream() for _ in range(workspace.max_stream_slots)]
+        num_tensors = 65
+        inputs, metadata, expected = [], [], []
+        for index in range(len(streams)):
+            first = [128 * (1 + (i + index) % 3) for i in range(num_tensors)]
+            last = [128 * (1 + (i + index) % 2) for i in range(num_tensors)]
+            tensor = torch.randn(
+                (1, sum(m * n for m, n in zip(first, last))),
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            rows = torch.tensor(first, device="cuda", dtype=torch.int64)
+            cols = torch.tensor(last, device="cuda", dtype=torch.int64)
+            inputs.append(tensor)
+            metadata.append((rows, cols))
+            expected.append(tex.group_quantize(tensor, quantizer, num_tensors, rows, cols))
+        torch.cuda.synchronize()
+        outputs, graphs = [], []
+        # Register streams in reverse creation order. The same shapes/group count
+        # reuse one allocation, irrespective of stream handle values.
+        for index in reversed(range(len(streams))):
+            with torch.cuda.stream(streams[index]):
+                outputs.append(
+                    tex.group_quantize(
+                        inputs[index], quantizer, num_tensors, *metadata[index], workspace=workspace
+                    )
+                )
+        generation = workspace.generation
+        assert generation == 1
+        for stream in streams:
+            stream.synchronize()
+        if capture:
+            outputs = [None] * len(streams)
+            for index, stream in enumerate(streams):
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    outputs[index] = tex.group_quantize(
+                        inputs[index], quantizer, num_tensors, *metadata[index], workspace=workspace
+                    )
+                graphs.append(graph)
+        for _ in range(20):
+            for index, stream in enumerate(streams):
+                with torch.cuda.stream(stream):
+                    if capture:
+                        graphs[index].replay()
+                    else:
+                        outputs[index] = tex.group_quantize(
+                            inputs[index],
+                            quantizer,
+                            num_tensors,
+                            *metadata[index],
+                            workspace=workspace,
+                        )
+        for stream in streams:
+            stream.synchronize()
+        assert workspace.generation == generation
+        for actual, reference in zip(outputs, expected):
+            for name in ("rowwise_data", "columnwise_data", "scale_inv", "columnwise_scale_inv"):
+                assert torch.equal(getattr(actual, name), getattr(reference, name)), name
+        extra = torch.cuda.Stream()
+        with torch.cuda.stream(extra), pytest.raises(RuntimeError, match="registered CUDA streams"):
+            tex.group_quantize(inputs[0], quantizer, num_tensors, *metadata[0], workspace=workspace)
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_quantize_workspace_growth_keeps_old_graph_slots(self) -> None:
+        """Growth preserves old graph storage while a new stream uses the new layout."""
+        workspace = tex.Workspace()
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=True)
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        results, references, graphs, sources = [], [], [], []
+        for index, count in enumerate((3, 129)):
+            first, last = [128] * count, [128] * count
+            first[0], last[-1] = 256, 256
+            tensor = torch.randn(
+                (1, sum(m * n for m, n in zip(first, last))),
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            rows = torch.tensor(first, device="cuda", dtype=torch.int64)
+            cols = torch.tensor(last, device="cuda", dtype=torch.int64)
+            sources.append((tensor, rows, cols))
+            references.append(tex.group_quantize(tensor, quantizer, count, rows, cols))
+            streams[index].wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(streams[index]):
+                tex.group_quantize(tensor, quantizer, count, rows, cols, workspace=workspace)
+            streams[index].synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=streams[index]):
+                results.append(
+                    tex.group_quantize(tensor, quantizer, count, rows, cols, workspace=workspace)
+                )
+            graphs.append(graph)
+        assert workspace.generation == 2
+        for _ in range(10):
+            for stream, graph in zip(streams, graphs):
+                with torch.cuda.stream(stream):
+                    graph.replay()
+        torch.cuda.synchronize()
+        for actual, reference in zip(results, references):
+            for name in ("rowwise_data", "columnwise_data", "scale_inv", "columnwise_scale_inv"):
+                assert torch.equal(getattr(actual, name), getattr(reference, name)), name
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_group_quantize_concurrent_cuda_graphs(self) -> None:

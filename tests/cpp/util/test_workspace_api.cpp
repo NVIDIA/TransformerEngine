@@ -40,7 +40,7 @@ TEST(WorkspaceApiTest, QueryIsIsolatedAndCanBeDiscarded) {
     auto plan = workspace.plan();
     plan.require("dbias", 129);
     plan.require("gelu", 257, kNVTEWorkspacePersistent);
-    EXPECT_EQ(plan.size(), 640);
+    EXPECT_EQ(plan.size(), kMaxWorkspaceStreamSlots * 256 + 384);
     EXPECT_EQ(workspace.size(), 0);
     EXPECT_EQ(nvte_workspace_num_regions(workspace.data()), 0);
   }
@@ -61,8 +61,9 @@ TEST(WorkspaceApiTest, AppendingTablesPreservesScratchOffsets) {
   EXPECT_EQ(nvte_workspace_find_region(workspace.data(), "gelu", nullptr, 0), 0);
   workspace.commit(extended);
   EXPECT_EQ(workspace.get(dbias), data.data() + dbias_offset);
-  EXPECT_EQ(nvte_workspace_get_region_info(workspace.data(), table).offset, 256);
-  EXPECT_EQ(workspace.size(), 640);
+  EXPECT_EQ(nvte_workspace_get_region_info(workspace.data(), table).offset,
+            kMaxWorkspaceStreamSlots * 256);
+  EXPECT_EQ(workspace.size(), kMaxWorkspaceStreamSlots * 256 + 384);
   EXPECT_EQ(workspace.generation(), 1);
   EXPECT_FALSE(workspace.initialized(table));
 }
@@ -118,8 +119,9 @@ TEST(WorkspaceApiTest, ExactKeysAndNamesAreCopied) {
   EXPECT_NE(first, second);
   workspace.commit(plan);
   const std::array<unsigned char, 3> original{1, 2, 3};
-  EXPECT_EQ(nvte_workspace_find_region(workspace.data(), "activation", original.data(),
-                                      original.size()), first);
+  EXPECT_EQ(
+      nvte_workspace_find_region(workspace.data(), "activation", original.data(), original.size()),
+      first);
   EXPECT_EQ(nvte_workspace_find_region(workspace.data(), "activation", key.data(), key.size()),
             second);
   const auto info = nvte_workspace_get_region_info(workspace.data(), first);
@@ -169,7 +171,7 @@ TEST(WorkspaceApiTest, ExplicitMigrationAfterNewBinding) {
   auto plan = workspace.plan();
   const auto table = plan.require("gelu", 64, kNVTEWorkspacePersistent);
   const auto scratch = plan.require("dbias", 128);
-  alignas(128) std::array<unsigned char, 256> old_data{};
+  alignas(128) std::array<unsigned char, 1024> old_data{};
   workspace.commit(plan, old_data.data());
   workspace.get<float>(table)[0] = 7.5f;
   workspace.mark_initialized(table, nullptr);
@@ -178,7 +180,7 @@ TEST(WorkspaceApiTest, ExplicitMigrationAfterNewBinding) {
 
   auto extended = workspace.plan();
   extended.require("tma", 257);
-  alignas(128) std::array<unsigned char, 1024> new_data;
+  alignas(128) std::array<unsigned char, 4096> new_data;
   new_data.fill(0xcc);
   workspace.commit(extended, new_data.data());
   EXPECT_EQ(workspace.find("gelu"), table);
@@ -197,7 +199,7 @@ TEST(WorkspaceApiTest, CommitPreservesInitializationEnqueuedAfterSnapshot) {
   WorkspaceWrapper workspace;
   auto first = workspace.plan();
   const auto table = first.require("gelu", 128, kNVTEWorkspacePersistent);
-  alignas(128) std::array<unsigned char, 512> data{};
+  alignas(128) std::array<unsigned char, 1024> data{};
   workspace.commit(first, data.data());
   auto extended = workspace.plan();
   extended.require("dbias", 128);
@@ -206,20 +208,38 @@ TEST(WorkspaceApiTest, CommitPreservesInitializationEnqueuedAfterSnapshot) {
   EXPECT_TRUE(workspace.initialized(table));
 }
 
-TEST(WorkspaceApiTest, StreamOrderingIncludesDefaultStream) {
+TEST(WorkspaceApiTest, StreamSlotsFollowFirstUseNotHandleOrder) {
   WorkspaceWrapper workspace;
   auto plan = workspace.plan();
+  const auto scratch = plan.require("scratch", 129);
+  const auto descriptors = plan.require("tma", 128, kNVTEWorkspaceStreamPersistent);
   const auto table = plan.require("gelu", 128, kNVTEWorkspacePersistent);
-  alignas(128) std::array<unsigned char, 128> data{};
+  alignas(128) std::array<unsigned char, 4096> data{};
   workspace.commit(plan, data.data());
-  const auto other = reinterpret_cast<cudaStream_t>(uintptr_t{1});
-  workspace.mark_initialized(table, nullptr);
-  EXPECT_NO_THROW(workspace.begin_use(nullptr));
-  EXPECT_THROW(workspace.begin_use(other), std::runtime_error);
+  std::array<cudaStream_t, kMaxWorkspaceStreamSlots> streams{};
+  for (auto &stream : streams) {
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+  }
+  EXPECT_EQ(nvte_workspace_max_stream_slots(), kMaxWorkspaceStreamSlots);
+  // Deliberately register the last-created stream first and include stream zero.
+  std::vector<cudaStream_t> order{streams.back(), nullptr};
+  for (int i = kMaxWorkspaceStreamSlots - 2; i > 0; --i) order.push_back(streams[i]);
+  ASSERT_EQ(order.size(), kMaxWorkspaceStreamSlots);
+  for (size_t slot = 0; slot < order.size(); ++slot) {
+    EXPECT_EQ(workspace.stream_slot(order[slot]), slot);
+    EXPECT_EQ(workspace.get(scratch, order[slot]), workspace.get(scratch) + slot * 256);
+    EXPECT_EQ(workspace.get(descriptors, order[slot]), workspace.get(descriptors) + slot * 128);
+    EXPECT_EQ(workspace.get(table, order[slot]), workspace.get(table));
+  }
+  for (size_t slot = order.size(); slot-- > 0;) {
+    EXPECT_EQ(workspace.stream_slot(order[slot]), slot);
+  }
+  EXPECT_THROW(workspace.begin_use(streams.front()), std::runtime_error);
+  EXPECT_EQ(workspace.stream_slot(order.front()), 0);
+  // Rebinding resets mapping, including when the numerical address is unchanged.
   workspace.bind(data.data());
-  workspace.mark_initialized(table, other);
-  EXPECT_NO_THROW(workspace.begin_use(other));
-  EXPECT_THROW(workspace.begin_use(nullptr), std::runtime_error);
+  EXPECT_EQ(workspace.stream_slot(streams.front()), 0);
+  for (auto stream : streams) EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
 }
 
 TEST(WorkspaceApiTest, InvalidationAndInitializationProtocol) {
@@ -238,6 +258,22 @@ TEST(WorkspaceApiTest, InvalidationAndInitializationProtocol) {
   EXPECT_FALSE(workspace.initialized(table));
   EXPECT_THROW(nvte_workspace_get_region_info(workspace.data(), 0), std::runtime_error);
   EXPECT_THROW(workspace.get(3), std::runtime_error);
+}
+
+TEST(WorkspaceApiTest, RecreatedStreamDoesNotReuseRetiredSlot) {
+  WorkspaceWrapper workspace;
+  auto plan = workspace.plan();
+  plan.require("scratch", 128);
+  alignas(128) std::array<unsigned char, 128 * kMaxWorkspaceStreamSlots> data{};
+  workspace.commit(plan, data.data());
+  cudaStream_t first, second;
+  ASSERT_EQ(cudaStreamCreateWithFlags(&first, cudaStreamNonBlocking), cudaSuccess);
+  EXPECT_EQ(workspace.stream_slot(first), 0);
+  ASSERT_EQ(cudaStreamDestroy(first), cudaSuccess);
+  ASSERT_EQ(cudaStreamCreateWithFlags(&second, cudaStreamNonBlocking), cudaSuccess);
+  // CUDA may recycle the handle address; its unique ID still identifies a new stream.
+  EXPECT_EQ(workspace.stream_slot(second), 1);
+  EXPECT_EQ(cudaStreamDestroy(second), cudaSuccess);
 }
 
 TEST(WorkspaceApiTest, ForeignAndStalePlansAreRejected) {
@@ -265,7 +301,7 @@ TEST(WorkspaceApiTest, InvalidRequirementsLeavePlanUnchanged) {
   EXPECT_THROW(plan.require("dbias", 1, kNVTEWorkspacePersistent), std::runtime_error);
   EXPECT_THROW(plan.require("dbias", 1, kNVTEWorkspaceScratch, 3), std::runtime_error);
   EXPECT_THROW(plan.require("huge", std::numeric_limits<size_t>::max()), std::runtime_error);
-  EXPECT_EQ(plan.size(), 128);
+  EXPECT_EQ(plan.size(), kMaxWorkspaceStreamSlots * 128);
   workspace.commit(plan);
   EXPECT_EQ(nvte_workspace_num_regions(workspace.data()), 1);
 }
@@ -280,7 +316,7 @@ TEST(WorkspaceApiTest, MoveOnlyWrappersPreservePlanAndBinding) {
   EXPECT_EQ(original.data(), nullptr);
   WorkspacePlanWrapper moved_plan(std::move(plan));
   EXPECT_EQ(plan.data(), nullptr);
-  alignas(128) std::array<unsigned char, 128> data{};
+  alignas(128) std::array<unsigned char, 512> data{};
   moved.commit(moved_plan, data.data());
   WorkspaceWrapper assigned;
   assigned = std::move(moved);
@@ -317,7 +353,7 @@ TEST(WorkspaceApiTest, PlainTensorWrapperOwnsCatalogAndByteRequirements) {
 }
 
 TEST(WorkspaceApiTest, ExistingTensorStorageCanAcquireCatalog) {
-  alignas(128) std::array<unsigned char, 256> data{};
+  alignas(128) std::array<unsigned char, 512> data{};
   TensorWrapper tensor(data.data(), std::vector<size_t>{data.size()}, DType::kByte);
   WorkspacePlanWrapper plan(tensor.data());
   const auto region = plan.require("scratch", 128);
