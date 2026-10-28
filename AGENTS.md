@@ -374,6 +374,33 @@ requirements, or performance-relevant behavior.
 - Standalone examples live under `examples/pytorch/` and `examples/jax/`.
 - Tutorials and notebooks live under `docs/examples/`.
 
+## Code Quality
+
+It is not sufficient for code to be correct and performant: it must be
+human-readable as well. Human review is the bottleneck in TE
+development, and PRs that are unpleasant to read are more likely to be
+neglected by reviewers. These guidelines are defaults, not substitutes
+for judgment.
+
+- Public APIs, including the C API, must be backward compatible. Design
+  new ones to be clean, general, and extensible. Within reason, generalize
+  existing APIs rather than adding new ones.
+- Limit changes to the task's scope; do not refactor unrelated code.
+- Within that scope, restructure abstractions when needed to keep the code
+  coherent rather than adding workarounds that minimize the diff. Avoid
+  overengineering and unnecessary indirection.
+- Write code that is understandable without its comments, and add
+  comments where they aid understanding. Keep them concise, since
+  humans skim long comments. Describe the code as it is for a reader
+  without context, not its edit history. Treat an incorrect comment
+  like incorrect code.
+- Use descriptive names that read naturally. Follow the conventions of the
+  surrounding code and domain, and avoid inventing idiosyncratic
+  terminology.
+- Extend existing infrastructure rather than building parallel systems.
+  For example, add cases to an existing test suite instead of creating
+  a new test file for each change.
+
 ## Contribution Requirements
 
 Follow `CONTRIBUTING.rst` and `.github/PULL_REQUEST_TEMPLATE.md`.
