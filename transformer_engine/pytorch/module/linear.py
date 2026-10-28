@@ -34,7 +34,7 @@ from .base import (
 from ._common import (
     can_reconstruct_wgrad_input_from_original,
     check_fp8_reduce_and_update,
-    concat_input,
+    prepare_parameter,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
@@ -2511,7 +2511,7 @@ class Linear(TransformerEngineBaseModule):
 
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
         try:
-            weight, bias, weight_list, bias_list = self._get_weight_and_bias_tensors()
+            weight, bias, weight_list, bias_list = self._get_weight_and_bias()
             weight_shape = concat_shape(weight_list) if weight_list else None
             weight_requires_grad = (
                 any(t.requires_grad for t in weight_list) if weight_list else weight.requires_grad
@@ -2812,14 +2812,14 @@ class Linear(TransformerEngineBaseModule):
             fp8_grad=fp8_grad,
         )
 
-    def _get_weight_and_bias_tensors(self):
+    def _get_weight_and_bias(self):
         weights = self._get_weight_tensors()
-        weight, weight_list = concat_input(weights, defer=True)
+        weight, weight_list = prepare_parameter(weights, defer=True)
         bias = None
         bias_list = None
         if self.use_bias:
             biases = [getattr(self, name) for name in self.bias_names]
-            bias, bias_list = concat_input(
+            bias, bias_list = prepare_parameter(
                 biases,
                 defer=self.apply_bias and not self.gemm_bias_unfused_add,
             )
@@ -2840,7 +2840,7 @@ class Linear(TransformerEngineBaseModule):
 
         assert_warmed_up(self)
         assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export."
-        weight_tensor, bias_tensor, weight_list, bias_list = self._get_weight_and_bias_tensors()
+        weight_tensor, bias_tensor, weight_list, bias_list = self._get_weight_and_bias()
         if weight_list:
             weight_tensor = torch.cat(weight_list)
         if bias_list:

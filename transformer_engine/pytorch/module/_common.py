@@ -241,7 +241,7 @@ def noop_cat(
     return _NoopCatFunc.apply(dim, *tensors)
 
 
-def concat_input(
+def prepare_parameter(
     tensors: Sequence[TensorOrQuantized], *, defer: bool = False
 ) -> Tuple[Optional[TensorOrQuantized], Optional[List[torch.Tensor]]]:
     """Return a parameter operand or its deferred parts."""

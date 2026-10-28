@@ -3348,7 +3348,7 @@ def test_te_split_parameters(
         )
         return weight, bias, None, None
 
-    reference._get_weight_and_bias_tensors = reference_parameters
+    reference._get_weight_and_bias = reference_parameters
 
     if (
         compile_mode == "default"
