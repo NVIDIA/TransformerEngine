@@ -282,21 +282,27 @@ TEST(SwizzleTest, NVFP4FullWidthChunkAndFallback) {
   performTestSwizzleNVFP4(4096, 128, false);   // 32.5 KiB: regular fallback.
 }
 
+constexpr size_t kAlignmentTestM = 128;
+constexpr size_t kAlignmentTestK = 128;
+constexpr size_t kAlignmentTestBlockSize = 32;
+constexpr size_t kAlignmentOffsetBytes = 4;
+
 void performTestRejectUnalignedMXFP8Scales(bool rowwise, bool offset_input) {
   using namespace test;
-  constexpr size_t kDataSize = 128 * 128;
-  constexpr size_t kScaleSize = 128 * 4;
+  constexpr size_t kDataSize = kAlignmentTestM * kAlignmentTestK;
+  constexpr size_t kScaleSize = kDataSize / kAlignmentTestBlockSize;
   auto input_data = cuda_alloc<uint8_t>(kDataSize);
   auto output_data = cuda_alloc<uint8_t>(kDataSize);
-  auto input_storage = cuda_alloc<uint8_t>(kScaleSize + 4);
-  auto output_storage = cuda_alloc<uint8_t>(kScaleSize + 4);
-  uint8_t* input_scales = input_storage.get() + (offset_input ? 4 : 0);
-  uint8_t* output_scales = output_storage.get() + (offset_input ? 0 : 4);
+  auto input_storage = cuda_alloc<uint8_t>(kScaleSize + kAlignmentOffsetBytes);
+  auto output_storage = cuda_alloc<uint8_t>(kScaleSize + kAlignmentOffsetBytes);
+  uint8_t* input_scales = input_storage.get() + (offset_input ? kAlignmentOffsetBytes : 0);
+  uint8_t* output_scales = output_storage.get() + (offset_input ? 0 : kAlignmentOffsetBytes);
   TensorWrapper input(NVTE_MXFP8_1D_SCALING);
   TensorWrapper output(NVTE_MXFP8_1D_SCALING);
-  const std::vector<size_t> data_shape{128, 128};
-  const std::vector<size_t> scale_shape = rowwise ? std::vector<size_t>{128, 4}
-                                                    : std::vector<size_t>{4, 128};
+  const std::vector<size_t> data_shape{kAlignmentTestM, kAlignmentTestK};
+  const std::vector<size_t> scale_shape =
+      rowwise ? std::vector<size_t>{kAlignmentTestM, kAlignmentTestK / kAlignmentTestBlockSize}
+              : std::vector<size_t>{kAlignmentTestM / kAlignmentTestBlockSize, kAlignmentTestK};
   if (rowwise) {
     input.set_rowwise_data(input_data.get(), DType::kFloat8E4M3, data_shape);
     input.set_rowwise_scale_inv(input_scales, DType::kFloat8E8M0, scale_shape);
@@ -321,22 +327,27 @@ TEST(SwizzleTest, RejectUnalignedMXFP8ScaleBuffers) {
 
 TEST(SwizzleTest, RejectUnalignedMultiMXFP8ScaleBuffers) {
   using namespace test;
-  constexpr size_t kScaleSize = 128 * 4;
-  const std::vector<size_t> data_shape{128, 128};
-  const std::vector<size_t> scale_shape{128, 4};
+  constexpr size_t kNumTensors = 2;
+  constexpr size_t kDataSize = kAlignmentTestM * kAlignmentTestK;
+  constexpr size_t kScaleSize = kDataSize / kAlignmentTestBlockSize;
+  const std::vector<size_t> data_shape{kAlignmentTestM, kAlignmentTestK};
+  const std::vector<size_t> scale_shape{kAlignmentTestM,
+                                        kAlignmentTestK / kAlignmentTestBlockSize};
   for (bool offset_input : {true, false}) {
     std::vector<CudaPtr<uint8_t>> input_data, output_data, input_storage, output_storage;
     std::vector<TensorWrapper> input_tensors, output_tensors;
     std::vector<NVTETensor> inputs, outputs;
-    input_tensors.reserve(2);
-    output_tensors.reserve(2);
-    for (int i = 0; i < 2; i++) {
-      input_data.push_back(cuda_alloc<uint8_t>(128 * 128));
-      output_data.push_back(cuda_alloc<uint8_t>(128 * 128));
-      input_storage.push_back(cuda_alloc<uint8_t>(kScaleSize + 4));
-      output_storage.push_back(cuda_alloc<uint8_t>(kScaleSize + 4));
-      uint8_t* input_scales = input_storage.back().get() + (i == 0 && offset_input ? 4 : 0);
-      uint8_t* output_scales = output_storage.back().get() + (i == 0 && !offset_input ? 4 : 0);
+    input_tensors.reserve(kNumTensors);
+    output_tensors.reserve(kNumTensors);
+    for (size_t i = 0; i < kNumTensors; i++) {
+      input_data.push_back(cuda_alloc<uint8_t>(kDataSize));
+      output_data.push_back(cuda_alloc<uint8_t>(kDataSize));
+      input_storage.push_back(cuda_alloc<uint8_t>(kScaleSize + kAlignmentOffsetBytes));
+      output_storage.push_back(cuda_alloc<uint8_t>(kScaleSize + kAlignmentOffsetBytes));
+      uint8_t* input_scales =
+          input_storage.back().get() + (i == 0 && offset_input ? kAlignmentOffsetBytes : 0);
+      uint8_t* output_scales =
+          output_storage.back().get() + (i == 0 && !offset_input ? kAlignmentOffsetBytes : 0);
       input_tensors.emplace_back(NVTE_MXFP8_1D_SCALING);
       output_tensors.emplace_back(NVTE_MXFP8_1D_SCALING);
       input_tensors.back().set_rowwise_data(input_data.back().get(), DType::kFloat8E4M3,

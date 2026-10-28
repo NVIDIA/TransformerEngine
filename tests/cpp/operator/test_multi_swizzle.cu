@@ -100,12 +100,12 @@ void performTestMultiTensorSwizzle(const int num_tensors, const size_t M, const 
       const NVTEShape rs = input->rowwise_scale_inv_shape();
       zero_scale_inv_padding(input->rowwise_cpu_scale_inv_ptr<uint8_t>(),
                              rs.data[0], rs.data[1],
-                             M, (K + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                             M, divide_round_up(K, BLOCK_SIZE));
     } else {
       const NVTEShape cs = input->columnwise_scale_inv_shape();
       zero_scale_inv_padding(input->columnwise_cpu_scale_inv_ptr<uint8_t>(),
                              cs.data[0], cs.data[1],
-                             (M + BLOCK_SIZE - 1) / BLOCK_SIZE, K);
+                             divide_round_up(M, BLOCK_SIZE), K);
     }
     input->from_cpu();
 
@@ -176,7 +176,7 @@ void performTestMultiTensorSwizzleNVFP4(const int num_tensors, const size_t M, c
                                     : input->columnwise_cpu_scale_inv_ptr<uint8_t>();
     const size_t original_rows = rowwise ? M : K;
     const size_t original_cols =
-        rowwise ? (K + BLOCK_SIZE - 1) / BLOCK_SIZE : (M + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        rowwise ? divide_round_up(K, BLOCK_SIZE) : divide_round_up(M, BLOCK_SIZE);
     set_scale_inv_padding(input_scales, scale_shape.data[0], scale_shape.data[1], original_rows,
                           original_cols, 0xFF);
     input->from_cpu();
@@ -201,7 +201,7 @@ void performTestMultiTensorSwizzleNVFP4(const int num_tensors, const size_t M, c
         input_scales, input_scales + scale_shape.data[0] * scale_shape.data[1]);
     const size_t original_rows = rowwise ? M : K;
     const size_t original_cols =
-        rowwise ? (K + BLOCK_SIZE - 1) / BLOCK_SIZE : (M + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        rowwise ? divide_round_up(K, BLOCK_SIZE) : divide_round_up(M, BLOCK_SIZE);
     zero_scale_inv_padding(reference_input.data(), scale_shape.data[0], scale_shape.data[1],
                            original_rows, original_cols);
     std::vector<uint8_t> reference(scale_shape.data[0] * scale_shape.data[1]);
@@ -332,12 +332,12 @@ void performTestMultiTensorUnswizzle(const int num_tensors, const size_t M, cons
       const NVTEShape rs = orig->rowwise_scale_inv_shape();
       zero_scale_inv_padding(orig->rowwise_cpu_scale_inv_ptr<uint8_t>(),
                              rs.data[0], rs.data[1],
-                             M, (K + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                             M, divide_round_up(K, BLOCK_SIZE));
     } else {
       const NVTEShape cs = orig->columnwise_scale_inv_shape();
       zero_scale_inv_padding(orig->columnwise_cpu_scale_inv_ptr<uint8_t>(),
                              cs.data[0], cs.data[1],
-                             (M + BLOCK_SIZE - 1) / BLOCK_SIZE, K);
+                             divide_round_up(M, BLOCK_SIZE), K);
     }
     orig->from_cpu();
 
@@ -409,12 +409,12 @@ void performTestMultiTensorRoundtrip(const int num_tensors, const size_t M, cons
       const NVTEShape rs = orig->rowwise_scale_inv_shape();
       zero_scale_inv_padding(orig->rowwise_cpu_scale_inv_ptr<uint8_t>(),
                              rs.data[0], rs.data[1],
-                             M, (K + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                             M, divide_round_up(K, BLOCK_SIZE));
     } else {
       const NVTEShape cs = orig->columnwise_scale_inv_shape();
       zero_scale_inv_padding(orig->columnwise_cpu_scale_inv_ptr<uint8_t>(),
                              cs.data[0], cs.data[1],
-                             (M + BLOCK_SIZE - 1) / BLOCK_SIZE, K);
+                             divide_round_up(M, BLOCK_SIZE), K);
     }
     orig->from_cpu();
 

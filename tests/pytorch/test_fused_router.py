@@ -661,109 +661,55 @@ def test_qb_topk_uses_logits_device(histogram_mode):
 
 
 @pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-@pytest.mark.parametrize("invalid_bounds", ["equal", "reversed", "nonfinite"])
-def test_qb_topk_rejects_invalid_bin_bounds(histogram_mode, invalid_bounds):
-    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
-    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
-    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
-    bounds = {
-        "equal": [1.0, 1.0],
-        "reversed": [1.0, -1.0],
-        "nonfinite": [float("nan"), 1.0],
-    }[invalid_bounds]
-    bin_bounds = torch.tensor(bounds, device="cuda", dtype=torch.float32)
-    with pytest.raises(ValueError, match="finite with lower < upper"):
-        fused_topk_with_score_function(
-            logits,
-            4,
-            False,
-            None,
-            None,
-            None,
-            "sigmoid",
-            expert_bias,
-            qb_histogram=histogram,
-            qb_bin_bounds=bin_bounds,
-            qb_histogram_mode=histogram_mode,
-        )
+@pytest.mark.parametrize("use_dense_indices", [False, True])
+@pytest.mark.parametrize(
+    "invalid_bounds",
+    [[1.0, 1.0], [1.0, -1.0], [float("nan"), 1.0], [float("-inf"), float("inf")]],
+    ids=["equal", "reversed", "nan", "infinite"],
+)
+def test_qb_topk_invalid_bin_bounds_stay_in_histogram(
+    histogram_mode, use_dense_indices, invalid_bounds
+):
+    num_tokens, num_experts, num_bins, topk = 8, 16, 32, 4
+    logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=torch.float32)
+    expert_bias = torch.zeros(num_experts, device="cuda", dtype=torch.float32)
+    histogram = torch.zeros(num_experts, num_bins, device="cuda", dtype=torch.int32)
+    bin_bounds = torch.tensor(invalid_bounds, device="cuda", dtype=torch.float32)
+    topk_indices = (
+        torch.empty(num_tokens, topk, device="cuda", dtype=torch.int32)
+        if use_dense_indices
+        else None
+    )
 
-
-@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-def test_qb_topk_revalidates_updated_bin_bounds(histogram_mode):
-    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
-    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
-    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
-    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
-    fused_topk_with_score_function(
+    # bin_bounds values are not validated, so invalid bounds must neither raise nor write outside
+    # the histogram.
+    probs, routing_output = fused_topk_with_score_function(
         logits,
-        4,
+        topk,
         False,
         None,
         None,
         None,
         "sigmoid",
         expert_bias,
+        topk_indices=topk_indices,
         qb_histogram=histogram,
         qb_bin_bounds=bin_bounds,
         qb_histogram_mode=histogram_mode,
     )
-    bin_bounds.fill_(0.0)
-    with pytest.raises(ValueError, match="finite with lower < upper"):
-        fused_topk_with_score_function(
-            logits,
-            4,
-            False,
-            None,
-            None,
-            None,
-            "sigmoid",
-            expert_bias,
-            qb_histogram=histogram,
-            qb_bin_bounds=bin_bounds,
-            qb_histogram_mode=histogram_mode,
-        )
-
-
-@pytest.mark.parametrize(
-    "histogram_mode",
-    [QBHistogramMode.TWO_KERNEL, QBHistogramMode.FUSED_ATOMIC],
-)
-@pytest.mark.parametrize("use_dense_indices", [False, True])
-def test_qb_raw_binding_rejects_invalid_bin_bounds_recoverably(histogram_mode, use_dense_indices):
-    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
-    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
-    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
-    topk_indices = (
-        torch.empty(8, 4, device="cuda", dtype=torch.int32) if use_dense_indices else None
-    )
-    invalid_bounds = torch.tensor([1.0, 1.0], device="cuda", dtype=torch.float32)
-    with pytest.raises(RuntimeError, match="finite with lower < upper"):
-        tex.fused_topk_with_score_function_qb_fwd(
-            logits,
-            4,
-            None,
-            expert_bias,
-            int(RoutingMapFormat.BYTEMAP),
-            topk_indices,
-            histogram,
-            invalid_bounds,
-            histogram_mode,
-        )
-
-    # The validation error must not poison the CUDA context.
-    valid_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
-    tex.fused_topk_with_score_function_qb_fwd(
-        logits,
-        4,
-        None,
-        expert_bias,
-        int(RoutingMapFormat.BYTEMAP),
-        topk_indices,
-        histogram,
-        valid_bounds,
-        histogram_mode,
-    )
     torch.cuda.synchronize()
+
+    # Routing does not read the bounds, and every (token, expert) pair is counted in some bin.
+    valid_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
+    reference = qb_topk_score_function_pytorch(logits, topk, expert_bias, valid_bounds, num_bins)
+    torch.testing.assert_close(probs, reference["probs"])
+    if use_dense_indices:
+        torch.testing.assert_close(
+            topk_indices_to_routing_map(routing_output, num_experts), reference["routing_map"]
+        )
+    else:
+        torch.testing.assert_close(routing_output, reference["routing_map"])
+    assert histogram.sum().item() == num_tokens * num_experts
 
 
 @pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
@@ -848,7 +794,6 @@ def test_qb_topk_cuda_graph_captures_bounds_update(histogram_mode):
             qb_histogram_mode=histogram_mode,
         )
         bin_bounds.copy_(next_bounds)
-        mark_qb_bin_bounds_validated(bin_bounds)
         return probs, routing_map
 
     # Match full-iteration capture: an eager warmup ends with a bounds update, and the same
@@ -871,97 +816,10 @@ def test_qb_topk_cuda_graph_captures_bounds_update(histogram_mode):
     torch.testing.assert_close(bin_bounds, next_bounds)
 
 
-@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-def test_qb_topk_eager_call_revalidates_after_captured_bounds_update(histogram_mode):
-    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
-    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
-    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+def test_mark_qb_bin_bounds_validated_is_deprecated():
     bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
-    next_bounds = torch.tensor([-0.75, 0.25], device="cuda", dtype=torch.float32)
-
-    def run_router():
-        return fused_topk_with_score_function(
-            logits,
-            4,
-            False,
-            None,
-            None,
-            None,
-            "sigmoid",
-            expert_bias,
-            qb_histogram=histogram,
-            qb_bin_bounds=bin_bounds,
-            qb_histogram_mode=histogram_mode,
-        )
-
-    run_router()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        bin_bounds.copy_(next_bounds)
+    with pytest.warns(DeprecationWarning, match="mark_qb_bin_bounds_validated is deprecated"):
         mark_qb_bin_bounds_validated(bin_bounds)
-
-    # Replayed device writes do not advance bin_bounds._version. The capture-time marker must not
-    # let a subsequent eager router call inherit trust in the replay-produced values.
-    next_bounds.zero_()
-    graph.replay()
-    torch.cuda.synchronize()
-    with pytest.raises(ValueError, match="finite with lower < upper"):
-        run_router()
-
-
-@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-def test_qb_topk_cuda_graph_rejects_unvalidated_bounds(histogram_mode):
-    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
-    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
-    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
-    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
-
-    with pytest.raises(RuntimeError, match="current version must be validated"):
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            fused_topk_with_score_function(
-                logits,
-                4,
-                False,
-                None,
-                None,
-                None,
-                "sigmoid",
-                expert_bias,
-                qb_histogram=histogram,
-                qb_bin_bounds=bin_bounds,
-                qb_histogram_mode=histogram_mode,
-            )
-
-
-@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-def test_qb_topk_cuda_graph_rejects_stale_bounds_validation(histogram_mode):
-    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
-    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
-    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
-    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
-
-    def run_router():
-        return fused_topk_with_score_function(
-            logits,
-            4,
-            False,
-            None,
-            None,
-            None,
-            "sigmoid",
-            expert_bias,
-            qb_histogram=histogram,
-            qb_bin_bounds=bin_bounds,
-            qb_histogram_mode=histogram_mode,
-        )
-
-    run_router()
-    bin_bounds.zero_()
-    with pytest.raises(RuntimeError, match="current version must be validated"):
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            run_router()
 
 
 @pytest.mark.parametrize(
@@ -1181,6 +1039,95 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
     aux_loss_fused.backward()
 
     torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("path", ["forward", "graph_safe_forward", "backward"])
+def test_fused_moe_aux_loss_rejects_int_offset_overflow(path):
+    num_rows, num_cols = 8_388_609, 256  # Above INT_MAX elements.
+    bytes_needed = num_rows * num_cols * 2
+    torch.cuda.empty_cache()
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < bytes_needed + (1 << 30):
+        pytest.skip("Needs 4.0 GiB for BF16 input/output plus 1 GiB headroom")
+
+    tokens_per_expert = torch.ones(num_cols, device="cuda", dtype=torch.int32)
+    try:
+        if path == "backward":
+            tex.fused_moe_aux_loss_bwd(
+                Const_buf=torch.ones(2, device="cuda", dtype=torch.float32),
+                tokens_per_expert=tokens_per_expert,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                grad_aux_loss=torch.ones((), device="cuda", dtype=torch.bfloat16),
+            )
+        else:
+            probs = torch.empty((num_rows, num_cols), device="cuda", dtype=torch.bfloat16)
+            arguments = dict(
+                probs=probs,
+                tokens_per_expert=tokens_per_expert,
+                num_experts=num_cols,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                topk=1,
+                coeff=0.01,
+            )
+            if path == "forward":
+                tex.fused_moe_aux_loss_fwd(total_num_tokens=num_rows, **arguments)
+            else:
+                total = torch.tensor(num_rows, device="cuda", dtype=torch.int64)
+                tex.fused_moe_aux_loss_fwd_graph_safe(total_num_tokens=total, **arguments)
+    except torch.cuda.OutOfMemoryError:
+        pytest.skip("Could not allocate the BF16 input/output tensor")
+    except RuntimeError as exc:
+        assert "num_rows * num_cols exceeds INT_MAX" in str(exc)
+    else:
+        pytest.fail("Expected the int-offset guard to reject the shape")
+
+
+@pytest.mark.parametrize("path", ["forward", "graph_safe_forward", "backward"])
+def test_fused_moe_aux_loss_largest_accepted_shape(path):
+    # Exactly INT_MAX elements with one column: loop counters and grid math must not overflow.
+    num_rows, num_cols = 2**31 - 1, 1
+    bytes_needed = num_rows * num_cols * 2
+    torch.cuda.empty_cache()
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < bytes_needed + (1 << 30):
+        pytest.skip("Needs 4.0 GiB for BF16 input/output plus 1 GiB headroom")
+
+    tokens_per_expert = torch.ones(num_cols, device="cuda", dtype=torch.int32)
+    try:
+        if path == "backward":
+            grad_probs = tex.fused_moe_aux_loss_bwd(
+                Const_buf=torch.tensor([0.25, 0.0], device="cuda", dtype=torch.float32),
+                tokens_per_expert=tokens_per_expert,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                grad_aux_loss=torch.tensor(2.0, device="cuda", dtype=torch.bfloat16),
+            )
+            for start in range(0, num_rows, 1 << 24):
+                assert torch.all(grad_probs[start : start + (1 << 24)] == 0.5)
+        else:
+            probs = torch.zeros((num_rows, num_cols), device="cuda", dtype=torch.bfloat16)
+            probs[-2:] = 1  # Nonzero only where the row counter is closest to INT_MAX.
+            arguments = dict(
+                probs=probs,
+                tokens_per_expert=tokens_per_expert,
+                num_experts=num_cols,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                topk=1,
+                coeff=1.0,
+            )
+            if path == "forward":
+                aux_loss, _ = tex.fused_moe_aux_loss_fwd(total_num_tokens=1, **arguments)
+            else:
+                total = torch.tensor(1, device="cuda", dtype=torch.int64)
+                aux_loss, _ = tex.fused_moe_aux_loss_fwd_graph_safe(
+                    total_num_tokens=total, **arguments
+                )
+            torch.testing.assert_close(aux_loss, probs.new_tensor(2.0), atol=0, rtol=0)
+    except torch.cuda.OutOfMemoryError:
+        pytest.skip("Could not allocate the BF16 input/output tensor")
 
 
 def test_fused_moe_aux_loss_cuda_graph_capture():

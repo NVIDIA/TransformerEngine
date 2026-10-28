@@ -118,10 +118,27 @@ class Recipe:
     _cached_repr: Optional[str] = None
 
     def __setattr__(self, name: str, value: Any) -> None:
-        # Invalidate the cached repr on any attribute mutation.
+        # Invalidate the cached repr on any attribute mutation. Track public
+        # attributes added outside the recipe's declared dataclass fields.
         if name != "_cached_repr":
             object.__setattr__(self, "_cached_repr", None)
+            if not name.startswith("_") and name not in getattr(
+                type(self), "__dataclass_fields__", {}
+            ):
+                extra_attrs = self.__dict__.get("_extra_attrs")
+                if extra_attrs is None:
+                    extra_attrs = set()
+                    object.__setattr__(self, "_extra_attrs", extra_attrs)
+                extra_attrs.add(name)
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        object.__delattr__(self, name)
+        if name != "_cached_repr":
+            object.__setattr__(self, "_cached_repr", None)
+            extra_attrs = self.__dict__.get("_extra_attrs")
+            if extra_attrs is not None:
+                extra_attrs.discard(name)
 
     @abc.abstractmethod
     def _make_repr(self) -> str:
@@ -133,7 +150,15 @@ class Recipe:
 
     def __repr__(self) -> str:
         if self._cached_repr is None:
-            self._cached_repr = self._make_repr()
+            recipe_repr = self._make_repr()
+            extra_attrs = self.__dict__.get("_extra_attrs")
+            if extra_attrs:
+                extras = ", ".join(
+                    f"{name}={getattr(self, name)!r}" for name in sorted(extra_attrs)
+                )
+                separator = "" if recipe_repr.endswith(", ") else ", "
+                recipe_repr += f"{separator}{extras}"
+            self._cached_repr = recipe_repr
         return self._cached_repr
 
     @classmethod
@@ -310,6 +335,9 @@ class Float8CurrentScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    fp8_quant_fwd_inp: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_fwd_weight: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_bwd_grad: QParams = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         assert self.fp8_format in (Format.E4M3, Format.HYBRID), "Unsupported FP8 format."
@@ -447,6 +475,9 @@ class Float8BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    fp8_quant_fwd_inp: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_fwd_weight: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_bwd_grad: QParams = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
@@ -586,6 +617,9 @@ class NVFP4BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    fp4_quant_fwd_inp: QParams = field(init=False, repr=False, compare=False)
+    fp4_quant_fwd_weight: QParams = field(init=False, repr=False, compare=False)
+    fp4_quant_bwd_grad: QParams = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
@@ -633,6 +667,7 @@ class NVFP4BlockScaling(Recipe):
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}, "
+            f"disable_rht={self.disable_rht}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
             f"nvfp4_4over6={self.nvfp4_4over6}, "
             f"nvfp4_4over6_e4m3_use_256={self.nvfp4_4over6_e4m3_use_256}, "
