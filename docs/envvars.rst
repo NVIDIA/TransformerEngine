@@ -167,6 +167,15 @@ General
                  this value if an application legitimately creates more grouped tensor
                  handles than the default pool can hold.
 
+.. envvar:: NVTE_CUTEDSL_FUSED_GROUPED_MLP
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: **Deprecated** (use ``split_alignment=256`` when constructing
+                 :class:`transformer_engine.pytorch.ops.GroupedLinear` instead).
+                 When set to ``1``, overrides the operation's declared split alignment
+                 to 256, enabling grouped MLP fusion when its other requirements are met.
+
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -555,6 +564,12 @@ JAX-Specific Variables
    :Type: ``str``
    :Default: None
    :Description: Test level for JAX unit tests (``"L0"``, ``"L1"``, ``"L2"``). Used internally by the test suite.
+
+.. envvar:: NVTE_EP_FUSED_PREPARE_DISPATCH
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use the fused prepare + dispatch path for expert parallelism (NCCL EP count mode) instead of separate prepare and dispatch calls. Supported only when EP stays within a single NVLink domain, and the received row order within an expert block may differ from the unfused path. In JAX the value is latched on first use.
 
 JAX Triton Extensions
 ^^^^^^^^^^^^^^^^^^^^^

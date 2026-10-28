@@ -131,6 +131,7 @@ def _row_id_map_pass_2_kernel(
     workspace_ptr,
     # sizes
     num_tokens,
+    num_out_tokens,
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -155,6 +156,9 @@ def _row_id_map_pass_2_kernel(
         -1,
         row_id_within_token_block + tl.sum(n_tokens_per_chunk) - 1,
     )
+    # capacity limit: destinations at or past num_out_tokens are dropped, matching
+    # the `idx >= num_out_tokens` branch of moe_permute_row_map in permutation.cu
+    row_id = tl.where(row_id >= num_out_tokens, -1, row_id)
     tl.store(
         row_id_map_ptr + pid_m * stride_row_id_map_expert + offset * stride_row_id_map_token,
         row_id,
@@ -367,6 +371,9 @@ def _unpermute_kernel(
             tl.store(
                 unpermuted_probs_ptr + unpermuted_prob_off, 0.0, mask=map_load_off < num_experts
             )
+            # Zeroing and routed stores are distributed across warps.
+            # Synchronize before any warp enters the routed-write loop.
+            tl.debug_barrier()
     accumulator = tl.zeros((BLOCK_SIZE,), dtype=compute_type)
     n_routed = tl.load(
         row_id_map_ptr
@@ -465,6 +472,9 @@ def _unpermute_bwd_with_merging_probs_kernel(
         pid * stride_merging_probs_grad_token + stride_merging_probs_grad_expert * map_load_off
     )
     tl.store(merging_probs_grad_ptr + token_probs_grad_off, 0.0, mask=map_load_off < num_experts)
+    # Zeroing and routed stores are distributed across warps.
+    # Synchronize before any warp enters the routed-write loop.
+    tl.debug_barrier()
     n_routed = tl.load(
         row_id_map_ptr + pid * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert
     )

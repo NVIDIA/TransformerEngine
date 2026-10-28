@@ -93,6 +93,7 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
  *         The type of quantized tensor in the output depends on the scaling mode of the output
  *         tensor. See file level comments.
  *         For grouped tensors with a varying last dimension, the last dimension must be a multiple of 128.
+ *         NVFP4 output requires row scaling, BF16 input, and dimensions that are multiples of 128.
  *
  *  \param[in]     input            Input grouped tensor to be cast.
  *  \param[in,out] output           Output grouped tensor.
@@ -493,6 +494,11 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
                                          const size_t *split_sections, size_t num_tensors,
                                          const NVTEQuantizationConfig quant_config,
                                          cudaStream_t stream);
+
+/*! \deprecated Use nvte_group_amax instead. */
+void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
+                                   const size_t *split_sections, size_t num_tensors,
+                                   cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

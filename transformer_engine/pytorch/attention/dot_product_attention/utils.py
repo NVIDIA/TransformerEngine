@@ -22,6 +22,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     QKVFormat,
@@ -123,7 +124,7 @@ class FlashAttentionUtils:
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
     version_required_blackwell = PkgVersion("2.7.3")
-    max_version = PkgVersion("2.8.4")
+    max_version = PkgVersion("2.8.5")
     v2_plus = False
     v2_1_plus = False
     v2_3_plus = False
@@ -148,11 +149,15 @@ class FlashAttentionUtils:
 
     v4_is_installed = False
     fa4_version = PkgVersion("0")
+    v4_0_0_beta31 = PkgVersion("4.0.0b31")
+    v4_0_0_beta33 = PkgVersion("4.0.0b33")
+    quack_version: Optional[PkgVersion] = None
+    cutlass_dsl_version: Optional[PkgVersion] = None
     use_v4 = False
     # Set by a signature probe in backends.py; fail-closed default.
     fa3_supports_softcap = False
     v4_installation_steps = """\
-pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
+pip install flash-attn-4==4.0.0b33 nvidia-cutlass-dsl[cu13]==4.8.0"""
     v4_warning_printed = False
     # Set by backends.py if FA4 is installed; calls flash_attn.cute.interface._validate_head_dims
     # which raises AssertionError for unsupported (head_dim, head_dim_v) combinations.
@@ -291,6 +296,11 @@ class AttentionParams:
         Whether a score_mod callback was provided.
     has_score_mod_bprop : bool, default = False
         Whether a score_mod bprop callback was provided.
+    device : Optional[torch.device], default = None
+        Query/key/value device. Defaults to the current CUDA device for standalone queries.
+    requires_backward : bool, default = True
+        Whether this call may require backward, independently of module training mode.
+        Standalone queries conservatively require backward support unless specified otherwise.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -334,6 +344,8 @@ class AttentionParams:
     checkpoint_core_attention: bool = False
     has_score_mod: bool = False
     has_score_mod_bprop: bool = False
+    device: Optional[torch.device] = None
+    requires_backward: bool = True
 
     def __eq__(self, other):
         """
@@ -543,7 +555,7 @@ def get_attention_backend(
         logger.setLevel(AttentionLogging._log_level)
         if not logger.hasHandlers():
             logger.addHandler(AttentionLogging._stream_handler)
-    device_compute_capability = get_device_compute_capability()
+    device_compute_capability = get_device_compute_capability(attention_params.device)
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
@@ -1279,6 +1291,32 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_flash_attention_4 = False
+    # SM100/SM110 D=256 gained seqused_q/k support in b31 for forward and b33 for backward.
+    # THD all-gather always passes this metadata; other THD paths pass it only
+    # when pad_between_seqs=True.
+    fa4_uses_seqused = qkv_format == "thd" and (
+        pad_between_seqs or (context_parallel and cp_comm_type == "all_gather")
+    )
+    if (  # pylint: disable=too-many-boolean-expressions
+        use_flash_attention_4
+        and FlashAttentionUtils.v4_is_installed
+        and (10, 0) <= device_compute_capability < (12, 0)
+        and head_dim_qk == head_dim_v == 256
+        and fa4_uses_seqused
+        and (
+            FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta31
+            or (
+                attention_params.requires_backward
+                and FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta33
+            )
+        )
+    ):
+        logger.debug(
+            "Disabling FlashAttention 4 for SM100/SM110 head_dim=256 with seqused_q/k: "
+            "version %s does not support the requested execution direction.",
+            FlashAttentionUtils.fa4_version,
+        )
+        use_flash_attention_4 = False
     if context_parallel and (
         use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     ):
@@ -1757,6 +1795,18 @@ def get_attention_backend(
                 head_dim_v,
             )
             use_flash_attention_3 = False
+    if use_flash_attention_4 and deterministic and FlashAttentionUtils.v4_is_installed:
+        # eval() does not disable autograd. SM12x backward and SM100/SM110 D=256 backward
+        # reject deterministic execution, so only forward-only calls can use those kernels.
+        if attention_params.requires_backward and (
+            device_compute_capability[0] == 12
+            or ((10, 0) <= device_compute_capability < (12, 0) and head_dim_qk == head_dim_v == 256)
+        ):
+            logger.debug(
+                "Disabling FlashAttention 4 because the selected backward kernel does not "
+                "support deterministic execution."
+            )
+            use_flash_attention_4 = False
     if use_fused_attention and deterministic:
         if softmax_type != "vanilla":
             logger.debug(
@@ -1889,8 +1939,23 @@ def get_attention_backend(
         bool(available_backends[2]),
     )
 
-    # Select FusedAttention for performance
-    if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
+    # Prefer FA2 for THD training with dropout on SM100/103, where FusedAttention has a known
+    # performance issue. At this point use_flash_attention_2 confirms a usable installation.
+    is_slow_fused_thd_dropout = (
+        is_training
+        and qkv_format == "thd"
+        and attention_dropout != 0.0
+        and device_compute_capability in ((10, 0), (10, 3))
+    )
+    if is_slow_fused_thd_dropout and use_flash_attention_2 and use_fused_attention:
+        logger.debug(
+            "Disabling FusedAttention to give FlashAttention 2 preference for THD with dropout"
+            " on SM100/103"
+        )
+        use_fused_attention = False
+        fused_attention_backend = None
+    # Select FusedAttention for performance in all other Hopper+ configurations.
+    elif use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
         logger.debug(
             "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
             "for performance reasons"
@@ -1924,11 +1989,26 @@ def get_attention_backend(
 
 @torch.no_grad()
 def get_thd_padding_mask(num_tokens, cu_seqlens, cu_seqlens_padded):
-    """Identify inter-sequence padding in a flattened packed THD buffer."""
+    """Return a boolean mask identifying padding token positions in a THD buffer.
+
+    ``num_tokens`` is the full physical buffer capacity, which may exceed
+    ``cu_seqlens_padded[-1]``. ``cu_seqlens`` describes cumulative valid token
+    counts, while ``cu_seqlens_padded`` describes physical sequence boundaries.
+    Inter-sequence gaps and all positions at or beyond the final padded boundary
+    are marked True. For example, a 16-token buffer with ``cu_seqlens=[0, 3, 8]``
+    and ``cu_seqlens_padded=[0, 4, 12]`` includes tail padding at positions [12, 16).
+
+    This helper is shared by non-CP and CP attention. Its operations stay on
+    device so that padding cleanup remains CUDA-graph-capturable in both paths.
+    """
     rows = torch.arange(num_tokens, device=cu_seqlens_padded.device)
     sequence = torch.searchsorted(cu_seqlens_padded[1:], rows, right=True)
-    valid_end = cu_seqlens_padded[sequence] + cu_seqlens[sequence + 1] - cu_seqlens[sequence]
-    return rows >= valid_end
+    valid_ends = cu_seqlens_padded[:-1] + cu_seqlens[1:] - cu_seqlens[:-1]
+    # Tail token positions map to sequence == batch_size. Append a zero-length sequence
+    # at the final physical boundary so that index is valid, even for an empty
+    # batch. All operations stay on device for CUDA Graph capture and replay.
+    valid_ends = torch.cat((valid_ends, cu_seqlens_padded[-1:]))
+    return rows >= valid_ends[sequence]
 
 
 @torch.no_grad()
@@ -1961,7 +2041,7 @@ def get_padding_mask(
         return (
             (positions.unsqueeze(0) >= seqlens.unsqueeze(1))
             .view(batch_size, 1, 1, max_seqlen)
-            .to(device="cuda")
+            .to(device=te_device_type())
         )
 
     attention_mask_q = _mask(cu_seqlens_q, max_seqlen_q)
@@ -2087,9 +2167,11 @@ def get_full_mask(
         actual_seqlens_kv = m[:, 0, 0, :].sum(dim=1)
 
     # apply SWA mask
-    mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+    mask = torch.arange(max_seqlen_q, dtype=torch.int32, device=te_device_type()).view(
         1, 1, max_seqlen_q, 1
-    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
+    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device=te_device_type()).view(
+        1, 1, 1, max_seqlen_kv
+    )
     swa_left = None
     swa_right = None
     if attn_mask_type == "causal_bottom_right" or (
@@ -2185,7 +2267,7 @@ def get_alibi(
                 m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
                 m = torch.cat([m, m_hat])
 
-            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device="cuda")
+            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device=te_device_type())
         _alibi_cache["_num_heads"] = num_heads
         _alibi_cache["_alibi_slopes_require_update"] = False
 
@@ -2198,9 +2280,9 @@ def get_alibi(
         else:
             raise ValueError("ALiBi slopes cannot exceed 2 dimensions.")
 
-        bias = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+        bias = torch.arange(max_seqlen_q, dtype=torch.int32, device=te_device_type()).view(
             1, 1, max_seqlen_q, 1
-        ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
+        ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device=te_device_type()).view(
             1, 1, 1, max_seqlen_kv
         )
         if actual_seqlens_q is None and actual_seqlens_kv is None:
@@ -2220,7 +2302,9 @@ def get_alibi(
         _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
         _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
         bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
-        _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
+        _alibi_cache["_alibi_bias"] = bias.contiguous().to(
+            dtype=bias_dtype, device=te_device_type()
+        )
         _alibi_cache["_alibi_bias_require_update"] = False
 
     return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
@@ -2235,7 +2319,7 @@ def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     mask = mask.squeeze(1).squeeze(1)
     reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+    zero = torch.zeros(1, dtype=torch.int32, device=te_device_type())
     cu_seqlens = torch.cat((zero, cu_seqlens))
 
     return cu_seqlens
@@ -2253,7 +2337,7 @@ def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.
 
     reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+    zero = torch.zeros(1, dtype=torch.int32, device=te_device_type())
     cu_seqlens = torch.cat((zero, cu_seqlens))
 
     mask = mask.reshape(-1)
@@ -2289,7 +2373,7 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
         ordered,
         bs * max_seqlen,
     )
-    return indices.to(dtype=torch.int64, device="cuda").unsqueeze(1).unsqueeze(1)
+    return indices.to(dtype=torch.int64, device=te_device_type()).unsqueeze(1).unsqueeze(1)
 
 
 def get_full_cu_seqlens(
@@ -3230,16 +3314,8 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
         "bshd",
         "sbhd",
     ), f"mxfp8_quantize_only only supports bshd/sbhd, got {src_format!r}."
-    _s_dim = {"bshd": 1, "sbhd": 0}
-    _d_dim = {"bshd": 3, "sbhd": 3}
-
     fp8_tensors = []
     for tensor, quantizer in tensor_quantizer_pairs:
-        original_shape = tensor.shape
-        rs_shape = list(original_shape)
-        rs_shape[_d_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
-        cs_shape = list(original_shape)
-        cs_shape[_s_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
         if src_format == "bshd":
             t2d = tensor.view(*tensor.shape[:2], -1)
         else:
@@ -3248,39 +3324,117 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
         quantizer.optimize_for_gemm = False
         fp8_2d = quantizer(t2d)
         quantizer.optimize_for_gemm = orig_optimize
-        # Re-wrap with the original 4D SBHD/BSHD shape so that shape[-1] equals the per-head
-        # dimension (matching Q's wrapper shape) and fused_attn_bwd produces 4D dkv that
-        # matches key/value's expected gradient shape in _KFQuantizeKVForAttn.backward.
-        fp8_t = MXFP8Tensor(
-            shape=original_shape,
-            dtype=tensor.dtype,
-            rowwise_data=(
-                fp8_2d._rowwise_data.view(original_shape)
-                if fp8_2d._rowwise_data is not None
-                else None
-            ),
-            rowwise_scale_inv=(
-                fp8_2d._rowwise_scale_inv.view(rs_shape)
-                if fp8_2d._rowwise_scale_inv is not None
-                else None
-            ),
-            columnwise_data=(
-                fp8_2d._columnwise_data.view(original_shape)
-                if fp8_2d._columnwise_data is not None
-                else None
-            ),
-            columnwise_scale_inv=(
-                fp8_2d._columnwise_scale_inv.view(cs_shape)
-                if fp8_2d._columnwise_scale_inv is not None
-                else None
-            ),
-            quantizer=quantizer,
-            requires_grad=False,
-            fp8_dtype=fp8_2d._fp8_dtype,
-            with_gemm_swizzled_scales=False,
+        fp8_tensors.append(
+            _mxfp8_tensor_in_src_format(fp8_2d, tensor.shape, tensor.dtype, quantizer, src_format)
         )
-        fp8_tensors.append(fp8_t)
     return fp8_tensors
+
+
+def _mxfp8_tensor_in_src_format(fp8_2d, shape, dtype, quantizer, src_format):
+    """Wrap the MXFP8 quantization of an attention input's 2D view with the input's shape.
+
+    Re-wrap with the original 4D SBHD/BSHD shape so that shape[-1] equals the per-head
+    dimension (matching Q's wrapper shape) and fused_attn_bwd produces 4D dkv that
+    matches key/value's expected gradient shape in _KFQuantizeKVForAttn.backward.
+    """
+    _s_dim = {"bshd": 1, "sbhd": 0}
+    _d_dim = {"bshd": 3, "sbhd": 3}
+    rs_shape = list(shape)
+    rs_shape[_d_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
+    cs_shape = list(shape)
+    cs_shape[_s_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
+    return MXFP8Tensor(
+        shape=shape,
+        dtype=dtype,
+        rowwise_data=(
+            fp8_2d._rowwise_data.view(shape) if fp8_2d._rowwise_data is not None else None
+        ),
+        rowwise_scale_inv=(
+            fp8_2d._rowwise_scale_inv.view(rs_shape)
+            if fp8_2d._rowwise_scale_inv is not None
+            else None
+        ),
+        columnwise_data=(
+            fp8_2d._columnwise_data.view(shape) if fp8_2d._columnwise_data is not None else None
+        ),
+        columnwise_scale_inv=(
+            fp8_2d._columnwise_scale_inv.view(cs_shape)
+            if fp8_2d._columnwise_scale_inv is not None
+            else None
+        ),
+        quantizer=quantizer,
+        requires_grad=False,
+        fp8_dtype=fp8_2d._fp8_dtype,
+        with_gemm_swizzled_scales=False,
+    )
+
+
+def fused_mla_kv_rope_mxfp8(
+    kv, k_rope, cos, sin, v_head_dim, key_quantizer=None, value_quantizer=None
+):
+    """MLA key/value split, key RoPE and MXFP8 quantization in one kernel.
+
+    Splits ``kv`` into the key dimensions without RoPE and the value, appends ``k_rope`` with
+    RoPE applied to the key, and quantizes key and value as
+    :func:`mxfp8_quantize_only` (``src_format="sbhd"``) does, with byte-identical results,
+    without writing key and value in BF16 first. The RoPE is that of Megatron-LM's MLA
+    (interleaved rotation pairs in, the two halves out), with its roundings; see
+    ``nvte_fused_mla_kv_rope_mxfp8``. Supports the head dimensions of DeepSeek-V3 (128 key
+    dimensions without RoPE, 64 RoPE dimensions, 128 value dimensions) on SM 10.0+.
+
+    Parameters
+    ----------
+    kv : torch.Tensor
+        [s, b, h, k_dim + v_head_dim] BF16: per head, the key dimensions without RoPE and then
+        the value. ``s`` must be a multiple of 128 and ``h`` even.
+    k_rope : torch.Tensor
+        [s, b, 1, emb_dim] or [s, b, emb_dim] BF16 key RoPE dimensions shared by the heads,
+        rotation pairs interleaved. May be a strided view, such as a slice of a projection
+        output.
+    cos, sin : torch.Tensor
+        [max_s, 1, 1, emb_dim] or [max_s, emb_dim], both BF16 or both FP32; row t is used for
+        token t.
+    v_head_dim : int
+        Value dimensions per head in ``kv``.
+    key_quantizer, value_quantizer : MXFP8Quantizer, optional
+        E4M3 quantizers with row-wise and column-wise usage; created if not given.
+
+    Returns
+    -------
+    key, value : MXFP8Tensor
+        [s, b, h, k_dim + emb_dim] and [s, b, h, v_head_dim], data and scale_invs in SBHD
+        layout; NOT yet BHSD-permuted or swizzled (see :func:`mxfp8_transpose_swizzle`).
+    """
+    s, b, h, kv_dim = kv.shape
+    if s % (4 * MXFP8_BLOCK_SCALING_SIZE) != 0:
+        raise ValueError(
+            "fused_mla_kv_rope_mxfp8 requires a sequence length that is a multiple of "
+            f"{4 * MXFP8_BLOCK_SCALING_SIZE}, got {s}."
+        )
+    quantizers = [
+        (
+            quantizer
+            if quantizer is not None
+            else MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+        )
+        for quantizer in (key_quantizer, value_quantizer)
+    ]
+    orig_optimize = [quantizer.optimize_for_gemm for quantizer in quantizers]
+    for quantizer in quantizers:
+        quantizer.optimize_for_gemm = False
+    try:
+        key_2d, value_2d = tex.fused_mla_kv_rope_mxfp8(
+            kv, k_rope, cos, sin, v_head_dim, quantizers[0], quantizers[1]
+        )
+    finally:
+        for quantizer, optimize in zip(quantizers, orig_optimize):
+            quantizer.optimize_for_gemm = optimize
+    key_shape = (s, b, h, kv_dim - v_head_dim + k_rope.shape[-1])
+    value_shape = (s, b, h, v_head_dim)
+    return (
+        _mxfp8_tensor_in_src_format(key_2d, key_shape, kv.dtype, quantizers[0], "sbhd"),
+        _mxfp8_tensor_in_src_format(value_2d, value_shape, kv.dtype, quantizers[1], "sbhd"),
+    )
 
 
 def mxfp8_transpose_swizzle(fp8_tensors, src_format):

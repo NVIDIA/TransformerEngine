@@ -44,6 +44,8 @@ namespace nvfp4 {
 
 namespace quantize_4over6_kernel {
 
+using nvfp4_scale_t = fp8e4m3;
+
 constexpr int kThreads = 128;
 constexpr int kWarpThreads = 32;
 constexpr int kGroupSize = 16;
@@ -107,7 +109,8 @@ __device__ __forceinline__ ScalePair compute_scale_pair(const float block_amax,
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
   constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;  // 448.0f
   constexpr float expand_to_map4 = 1.5f;
-  const float S_enc = core::compute_global_encode_scaling_factor_FP4<E4M3_MAX>(global_amax);
+  const float S_enc =
+      core::compute_global_encode_scaling_factor_FP4<nvfp4_scale_t, E4M3_MAX>(global_amax);
   const float base = block_amax / fp4_max * S_enc;
 
   ScalePair scales;
@@ -454,9 +457,13 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvf
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    float global_amax = amax[0];
-    if constexpr (ROW_SCALED_NVFP4) {
-      global_amax = amax[global_row];
+    float global_amax = static_cast<float>(E4M3_MAX * detail::TypeExtrema<fp4e2m1>::max);
+    if (amax != nullptr) {
+      if constexpr (ROW_SCALED_NVFP4) {
+        global_amax = amax[global_row];
+      } else {
+        global_amax = amax[0];
+      }
     }
 
     const ScalePair scale_pair = compute_scale_pair<E4M3_MAX>(block_amax, global_amax);
@@ -505,7 +512,11 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    const float global_amax = amax[0];
+    float global_amax = static_cast<float>(E4M3_MAX * detail::TypeExtrema<fp4e2m1>::max);
+    if (amax != nullptr) {
+      global_amax = amax[0];
+    }
+
     const ScalePair scale_pair = compute_scale_pair<E4M3_MAX>(block_amax, global_amax);
     CandidatePair candidates = make_candidates<Cfg, E4M3_MAX>(x0, x1, scale_pair, global_amax);
 

@@ -16,19 +16,483 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <algorithm>
+#include <vector>
+
 #include "../../common.h"
 #include "../../util/math.h"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
+#include "../core/grouped_layout.cuh"
 #include "core_nvfp4.cuh"
+#include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
+// Single-launch fused row/col amax for grouped (MoE) row-scaled NVFP4. Grouped
+// counterpart of the single-tensor row_scaled_amax_kernel: the input is one
+// packed (sum_M, K) buffer, so a single input TMA map covers all experts; only
+// the tiny per-expert amax vectors are selected via GetTensorId.
+namespace group_row_scaled_amax_kernel {
+
+using namespace ptx;
+
+#if FP4_TYPE_SUPPORTED
+
+constexpr int kMaxAmaxTensorsPerKernel = 64;
+
+// Per-expert amax output pointers plus the prefix sum of per-expert row counts.
+struct GroupedFusedAmaxArgs {
+  void *row_amax_list[kMaxAmaxTensorsPerKernel];           // float* [M_i], null if !DO_ROW
+  void *col_amax_list[kMaxAmaxTensorsPerKernel];           // float* [K],   null if !DO_COL
+  int split_sections_range[kMaxAmaxTensorsPerKernel + 1];  // prefix sum of M_i (rows)
+  int num_tensors;
+};
+
+// A 128-row chunk lies fully inside one expert (each M_i is 128-aligned), so the
+// tensor id is constant per CTA.
+__device__ __forceinline__ int GetTensorId(const GroupedFusedAmaxArgs &args, int row_offset) {
+  int tensor_id = 0;
+  while (args.split_sections_range[tensor_id + 1] <= row_offset) {
+    ++tensor_id;
+  }
+  return tensor_id;
+}
+
+constexpr int FA_CHUNK_DIM_Y = 128;
+constexpr int FA_CHUNK_DIM_X = 128;
+constexpr int FA_TILE_DIM_Y = 64;
+constexpr int FA_TILE_DIM_X = 64;
+constexpr int FA_THREADS_NUM = 128;
+constexpr int FA_TILES_Y = FA_CHUNK_DIM_Y / FA_TILE_DIM_Y;
+constexpr int FA_TILES_X = FA_CHUNK_DIM_X / FA_TILE_DIM_X;
+constexpr int FA_STAGES = FA_TILES_Y * FA_TILES_X;
+constexpr int FA_PREFETCH_STAGES = 1;
+constexpr int FA_BUFFS_NUM = FA_PREFETCH_STAGES + 1;
+constexpr int FA_BUFF_IN_SIZE = FA_TILE_DIM_Y * FA_TILE_DIM_X;
+
+// Zero the per-expert amax vectors so the main kernel can atomicMax into them.
+// ``static`` gives internal linkage so this header can be included by multiple TUs.
+static __global__ void group_fused_amax_zero_kernel(GroupedFusedAmaxArgs args, const int cols,
+                                                    const float *noop) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+  const int tensor_id = blockIdx.x;
+  if (tensor_id >= args.num_tensors) {
+    return;
+  }
+  const int rows = args.split_sections_range[tensor_id + 1] - args.split_sections_range[tensor_id];
+  float *row_amax = reinterpret_cast<float *>(args.row_amax_list[tensor_id]);
+  float *col_amax = reinterpret_cast<float *>(args.col_amax_list[tensor_id]);
+  const int stride = blockDim.x * gridDim.y;
+  const int base = threadIdx.x + blockIdx.y * blockDim.x;
+  if (row_amax != nullptr) {
+    for (int i = base; i < rows; i += stride) {
+      row_amax[i] = 0.0f;
+    }
+  }
+  if (col_amax != nullptr) {
+    for (int i = base; i < cols; i += stride) {
+      col_amax[i] = 0.0f;
+    }
+  }
+}
+
+// Shared amax body; host-split and graph-safe kernels differ only in the prologue.
+template <bool DO_ROW, bool DO_COL>
+__device__ __forceinline__ void group_compute_fused_amax_body(const CUtensorMap &tensor_map_input,
+                                                              float *const row_amax_out,
+                                                              float *const col_amax_out,
+                                                              const int split_start) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  using IType = __nv_bfloat16;
+  using IType2 = ptx::FPx2<IType>;
+  using IType3D = IType[FA_BUFFS_NUM][FA_TILE_DIM_Y][FA_TILE_DIM_X];
+
+  const bool leading_thread = (threadIdx.x == 0);
+  const int tid = threadIdx.x;
+  const int block_offset_Y = blockIdx.y * FA_CHUNK_DIM_Y;
+  const int block_offset_X = blockIdx.x * FA_CHUNK_DIM_X;
+  const int local_row = block_offset_Y - split_start + tid;
+  const int global_col = block_offset_X + tid;
+
+  constexpr size_t buff_elems_total = FA_BUFFS_NUM * FA_BUFF_IN_SIZE;
+  constexpr size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t shmem_buff_size = buff_size_aligned_in / FA_BUFFS_NUM;
+
+  extern __shared__ char dynamic_shmem[];
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
+  auto &sIn = *reinterpret_cast<IType3D *>(dshmem);
+
+  __shared__ alignas(8) uint64_t in_readable_mbar[FA_BUFFS_NUM];
+
+  const int my_row_stage_Y = tid / FA_TILE_DIM_Y;
+  const int my_col_stage_X = tid / FA_TILE_DIM_X;
+  const int my_row_in_subtile = tid % FA_TILE_DIM_Y;
+  const int my_col_in_subtile = tid % FA_TILE_DIM_X;
+
+  float row_partial = 0.0f;
+  float col_partial = 0.0f;
+
+  if (leading_thread) {
+#pragma unroll
+    for (int buff = 0; buff < FA_BUFFS_NUM; ++buff) {
+      ptx::mbarrier_init(&in_readable_mbar[buff], 1);
+    }
+    ptx::fence_proxy_async_shared_cta();
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int stage = 0; stage < FA_PREFETCH_STAGES; ++stage) {
+    const int buff_in = stage;
+    const int stage_Y = stage / FA_TILES_X;
+    const int stage_X = stage % FA_TILES_X;
+    const int global_offset_Y = block_offset_Y + stage_Y * FA_TILE_DIM_Y;
+    const int global_offset_X = block_offset_X + stage_X * FA_TILE_DIM_X;
+    if (leading_thread) {
+      ptx::mbarrier_arrive_expect_tx(&in_readable_mbar[buff_in], shmem_buff_size);
+      ptx::cp_async_bulk_tensor_2d_global_to_shared(
+          reinterpret_cast<uint64_t *>(&sIn[buff_in]),
+          reinterpret_cast<const uint64_t *>(&tensor_map_input), global_offset_X, global_offset_Y,
+          &in_readable_mbar[buff_in]);
+    }
+  }
+
+  int buff_in = 0;
+  int readable_parity[FA_BUFFS_NUM] = {0, 0};
+
+#pragma unroll
+  for (int stage = 0; stage < FA_STAGES; ++stage) {
+    const int stage_Y = stage / FA_TILES_X;
+    const int stage_X = stage % FA_TILES_X;
+
+    if (stage < FA_STAGES - FA_PREFETCH_STAGES) {
+      const int next_prefetch_buff = (buff_in + FA_PREFETCH_STAGES) % FA_BUFFS_NUM;
+      const int next_prefetch_stage = (stage + FA_PREFETCH_STAGES) % FA_STAGES;
+      const int next_stage_Y = next_prefetch_stage / FA_TILES_X;
+      const int next_stage_X = next_prefetch_stage % FA_TILES_X;
+      const int next_global_offset_Y = block_offset_Y + next_stage_Y * FA_TILE_DIM_Y;
+      const int next_global_offset_X = block_offset_X + next_stage_X * FA_TILE_DIM_X;
+      if (leading_thread) {
+        ptx::mbarrier_arrive_expect_tx(&in_readable_mbar[next_prefetch_buff], shmem_buff_size);
+        ptx::cp_async_bulk_tensor_2d_global_to_shared(
+            reinterpret_cast<uint64_t *>(&sIn[next_prefetch_buff]),
+            reinterpret_cast<const uint64_t *>(&tensor_map_input), next_global_offset_X,
+            next_global_offset_Y, &in_readable_mbar[next_prefetch_buff]);
+      }
+      ptx::fence_proxy_async_shared_cta();
+    }
+
+    // Acquire wait orders the TMA store before the SMEM read; required for buffer reuse.
+    ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&in_readable_mbar[buff_in],
+                                                     readable_parity[buff_in]);
+    readable_parity[buff_in] ^= 1;
+
+    if constexpr (DO_ROW) {
+      if (stage_Y == my_row_stage_Y) {
+        float local_max = row_partial;
+        const int row_bank_group = (my_row_in_subtile >> 2) & 0x7;
+#pragma unroll
+        for (int e_iter = 0; e_iter < FA_TILE_DIM_X / 8; ++e_iter) {
+          const int e = ((e_iter + row_bank_group) & 0x7) << 3;
+          __uint128_t elts_8x = ptx::ld_shared_b128(&sIn[buff_in][my_row_in_subtile][e]);
+          const IType2 *pairs = reinterpret_cast<const IType2 *>(&elts_8x);
+          IType2 amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#pragma unroll
+          for (int p = 0; p < 4; ++p) {
+            ptx::abs_max_2x(amax_2x, amax_2x, pairs[p]);
+          }
+          local_max =
+              fmaxf(local_max, static_cast<float>(__hmax(__habs(amax_2x.x), __habs(amax_2x.y))));
+        }
+        row_partial = local_max;
+      }
+    }
+
+    if constexpr (DO_COL) {
+      if (stage_X == my_col_stage_X) {
+        float local_max = col_partial;
+#pragma unroll
+        for (int e = 0; e < FA_TILE_DIM_Y; ++e) {
+          const IType v = sIn[buff_in][e][my_col_in_subtile];
+          local_max = fmaxf(local_max, fabsf(static_cast<float>(v)));
+        }
+        col_partial = local_max;
+      }
+    }
+
+    __syncthreads();
+    buff_in = (buff_in + 1) % FA_BUFFS_NUM;
+  }
+
+  if constexpr (DO_ROW) {
+    if (row_amax_out != nullptr) {
+      atomicMaxFloat(&row_amax_out[local_row], row_partial);
+    }
+  }
+  if constexpr (DO_COL) {
+    if (col_amax_out != nullptr) {
+      atomicMaxFloat(&col_amax_out[global_col], col_partial);
+    }
+  }
+
+  if (leading_thread) {
+#pragma unroll
+    for (int buff = 0; buff < FA_BUFFS_NUM; ++buff) {
+      ptx::mbarrier_invalid(&in_readable_mbar[buff]);
+    }
+  }
+#else
+  NVTE_DEVICE_ERROR("Grouped fused amax kernel requires SM 10.0+ (Blackwell).");
+#endif  // __CUDA_ARCH__ >= 1000
+}
+
+template <bool DO_ROW, bool DO_COL>
+__global__ void __launch_bounds__(FA_THREADS_NUM)
+    group_compute_fused_amax_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+                                    GroupedFusedAmaxArgs args, const float *noop, const size_t rows,
+                                    const size_t cols) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  const int block_offset_Y = blockIdx.y * FA_CHUNK_DIM_Y;
+  // The 128-row chunk is inside a single expert; select its per-expert outputs.
+  const int tensor_id = GetTensorId(args, block_offset_Y);
+  const int split_start = args.split_sections_range[tensor_id];
+  float *const row_amax_out =
+      DO_ROW ? reinterpret_cast<float *>(args.row_amax_list[tensor_id]) : nullptr;
+  float *const col_amax_out =
+      DO_COL ? reinterpret_cast<float *>(args.col_amax_list[tensor_id]) : nullptr;
+
+  group_compute_fused_amax_body<DO_ROW, DO_COL>(tensor_map_input, row_amax_out, col_amax_out,
+                                                split_start);
+#else
+  NVTE_DEVICE_ERROR("Grouped fused amax kernel requires SM 10.0+ (Blackwell).");
+#endif  // __CUDA_ARCH__ >= 1000
+}
+
+// Zero the capacity-sized grouped amax buffers before atomicMax.
+static __global__ void group_fused_amax_zero_graph_safe_kernel(float *row_amax_all,
+                                                               float *col_amax_all,
+                                                               const size_t row_count,
+                                                               const size_t col_count,
+                                                               const float *noop) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+  if (row_amax_all != nullptr) {
+    for (size_t i = idx; i < row_count; i += stride) row_amax_all[i] = 0.0f;
+  }
+  if (col_amax_all != nullptr) {
+    for (size_t i = idx; i < col_count; i += stride) col_amax_all[i] = 0.0f;
+  }
+}
+
+// Graph-safe: per-expert outputs and row start derived on device from offsets;
+// CTAs past the live row sum noop.
+template <bool DO_ROW, bool DO_COL>
+__global__ void __launch_bounds__(FA_THREADS_NUM)
+    group_compute_fused_amax_graph_safe_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+                                               float *const row_amax_all, float *const col_amax_all,
+                                               const int64_t *const __restrict__ offsets_ptr,
+                                               const size_t num_tensors, const float *noop,
+                                               const size_t cols) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  const size_t block_offset_Y = static_cast<size_t>(blockIdx.y) * FA_CHUNK_DIM_Y;
+  const size_t global_offset = block_offset_Y * cols;
+  if (global_offset >= static_cast<size_t>(offsets_ptr[num_tensors])) {
+    return;
+  }
+
+  const size_t tensor_id =
+      dispatch::common::find_tensor_from_offsets(offsets_ptr, num_tensors, global_offset);
+  const int split_start = static_cast<int>(static_cast<size_t>(offsets_ptr[tensor_id]) / cols);
+  float *const row_amax_out = DO_ROW ? row_amax_all + split_start : nullptr;
+  float *const col_amax_out = DO_COL ? col_amax_all + tensor_id * cols : nullptr;
+
+  group_compute_fused_amax_body<DO_ROW, DO_COL>(tensor_map_input, row_amax_out, col_amax_out,
+                                                split_start);
+#else
+  NVTE_DEVICE_ERROR("Grouped fused amax kernel requires SM 10.0+ (Blackwell).");
+#endif  // __CUDA_ARCH__ >= 1000
+}
+
+#endif  // FP4_TYPE_SUPPORTED
+
+}  // namespace group_row_scaled_amax_kernel
+
+inline void group_row_amax(const Tensor &input, const Tensor *noop,
+                           std::vector<Tensor *> &output_list, const size_t *split_sections,
+                           size_t num_tensors, cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace group_row_scaled_amax_kernel;
+
+  const auto [rows, cols] = input.flat_2d_dims();
+  NVTE_CHECK(input.dtype() == DType::kBFloat16, "Grouped fused amax requires BF16 input.");
+  NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxAmaxTensorsPerKernel),
+             "Number of tensors should be <= ", kMaxAmaxTensorsPerKernel);
+  NVTE_CHECK(cols % FA_CHUNK_DIM_X == 0, "Grouped fused amax requires cols to be a multiple of ",
+             FA_CHUNK_DIM_X, " (got ", cols, ").");
+
+  // A direction runs if any non-empty expert allocates it; per-expert null buffers
+  // are then skipped by the kernel, so experts may opt in independently.
+  bool do_row = false;
+  bool do_col = false;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    if (split_sections[i] == 0) continue;
+    NVTE_CHECK(split_sections[i] % FA_CHUNK_DIM_Y == 0,
+               "Grouped fused amax requires each split to be a multiple of ", FA_CHUNK_DIM_Y,
+               " (split ", i, " = ", split_sections[i], ").");
+    if (output_list[i]->amax.dptr != nullptr) do_row = true;
+    if (output_list[i]->columnwise_amax.dptr != nullptr) do_col = true;
+  }
+  if (!do_row && !do_col) return;
+
+  GroupedFusedAmaxArgs args;
+  args.num_tensors = 0;
+  args.split_sections_range[0] = 0;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    if (split_sections[i] == 0) continue;
+    args.row_amax_list[args.num_tensors] = reinterpret_cast<void *>(output_list[i]->amax.dptr);
+    args.col_amax_list[args.num_tensors] =
+        reinterpret_cast<void *>(output_list[i]->columnwise_amax.dptr);
+    args.split_sections_range[args.num_tensors + 1] =
+        args.split_sections_range[args.num_tensors] + static_cast<int>(split_sections[i]);
+    args.num_tensors++;
+  }
+  NVTE_CHECK(args.split_sections_range[args.num_tensors] == static_cast<int>(rows),
+             "Sum of split sections must equal the number of input rows.");
+
+  checkCuDriverContext(stream);
+
+  const float *noop_ptr = (noop != nullptr && noop->data.dptr != nullptr)
+                              ? reinterpret_cast<const float *>(noop->data.dptr)
+                              : nullptr;
+
+  // Zero the per-expert amax vectors before atomicMax accumulation.
+  {
+    const dim3 zero_grid(static_cast<unsigned>(args.num_tensors),
+                         DIVUP(std::max(rows, cols), static_cast<size_t>(1024)));
+    group_fused_amax_zero_kernel<<<zero_grid, 256, 0, stream>>>(args, static_cast<int>(cols),
+                                                                noop_ptr);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+
+  alignas(64) CUtensorMap tensor_map_input{};
+  create_2D_tensor_map(tensor_map_input, input.data, rows, cols, FA_TILE_DIM_Y, FA_TILE_DIM_X, cols,
+                       0, sizeof(__nv_bfloat16) * 8);
+
+  constexpr size_t buff_elems_total = FA_BUFFS_NUM * FA_BUFF_IN_SIZE;
+  constexpr size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(__nv_bfloat16), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t dshmem_size = buff_size_aligned_in + TMA_SHMEM_ALIGNMENT;
+
+  const dim3 grid(static_cast<unsigned>(cols / FA_CHUNK_DIM_X),
+                  static_cast<unsigned>(rows / FA_CHUNK_DIM_Y), 1);
+  const dim3 block(FA_THREADS_NUM, 1, 1);
+
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      do_row, DO_ROW, TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
+        auto kernel = group_compute_fused_amax_kernel<DO_ROW, DO_COL>;
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+        kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, args, noop_ptr, rows, cols);
+      }));
+  NVTE_CHECK_CUDA(cudaGetLastError());
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
+}
+
+// Graph-safe calculation of amaxes for row-scaled NVFP4: routing comes from device
+// output->tensor_offsets, amax goes to the contiguous rowwise [sum_M] / columnwise
+// [num_tensors * K] buffers. BF16-only, VARYING_FIRST_DIM.
+inline void group_row_amax_graph_safe(const GroupedTensor *input, const Tensor *noop,
+                                      GroupedTensor *output, cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace group_row_scaled_amax_kernel;
+
+  NVTE_CHECK(input->dtype() == DType::kBFloat16, "Grouped fused amax requires BF16 input.");
+  NVTE_CHECK(output->all_same_last_dim() || output->all_same_shape(),
+             "Graph-safe grouped fused amax only supports a common last dimension "
+             "(VARYING_FIRST_DIM).");
+
+  const size_t num_tensors = input->num_tensors;
+  const size_t capacity_rows = input->logical_shape.data[0];
+  const size_t cols = input->logical_shape.data[1];
+  NVTE_CHECK(cols % FA_CHUNK_DIM_X == 0, "Grouped fused amax requires cols to be a multiple of ",
+             FA_CHUNK_DIM_X, " (got ", cols, ").");
+  NVTE_CHECK(capacity_rows % FA_CHUNK_DIM_Y == 0,
+             "Graph-safe grouped fused amax requires the capacity row dimension to be a multiple "
+             "of ",
+             FA_CHUNK_DIM_Y, " (got ", capacity_rows, ").");
+
+  float *const row_amax_all = reinterpret_cast<float *>(output->amax.dptr);
+  float *const col_amax_all = reinterpret_cast<float *>(output->columnwise_amax.dptr);
+  const bool do_row = row_amax_all != nullptr;
+  const bool do_col = col_amax_all != nullptr;
+  if (!do_row && !do_col) return;
+
+  const int64_t *offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
+  NVTE_CHECK(offsets_ptr != nullptr,
+             "Graph-safe grouped fused amax requires device tensor_offsets.");
+
+  checkCuDriverContext(stream);
+  const float *noop_ptr = (noop != nullptr && noop->data.dptr != nullptr)
+                              ? reinterpret_cast<const float *>(noop->data.dptr)
+                              : nullptr;
+
+  // Zero the capacity-sized amax buffers before atomicMax.
+  {
+    const size_t row_count = do_row ? capacity_rows : 0;
+    const size_t col_count = do_col ? num_tensors * cols : 0;
+    const size_t total = std::max(row_count, col_count);
+    const unsigned zero_blocks = static_cast<unsigned>(DIVUP(total, static_cast<size_t>(256))) + 1u;
+    group_fused_amax_zero_graph_safe_kernel<<<zero_blocks, 256, 0, stream>>>(
+        row_amax_all, col_amax_all, row_count, col_count, noop_ptr);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+
+  alignas(64) CUtensorMap tensor_map_input{};
+  create_2D_tensor_map(tensor_map_input, input->data, capacity_rows, cols, FA_TILE_DIM_Y,
+                       FA_TILE_DIM_X, cols, 0, sizeof(__nv_bfloat16) * 8);
+
+  constexpr size_t buff_elems_total = FA_BUFFS_NUM * FA_BUFF_IN_SIZE;
+  constexpr size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(__nv_bfloat16), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t dshmem_size = buff_size_aligned_in + TMA_SHMEM_ALIGNMENT;
+
+  const dim3 grid(static_cast<unsigned>(cols / FA_CHUNK_DIM_X),
+                  static_cast<unsigned>(capacity_rows / FA_CHUNK_DIM_Y), 1);
+  const dim3 block(FA_THREADS_NUM, 1, 1);
+
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      do_row, DO_ROW, TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
+        auto kernel = group_compute_fused_amax_graph_safe_kernel<DO_ROW, DO_COL>;
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+        kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, row_amax_all, col_amax_all,
+                                                     offsets_ptr, num_tensors, noop_ptr, cols);
+      }));
+  NVTE_CHECK_CUDA(cudaGetLastError());
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
+}
+
 namespace group_quantize_transpose_kernel {
 
-using namespace quantization_and_transposition_SF;
 using namespace core;
 using namespace ptx;
 
@@ -84,10 +548,12 @@ __device__ __forceinline__ int GetTensorIdAndBoundary(
   return tensor_id_start;
 }
 
+template <typename ScaleType>
 __device__ __forceinline__ void UpdateEncodeDecodeScaleFP32(float *amax_ptr, float *s_enc_ptr,
                                                             float *s_dec_ptr) {
-  float s_env_value =
-      (amax_ptr == nullptr) ? 1.0f : compute_global_encode_scaling_factor_FP4(*amax_ptr);
+  float s_env_value = (amax_ptr == nullptr)
+                          ? 1.0f
+                          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_ptr);
   float s_dec_value = 1.0 / s_env_value;
   *s_enc_ptr = s_env_value;
   *s_dec_ptr = s_dec_value;
@@ -167,11 +633,11 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 / 16
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
+          typename IType, typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
 __global__ void __launch_bounds__(THREADS_NUM)
     group_quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                           const __grid_constant__ CUtensorMap tensor_map_output,
-                                          nvfp4_scale_t *const scales_ptr, const float *noop,
+                                          ScaleType *const scales_ptr, const float *noop,
                                           const size_t rows, const size_t cols,
                                           const size_t scale_stride, const size_t *rng_state,
                                           MultiAmaxCastTransposeFusionArgs kernel_args) {
@@ -271,9 +737,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
   fp4e2m1x2 *out_data_sh = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem);
   fp4e2m1x2 *out_t_data_sh = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem + out_mem_rowwise_data);
 
-  nvfp4_scale_t *out_rowwise_scales_sh = reinterpret_cast<nvfp4_scale_t *>(
-      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
-  nvfp4_scale_t *out_colwise_scales_sh = reinterpret_cast<nvfp4_scale_t *>(
+  ScaleType *out_rowwise_scales_sh =
+      reinterpret_cast<ScaleType *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
+  ScaleType *out_colwise_scales_sh = reinterpret_cast<ScaleType *>(
       dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_rowwise_scales);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
@@ -284,7 +750,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   // TODO (zhongbo): finish this
   float *amax_rowwise_ptr = nullptr;
   float *amax_colwise_ptr = nullptr;
-  nvfp4_scale_t *split_rowwise_scale_ptr = nullptr;
+  ScaleType *split_rowwise_scale_ptr = nullptr;
 
   // suppose the amax is fixed for the current 128x128 tile (need 128 padding)
   bool need_update_tensor_id = true;
@@ -294,17 +760,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
   size_t split_end = kernel_args.split_sections_range[tensor_id + 1];
   amax_rowwise_ptr = reinterpret_cast<float *>(kernel_args.rowwise_amax_list[tensor_id]);
   split_rowwise_scale_ptr =
-      reinterpret_cast<nvfp4_scale_t *>(kernel_args.output_rowwise_scale_inv_list[tensor_id]);
+      reinterpret_cast<ScaleType *>(kernel_args.output_rowwise_scale_inv_list[tensor_id]);
 
   float S_enc_rowwise = 1.0f;
   float S_dec_rowwise = 1.0f;
-  UpdateEncodeDecodeScaleFP32(amax_rowwise_ptr, &S_enc_rowwise, &S_dec_rowwise);
+  UpdateEncodeDecodeScaleFP32<ScaleType>(amax_rowwise_ptr, &S_enc_rowwise, &S_dec_rowwise);
 
   // TODO (zhongbo): colwise scaling disabled for now because of transpose
   float S_enc_colwise = 1.0f;
   float S_dec_colwise = 1.0f;
   if (amax_colwise_ptr != nullptr) {
-    UpdateEncodeDecodeScaleFP32(amax_colwise_ptr, &S_enc_colwise, &S_dec_colwise);
+    UpdateEncodeDecodeScaleFP32<ScaleType>(amax_colwise_ptr, &S_enc_colwise, &S_dec_colwise);
   } else {
     S_enc_colwise = S_enc_rowwise;
     S_dec_colwise = S_dec_rowwise;
@@ -331,6 +797,15 @@ __global__ void __launch_bounds__(THREADS_NUM)
     const size_t buff_offset_out = buff * BUFF_OUT_SIZE;
     const size_t buff_offset_out_t = buff * BUFF_OUT_T_SIZE;
 
+    if (stage >= BUFFS_NUM) {
+      if (is_master_thread) {
+        ptx::cp_async_bulk_wait_group_read<BUFFS_NUM - 1>();
+      }
+      // Bulk async-groups are thread-local. Publish the master's completion before any thread
+      // overwrites this reused output buffer.
+      __syncthreads();
+    }
+
     // for stages from 1 to STAGES - 1, we need to update the tensor id
     // skip updating tensor id if it's the last CTA, and some stages will be out of bounds
     if (need_update_tensor_id && stage > 0 && (block_offset_Y + stage_offset_Y < rows)) {
@@ -340,19 +815,15 @@ __global__ void __launch_bounds__(THREADS_NUM)
         split_start = kernel_args.split_sections_range[tensor_id];
         split_end = kernel_args.split_sections_range[tensor_id + 1];
         amax_rowwise_ptr = reinterpret_cast<float *>(kernel_args.rowwise_amax_list[tensor_id]);
-        UpdateEncodeDecodeScaleFP32(amax_rowwise_ptr, &S_enc_rowwise, &S_dec_rowwise);
+        UpdateEncodeDecodeScaleFP32<ScaleType>(amax_rowwise_ptr, &S_enc_rowwise, &S_dec_rowwise);
         split_rowwise_scale_ptr =
-            reinterpret_cast<nvfp4_scale_t *>(kernel_args.output_rowwise_scale_inv_list[tensor_id]);
+            reinterpret_cast<ScaleType *>(kernel_args.output_rowwise_scale_inv_list[tensor_id]);
         // TODO (zhongbo): colwise scaling disabled for now because of transpose
         // Skip fetching colwise amax pointer and scaling factor updates
       }
     }
 
     if (next_stage < STAGES) {
-      // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<1>();
-
       const size_t next_buff = next_stage % BUFFS_NUM;
       const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
@@ -428,9 +899,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
             in_compute_colwise[i] = elt;
           }
         }
-        // 2. Compute E4M3 scaling factor
-        const nvfp4_scale_t S_dec_b_fp8 =
-            compute_decoding_scaling_factor(block_amax, S_enc_colwise);
+        // 2. Compute block scaling factor
+        const ScaleType S_dec_b_fp8 =
+            core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_colwise);
 
         // Store scaling factors through SHMEM
         const size_t scale_idx_sh =
@@ -601,9 +1072,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
-        // 2. Compute E4M3 scaling factor
-        const nvfp4_scale_t S_dec_b_fp8 =
-            compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+        // 2. Compute block scaling factor
+        const ScaleType S_dec_b_fp8 =
+            core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_rowwise);
 
         // Check boundaries
         const size_t scales_offset_Y =
@@ -709,14 +1180,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
   // TODO(zhongbo): add back when transpose is supported
   // Vectorized store scaling factors through SHMEM
   // if (RETURN_TRANSPOSE && colwise_scale_is_within_bounds_Y) {
-  //   using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_Y>;
+  //   using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_Y>;
   //   const size_t scale_idx_sh = tid_Y_t * SCALES_PER_CHUNK_Y;
   //   ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(&out_colwise_scales_sh[scale_idx_sh]);
   //   const size_t scale_idx_global = scales_offset_Y_t * scale_stride_t + scales_offset_X_t;
   //   const size_t count =  // number of scales in Y dimension of this chunk
   //       (chunk_rows >= CHUNK_DIM_Y) ? SCALES_PER_CHUNK_Y : (chunk_rows / SCALE_DIM);
-  //   nvfp4_scale_t *dst = &scales_t_ptr[scale_idx_global];
-  //   constexpr size_t vec_bytes = SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t);
+  //   ScaleType *dst = &scales_t_ptr[scale_idx_global];
+  //   constexpr size_t vec_bytes = SCALES_PER_CHUNK_Y * sizeof(ScaleType);
   //   if (count == SCALES_PER_CHUNK_Y && (reinterpret_cast<uintptr_t>(dst) % vec_bytes == 0)) {
   //     // Fast path: vectorized store when destination is properly aligned
   //     scales_vec.store_to(dst);
@@ -725,6 +1196,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
   //     scales_vec.store_to_elts(dst, 0, count);
   //   }
   // }
+
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
 
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #else
@@ -762,6 +1238,14 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
   // also check that the output has not null data pointer
   NVTE_CHECK(output->data.dptr != nullptr, "Output data pointer is null.");
 
+  const DType scale_dtype = output->scale_inv.dtype;
+  for (const Tensor *group_output : output_list) {
+    if (group_output->has_data()) {
+      NVTE_CHECK(group_output->scale_inv.dtype == scale_dtype,
+                 "All grouped NVFP4 scale tensors must have the same dtype (expected ",
+                 to_string(scale_dtype), ", got ", to_string(group_output->scale_inv.dtype), ").");
+    }
+  }
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
   bool return_transpose = output->has_columnwise_data();
@@ -822,8 +1306,6 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
   // const size_t scale_stride_transpose =
   //     return_transpose ? output->columnwise_scale_inv.shape[1] : 0;
 
-  nvfp4_scale_t *const scales_ptr = reinterpret_cast<nvfp4_scale_t *>(output->scale_inv.dptr);
-
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
   const NVTETensor rng_state_tensor = (quant_config != nullptr) ? quant_config->rng_state : nullptr;
@@ -858,37 +1340,426 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
       DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
   constexpr size_t buff_size_aligned_out =
       DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
-  constexpr size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(nvfp4_scale_t);
+  const size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * typeToSize(scale_dtype);
 
   constexpr size_t in_mem = buff_size_aligned_in;
 
   constexpr size_t out_data_mem = buff_size_aligned_out;
   constexpr size_t out_data_transpose_mem = buff_size_aligned_out;
-  constexpr size_t out_scales_transpose_mem = buff_size_scales;
+  const size_t out_scales_transpose_mem = buff_size_scales;
 
   constexpr size_t out_mem = out_data_mem + out_data_transpose_mem;
 
-  constexpr size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+  const size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-        auto kernel =
-            group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                  USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
-
         if constexpr (use_2d_quantization) {
           NVTE_ERROR("2D quantization is not supported for group quantize transpose.");
         }
 
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-        kernel<<<grid, block_size, dshmem_size, stream>>>(tensor_map_input, tensor_map_output,
-                                                          scales_ptr, noop_ptr, rows, cols,
-                                                          scale_stride, rng_state, kernel_args);
+        TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+            scale_dtype, ScaleType,
+            auto kernel =
+                group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                      ScaleType, USE_STOCHASTIC_ROUNDING,
+                                                      RETURN_TRANSPOSE>;
+            auto *scales_ptr = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+            kernel<<<grid, block_size, dshmem_size, stream>>>(
+                tensor_map_input, tensor_map_output, scales_ptr, noop_ptr, rows, cols, scale_stride,
+                rng_state, kernel_args);)
         NVTE_CHECK_CUDA(cudaGetLastError());
       }););
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
+}
+
+// Single-launch grouped (MoE) row-scaled NVFP4 cast. Reuses the single-tensor
+// tuned_1D encode helpers verbatim (so the output is byte-identical to the
+// per-expert loop) and replaces tuned_1D's TMA output stores with a per-expert
+// global scatter, since each expert's transpose output has its own M_i stride.
+namespace group_row_scaled_cast_kernel {
+
+using namespace quantize_transpose_tuned_kernel;
+using namespace ptx;
+
+#if FP4_TYPE_SUPPORTED
+
+template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE>
+__device__ __forceinline__ void group_row_scaled_cast_body(
+    const CUtensorMap &tensor_map_input, uint8_t *const q_row_base, ScaleType *const s_dec_row_base,
+    const float *const row_amax_base, uint8_t *const q_col_base, ScaleType *const s_dec_col_base,
+    const float *const col_amax_base, const size_t scale_stride_col, const int M_t,
+    const int local_row_base, const int ctaid_X, const int ctaid_Y, const size_t cols,
+    const size_t scale_stride_row) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  constexpr bool USE_STOCHASTIC_ROUNDING = false;  // row-scaled rejects SR
+  constexpr bool ROW_SCALED_NVFP4 = true;
+
+  // SR off: the RNG stays inert (random_uint4 is never consumed); it exists only
+  // to satisfy the shared encode-helper signatures.
+  RNG_t rng;
+  rng.init(0, 0, 0);
+  uint4 random_uint4 = uint4{0, 0, 0, 0};
+  int rnd_idx = 0;
+
+  const bool leading_thread = (threadIdx.x == 0);
+
+  const int block_offset_Y = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
+  const int block_offset_X = ctaid_X * TunableConfig::CHUNK_DIM_X;
+
+  const size_t data_stride_row = cols / 2;
+  const size_t data_stride_col = static_cast<size_t>(M_t) / 2;
+
+  // SMEM layout: identical to the single-tensor tuned_1D kernel.
+  constexpr int buff_elems = BUFF_DIM_Y * BUFF_IN_DIM_X;
+  constexpr int buff_elems_total_in = BUFFS_NUM_IN * buff_elems;
+  constexpr int buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total_in * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_out_t =
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
+  constexpr int in_mem = buff_size_aligned_in;
+  constexpr int out_mem_rowwise_data = buff_size_aligned_out;
+  constexpr int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
+  constexpr int out_mem_rowwise_scales = DIVUP_TO_MULTIPLE(
+      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(ScaleType), TMA_SHMEM_ALIGNMENT);
+
+  extern __shared__ char dynamic_shmem[];
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
+
+  IType *sIn_ptr = reinterpret_cast<IType *>(dshmem);
+  fp4e2m1x2 *sOut_ptr = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem);
+  fp4e2m1x2 *sOut_tr_ptr = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem + out_mem_rowwise_data);
+  ScaleType *sSFrowwise_ptr =
+      reinterpret_cast<ScaleType *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
+  ScaleType *sSFcolwise_ptr = reinterpret_cast<ScaleType *>(
+      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_rowwise_scales);
+
+  auto &sIn = *reinterpret_cast<IType3D *>(sIn_ptr);
+
+  constexpr int shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
+
+  __shared__ uint64_t IN_buff_readable_mbar[BUFFS_NUM];
+
+  if (leading_thread) {
+#pragma unroll
+    for (int buff = 0; buff < BUFFS_NUM; ++buff) {
+      ptx::mbarrier_init(&IN_buff_readable_mbar[buff], 1);
+    }
+    ptx::fence_proxy_async_shared_cta();
+  }
+  __syncthreads();
+
+  // Prefetch the first input tile(s).
+#pragma unroll
+  for (int stage = 0; stage < TunableConfig::PREFETCH_STAGES; ++stage) {
+    const int buff_in_p = stage;
+    const int stage_Y = stage / STAGES_X;
+    const int stage_X = stage % STAGES_X;
+    const int global_offset_Y = block_offset_Y + stage_Y * TILE_DIM_Y;
+    const int global_offset_X = block_offset_X + stage_X * TILE_DIM_X;
+    if (leading_thread) {
+      ptx::mbarrier_arrive_expect_tx(&IN_buff_readable_mbar[buff_in_p], shmem_buff_size);
+      ptx::cp_async_bulk_tensor_2d_global_to_shared(
+          reinterpret_cast<uint64_t *>(&sIn[buff_in_p]),
+          reinterpret_cast<const uint64_t *>(&tensor_map_input), global_offset_X, global_offset_Y,
+          &IN_buff_readable_mbar[buff_in_p]);
+    }
+  }
+
+  int buff_in = 0;
+  int buff_out = 0;
+  int buff_out_tr = 0;
+  int IN_buff_readable_parity[BUFFS_NUM] = {0, 0};
+
+#pragma unroll
+  for (int stage = 0; stage < STAGES; ++stage) {
+    const int stage_Y = stage / STAGES_X;
+    const int stage_X = stage % STAGES_X;
+
+    // Prefetch the next input tile.
+    if (stage < STAGES - TunableConfig::PREFETCH_STAGES) {
+      const int next_prefetch_buff = (buff_in + TunableConfig::PREFETCH_STAGES) % BUFFS_NUM;
+      const int next_prefetch_stage = stage + TunableConfig::PREFETCH_STAGES;
+      const int next_stage_Y = next_prefetch_stage / STAGES_X;
+      const int next_stage_X = next_prefetch_stage % STAGES_X;
+      const int next_global_offset_Y = block_offset_Y + next_stage_Y * TILE_DIM_Y;
+      const int next_global_offset_X = block_offset_X + next_stage_X * TILE_DIM_X;
+      if (leading_thread) {
+        ptx::mbarrier_arrive_expect_tx(&IN_buff_readable_mbar[next_prefetch_buff], shmem_buff_size);
+        ptx::cp_async_bulk_tensor_2d_global_to_shared(
+            reinterpret_cast<uint64_t *>(&sIn[next_prefetch_buff]),
+            reinterpret_cast<const uint64_t *>(&tensor_map_input), next_global_offset_X,
+            next_global_offset_Y, &IN_buff_readable_mbar[next_prefetch_buff]);
+      }
+      ptx::fence_proxy_async_shared_cta();
+    }
+
+    // Wait for the current input tile to land.
+    ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
+                                                     IN_buff_readable_parity[buff_in]);
+    IN_buff_readable_parity[buff_in] ^= 1;
+
+    // Per-row encode (byte-identical to the single-tensor path): pass the
+    // per-expert amax base and a local row offset so amax[row_idx] indexes the
+    // expert-local row.
+    rowwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
+        sIn_ptr, sOut_ptr, sSFrowwise_ptr, /*S_enc_rowwise=*/1.0f, stage_Y, stage_X, buff_in,
+        buff_out, row_amax_base, static_cast<size_t>(local_row_base), static_cast<size_t>(M_t), rng,
+        random_uint4, rnd_idx);
+
+    if constexpr (RETURN_TRANSPOSE) {
+      colwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
+          sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, /*S_enc_colwise=*/1.0f, stage_Y, stage_X, buff_in,
+          buff_out_tr, col_amax_base, static_cast<size_t>(block_offset_X), cols, rng, random_uint4,
+          rnd_idx);
+    }
+
+    // Make the encode-helper SMEM writes visible before the scatter.
+    __syncthreads();
+
+    // Scatter the rowwise FP4 tile to the per-expert buffer: a verbatim copy of
+    // the 64-row x 32-byte tile (2 threads x 16 B per row).
+    {
+      auto &sOut = *reinterpret_cast<OType2x3D *>(sOut_ptr);
+      const int row_in_tile = static_cast<int>(threadIdx.x) >> 1;
+      const int half = static_cast<int>(threadIdx.x) & 1;
+      const int local_row = local_row_base + stage_Y * TILE_DIM_Y + row_in_tile;
+      const size_t byte_off_X =
+          static_cast<size_t>(block_offset_X / 2) + stage_X * (TILE_DIM_X / 2) + half * 16;
+      const uint4 *src = reinterpret_cast<const uint4 *>(&sOut[buff_out][row_in_tile][half * 16]);
+      uint4 *dst = reinterpret_cast<uint4 *>(
+          q_row_base + static_cast<size_t>(local_row) * data_stride_row + byte_off_X);
+      *dst = *src;
+    }
+    if constexpr (RETURN_TRANSPOSE) {
+      auto &sOut_tr = *reinterpret_cast<OType2xt3D *>(sOut_tr_ptr);
+      const int col_in_tile = static_cast<int>(threadIdx.x) >> 1;
+      const int half = static_cast<int>(threadIdx.x) & 1;
+      const int global_col = block_offset_X + stage_X * TILE_DIM_X + col_in_tile;
+      const size_t byte_off_M =
+          static_cast<size_t>(local_row_base / 2) + stage_Y * (TILE_DIM_Y / 2) + half * 16;
+      const uint4 *src =
+          reinterpret_cast<const uint4 *>(&sOut_tr[buff_out_tr][col_in_tile][half * 16]);
+      uint4 *dst = reinterpret_cast<uint4 *>(
+          q_col_base + static_cast<size_t>(global_col) * data_stride_col + byte_off_M);
+      *dst = *src;
+    }
+
+    // Sync so the scatter completes before the next stage overwrites the buffer.
+    __syncthreads();
+
+    buff_in = (buff_in + 1) % BUFFS_NUM_IN;
+    buff_out = (buff_out + 1) % BUFFS_NUM_OUT;
+    buff_out_tr = (buff_out_tr + 1) % BUFFS_NUM_OUT_TR;
+  }
+
+  // SF epilogue: store the per-chunk SMEM scale tiles to the per-expert buffers.
+  {
+    auto &sSFrowwise = *reinterpret_cast<ScalesType2D<ScaleType> *>(sSFrowwise_ptr);
+    using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_X>;
+    const size_t scales_block_offset_X_rowwise = static_cast<size_t>(ctaid_X) * SCALES_PER_CHUNK_X;
+    for (int row = static_cast<int>(threadIdx.x); row < TunableConfig::CHUNK_DIM_Y;
+         row += THREADS_NUM) {
+      ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFrowwise[row]);
+      const size_t local_row = static_cast<size_t>(local_row_base) + row;
+      const size_t scale_idx = local_row * scale_stride_row + scales_block_offset_X_rowwise;
+      scales_vec.store_to_elts(&s_dec_row_base[scale_idx], 0, SCALES_PER_CHUNK_X);
+    }
+  }
+  if constexpr (RETURN_TRANSPOSE) {
+    auto &sSFcolwise = *reinterpret_cast<ScalesTypeTr2D<ScaleType> *>(sSFcolwise_ptr);
+    using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_Y>;
+    const size_t local_block_offset_M = static_cast<size_t>(local_row_base) / SCALE_DIM;
+    for (int row_tr = static_cast<int>(threadIdx.x); row_tr < TunableConfig::CHUNK_DIM_X;
+         row_tr += THREADS_NUM) {
+      ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);
+      const size_t global_col = static_cast<size_t>(block_offset_X) + row_tr;
+      const size_t scale_idx = global_col * scale_stride_col + local_block_offset_M;
+      scales_vec.store_to_elts(&s_dec_col_base[scale_idx], 0, SCALES_PER_CHUNK_Y);
+    }
+  }
+
+  if (leading_thread) {
+#pragma unroll
+    for (int buff = 0; buff < BUFFS_NUM; ++buff) {
+      ptx::mbarrier_invalid(&IN_buff_readable_mbar[buff]);
+    }
+  }
+#else
+  NVTE_DEVICE_ERROR("Grouped row-scaled NVFP4 cast kernel requires SM 10.0+ (Blackwell).");
+#endif  // __CUDA_ARCH__ >= 1000
+}
+
+// Grid covers the input capacity; CTAs past the live row sum noop.
+template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE>
+__global__ void __launch_bounds__(THREADS_NUM) group_row_scaled_cast_nvfp4_graph_safe_kernel(
+    const __grid_constant__ CUtensorMap tensor_map_input, uint8_t *const q_row_all,
+    ScaleType *const s_dec_row_all, const float *const row_amax_all, uint8_t *const q_col_all,
+    ScaleType *const s_dec_col_all, const float *const col_amax_all,
+    const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
+    const size_t num_tensors, const float *noop, const size_t cols, const size_t scale_stride_row) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  const int ctaid_X = blockIdx.x;
+  const int ctaid_Y = blockIdx.y;
+  const size_t block_offset_Y = static_cast<size_t>(ctaid_Y) * TunableConfig::CHUNK_DIM_Y;
+
+  const size_t global_offset = block_offset_Y * cols;
+  if (global_offset >= static_cast<size_t>(offsets_ptr[num_tensors])) {
+    return;
+  }
+
+  const size_t tensor_id =
+      dispatch::common::find_tensor_from_offsets(offsets_ptr, num_tensors, global_offset);
+  const size_t row_start = static_cast<size_t>(offsets_ptr[tensor_id]) / cols;
+  const int M_t = static_cast<int>(first_dims_ptr[tensor_id]);
+  const int local_row_base = static_cast<int>(block_offset_Y - row_start);
+
+  // Rowwise buffers are contiguous by global row; transpose buffers are packed
+  // per expert with column stride M_t.
+  const size_t scale_stride_col = RETURN_TRANSPOSE ? static_cast<size_t>(M_t) / SCALE_DIM : 0;
+
+  uint8_t *const q_row_base = q_row_all + row_start * (cols / 2);
+  ScaleType *const s_dec_row_base = s_dec_row_all + row_start * scale_stride_row;
+  const float *const row_amax_base = row_amax_all + row_start;
+
+  uint8_t *const q_col_base = RETURN_TRANSPOSE ? q_col_all + (cols / 2) * row_start : nullptr;
+  ScaleType *const s_dec_col_base =
+      RETURN_TRANSPOSE ? s_dec_col_all + (cols / SCALE_DIM) * row_start : nullptr;
+  const float *const col_amax_base = RETURN_TRANSPOSE ? col_amax_all + tensor_id * cols : nullptr;
+
+  group_row_scaled_cast_body<ScaleType, USE_FAST_MATH, RETURN_TRANSPOSE>(
+      tensor_map_input, q_row_base, s_dec_row_base, row_amax_base, q_col_base, s_dec_col_base,
+      col_amax_base, scale_stride_col, M_t, local_row_base, ctaid_X, ctaid_Y, cols,
+      scale_stride_row);
+#else
+  NVTE_DEVICE_ERROR("Grouped row-scaled NVFP4 cast kernel requires SM 10.0+ (Blackwell).");
+#endif  // __CUDA_ARCH__ >= 1000
+}
+
+#endif  // FP4_TYPE_SUPPORTED
+
+}  // namespace group_row_scaled_cast_kernel
+
+template <typename ScaleType>
+inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const Tensor *noop,
+                                             GroupedTensor *output,
+                                             const QuantizationConfig *quant_config,
+                                             cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace group_row_scaled_cast_kernel;
+  using namespace quantize_transpose_tuned_kernel;
+
+  NVTE_CHECK(input->dtype() == DType::kBFloat16,
+             "Grouped row-scaled NVFP4 cast requires BF16 input.");
+  NVTE_CHECK(output->all_same_last_dim() || output->all_same_shape(),
+             "Graph-safe grouped row-scaled NVFP4 cast only supports a common last dimension "
+             "(VARYING_FIRST_DIM).");
+
+  const bool use_fast_math = quant_config ? quant_config->use_fast_math : false;
+
+  checkCuDriverContext(stream);
+  CheckNoopTensor(*noop, "cast_noop");
+
+  const size_t num_tensors = input->num_tensors;
+  const size_t capacity_rows = input->logical_shape.data[0];
+  const size_t cols = input->logical_shape.data[1];
+  NVTE_CHECK(cols % TunableConfig::CHUNK_DIM_X == 0,
+             "Grouped row-scaled NVFP4 cast requires cols to be a multiple of ",
+             TunableConfig::CHUNK_DIM_X, " (got ", cols, ").");
+  NVTE_CHECK(capacity_rows % TunableConfig::CHUNK_DIM_Y == 0,
+             "Graph-safe grouped row-scaled NVFP4 cast requires the capacity row dimension to be a "
+             "multiple of ",
+             TunableConfig::CHUNK_DIM_Y, " (got ", capacity_rows, ").");
+
+  const bool return_transpose = output->has_columnwise_data();
+  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Graph-safe cast requires rowwise scales.");
+  NVTE_CHECK(output->amax.dptr != nullptr, "Graph-safe cast requires rowwise amax.");
+  // Per-row scale stride, from a 2D [rows, stride] scale or a flat 1D buffer.
+  size_t scale_stride_row = 0;
+  {
+    const auto &scale_shape = output->scale_inv.shape;
+    const size_t scale_ndim = scale_shape.size();
+    if (scale_ndim >= 2) {
+      scale_stride_row = scale_shape[scale_ndim - 1];
+    } else {
+      size_t scale_numel = 1;
+      for (size_t i = 0; i < scale_ndim; ++i) scale_numel *= scale_shape[i];
+      scale_stride_row = scale_numel / capacity_rows;
+    }
+  }
+
+  const int64_t *offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
+  const int64_t *first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
+  NVTE_CHECK(offsets_ptr != nullptr && first_dims_ptr != nullptr,
+             "Graph-safe cast requires device tensor_offsets and first_dims.");
+
+  uint8_t *q_row_all = reinterpret_cast<uint8_t *>(output->data.dptr);
+  ScaleType *s_dec_row_all = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
+  const float *row_amax_all = reinterpret_cast<const float *>(output->amax.dptr);
+  uint8_t *q_col_all =
+      return_transpose ? reinterpret_cast<uint8_t *>(output->columnwise_data.dptr) : nullptr;
+  ScaleType *s_dec_col_all =
+      return_transpose ? reinterpret_cast<ScaleType *>(output->columnwise_scale_inv.dptr) : nullptr;
+  const float *col_amax_all =
+      return_transpose ? reinterpret_cast<const float *>(output->columnwise_amax.dptr) : nullptr;
+  if (return_transpose) {
+    NVTE_CHECK(s_dec_col_all != nullptr && col_amax_all != nullptr,
+               "Graph-safe transpose cast requires columnwise scale and amax buffers.");
+  }
+
+  const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
+
+  alignas(64) CUtensorMap tensor_map_input{};
+  create_2D_tensor_map(tensor_map_input, input->data, capacity_rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
+                       cols, 0, sizeof(IType) * 8);
+
+  constexpr int buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
+  constexpr int buff_elems_total_in = BUFFS_NUM_IN * buff_elems;
+  constexpr int buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total_in * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_out_t =
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_scales = DIVUP_TO_MULTIPLE(
+      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(ScaleType), TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_scales_transpose = DIVUP_TO_MULTIPLE(
+      TunableConfig::CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(ScaleType), TMA_SHMEM_ALIGNMENT);
+
+  const dim3 grid(static_cast<unsigned>(cols / TunableConfig::CHUNK_DIM_X),
+                  static_cast<unsigned>(capacity_rows / TunableConfig::CHUNK_DIM_Y), 1);
+  const dim3 block(THREADS_NUM, 1, 1);
+
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      use_fast_math, USE_FAST_MATH,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+        const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
+        const int out_scales_transpose_mem = RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
+        const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
+                                out_mem_colwise_data + buff_size_scales + out_scales_transpose_mem +
+                                TMA_SHMEM_ALIGNMENT;
+        auto kernel = group_row_scaled_cast_nvfp4_graph_safe_kernel<ScaleType, USE_FAST_MATH,
+                                                                    RETURN_TRANSPOSE>;
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+        kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, q_row_all, s_dec_row_all,
+                                                     row_amax_all, q_col_all, s_dec_col_all,
+                                                     col_amax_all, offsets_ptr, first_dims_ptr,
+                                                     num_tensors, noop_ptr, cols, scale_stride_row);
+      }));
+  NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

@@ -49,6 +49,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <vector>
 
@@ -340,6 +341,8 @@ class MXFP8Quantizer : public Quantizer {
 
 class NVFP4Quantizer : public Quantizer {
  public:
+  using ShapeAlignment = std::optional<std::pair<size_t, size_t>>;
+
   // amax reduction for low precision FP4 AG
   bool with_amax_reduction;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;
@@ -351,10 +354,14 @@ class NVFP4Quantizer : public Quantizer {
   bool stochastic_rounding;
   // 4over6 candidate-selection mode used when quantizing emitted NVFP4 tensors.
   NVTENVFP44Over6Mode nvfp4_4over6_mode;
-  // Global E4M3 scale bound used by emitted NVFP4 tensors.
-  int nvfp4_e4m3_max;
+  // Global E4M3 scale bound used by emitted NVFP4 tensors (0 when inactive).
+  int nvfp4_e4m3_max = 0;
+  // Dtype of scale_inv tensors (kFloat8E4M3 or kFloat8UE5M3).
+  DType scale_dtype;
   // Whether tensors emitted by this quantizer use row-scaled NVFP4 metadata.
   bool row_scaled_nvfp4;
+  // Whether to use only block scaling by fixing the global encode scale to one.
+  bool disable_second_level_scale;
 
   int rht_matrix_random_sign_mask_t;
   at::Tensor rht_matrix;
@@ -417,7 +424,21 @@ class NVFP4Quantizer : public Quantizer {
    */
   static bool is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape);
 
+  // Flattened row/column alignment for directly emitted GEMM-swizzled scales, or no such path.
+  static ShapeAlignment gemm_swizzled_scales_alignment(bool optimize_for_gemm, bool with_rht,
+                                                       bool with_2d_quantization,
+                                                       bool row_scaled_nvfp4, bool nvfp4_use_4over6,
+                                                       int sm_arch,
+                                                       std::optional<bool> disable_rht_cast_fusion);
+
  private:
+  static ShapeAlignment rht_cast_fusion_alignment(int sm_arch,
+                                                  std::optional<bool> disable_rht_cast_fusion,
+                                                  bool for_grouped_kernel = false);
+  static ShapeAlignment get_2d_swizzle_fusion_alignment(int sm_arch);
+  static bool meets_alignment(const std::vector<size_t>& shape, const ShapeAlignment& alignment);
+  bool emits_gemm_swizzled_scales(const std::vector<size_t>& shape) const;
+
   void quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out,
                                         TensorWrapper& rht_output_t_cpp,
                                         QuantizationConfigWrapper& quant_config,
@@ -456,6 +477,7 @@ inline size_t typeToNumBits(transformer_engine::DType t) {
     case transformer_engine::DType::kFloat8E4M3:
     case transformer_engine::DType::kFloat8E5M2:
     case transformer_engine::DType::kFloat8E8M0:
+    case transformer_engine::DType::kFloat8UE5M3:
       return 8;
     case transformer_engine::DType::kFloat4E2M1:
       return 4;
@@ -486,6 +508,8 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
       return at::kFloat8_e5m2;
     case transformer_engine::DType::kFloat8E8M0:
       return at::kByte;  // e8m0 dtype requires PyTorch 2.7.0+
+    case transformer_engine::DType::kFloat8UE5M3:
+      return at::kByte;
     default:
       NVTE_ERROR("Invalid type (", static_cast<int>(t), ").");
   }

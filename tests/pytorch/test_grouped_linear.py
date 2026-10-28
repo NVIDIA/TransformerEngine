@@ -1355,7 +1355,7 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
                 fp8_dtype=fp8_dtype,
                 rowwise=rowwise,
                 columnwise=columnwise,
-                force_pow_2_scales=False,
+                force_pow_2_scales=True,
                 amax_epsilon=0.0,
                 block_scaling_dim=1,
             )
@@ -1606,6 +1606,330 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
         torch.testing.assert_close(o, o_ref, **tols)
 
 
+def _fp8bs_grouped_gemm_available() -> bool:
+    """Whether grouped-tensor GEMM supports FP8 block scaling on this system."""
+    cc = torch.cuda.get_device_capability()
+    if not (9, 0) <= cc <= (11, 0):  # cuBLASLt grouped GEMM window
+        return False
+    return tex.get_cublasLt_version() >= (130600 if cc < (10, 0) else 130300)
+
+
+def _tile_scaled_randn(shape, dtype) -> torch.Tensor:
+    """Random tensor whose 128x128 tiles have different power-of-2 magnitudes."""
+    # Block scales then differ across tiles, so a GEMM that reads the wrong block's scale fails.
+    rows, cols = shape
+    pow2 = torch.tensor([2.0**e for e in range(-3, 4)], device="cuda")
+    tile_grid = ((rows + 127) // 128, (cols + 127) // 128)
+    factors = pow2[torch.randint(0, pow2.numel(), tile_grid, device="cuda")]
+    factors = factors.repeat_interleave(128, dim=0).repeat_interleave(128, dim=1)
+    return (torch.randn(shape, device="cuda") * factors[:rows, :cols]).to(dtype)
+
+
+def _quantize_fp8bs(tensors, *, rowwise, columnwise, block_scaling_dim, grouped, is_weight):
+    quantizer = Float8BlockQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=rowwise,
+        columnwise=columnwise,
+        force_pow_2_scales=True,
+        amax_epsilon=0.0,
+        block_scaling_dim=block_scaling_dim,
+    )
+    if not grouped:
+        return [quantizer(t) for t in tensors]
+    first_dims = (
+        None
+        if is_weight
+        else torch.tensor([t.shape[0] for t in tensors], dtype=torch.int64, device="cuda")
+    )
+    return tex.group_quantize(torch.cat(tensors, dim=0), quantizer, len(tensors), first_dims)
+
+
+def _run_fp8bs_grouped_gemm(
+    z, m_sizes, k, n, layout, case, weight_block_dim, accumulate, dtype
+) -> None:
+    if layout == "TN":
+        A = [_tile_scaled_randn((n, k), dtype) for _ in range(z)]  # weight
+        B = [_tile_scaled_randn((ms, k), dtype) for ms in m_sizes]  # input
+        out = [torch.randn(ms, n, dtype=dtype, device="cuda") for ms in m_sizes]  # output
+    elif layout == "NN":
+        A = [_tile_scaled_randn((n, k), dtype) for _ in range(z)]  # weight
+        B = [_tile_scaled_randn((ms, n), dtype) for ms in m_sizes]  # grad_output
+        out = [torch.randn(ms, k, dtype=dtype, device="cuda") for ms in m_sizes]  # dgrad
+    else:  # layout == "NT"
+        A = [_tile_scaled_randn((ms, k), dtype) for ms in m_sizes]  # input
+        B = [_tile_scaled_randn((ms, n), dtype) for ms in m_sizes]  # grad_output
+        out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+
+    out_ref = [o.clone() for o in out]
+
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    a_is_weight = layout != "NT"
+    a_kwargs = dict(
+        # Weights always keep rowwise data, as in GroupedLinear (non-grouped 2D quantize also
+        # needs rowwise output allocated).
+        rowwise=transa or a_is_weight,
+        columnwise=not transa,
+        block_scaling_dim=weight_block_dim if a_is_weight else 1,
+        is_weight=a_is_weight,
+    )
+    b_kwargs = dict(rowwise=not transb, columnwise=transb, block_scaling_dim=1, is_weight=False)
+    A_fp8 = _quantize_fp8bs(A, grouped=False, **a_kwargs)
+    B_fp8 = _quantize_fp8bs(B, grouped=False, **b_kwargs)
+    grouped_A = A_fp8 if case == "discrete_in" else _quantize_fp8bs(A, grouped=True, **a_kwargs)
+    grouped_B = _quantize_fp8bs(B, grouped=True, **b_kwargs)
+
+    general_grouped_gemm(
+        A_fp8,
+        B_fp8,
+        out_ref,
+        [None] * z,
+        dtype,
+        m_splits=m_sizes,
+        grad=layout != "TN",
+        accumulate=accumulate,
+        layout=layout,
+        use_split_accumulator=True,
+        single_output=False,
+    )
+
+    device = A[0].device
+    grouped_out = None
+    if case != "discrete_out":
+        if layout == "TN":
+            grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
+        elif layout == "NN":
+            grouped_out = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+        else:
+            grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+        _pack_grouped_tensor(grouped_out, out)
+
+    general_grouped_gemm_for_grouped_tensor(
+        grouped_A,
+        grouped_B,
+        out if case == "discrete_out" else grouped_out,
+        layout=layout,
+        accumulate=accumulate,
+    )
+    results = out if case == "discrete_out" else grouped_out.split_into_quantized_tensors()
+
+    tols = dict(rtol=0.125, atol=0.0675)  # same as the MXFP8 test
+    for o, o_ref in zip(results, out_ref):
+        torch.testing.assert_close(o, o_ref, **tols)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 128, 128, 512),
+        (8, 1024, 128, 512),
+        (16, 4096, 128, 512),
+        # Grouped FP8 block-scaling quantize of the weights requires n to be a multiple of 128.
+        (2, 256, 2880, 2944),
+    ],
+)
+@pytest.mark.parametrize("splits", ["uniform", "varying", "zero_experts"])
+@pytest.mark.parametrize("weight_block_dim", [1, 2], ids=["w1D", "w2D"])
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("case", ["no_discrete", "discrete_in", "discrete_out"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_grouped_gemm_grouped_tensor_fp8_block_scaling(
+    shape, splits, weight_block_dim, accumulate, layout, case, dtype
+) -> None:
+    if not _fp8bs_grouped_gemm_available():
+        pytest.skip("Grouped GEMM with FP8 block scaling is unavailable on this system.")
+    if dtype == torch.bfloat16 and not is_bf16_available():
+        pytest.skip("bfloat16 is required for grouped GEMM test.")
+    if layout == "NT" and weight_block_dim == 2:
+        pytest.skip("NT (wgrad) has no weight operand.")
+    z, m, k, n = shape
+    if splits != "uniform" and z == 1:
+        pytest.skip("Non-uniform splits need more than one expert.")
+    torch.manual_seed(0)
+    if splits == "uniform":
+        m_sizes = [m // z] * z
+    elif splits == "varying":
+        m_sizes = [128 * (i % 3 + 1) for i in range(z)]
+    else:  # Empty experts first, in the middle and, for z=16, last.
+        m_sizes = [128 * (i % 3) for i in range(z)]
+    # Grouped FP8 block-scaling quantize requires every expert's token count to be a multiple of
+    # 128 (its per-expert check is a device assert that release builds strip).
+    assert all(ms % 128 == 0 for ms in m_sizes)
+    _run_fp8bs_grouped_gemm(z, m_sizes, k, n, layout, case, weight_block_dim, accumulate, dtype)
+
+
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("quant_type", ["mxfp8", "fp8_block_scaling"])
+def test_grouped_gemm_grouped_tensor_cuda_graph_changed_splits(quant_type, layout) -> None:
+    """Grouped quantize and GEMM in a CUDA graph, replayed with changed per-expert splits."""
+    if quant_type == "fp8_block_scaling":
+        if not _fp8bs_grouped_gemm_available():
+            pytest.skip("Grouped GEMM with FP8 block scaling is unavailable on this system.")
+    else:
+        # As test_grouped_gemm_grouped_tensor_mxfp8, within the cuBLASLt grouped GEMM window.
+        if tex.get_cublasLt_version() < 130300:
+            pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+        if not (10, 0) <= torch.cuda.get_device_capability() <= (11, 0):
+            pytest.skip("Grouped GEMM with MXFP8 requires Blackwell (SM100 to SM110).")
+    if not is_bf16_available():
+        pytest.skip("bfloat16 is required for grouped GEMM test.")
+
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    z, k, n = 4, 256, 384
+    capacity = 1024
+    # Per-expert token counts: the capture-time splits, then changed splits with zero-token
+    # experts (in the middle and at both ends) and fewer tokens than the capacity. Grouped
+    # quantization requires every count to be a multiple of 128.
+    split_schedule = [
+        [256, 128, 384, 256],
+        [128, 0, 512, 128],
+        [0, 384, 128, 0],
+        [384, 256, 0, 384],
+    ]
+    for splits in split_schedule:
+        assert len(splits) == z and sum(splits) <= capacity
+        assert all(ms % 128 == 0 for ms in splits)
+
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    # A is the weight (uniform [n, k] per expert) for TN and NN, and the input for NT. B is the
+    # input for TN and the grad output for NN and NT.
+    a_is_weight = layout != "NT"
+    b_last_dim = k if layout == "TN" else n
+    out_last_dim = n if layout == "TN" else k
+    static_a = torch.empty(z * n if a_is_weight else capacity, k, dtype=dtype, device=device)
+    static_b = torch.empty(capacity, b_last_dim, dtype=dtype, device=device)
+    static_first_dims = torch.zeros(z, dtype=torch.int64, device=device)
+    if layout == "NT":
+        grouped_wgrad = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+        static_out = grouped_wgrad.rowwise_data.view(z * n, k)
+    else:
+        static_out = torch.empty(capacity, out_last_dim, dtype=dtype, device=device)
+
+    def _make_quantizer(*, rowwise, columnwise, is_weight, optimize_for_gemm=True):
+        if quant_type == "mxfp8":
+            quantizer = MXFP8Quantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=columnwise
+            )
+        else:
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=rowwise,
+                columnwise=columnwise,
+                force_pow_2_scales=True,
+                amax_epsilon=0.0,
+                block_scaling_dim=2 if is_weight else 1,
+            )
+        # GEMM-ready scales, as GroupedLinear requests (FP8 block scaling keeps compact scales).
+        quantizer.optimize_for_gemm = optimize_for_gemm
+        return quantizer
+
+    a_usage = dict(rowwise=transa or a_is_weight, columnwise=not transa, is_weight=a_is_weight)
+    b_usage = dict(rowwise=not transb, columnwise=transb, is_weight=False)
+    quantizer_a = _make_quantizer(**a_usage)
+    quantizer_b = _make_quantizer(**b_usage)
+    # Per-expert quantizers for the split-tensor reference GEMM.
+    ref_quantizer_a = _make_quantizer(**a_usage, optimize_for_gemm=False)
+    ref_quantizer_b = _make_quantizer(**b_usage, optimize_for_gemm=False)
+
+    def _run():
+        """Quantize both operands and run the grouped GEMM without reading splits on the host."""
+        if a_is_weight:
+            grouped_a = tex.group_quantize(static_a, quantizer_a, z, None)
+        else:
+            grouped_a = tex.group_quantize(
+                static_a,
+                quantizer_a,
+                z,
+                static_first_dims,
+                tensor_offsets=tex.splits_to_offsets(static_first_dims, k),
+            )
+        grouped_b = tex.group_quantize(
+            static_b,
+            quantizer_b,
+            z,
+            static_first_dims,
+            tensor_offsets=tex.splits_to_offsets(static_first_dims, b_last_dim),
+        )
+        if layout == "NT":
+            grouped_out = grouped_wgrad
+        else:
+            grouped_out = _GroupedLinear._make_grouped_tensor(
+                static_out,
+                num_gemms=z,
+                split_sizes=static_first_dims,
+                tensor_offsets=tex.splits_to_offsets(static_first_dims, out_last_dim),
+                last_dim=out_last_dim,
+                dtype=dtype,
+            )
+        general_grouped_gemm_for_grouped_tensor(
+            grouped_a, grouped_b, grouped_out, layout=layout, use_split_accumulator=True
+        )
+        return grouped_a, grouped_b, grouped_out
+
+    def _prepare(splits):
+        """Update the device-side splits and refill every static buffer in place."""
+        static_first_dims.copy_(torch.tensor(splits, dtype=torch.int64))
+        static_a.copy_(_tile_scaled_randn(tuple(static_a.shape), dtype))
+        static_b.copy_(_tile_scaled_randn(tuple(static_b.shape), dtype))
+        # Values from an earlier run must not survive in the output.
+        static_out.copy_(torch.randn_like(static_out))
+
+    def _check(splits, run_name):
+        bounds = [0]
+        for ms in splits:
+            bounds.append(bounds[-1] + ms)
+        experts = range(z)
+        b_parts = [static_b[bounds[e] : bounds[e + 1]] for e in experts]
+        if a_is_weight:
+            a_parts = [static_a[e * n : (e + 1) * n] for e in experts]
+            results = [static_out[bounds[e] : bounds[e + 1]] for e in experts]
+        else:
+            a_parts = [static_a[bounds[e] : bounds[e + 1]] for e in experts]
+            results = [static_out[e * n : (e + 1) * n] for e in experts]
+        expected = [torch.empty_like(r) for r in results]
+        general_grouped_gemm(
+            [ref_quantizer_a(a) for a in a_parts],
+            [ref_quantizer_b(b) for b in b_parts],
+            expected,
+            [None] * z,
+            dtype,
+            m_splits=splits,
+            grad=layout != "TN",
+            layout=layout,
+            use_split_accumulator=True,
+            single_output=False,
+        )
+        for e in experts:
+            torch.testing.assert_close(
+                results[e],
+                expected[e],
+                rtol=0.125,
+                atol=0.0675,
+                msg=lambda m, e=e: f"{run_name}, splits {splits}, expert {e}: {m}",
+            )
+
+    # Eager warm-up outside the capture: initializes kernels, cuBLASLt and the cached grouped
+    # GEMM workspaces, and separates eager failures from graph-replay failures.
+    _prepare(split_schedule[0])
+    _run()
+    torch.cuda.synchronize()
+    _check(split_schedule[0], "eager")
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_outputs = _run()  # Keep the captured outputs alive across replays.
+
+    for replay, splits in enumerate(split_schedule):
+        _prepare(splits)
+        graph.replay()
+        torch.cuda.synchronize()
+        _check(splits, f"replay {replay}")
+
+
 @pytest.mark.parametrize(
     "shape",
     [
@@ -1698,12 +2022,53 @@ def _reset_fp8_state(monkeypatch):
     monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
 
 
+@pytest.mark.parametrize("use_op_fuser", (False, True), ids=("module", "op"))
+@pytest.mark.parametrize(
+    "single_grouped_weight,single_grouped_bias",
+    [(None, None), (False, False), (True, False), (False, True), (True, True)],
+    ids=("default", "discrete", "single-weight", "single-bias", "single-weight-and-bias"),
+)
+def test_grouped_parameter_layout_selected_by_constructor(
+    use_op_fuser, single_grouped_weight, single_grouped_bias
+):
+    """Constructor options alone select registered parameters; defaults stay per-expert."""
+    kwargs = {}
+    if single_grouped_weight is not None:
+        kwargs.update(
+            single_grouped_weight=single_grouped_weight,
+            single_grouped_bias=single_grouped_bias,
+        )
+    if use_op_fuser:
+        linear = te.ops.GroupedLinear(2, 64, 64, device="cuda", dtype=torch.bfloat16, **kwargs)
+    else:
+        linear = GroupedLinear(
+            2,
+            64,
+            64,
+            device="cuda",
+            params_dtype=torch.bfloat16,
+            use_grouped_tensor=True,
+            **kwargs,
+        )
+
+    assert linear.single_grouped_weight is bool(single_grouped_weight)
+    assert linear.single_grouped_bias is bool(single_grouped_bias)
+    parameters = dict(linear.named_parameters())
+    expected_weights = {"weight"} if single_grouped_weight else {"weight0", "weight1"}
+    expected_biases = {"bias"} if single_grouped_bias else {"bias0", "bias1"}
+    assert parameters.keys() == expected_weights | expected_biases
+    if single_grouped_weight:
+        assert isinstance(parameters["weight"], GroupedTensor)
+    if single_grouped_bias:
+        assert isinstance(parameters["bias"], GroupedTensor)
+
+
 @pytest.mark.parametrize(
     "m_splits,exception",
     [([256, 256], ValueError), (torch.tensor([256, 256]), ValueError)],
     ids=["python-list", "cpu-tensor"],
 )
-def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exception):
+def test_single_grouped_weight_rejects_host_m_splits(m_splits, exception):
     """A single parent parameter must never fall back to host-split per-expert GEMMs."""
     if not is_module_grouped_tensor_path_supported(
         None,
@@ -1711,7 +2076,6 @@ def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exce
     ):
         pytest.skip("Native GroupedTensor GEMM is unavailable on this system.")
 
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     grouped_linear = GroupedLinear(
         2,
         64,
@@ -1751,7 +2115,7 @@ def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exce
         ),
     ],
 )
-def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch, fp8_recipe):
+def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
     """Match single and discrete weights while both use CUDA m_splits and grouped GEMM."""
     if not is_module_grouped_tensor_path_supported(
         fp8_recipe,
@@ -1759,7 +2123,6 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch,
     ):
         pytest.skip("Recipe is not supported with a single grouped weight on this system.")
 
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
 
     num_gemms = 3
@@ -1820,7 +2183,7 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch,
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
-def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
+def test_single_grouped_weight_mxfp8_workspace_cache():
     """BF16 primary weights update one persistent MXFP8 grouped workspace per iteration."""
     mxfp8_recipe = recipe.MXFP8BlockScaling()
     if not is_module_grouped_tensor_path_supported(
@@ -1828,7 +2191,6 @@ def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
         torch.bfloat16,
     ):
         pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     grouped_linear = GroupedLinear(
         2,
@@ -1873,9 +2235,8 @@ def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
 @pytest.mark.parametrize("fp8_recipe", [recipe.MXFP8BlockScaling()], ids=recipe_id)
-def test_single_grouped_weight_with_disabled_weight_preswizzle(monkeypatch, fp8_recipe):
+def test_single_grouped_weight_with_disabled_weight_preswizzle(fp8_recipe):
     """Grouped weight preparation preserves a disabled preswizzle decision."""
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     with quantized_model_init(enabled=True, recipe=fp8_recipe):
         grouped_linear = GroupedLinear(
@@ -1920,7 +2281,7 @@ def test_single_grouped_weight_with_disabled_weight_preswizzle(monkeypatch, fp8_
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
-def test_single_grouped_primary_mxfp8_bypasses_weight_workspace(monkeypatch):
+def test_single_grouped_primary_mxfp8_bypasses_weight_workspace():
     """An MXFP8 primary grouped parameter is already GEMM-ready and is not requantized."""
     mxfp8_recipe = recipe.MXFP8BlockScaling()
     if not is_module_grouped_tensor_path_supported(
@@ -1928,7 +2289,6 @@ def test_single_grouped_primary_mxfp8_bypasses_weight_workspace(monkeypatch):
         torch.bfloat16,
     ):
         pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     with quantized_model_init(enabled=True, recipe=mxfp8_recipe):
         grouped_linear = GroupedLinear(
@@ -2136,7 +2496,6 @@ _GROUPED_PARAMETER_LAYOUTS = [
 @pytest.mark.parametrize("delay_wgrad_compute", _ALL_BOOLEAN)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", _ALL_BOOLEAN)
 def test_grouped_parameter_layout_matches_cpu_m_splits(
-    monkeypatch,
     use_bias,
     single_grouped_weight,
     single_grouped_bias,
@@ -2170,7 +2529,6 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
         biases = (0.1 * torch.randn(num_gemms, out_features, device="cuda")).to(torch.bfloat16)
 
     # The CPU m_splits baseline is explicitly the legacy, discrete-parameter contract.
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
     reference = _run_grouped_parameter_layout(
         use_grouped_tensor=False,
         fp8_recipe=fp8_recipe,
@@ -2186,9 +2544,7 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
         m_splits=m_splits,
     )
 
-    # Enable single parameters only for the CUDA m_splits target. The explicit layout flags
-    # below still decide whether this particular case uses discrete or grouped parameters.
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    # The explicit layout flags select discrete or grouped parameters for the CUDA target.
     result = _run_grouped_parameter_layout(
         use_grouped_tensor=True,
         fp8_recipe=fp8_recipe,
@@ -2269,7 +2625,6 @@ def test_grouped_tensor_save_original_input_matches_saved_grouped_input(
         "transformer_engine.pytorch.module._split_quantization._split_quantize",
         reject_split_fallback,
     )
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
 
     torch.manual_seed(1234)
     num_gemms = 2
@@ -2527,7 +2882,7 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     grouped_linear.backward_dw()
 
 
-def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
+def test_grouped_linear_returns_single_grouped_bias_parameter():
     """return_bias preserves the grouped parent and accumulates dbias into it.
 
     This mirrors how MCore applies a returned MoE bias::
@@ -2552,7 +2907,6 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
         torch.bfloat16,
     ):
         pytest.skip("BF16 GroupedTensor path is unavailable on this system.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
 
     dtype = torch.bfloat16
     num_gemms = 2
@@ -2957,22 +3311,23 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
 
 
-@pytest.mark.skipif(not _fp8_block_scaling_available, reason=_reason_for_no_fp8_block_scaling)
-@pytest.mark.skipif(
-    not (10, 0) <= torch.cuda.get_device_capability() <= (11, 0),
-    reason="Error path only triggers on Blackwell (SM100/SM110).",
-)
-def test_grouped_linear_fused_path_fp8_block_scaling_blackwell_error(monkeypatch):
-    """FP8BS + fused env var on Blackwell must raise, not silently fall back."""
-    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
-    FP8GlobalStateManager.reset()
+def test_fp8_block_scaling_grouped_tensor_path_matches_mxfp8_support():
+    """FP8 block scaling takes the grouped-tensor path wherever MXFP8 does, and on Hopper."""
+    from transformer_engine.pytorch.ops.basic.grouped_linear import (
+        is_op_fuser_grouped_tensor_path_supported,
+    )
+
     dtype = torch.bfloat16
-    grouped_linear = GroupedLinear(2, 128, 128, bias=False, params_dtype=dtype, device="cuda")
-    x = torch.randn(256, 128, device="cuda", dtype=dtype, requires_grad=True)
-    m_splits = torch.tensor([128, 128], dtype=torch.int64, device="cuda")
-    with pytest.raises(RuntimeError, match="Hopper-only"):
-        with autocast(enabled=True, recipe=recipe.Float8BlockScaling()):
-            grouped_linear(x, m_splits)
+    cc = torch.cuda.get_device_capability()
+    for predicate in (
+        is_module_grouped_tensor_path_supported,
+        is_op_fuser_grouped_tensor_path_supported,
+    ):
+        fp8bs = predicate(recipe.Float8BlockScaling(), dtype)
+        if cc >= (10, 0):
+            assert fp8bs == predicate(recipe.MXFP8BlockScaling(), dtype), predicate.__name__
+        elif cc >= (9, 0):
+            assert fp8bs == (tex.get_cublasLt_version() >= 130600), predicate.__name__
 
 
 @pytest.mark.parametrize("swizzle_type", ["mxfp8_rowwise", "mxfp8_columnwise", "nvfp4"])

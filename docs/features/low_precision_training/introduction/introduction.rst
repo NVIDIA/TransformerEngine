@@ -231,7 +231,7 @@ Let's now see how we can train in lower precisions in supported frameworks.
       .. note::
          Python context managers like ``autocast`` may interact unexpectedly with JAX's JIT compilation.
          For finer-grained control, consider passing the recipe directly to TE modules instead.
-         See the `TE JAX Integration notebook <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/te_jax_integration.ipynb>`_
+         See the `TE JAX Integration guide <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/te_jax_integration.rst>`_
          for details.
 
 **Mixed precision with 8- or 4-bit precisions**

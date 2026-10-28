@@ -552,6 +552,46 @@ TYPED_TEST(EPCombineTest, Combine) {
   NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
 }
 
+// v2 ops take the layer config explicitly.
+TYPED_TEST(EPCombineTest, CombineV2) {
+  using Tok = TypeParam;
+  EP_PULL_FIXTURE();
+  EPBuffers<Tok> buf;
+  buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
+            ep_size_, max_tokens_per_rank_);
+  this->template upload_inputs<Tok>(buf);
+  EPTensors<Tok> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+
+  cudaStream_t stream;
+  NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
+
+  NVTEEpLayerConfig cfg = t.layer_cfg_;
+  cfg.topk_idx_dtype = kNVTEInt64;
+  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), t.topk_idx.data(), t.recv_tokens_per_expert.data(), nullptr, &cfg, stream));
+  ASSERT_NO_THROW(nvte_ep_dispatch_v2(t.handle_mem.data(), t.topk_idx.data(),
+                                      t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
+                                      NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
+                                      t.recv_topk_weights.data(), NVTECommWindow{}, &cfg, stream));
+  ASSERT_NO_THROW(nvte_ep_combine_v2(t.handle_mem.data(), t.recv_tokens.data(), NVTECommWindow{},
+                                     t.result.data(), &cfg, stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+
+  std::vector<Tok> h_result(num_tokens_ * hidden_dim_);
+  NVTE_CHECK_CUDA(cudaMemcpy(h_result.data(), buf.result.get(),
+                        h_result.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
+  auto h_tok = generate_tokens<Tok>(g_process_id, num_tokens_, hidden_dim_);
+  for (int tok = 0; tok < num_tokens_; ++tok) {
+    float exp = tok_to_float(h_tok[tok * hidden_dim_]) * static_cast<float>(top_k_);
+    for (int p = 0; p < hidden_dim_; ++p) {
+      float got = tok_to_float(h_result[tok * hidden_dim_ + p]);
+      EXPECT_NEAR(got, exp, bf16_tol(exp))
+          << "token " << tok << " rank " << g_process_id << " hidden " << p;
+    }
+  }
+
+  NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+}
+
 // =============================================================================
 // EPCombineBwdTest: filled slots in grad_expert == d_result (unweighted).
 // =============================================================================
