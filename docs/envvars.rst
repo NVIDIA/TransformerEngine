@@ -216,6 +216,14 @@ backend-selection overview.
    :Default: ``1``
    :Description: Enable or disable FlashAttention 4 (the ``flash-attn-4`` package) for DotProductAttention, without affecting FlashAttention 2 or 3. When set to ``0``, FlashAttention 4 will not be used even if it is installed.
 
+   FA4 backward on Hopper (SM90) can hang with Quack ``0.6.0``--``0.6.3``
+   and CUTLASS DSL ``>=4.6.2``. TE raises an actionable error before
+   dispatch when that combination is selected and gradients are required.
+   Use a compatible Quack release containing `the fix in 0.6.4
+   <https://github.com/Dao-AILab/quack/pull/181>`_.
+   CUTLASS DSL ``4.6.2`` reverted automatic bulk-copy lane election; the
+   affected Quack releases require that behavior to be supplied by the DSL.
+
 .. envvar:: NVTE_FUSED_ATTN
 
    :Type: ``int`` (0 or 1)
