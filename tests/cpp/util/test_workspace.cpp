@@ -17,92 +17,132 @@
 
 using namespace transformer_engine;
 
+namespace {
+
+// Independent expected packing: round the byte count up to a whole alignment unit.
+// Test sizes are small; overflow cases are exercised directly against WorkspaceLayout.
+constexpr size_t PaddedBytes(size_t bytes, size_t alignment = kWorkspaceAlignment) {
+  return ((bytes + alignment - 1) / alignment) * alignment;
+}
+
+}  // namespace
+
 TEST(WorkspaceTest, EmptyAndOptionalBlocks) {
+  constexpr size_t kUnusedAlignment = 4 * kWorkspaceAlignment;
   WorkspaceLayout layout;
   const auto absent = layout.add<float>(0);
-  layout.add_bytes(0, 512);
+  layout.add_bytes(0, kUnusedAlignment);
   EXPECT_EQ(layout.size(), 0);
-  EXPECT_EQ(layout.alignment(), 128);
+  EXPECT_EQ(layout.alignment(), kWorkspaceAlignment);
   EXPECT_EQ(absent.size, 0);
   const WorkspaceView view(nullptr, layout);
   EXPECT_EQ(view.get<float>(absent), nullptr);
 }
 
 TEST(WorkspaceTest, AlignedIndependentRegions) {
-  WorkspaceLayout layout;
-  const auto table = layout.add<float>(17);
-  const auto flags = layout.add_bytes(1);
-  const auto metadata = layout.add<size_t>(65);
-  const auto activations = layout.add<float>(3);
-  EXPECT_EQ(table.offset, 0);
-  EXPECT_EQ(flags.offset, 128);
-  EXPECT_EQ(metadata.offset, 256);
-  EXPECT_EQ(activations.offset, 896);
-  EXPECT_EQ(layout.size(), 1024);
+  // Leave padding after the table and overflow four alignment units with metadata.
+  constexpr size_t kTableElements = kWorkspaceAlignment / (2 * sizeof(float)) + 1;
+  constexpr size_t kFlagBytes = sizeof(unsigned char);
+  constexpr size_t kMetadataElements = 4 * kWorkspaceAlignment / sizeof(size_t) + 1;
+  constexpr size_t kActivationElements = 3;
+  constexpr size_t kTableOffset = 0;
+  constexpr size_t kFlagsOffset = PaddedBytes(kTableOffset + kTableElements * sizeof(float));
+  constexpr size_t kMetadataOffset = PaddedBytes(kFlagsOffset + kFlagBytes);
+  constexpr size_t kMetadataPaddedBytes = PaddedBytes(kMetadataElements * sizeof(size_t));
+  constexpr size_t kActivationsOffset = kMetadataOffset + kMetadataPaddedBytes;
+  constexpr size_t kWorkspaceBytes =
+      PaddedBytes(kActivationsOffset + kActivationElements * sizeof(float));
+  constexpr float kTableValue = 4.5f;
+  constexpr unsigned char kFlagValue = 7;
+  constexpr size_t kMetadataValue = 12345;
+  constexpr float kActivationValue = 9.5f;
 
-  alignas(128) std::array<unsigned char, 1024> data{};
+  WorkspaceLayout layout;
+  const auto table = layout.add<float>(kTableElements);
+  const auto flags = layout.add_bytes(kFlagBytes);
+  const auto metadata = layout.add<size_t>(kMetadataElements);
+  const auto activations = layout.add<float>(kActivationElements);
+  EXPECT_EQ(table.offset, kTableOffset);
+  EXPECT_EQ(flags.offset, kFlagsOffset);
+  EXPECT_EQ(metadata.offset, kMetadataOffset);
+  EXPECT_EQ(activations.offset, kActivationsOffset);
+  EXPECT_EQ(layout.size(), kWorkspaceBytes);
+
+  alignas(kWorkspaceAlignment) std::array<unsigned char, kWorkspaceBytes> data{};
   const WorkspaceView view(data.data(), layout);
   for (const auto &block : {table, flags, metadata, activations}) {
-    EXPECT_EQ(block.offset % 128, 0);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(view.get<unsigned char>(block)) % 128, 0);
+    EXPECT_EQ(block.offset % kWorkspaceAlignment, 0);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(view.get<unsigned char>(block)) % kWorkspaceAlignment, 0);
   }
-  view.get<float>(table)[16] = 4.5f;
-  view.get<unsigned char>(flags)[0] = 7;
-  view.get<size_t>(metadata)[64] = 12345;
-  view.get<float>(activations)[0] = 9.5f;
-  EXPECT_EQ(view.get<const float>(table)[16], 4.5f);
-  EXPECT_EQ(view.get<unsigned char>(flags)[0], 7);
-  EXPECT_EQ(view.get<size_t>(metadata)[64], 12345);
-  EXPECT_EQ(view.get<float>(activations)[0], 9.5f);
+  view.get<float>(table)[kTableElements - 1] = kTableValue;
+  view.get<unsigned char>(flags)[0] = kFlagValue;
+  view.get<size_t>(metadata)[kMetadataElements - 1] = kMetadataValue;
+  view.get<float>(activations)[0] = kActivationValue;
+  EXPECT_EQ(view.get<const float>(table)[kTableElements - 1], kTableValue);
+  EXPECT_EQ(view.get<unsigned char>(flags)[0], kFlagValue);
+  EXPECT_EQ(view.get<size_t>(metadata)[kMetadataElements - 1], kMetadataValue);
+  EXPECT_EQ(view.get<float>(activations)[0], kActivationValue);
 }
 
 TEST(WorkspaceTest, StrongerAlignmentAndAlignedTypes) {
-  struct alignas(256) AlignedElement {
-    unsigned char data[256];
+  constexpr size_t kSmallRequestedAlignment = kWorkspaceAlignment / 8;
+  constexpr size_t kElementAlignment = 2 * kWorkspaceAlignment;
+  constexpr size_t kStrongerAlignment = 2 * kElementAlignment;
+  constexpr size_t kWorkspaceBytes = PaddedBytes(kStrongerAlignment + 1, kStrongerAlignment);
+  struct alignas(kElementAlignment) AlignedElement {
+    unsigned char data[kElementAlignment];
   };
   WorkspaceLayout layout;
-  const auto small = layout.add_bytes(1, 16);
+  const auto small = layout.add_bytes(1, kSmallRequestedAlignment);
   const auto aligned = layout.add<AlignedElement>(1);
-  const auto stronger = layout.add_bytes(1, 512);
-  EXPECT_EQ(small.alignment, 128);
-  EXPECT_EQ(aligned.offset, 256);
-  EXPECT_EQ(aligned.alignment, 256);
-  EXPECT_EQ(stronger.offset, 512);
-  EXPECT_EQ(layout.alignment(), 512);
-  EXPECT_EQ(layout.size(), 1024);
+  const auto stronger = layout.add_bytes(1, kStrongerAlignment);
+  EXPECT_EQ(small.alignment, kWorkspaceAlignment);
+  EXPECT_EQ(aligned.offset, kElementAlignment);
+  EXPECT_EQ(aligned.alignment, kElementAlignment);
+  EXPECT_EQ(stronger.offset, kStrongerAlignment);
+  EXPECT_EQ(layout.alignment(), kStrongerAlignment);
+  // The final byte starts at kStrongerAlignment and requires another alignment unit.
+  EXPECT_EQ(layout.size(), kWorkspaceBytes);
 
-  alignas(512) std::array<unsigned char, 2048> data{};
+  alignas(kStrongerAlignment) std::array<unsigned char, kWorkspaceBytes> data{};
   const WorkspaceView view(data.data(), layout);
-  EXPECT_EQ(reinterpret_cast<uintptr_t>(view.get<AlignedElement>(aligned)) % 256, 0);
-  EXPECT_EQ(reinterpret_cast<uintptr_t>(view.get<unsigned char>(stronger)) % 512, 0);
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(view.get<AlignedElement>(aligned)) % kElementAlignment, 0);
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(view.get<unsigned char>(stronger)) % kStrongerAlignment, 0);
 }
 
 TEST(WorkspaceTest, RejectsInvalidBlocksAndElementTypes) {
+  constexpr size_t kTruncatedFloatBytes = 2 * sizeof(float) - 1;
+  constexpr size_t kOutsideBytes = 2 * kWorkspaceAlignment;
+  constexpr size_t kNonPowerOfTwoAlignment = 3;
   WorkspaceLayout layout;
-  const auto bytes = layout.add_bytes(7);
-  alignas(128) std::array<unsigned char, 1024> data{};
+  const auto bytes = layout.add_bytes(kTruncatedFloatBytes);
+  alignas(kWorkspaceAlignment) std::array<unsigned char, kOutsideBytes> data{};
   const WorkspaceView view(data.data(), layout);
   EXPECT_THROW(view.get<float>(bytes), std::runtime_error);
   // Extra allocation capacity does not make blocks outside the declared layout valid.
   WorkspaceLayout other;
-  const auto outside = other.add_bytes(256);
+  const auto outside = other.add_bytes(kOutsideBytes);
   EXPECT_THROW(view.get<unsigned char>(outside), std::runtime_error);
-  const WorkspaceBlock overflow{std::numeric_limits<size_t>::max(), 1, 128};
+  const WorkspaceBlock overflow{std::numeric_limits<size_t>::max(), 1, kWorkspaceAlignment};
   EXPECT_THROW(view.get<unsigned char>(overflow), std::runtime_error);
-  const WorkspaceBlock unaligned{1, 1, 128};
+  const WorkspaceBlock unaligned{1, 1, kWorkspaceAlignment};
   EXPECT_THROW(view.get<unsigned char>(unaligned), std::runtime_error);
-  const WorkspaceBlock bad_alignment{0, 1, 3};
+  const WorkspaceBlock bad_alignment{0, 1, kNonPowerOfTwoAlignment};
   EXPECT_THROW(view.get<unsigned char>(bad_alignment), std::runtime_error);
 }
 
 TEST(WorkspaceTest, RejectsInvalidAlignmentWithoutChangingLayout) {
+  constexpr size_t kZeroAlignment = 0;
+  constexpr size_t kNonPowerOfTwoBelowMinimum = 3;
+  constexpr size_t kNonPowerOfTwoAboveMinimum = kWorkspaceAlignment + kWorkspaceAlignment / 2;
   WorkspaceLayout layout;
   layout.add_bytes(1);
-  for (size_t alignment : {size_t{0}, size_t{3}, size_t{192}}) {
+  for (size_t alignment :
+       {kZeroAlignment, kNonPowerOfTwoBelowMinimum, kNonPowerOfTwoAboveMinimum}) {
     EXPECT_THROW(layout.add_bytes(1, alignment), std::runtime_error);
     EXPECT_THROW(layout.add<float>(1, alignment), std::runtime_error);
-    EXPECT_EQ(layout.size(), 128);
-    EXPECT_EQ(layout.alignment(), 128);
+    EXPECT_EQ(layout.size(), kWorkspaceAlignment);
+    EXPECT_EQ(layout.alignment(), kWorkspaceAlignment);
   }
 }
 
@@ -113,60 +153,78 @@ TEST(WorkspaceTest, RejectsMultiplicationAndPaddingOverflow) {
   EXPECT_THROW(layout.add_bytes(max_size), std::runtime_error);
   EXPECT_EQ(layout.size(), 0);
   EXPECT_EQ(layout.add_bytes(1).offset, 0);
-  EXPECT_EQ(layout.size(), 128);
+  EXPECT_EQ(layout.size(), kWorkspaceAlignment);
 }
 
 TEST(WorkspaceTest, RejectsAdditionAndOffsetAlignmentOverflow) {
+  constexpr size_t kStrongerAlignment = 2 * kWorkspaceAlignment;
+  // The largest size_t aligned to the minimum alignment has no room for another unit.
+  const size_t max_aligned = std::numeric_limits<size_t>::max() - (kWorkspaceAlignment - 1);
   WorkspaceLayout layout;
-  const size_t max_aligned = std::numeric_limits<size_t>::max() - 127;
   layout.add_bytes(max_aligned);
-  EXPECT_THROW(layout.add_bytes(128), std::runtime_error);
-  EXPECT_THROW(layout.add_bytes(1, 256), std::runtime_error);
+  EXPECT_THROW(layout.add_bytes(kWorkspaceAlignment), std::runtime_error);
+  EXPECT_THROW(layout.add_bytes(1, kStrongerAlignment), std::runtime_error);
   EXPECT_EQ(layout.size(), max_aligned);
-  EXPECT_EQ(layout.alignment(), 128);
+  EXPECT_EQ(layout.alignment(), kWorkspaceAlignment);
 }
 
 TEST(WorkspaceTest, AppendingAndExplicitCacheMigration) {
+  constexpr size_t kTableElements = kWorkspaceAlignment / (2 * sizeof(float));
+  constexpr size_t kScratchBytes = kWorkspaceAlignment / 4 + 1;
+  constexpr size_t kExtraBytes = 4 * kWorkspaceAlignment;
+  constexpr size_t kOriginalBytes =
+      PaddedBytes(kTableElements * sizeof(float)) + PaddedBytes(kScratchBytes);
+  constexpr size_t kExtendedBytes = kOriginalBytes + kExtraBytes;
+  constexpr unsigned char kUninitializedByte = 0xcc;
+  constexpr float kValueDivisor = 4.f;  // Exactly representable cache values.
   WorkspaceLayout original;
-  const auto table = original.add<float>(16);
-  const auto scratch = original.add_bytes(33);
+  const auto table = original.add<float>(kTableElements);
+  const auto scratch = original.add_bytes(kScratchBytes);
+  EXPECT_EQ(original.size(), kOriginalBytes);
   WorkspaceLayout extended = original;
-  const auto extra = extended.add_bytes(512);
-  EXPECT_EQ(extra.offset, original.size());
-  EXPECT_EQ(extended.size(), 768);
+  const auto extra = extended.add_bytes(kExtraBytes);
+  EXPECT_EQ(extra.offset, kOriginalBytes);
+  EXPECT_EQ(extended.size(), kExtendedBytes);
 
-  alignas(128) std::array<unsigned char, 256> old_data{};
-  alignas(128) std::array<unsigned char, 1024> new_data;
-  new_data.fill(0xcc);
+  alignas(kWorkspaceAlignment) std::array<unsigned char, kOriginalBytes> old_data{};
+  alignas(kWorkspaceAlignment) std::array<unsigned char, kExtendedBytes> new_data;
+  new_data.fill(kUninitializedByte);
   const WorkspaceView old_view(old_data.data(), original);
-  for (size_t i = 0; i < 16; ++i) {
-    old_view.get<float>(table)[i] = static_cast<float>(i) / 4;
+  for (size_t i = 0; i < kTableElements; ++i) {
+    old_view.get<float>(table)[i] = static_cast<float>(i) / kValueDivisor;
   }
   const WorkspaceView new_view(new_data.data(), extended);
   EXPECT_NE(new_view.get<float>(table), old_view.get<float>(table));
   // The owner explicitly migrates a valid cache. Views do not initialize/copy any region.
   std::memcpy(new_view.get<float>(table), old_view.get<float>(table), table.size);
-  for (size_t i = 0; i < 16; ++i) {
-    EXPECT_EQ(new_view.get<float>(table)[i], static_cast<float>(i) / 4);
+  for (size_t i = 0; i < kTableElements; ++i) {
+    EXPECT_EQ(new_view.get<float>(table)[i], static_cast<float>(i) / kValueDivisor);
   }
-  EXPECT_EQ(new_view.get<unsigned char>(scratch)[0], 0xcc);
-  EXPECT_EQ(new_view.get<unsigned char>(extra)[0], 0xcc);
-  EXPECT_EQ(old_view.get<float>(table)[15], 15.f / 4);
+  EXPECT_EQ(new_view.get<unsigned char>(scratch)[0], kUninitializedByte);
+  EXPECT_EQ(new_view.get<unsigned char>(extra)[0], kUninitializedByte);
+  EXPECT_EQ(old_view.get<float>(table)[kTableElements - 1],
+            static_cast<float>(kTableElements - 1) / kValueDivisor);
 }
 
 TEST(WorkspaceTest, ExtendingWithinExistingCapacity) {
+  constexpr size_t kTableElements = kWorkspaceAlignment / (2 * sizeof(float));
+  constexpr size_t kExtraBytes = kWorkspaceAlignment + 1;  // Needs two alignment units.
+  constexpr size_t kExtraOffset = PaddedBytes(kTableElements * sizeof(float));
+  constexpr size_t kExtendedBytes = kExtraOffset + PaddedBytes(kExtraBytes);
+  constexpr float kCachedValue = 7.5f;
   WorkspaceLayout layout;
-  const auto table = layout.add<float>(16);
-  alignas(128) std::array<unsigned char, 512> data{};
+  const auto table = layout.add<float>(kTableElements);
+  alignas(kWorkspaceAlignment) std::array<unsigned char, kExtendedBytes> data{};
   const WorkspaceView original(data.data(), layout);
-  original.get<float>(table)[0] = 7.5f;
+  original.get<float>(table)[0] = kCachedValue;
 
-  const auto extra = layout.add_bytes(129);
-  EXPECT_EQ(layout.size(), 384);
+  const auto extra = layout.add_bytes(kExtraBytes);
+  EXPECT_EQ(extra.offset, kExtraOffset);
+  EXPECT_EQ(layout.size(), kExtendedBytes);
   EXPECT_THROW(original.get<unsigned char>(extra), std::runtime_error);
   // Rebuild the view for the larger layout; the allocation and cache stay in place.
   const WorkspaceView extended(data.data(), layout);
   EXPECT_EQ(original.get<float>(table), extended.get<float>(table));
-  EXPECT_EQ(extended.get<float>(table)[0], 7.5f);
-  EXPECT_EQ(extended.get<unsigned char>(extra), data.data() + 128);
+  EXPECT_EQ(extended.get<float>(table)[0], kCachedValue);
+  EXPECT_EQ(extended.get<unsigned char>(extra), data.data() + kExtraOffset);
 }

@@ -4,25 +4,31 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <algorithm>
-#include <cmath>
-#include <cstring>
-#include <memory>
-#include <iomanip>
-#include <iostream>
-#include <random>
-
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
-
 #include <transformer_engine/cast.h>
 #include <transformer_engine/workspace.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <random>
+
 #include "../test_common.h"
+#include "util/workspace.h"
 
 using namespace transformer_engine;
 
 namespace {
+
+// Cross two alignment boundaries so persistent-region checks also cover an unaligned tail.
+constexpr size_t kPersistentTableBytes = 2 * kWorkspaceAlignment + 1;
+// A recognizable nonzero sentinel detects writes into the shared immutable region.
+constexpr unsigned char kPersistentTableFillByte = 0x5a;
 
 template <typename IT, typename OT, typename CT>
 void compute_ref_cast_dbias(const IT *input_h,
@@ -95,7 +101,8 @@ void performTest(const std::vector<size_t>& shape, bool use_workspace_descriptor
 
   if (use_workspace_descriptor) {
     WorkspacePlanWrapper plan(descriptor.data());
-    persistent_region = plan.require("test.activation", 257, kNVTEWorkspacePersistent);
+    persistent_region =
+        plan.require("test.activation", kPersistentTableBytes, kNVTEWorkspacePersistent);
     nvte_workspace_commit_plan(descriptor.data(), plan.data());
     nvte_quantize_dbias(input.data(), output_c.data(), dbias.data(), descriptor.data(), 0);
     const auto scratch = nvte_workspace_find_region(descriptor.data(), "te.dbias", nullptr, 0);
@@ -104,7 +111,8 @@ void performTest(const std::vector<size_t>& shape, bool use_workspace_descriptor
     workspace = Tensor("workspace", descriptor.shape(), descriptor.dtype());
     descriptor.set_rowwise_data(workspace.rowwise_dptr(), descriptor.dtype(), descriptor.shape());
     ASSERT_EQ(cudaMemset(nvte_workspace_get_region_data(descriptor.data(), persistent_region),
-                         0x5a, 257), cudaSuccess);
+                         kPersistentTableFillByte, kPersistentTableBytes),
+              cudaSuccess);
     nvte_workspace_mark_region_initialized(descriptor.data(), persistent_region, nullptr);
     nvte_quantize_dbias(input.data(), output_c.data(), dbias.data(), descriptor.data(), 0);
   } else {
@@ -129,11 +137,12 @@ void performTest(const std::vector<size_t>& shape, bool use_workspace_descriptor
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   if (persistent_region != 0) {
-    std::vector<unsigned char> table(257);
+    std::vector<unsigned char> table(kPersistentTableBytes);
     ASSERT_EQ(cudaMemcpy(table.data(),
                          nvte_workspace_get_region_data(descriptor.data(), persistent_region),
                          table.size(), cudaMemcpyDeviceToHost), cudaSuccess);
-    EXPECT_TRUE(std::all_of(table.begin(), table.end(), [](unsigned char x) { return x == 0x5a; }));
+    EXPECT_TRUE(std::all_of(table.begin(), table.end(),
+                            [](unsigned char x) { return x == kPersistentTableFillByte; }));
     EXPECT_TRUE(nvte_workspace_region_initialized(descriptor.data(), persistent_region));
   }
 

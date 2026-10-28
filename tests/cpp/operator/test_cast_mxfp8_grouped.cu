@@ -8,19 +8,25 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
+#include <transformer_engine/activation.h>
+#include <transformer_engine/cast.h>
+#include <transformer_engine/workspace.h>
 
 #include <stdexcept>
 
-#include <transformer_engine/cast.h>
-#include <transformer_engine/workspace.h>
-#include <transformer_engine/activation.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
+#include "util/workspace.h"
 
 using namespace transformer_engine;
 using namespace test;
 
 namespace {
+
+// Cross two alignment boundaries so persistent-region checks also cover an unaligned tail.
+constexpr size_t kPersistentTableBytes = 2 * kWorkspaceAlignment + 1;
+// A recognizable nonzero sentinel detects writes into the shared immutable region.
+constexpr unsigned char kPersistentTableFillByte = 0x5a;
 
 enum ProcessingMethod {
     CAST_ONLY,
@@ -538,7 +544,8 @@ void performTest(const ProcessingMethod processing_method,
     cudaStream_t workspace_stream = nullptr;
     auto prepare_descriptor = [&](auto query) {
         WorkspacePlanWrapper plan(descriptor.data());
-        persistent_region = plan.require("test.activation", 257, kNVTEWorkspacePersistent);
+        persistent_region =
+            plan.require("test.activation", kPersistentTableBytes, kNVTEWorkspacePersistent);
         nvte_workspace_commit_plan(descriptor.data(), plan.data());
         query(descriptor.data());
         const auto bytes = nvte_workspace_size(descriptor.data());
@@ -549,9 +556,10 @@ void performTest(const ProcessingMethod processing_method,
         EXPECT_EQ(nvte_workspace_num_regions(descriptor.data()), regions);
         workspace = Tensor("workspace", descriptor.shape(), descriptor.dtype());
         descriptor.set_rowwise_data(workspace.rowwise_dptr(), descriptor.dtype(), descriptor.shape());
-        EXPECT_EQ(cudaMemsetAsync(
-                      nvte_workspace_get_region_data(descriptor.data(), persistent_region),
-                      0x5a, 257, workspace_stream), cudaSuccess);
+        EXPECT_EQ(
+            cudaMemsetAsync(nvte_workspace_get_region_data(descriptor.data(), persistent_region),
+                            kPersistentTableFillByte, kPersistentTableBytes, workspace_stream),
+            cudaSuccess);
         nvte_workspace_mark_region_initialized(descriptor.data(), persistent_region, workspace_stream);
     };
     switch (processing_method) {
@@ -579,7 +587,7 @@ void performTest(const ProcessingMethod processing_method,
                     // Discarded planning must preserve the legacy empty-tensor query.
                     {
                         WorkspacePlanWrapper discarded(workspace.data());
-                        discarded.require("uncommitted", 128);
+                        discarded.require("uncommitted", kWorkspaceAlignment);
                     }
                     quantize(workspace.data(), 0);
                     ASSERT_EQ(workspace.dtype(), DType::kByte);
@@ -592,7 +600,7 @@ void performTest(const ProcessingMethod processing_method,
                     if (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM) {
                         EXPECT_EQ(workspace.rowwise_shape().data[0], 1);
                     } else {
-                        EXPECT_EQ(workspace.rowwise_shape().data[0] % 128, 0);
+                      EXPECT_EQ(workspace.rowwise_shape().data[0] % kWorkspaceAlignment, 0);
                     }
                     // A size query must leave both quantized outputs untouched.
                     if (rowwise) {
@@ -710,12 +718,14 @@ void performTest(const ProcessingMethod processing_method,
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
     if (persistent_region != 0) {
-        std::vector<unsigned char> table(257);
-        ASSERT_EQ(cudaMemcpy(table.data(),
-                             nvte_workspace_get_region_data(descriptor.data(), persistent_region),
-                             table.size(), cudaMemcpyDeviceToHost), cudaSuccess);
-        EXPECT_TRUE(std::all_of(table.begin(), table.end(), [](unsigned char x) { return x == 0x5a; }));
-        EXPECT_TRUE(nvte_workspace_region_initialized(descriptor.data(), persistent_region));
+      std::vector<unsigned char> table(kPersistentTableBytes);
+      ASSERT_EQ(cudaMemcpy(table.data(),
+                           nvte_workspace_get_region_data(descriptor.data(), persistent_region),
+                           table.size(), cudaMemcpyDeviceToHost),
+                cudaSuccess);
+      EXPECT_TRUE(std::all_of(table.begin(), table.end(),
+                              [](unsigned char x) { return x == kPersistentTableFillByte; }));
+      EXPECT_TRUE(nvte_workspace_region_initialized(descriptor.data(), persistent_region));
     }
 
     auto [atol, rtol] = getTolerances(otype);
