@@ -17,6 +17,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
+from transformer_engine.pytorch.device import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_cublasmp_all_gather_output,
@@ -1600,7 +1601,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -1674,7 +1675,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         return_layernorm_output_gathered: bool = False,
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         zero_centered_gamma: bool = False,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,
