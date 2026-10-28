@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """This module provides predefined FP8 recipes."""
+
 from __future__ import annotations
 import abc
 import os
@@ -10,7 +11,6 @@ from enum import Enum
 from typing import Any, Literal, Optional, Union, Callable, NamedTuple
 from dataclasses import field
 from pydantic.dataclasses import dataclass
-
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 _NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")
@@ -118,10 +118,27 @@ class Recipe:
     _cached_repr: Optional[str] = None
 
     def __setattr__(self, name: str, value: Any) -> None:
-        # Invalidate the cached repr on any attribute mutation.
+        # Invalidate the cached repr on any attribute mutation. Track public
+        # attributes added outside the recipe's declared dataclass fields.
         if name != "_cached_repr":
             object.__setattr__(self, "_cached_repr", None)
+            if not name.startswith("_") and name not in getattr(
+                type(self), "__dataclass_fields__", {}
+            ):
+                extra_attrs = self.__dict__.get("_extra_attrs")
+                if extra_attrs is None:
+                    extra_attrs = set()
+                    object.__setattr__(self, "_extra_attrs", extra_attrs)
+                extra_attrs.add(name)
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        object.__delattr__(self, name)
+        if name != "_cached_repr":
+            object.__setattr__(self, "_cached_repr", None)
+            extra_attrs = self.__dict__.get("_extra_attrs")
+            if extra_attrs is not None:
+                extra_attrs.discard(name)
 
     @abc.abstractmethod
     def _make_repr(self) -> str:
@@ -133,7 +150,15 @@ class Recipe:
 
     def __repr__(self) -> str:
         if self._cached_repr is None:
-            self._cached_repr = self._make_repr()
+            recipe_repr = self._make_repr()
+            extra_attrs = self.__dict__.get("_extra_attrs")
+            if extra_attrs:
+                extras = ", ".join(
+                    f"{name}={getattr(self, name)!r}" for name in sorted(extra_attrs)
+                )
+                separator = "" if recipe_repr.endswith(", ") else ", "
+                recipe_repr += f"{separator}{extras}"
+            self._cached_repr = recipe_repr
         return self._cached_repr
 
     @classmethod
@@ -304,21 +329,29 @@ class Float8CurrentScaling(Recipe):
 
     use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
     fp8_format: Format = Format.HYBRID
-    fp8_quant_fwd_inp = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
-    fp8_quant_fwd_weight = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
-    fp8_quant_bwd_grad = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
     fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=False)
     fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    fp8_quant_fwd_inp: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_fwd_weight: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_bwd_grad: QParams = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         assert self.fp8_format in (Format.E4M3, Format.HYBRID), "Unsupported FP8 format."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        self.fp8_quant_fwd_inp = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
+        self.fp8_quant_fwd_weight = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
+        self.fp8_quant_bwd_grad = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+        if "fp8_quant_fwd_inp" not in state:
+            self.__post_init__()
 
     def _make_repr(self) -> str:
         return (
@@ -410,6 +443,7 @@ class Float8BlockScaling(Recipe):
 
     NOTE: To relax the default constraint that scales be powers of 2, set env variable
     NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it for the recipe defaults.
+    This is only supported on Hopper; Blackwell and newer require power-of-2 scales.
 
     NOTE: FP8 block scaling requires split accumulation for numerical accuracy, so
     ``fp8_gemm_fprop``/``fp8_gemm_dgrad``/``fp8_gemm_wgrad`` all fix
@@ -432,9 +466,6 @@ class Float8BlockScaling(Recipe):
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
 
     fp8_format: Format = Format.E4M3
-    fp8_quant_fwd_inp = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
-    fp8_quant_fwd_weight = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
-    fp8_quant_bwd_grad = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
     x_block_scaling_dim: int = 1
     w_block_scaling_dim: int = 2
     grad_block_scaling_dim: int = 1
@@ -444,6 +475,9 @@ class Float8BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    fp8_quant_fwd_inp: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_fwd_weight: QParams = field(init=False, repr=False, compare=False)
+    fp8_quant_bwd_grad: QParams = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
@@ -468,6 +502,14 @@ class Float8BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        self.fp8_quant_fwd_inp = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+        self.fp8_quant_fwd_weight = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+        self.fp8_quant_bwd_grad = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+        if "fp8_quant_fwd_inp" not in state:
+            self.__post_init__()
 
     def _make_repr(self) -> str:
         return (
@@ -575,6 +617,9 @@ class NVFP4BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    fp4_quant_fwd_inp: QParams = field(init=False, repr=False, compare=False)
+    fp4_quant_fwd_weight: QParams = field(init=False, repr=False, compare=False)
+    fp4_quant_bwd_grad: QParams = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
@@ -622,6 +667,7 @@ class NVFP4BlockScaling(Recipe):
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}, "
+            f"disable_rht={self.disable_rht}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
             f"nvfp4_4over6={self.nvfp4_4over6}, "
             f"nvfp4_4over6_e4m3_use_256={self.nvfp4_4over6_e4m3_use_256}, "

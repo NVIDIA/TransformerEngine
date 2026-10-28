@@ -10,11 +10,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 
+from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 from torch.fx.experimental.symbolic_shapes import guard_scalar
 from torch.nn.parameter import Parameter
 
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import (
     Format,
     Recipe,
@@ -962,12 +964,14 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.softmax_offset = None
         if self.softmax_type == "off-by-one":
             self.softmax_offset = torch.zeros(
-                self.num_attention_heads // self.tp_size, device="cuda"
+                self.num_attention_heads // self.tp_size, device=te_device_type()
             )
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
-                Parameter(torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")),
+                Parameter(
+                    torch.zeros(self.num_attention_heads // self.tp_size, device=te_device_type())
+                ),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
 
@@ -2353,9 +2357,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_output = False
 
             # checks for q/k/v shapes
-            assert (
-                query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-            ), "DotProductAttention only supports CUDA tensors."
+            assert all(
+                x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+            ), f"DotProductAttention only supports {te_device_type()} tensors."
             assert (
                 query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
             ), "Queries, keys and values must have the same data type!"
@@ -2516,7 +2520,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                             "Mixed THD policy sequence_ids must be one-dimensional int32 or "
                             "int64 tensors."
                         )
-                    if not sequence_ids.is_cuda or sequence_ids.device != query_layer.device:
+                    if sequence_ids.device != query_layer.device:
                         raise ValueError(
                             "Mixed THD policy sequence_ids must be on the Q/K/V device."
                         )
@@ -2913,6 +2917,29 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
 
             if use_flash_attention:
+                # DSL 4.6.2 reverted bulk-copy lane election; Quack PR #181 restores it.
+                quack_version = FlashAttentionUtils.quack_version
+                cutlass_version = FlashAttentionUtils.cutlass_dsl_version
+                affected_dependencies = (
+                    quack_version is not None
+                    and PkgVersion("0.6.0") <= quack_version < PkgVersion("0.6.4")
+                    and cutlass_version is not None
+                    and cutlass_version >= PkgVersion("4.6.2")
+                )
+                if (
+                    flash_attention_backend is not None
+                    and flash_attention_backend.major == 4
+                    and attention_params.requires_backward
+                    and affected_dependencies
+                    and dpa_utils.get_device_compute_capability(query_layer.device) == (9, 0)
+                ):
+                    raise RuntimeError(
+                        f"FA4 {flash_attention_backend} backward on Hopper (SM90) can hang with "
+                        f"quack-kernels {quack_version} and CUTLASS DSL "
+                        f"{cutlass_version}. Upgrade to a compatible "
+                        "Quack release containing the fix in 0.6.4: "
+                        "https://github.com/Dao-AILab/quack/pull/181"
+                    )
                 orig_qk_dim = None
                 orig_v_dim = None
                 if (

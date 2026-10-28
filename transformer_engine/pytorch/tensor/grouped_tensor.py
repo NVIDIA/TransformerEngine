@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 import torch
 from torch.utils._pytree import tree_map
 
+from transformer_engine.pytorch.device import te_device_type
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from .storage.grouped_tensor_storage import GroupedTensorStorage
 from ..constants import DType
@@ -133,7 +134,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
                 device = maybe_tensor.device
                 break
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
 
         # Match QuantizedTensor __new__: accept externally-computed stride to
         # avoid Python-side stride computation overhead for C++ construction.
@@ -209,7 +210,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             dst.nvfp4_e4m3_max = src.nvfp4_e4m3_max
             dst.scale_inv_dtype = src._scale_inv_dtype
 
-        def make_wrapper_like(src: GroupedTensor, requires_grad: bool) -> GroupedTensor:
+        def make_wrapper_like(src: GroupedTensor) -> GroupedTensor:
             """Create a wrapper of the same type and tensor metadata as src."""
             out = torch.Tensor._make_wrapper_subclass(
                 type(src),
@@ -218,7 +219,9 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
                 storage_offset=src.storage_offset(),
                 dtype=src.dtype,
                 layout=src.layout,
-                requires_grad=requires_grad,
+                # Autograd attaches the output's differentiable-view metadata after
+                # __torch_dispatch__ returns.
+                requires_grad=False,
                 device=src.device,
             )
             copy_grouped_storage_metadata(out, src)
@@ -229,9 +232,18 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             src = args[0]
             if not isinstance(src, GroupedTensor):
                 raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
-            if func == torch.ops.aten.detach.default:
-                return make_wrapper_like(src, requires_grad=False)
-            return make_wrapper_like(src, requires_grad=src.requires_grad)
+            return make_wrapper_like(src)
+
+        # The wrapper has no allocation of its own. Propagate CUDA allocator
+        # stream tracking to every tensor that backs the grouped representation.
+        if func == torch.ops.aten.record_stream.default:
+            src, stream = args
+            if not isinstance(src, GroupedTensor):
+                raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
+            for tensor in src.get_data_tensors():
+                if tensor is not None and tensor.device.type == te_device_type():
+                    tensor.record_stream(stream)
+            return None
 
         # Parameter construction may invoke aten.expand on tensor subclasses.
         # Handle this explicitly so grouped parameters can be created safely.
@@ -246,7 +258,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
                     src_shape[i] if dim == -1 else dim for i, dim in enumerate(expanded_shape)
                 )
                 if normalized_shape == src_shape:
-                    return make_wrapper_like(src, requires_grad=src.requires_grad)
+                    return make_wrapper_like(src)
             return super().__torch_dispatch__(func, types, args, kwargs)
 
         # DDP and mcore use expand_as(self) to build a dummy autograd node and
@@ -259,7 +271,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             if other is src:
                 return _GroupedIdentityFunc.apply(src)
             if tuple(other.shape) == tuple(src.shape):
-                return make_wrapper_like(src, requires_grad=src.requires_grad)
+                return make_wrapper_like(src)
             return super().__torch_dispatch__(func, types, args, kwargs)
 
         # Distributed optimizer flattens detached parameters via
@@ -270,6 +282,11 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             if not isinstance(src, GroupedTensor):
                 raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
             target_shape = tuple(args[1])
+            # Autograd Functions that return an input unchanged create a
+            # shape-preserving view to track the output alias. Preserve the
+            # grouped layout and share its backing buffers in that case.
+            if target_shape == tuple(src.shape):
+                return make_wrapper_like(src)
             if target_shape in ((-1,), (src.numel(),)):
                 if src.rowwise_data is not None:
                     return src.rowwise_data.view(-1)
@@ -358,12 +375,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         new_kwargs = tree_map(maybe_unwrap, kwargs)
         return super().__torch_dispatch__(func, types, new_args, new_kwargs)
 
-    @classmethod
-    def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-        # Do not force GroupedTensor on outputs.
-        return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
+    __torch_function__ = torch._C._disabled_torch_function_impl
 
     def expand_as(self, other: torch.Tensor) -> torch.Tensor:
         # pylint: disable=missing-function-docstring

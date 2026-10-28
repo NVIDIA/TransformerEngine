@@ -198,10 +198,17 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
       ptx::cp_async_bulk_commit_group();
 
       // Wait for TMA transfer to have finished reading shared memory.
-      ptx::cp_async_bulk_wait_group_read<FP8_PREFETCH_BUFFERS_NUM>();
+      ptx::cp_async_bulk_wait_group_read<FP8_BUFFERS_NUM - 1>();
+    }
+    // The bulk async-group is owned by the issuing thread. Hand its completion
+    // off to all cooperative writers before the output ring can be reused.
+    if (iter + 1 < FP8_ITERATIONS && iter + 1 >= FP8_BUFFERS_NUM) {
+      __syncthreads();
     }
   }
-  ptx::cp_async_bulk_wait_group_read<0>();
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
   __syncthreads();
 
   parity ^= 1;
@@ -331,10 +338,17 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
       ptx::cp_async_bulk_commit_group();
 
       // Wait for TMA transfer to have finished reading shared memory.
-      ptx::cp_async_bulk_wait_group_read<1>();
+      ptx::cp_async_bulk_wait_group_read<SHMEM_BUFFERS - 1>();
+    }
+    // The bulk async-group is owned by the issuing thread. Hand its completion
+    // off to all cooperative writers before the output ring can be reused.
+    if (next_iter < ITERATIONS && next_iter >= SHMEM_BUFFERS) {
+      __syncthreads();
     }
   }
-  ptx::cp_async_bulk_wait_group_read<0>();
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
   __syncthreads();
 
   if (amax_ptr != nullptr) {

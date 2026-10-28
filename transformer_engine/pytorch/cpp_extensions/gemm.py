@@ -11,6 +11,7 @@ import os
 import functools
 import torch
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.device import te_device_type
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
 from ..utils import ceil_div, get_cached_ones_tensor, get_sm_count, _empty_tensor
 
@@ -983,7 +984,8 @@ def general_grouped_gemm(
 
     if grad and use_bias:
         grad_bias = [
-            torch.empty(B[i].size(1), dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
+            torch.empty(B[i].size(1), dtype=out[0].dtype, device=te_device_type())
+            for i in range(num_gemms)
         ]
     else:
         grad_bias = empty_tensors
@@ -1158,6 +1160,8 @@ def general_grouped_gemm_for_grouped_tensor(
         # so force it on and intentionally override any caller-supplied value. This
         # matches the Float8BlockScaling recipe, which fixes use_split_accumulator=True
         # for all of fprop/dgrad/wgrad, so no user-configurable setting is discarded.
+        # On Blackwell and newer the binding emulates this GEMM with MXFP8 (as for
+        # non-grouped GEMM); the setting is passed through unchanged.
         use_split_accumulator = True
 
     if is_discrete_out:

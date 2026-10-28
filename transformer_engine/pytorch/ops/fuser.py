@@ -51,7 +51,7 @@ OperationFusionFunction: TypeAlias = (
     "Callable[tuple[list[FusibleOperation], ...], list[FusibleOperation]]"
 )
 _FusedOpList: TypeAlias = list[tuple[FusibleOperation, list[int]]]
-_FusionParams: TypeAlias = tuple[type, int, Optional[str]]
+_FusionParams: TypeAlias = tuple[str, int]
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -669,8 +669,7 @@ class OperationFuser:
         # paths that reuse a cached fused operation configuration.
         self.first_op_requiring_backward = first_op_requiring_backward
 
-        # Check if recipe parameters don't match cached values. In this case,
-        # the recipe state in the basic ops might be invalid, so reset it.
+        # Check for changes in recipe parameters that might have invalidated recipe state in basic ops
         recipe_type = type(recipe)
         need_to_reset_recipe_state = self.recipe_type != recipe_type
 
@@ -702,7 +701,10 @@ class OperationFuser:
         # backward boundary in the key, but pay construction cost only once for
         # each configuration. Full recompute therefore builds at most one
         # no-grad plan and one grad-enabled plan for a stable recipe.
-        fusion_params = (recipe_type, first_op_requiring_backward, backward_override)
+        fusion_params: _FusionParams = (
+            str(recipe) if recipe is not None else "",
+            first_op_requiring_backward,
+        )
         cached_ops = self._fused_ops_cache.get(fusion_params)
         if cached_ops is not None:
             self._forward_ops, self._backward_ops = cached_ops
@@ -742,13 +744,6 @@ class OperationFuser:
     ) -> Optional[str]:
         """Why this pass may not run through its operations' custom ops."""
         ops = self._forward_ops if mode == "forward" else self._backward_ops
-        if len(ops) != self._num_basic_ops or any(
-            op is not self._basic_ops[idx] or basic_op_idxs != [idx]
-            for idx, (op, basic_op_idxs) in enumerate(ops)
-        ):
-            return f"a {mode} fusion"
-        if self._num_basic_ops != 1:
-            return "a group of several operations"
         for op, kwargs in zip(self._basic_ops, basic_op_kwargs, strict=True):
             # Only tensors. The other fields of an args container are values read
             # off the module, constant across calls and baked into the graph; a
@@ -761,6 +756,11 @@ class OperationFuser:
         for op in self._basic_ops:
             if op.num_extra_inputs or op.num_extra_outputs:
                 return f"{type(op).__name__} with extra tensor inputs or outputs"
+        for op, basic_op_idxs in ops:
+            # A frozen prefix is not visited by backward, so its missing
+            # backward custom ops must not force the trainable suffix to eager.
+            if mode == "backward" and basic_op_idxs[-1] < self.first_op_requiring_backward:
+                continue
             reason = op.compile_unsupported_reason(mode)
             if reason is not None:
                 return reason

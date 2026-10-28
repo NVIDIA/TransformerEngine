@@ -173,7 +173,8 @@ __global__ void __launch_bounds__(THREADS_PER_WARP)
 __device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tensor_map) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   // The descriptor updater and consumer execute in different CTAs, so CTA scope is insufficient.
-  asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" ::"l"(tensor_map));
+  asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" ::"l"(tensor_map)
+               : "memory");
 #else
   NVTE_DEVICE_ERROR("fence_acquire_tensormap is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
