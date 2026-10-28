@@ -6,9 +6,9 @@
 
 // The fused MXFP8 activation quantize must round exactly as if the activation were computed per
 // element, truncated to the input type, and then quantized on its own. This compares the fused
-// kernels (the register-tiled kernel where it applies, the generic kernel elsewhere) bit for bit
-// against that composition: the activation is computed on the GPU, and the result is quantized by
-// the generic cast-only kernel (a noop tensor keeps the call off the specialized cast kernels).
+// kernels (CUDA, or CuTeDSL with NVTE_ENABLE_CUTEDSL_BACKEND=1) bit for bit against that
+// composition: the activation is computed on the GPU, and the result is quantized by the generic
+// cast-only kernel (a noop tensor keeps the call off the specialized cast kernels).
 // dbias is compared against a host sum in the order the kernels accumulate it, and the tensor amax
 // against the largest magnitude of the activation.
 //
@@ -450,15 +450,15 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
                        ::testing::Values(0, 1, 2), ::testing::Bool(),
                        ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
-                                         // Enough row tiles that the register-resident kernels
-                                         // walk several per CTA.
+                                         // Enough row tiles that the CuTeDSL register-resident
+                                         // kernel walks several per CTA.
                                          std::pair<size_t, size_t>{4096, 2048},
                                          // A row tail on 256-column tiles: 31 row tiles, the
                                          // last of 16 rows, and an odd number for dbias.
                                          std::pair<size_t, size_t>{976, 2048},
                                          std::pair<size_t, size_t>{544, 2080},
-                                         // At least 2^23 elements (the register-tiled forward
-                                         // without tables), with a row and a column tail.
+                                         // A row tail and a column tail ending inside an MX
+                                         // block.
                                          std::pair<size_t, size_t>{4127, 2064},
                                          // A dbias workspace of 130 rows, past the dbias
                                          // reduction's 128-row pipeline.

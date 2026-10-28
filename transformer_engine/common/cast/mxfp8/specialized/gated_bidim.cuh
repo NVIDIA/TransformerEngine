@@ -4,29 +4,138 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file quantize_gated_mxfp8_regtile.cuh
+/*! \file gated_bidim.cuh
  *  \brief Register-resident MXFP8 bidimensional quantize fused with SwiGLU or its gradient.
  *
- *  The gated counterpart of quantize_mxfp8_regtile.cuh. Input [M, 2K] holds the activated half
- *  and the gate half side by side. The forward writes silu(act) * gate as [M, K]; the backward
- *  writes the gradients of both halves as [M, 2K], quantized independently, one after the other
- *  from the same 32-row band. A CTA covers 256 output columns and walks 32-row bands; the band
- *  stays in registers, and both scale directions are computed from there.
+ *  Input [M, 2K] holds the activated half and the gate half side by side. The forward writes
+ *  silu(act) * gate as [M, K]; the backward writes the gradients of both halves as [M, 2K],
+ *  quantized independently, one after the other from the same 32-row band. A CTA covers 256
+ *  output columns and walks 32-row bands; the band stays in registers, and both scale
+ *  directions are computed from there, instead of being staged through shared memory as in the
+ *  generic gated kernel (gated_mxfp8.cuh).
  *
- *  It writes the bytes the generic gated kernel (gated_mxfp8.cuh) writes: the same math, the
- *  same rounding to BF16, and scales only inside the tensor.
+ *  It writes the bytes the generic gated kernel writes: the same math, the same rounding to
+ *  BF16, and scales only inside the tensor.
  */
 
-#ifndef TRANSFORMER_ENGINE_QUANTIZE_GATED_MXFP8_REGTILE_CUH_
-#define TRANSFORMER_ENGINE_QUANTIZE_GATED_MXFP8_REGTILE_CUH_
+#ifndef TRANSFORMER_ENGINE_MXFP8_SPECIALIZED_GATED_BIDIM_CUH_
+#define TRANSFORMER_ENGINE_MXFP8_SPECIALIZED_GATED_BIDIM_CUH_
 
-#include "quantize_mxfp8_regtile.cuh"
+#include <cuda_runtime.h>
+
+#include <cstdint>
+#include <limits>
+
+#include "../../../common.h"
+#include "../../../util/cuda_runtime.h"
+#include "../../../util/math.h"
+#include "../../../util/ptx.cuh"
+#include "../../../utils.cuh"
+#include "../swizzle.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
-namespace regtile {
-namespace gated {
+namespace gated_bidim {
+
+namespace ptx = transformer_engine::ptx;
+
+namespace {
+
+/*! \brief Elementwise max(|a|, |b|) on a packed BF16 pair, as a raw word. */
+__device__ __forceinline__ unsigned abs_max_bf16x2(unsigned a, unsigned b) {
+  ptx::bf16x2 d;
+  ptx::abs_max_2x(d, reinterpret_cast<const ptx::bf16x2&>(a),
+                  reinterpret_cast<const ptx::bf16x2&>(b));
+  return reinterpret_cast<const unsigned&>(d);
+}
+
+/*! \brief Widen a BF16 pair word to FP32, low half to x.  Same result as ptx::up_cast, whose
+ *  volatile asm the compiler cannot schedule as freely in the derivative loop. */
+__device__ __forceinline__ ptx::floatx2 widen_bf16x2(const unsigned v) {
+  return {__uint_as_float(v << 16), __uint_as_float(v & 0xffff0000u)};
+}
+
+/*! \brief Round an FP32 pair to a BF16 pair word, low lane in the low half. */
+__device__ __forceinline__ unsigned to_bf16x2(const ptx::floatx2& v) {
+  const __nv_bfloat162 r = __floats2bfloat162_rn(v.x, v.y);
+  return reinterpret_cast<const unsigned&>(r);
+}
+
+/*! \brief The reciprocal of an E8M0 scale, 2^(127-e), broadcast to a BF16 pair. */
+__device__ __forceinline__ unsigned e8m0_to_bf16x2_reciprocal(unsigned e) {
+  const ptx::bf16x2 r = ptx::exp2f_rcp_2x(static_cast<e8m0_t>(e));
+  return reinterpret_cast<const unsigned&>(r);
+}
+
+/*! \brief E8M0 scales for two block amaxes, packed as ptx::float_to_e8m0_2x.
+ *
+ * The generic kernel's amax is a 0-seeded max that ignores NaN, so a block of
+ * only NaNs gets amax 0; the fmaxf reproduces that for the data-seeded maxima
+ * here.  The conversion saturates, so the scale never reaches 255.
+ */
+template <typename OType>
+__device__ __forceinline__ unsigned amax_to_e8m0_2x(float amax_hi, float amax_lo) {
+  constexpr float kMaxNormRcp = Quantized_Limits<OType>::max_norm_rcp;
+  return ptx::float_to_e8m0_2x(fmaxf(amax_hi * kMaxNormRcp, 0.0f),
+                               fmaxf(amax_lo * kMaxNormRcp, 0.0f));
+}
+
+// Tile geometry.  A CTA covers 256 columns and walks 32-row sub-tiles; 32 rows
+// is the colwise MX block height, so the colwise reduction closes in the CTA.
+
+//! Columns a CTA covers.
+constexpr int kTileCols = 256;
+//! Elements in one MX block, and equivalently the colwise block height.
+constexpr int kRowsPerMxBlock = 32;
+//! MX groups (32 columns each) across the tile.
+constexpr int kMxGroupsPerRow = kTileCols / 32;
+//! A register-resident tile spreads its 256 columns over the 32 lanes of a warp.
+constexpr int kColsPerLane = kTileCols / 32;
+//! ...which a lane holds as BF16 pairs, one 32-bit word each.
+constexpr int kWordsPerLane = kColsPerLane / 2;
+//! ...read as one 128-bit vector per row.
+constexpr int kVecLoadsPerRow = kWordsPerLane / 4;
+//! Lanes that have to cooperate to cover one 32-column MX group.
+constexpr int kLanesPerMxGroup = 32 / kColsPerLane;
+
+/*! \brief Scale two BF16 pairs, each by its own reciprocal scale pair, to four OType (E4M3 or
+ *         E5M2). */
+template <typename OType>
+__device__ __forceinline__ unsigned quantize_x4(unsigned in01, unsigned in23, unsigned scale01,
+                                                unsigned scale23) {
+  ptx::FPx4<OType> out;
+  ptx::mul_cvt_4x(out, reinterpret_cast<const ptx::bf16x2&>(in01),
+                  reinterpret_cast<const ptx::bf16x2&>(scale01),
+                  reinterpret_cast<const ptx::bf16x2&>(in23),
+                  reinterpret_cast<const ptx::bf16x2&>(scale23));
+  return reinterpret_cast<const unsigned&>(out);
+}
+
+/*! \brief Store one lane's quantized row: kColsPerLane FP8 bytes, one STG.64. */
+__device__ __forceinline__ void store_quantized(unsigned char* p, const unsigned* v) {
+  static_assert(kColsPerLane == 8, "One STG.64 covers exactly eight FP8 bytes.");
+  *(uint2*)p = *(const uint2*)v;
+}
+
+
+// Row bands per CTA. Walking several bands deepens each CTA's work without starving SMs.
+//! Grid size, in CTAs, that the walk length aims for.
+constexpr long long kCtaTargetActivation = 16384;
+//! Minimum walk, unless that leaves fewer than two CTAs per SM.
+constexpr int kMinWalk = 2;
+//! Maximum walk.
+constexpr int kMaxWalkDact = 64;
+
+int pick_walk_length(int row_blocks, int grid_cols, long long target, int min_walk = kMinWalk) {
+  int walk = 1;
+  while ((row_blocks / walk) % 2 == 0 && (long long)grid_cols * (row_blocks / walk) > target)
+    walk *= 2;
+  if (walk < min_walk && row_blocks % min_walk == 0) walk = min_walk;
+  return walk;
+}
+
+}  // namespace
 
 constexpr int kThreadsPerCta = 256;
 constexpr int kWarpsPerCta = kThreadsPerCta / 32;
@@ -265,7 +374,7 @@ __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
 #endif
 }
 
-//! Whether the gated regtile kernel takes this request: BF16 [M, 2K] -> E4M3 or E5M2, both directions,
+//! Whether this kernel takes the request: BF16 [M, 2K] -> E4M3 or E5M2, both directions,
 //! K % 32 == 0 (the generic gated kernel's requirement), aligned buffers.
 inline bool can_use(const Tensor& input, const Tensor& grad, const Tensor& output,
                     const bool is_bwd) {
@@ -317,10 +426,9 @@ void quantize(const Tensor& input, const Tensor& grad, Tensor* output, cudaStrea
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-}  // namespace gated
-}  // namespace regtile
+}  // namespace gated_bidim
 }  // namespace mxfp8
 }  // namespace dispatch
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_QUANTIZE_GATED_MXFP8_REGTILE_CUH_
+#endif  // TRANSFORMER_ENGINE_MXFP8_SPECIALIZED_GATED_BIDIM_CUH_

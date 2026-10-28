@@ -9,10 +9,11 @@
  *
  *  A BF16 input takes only 2^16 values, so these activations can be read from a table
  *  generated once per device from the scalar util/math.h functions. TE builds each table
- *  on its first use and keeps it for the life of the process (device_table); kernels read
- *  them for BF16 inputs quantized to MXFP8 when NVTE_ACTIVATION_TABLE=1 (off by default).
- *  Outside each table's window the result has a closed form, so every lookup is
- *  branch-free.
+ *  on its first use and keeps it for the life of the process (device_table). With
+ *  NVTE_ACTIVATION_TABLE=1 (off by default), BF16 inputs quantized to MXFP8 follow the tables:
+ *  the CuTeDSL register-resident kernel reads them, and the other kernels compute what they
+ *  hold (kComputedTable). Outside each table's window the result has a closed form, so every
+ *  lookup is branch-free.
  *
  *  Forward (GeLU, SiLU): BF16 entries. Below the window the result is RN(x/2); above it
  *  it is x for x > 0 and -0 for x < 0. The forward result is truncated to BF16 by every
@@ -66,12 +67,10 @@ enum Kind : int {
 template <uint32_t kLo, uint32_t kHi>
 struct ForwardLayout {
   static constexpr bool kForward = true;
-  //! Whether the kernel computes op() instead of reading the table (see the register-tiled kernel).
-  static constexpr bool kComputed = false;
   static constexpr uint32_t kLowSentinel = kLo - 1;
   static constexpr uint32_t kHighSentinel = kHi + 1;
   static constexpr uint32_t kRows = kHighSentinel - kLowSentinel + 1;
-  //! Rounded up to 16 bytes, the granularity of a bulk copy into shared memory.
+  //! Rounded up to 16 bytes, so kernels can copy it into shared memory in 16-byte pieces.
   static constexpr size_t kBytes = (kRows * 2 * sizeof(__nv_bfloat16) + 15) / 16 * 16;
 };
 
@@ -83,7 +82,6 @@ struct ForwardLayout {
 template <uint32_t kLo, uint32_t kHi, uint32_t kSaturatedEnd, uint32_t kStride = 2048>
 struct DerivativeLayout {
   static constexpr bool kForward = false;
-  static constexpr bool kComputed = false;
   static constexpr uint32_t kLoBits = kLo;
   static constexpr uint32_t kHiBits = kHi;
   //! Magnitudes from here on (and NaN) give NaN, as util/math.h does.
@@ -91,11 +89,9 @@ struct DerivativeLayout {
   static constexpr uint32_t kEntriesPerSign = kHi - kLo + 1;
   static constexpr uint32_t kSignStride = kStride;
   static_assert(kEntriesPerSign <= kSignStride, "The two signs' entries must not overlap.");
-  //! Rounded up to 16 bytes, the granularity of a bulk copy into shared memory.
+  //! Rounded up to 16 bytes, so kernels can copy it into shared memory in 16-byte pieces.
   static constexpr size_t kBytes = ((kSignStride + kEntriesPerSign) * sizeof(float) + 15) / 16 * 16;
-  //! The sign bit, 0x8000, shifted right by this is the byte offset of the negative half.
-  static constexpr int kSignShift = kStride == 2048 ? 2 : 1;
-  static_assert(kStride == 2048 || kStride == 4096, "The packed lookup assumes these strides.");
+  static_assert(kStride == 2048 || kStride == 4096, "The packed lookups assume these strides.");
 };
 
 /*! \brief The table of kKind for inputs of type IType.
@@ -258,86 +254,6 @@ __device__ __forceinline__ float derivative(const float x, const float *__restri
   const float entry = __ldg(table + index);
   const float value = magnitude < T::kLoBits ? T::below_window(x) : entry;
   return magnitude >= T::kSaturatedEndBits ? __uint_as_float(0x7fffffffu) : value;
-}
-
-/*! \brief Forward activation of a BF16 pair, low lane in the low half. Same results as
- *         forward() per lane; the table may be in shared memory.
- */
-template <typename T>
-__device__ __forceinline__ uint32_t forward_2x(const uint32_t x,
-                                               const __nv_bfloat16 *__restrict__ table) {
-  static_assert(T::kForward, "Not a forward table.");
-  const __nv_bfloat162 a = *reinterpret_cast<const __nv_bfloat162 *>(&x);
-  // Clamp one lane's magnitude to the table rows. The +0 bound of the high lane zeroes it,
-  // so the word is exactly the clamped magnitude.
-  const auto row = [](const __nv_bfloat162 lane) {
-    constexpr uint32_t kLowBound = T::kLowSentinel * 0x10001u;
-    constexpr uint32_t kHighBound = T::kHighSentinel;
-    __nv_bfloat162 m =
-        __hmax2(__habs2(lane), *reinterpret_cast<const __nv_bfloat162 *>(&kLowBound));
-    m = __hmin2(m, *reinterpret_cast<const __nv_bfloat162 *>(&kHighBound));
-    return *reinterpret_cast<const uint32_t *>(&m) - T::kLowSentinel;
-  };
-  const __nv_bfloat16 entry_lo = table[2 * row(__low2bfloat162(a)) + ((x >> 15) & 1u)];
-  const __nv_bfloat16 entry_hi = table[2 * row(__high2bfloat162(a)) + (x >> 31)];
-  constexpr uint32_t kHalf = 0x3f003f00u, kNegativeZero = 0x80008000u;
-  const __nv_bfloat162 half = __hmul2(a, *reinterpret_cast<const __nv_bfloat162 *>(&kHalf));
-  const __nv_bfloat162 upper =
-      __hmax2_nan(a, *reinterpret_cast<const __nv_bfloat162 *>(&kNegativeZero));
-  const __nv_bfloat162 r =
-      __hmin2_nan(__hmax2(__halves2bfloat162(entry_lo, entry_hi), half), upper);
-  return *reinterpret_cast<const uint32_t *>(&r);
-}
-
-/*! \brief Derivative of a BF16 pair, low lane in .x. Same results as derivative() per lane;
- *         the table may be in shared memory.
- *
- *  Both lanes' byte offsets are formed in one 32-bit word: the clamp runs on the BF16 pair,
- *  and each lane's offset stays below 0x10000, so the halves never carry into each other.
- */
-template <typename T>
-__device__ __forceinline__ float2 derivative_2x(const uint32_t x,
-                                                const unsigned char *__restrict__ table) {
-  static_assert(!T::kForward, "Not a derivative table.");
-  static_assert((T::kSignStride + T::kEntriesPerSign) * sizeof(float) <= 0x10000,
-                "Byte offsets must fit in 16 bits.");
-  constexpr uint32_t kLo2 = T::kLoBits * 0x10001u, kHi2 = T::kHiBits * 0x10001u;
-  const uint32_t magnitude = x & 0x7fff7fffu;
-  const __nv_bfloat162 clamped =
-      __hmin2(__hmax2(*reinterpret_cast<const __nv_bfloat162 *>(&magnitude),
-                      *reinterpret_cast<const __nv_bfloat162 *>(&kLo2)),
-              *reinterpret_cast<const __nv_bfloat162 *>(&kHi2));
-  const uint32_t offsets = ((*reinterpret_cast<const uint32_t *>(&clamped) - kLo2) << 2) +
-                           ((x ^ magnitude) >> T::kSignShift);
-  const float entry_lo = *reinterpret_cast<const float *>(table + (offsets & 0xffffu));
-  const float entry_hi = *reinterpret_cast<const float *>(table + (offsets >> 16));
-  const float linear_lo = T::below_window(__uint_as_float(x << 16));
-  const float linear_hi = T::below_window(__uint_as_float(x & 0xffff0000u));
-  constexpr uint32_t kSaturatedEnd2 = T::kSaturatedEndBits * 0x10001u;
-  float lo, hi;
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  // One BF16x2 compare per condition sets both lanes' predicates. The unordered >= also
-  // holds for NaN, which gives NaN like the saturated end.
-  asm("{\n\t"
-      ".reg .pred below_lo, below_hi, nan_lo, nan_hi;\n\t"
-      "setp.lt.bf16x2 below_lo|below_hi, %2, %3;\n\t"
-      "setp.geu.bf16x2 nan_lo|nan_hi, %2, %4;\n\t"
-      "selp.f32 %0, %5, %6, below_lo;\n\t"
-      "selp.f32 %1, %7, %8, below_hi;\n\t"
-      "selp.b32 %0, 0x7fffffff, %0, nan_lo;\n\t"
-      "selp.b32 %1, 0x7fffffff, %1, nan_hi;\n\t"
-      "}"
-      : "=f"(lo), "=f"(hi)
-      : "r"(magnitude), "r"(kLo2), "r"(kSaturatedEnd2), "f"(linear_lo), "f"(entry_lo),
-        "f"(linear_hi), "f"(entry_hi));
-#else
-  const uint32_t magnitude_lo = magnitude & 0xffffu, magnitude_hi = magnitude >> 16;
-  lo = magnitude_lo < T::kLoBits ? linear_lo : entry_lo;
-  hi = magnitude_hi < T::kLoBits ? linear_hi : entry_hi;
-  lo = magnitude_lo >= T::kSaturatedEndBits ? __uint_as_float(0x7fffffffu) : lo;
-  hi = magnitude_hi >= T::kSaturatedEndBits ? __uint_as_float(0x7fffffffu) : hi;
-#endif
-  return make_float2(lo, hi);
 }
 
 /*! \brief OP(x), from the table given by kUse, or from util/math.h for kNoTable.
