@@ -3271,166 +3271,164 @@ def _check_linear_bias_compile(
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize("compile_mode", ["default", "reduce-overhead"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("equal_splits", [False, True])
-def test_te_split_parameters_compile(compile_mode, dtype, equal_splits):
-    """Every split remains an autograd input across storage and parameter changes."""
-    import copy
-
+@pytest.mark.parametrize(
+    "module, compile_mode, dtype, equal_splits, fp8_recipe, bias_mode, grads",
+    [
+        (te.Linear, mode, dtype, equal, None, "fused", "mixed")
+        for mode in ("default", "reduce-overhead")
+        for dtype in (torch.float16, torch.bfloat16, torch.float32)
+        for equal in (False, True)
+    ]
+    + [
+        (te.Linear, "default", torch.bfloat16, False, quant_recipe, bias, "all")
+        for quant_recipe in (None, *_all_recipes)
+        for bias in ("fused", "none", "returned")
+    ]
+    + [
+        (module, mode, torch.bfloat16, False, None, "fused", grads)
+        for module, mode, targets in (
+            (te.Linear, None, ("none", "mixed")),
+            (te.Linear, "default", ("none", "input", "weight")),
+            (te.LayerNormLinear, None, ("none", "mixed", "input", "weight")),
+        )
+        for grads in targets
+    ],
+)
+def test_te_split_parameters(
+    module, compile_mode, dtype, equal_splits, fp8_recipe, bias_mode, grads
+):
+    """Check outputs, gradients, storage changes, version checks and concatenation counts."""
     torch._dynamo.reset()
     counters.clear()
-    splits = ("q", "k", "v") if equal_splits else dict(q=64, k=32, v=32)
-    model = te.Linear(64, 192 if equal_splits else 128, parameters_split=splits, params_dtype=dtype)
-    model.k_weight.requires_grad_(False)
-    model.v_bias.requires_grad_(False)
+    training = grads != "none"
+    splits = ("q", "k", "v") if equal_splits else dict(q=128, k=64, v=64)
+    model = module(
+        128,
+        384 if equal_splits else 256,
+        parameters_split=splits,
+        params_dtype=dtype,
+        bias=bias_mode != "none",
+        return_bias=bias_mode == "returned",
+    )
+    for name, parameter in model.named_parameters():
+        parameter.requires_grad_(
+            grads == "all"
+            or (grads == "mixed" and name not in ("k_weight", "v_bias"))
+            or (grads == "weight" and name == "v_weight")
+        )
     reference = copy.deepcopy(model)
-    compiled = torch.compile(model, fullgraph=True, mode=compile_mode)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     ref_optimizer = torch.optim.SGD(reference.parameters(), lr=0.01)
+    quant_recipe = copy.deepcopy(fp8_recipe)
+    if isinstance(quant_recipe, recipe.NVFP4BlockScaling):
+        quant_recipe.disable_stochastic_rounding = True
+
+    def run(inp, current=model):
+        if quant_recipe is None:
+            out = current(inp)
+        else:
+            with te.autocast(recipe=quant_recipe):
+                out = current(inp)
+        return out[0] + out[1] if bias_mode == "returned" else out
+
+    def reference_parameters(defer_concatenation=False):
+        weight = torch.cat([getattr(reference, name) for name in reference.weight_names])
+        bias = (
+            torch.cat([getattr(reference, name) for name in reference.bias_names])
+            if reference.use_bias
+            else None
+        )
+        return weight, bias, None, None
+
+    reference._get_weight_and_bias_tensors = reference_parameters
+
+    if (
+        compile_mode == "default"
+        and dtype == torch.bfloat16
+        and not equal_splits
+        and fp8_recipe is None
+        and bias_mode == "fused"
+        and grads == "mixed"
+    ):
+        inp = torch.randn(16, 128, device="cuda", dtype=dtype, requires_grad=True)
+        out = torch.compile(model, fullgraph=True, backend="aot_eager")(inp)
+        with torch.no_grad():
+            model.v_weight.add_(0.01)
+            reference.v_weight.add_(0.01)
+        with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+            out.sum().backward()
+
+    actual_forward = torch.compile(run, fullgraph=True, mode=compile_mode) if compile_mode else run
+    check_cats = (
+        compile_mode != "reduce-overhead"
+        and dtype == torch.bfloat16
+        and fp8_recipe is None
+        and bias_mode == "fused"
+    )
     for mutation in ("none", "optimizer", "data", "parameter", "assign", "dtype"):
         for current in (model, reference):
             if mutation == "data":
                 current.k_weight.data = current.k_weight.detach().clone() + 0.01
                 current.k_bias.data = current.k_bias.detach().clone() + 0.01
             elif mutation == "parameter":
-                current.q_weight = torch.nn.Parameter(current.q_weight.detach().clone() + 0.01)
+                current.q_weight = torch.nn.Parameter(
+                    current.q_weight.detach().clone() + 0.01,
+                    requires_grad=current.q_weight.requires_grad,
+                )
             elif mutation == "assign":
                 state = {name: value.clone() for name, value in current.state_dict().items()}
                 current.load_state_dict(state, assign=True)
             elif mutation == "dtype":
                 current.to(torch.float64).to(dtype)
-        if mutation == "optimizer":
+        if mutation == "optimizer" and training:
             optimizer.step()
             ref_optimizer.step()
-        for _ in range(3):
+        for iteration in range(3):
             torch.compiler.cudagraph_mark_step_begin()
-            inp = torch.randn(16, 64, device="cuda", dtype=dtype, requires_grad=True)
-            ref_inp = inp.detach().clone().requires_grad_()
+            inp = torch.randn(
+                16,
+                128,
+                device="cuda",
+                dtype=dtype,
+                requires_grad=grads in ("all", "mixed", "input"),
+            )
+            ref_inp = inp.detach().clone().requires_grad_(inp.requires_grad)
             model.zero_grad(set_to_none=True)
             reference.zero_grad(set_to_none=True)
-            out = compiled(inp)
-            grad = torch.randn_like(out)
-            out.backward(grad)
-            actual = [out.detach().clone(), inp.grad.clone()]
-            actual.extend(None if p.grad is None else p.grad.clone() for p in model.parameters())
-            ref_out = reference(ref_inp)
-            ref_out.backward(grad)
-            expected = [ref_out, ref_inp.grad, *(p.grad for p in reference.parameters())]
-            for result, target in zip(actual, expected):
-                if target is None:
-                    assert result is None
+            grad = torch.randn(16, model.out_features, device="cuda", dtype=dtype)
+            rng_state = torch.cuda.get_rng_state() if quant_recipe is not None else None
+            profile = check_cats and iteration == 2 and mutation in ("none", "optimizer", "data")
+            with (
+                torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU])
+                if profile
+                else contextlib.nullcontext()
+            ) as prof:
+                with torch.set_grad_enabled(training):
+                    out = actual_forward(inp)
+                    if training:
+                        out.backward(grad)
+            if profile:
+                cats = sum(event.count for event in prof.key_averages() if event.key == "aten::cat")
+                expected_cats = (
+                    0
+                    if mutation in ("none", "optimizer")
+                    else (4 if compile_mode and training else 2)
+                )
+                assert cats == expected_cats
+            if rng_state is not None:
+                torch.cuda.set_rng_state(rng_state)
+            with torch.set_grad_enabled(training):
+                ref_out = run(ref_inp, reference)
+                if training:
+                    ref_out.backward(grad)
+            torch.testing.assert_close(out, ref_out, **dtype_tols(dtype))
+            for actual, expected in zip(
+                (inp, *model.parameters()), (ref_inp, *reference.parameters())
+            ):
+                if not actual.requires_grad:
+                    assert actual.grad is None
                 else:
-                    torch.testing.assert_close(result, target, **dtype_tols(dtype))
+                    assert actual.grad is not None
+                    torch.testing.assert_close(actual.grad, expected.grad, **dtype_tols(dtype))
     if compile_mode == "reduce-overhead":
         assert not counters["inductor"]["cudagraph_skips"]
-
-
-@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize("fp8_recipe", [None, *_all_recipes], ids=recipe_id)
-@pytest.mark.parametrize("bias_mode", ["fused", "none", "returned"])
-def test_te_split_parameters_recipes(fp8_recipe, bias_mode):
-    autocast_recipe = fp8_recipe or recipe.Float8CurrentScaling()
-    options = dict(bias=bias_mode != "none", return_bias=bias_mode == "returned")
-    model = te.Linear(
-        128,
-        256,
-        parameters_split=dict(q=128, k=64, v=64),
-        params_dtype=torch.bfloat16,
-        **options,
-    )
-
-    def fn(inp):
-        with te.autocast(enabled=fp8_recipe is not None, recipe=autocast_recipe):
-            out = model(inp)
-        if bias_mode == "returned":
-            out, bias = out
-            out = out + bias
-        return out
-
-    torch._dynamo.reset()
-    compiled = torch.compile(fn, fullgraph=True)
-    inp = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    grad = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    expected = fn(inp)
-    expected.backward(grad)
-    expected_grads = [t.grad.clone() for t in (inp, *model.parameters()) if t.requires_grad]
-    inp.grad = None
-    model.zero_grad(set_to_none=True)
-    actual = compiled(inp)
-    actual.backward(grad)
-    actual_grads = [t.grad for t in (inp, *model.parameters()) if t.requires_grad]
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    torch.testing.assert_close(actual_grads, expected_grads, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize("training", [False, True])
-@pytest.mark.parametrize(
-    "module, execution_mode",
-    [(te.Linear, "eager"), (te.Linear, "compile"), (te.LayerNormLinear, "eager")],
-)
-def test_te_split_parameters_no_cat(training, module, execution_mode):
-    """Adjacent parameter storage does not launch a concatenation in either pass."""
-    model = module(64, 128, parameters_split=dict(q=64, k=32, v=32), params_dtype=torch.bfloat16)
-    run_model = torch.compile(model, fullgraph=True) if execution_mode == "compile" else model
-    inp = torch.randn(16, 64, device="cuda", dtype=torch.bfloat16, requires_grad=training)
-
-    def run():
-        with torch.set_grad_enabled(training):
-            out = run_model(inp)
-            if training:
-                out.sum().backward()
-        model.zero_grad(set_to_none=True)
-        inp.grad = None
-
-    for _ in range(3):
-        run()
-    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
-        run()
-    assert "aten::cat" not in {event.key for event in prof.key_averages()}
-    model.k_weight.data = model.k_weight.detach().clone()
-    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
-        run()
-    cats = sum(event.count for event in prof.key_averages() if event.key == "aten::cat")
-    assert cats == (2 if training and execution_mode == "compile" else 1)
-
-
-@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-def test_te_split_parameters_saved_versions():
-    model = te.Linear(64, 128, parameters_split=dict(q=64, k=32, v=32), params_dtype=torch.bfloat16)
-    compiled = torch.compile(model, fullgraph=True, backend="aot_eager")
-    inp = torch.randn(16, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    out = compiled(inp)
-    with torch.no_grad():
-        model.v_weight.add_(0.01)
-    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
-        out.sum().backward()
-
-
-@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize("grad_target", ["input", "weight"])
-def test_te_split_parameters_grad_targets(grad_target):
-    model = te.Linear(64, 128, parameters_split=dict(q=64, k=32, v=32), params_dtype=torch.bfloat16)
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-    if grad_target != "input":
-        getattr(model, f"v_{grad_target}").requires_grad_(True)
-    inp = torch.randn(16, 64, device="cuda", dtype=torch.bfloat16)
-    inp.requires_grad_(grad_target == "input")
-    compiled = torch.compile(model, fullgraph=True)
-    out = compiled(inp)
-    grad = torch.randn_like(out)
-    out.backward(grad)
-    actual = [out.detach().clone()]
-    tensors = [inp, *model.parameters()]
-    actual.extend(None if t.grad is None else t.grad.clone() for t in tensors)
-    for tensor in tensors:
-        tensor.grad = None
-    expected = model(inp)
-    expected.backward(grad)
-    for result, target in zip(actual, [expected, *(t.grad for t in tensors)]):
-        if target is None:
-            assert result is None
-        else:
-            torch.testing.assert_close(result, target, rtol=0, atol=0)
