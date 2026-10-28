@@ -2484,43 +2484,6 @@ def test_grouped_runtime_recipe_rebuild():
     torch.testing.assert_close(module.weight.grad, ref_wgrad, rtol=1e-2, atol=5e-3)
 
 
-@pytest.mark.parametrize("single_weight", [False, True])
-@pytest.mark.parametrize("restriction", ["debug", "calibration", "offload", "output", "override"])
-def test_grouped_runtime_rechecks_support(monkeypatch, single_weight, restriction):
-    """Recheck runtime restrictions without allowing a single weight to use the split path."""
-    module = GroupedLinear(
-        2,
-        128,
-        128,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        single_grouped_weight=single_weight,
-        use_grouped_tensor=True,
-    )
-    module.activation_dtype = torch.bfloat16
-    module.fp8 = True
-    active_recipe = recipe.Float8CurrentScaling()
-    if restriction == "override":
-        active_recipe.backward_override = "high_precision"
-    if not is_module_grouped_tensor_path_supported(recipe.Float8CurrentScaling(), torch.bfloat16):
-        pytest.skip("Native current-scaling grouped GEMM is unavailable.")
-    monkeypatch.setattr(FP8GlobalStateManager, "get_fp8_recipe", lambda: active_recipe)
-    module.fp8_calibration = restriction == "calibration"
-    args = (
-        restriction == "debug",
-        restriction == "offload",
-        [object()] if restriction == "output" else (),
-    )
-    if single_weight:
-        with pytest.raises(RuntimeError, match="Single grouped parameters require"):
-            module._grouped_tensor_path_supported(*args)
-    else:
-        assert not module._grouped_tensor_path_supported(*args)
-    module.fp8_calibration = False
-    active_recipe.backward_override = None
-    assert module._grouped_tensor_path_supported(False, False, ())
-
-
 @pytest.mark.parametrize(
     "use_grouped_tensor,single_bias", [(False, False), (True, False), (True, True)]
 )
