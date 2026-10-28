@@ -11,6 +11,7 @@ import os
 import functools
 import torch
 import transformer_engine_torch as tex
+from transformer_engine import te_device_type
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
 from ..utils import (
     ceil_div,
@@ -989,7 +990,8 @@ def general_grouped_gemm(
 
     if grad and use_bias:
         grad_bias = [
-            torch.empty(B[i].size(1), dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
+            torch.empty(B[i].size(1), dtype=out[0].dtype, device=te_device_type())
+            for i in range(num_gemms)
         ]
     else:
         grad_bias = empty_tensors

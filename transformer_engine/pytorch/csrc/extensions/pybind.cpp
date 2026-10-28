@@ -149,7 +149,7 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
         py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
-        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
+        py::arg("bin_bounds"), py::arg("histogram_mode"),
         "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
@@ -210,6 +210,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+  m.def("nvfp4_gemm_swizzled_scales_alignment",
+        &transformer_engine::pytorch::NVFP4Quantizer::gemm_swizzled_scales_alignment,
+        py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
+        py::arg("row_scaled_nvfp4"), py::arg("nvfp4_use_4over6"), py::arg("sm_arch"),
+        py::arg("disable_rht_cast_fusion"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),

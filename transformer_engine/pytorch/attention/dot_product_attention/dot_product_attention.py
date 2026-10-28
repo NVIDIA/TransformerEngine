@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch.fx.experimental.symbolic_shapes import guard_scalar
 from torch.nn.parameter import Parameter
 
+from transformer_engine import te_device_type
 from transformer_engine.common.recipe import (
     Format,
     Recipe,
@@ -962,12 +963,14 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.softmax_offset = None
         if self.softmax_type == "off-by-one":
             self.softmax_offset = torch.zeros(
-                self.num_attention_heads // self.tp_size, device="cuda"
+                self.num_attention_heads // self.tp_size, device=te_device_type()
             )
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
-                Parameter(torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")),
+                Parameter(
+                    torch.zeros(self.num_attention_heads // self.tp_size, device=te_device_type())
+                ),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
 
@@ -2353,9 +2356,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_output = False
 
             # checks for q/k/v shapes
-            assert (
-                query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-            ), "DotProductAttention only supports CUDA tensors."
+            assert all(
+                x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+            ), f"DotProductAttention only supports {te_device_type()} tensors."
             assert (
                 query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
             ), "Queries, keys and values must have the same data type!"
@@ -2516,7 +2519,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                             "Mixed THD policy sequence_ids must be one-dimensional int32 or "
                             "int64 tensors."
                         )
-                    if not sequence_ids.is_cuda or sequence_ids.device != query_layer.device:
+                    if sequence_ids.device != query_layer.device:
                         raise ValueError(
                             "Mixed THD policy sequence_ids must be on the Q/K/V device."
                         )
