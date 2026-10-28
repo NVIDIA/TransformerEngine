@@ -1936,9 +1936,24 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         ):
             grouped_fc2_weight._with_gemm_swizzled_scales = False
 
+        # Decide up front whether the backward rebuilds fc2_x from the dSReLU kernel
+        # (which applies the tanh clamp when regenerating fc2_x). When it does, the
+        # forward only needs row-wise fc2_x for the fc2 GEMM; the column-wise copy
+        # for wgrad is produced in the backward from the recomputed tensor.
+        recompute_srelu_fc2_x = (
+            isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU))
+            and bool(getattr(activation_op, "activation_recompute_in_mlp", False))
+            and weight_requires_grad
+            and _grouped_gemm_dsrelu_backward_supported()
+            and _nvidia_cudnn_frontend_supports_wgrad()
+        )
+
         # Unpack kernel outputs
         if use_nvfp4:
-            fc2_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            fc2_input_quantizer.set_usage(
+                rowwise=True,
+                columnwise=weight_requires_grad and not recompute_srelu_fc2_x,
+            )
             fc2_input_quantizer.optimize_for_gemm = True
             if kernel_impl == "gemm_act":
                 # Quantize to NVFP4
@@ -2266,22 +2281,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Save state for backward pass
         if requires_grad:
             saved_fc1_x = grouped_fc1_x
-            mark_grouped_tensor(saved_fc1_x, activation_in, scales, grouped_fc2_x)
-            activation_op = self.basic_ops[1]
             cpu_offloading = is_cpu_offload_enabled()
-            # The dSReLU kernel applies the tanh clamp when regenerating fc2_x.
-            activation_is_srelu = isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU))
-            activation_recompute_in_mlp = bool(
-                getattr(activation_op, "activation_recompute_in_mlp", False)
-            )
-            recompute_srelu_fc2_x = (
-                activation_is_srelu
-                and activation_recompute_in_mlp
-                and weight_requires_grad
-                and _grouped_gemm_dsrelu_backward_supported()
-                and _nvidia_cudnn_frontend_supports_wgrad()
-            )
+            # recompute_srelu_fc2_x was decided before the fc2 input quantization above.
+            # A recomputed fc2_x is row-wise only and is not saved, so only mark what
+            # actually goes to save_for_backward.
             saved_grouped_fc2_x = None if recompute_srelu_fc2_x else grouped_fc2_x
+            mark_grouped_tensor(saved_fc1_x, activation_in, scales, saved_grouped_fc2_x)
 
             # wgrad only needs column-wise data, so clear row-wise data
             for grouped_fc_x in (saved_fc1_x, saved_grouped_fc2_x):
