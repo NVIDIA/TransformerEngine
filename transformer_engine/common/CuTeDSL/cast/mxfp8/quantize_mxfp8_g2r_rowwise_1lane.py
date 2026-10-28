@@ -245,7 +245,9 @@ class MXFP8QuantizeRowwise1LaneG2RKernel(MXFP8QuantizeKernelBase):
         self.cfg = cfg
         # If True, then this kernel will first write each thread's scale byte to a shared memory buffer,
         # then utilize vectorized store to flush the buffer to global memory.
-        self._STASH_SCALE_TO_SMEM = True  # Hardcode to True for now because it in general improves perf
+        self._STASH_SCALE_TO_SMEM = (
+            True  # Hardcode to True for now because it in general improves perf
+        )
 
     @cute.jit
     def __call__(
