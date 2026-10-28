@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cfloat>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
@@ -51,15 +52,22 @@ void scales_from_amax(float amax, const QuantizationOptions& opts, float* qscale
   float quant_type_max_val = Quantized_Limits<OutputType>::max();
   float eps = opts.amax_epsilon;
   amax = std::max(amax, eps);
-  float qscale = quant_type_max_val / amax;
-  if (std::isinf(qscale)) {
-    qscale = input_type_max_val;
-  }
-  if (std::isnan(qscale) || amax == 0) {
-    qscale = 1.0;
+  const float guard = quant_type_max_val * FLT_MIN;
+  float qscale = 1.0f;
+  if (!(std::isinf(amax) || std::isnan(amax) || amax == 0.0f)) {
+    if (amax < guard) {
+      amax = guard;
+    }
+    qscale = quant_type_max_val / amax;
+    if (std::isinf(qscale)) {
+      qscale = input_type_max_val;
+    }
+    if (std::isnan(qscale)) {
+      qscale = 1.0f;
+    }
   }
 
-  if (opts.force_pow_2_scales && qscale != 0.0) {
+  if (opts.force_pow_2_scales && qscale != 0.0f) {
     uint32_t scale_bits = *reinterpret_cast<uint32_t*>(&qscale);
     // Scale must be positive, shift it
     uint8_t exp = scale_bits >> 23;
