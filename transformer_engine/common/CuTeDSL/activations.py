@@ -38,7 +38,8 @@ def act_gelu(x: Float32) -> Float32:
 
 
 def act_silu(x: Float32) -> Float32:
-    return x / (Float32(1.0) + exp(-x))
+    # x * sigmoid(x), as math.h computes it: x / (1 + exp(-x)) rounds differently in FP32.
+    return x * sigmoid(x)
 
 
 def act_qgelu(x: Float32) -> Float32:

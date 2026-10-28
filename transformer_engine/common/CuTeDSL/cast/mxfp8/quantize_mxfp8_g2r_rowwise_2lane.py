@@ -220,6 +220,10 @@ def quantize_mxfp8_gmem_tile_rowwise_2lane(
         rX_tile_i32 = cute.recast_tensor(rX[None, tile_idx], Int32)
         rO_u32 = cute.recast_tensor(rO, Uint32)
         amax = extract_mx_block_amax(rX_tile_i32)
+        # With an activation fused, a block of only NaNs gets amax 0 and so scale 0, as in CUDA's
+        # generic kernel; cast_rowwise.cuh, like the plain cast here, gives it the NaN scale.
+        if cutlass.const_expr(ACTIVATION is not None):
+            amax = cute.arch.fmax(amax, Float32(0.0))
         exponent = cvt_f32_to_fp8e8m0fnu(amax * MAX_NORM_RCP)
 
         # The even lane of each pair stores its block's scale byte, as cast_rowwise.cuh does.

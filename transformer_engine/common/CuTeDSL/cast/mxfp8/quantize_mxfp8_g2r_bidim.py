@@ -50,6 +50,41 @@ from .quantize_mxfp8_common import (
 
 
 @cute.jit
+def _bf16_nan_magnitudes_to_zero(pair: Uint32) -> Uint32:
+    """A packed pair of BF16 block amaxes with each NaN half replaced by +0.
+
+    With an activation fused, a block of only NaNs gets amax 0 and so scale 0, as in CUDA's
+    generic kernel (0-seeded fmaxf); CUDA's cast kernels, like the plain cast here, give it the NaN
+    scale (cast_bidim.cuh's kNaNReciprocal).
+    """
+    magnitudes = pair & Uint32(0x7FFF7FFF)
+    lo = magnitudes & Uint32(0xFFFF)
+    hi = magnitudes >> Uint32(16)
+    if lo > Uint32(0x7F80):
+        lo = Uint32(0)
+    if hi > Uint32(0x7F80):
+        hi = Uint32(0)
+    return lo | (hi << Uint32(16))
+
+
+@cute.jit
+def _bf16_mx_scale_reciprocal_fused(
+    magnitude: Uint32, MAX_EXPONENT: cutlass.Constexpr[int]
+) -> Uint32:
+    """bf16_mx_scale_reciprocal with a fused activation: a NaN block amax gives the reciprocal of
+    amax 0 (see _bf16_nan_magnitudes_to_zero). Same instructions, so it costs nothing extra."""
+    rounded = (magnitude + Uint32(31)) & Uint32(0x7F80)
+    if rounded < Uint32(MAX_EXPONENT << 7):  # pylint: disable=consider-using-max-builtin
+        rounded = Uint32(MAX_EXPONENT << 7)
+    reciprocal = Uint32((254 + MAX_EXPONENT) << 7) - rounded
+    if magnitude >= Uint32(0x7F80):
+        reciprocal = Uint32(0x0040)
+        if magnitude != Uint32(0x7F80):
+            reciprocal = Uint32(254 << 7)
+    return reciprocal
+
+
+@cute.jit
 def _quantize_rowwise(
     rX: cute.Tensor,
     gO_row_thread: cute.Tensor,
@@ -68,8 +103,10 @@ def _quantize_rowwise(
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     EDGE: cutlass.Constexpr[bool] = False,
     rows_left: Int32 = 0,
+    FUSED: cutlass.Constexpr[bool] = False,
 ):
-    """With EDGE, only the thread's first rows_left rows are stored."""
+    """With EDGE, only the thread's first rows_left rows are stored. FUSED: an activation is fused
+    (see _bf16_nan_magnitudes_to_zero)."""
     tidx, _, _ = cute.arch.thread_idx()
     MAX_EXPONENT = 8 if FP8_DTYPE is cutlass.Float8E4M3FN else 15
 
@@ -91,7 +128,12 @@ def _quantize_rowwise(
     is_writer_thread = tidx % THREADS_X_PER_MX_BLOCK == 0
     for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
         rX_row_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
-        reciprocal = bf16_mx_scale_reciprocal(extract_mx_block_amax(rX_row_i32), MAX_EXPONENT)
+        if cutlass.const_expr(FUSED):
+            reciprocal = _bf16_mx_scale_reciprocal_fused(
+                extract_mx_block_amax(rX_row_i32), MAX_EXPONENT
+            )
+        else:
+            reciprocal = bf16_mx_scale_reciprocal(extract_mx_block_amax(rX_row_i32), MAX_EXPONENT)
         reciprocal_pair = reciprocal | (reciprocal << Uint32(16))
         for pack_idx in cutlass.range_constexpr(
             cute.size(rO_row_u32)
@@ -202,8 +244,11 @@ def _reduce_partial_colwise_amaxes(
     ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    FUSED: cutlass.Constexpr[bool] = False,
 ) -> cute.Tensor:
     """
+    FUSED: an activation is fused (see _bf16_nan_magnitudes_to_zero).
+
     sAmaxs_col_scratch: the SMEM buffer of layout (ELEMENTS_X_PER_THREAD, (CTA_THREADS_Y, CTA_THREADS_X))
         that contains each threads' own columnwise amax of its ELEMENTS_X_PER_THREAD columns
 
@@ -278,6 +323,8 @@ def _reduce_partial_colwise_amaxes(
             for scratch_row_idx in cutlass.range_constexpr(1, CTA_THREADS_Y):
                 amaxX2 = abs_max_x2_bf16(amaxX2, sAmaxs_col_frag_i32_rows[scratch_row_idx])
 
+            if cutlass.const_expr(FUSED):
+                amaxX2 = Int32(_bf16_nan_magnitudes_to_zero(Uint32(amaxX2)))
             # Obtain the columnwise scale reciprocal for this column pair
             sS_col_i32[tidx, pair_idx] = bf16_mx_scale_reciprocal_pair(amaxX2, MAX_EXPONENT)
     cute.arch.sync_threads()
@@ -404,8 +451,10 @@ def _quantize_colwise(
     EDGE: cutlass.Constexpr[bool] = False,
     rows_left: Int32 = 0,
     cols_ok: Boolean = True,
+    FUSED: cutlass.Constexpr[bool] = False,
 ):
-    """Reduce columnwise amaxes across the CTA, write the columnwise scales, and quantize rX with them."""
+    """Reduce columnwise amaxes across the CTA, write the columnwise scales, and quantize rX with them.
+    FUSED: an activation is fused (see _bf16_nan_magnitudes_to_zero)."""
     tidx, _, _ = cute.arch.thread_idx()
 
     sAmaxs_col_scratch = _gather_partial_colwise_amaxes(
@@ -424,6 +473,7 @@ def _quantize_colwise(
         ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
         DTYPE=DTYPE,
         FP8_DTYPE=FP8_DTYPE,
+        FUSED=FUSED,
     )
 
     # Copy the reduced columnwise scale reciprocals to RMEM.
@@ -921,6 +971,7 @@ def quantize_mxfp8_gmem_tile_bidimensional(
                 FP8_DTYPE=FP8_DTYPE,
                 EDGE=EDGE,
                 rows_left=rows_left,
+                FUSED=WITH_ACT or WITH_DACT,
             )
 
     if cutlass.const_expr(COLWISE):
@@ -989,6 +1040,7 @@ def quantize_mxfp8_gmem_tile_bidimensional(
                 EDGE=EDGE,
                 rows_left=rows_left,
                 cols_ok=cols_ok,
+                FUSED=WITH_ACT or WITH_DACT,
             )
 
     return thread_amax
@@ -1032,11 +1084,12 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         faster than the general kernel. GB200, geometric mean speedup over TE main, general ->
         this kernel: FP16 GeLU 1.46 -> 1.62, SiLU 1.41 -> 1.69, dGeLU 1.56 -> 1.69, dSiLU
         1.28 -> 1.76, dbias_dSiLU 1.48 -> 1.74; FP32 SiLU 1.32 -> 1.54, dGeLU 1.38 -> 1.52,
-        dSiLU 1.10 -> 1.85, dbias_dSiLU 1.18 -> 1.53. dbias_dGeLU (FP16 1.75 -> 1.50, FP32
-        1.47 -> 1.25) and FP32 GeLU (1.20 -> 1.16) keep the general kernel."""
+        dSiLU 1.10 -> 1.85, dbias_dSiLU 1.18 -> 1.53, dbias_dGeLU 1.47 -> 1.25 (CUDA 1.30; the
+        general kernel's FP32 dbias differs from CUDA's in the last bit, this kernel's matches).
+        FP16 dbias_dGeLU (1.75 -> 1.50) and FP32 GeLU (1.20 -> 1.16) keep the general kernel."""
         if not (cfg.WITH_ACT or cfg.WITH_DACT):
             return False
-        if cfg.WITH_DBIAS and cfg.ACTIVATION == "dgelu":
+        if cfg.WITH_DBIAS and cfg.ACTIVATION == "dgelu" and cfg.DTYPE is cutlass.Float16:
             return False
         return not (cfg.DTYPE is cutlass.Float32 and cfg.ACTIVATION == "gelu")
 
