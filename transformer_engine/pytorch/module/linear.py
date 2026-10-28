@@ -1948,7 +1948,7 @@ class _Linear(torch.autograd.Function):
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
         result = _linear_backward_impl(bwd_args) + (None,)  # fwd_args grad slot
-        if len(ctx.needs_input_grad) > 4:
+        if hasattr(ctx, "parameter_split_sizes"):
             wgrad, dgrad, bgrad, _ = result
             weight_sizes, bias_sizes = ctx.parameter_split_sizes
             part_grads = []

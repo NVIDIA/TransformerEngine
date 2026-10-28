@@ -1561,7 +1561,7 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
-        if len(ctx.needs_input_grad) > 6:
+        if hasattr(ctx, "parameter_split_sizes"):
             weight_sizes, bias_sizes = ctx.parameter_split_sizes
             part_grads = []
             for grad, sizes in ((wgrad, weight_sizes), (grad_bias, bias_sizes)):
