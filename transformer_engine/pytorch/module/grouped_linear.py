@@ -2388,11 +2388,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             # Choose between grouped tensor path or split-quantize path
             use_grouped_tensor_path = False
-            if self.use_grouped_tensor and not (
-                self.fp8_calibration
-                or debug
-                or cpu_offloading
-            ):
+            if self.use_grouped_tensor and not (self.fp8_calibration or debug or cpu_offloading):
                 use_grouped_tensor_path = is_module_grouped_tensor_path_supported(
                     _recipe,
                     self.activation_dtype,

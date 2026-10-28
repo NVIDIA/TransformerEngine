@@ -1147,12 +1147,10 @@ class GroupedLinear(BasicOperation):
             )
         else:
             input_quantizers = [
-                self.get_quantizer("forward", 2 * group_idx)
-                for group_idx in range(num_groups)
+                self.get_quantizer("forward", 2 * group_idx) for group_idx in range(num_groups)
             ]
             weight_quantizers = [
-                self.get_quantizer("forward", 2 * group_idx + 1)
-                for group_idx in range(num_groups)
+                self.get_quantizer("forward", 2 * group_idx + 1) for group_idx in range(num_groups)
             ]
             out, tensors_to_save = self._fuser_forward_split_quantize(
                 ctx=ctx,
@@ -1237,8 +1235,7 @@ class GroupedLinear(BasicOperation):
             grad_output_quantizers = [self.get_quantizer("backward", 0)]
         else:
             grad_output_quantizers = [
-                self.get_quantizer("backward", group_idx)
-                for group_idx in range(num_groups)
+                self.get_quantizer("backward", group_idx) for group_idx in range(num_groups)
             ]
 
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
