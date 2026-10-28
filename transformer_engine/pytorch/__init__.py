@@ -18,22 +18,9 @@ assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {t
 
 load_framework_extension("torch")
 
-# Device type and platform globals — live here because torch cannot be imported
-# at the top-level transformer_engine package (shared with JAX).
-# Use plugin-set values if available, otherwise fall back to CUDA defaults.
-transformer_engine.TE_DEVICE_TYPE = getattr(transformer_engine, "TE_DEVICE_TYPE", "cuda")
-transformer_engine.TE_PLATFORM = getattr(transformer_engine, "TE_PLATFORM", torch.cuda)
-
-
-def te_device_type() -> str:
-    """Torch device type used by Transformer Engine, e.g. `cuda`."""
-    return transformer_engine.TE_DEVICE_TYPE
-
-
-def te_platform():
-    """Torch device module used by Transformer Engine, e.g. `torch.cuda`."""
-    return transformer_engine.TE_PLATFORM
-
+# Defined in a standalone module so that internal modules can import them without
+# going through this package's __init__.
+from transformer_engine.pytorch.device import te_device_type, te_platform
 
 transformer_engine.te_device_type = te_device_type
 transformer_engine.te_platform = te_platform
