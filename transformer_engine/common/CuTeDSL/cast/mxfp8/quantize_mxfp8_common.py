@@ -294,7 +294,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
         self.general_kernel = MXFP8QuantizeGeneralG2SKernel(cfg) if self.ACT_NEED_MASKING else None
 
-        # Specialized cast-only kernels in a specific dispatch priority order so we prefer to dispatch to kernels that come first in the list.
+        # Specialized kernels in a specific dispatch priority order so we prefer to dispatch to kernels that come first in the list.
         self.specialized_kernels = [
             kernel_cls(cfg)
             for kernel_cls in (
