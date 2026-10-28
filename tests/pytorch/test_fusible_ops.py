@@ -5667,34 +5667,6 @@ class TestTrainingLoops:
         )
 
 
-@pytest.mark.parametrize("split_alignment", [64, 128])
-def test_basic_grouped_pre_fuser_split_alignment(monkeypatch, split_alignment):
-    """Split fallback configures every expert before adjacent ops consume the quantizers."""
-    fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling()
-    if not is_op_fuser_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
-        pytest.skip("Native MXFP8 grouped GEMM is unavailable.")
-    monkeypatch.delenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP", raising=False)
-    FP8GlobalStateManager.reset()
-    op = te_ops.GroupedLinear(
-        3,
-        128,
-        128,
-        bias=False,
-        dtype=torch.bfloat16,
-        device="cuda",
-        split_alignment=split_alignment,
-    )
-    with te.autocast(enabled=True, recipe=fp8_recipe):
-        op.reset_recipe_state(recipe=fp8_recipe)
-        for quantizers in (op._input_quantizers, op._grad_output_quantizers):
-            for quantizer in quantizers:
-                quantizer.set_usage(rowwise=True, columnwise=False)
-        op.pre_fuser_forward(requires_grad=True)
-        for quantizers in (op._input_quantizers, op._grad_output_quantizers):
-            for index, quantizer in enumerate(quantizers):
-                assert quantizer.columnwise_usage == (split_alignment == 64 or index == 0)
-
-
 @pytest.mark.parametrize(
     "fp8_recipe",
     [

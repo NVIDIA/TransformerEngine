@@ -791,23 +791,13 @@ class GroupedLinear(BasicOperation):
             )
             weight_requires_grad = requires_grad and weight_requires_grad
 
-            # The adjacent activation may consume these before our own forward/backward.
-            # Weight usage is only needed when preparing the GEMM operand.
-            weight = self.weight if self.single_grouped_weight else self.weight0
-            dtype = (
-                torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled() else weight.dtype
-            )
-            grouped = is_op_fuser_grouped_tensor_path_supported(
-                FP8GlobalStateManager.get_fp8_recipe(), dtype, self.split_alignment
-            )
-            input_quantizers = (self._input_quantizers[0],) if grouped else self._input_quantizers
-            grad_output_quantizers = (
-                (self._grad_output_quantizers[0],) if grouped else self._grad_output_quantizers
-            )
-            for quantizer in input_quantizers:
-                quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            for quantizer in grad_output_quantizers:
-                quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            # Configure the first group's input and grad output
+            # quantizers since they are exposed externally and may be
+            # used by other ops for early quantization
+            input_quantizer = self.get_quantizer("forward", 0)
+            grad_output_quantizer = self.get_quantizer("backward", 0)
+            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
 
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
@@ -879,18 +869,6 @@ class GroupedLinear(BasicOperation):
                         weight.quantizer = weight_quantizer.copy()
                 else:
                     weight.update_quantizer(weight_quantizer.copy())
-
-        # Cache object references for this recipe generation, not tensor workspaces.
-        # Keep the per-expert slots for legacy split quantization and checkpoint metadata.
-        self._input_quantizers = tuple(
-            self.get_quantizer("forward", 2 * i) for i in range(self.num_groups)
-        )
-        self._weight_quantizers = tuple(
-            self.get_quantizer("forward", 2 * i + 1) for i in range(self.num_groups)
-        )
-        self._grad_output_quantizers = tuple(
-            self.get_quantizer("backward", i) for i in range(self.num_groups)
-        )
 
     def op_forward(self, *args, **kwargs):
         raise RuntimeError(
@@ -1116,17 +1094,20 @@ class GroupedLinear(BasicOperation):
                 "tensor configuration."
             )
 
-        weight_quantizers = self._weight_quantizers
-        if use_grouped_tensor_path and self.single_grouped_weight:
-            weight_quantizers = (weight_quantizers[0],)
-
         if use_grouped_tensor_path:
+            if self.single_grouped_weight:
+                weight_quantizers = [self.get_quantizer("forward", 1)]
+            else:
+                weight_quantizers = [
+                    self.get_quantizer("forward", 2 * group_idx + 1)
+                    for group_idx in range(num_groups)
+                ]
             out, tensors_to_save = self._fuser_forward_grouped_tensor(
                 input_=input_,
                 split_sizes=split_sizes,
                 scales=scales,
                 with_quantized_compute=with_quantized_compute,
-                input_quantizer=self._input_quantizers[0],
+                input_quantizer=self.get_quantizer("forward", 0),
                 weight_quantizers=weight_quantizers,
                 dtype=dtype,
                 input_requires_grad=input_requires_grad,
@@ -1135,13 +1116,21 @@ class GroupedLinear(BasicOperation):
                 out_buffer=out_buffer,
             )
         else:
+            input_quantizers = [
+                self.get_quantizer("forward", 2 * group_idx)
+                for group_idx in range(num_groups)
+            ]
+            weight_quantizers = [
+                self.get_quantizer("forward", 2 * group_idx + 1)
+                for group_idx in range(num_groups)
+            ]
             out, tensors_to_save = self._fuser_forward_split_quantize(
                 ctx=ctx,
                 input_=input_,
                 split_sizes=split_sizes,
                 scales=scales,
                 with_quantized_compute=with_quantized_compute,
-                input_quantizers=self._input_quantizers,
+                input_quantizers=input_quantizers,
                 weight_quantizers=weight_quantizers,
                 dtype=dtype,
                 input_requires_grad=input_requires_grad,
@@ -1211,15 +1200,21 @@ class GroupedLinear(BasicOperation):
 
         ctx.save_for_backward(*tensors_to_save[0])
 
+        num_groups = self.num_groups
         weight_param = self.weight if self.single_grouped_weight else self.weight0
+
+        if use_grouped_tensor_path:
+            grad_output_quantizers = [self.get_quantizer("backward", 0)]
+        else:
+            grad_output_quantizers = [
+                self.get_quantizer("backward", group_idx)
+                for group_idx in range(num_groups)
+            ]
 
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         ctx.use_grouped_tensor_path = use_grouped_tensor_path
         ctx.with_quantized_compute = with_quantized_compute
-        if use_grouped_tensor_path:
-            ctx.grad_output_quantizer = self._grad_output_quantizers[0]
-        else:
-            ctx.grad_output_quantizers = self._grad_output_quantizers
+        ctx.grad_output_quantizers = grad_output_quantizers
         ctx.grad_input_quantizers = None
         # ``split_sizes``, offset metadata, and related tensors are routed
         # through ``save_for_backward`` (see ``_fuser_forward_split_quantize``
@@ -1802,7 +1797,7 @@ class GroupedLinear(BasicOperation):
         # Optionally get dbias is fusion available with bgrad_group_quantize
         dbias_packed = None
         if with_quantized_compute:
-            grad_output_quantizer = ctx.grad_output_quantizer
+            grad_output_quantizer = ctx.grad_output_quantizers[0]
             grad_output_quantizer.set_usage(
                 rowwise=ctx.input_requires_grad,
                 columnwise=ctx.weight_requires_grad,
