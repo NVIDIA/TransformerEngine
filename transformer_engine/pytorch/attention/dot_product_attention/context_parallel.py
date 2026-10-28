@@ -1125,7 +1125,8 @@ def cp_p2p_fwd_fused_attn(
     )
 
     if fp8:
-        softmax_lse_per_step, rng_states = aux_ctx_tensors
+        # With a sink, the FP8 aux pack also carries the offset: [stats, rng, (offset)].
+        softmax_lse_per_step, rng_states, *_ = aux_ctx_tensors
     else:
         softmax_lse_per_step, rng_states, *rest = aux_ctx_tensors
         # The aux pack is [stats, rng, (bias), (offset)], so an unconditional

@@ -1253,13 +1253,6 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_fused_attention = False
-        if context_parallel and cp_comm_type == "p2p" and fp8 and fp8_meta["recipe"].fp8_dpa:
-            logger.debug(
-                "Disabling FusedAttention for context parallelism with softmax_type = %s,"
-                " cp_comm_type = p2p and FP8 attention",
-                softmax_type,
-            )
-            use_fused_attention = False
 
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
