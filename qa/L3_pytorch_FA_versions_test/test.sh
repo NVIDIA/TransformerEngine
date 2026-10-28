@@ -37,14 +37,20 @@ export FLASH_ATTN_CUDA_ARCHS=$sm_arch
 # FA4: routine tests are here; sm100+ only; non-CP and CP
 FA2_SOURCE_VERSION="2.8.4"
 FA2_SOURCE_COMMIT="1fc0221183e799363001394a12dd9e78e15f5dda"
+FA2_SOURCE_GENCODE_ARCHS="80 90 100 110 120 121"
+FA2_versions=()
+case " $FA2_SOURCE_GENCODE_ARCHS " in
+  *" $sm_arch "*) FA2_versions=("$FA2_SOURCE_VERSION") ;;
+  *) echo "Skipping FA2 on sm${sm_arch} as FA2 has no --gencode for this arch" ;;
+esac
 CP_FA_VERSION=""
 if [ $sm_arch -gt 90 ]
 then
-  FA_versions=(2.8.4 4.0.0b33)
+  FA_versions=("${FA2_versions[@]}" 4.0.0b33)
   CP_FA_VERSION="4.0.0b33"
 elif [ $sm_arch -eq 90 ]
 then
-  FA_versions=(2.8.4 3.0.0b1)
+  FA_versions=("${FA2_versions[@]}" 3.0.0b1)
   CP_FA_VERSION="3.0.0b1"
 else
   error_exit "No L3 FlashAttention generation is defined for sm${sm_arch}"
