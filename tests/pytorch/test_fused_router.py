@@ -1042,7 +1042,16 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
     torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("path", ["forward", "graph_safe_forward", "backward"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "forward",
+        "graph_safe_forward",
+        "deterministic_forward",
+        "deterministic_graph_safe_forward",
+        "backward",
+    ],
+)
 def test_fused_moe_aux_loss_rejects_int_offset_overflow(path):
     num_rows, num_cols = 8_388_609, 256  # Above INT_MAX elements.
     bytes_needed = num_rows * num_cols * 2
@@ -1072,7 +1081,12 @@ def test_fused_moe_aux_loss_rejects_int_offset_overflow(path):
                 topk=1,
                 coeff=0.01,
             )
-            if path == "forward":
+            if path.startswith("deterministic_"):
+                arguments.update(
+                    deterministic=True,
+                    workspace=te_router._get_moe_aux_loss_workspace(probs.device),
+                )
+            if path in ("forward", "deterministic_forward"):
                 tex.fused_moe_aux_loss_fwd(total_num_tokens=num_rows, **arguments)
             else:
                 total = torch.tensor(num_rows, device="cuda", dtype=torch.int64)
@@ -1085,7 +1099,16 @@ def test_fused_moe_aux_loss_rejects_int_offset_overflow(path):
         pytest.fail("Expected the int-offset guard to reject the shape")
 
 
-@pytest.mark.parametrize("path", ["forward", "graph_safe_forward", "backward"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "forward",
+        "graph_safe_forward",
+        "deterministic_forward",
+        "deterministic_graph_safe_forward",
+        "backward",
+    ],
+)
 def test_fused_moe_aux_loss_largest_accepted_shape(path):
     # Exactly INT_MAX elements with one column: loop counters and grid math must not overflow.
     num_rows, num_cols = 2**31 - 1, 1
@@ -1119,7 +1142,12 @@ def test_fused_moe_aux_loss_largest_accepted_shape(path):
                 topk=1,
                 coeff=1.0,
             )
-            if path == "forward":
+            if path.startswith("deterministic_"):
+                arguments.update(
+                    deterministic=True,
+                    workspace=te_router._get_moe_aux_loss_workspace(probs.device),
+                )
+            if path in ("forward", "deterministic_forward"):
                 aux_loss, _ = tex.fused_moe_aux_loss_fwd(total_num_tokens=1, **arguments)
             else:
                 total = torch.tensor(1, device="cuda", dtype=torch.int64)
