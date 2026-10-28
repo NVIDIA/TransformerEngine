@@ -3274,13 +3274,18 @@ def _check_linear_bias_compile(
 @pytest.mark.parametrize(
     "module, compile_mode, dtype, equal_splits, fp8_recipe, bias_mode, grads",
     [
-        (te.Linear, mode, dtype, equal, None, "fused", "mixed")
-        for mode in ("default", "reduce-overhead")
+        (module, mode, dtype, equal, None, "fused", "mixed")
+        for module, mode in (
+            (te.Linear, "default"),
+            (te.Linear, "reduce-overhead"),
+            (te.LayerNormLinear, None),
+        )
         for dtype in (torch.float16, torch.bfloat16, torch.float32)
         for equal in (False, True)
     ]
     + [
-        (te.Linear, "default", torch.bfloat16, False, quant_recipe, bias, "all")
+        (module, mode, torch.bfloat16, False, quant_recipe, bias, "all")
+        for module, mode in ((te.Linear, "default"), (te.LayerNormLinear, None))
         for quant_recipe in (None, *_all_recipes)
         for bias in ("fused", "none", "returned")
     ]
@@ -3289,7 +3294,7 @@ def _check_linear_bias_compile(
         for module, mode, targets in (
             (te.Linear, None, ("none", "mixed")),
             (te.Linear, "default", ("none", "input", "weight")),
-            (te.LayerNormLinear, None, ("none", "mixed", "input", "weight")),
+            (te.LayerNormLinear, None, ("none", "input", "weight")),
         )
         for grads in targets
     ],
@@ -3323,12 +3328,15 @@ def test_te_split_parameters(
     if isinstance(quant_recipe, recipe.NVFP4BlockScaling):
         quant_recipe.disable_stochastic_rounding = True
 
+    autocast_enabled = False
+
     def run(inp, current=model):
-        if quant_recipe is None:
-            out = current(inp)
-        else:
-            with te.autocast(recipe=quant_recipe):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast_enabled):
+            if quant_recipe is None:
                 out = current(inp)
+            else:
+                with te.autocast(recipe=quant_recipe):
+                    out = current(inp)
         return out[0] + out[1] if bias_mode == "returned" else out
 
     def reference_parameters(defer_concatenation=False):
@@ -3365,7 +3373,11 @@ def test_te_split_parameters(
         and fp8_recipe is None
         and bias_mode == "fused"
     )
-    for mutation in ("none", "optimizer", "data", "parameter", "assign", "dtype"):
+    mutations = ["none", "optimizer", "data", "parameter", "assign", "dtype"]
+    if dtype == torch.bfloat16 and fp8_recipe is None:
+        mutations.append("mixed_dtype")
+    for mutation in mutations:
+        autocast_enabled = mutation == "mixed_dtype"
         for current in (model, reference):
             if mutation == "data":
                 current.k_weight.data = current.k_weight.detach().clone() + 0.01
@@ -3380,6 +3392,10 @@ def test_te_split_parameters(
                 current.load_state_dict(state, assign=True)
             elif mutation == "dtype":
                 current.to(torch.float64).to(dtype)
+            elif mutation == "mixed_dtype":
+                current.k_weight.data = current.k_weight.float()
+                if current.use_bias:
+                    current.k_bias.data = current.k_bias.float()
         if mutation == "optimizer" and training:
             optimizer.step()
             ref_optimizer.step()

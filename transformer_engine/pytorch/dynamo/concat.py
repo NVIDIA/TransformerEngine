@@ -10,20 +10,6 @@ from typing import List, Sequence, Tuple, Union
 import torch
 
 from .tensor_spec import TensorSpec
-from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage
-
-
-def validate_concat(parts: List[torch.Tensor]) -> None:
-    """Require a nonempty list of non-quantized tensors."""
-    if not parts:
-        raise ValueError("Attempted to concatenate 0 tensors")
-    if any(
-        not isinstance(part, (torch.Tensor, TensorSpec))
-        or isinstance(part, (QuantizedTensor, QuantizedTensorStorage))
-        or (isinstance(part, TensorSpec) and part.is_quantized)
-        for part in parts
-    ):
-        raise TypeError("Deferred concatenation only supports non-quantized tensors")
 
 
 def concat_shape(parts: Sequence[Union[torch.Tensor, TensorSpec]]) -> Tuple[int, ...]:
@@ -33,7 +19,6 @@ def concat_shape(parts: Sequence[Union[torch.Tensor, TensorSpec]]) -> Tuple[int,
 
 def concat_to_spec(parts: Sequence[Union[torch.Tensor, TensorSpec]]) -> TensorSpec:
     """Describe the concatenation without accessing its storage."""
-    validate_concat(parts)
     first = parts[0]
     dtype = first.dtype
     for tensor in parts[1:]:
@@ -48,7 +33,6 @@ def concat_to_spec(parts: Sequence[Union[torch.Tensor, TensorSpec]]) -> TensorSp
 
 def materialize_concat(value: List[torch.Tensor]) -> torch.Tensor:
     """Build a checked view, or copy parts whose storage is not adjacent."""
-    validate_concat(value)
     if len(value) == 1:
         return value[0]
     first = value[0]
