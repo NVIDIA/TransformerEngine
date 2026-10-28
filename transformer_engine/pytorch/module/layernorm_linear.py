@@ -67,7 +67,7 @@ from ..graph import is_graph_capturing
 from ._common import (
     apply_normalization,
     check_fp8_reduce_and_update,
-    noop_cat,
+    concat_input,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
@@ -79,6 +79,7 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
+from ..dynamo.concat import concat_shape, materialize_concat
 from ..dynamo import TensorOrQuantized
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -109,7 +110,7 @@ class LayerNormLinearFwdArgs:
     inp: torch.Tensor
     ln_weight: torch.Tensor
     ln_bias: Optional[torch.Tensor]
-    weight: TensorOrQuantized
+    weight: Optional[TensorOrQuantized]
     bias: Optional[torch.Tensor]
 
     # --- Non-differentiable cached tensors ---
@@ -181,6 +182,8 @@ class LayerNormLinearFwdArgs:
     # --- Misc ---
     cpu_offloading: bool
     is_grad_enabled: bool
+    weight_list: Optional[List[torch.Tensor]] = None
+    bias_list: Optional[List[torch.Tensor]] = None
 
     def any_requires_grad(self) -> bool:
         """Whether any differentiable input requires a gradient."""
@@ -315,8 +318,11 @@ def _layernorm_linear_forward_impl(
     inp = args.inp
     ln_weight = args.ln_weight
     ln_bias = args.ln_bias
-    weight = args.weight
-    bias = args.bias
+    weight = materialize_concat(args.weight_list) if args.weight_list else args.weight
+    bias = materialize_concat(args.bias_list) if args.bias_list else args.bias
+    if args.weight_list or args.bias_list:
+        args.weight, args.bias = weight, bias
+        args.weight_list = args.bias_list = None
     input_quantizer = args.input_quantizer
     weight_quantizer = args.weight_quantizer
     output_quantizer = args.output_quantizer
@@ -1477,9 +1483,10 @@ class _LayerNormLinear(torch.autograd.Function):
         inp: torch.Tensor,
         ln_weight: torch.Tensor,
         ln_bias: Optional[torch.Tensor],
-        weight: torch.Tensor,
+        weight: Optional[torch.Tensor],
         bias: Optional[torch.Tensor],
         fwd_args: LayerNormLinearFwdArgs,
+        *parameter_parts: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward pass: compute the output and set up the autograd context.
 
@@ -1494,6 +1501,14 @@ class _LayerNormLinear(torch.autograd.Function):
         fwd_args.ln_bias = ln_bias
         fwd_args.weight = weight
         fwd_args.bias = bias
+        if parameter_parts:
+            weight_count = len(fwd_args.weight_list or ())
+            fwd_args.weight_list = list(parameter_parts[:weight_count]) if weight_count else None
+            fwd_args.bias_list = list(parameter_parts[weight_count:]) or None
+            ctx.parameter_split_sizes = (
+                tuple(t.shape[0] for t in fwd_args.weight_list or ()),
+                tuple(t.shape[0] for t in fwd_args.bias_list or ()),
+            )
         (
             out,
             ln_out_return,
@@ -1546,14 +1561,24 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
-        return (
-            dgrad,
-            dgamma,
-            dbeta,
-            wgrad,
-            grad_bias,
-            None,  # fwd_args
-        )
+        if len(ctx.needs_input_grad) > 6:
+            weight_sizes, bias_sizes = ctx.parameter_split_sizes
+            part_grads = []
+            for grad, sizes in ((wgrad, weight_sizes), (grad_bias, bias_sizes)):
+                if sizes:
+                    part_grads.extend(
+                        grad.split(sizes) if grad is not None else (None,) * len(sizes)
+                    )
+            return (
+                dgrad,
+                dgamma,
+                dbeta,
+                None if weight_sizes else wgrad,
+                None if bias_sizes else grad_bias,
+                None,
+                *part_grads,
+            )
+        return dgrad, dgamma, dbeta, wgrad, grad_bias, None
 
 
 class LayerNormLinear(TransformerEngineBaseModule):
@@ -2081,7 +2106,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         try:
             # Get concatenated weight and bias tensors
-            weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+            weight_tensor, bias_tensor, weight_list, bias_list = self._get_weight_and_bias_tensors(
+                defer_concatenation=True
+            )
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
@@ -2103,7 +2130,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
             ) = quantizers
             if weight_quantizer is not None and not debug:
                 weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
-                    weight_quantizer, weight_tensor
+                    weight_quantizer,
+                    weight_tensor,
+                    weight_shape=concat_shape(weight_list) if weight_list else None,
                 )
 
             cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
@@ -2148,6 +2177,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 ln_bias=self.layer_norm_bias,
                 weight=weight_tensor,
                 bias=linear_bias_tensor,
+                weight_list=weight_list,
+                bias_list=bias_list,
                 weight_workspace=weight_workspace,
                 # requires_grad flags
                 input_requires_grad=inp.requires_grad,
@@ -2157,9 +2188,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     if self.layer_norm_bias is not None
                     else False
                 ),
-                weight_requires_grad=weight_tensor.requires_grad,
+                weight_requires_grad=(
+                    any(t.requires_grad for t in weight_list)
+                    if weight_list
+                    else weight_tensor.requires_grad
+                ),
                 bias_requires_grad=(
-                    linear_bias_tensor.requires_grad if linear_bias_tensor is not None else False
+                    any(t.requires_grad for t in bias_list)
+                    if bias_list
+                    else linear_bias_tensor is not None and linear_bias_tensor.requires_grad
                 ),
                 # quantizers
                 input_quantizer=input_quantizer,
@@ -2216,7 +2253,18 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 is_grad_enabled=is_grad_enabled,
             )
 
-            if is_grad_enabled:
+            if is_grad_enabled and (weight_list or bias_list):
+                out, ln_out, new_weight_workspace = _LayerNormLinear.apply(
+                    inp,
+                    self.layer_norm_weight,
+                    self.layer_norm_bias,
+                    weight_tensor,
+                    linear_bias_tensor,
+                    fwd_args,
+                    *(weight_list or ()),
+                    *(bias_list or ()),
+                )
+            elif is_grad_enabled:
                 out, ln_out, new_weight_workspace = _LayerNormLinear.apply(
                     inp,
                     self.layer_norm_weight,
@@ -2300,16 +2348,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
             for name, q in zip(names, original_quantizers)
         )
 
-    def _get_weight_and_bias_tensors(self):
-        # Get concatenated weight and bias tensors
-        unfused_weights = self._get_weight_tensors()
-
-        weight_tensor = noop_cat(unfused_weights)
+    def _get_weight_and_bias_tensors(self, defer_concatenation=False):
+        weight, weight_list = concat_input(self._get_weight_tensors(), defer=defer_concatenation)
+        bias, bias_list = None, None
         if self.use_bias:
-            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
-        else:
-            bias_tensor = getattr(self, self.bias_names[0])  # Unused
-        return weight_tensor, bias_tensor
+            bias, bias_list = concat_input(
+                [getattr(self, name) for name in self.bias_names],
+                defer=defer_concatenation and self.apply_bias and not self.gemm_bias_unfused_add,
+            )
+        return weight, bias, weight_list, bias_list
 
     def onnx_forward(
         self,
@@ -2334,7 +2381,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ) = self._get_quantizers(fp8_output, False, is_grad_enabled)
         inp_dtype = inp.dtype
 
-        weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+        weight_tensor, bias_tensor, _, _ = self._get_weight_and_bias_tensors()
         ln_out, ln_out_return = onnx_layernorm(
             inp,
             self.layer_norm_weight,

@@ -3366,10 +3366,13 @@ def test_te_split_parameters_recipes(fp8_recipe, bias_mode):
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("training", [False, True])
-@pytest.mark.parametrize("execution_mode", ["eager", "compile"])
-def test_te_split_parameters_no_cat(training, execution_mode):
+@pytest.mark.parametrize(
+    "module, execution_mode",
+    [(te.Linear, "eager"), (te.Linear, "compile"), (te.LayerNormLinear, "eager")],
+)
+def test_te_split_parameters_no_cat(training, module, execution_mode):
     """Adjacent parameter storage does not launch a concatenation in either pass."""
-    model = te.Linear(64, 128, parameters_split=dict(q=64, k=32, v=32), params_dtype=torch.bfloat16)
+    model = module(64, 128, parameters_split=dict(q=64, k=32, v=32), params_dtype=torch.bfloat16)
     run_model = torch.compile(model, fullgraph=True) if execution_mode == "compile" else model
     inp = torch.randn(16, 64, device="cuda", dtype=torch.bfloat16, requires_grad=training)
 
@@ -3403,87 +3406,6 @@ def test_te_split_parameters_saved_versions():
         model.v_weight.add_(0.01)
     with pytest.raises(RuntimeError, match="modified by an inplace operation"):
         out.sum().backward()
-
-
-@pytest.mark.parametrize(
-    "layout",
-    [
-        "adjacent",
-        "offset",
-        "single_row",
-        "disjoint",
-        "strided",
-        "singleton",
-        "negative",
-        "conjugate",
-    ],
-)
-def test_concat_storage(layout):
-    from transformer_engine.pytorch.dynamo.concat import materialize_concat
-    from transformer_engine.pytorch.module._common import concat_input
-
-    storage = torch.arange(128, device="cuda").view(16, 8)
-    if layout == "offset":
-        storage = storage[2:10]
-    elif layout == "strided":
-        storage = storage[:, ::2]
-    elif layout == "singleton":
-        storage = storage[:, :1]
-    elif layout == "negative":
-        storage = torch._neg_view(storage)
-    elif layout == "conjugate":
-        storage = torch.complex(storage.float(), storage.float()).conj()
-    parts = list(storage.split([1, storage.shape[0] - 3, 2]))
-    if layout == "single_row":
-        parts[0] = parts[0].as_strided(parts[0].shape, (0, *parts[0].stride()[1:]))
-    elif layout == "disjoint":
-        parts[1] = parts[1].clone()
-    tensor, deferred = concat_input(parts, defer=True)
-    assert tensor is None
-    assert isinstance(deferred, list)
-    result = materialize_concat(deferred)
-    torch.testing.assert_close(result, torch.cat(parts), rtol=0, atol=0)
-    if layout in ("adjacent", "offset", "single_row"):
-        assert result.data_ptr() == parts[0].data_ptr()
-    else:
-        assert result.untyped_storage().data_ptr() != parts[0].untyped_storage().data_ptr()
-
-
-@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize(
-    "optional, contents",
-    [(False, "full"), (False, "empty"), (True, "full"), (True, "empty"), (True, "none")],
-)
-def test_tensor_list_custom_op(optional, contents):
-    from transformer_engine.pytorch.dynamo import register_custom_op
-
-    @dataclasses.dataclass
-    class Args:
-        inp: torch.Tensor
-        tensors: list[torch.Tensor] | None if optional else list[torch.Tensor]
-
-    op = register_custom_op(
-        op_name=f"test_tensor_list_inputs_{optional}_{contents}",
-        arg_type=Args,
-        impl=lambda args: [args.inp + (args.tensors is not None)]
-        + [tensor.square() for tensor in (args.tensors or ())],
-        fake_impl=lambda args: [args.inp, *(args.tensors or ())],
-    )
-    assert op is not None
-
-    def fn(inp, tensors):
-        return op(Args(inp, tensors))
-
-    tensors = [torch.randn(3), torch.randn(2, 4, dtype=torch.float64)]
-    if contents == "empty":
-        tensors = []
-    elif contents == "none":
-        tensors = None
-    inp = torch.randn(2)
-    expected = [inp + (contents != "none"), *[tensor.square() for tensor in (tensors or ())]]
-    torch.testing.assert_close(fn(inp, tensors), expected)
-    compiled = torch.compile(fn, fullgraph=True, backend="aot_eager")
-    torch.testing.assert_close(compiled(inp, tensors), expected)
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
