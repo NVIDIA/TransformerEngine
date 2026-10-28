@@ -1045,10 +1045,13 @@ def _register_autograd_for_op(
     the plan on ``ctx`` so backward can slice its grads per user output.
     """
     bwd_takes_grad_tuple = any(f.name == "grad_outputs" for f in bwd_plan.fields)
+    fwd_slot_indices = {name: i for i, name in enumerate(fwd_plan.slot_names)}
 
     def _setup_context(ctx, inputs, output):
         ctx.fwd_tensor_list_lengths = {
-            i: len(value) for i, value in enumerate(inputs) if isinstance(value, list)
+            name: len(value)
+            for name, value in zip(fwd_plan.slot_names, inputs)
+            if isinstance(value, list)
         }
         fwd_obj = fwd_plan.unpack(dict(zip(fwd_plan.slot_names, inputs)))
         spec_obj = _spec_view(fwd_obj, fwd_plan.tensor_field_names())
@@ -1100,12 +1103,13 @@ def _register_autograd_for_op(
         # (always recorded in ``fwd_tensor_list_lengths``) needs a
         # list-shaped no-grad of matching length.
         out: List[Any] = [None] * len(fwd_plan.slot_names)
-        for pos, length in ctx.fwd_tensor_list_lengths.items():
-            out[pos] = [None] * length
+        for name, length in ctx.fwd_tensor_list_lengths.items():
+            out[fwd_slot_indices[name]] = [None] * length
         for pos, g in zip(grad_targets, grads):
-            if pos in ctx.fwd_tensor_list_lengths:
+            name = fwd_plan.slot_names[pos]
+            if name in ctx.fwd_tensor_list_lengths:
                 if g is not None:
-                    if not isinstance(g, list) or len(g) != ctx.fwd_tensor_list_lengths[pos]:
+                    if not isinstance(g, list) or len(g) != ctx.fwd_tensor_list_lengths[name]:
                         raise RuntimeError("Expected one gradient per tensor-list element")
                     out[pos] = g
                 continue

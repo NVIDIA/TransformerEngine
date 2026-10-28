@@ -246,8 +246,6 @@ class LinearBwdArgs:
     bias: Optional[torch.Tensor] = None
     weight_list: Optional[List[torch.Tensor]] = None
     bias_list: Optional[List[torch.Tensor]] = None
-    parameter_list_lengths: Tuple[int, int] = (0, 0)
-    weight_fp8_from_list: bool = False
 
     # --- Quantizers ---
     input_quantizer: Optional[Quantizer] = None
@@ -314,15 +312,13 @@ class LinearBwdArgs:
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
         saved = restore_from_func_ctx(ctx)
-        if self.parameter_list_lengths == (0, 0):
+        if len(saved) == 4:
             self.inputmat, self.weight_fp8, self.saved_weight, self.bias = saved
             return
         self.inputmat, self.weight_fp8, self.saved_weight, self.bias = saved[:4]
-        weight_count, bias_count = self.parameter_list_lengths
-        self.weight_list = list(saved[4 : 4 + weight_count]) if weight_count else None
-        self.bias_list = (
-            list(saved[4 + weight_count : 4 + weight_count + bias_count]) if bias_count else None
-        )
+        weight_count = ctx.fwd_tensor_list_lengths.get("weight_list", 0)
+        self.weight_list = saved[4 : 4 + weight_count] if weight_count else None
+        self.bias_list = saved[4 + weight_count :] or None
 
     def postprocess_gradients(self, grads):
         """Split gradients outside the op so the parts can share storage."""
@@ -1134,17 +1130,13 @@ def _linear_setup_ctx(
         saved_bias = bias
     if not fwd_args.weight_list and not fwd_args.bias_list:
         return saved_inputmat, wt_save, saved_weight, saved_bias
-    bwd_args.weight_fp8_from_list = wt_save_alias == "weight" and bool(fwd_args.weight_list)
-    weight_list = fwd_args.weight_list or ()
-    bias_list = fwd_args.bias_list or ()
-    bwd_args.parameter_list_lengths = (len(weight_list), len(bias_list))
     return (
         saved_inputmat,
         wt_save,
         saved_weight,
         saved_bias,
-        *weight_list,
-        *bias_list,
+        *(fwd_args.weight_list or ()),
+        *(fwd_args.bias_list or ()),
     )
 
 
@@ -1159,7 +1151,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
     assert grad_output is not None
     inputmat = args.inputmat
     saved_weight = materialize_concat(args.weight_list) if args.weight_list else args.saved_weight
-    weight_fp8 = saved_weight if args.weight_fp8_from_list else args.weight_fp8
+    weight_fp8 = args.weight_fp8
     is_dist_weight = is_distributed_weight(saved_weight)
     bias = materialize_concat(args.bias_list) if args.bias_list else args.bias
     input_quantizer = args.input_quantizer
@@ -1402,6 +1394,8 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 elif bwd_args.weight_quantizer is not None:
                     bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                     weight_fp8 = bwd_args.weight_quantizer(saved_weight)
+                elif args.weight_list:
+                    weight_fp8 = cast_if_needed(saved_weight, bwd_args.activation_dtype)
             elif (
                 is_dist_weight
                 and bwd_args.fp8

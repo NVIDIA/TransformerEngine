@@ -3290,6 +3290,19 @@ def _check_linear_bias_compile(
         for bias in ("fused", "none", "returned")
     ]
     + [
+        (
+            te.Linear,
+            "default",
+            torch.bfloat16,
+            False,
+            recipe.Float8CurrentScaling(backward_override=override),
+            "fused",
+            "all",
+        )
+        for override in ("high_precision", "dequantized")
+        if fp8_available
+    ]
+    + [
         (module, mode, torch.bfloat16, False, None, "fused", grads)
         for module, mode, targets in (
             (te.Linear, None, ("none", "mixed")),
@@ -3329,14 +3342,15 @@ def test_te_split_parameters(
         quant_recipe.disable_stochastic_rounding = True
 
     autocast_enabled = False
+    is_first_microbatch = None
 
     def run(inp, current=model):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast_enabled):
             if quant_recipe is None:
-                out = current(inp)
+                out = current(inp, is_first_microbatch=is_first_microbatch)
             else:
                 with te.autocast(recipe=quant_recipe):
-                    out = current(inp)
+                    out = current(inp, is_first_microbatch=is_first_microbatch)
         return out[0] + out[1] if bias_mode == "returned" else out
 
     def reference_parameters():
@@ -3376,6 +3390,8 @@ def test_te_split_parameters(
     mutations = ["none", "optimizer", "data", "parameter", "assign", "dtype"]
     if dtype == torch.bfloat16 and fp8_recipe is None:
         mutations.append("mixed_dtype")
+    if module is te.Linear and compile_mode and fp8_recipe is not None:
+        mutations.extend(("cache", "fsdp2"))
     for mutation in mutations:
         autocast_enabled = mutation == "mixed_dtype"
         for current in (model, reference):
@@ -3396,10 +3412,13 @@ def test_te_split_parameters(
                 current.k_weight.data = current.k_weight.float()
                 if current.use_bias:
                     current.k_bias.data = current.k_bias.float()
+            elif mutation == "fsdp2":
+                current._is_fsdp2 = True
         if mutation == "optimizer" and training:
             optimizer.step()
             ref_optimizer.step()
         for iteration in range(3):
+            is_first_microbatch = iteration == 0 if mutation == "cache" else None
             torch.compiler.cudagraph_mark_step_begin()
             inp = torch.randn(
                 16,
@@ -3446,5 +3465,10 @@ def test_te_split_parameters(
                 else:
                     assert actual.grad is not None
                     torch.testing.assert_close(actual.grad, expected.grad, **dtype_tols(dtype))
+            if mutation == "cache":
+                if iteration == 0:
+                    cached_workspace = model._fp8_workspaces["weight"]
+                else:
+                    assert model._fp8_workspaces["weight"] is cached_workspace
     if compile_mode == "reduce-overhead":
         assert not counters["inductor"]["cudagraph_skips"]
