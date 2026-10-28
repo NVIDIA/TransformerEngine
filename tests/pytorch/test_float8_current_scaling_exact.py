@@ -817,8 +817,8 @@ class TestFP8CurrentScalingNativeVsRef:
         qx_native = x_te._data.view(dtype=torch.float8_e4m3fn)
         torch.testing.assert_close(qx_native, x_ref.data, atol=0.0, rtol=0.0)
         torch.testing.assert_close(x_te._scale_inv, x_ref.scale, atol=0.0, rtol=0.0)
-        flt_min = torch.tensor(torch.finfo(torch.float32).tiny, device=x_te._scale_inv.device)
-        torch.testing.assert_close(x_te._scale_inv.float(), flt_min, atol=0.0, rtol=0.0)
+        flt_min = torch.full_like(x_te._scale_inv, torch.finfo(torch.float32).tiny)
+        torch.testing.assert_close(x_te._scale_inv, flt_min, atol=0.0, rtol=0.0)
         assert not torch.all(qx_native.to(dtype=torch.float32) == 0)
 
         zeros = torch.zeros_like(x)
