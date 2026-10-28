@@ -797,6 +797,17 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
 // Registers the EP pybind functions on `m`. Defined under NVTE_WITH_NCCL_EP.
 void register_ep_bindings(pybind11::module_ &m);
 
+// NVFP4 token rows for the EP dispatch / combine backward (independent of NCCL EP).
+at::Tensor ep_nvfp4_pack(const at::Tensor &tokens, bool stochastic);
+
+at::Tensor ep_nvfp4_unpack(const at::Tensor &packed, int64_t hidden,
+                           std::optional<at::Tensor> counts, std::optional<at::Tensor> out);
+
+// Returns {row_data, row_scale, col_data, col_scale, row_amax, col_amax}.
+std::vector<at::Tensor> ep_nvfp4_direct_receive(const at::Tensor &packed, int64_t hidden,
+                                                const at::Tensor &counts, int64_t sign_mask,
+                                                bool stochastic);
+
 /***************************************************************************************************
  * NVSHMEM APIs
  **************************************************************************************************/

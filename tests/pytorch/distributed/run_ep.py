@@ -16,7 +16,7 @@ import torch.distributed as dist
 from ep_reference import BlockScaledTensor, MoeEpReference, MoeFormat, quantize_blockwise
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import ops as te_ops
-from transformer_engine.common.recipe import MXFP8BlockScaling
+from transformer_engine.common.recipe import MXFP8BlockScaling, NVFP4BlockScaling
 from transformer_engine.pytorch.ep import (
     EpBuffer,
     EpConfig,
@@ -731,6 +731,378 @@ class TestEP(_EpTestCase):
         torch.testing.assert_close(
             _degroup_mxfp8(g_mx).float(), src_bf.grad.float()[:n], atol=5e-2, rtol=5e-2
         )
+
+    # NVFP4 dispatch / combine backward
+
+    def _require_nvfp4_shapes(self):
+        if HIDDEN_DIM % 512 != 0:
+            self.skipTest("NVFP4 EP needs HIDDEN_DIM % 512 == 0 (set NVTE_EP_HIDDEN_DIM)")
+        if torch.cuda.get_device_capability() < (10, 0):
+            self.skipTest("NVFP4 EP tests require Blackwell (SM 10.0) or newer")
+
+    @staticmethod
+    def _nvfp4_decoded(tokens):
+        """Tokens as the receiver decodes them: RN pack then decode."""
+        return tex.ep_nvfp4_unpack(tex.ep_nvfp4_pack(tokens, False), HIDDEN_DIM)
+
+    class _RecordPack:
+        """Records the packed rows of every stochastic NVFP4 pack the EP module runs."""
+
+        def __enter__(self):
+            self.orig, self.packed = tex.ep_nvfp4_pack, []
+
+            def record(tokens, stochastic):
+                out = self.orig(tokens, stochastic)
+                if stochastic:
+                    self.packed.append(out)
+                return out
+
+            tex.ep_nvfp4_pack = record
+            return self
+
+        def __exit__(self, *exc):
+            tex.ep_nvfp4_pack = self.orig
+
+    def _assert_rows_match_per_expert(self, got, ref, counts, max_mismatch=0.0):
+        """Row-set equality inside each expert block (row order can differ between dispatch
+        runs). Rows are keyed by a fixed random projection: FP4-decoded rows can share a row
+        sum, which would make a sum-sorted order ambiguous. ``max_mismatch`` is the largest
+        fraction of differing elements allowed per expert."""
+        cum = [0] + counts.cumsum(0).tolist()
+        generator = torch.Generator(device=got.device)
+        generator.manual_seed(7)
+        proj = torch.randn(HIDDEN_DIM, generator=generator, device=got.device, dtype=torch.float64)
+        worst = 0.0
+        for lo, hi in zip(cum[:-1], cum[1:]):
+            a, b = got[lo:hi].double(), ref[lo:hi].double()
+            a = a[torch.argsort(a @ proj)]
+            b = b[torch.argsort(b @ proj)]
+            worst = max(worst, (a != b).float().mean().item() if hi > lo else 0.0)
+        if worst > max_mismatch:
+            print(f"[rank {self.cfg.rank}] NVFP4 rows differ in {worst:.5f}", flush=True)
+        self.assertLessEqual(worst, max_mismatch)
+
+    def _nvfp4_dispatch_ref(self, tokens, topk_idx, w, alignment=0):
+        """BF16 dispatch of the receiver-decoded tokens: (recv, counts)."""
+        ref_recv, _rw, ref_tc = ep_dispatch(
+            self._make_buffer(alignment=alignment), self._nvfp4_decoded(tokens), topk_idx, w
+        )
+        torch.cuda.synchronize()
+        return ref_recv, ref_tc
+
+    @staticmethod
+    def _decode_nvfp4_rowwise(grouped, counts, hidden):
+        """Decode the rowwise part of a swizzled NVFP4 GroupedTensor to FP32 [rows, hidden]."""
+        e2m1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=counts.device)
+        rows = int(counts.sum().item())
+        data = grouped.rowwise_data.view(torch.uint8)[: rows * hidden // 2].view(rows, hidden // 2)
+        codes = torch.stack([data & 15, data >> 4], dim=-1).reshape(rows, hidden).long()
+        vals = e2m1[codes & 7] * torch.where((codes & 8) != 0, -1.0, 1.0)
+        ks = hidden // 16
+        r = torch.arange(rows, device=counts.device)[:, None]
+        c = torch.arange(ks, device=counts.device)[None, :]
+        idx = ((r // 128) * ((ks + 3) // 4) + c // 4) * 512 + (r % 32) * 16 + ((r // 32) % 4) * 4
+        idx = idx + c % 4
+        scales = grouped.scale_inv.view(torch.uint8)[idx].view(torch.float8_e4m3fn).float()
+        group = torch.repeat_interleave(torch.arange(counts.numel(), device=counts.device), counts)
+        dec = grouped.amax.view(-1)[group].float() / (6.0 * 448.0)
+        return vals * scales.repeat_interleave(16, dim=1) * dec[:, None]
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    def test_dispatch_nvfp4(self):
+        """NVFP4 dispatch outside NVFP4 autocast returns BF16 recv tokens equal to dispatching
+        the sender-decoded tokens; recv weights are not quantized."""
+        self._require_nvfp4_shapes()
+        topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=NVFP4BlockScaling())
+        recv, rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
+        torch.cuda.synchronize()
+        self.assertEqual(recv.dtype, torch.bfloat16)
+        self.assertEqual(recv.shape[-1], HIDDEN_DIM)
+        n = int(tc.sum().item())
+        ref_recv, ref_tc = self._nvfp4_dispatch_ref(tokens, topk_idx, w)
+        self.assertEqual(int(ref_tc.sum().item()), n)
+        self._assert_rows_match_per_expert(recv, ref_recv, ref_tc)
+        _ref, ref_rw, _ = ep_dispatch(self._make_buffer(), tokens, topk_idx, w)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(rw[:n].sort().values, ref_rw[:n].sort().values, atol=0, rtol=0)
+
+    @_eager_test_include
+    def test_dispatch_nvfp4_autograd(self):
+        """The NVFP4 dispatch backward is a straight-through BF16 gradient: seeding the recv grad
+        with ones scatters TOP_K back to each token under identity routing."""
+        self._require_nvfp4_shapes()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=NVFP4BlockScaling())
+        recv, _rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
+        torch.autograd.backward(recv, grad_tensors=torch.ones_like(recv))
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            tokens_p.grad.float(), torch.full_like(tokens_p, float(TOP_K)).float(), atol=0, rtol=0
+        )
+
+    def test_dispatch_nvfp4_capture(self):
+        """NVFP4 dispatch captured in a CUDA graph with caller recv buffers: a replay with new
+        tokens decodes the new tokens into the caller buffer, bounded by the replay's counts."""
+        if EAGER:
+            self.skipTest("capture requires non-eager static recv capacity")
+        self._require_nvfp4_shapes()
+        recv_buf, rw_buf = self._caller_recv()
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=NVFP4BlockScaling())
+        topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        static_tokens = tokens.clone()
+        out = {}
+
+        def step():
+            out["recv"], out["rw"], _tc = ep_dispatch(
+                buf, static_tokens, topk_idx, w, recv_tokens=recv_buf, recv_topk_weights=rw_buf
+            )
+
+        graph = self._capture(step)
+        new_tokens = (tokens.float() * -3.0 + 0.125).to(torch.bfloat16)
+        static_tokens.copy_(new_tokens)
+        recv_buf.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        self.assertEqual(out["recv"].data_ptr(), recv_buf.data_ptr())
+        ref_recv, ref_tc = self._nvfp4_dispatch_ref(new_tokens, topk_idx, w)
+        self.assertEqual(int(buf.tokens_per_expert.sum().item()), int(ref_tc.sum().item()))
+        self._assert_rows_match_per_expert(recv_buf, ref_recv, ref_tc)
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    @_mxfp8_align_test
+    def test_dispatch_nvfp4_direct_receive(self):
+        """NVFP4 dispatch under NVFP4 autocast returns a swizzled NVFP4 GroupedTensor whose
+        rowwise rows decode to the sender's packed tokens (per expert, order-tolerant), with
+        finite per-expert scales; the backward is the straight-through BF16 gradient. Outside
+        autocast, and in eager mode, recv is the decoded BF16 tokens."""
+        self._require_nvfp4_shapes()
+        from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+
+        topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=NVFP4BlockScaling(), alignment=256)
+        recv_bf16, _, _ = ep_dispatch(buf, tokens, topk_idx, w)
+        self.assertEqual(recv_bf16.dtype, torch.bfloat16)
+        with te.autocast(enabled=True, recipe=NVFP4BlockScaling()):
+            recv, _rw, tc = ep_dispatch(buf, tokens_p, topk_idx, w)
+        counts = tc.clone()
+        if EAGER:
+            self.assertEqual(recv.dtype, torch.bfloat16)
+            return
+        self.assertIsInstance(recv, GroupedTensor)
+        self.assertTrue(recv._with_gemm_swizzled_scales)
+        torch.cuda.synchronize()
+        self.assertTrue(torch.isfinite(recv.amax).all() and (recv.amax > 0).all())
+        self.assertTrue(torch.isfinite(recv.columnwise_amax).all())
+
+        ref_recv, ref_tc = self._nvfp4_dispatch_ref(tokens, topk_idx, w, alignment=256)
+        torch.testing.assert_close(counts, ref_tc, atol=0, rtol=0)
+        got = self._decode_nvfp4_rowwise(recv, counts, HIDDEN_DIM)
+        # Block scales re-expressed against the expert scale can underflow for tokens far
+        # smaller than the expert's largest; allow a tiny fraction of such elements.
+        self._assert_rows_match_per_expert(got, ref_recv[: got.shape[0]], counts, max_mismatch=1e-3)
+
+        if ZERO_COPY:
+            return  # zero-copy dispatch_bwd needs a symm-mem grad; checked in the other passes
+        g_recv = torch.ones(recv.shape, dtype=torch.bfloat16, device=self.cfg.device)
+        torch.autograd.backward(recv, grad_tensors=g_recv)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            tokens_p.grad.float(), torch.full_like(tokens_p, float(TOP_K)).float(), atol=0, rtol=0
+        )
+
+    def _combine_bwd_bf16_ref(self, tokens, topk_idx, w, rows, grad, alignment=0):
+        """BF16 combine backward of ``grad`` on the same routing: the expert_out grad."""
+        buf = self._make_buffer(alignment=alignment)
+        ep_dispatch(buf, tokens, topk_idx, w)
+        src = torch.zeros(rows, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        src.requires_grad_(True)
+        out = ep_combine(buf, self._expert_out(src))
+        torch.autograd.backward(out, grad_tensors=grad)
+        torch.cuda.synchronize()
+        return src.grad
+
+    def _combine_grad(self, num_tokens):
+        generator = torch.Generator(device=self.cfg.device)
+        generator.manual_seed(100 + self.cfg.rank)
+        g = torch.randn(num_tokens, HIDDEN_DIM, generator=generator, device=self.cfg.device)
+        g = g * torch.logspace(-2, 1, num_tokens, device=self.cfg.device)[:, None]
+        return g.to(torch.bfloat16)
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    def test_combine_bwd_nvfp4(self):
+        """NVFP4 combine backward outside NVFP4 autocast returns a BF16 expert_out grad equal to
+        a BF16 combine backward of the sender-decoded (stochastically rounded) result-grad."""
+        self._require_nvfp4_shapes()
+        topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        buf = self._make_buffer(combine_bwd_quant_recipe=NVFP4BlockScaling())
+        recv, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
+        rows = recv.shape[0]
+        src = torch.zeros(rows, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        src.requires_grad_(True)
+        out = ep_combine(buf, self._expert_out(src))
+        grad = self._combine_grad(out.shape[0])
+        with self._RecordPack() as rec:
+            torch.autograd.backward(out, grad_tensors=grad)
+        torch.cuda.synchronize()
+        self.assertEqual(len(rec.packed), 1)
+        self.assertEqual(src.grad.dtype, torch.bfloat16)
+        self.assertEqual(tuple(src.grad.shape), (rows, HIDDEN_DIM))
+        decoded = tex.ep_nvfp4_unpack(rec.packed[0], HIDDEN_DIM)
+        n = int(tc.sum().item())
+        ref = self._combine_bwd_bf16_ref(tokens, topk_idx, w, rows, decoded)
+        self._assert_rows_match_per_expert(src.grad[:n], ref[:n], tc)
+        # The only quantization is on the sender: the SR-decoded grad stays close to the grad.
+        rel = (decoded.float() - grad.float()).norm(dim=1) / grad.float().norm(dim=1)
+        self.assertLess(rel.max().item(), 0.25)
+
+    def test_combine_bwd_nvfp4_caller_grad_out(self):
+        """NVFP4 combine backward decodes into the caller grad_out and leaves rows past the live
+        recv count untouched."""
+        if EAGER:
+            self.skipTest("eager mode forbids a caller grad_out")
+        self._require_nvfp4_shapes()
+        rc = self.cfg.recv_capacity_per_rank
+        topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        buf = self._make_buffer(combine_bwd_quant_recipe=NVFP4BlockScaling())
+        _recv, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
+        gbuf = torch.full((rc, HIDDEN_DIM), 7.0, dtype=torch.bfloat16, device=self.cfg.device)
+        src = torch.zeros(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        src.requires_grad_(True)
+        out = ep_combine(buf, self._expert_out(src), grad_out=gbuf)
+        grad = self._combine_grad(out.shape[0])
+        with self._RecordPack() as rec:
+            torch.autograd.backward(out, grad_tensors=grad)
+        torch.cuda.synchronize()
+        self.assertEqual(src.grad.data_ptr(), gbuf.data_ptr())
+        n = int(tc.sum().item())
+        self.assertTrue(bool((gbuf[n:] == 7.0).all()))
+        decoded = tex.ep_nvfp4_unpack(rec.packed[0], HIDDEN_DIM)
+        ref = self._combine_bwd_bf16_ref(tokens, topk_idx, w, rc, decoded)
+        self._assert_rows_match_per_expert(gbuf[:n], ref[:n], tc)
+
+    def test_combine_bwd_nvfp4_capture(self):
+        """NVFP4 combine fwd+bwd captured in a CUDA graph: each replay decodes the replay's grad
+        exactly into the caller grad_out, and draws fresh stochastic-rounding bits."""
+        if EAGER:
+            self.skipTest("capture requires non-eager static recv capacity")
+        self._require_nvfp4_shapes()
+        rc = self.cfg.recv_capacity_per_rank
+        topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        buf = self._make_buffer(combine_bwd_quant_recipe=NVFP4BlockScaling())
+        _recv, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)  # fixes the routing
+        torch.cuda.synchronize()
+        gbuf = torch.zeros(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        src = torch.zeros(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        src.requires_grad_(True)
+        static_grad = self._combine_grad(buf.max_tokens_per_rank)
+
+        def step():
+            out = ep_combine(buf, src, grad_out=gbuf)
+            torch.autograd.grad(out, src, grad_outputs=static_grad)
+
+        with self._RecordPack() as rec:
+            graph = self._capture(step)
+            static_grad.copy_((static_grad.float() * -2.0 + 0.0625).to(torch.bfloat16))
+            gbuf.zero_()
+            graph.replay()
+            torch.cuda.synchronize()
+            first_packed = rec.packed[-1].clone()
+            first = gbuf.clone()
+            graph.replay()
+            torch.cuda.synchronize()
+            second_packed = rec.packed[-1].clone()
+        n = int(tc.sum().item())
+        self.assertFalse(torch.equal(first_packed, second_packed))
+        for packed, got in ((first_packed, first), (second_packed, gbuf)):
+            decoded = tex.ep_nvfp4_unpack(packed, HIDDEN_DIM)
+            ref = self._combine_bwd_bf16_ref(tokens, topk_idx, w, rc, decoded)
+            self._assert_rows_match_per_expert(got[:n], ref[:n], tc)
+
+    def _assert_direct_grad_matches(self, g, packed, tokens, topk_idx, w, counts, rows):
+        """Rowwise rows of the direct-receive grad decode to a BF16 combine backward of the
+        sender's packed (stochastically rounded) grad, per expert and order-tolerant; per-expert
+        scales are finite."""
+        from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+
+        self.assertIsInstance(g, GroupedTensor)
+        self.assertTrue(g._with_gemm_swizzled_scales)
+        self.assertTrue(g.quantizer.stochastic_rounding)
+        self.assertTrue(torch.isfinite(g.amax).all() and torch.isfinite(g.columnwise_amax).all())
+        decoded = tex.ep_nvfp4_unpack(packed, HIDDEN_DIM)
+        ref = self._combine_bwd_bf16_ref(tokens, topk_idx, w, rows, decoded, alignment=256)
+        got = self._decode_nvfp4_rowwise(g, counts, HIDDEN_DIM)
+        self._assert_rows_match_per_expert(got, ref[: got.shape[0]], counts, max_mismatch=1e-3)
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    @_mxfp8_align_test
+    def test_combine_bwd_nvfp4_direct(self):
+        """NVFP4 combine backward under NVFP4 autocast returns FC2's grad_output as a swizzled
+        NVFP4 GroupedTensor (stochastic rounding) matching a BF16 combine backward of the
+        sender-packed grad. In eager mode it decodes to BF16."""
+        self._require_nvfp4_shapes()
+        topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        buf = self._make_buffer(combine_bwd_quant_recipe=NVFP4BlockScaling(), alignment=256)
+        recv, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
+        rows = recv.shape[0]
+        counts = tc.clone()
+        src = torch.zeros(rows, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        src.requires_grad_(True)
+        with self._RecordPack() as rec:
+            with te.autocast(enabled=True, recipe=NVFP4BlockScaling()):
+                out = ep_combine(buf, self._expert_out(src))
+            grad = self._combine_grad(out.shape[0])
+            torch.autograd.backward(out, grad_tensors=grad)
+        torch.cuda.synchronize()
+        self.assertEqual(len(rec.packed), 1)
+        if EAGER:
+            self.assertEqual(src.grad.dtype, torch.bfloat16)
+            return
+        self._assert_direct_grad_matches(src.grad, rec.packed[0], tokens, topk_idx, w, counts, rows)
+
+    @_mxfp8_align_test
+    def test_combine_bwd_nvfp4_direct_capture(self):
+        """Combine fwd+bwd (direct NVFP4 grad, packed rows landing in the caller grad_out)
+        captured in a CUDA graph: each replay matches a BF16 combine backward of that replay's
+        packed grad, and replays draw fresh stochastic-rounding bits."""
+        if EAGER:
+            self.skipTest("capture requires non-eager static recv capacity")
+        self._require_nvfp4_shapes()
+        rc = self.cfg.recv_capacity_per_rank
+        topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        buf = self._make_buffer(combine_bwd_quant_recipe=NVFP4BlockScaling(), alignment=256)
+        _recv, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
+        torch.cuda.synchronize()
+        counts = tc.clone()
+        gbuf = torch.zeros(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        src = torch.zeros(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        src.requires_grad_(True)
+        static_grad = self._combine_grad(buf.max_tokens_per_rank)
+        res = {}
+
+        def step():
+            with te.autocast(enabled=True, recipe=NVFP4BlockScaling()):
+                out = ep_combine(buf, src, grad_out=gbuf)
+            (res["g"],) = torch.autograd.grad(out, src, grad_outputs=static_grad)
+
+        with self._RecordPack() as rec:
+            graph = self._capture(step)
+            static_grad.copy_((static_grad.float() * -2.0 + 0.0625).to(torch.bfloat16))
+            packs = []
+            for _ in range(2):
+                graph.replay()
+                torch.cuda.synchronize()
+                packs.append(rec.packed[-1].clone())
+                self._assert_direct_grad_matches(
+                    res["g"], packs[-1], tokens, topk_idx, w, counts, rc
+                )
+        self.assertFalse(torch.equal(packs[0], packs[1]), "replays must draw fresh bits")
 
     @_zero_copy_test_include
     def test_zero_copy_pool_auto_alloc(self):

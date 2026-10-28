@@ -599,6 +599,148 @@ def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.
     tex.ep_combine(buffer.handle_mem, expert_out, result)
 
 
+# NVFP4 token rows
+#
+# One packed row per token: [H/2 bytes of E2M1 pairs | H/16 E4M3 block scales | FP32 token
+# scale], zero-padded to 16 bytes. The second-level scale is per token (a power of two) instead of
+# per tensor, so every token decodes on its own and ranks need no scale agreement. The rows travel
+# as an unscaled payload (a BF16 view: dispatch and combine backward only copy bytes). The receiver
+# either decodes them to BF16 or builds the expert GEMM's NVFP4 GroupedTensor directly: the
+# rowwise operand reuses the sender's E2M1 codes and the columnwise RHT operand is quantized in
+# the same pass (see transformer_engine/common/ep/nvfp4_ep_rows.cu).
+
+_NVFP4_DIRECT_RECEIVE_ALIGNMENT = 128
+_NVFP4_DIRECT_RECEIVE_MAX_EXPERTS = 128
+
+
+def _nvfp4_row_bytes(hidden: int) -> int:
+    """Bytes of one packed NVFP4 token row, padded to the 16-byte EP row alignment."""
+    return (hidden // 2 + hidden // 16 + 4 + 15) // 16 * 16
+
+
+def _is_nvfp4_recipe(recipe) -> bool:
+    if recipe is None:
+        return False
+    from ..common.recipe import NVFP4BlockScaling
+
+    return isinstance(recipe, NVFP4BlockScaling)
+
+
+def _check_quant_recipe(recipe, what: str) -> None:
+    """EP quantizes on the wire with MXFP8BlockScaling or NVFP4BlockScaling."""
+    from ..common.recipe import MXFP8BlockScaling
+
+    if not isinstance(recipe, MXFP8BlockScaling) and not _is_nvfp4_recipe(recipe):
+        raise NotImplementedError(
+            f"{what} supports MXFP8BlockScaling and NVFP4BlockScaling only; got "
+            f"{type(recipe).__name__}."
+        )
+    if _is_nvfp4_recipe(recipe):
+        from ..common.recipe import Format
+
+        if recipe.fp8_format != Format.E4M3:
+            raise NotImplementedError(f"{what} with NVFP4 supports E4M3 block scales only.")
+
+
+def _check_nvfp4_hidden(hidden: int) -> None:
+    if hidden % 512 != 0 or hidden > 16384:
+        raise ValueError(
+            f"NVFP4 EP quantization requires hidden % 512 == 0 and hidden <= 16384, got {hidden}."
+        )
+
+
+def _nvfp4_gemm_recipe(buffer: "EpBuffer", rows: int, grad: bool):
+    """The active NVFP4 autocast recipe when the receiver can hand the expert GEMMs an NVFP4
+    GroupedTensor directly, else None (the receiver decodes to BF16). ``grad`` selects the
+    gradient quantization (combine backward) instead of the forward input (dispatch).
+
+    Needs graph mode (static recv capacity), NVFP4 autocast with the RHT columnwise operand that
+    the direct receive produces, per-expert groups aligned to 128 rows, and at most 128 local
+    experts. Evaluated in the forward pass, where the autocast state is visible."""
+    from .quantization import FP8GlobalStateManager
+    from ..common.recipe import Format
+
+    if buffer.eager or not FP8GlobalStateManager.is_fp8_enabled():
+        return None
+    recipe = FP8GlobalStateManager.get_fp8_recipe()
+    if not recipe.nvfp4() or recipe.fp8_format != Format.E4M3:
+        return None
+    qparams = recipe.fp4_quant_bwd_grad if grad else recipe.fp4_quant_fwd_inp
+    if not qparams.random_hadamard_transform or qparams.fp4_2d_quantization:
+        return None
+    if not grad and (recipe.row_scaled_activation or recipe.nvfp4_4over6 in ("activations", "all")):
+        return None
+    if (
+        buffer.alignment < _NVFP4_DIRECT_RECEIVE_ALIGNMENT
+        or buffer.num_local_experts > _NVFP4_DIRECT_RECEIVE_MAX_EXPERTS
+        or rows % _NVFP4_DIRECT_RECEIVE_ALIGNMENT != 0
+    ):
+        return None
+    return recipe
+
+
+def _nvfp4_landing(buf, rows: int, row_bytes: int, device, zero_copy: bool) -> torch.Tensor:
+    """Receive buffer for ``rows`` packed NVFP4 rows, as the BF16 view the EP ops copy. Carved from
+    a caller buffer when given (so a persistent or symm-mem buffer backs it), else allocated."""
+    if buf is None:
+        return _alloc_io((rows, row_bytes // 2), torch.bfloat16, device, zero_copy)
+    if not buf.is_contiguous():
+        raise ValueError("NVFP4 receive buffer must be contiguous.")
+    flat = buf.view(-1).view(torch.uint8)
+    need = rows * row_bytes
+    if flat.numel() < need:
+        raise ValueError(f"NVFP4 receive buffer too small: need {need} bytes, got {flat.numel()}.")
+    return flat[:need].view(torch.bfloat16).view(rows, row_bytes // 2)
+
+
+def _nvfp4_direct_receive(
+    recv_packed: torch.Tensor,
+    hidden: int,
+    counts: torch.Tensor,
+    fake_dtype: torch.dtype,
+    stochastic: bool,
+):
+    """Per-expert NVFP4 GroupedTensor (rowwise + columnwise RHT operands, GEMM-swizzled scales)
+    built in one pass from packed rows (uint8 [capacity, row_bytes]) grouped by ``counts``.
+    Second-level scales are per expert: rowwise ``6 * 448 * G`` and columnwise ``4 * 6 * 448 * G``
+    with ``G`` the largest token scale of the expert. ``stochastic`` rounds the columnwise
+    operand stochastically (gradients)."""
+    from .tensor.grouped_tensor import GroupedTensor
+    from .tensor.nvfp4_tensor import NVFP4Quantizer, get_random_sign_mask_for_rht
+
+    row_data, row_scale, col_data, col_scale, row_amax, col_amax = tex.ep_nvfp4_direct_receive(
+        recv_packed,
+        hidden,
+        counts,
+        get_random_sign_mask_for_rht(True, recv_packed.device.index),
+        stochastic,
+    )
+    quantizer = NVFP4Quantizer(
+        rowwise=True,
+        columnwise=True,
+        with_rht=True,
+        with_post_rht_amax=True,
+        stochastic_rounding=stochastic,
+    )
+    quantizer.optimize_for_gemm = True
+    quantizer.internal = True
+    return GroupedTensor(
+        shape=(recv_packed.shape[0], hidden),
+        dtype=fake_dtype,
+        num_tensors=counts.numel(),
+        quantizer=quantizer,
+        data=row_data,
+        columnwise_data=col_data,
+        scale_inv=row_scale,
+        columnwise_scale_inv=col_scale,
+        amax=row_amax,
+        columnwise_amax=col_amax,
+        first_dims=counts,
+        tensor_offsets=tex.splits_to_offsets(counts, hidden),
+        with_gemm_swizzled_scales=True,
+    )
+
+
 # autograd.Function wrappers
 
 
@@ -633,6 +775,10 @@ def _ep_prepare_and_dispatch_fwd(
     output (a per-expert GroupedTensor for MXFP8, else the raw recv tokens), the recv topk weights,
     and a _DispatchState for backward. No autograd; the caller owns context handling."""
     _require_bf16("dispatch input", tokens)
+    if _is_nvfp4_recipe(buffer.dispatch_fwd_quant_recipe):
+        return _ep_prepare_and_dispatch_nvfp4_fwd(
+            tokens, topk_weights, topk_idx, buffer, recv_tokens, recv_topk_weights
+        )
     tokens_scale_inv = None
     if buffer.dispatch_fwd_quant_recipe is not None:
         from .tensor.mxfp8_tensor import MXFP8Quantizer
@@ -736,6 +882,92 @@ def _ep_prepare_and_dispatch_fwd(
         )
         return recv_out, recv_topk_weights, state
     return recv_tokens, recv_topk_weights, state
+
+
+def _ep_prepare_and_dispatch_nvfp4_fwd(
+    tokens: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_idx: torch.Tensor,
+    buffer: "EpBuffer",
+    recv_tokens: Optional[torch.Tensor],
+    recv_topk_weights: Optional[torch.Tensor],
+):
+    """NVFP4 dispatch: pack each token into an NVFP4 row and move the rows as an unscaled payload.
+    Under NVFP4 autocast (graph mode, see ``_nvfp4_gemm_recipe``) the receiver returns the expert
+    GEMM's NVFP4 GroupedTensor, with the packed rows landing in ``recv_tokens`` when given;
+    otherwise it decodes to BF16 recv tokens (into ``recv_tokens`` when given). The backward is a
+    straight-through BF16 gradient."""
+    tokens_2d = tokens.reshape(-1, tokens.shape[-1])
+    hidden = tokens_2d.shape[-1]
+    packed = tex.ep_nvfp4_pack(tokens_2d, False)
+    row_bytes = packed.shape[-1]
+    handle_mem = buffer.handle_mem
+    tokens_per_expert = buffer.tokens_per_expert
+    direct = False
+    if buffer.eager:
+        recv_packed, recv_topk_weights = tex.ep_prepare_and_dispatch(
+            handle_mem,
+            topk_idx,
+            packed.view(torch.bfloat16),
+            topk_weights,
+            tokens_per_expert,
+            buffer.total_recv_tokens,
+            buffer.top_k,
+            buffer.alignment,
+        )
+        recv_out = tex.ep_nvfp4_unpack(recv_packed.view(torch.uint8), hidden)
+    else:
+        device = tokens_2d.device
+        num_recv_tokens = buffer.recv_capacity_per_rank
+        gemm_recipe = _nvfp4_gemm_recipe(buffer, num_recv_tokens, grad=False)
+        direct = gemm_recipe is not None
+        recv_packed = _nvfp4_landing(
+            recv_tokens if direct else None, num_recv_tokens, row_bytes, device, buffer.zero_copy
+        )
+        if recv_topk_weights is None:
+            recv_topk_weights = _alloc_io(
+                (num_recv_tokens,), torch.float32, device, buffer.zero_copy
+            )
+        torch.ops.transformer_engine_ep.prepare_and_dispatch(
+            handle_mem,
+            topk_idx,
+            packed.view(torch.bfloat16),
+            topk_weights,
+            tokens_per_expert,
+            buffer.total_recv_tokens,
+            buffer.top_k,
+            buffer.alignment,
+            recv_packed,
+            recv_topk_weights,
+            None,
+            None,
+        )
+        if direct:
+            recv_out = _nvfp4_direct_receive(
+                recv_packed.view(torch.uint8),
+                hidden,
+                tokens_per_expert,
+                tokens.dtype,
+                stochastic=False,
+            )
+        else:
+            # Decode only the live rows (device-side count, so CUDA graph replays see it).
+            recv_out = tex.ep_nvfp4_unpack(
+                recv_packed.view(torch.uint8), hidden, tokens_per_expert, recv_tokens
+            )
+    state = _DispatchState(
+        handle_mem=handle_mem,
+        tokens_shape=tokens.shape,
+        topk_weights_shape=topk_weights.shape,
+        tokens_T_flat=tokens_2d.shape[0],
+        topk_T_flat=topk_weights.numel() // topk_weights.shape[-1],
+        top_k=topk_weights.shape[-1],
+        hidden_dim=hidden,
+        eager=buffer.eager,
+        # The GroupedTensor is returned like the MXFP8 one (not detached).
+        is_scaled=direct,
+    )
+    return recv_out, recv_topk_weights, state
 
 
 def _ep_dispatch_bwd(
@@ -849,6 +1081,9 @@ class _CombineState:
     device: torch.device
     eager: bool
     zero_copy: bool
+    # NVFP4 combine backward: the NVFP4 autocast recipe when the backward returns FC2's
+    # grad_output as a GroupedTensor (decided in the forward, where autocast is visible).
+    nvfp4_gemm_recipe: object = None
 
 
 def _ep_combine_fwd(
@@ -881,19 +1116,23 @@ def _ep_combine_fwd(
         eager=eager,
         zero_copy=buffer.zero_copy,
     )
+    if _is_nvfp4_recipe(bwd_quant_recipe):
+        state.nvfp4_gemm_recipe = _nvfp4_gemm_recipe(buffer, expert_out.shape[0], grad=True)
     return result, state
 
 
 def _ep_combine_bwd(state: "_CombineState", g_result: torch.Tensor):
     """Scatter the result-grad to expert positions and return the expert_out grad. High-precision
-    sends the grad as-is; a quantized recipe (MXFP8 today) quantizes it and returns a per-expert
-    GroupedTensor. No autograd; the caller owns context handling."""
+    sends the grad as-is; MXFP8 quantizes it and returns a per-expert GroupedTensor; NVFP4 see
+    ``_ep_combine_bwd_nvfp4``. No autograd; the caller owns context handling."""
     _require_bf16("combine backward grad_output", g_result)
     if not g_result.is_contiguous():
         g_result = g_result.contiguous()
     handle_mem = state.handle_mem
 
-    if state.bwd_quant_recipe is None:
+    if _is_nvfp4_recipe(state.bwd_quant_recipe):
+        grad_expert_out = _ep_combine_bwd_nvfp4(state, g_result)
+    elif state.bwd_quant_recipe is None:
         grad_expert_out = state.grad_out
         if grad_expert_out is None:
             grad_expert_out = _alloc_io(
@@ -940,6 +1179,50 @@ def _ep_combine_bwd(state: "_CombineState", g_result: torch.Tensor):
     return grad_expert_out
 
 
+def _ep_combine_bwd_nvfp4(state: "_CombineState", g_result: torch.Tensor):
+    """NVFP4 combine backward: pack the result-grad rows to NVFP4 (stochastic rounding per the
+    recipe) and scatter them as an unscaled payload. Under NVFP4 autocast the receiver returns FC2's
+    grad_output as an NVFP4 GroupedTensor, with the packed rows landing in ``grad_out`` when given;
+    otherwise it decodes them to the BF16 expert_out grad (into ``grad_out`` when given), bounded
+    by the device-side per-expert counts so CUDA graph replays see the live count."""
+    recv_rows, hidden = state.expert_out_shape[0], state.expert_out_shape[-1]
+    stochastic = state.bwd_quant_recipe.fp4_quant_bwd_grad.stochastic_rounding
+    packed = tex.ep_nvfp4_pack(g_result.reshape(-1, hidden), stochastic)
+    gemm_recipe = state.nvfp4_gemm_recipe
+    ge_packed = _nvfp4_landing(
+        state.grad_out if gemm_recipe is not None else None,
+        recv_rows,
+        packed.shape[-1],
+        state.device,
+        state.zero_copy,
+    )
+    if state.eager:
+        tex.ep_combine_bwd(state.handle_mem, packed.view(torch.bfloat16), ge_packed, None, None)
+    else:
+        torch.ops.transformer_engine_ep.combine_bwd(
+            state.handle_mem, packed.view(torch.bfloat16), ge_packed
+        )
+    if gemm_recipe is not None:
+        return _nvfp4_direct_receive(
+            ge_packed.view(torch.uint8),
+            hidden,
+            state.token_counts,
+            state.expert_out_dtype,
+            stochastic=gemm_recipe.fp4_quant_bwd_grad.stochastic_rounding,
+        )
+    grad_expert_out = state.grad_out
+    if grad_expert_out is None:
+        grad_expert_out = torch.empty(
+            state.expert_out_shape, dtype=state.expert_out_dtype, device=state.device
+        )
+    return tex.ep_nvfp4_unpack(
+        ge_packed.view(torch.uint8),
+        hidden,
+        None if state.eager else state.token_counts,
+        grad_expert_out.view(-1, hidden),
+    ).view(state.expert_out_shape)
+
+
 class _EpCombine(torch.autograd.Function):
     """Autograd combine; bwd scatters the expert_out grad into ``grad_out``. When the caller
     supplies it that buffer is used as-is; otherwise it is allocated in the backward from the
@@ -960,7 +1243,7 @@ class _EpCombine(torch.autograd.Function):
         bwd_quant_recipe=None,
     ):
         """Combine fwd; stashes the backward state on ctx. When ``bwd_quant_recipe`` is set, the
-        backward sends the result-grad as MXFP8."""
+        backward sends the result-grad as MXFP8 or NVFP4."""
         result, ctx.state = _ep_combine_fwd(
             expert_out, grad_out, buffer, num_local_tokens, bwd_quant_recipe
         )
@@ -1144,14 +1427,19 @@ def ep_dispatch(
 ):
     """Prepare + dispatch with autograd. ``tokens`` is bfloat16; ``topk_idx`` is int32 or int64.
 
-    When the buffer's ``dispatch_fwd_quant_recipe`` is set (``MXFP8BlockScaling`` only for now), tokens
-    are quantized internally and recv is returned as a per-expert ``GroupedTensor``; otherwise recv
-    stays bfloat16. A pre-quantized ``tokens`` is not accepted.
+    When the buffer's ``dispatch_fwd_quant_recipe`` is ``MXFP8BlockScaling``, tokens are quantized
+    internally and recv is returned as a per-expert ``GroupedTensor``; otherwise recv stays
+    bfloat16. With ``NVFP4BlockScaling`` tokens travel as packed NVFP4 rows (hidden % 512 == 0);
+    under NVFP4 autocast in graph mode, with an alignment of at least 128 and at most 128 local
+    experts, recv is the expert GEMM's NVFP4 ``GroupedTensor`` (rowwise and columnwise RHT operands,
+    built in one pass from the received rows), else the decoded bfloat16 tokens. A pre-quantized
+    ``tokens`` is not accepted.
 
     ``recv_tokens`` / ``recv_topk_weights`` are the recv outputs: pass caller-owned buffers
     (symm-mem-backed under zero-copy) or leave them None to allocate. For MXFP8 the recv data and
     scales share ``recv_tokens`` (data then scales), so size it to at least
-    ``recv_capacity_per_rank * (hidden + hidden/block)`` bytes. Eager mode sizes the recv outputs
+    ``recv_capacity_per_rank * (hidden + hidden/block)`` bytes; an NVFP4 ``GroupedTensor`` recv
+    lands the packed rows in it. Eager mode sizes the recv outputs
     per step and forbids caller-supplied buffers. Under zero-copy, leaving them None allocates from
     the symm-mem pool, which is not CUDA-graph capturable; pass persistent buffers to capture a graph.
 
@@ -1176,13 +1464,9 @@ def ep_dispatch(
         )
 
     if buffer.dispatch_fwd_quant_recipe is not None:
-        from ..common.recipe import MXFP8BlockScaling
-
-        if not isinstance(buffer.dispatch_fwd_quant_recipe, MXFP8BlockScaling):
-            raise NotImplementedError(
-                "EP block-scaled dispatch supports MXFP8BlockScaling only; got "
-                f"{type(buffer.dispatch_fwd_quant_recipe).__name__}."
-            )
+        _check_quant_recipe(buffer.dispatch_fwd_quant_recipe, "EP block-scaled dispatch")
+        if _is_nvfp4_recipe(buffer.dispatch_fwd_quant_recipe):
+            _check_nvfp4_hidden(tokens.shape[-1])
 
     # Fused prepare + dispatch in one C++ op. Eager sizes the recv outputs from the per-step host
     # recv-count (allocated in C++, no caller buffers); non-eager sizes them to the static recv
@@ -1210,8 +1494,10 @@ def ep_combine(
     ``expert_out`` is the combine input (symm-mem-backed under zero-copy). ``grad_out`` is the
     backward's grad target: pass a caller-owned buffer or leave it None to allocate. For MXFP8 the
     grad data and scales share ``grad_out`` (data then scales), so size it to at least
-    ``recv_capacity_per_rank * (hidden + hidden/block)`` bytes (non-zero-copy only). Eager mode sizes
-    the grad target per step and forbids a caller-supplied buffer. Under zero-copy, leaving it None
+    ``recv_capacity_per_rank * (hidden + hidden/block)`` bytes (non-zero-copy only). For NVFP4 the
+    backward returns FC2's grad_output as an NVFP4 ``GroupedTensor`` under NVFP4 autocast (see
+    ``ep_dispatch``; the packed rows land in ``grad_out``), else a bfloat16 grad decoded into
+    ``grad_out``. Eager mode sizes the grad target per step and forbids a caller-supplied buffer. Under zero-copy, leaving it None
     allocates from the symm-mem pool, which is not CUDA-graph capturable; pass a persistent buffer to
     capture a graph. Result shape is (num_local_tokens, hidden_dim); num_local_tokens defaults to
     buffer.max_tokens_per_rank.
@@ -1225,16 +1511,13 @@ def ep_combine(
     if num_local_tokens is None:
         num_local_tokens = buffer.max_tokens_per_rank
     # When combine_bwd_quant_recipe is set the combine backward sends the result-grad over the
-    # wire as MXFP8 and returns the expert_out grad as a GroupedTensor.
+    # wire quantized: MXFP8 returns the expert_out grad as a GroupedTensor; NVFP4 returns it as an
+    # NVFP4 GroupedTensor under NVFP4 autocast and as BF16 otherwise.
     bwd_quant_recipe = None
     if buffer.combine_bwd_quant_recipe is not None:
-        from ..common.recipe import MXFP8BlockScaling
-
-        if not isinstance(buffer.combine_bwd_quant_recipe, MXFP8BlockScaling):
-            raise NotImplementedError(
-                "EP combine backward supports MXFP8BlockScaling only; got "
-                f"{type(buffer.combine_bwd_quant_recipe).__name__}."
-            )
+        _check_quant_recipe(buffer.combine_bwd_quant_recipe, "EP combine backward")
+        if _is_nvfp4_recipe(buffer.combine_bwd_quant_recipe):
+            _check_nvfp4_hidden(expert_out.shape[-1])
         bwd_quant_recipe = buffer.combine_bwd_quant_recipe
     return _EpCombine.apply(
         expert_out,
