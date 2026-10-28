@@ -28,17 +28,16 @@ int aux_loss_reduction_blocks(int num_rows) {
   return std::max(1, std::min(num_rows, kAuxLossMaxReductionBlocks));
 }
 
-void populate_aux_loss_workspace_config(Tensor& workspace, int num_rows) {
-  const size_t num_partials = aux_loss_reduction_blocks(num_rows);
+void populate_aux_loss_workspace_config(Tensor& workspace) {
   if (workspace.data.dptr == nullptr) {
-    // The bounded capacity can be reused across all input shapes on a stream.
+    // This fixed capacity can be reused across all input shapes on a stream.
     workspace.data.shape = {kAuxLossMaxReductionBlocks};
     workspace.data.dtype = DType::kFloat32;
     return;
   }
   NVTE_CHECK(workspace.data.dtype == DType::kFloat32, "Aux-loss workspace must have FP32 dtype.");
-  NVTE_CHECK(workspace.numel() >= num_partials, "Aux-loss workspace needs at least ", num_partials,
-             " FP32 elements, got ", workspace.numel());
+  NVTE_CHECK(workspace.numel() >= kAuxLossMaxReductionBlocks, "Aux-loss workspace needs at least ",
+             kAuxLossMaxReductionBlocks, " FP32 elements, got ", workspace.numel());
 }
 
 void check_aux_loss_const_buffer(const Tensor& const_buf) {
@@ -400,7 +399,7 @@ void nvte_fused_moe_aux_loss_forward_v2(const NVTETensor probs, const NVTETensor
   NVTE_API_CALL(nvte_fused_moe_aux_loss_forward_v2);
   using namespace transformer_engine;
   auto& scratch = *convertNVTETensorCheck(workspace);
-  fused_router::populate_aux_loss_workspace_config(scratch, num_rows);
+  fused_router::populate_aux_loss_workspace_config(scratch);
   if (scratch.data.dptr == nullptr) return;
   auto& constants = *convertNVTETensorCheck(Const_buf);
   fused_router::check_aux_loss_const_buffer(constants);
@@ -417,7 +416,7 @@ void nvte_fused_moe_aux_loss_forward_graph_safe_v2(
   NVTE_API_CALL(nvte_fused_moe_aux_loss_forward_graph_safe_v2);
   using namespace transformer_engine;
   auto& scratch = *convertNVTETensorCheck(workspace);
-  fused_router::populate_aux_loss_workspace_config(scratch, num_rows);
+  fused_router::populate_aux_loss_workspace_config(scratch);
   if (scratch.data.dptr == nullptr) return;
   auto& constants = *convertNVTETensorCheck(Const_buf);
   fused_router::check_aux_loss_const_buffer(constants);

@@ -49,16 +49,18 @@ TEST_P(FusedMoeAuxLossWorkspaceTest, QueryWithoutAccessingInputs) {
     ASSERT_EQ(workspace.shape().ndim, 1);
     EXPECT_EQ(workspace.dtype(), DType::kFloat32);
     EXPECT_EQ(nvte_tensor_data(workspace.data()), nullptr);
-    EXPECT_GT(workspace.shape().data[0], 0);
+    EXPECT_EQ(workspace.shape().data[0], 256);
     if (capacity == 0) capacity = workspace.shape().data[0];
     EXPECT_EQ(workspace.shape().data[0], capacity);
   }
 }
 
 TEST_P(FusedMoeAuxLossWorkspaceTest, RejectInsufficientCapacity) {
-  float storage = 0.0f;
-  TensorWrapper workspace(&storage, std::vector<size_t>{1}, DType::kFloat32);
-  expect_workspace_error(GetParam(), workspace.data(), 257, "workspace needs at least");
+  std::vector<float> storage(255);
+  TensorWrapper workspace(storage.data(), std::vector<size_t>{storage.size()}, DType::kFloat32);
+  for (int num_rows : {0, 1, 3, 257}) {
+    expect_workspace_error(GetParam(), workspace.data(), num_rows, "workspace needs at least 256");
+  }
 }
 
 TEST_P(FusedMoeAuxLossWorkspaceTest, RejectWrongDtype) {
