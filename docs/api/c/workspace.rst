@@ -32,10 +32,10 @@ catalog with its allocation; copying the byte buffer alone does not reconstruct
 the catalog or establish table validity. Metadata is not a serialized/device ABI.
 There is no GPU header to read back when planning an operation.
 
-The caller supplies the required allocation size and base alignment. Execution
-trusts that allocation; it does not validate its capacity or base alignment.
-Checks of resource IDs, planned reservations, arithmetic, and ordering describe
-the host protocol and do not inspect the allocation.
+The caller supplies the required allocation size and base alignment. Operation
+adapters validate the tensor's declared byte capacity and base alignment; they
+cannot verify the actual allocation behind a supplied pointer. Low-level region
+accessors resolve offsets without inspecting device memory.
 
 Query and execution
 ---------------------
@@ -70,8 +70,10 @@ Several operations can query the same empty tensor before allocation. Each query
 includes the previous reservations, so the last shape/dtype covers all of them.
 Repeated sufficient requests reuse the same regions. Keep that tensor handle
 when the layout contains multiple regions or persistent data. A fresh handle over
-a scratch-only allocation also supports the original execution protocol, as used
-by callers that cache the queried shape/dtype separately.
+a scratch-only allocation also supports isolated execution, as used by callers
+that cache the queried shape/dtype separately. Independent handles over the same
+allocation do not share stream mapping or table readiness: retain the same
+tensor/catalog for concurrent reuse.
 
 Optional application resources
 --------------------------------
@@ -95,13 +97,18 @@ reservations; operations add their own scratch during the normal size query:
    workspace.set_rowwise_data(buffer, workspace.dtype(), workspace.shape());
    auto table = nvte_workspace_find_region(workspace.data(), "activation.gelu",
                                             table_key, sizeof(table_key));
-   initialize_table(nvte_workspace_get_region_data(workspace.data(), table), stream);
-   nvte_workspace_mark_region_initialized(workspace.data(), table, stream);
+   // initialize_table(data, bytes, stream, context) enqueues the producer.
+   nvte_workspace_initialize_region(workspace.data(), table, stream,
+                                    initialize_table, nullptr);
    nvte_quantize_dbias(input, output, dbias, workspace.data(), stream);
 
-``initialize_table`` is an application function; workspace metadata does not
-generate table values. Application keys include the table format version and
-all parameters affecting its values.
+``initialize_table`` is a host callback with type ``NVTEWorkspaceInitializer``;
+it enqueues initialization and reports any enqueue failure before returning.
+The workspace calls it once per region/allocation generation. Later streams
+wait for an event immediately following that producer, not for its later kernels.
+The callback must not synchronize the device or re-enter this workspace. After
+a callback failure, drain any partially enqueued writes before retrying.
+Application keys include the table format version and all value parameters.
 
 A generic plan snapshots one workspace revision; it never changes the active
 layout until committed. A commit, an operation query that grows the layout, or a
@@ -114,16 +121,29 @@ regions are not reclaimed or compacted automatically. A relocated persistent
 region needs initialization again; unchanged regions retain their validity when
 the same allocation is reused. Every nonempty region starts on at least a 128-byte
 boundary. Stricter power-of-two alignment is supported. Total size includes final
-padding, and the owner satisfies the maximum base alignment.
+padding, and the owner satisfies the maximum base alignment. Every scratch or
+stream-persistent reservation includes one aligned copy per stream slot. Region
+info describes slot zero and the per-slot byte size, not the replicated total.
+Replicas are reserved together per region so appending another resource preserves
+existing addresses; a stream's regions need not form one contiguous suballocation.
 
 Persistent initialization and streams
 --------------------------------------
 
-Scratch may be overwritten on every invocation. Persistent resources remain valid
-for the same key, region reservation, and allocation generation until explicitly
-invalidated. Grouped and non-grouped consumers can share a table when they agree
-on its name, key, format, and contents. Mutable scratch must not overlap those
-regions.
+There are three resource modes:
+
+* ``kNVTEWorkspacePersistent``: shared immutable resources such as activation
+  tables, initialized once per key/reservation/allocation generation.
+* ``kNVTEWorkspaceStreamPersistent``: retained mutable resources such as TMA
+  descriptors, with an independent copy per stream. Grouped TMA consumers rebuild
+  their descriptors before every invocation.
+* ``kNVTEWorkspaceScratch``: temporary mutable storage, also private per stream.
+
+Grouped and non-grouped consumers may share an immutable table when they agree on
+its name, key, format, and contents. Lazy initialization does not defer reserving
+space: query the complete layout before allocating. A table is initialized once
+for the program only when its device/context, key and backing allocation survive
+for the program's lifetime.
 
 Setting rowwise data through ``nvte_set_tensor_param``,
 ``nvte_set_tensor_param_v2``, or ``TensorWrapper::set_rowwise_data`` binds a new
@@ -133,16 +153,29 @@ including when the allocator returns the same numerical address. Do not bind aga
 just to reuse the same live allocation. A larger byte count or a familiar pointer
 value does not establish that a table's contents are valid.
 
-``mark_initialized`` records that the producer was successfully enqueued for the
-current generation; it performs no initialization or synchronization. It applies
-only to persistent regions. ``initialized`` means subsequent consumers ordered
-in the workspace stream can use the table, rather than that the GPU has finished.
-An explicit invalidation requires preparing the table before its next consumer.
+``mark_initialized`` records a readiness event after an explicitly enqueued
+producer; it performs no initialization or host/GPU synchronization. It applies
+only to shared immutable regions. ``initialized`` means the producer/event was
+enqueued, not that the GPU has finished. Prefer ``initialize_region`` to combine
+the once-only producer and readiness protocol. The stream-aware region accessor
+also establishes readiness for an already initialized shared region. Drain all
+consumers and destroy referencing graphs before invalidating or overwriting a
+shared table.
 
-The first ``begin_use`` or ``mark_initialized`` selects the CUDA stream for that
-allocation generation, including the default stream. Further uses must use the
-same stream. Use separate workspaces for other streams. Host metadata must be
-accessed serially. No CUDA events or implicit waits are inserted by the catalog.
+``kMaxWorkspaceStreamSlots`` is the single C++ constant controlling the limit,
+currently four; C callers can query ``nvte_workspace_max_stream_slots()``. A new
+CUDA stream ID receives the next free slot. IDs are compared for equality; stream
+handle values are neither indices nor assumed ordered, and recycled handles do
+not acquire a previous stream's slot. Default streams use CUDA's stream identity.
+All streams must belong to one CUDA device. Slots stay reserved until rebinding;
+exhaustion raises an error without waiting or eviction.
+
+``get_region_data_on_stream`` resolves the stream-private copy of mutable storage
+or the common immutable address. The legacy accessor without a stream resolves
+slot zero; it must not be used to share mutable regions between streams.
+Host access, including the complete enqueue sequence of each operation, must be
+serialized by the caller. This serialization does not add GPU dependencies:
+different slots execute independently, even when submitted by one host thread.
 
 Growing storage and CUDA Graphs
 --------------------------------
@@ -155,13 +188,20 @@ table contents from the old allocation and then mark the new region initialized,
 ordering that copy after the old producer and before new consumers. Keep the old
 allocation alive until all kernels and captured graphs referring to it finish.
 
-Plan, allocate, and initialize before graph capture. During capture, execute
-using prepared regions and stable addresses. A new binding does not update
+Plan, allocate, and prepare immutable resources on every consuming stream before
+graph capture. Ensure initialization has completed before capturing consumers:
+a wait enqueued before capture is not embedded in the graph, which may later be
+replayed on a different stream. Capture rejects pending initialization.
+Readiness events are created/recorded outside capture; prepared streams reuse
+them without adding capture dependencies. During capture, execute
+using stable addresses. A new binding does not update
 pointers embedded in an existing graph. Keep the old allocation for that graph or
 recapture with the new binding/layout. Graph replays and ordinary executions that
 share mutable storage must be ordered; the descriptor cannot observe an external
-CUDA graph launch. Views and previously obtained pointers do not follow a new
-binding or a relocated region automatically.
+CUDA graph launch. Graphs keep the slot selected at capture, even when replayed
+on another stream. Independently executing graphs require separate slots or
+separate workspaces, including graphs captured on the same stream. Views and
+previously obtained pointers do not follow a new binding or relocated region.
 
 Operation adapters and compatibility
 -------------------------------------
@@ -173,15 +213,15 @@ need no TMA region. Varying last dimensions support more than 64 groups. Each of
 the four TMA arrays and three metadata arrays is independently aligned to 128 bytes.
 
 ``nvte_quantize_dbias`` and ``nvte_group_quantize_dbias`` query their selected
-backend internally, reserve the shared ``te.dbias`` scratch region, and report
+backend internally, reserve the stream-private ``te.dbias`` scratch region, and report
 storage through the same tensor. Execution adapts that region to the backend's
 temporary tensor representation. Sequential grouped and non-grouped DBias
 operations can query and reuse the same reservation. Persistent regions remain
 separate from both DBias and TMA scratch.
 
-Pure temporary scratch retains the original caller-controlled stream ordering.
-Catalogs containing persistent data additionally enforce one stream per allocation
-generation. Reuse the tensor handle to preserve its catalog; copying the byte
+All mutable regions are replicated per registered stream; no descriptor or scratch
+storage is shared between different slots. Reuse the tensor handle to preserve
+its catalog; copying the byte
 buffer or creating another handle does not share that metadata. Destroying the
 tensor releases its catalog, including when its handle slot is reused.
 
@@ -202,11 +242,15 @@ The private extension exposes an explicit, reusable owner:
 The owner holds an ordinary TE tensor with its internal catalog and a
 one-dimensional CUDA ``uint8`` tensor.
 It uses the same operation for size queries and execution, grows storage
-geometrically, reuses sufficient capacity, and keeps retired
+geometrically, reuses an unchanged layout, and keeps retired
 allocations until the owner is destroyed so earlier graphs retain their storage.
-It belongs to one device and stream and serializes host metadata access. Warm it
-up with all required shapes before capture; layout growth during capture is
-rejected. ``size``, ``capacity``, and ``generation`` expose its state. Explicit
+It belongs to one device and supports the common stream-slot limit. Its mutex
+serializes host submission without waiting for GPU consumers. Layout growth
+always uses fresh storage, including when spare capacity exists, so old streams
+and graphs keep valid private addresses. Allocator stream recording protects
+asynchronous consumers. Warm it up with all required shapes before capture;
+layout growth during capture is rejected. ``size``, ``capacity``, ``generation``
+and ``max_stream_slots`` expose its state. Explicit
 ownership supports grouped MXFP8 quantization. Calls without this owner preserve
 the existing temporary-workspace behavior.
 

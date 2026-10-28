@@ -610,12 +610,15 @@ void performTest(const ProcessingMethod processing_method,
                     workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
                     if (check_workspace_contract) {
                         EXPECT_THROW(quantize(nullptr, 0), std::runtime_error);
-                        // Execution trusts the allocation supplied by the caller, without checking
-                        // the tensor's declared capacity. The actual allocation still meets the query.
+                        // Reject insufficient declared capacity before launching any GPU work.
                         TensorWrapper opaque_workspace;
                         opaque_workspace.set_rowwise_data(workspace.rowwise_dptr(), DType::kByte,
                                                           std::vector<size_t>{1});
-                        quantize(opaque_workspace.data(), 0);
+                        EXPECT_THROW(quantize(opaque_workspace.data(), 0), std::runtime_error);
+                        opaque_workspace.set_rowwise_data(
+                            static_cast<char *>(workspace.rowwise_dptr()) + 1, DType::kByte,
+                            std::vector<size_t>{workspace.rowwise_shape().data[0]});
+                        EXPECT_THROW(quantize(opaque_workspace.data(), 0), std::runtime_error);
                         EXPECT_THROW(nvte_group_quantize(in_group_tensor, out_group_tensor,
                                                            quant_config, 0), std::runtime_error);
                     }
