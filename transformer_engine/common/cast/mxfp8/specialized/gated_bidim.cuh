@@ -118,7 +118,6 @@ __device__ __forceinline__ void store_quantized(unsigned char* p, const unsigned
   *(uint2*)p = *(const uint2*)v;
 }
 
-
 // Row bands per CTA. Walking several bands deepens each CTA's work without starving SMs.
 //! Grid size, in CTAs, that the walk length aims for.
 constexpr long long kCtaTargetActivation = 16384;
