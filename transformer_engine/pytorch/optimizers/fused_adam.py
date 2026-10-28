@@ -106,6 +106,12 @@ class FusedAdam(torch.optim.Optimizer):
             when param type is BF16 and master weight type is FP32, no effect otherwise.
             Useful memory saving optimization.
             (default: False)
+        state_dict_cpu_offload (bool, optional): Copy each exported optimizer state to CPU
+            before exporting the next state. This bounds temporary GPU memory during
+            checkpoint export by the largest individual state, while preserving exported
+            dtypes and DTensor metadata. Live optimizer states and parameter-group metadata
+            remain on their existing devices. A subsequent full-state gather may move
+            exported states back to their mesh device. (default: False)
 
 
     .. _Adam - A Method for Stochastic Optimization:
@@ -132,6 +138,7 @@ class FusedAdam(torch.optim.Optimizer):
         exp_avg_sq_dtype=torch.float32,
         use_decoupled_grad=False,
         store_param_remainders=False,
+        state_dict_cpu_offload=False,
         set_grad_none: Optional[bool] = None,  # deprecated
     ):
 
@@ -177,6 +184,7 @@ class FusedAdam(torch.optim.Optimizer):
         super().__init__(params, defaults)
         self.adam_w_mode = 1 if adam_w_mode else 0
 
+        self.state_dict_cpu_offload = state_dict_cpu_offload
         self.capturable = capturable
         self.master_weights = master_weights
 
@@ -481,9 +489,7 @@ class FusedAdam(torch.optim.Optimizer):
                 self.set_scaled_state(param, "master_param", master)
 
     def state_dict(self):
-        """Override the state_dict() of pytorch. Before returning the state_dict, cast all
-        non-fp32 states to fp32.
-        """
+        """Return checkpoint states, optionally copying each state to CPU during export."""
         state_dict = super().state_dict()
 
         groups = self.param_groups
@@ -509,6 +515,9 @@ class FusedAdam(torch.optim.Optimizer):
                             shape=param.size(),
                             stride=param.stride(),
                         )
+                    if self.state_dict_cpu_offload:
+                        # CUDA meshes move CPU local tensors back to the GPU during wrapping.
+                        new_v[name] = new_v[name].cpu()
                 state_dict["state"][k] = new_v
 
         return state_dict
