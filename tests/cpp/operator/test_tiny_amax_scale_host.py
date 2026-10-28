@@ -18,11 +18,7 @@ HOST_SRC = Path(__file__).resolve().parent / "test_tiny_amax_scale_host.cpp"
 RECIPE_CUH = ROOT / "transformer_engine" / "common" / "recipe" / "recipe_common.cuh"
 REFERENCE_PY = ROOT / "tests" / "pytorch" / "references" / "quantize_scale_calc.py"
 CUSTOM_REFERENCE_PY = (
-    ROOT
-    / "transformer_engine"
-    / "pytorch"
-    / "custom_recipes"
-    / "reference_current_scaling.py"
+    ROOT / "transformer_engine" / "pytorch" / "custom_recipes" / "reference_current_scaling.py"
 )
 JAX_QUANTIZER_PY = ROOT / "transformer_engine" / "jax" / "quantize" / "quantizer.py"
 
@@ -61,7 +57,9 @@ def scales_from_amax(amax, max_fp8, pow2: bool, guarded: bool, epsilon: float = 
     usable = np.where(early, np.float32(1), usable)
     with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
         scale = np.divide(max_fp8, usable)
-    scale = np.where(np.isinf(scale), np.float32(np.finfo(np.float32).max), scale).astype(np.float32)
+    scale = np.where(np.isinf(scale), np.float32(np.finfo(np.float32).max), scale).astype(
+        np.float32
+    )
     if pow2:
         masked = scale.view(np.uint32) & np.uint32(0xFF800000)
         scale = masked.view(np.float32)
@@ -197,16 +195,28 @@ def cross_check_numpy(rows: list[dict]) -> None:
 
 def check_sources() -> None:
     recipe = RECIPE_CUH.read_text()
-    if "amax < amax_floor" not in recipe or "amax == 0.f" not in recipe or "#include <cfloat>" not in recipe:
+    if (
+        "amax < amax_floor" not in recipe
+        or "amax == 0.f" not in recipe
+        or "#include <cfloat>" not in recipe
+    ):
         raise AssertionError("recipe_common.cuh does not floor a positive tiny amax")
     reference = REFERENCE_PY.read_text()
-    if "torch.finfo(torch.float32).tiny" not in reference or "amax < guard" not in reference or "amax == 0" not in reference:
+    if (
+        "torch.finfo(torch.float32).tiny" not in reference
+        or "amax < guard" not in reference
+        or "amax == 0" not in reference
+    ):
         raise AssertionError("quantize_scale_calc.py does not mirror the floor")
     custom = CUSTOM_REFERENCE_PY.read_text()
     if "amax < guard" not in custom or "amax == 0" not in custom:
         raise AssertionError("reference_current_scaling.py does not mirror the floor")
     jax = JAX_QUANTIZER_PY.read_text()
-    if "jnp.finfo(jnp.float32).tiny" not in jax or "amax < guard" not in jax or "amax > 0" not in jax:
+    if (
+        "jnp.finfo(jnp.float32).tiny" not in jax
+        or "amax < guard" not in jax
+        or "amax > 0" not in jax
+    ):
         raise AssertionError("jax quantizer.py does not mirror the floor")
 
 
@@ -314,7 +324,11 @@ def linear_case(recipe: str) -> dict:
     tiny_activation = np.full_like(activation, TINY)
     tiny_out, tiny_dgrad, tiny_wgrad, tiny_meta = forward_backward(True, tiny_activation, grad_out)
     legacy_tiny = forward_backward(False, tiny_activation, grad_out)
-    if not (np.isfinite(tiny_out).all() and np.isfinite(tiny_dgrad).all() and np.isfinite(tiny_wgrad).all()):
+    if not (
+        np.isfinite(tiny_out).all()
+        and np.isfinite(tiny_dgrad).all()
+        and np.isfinite(tiny_wgrad).all()
+    ):
         raise AssertionError("tiny tensorwise activation produced a non-finite gradient")
     _finite_normal_invs(tiny_meta[:3])
     if not np.any(is_subnormal(legacy_tiny[3][0])):
@@ -335,7 +349,9 @@ def grouped_linear_case() -> dict:
     rng = np.random.default_rng(11)
     experts, tokens, in_features, out_features = 2, 32, 128, 128
     activation = rng.standard_normal((experts, tokens, in_features)).astype(np.float32)
-    weight = rng.standard_normal((experts, out_features, in_features)).astype(np.float32) * np.float32(0.05)
+    weight = rng.standard_normal((experts, out_features, in_features)).astype(
+        np.float32
+    ) * np.float32(0.05)
     grad_out = rng.standard_normal((experts, tokens, out_features)).astype(np.float32)
     activation[1].fill(TINY)
     grad_out[1].fill(TINY)
@@ -351,7 +367,9 @@ def grouped_linear_case() -> dict:
             if not np.isfinite(tensor).all():
                 raise AssertionError("grouped linear produced a non-finite value")
         for tensor in (x_inv, w_inv, dy_inv):
-            if np.any(is_subnormal(tensor)) or np.any(np.asarray(tensor, dtype=np.float32) < FLT_MIN):
+            if np.any(is_subnormal(tensor)) or np.any(
+                np.asarray(tensor, dtype=np.float32) < FLT_MIN
+            ):
                 raise AssertionError("grouped linear stored a subnormal scale_inv")
         outputs.append(output)
         if expert == 1:
@@ -409,7 +427,9 @@ def train_proxy(steps: int = 15) -> dict:
             dw1 = (dh_dq.T @ x_dq).astype(np.float32)
             if not np.isfinite(loss) or not np.isfinite(dw1).all() or not np.isfinite(dw2).all():
                 raise AssertionError(f"non-finite training state guarded={guarded} inject={inject}")
-            grad_norm = np.float32(math.sqrt(float(np.sum(np.square(dw1)) + np.sum(np.square(dw2)))))
+            grad_norm = np.float32(
+                math.sqrt(float(np.sum(np.square(dw1)) + np.sum(np.square(dw2))))
+            )
             w1 -= np.float32(0.05) * dw1
             w2 -= np.float32(0.05) * dw2
             losses.append(float(loss))
@@ -425,7 +445,10 @@ def train_proxy(steps: int = 15) -> dict:
     normal_old = execute(False, False)
     injected_new = execute(True, True)
     injected_old = execute(False, True)
-    if normal_new["losses"] != normal_old["losses"] or normal_new["grad_norms"] != normal_old["grad_norms"]:
+    if (
+        normal_new["losses"] != normal_old["losses"]
+        or normal_new["grad_norms"] != normal_old["grad_norms"]
+    ):
         raise AssertionError("normal-data loss or grad norm changed")
     if injected_new["subnormal_scale_inv"] or not injected_old["subnormal_scale_inv"]:
         raise AssertionError("injected smoke did not isolate the legacy subnormal")
@@ -467,7 +490,9 @@ def probe_gpu_stack() -> dict:
         "torch": torch_status,
         "transformer_engine_import": te_status,
         "cuda_operator_tests": "not executed; test_operator requires nvcc, CUDA, and a GPU",
-        "pytorch_quantization_tests": "not executed; no PyTorch or CUDA runtime in this environment",
+        "pytorch_quantization_tests": (
+            "not executed; no PyTorch or CUDA runtime in this environment"
+        ),
     }
 
 
