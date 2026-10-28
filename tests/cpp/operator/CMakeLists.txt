@@ -59,3 +59,7 @@ target_compile_options(test_operator PRIVATE -O2 -fopenmp)
 # the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
 # TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
 add_test(NAME test_operator COMMAND test_operator)
+
+add_executable(test_tiny_amax_scale_host test_tiny_amax_scale_host.cpp)
+target_compile_options(test_tiny_amax_scale_host PRIVATE -O2 -Wall -Wextra)
+add_test(NAME test_tiny_amax_scale_host COMMAND test_tiny_amax_scale_host)

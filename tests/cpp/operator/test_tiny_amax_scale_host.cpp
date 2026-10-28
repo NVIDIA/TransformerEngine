@@ -1,3 +1,9 @@
+/*************************************************************************
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
 // Host IEEE-754 model of compute_scale_from_amax without fast-math.
 
 #include <cfloat>

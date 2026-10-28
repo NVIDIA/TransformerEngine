@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Host checks for flooring a tiny positive FP8 amax at max_fp8 * FLT_MIN."""
 
 from __future__ import annotations
@@ -8,6 +12,7 @@ import math
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -149,12 +154,22 @@ def apply_2d(weight, block, max_fp8, pow2, guarded, fmt):
 
 
 def run_host() -> list[dict]:
-    binary = Path("/tmp/fp8_scale_guard_host")
-    compile_cmd = ["g++", "-O2", "-std=c++17", "-Wall", "-Wextra", str(HOST_SRC), "-o", str(binary)]
-    compiled = subprocess.run(compile_cmd, check=True, capture_output=True, text=True)
-    if compiled.stderr.strip():
-        print(compiled.stderr, file=sys.stderr)
-    completed = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        binary = Path(tmp) / "fp8_scale_guard_host"
+        compile_cmd = [
+            "g++",
+            "-O2",
+            "-std=c++17",
+            "-Wall",
+            "-Wextra",
+            str(HOST_SRC),
+            "-o",
+            str(binary),
+        ]
+        compiled = subprocess.run(compile_cmd, check=True, capture_output=True, text=True)
+        if compiled.stderr.strip():
+            print(compiled.stderr, file=sys.stderr)
+        completed = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
     rows = []
     for line in completed.stdout.splitlines():
         parts = line.split()
@@ -494,6 +509,44 @@ def probe_gpu_stack() -> dict:
             "not executed; no PyTorch or CUDA runtime in this environment"
         ),
     }
+
+
+def test_recipe_sources_have_amax_floor() -> None:
+    check_sources()
+
+
+def test_host_binary_matches_numpy() -> None:
+    import pytest
+
+    if shutil.which("g++") is None:
+        pytest.skip("g++ is not available")
+    cross_check_numpy(run_host())
+
+
+def test_random_blocks_match_legacy() -> None:
+    for fmt, max_fp8 in (("e4m3", E4M3_MAX), ("e5m2", E5M2_MAX)):
+        for pow2 in (False, True):
+            assert_random_bitwise(fmt, max_fp8, pow2)
+    rng = np.random.default_rng(3)
+    weight = rng.standard_normal((256, 256)).astype(np.float32)
+    for pow2 in (False, True):
+        new = apply_2d(weight, 128, E4M3_MAX, pow2, True, "e4m3")
+        old = apply_2d(weight, 128, E4M3_MAX, pow2, False, "e4m3")
+        if any(not np.array_equal(a.view(np.uint32), b.view(np.uint32)) for a, b in zip(new, old)):
+            raise AssertionError("2D random block quantization changed")
+
+
+def test_tiny_block_stays_representable() -> None:
+    linear_case("blockwise")
+    linear_case("tensorwise")
+
+
+def test_grouped_tiny_expert_stays_representable() -> None:
+    grouped_linear_case()
+
+
+def test_training_proxy_normal_data_matches_legacy() -> None:
+    train_proxy()
 
 
 def main() -> None:
