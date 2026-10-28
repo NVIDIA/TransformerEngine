@@ -698,7 +698,8 @@ __launch_bounds__(640, 1) __global__ static void group_row_col_rht_gemm_device_g
       // Warp responsible for quantizing output of Hadamard transform to FP4 for columnwise usage,
       // and writing result tensors/scales to global memory.
       if constexpr (kEnableRHTColQuant) {
-        cutlass::arch::warpgroup_reg_alloc<120>();
+        cutlass::arch::warpgroup_reg_alloc<(
+            kEnableRowQuant ? ((kEnableStochasticRounding && kUseFastMath) ? 128 : 120) : 160)>();
         using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b32x;
         const int col_half = warp_idx >= 8 ? 1 : 0;
         auto col_tiler = Shape<_128, _64, _128>{};
@@ -976,7 +977,8 @@ __launch_bounds__(640, 1) __global__ static void group_row_col_rht_gemm_device_g
     } else if (is_epilogue_row_quant_warp) {
       // Warp responsible for quantizing the input (before Hadamard transform) to FP4 for row-wise usage.
       if constexpr (kEnableRowQuant) {
-        cutlass::arch::warpgroup_reg_alloc<(kEnableRHTColQuant ? 104 : 136)>();
+        cutlass::arch::warpgroup_reg_alloc<(
+            kEnableRHTColQuant ? ((kEnableStochasticRounding && kUseFastMath) ? 96 : 104) : 136)>();
         using S2RVectorType = uint128_t;
 
         int global_thread_idx = threadIdx.x - cutlass::NumThreadsPerWarpGroup;

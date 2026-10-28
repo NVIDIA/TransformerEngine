@@ -658,7 +658,8 @@ __global__ static void row_col_rht_gemm_device(
     } while (scheduler.is_valid());
   } else if (is_epilogue_col_quant_warp) {
     if constexpr (kEnableRHTColQuant) {
-      cutlass::arch::warpgroup_reg_alloc<120>();
+      cutlass::arch::warpgroup_reg_alloc<(
+          kEnableRowQuant ? ((kEnableStochasticRounding && kUseFastMath) ? 136 : 120) : 160)>();
       using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b32x;
       const int col_half = warp_idx >= 8 ? 1 : 0;
       auto col_tiler = Shape<_128, _64, _128>{};
@@ -896,7 +897,11 @@ __global__ static void row_col_rht_gemm_device(
     }
   } else if (is_epilogue_row_quant_warp) {
     if constexpr (kEnableRowQuant) {
-      cutlass::arch::warpgroup_reg_alloc<(kEnableRHTColQuant ? 104 : 136)>();
+      if constexpr (kEnableRHTColQuant && kEnableStochasticRounding && kUseFastMath) {
+        cutlass::arch::warpgroup_reg_dealloc<88>();
+      } else {
+        cutlass::arch::warpgroup_reg_alloc<(kEnableRHTColQuant ? 104 : 136)>();
+      }
       using S2RVectorType = uint128_t;
       float const a_global_amax_val =
           a_global_amax == nullptr
@@ -1160,7 +1165,7 @@ void row_col_rht_gemm_ntt_w_sfc(
 
   // Define the smem layouts (static)
   // Calculate max pipeline stages based on Blackwell SM100's 232KB shared memory
-  constexpr int SchedulerPipelineStageCount = 6;
+  constexpr int SchedulerPipelineStageCount = 2;
   static int constexpr MainloopPipelineBytes = sizeof(typename cutlass::detail::CustomizedPipelineTmaUmmaAsync<
                                                 1,
                                                 Shape<_1,_1,_1>,
