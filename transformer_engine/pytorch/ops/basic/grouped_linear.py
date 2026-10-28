@@ -9,7 +9,9 @@ from collections.abc import Callable, Iterable, Sequence
 import contextlib
 import functools
 import math
+import os
 from typing import Any, Optional
+import warnings
 
 import torch
 
@@ -39,14 +41,15 @@ from ...utils import (
     clear_tensor_data,
     devices_match,
     get_device_compute_capability,
-    resolve_grouped_linear_single_param_flags,
     round_up_to_nearest_multiple,
+    warn_if_single_grouped_parameters,
 )
 from .._common import (
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
+    maybe_autocast_dtype,
     maybe_dequantize,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
@@ -57,6 +60,7 @@ from ...distributed_weight import (
     is_distributed_weight,
     materialize_weight_for_backward,
     materialize_weight_for_forward,
+    weight_grad_dtype,
 )
 from ...tensor import GroupedTensor, GroupedTensorStorage
 from ...triton.grouped_dbias_dscales import (
@@ -74,6 +78,8 @@ GRAD_INPUT_BUFFER_KEY = "grad_input"
 def is_op_fuser_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
+    split_alignment: int = 128,
+    device: Optional[torch.device] = None,
 ) -> bool:
     """Whether the op-fuser grouped-tensor path supports this recipe and dtype.
 
@@ -81,15 +87,16 @@ def is_op_fuser_grouped_tensor_path_supported(
       which is backed by ``nvte_grouped_gemm_with_discrete_inputA`` in the common
       library.
     * MXFP8 and NVFP4 are supported on Blackwell GPUs with Compute Capability
-      (CC) 10.x and 11.0. NVFP4 requires RHT because graph-safe grouped
-      quantization currently requires it.
+      (CC) 10.x and 11.0 when split alignment is divisible by 128. NVFP4
+      requires RHT because graph-safe grouped quantization currently requires it.
     * FP8 per-tensor current scaling uses grouped current-scaling quantization
       through ``tex.group_quantize`` and cuBLASLt grouped GEMM with per-batch
       scalar FP8 scaling. It is supported on Hopper and Blackwell, with
       cuBLASLt 13.5+ required on Hopper.
-    * FP8 block scaling uses the grouped-tensor path only on Hopper with
-      cuBLASLt 13.6+. On other architectures or older cuBLAS versions it
-      falls back to the split-quantize path for discrete parameters.
+    * FP8 block scaling uses the grouped-tensor path wherever MXFP8 does
+      (power-of-2 scales only) and on Hopper with cuBLASLt 13.6+, in both
+      cases with split alignment divisible by 128. Otherwise it falls back to
+      the split-quantize path for discrete parameters.
     * Custom recipes are unsupported because they may assign different
       quantizers to input, weight, and grad-output roles. This predicate
       currently supports only built-in recipes with known uniform layouts.
@@ -99,11 +106,40 @@ def is_op_fuser_grouped_tensor_path_supported(
       is excluded because cuBLASLt grouped GEMM does not support it.
     * Single grouped parameters have no split-quantize fallback, so callers
       must reject them when this function returns ``False``.
+
+    If device is omitted, the current CUDA device is used.
     """
+    # Recipe objects are not hashable. Resolve the device before the cached call so
+    # support results from different GPUs cannot share a cache entry.
+    device_index = device.index if device is not None else None
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    return _is_op_fuser_grouped_tensor_path_supported(
+        type(recipe) if recipe is not None else None,
+        getattr(recipe, "disable_rht", None),
+        getattr(recipe, "row_scaled_activation", None),
+        getattr(recipe, "fp8_format", None),
+        dtype,
+        split_alignment,
+        device_index,
+    )
+
+
+@functools.lru_cache
+def _is_op_fuser_grouped_tensor_path_supported(
+    recipe_type: Optional[type[Recipe]],
+    disable_rht: Optional[bool],
+    row_scaled_activation: Optional[bool],
+    fp8_format: Optional[RecipeFormat],
+    dtype: torch.dtype,
+    split_alignment: int,
+    device_index: int,
+) -> bool:
+    """Cache routing for a recipe snapshot, dtype, alignment, and CUDA device."""
     if dtype not in (torch.bfloat16, torch.float16):
         return False
 
-    device_capability = get_device_compute_capability()
+    device_capability = get_device_compute_capability(torch.device("cuda", device_index))
     if not (9, 0) <= device_capability <= (11, 0):
         return False
     cublaslt_version = tex.get_cublasLt_version()
@@ -112,23 +148,28 @@ def is_op_fuser_grouped_tensor_path_supported(
     if device_capability < (10, 0) and cublaslt_version < 130400:
         return False
 
-    if recipe is None:
+    if recipe_type is None:
         return True
-    if recipe.custom():
+    if recipe_type.custom():
         return False
-    if recipe.float8_current_scaling():
+    if recipe_type.float8_current_scaling():
         return device_capability >= (10, 0) or cublaslt_version >= 130500
-    if recipe.float8_block_scaling():
-        # cuBLASLt 13.6 fixes Hopper grouped GEMM algo selection for block-scaled FP8.
-        return device_capability < (10, 0) and cublaslt_version >= 130600
-    if recipe.mxfp8():
-        return device_capability >= (10, 0)
-    if recipe.nvfp4():
+    if recipe_type.float8_block_scaling():
+        # Blackwell and newer emulate FP8 block scaling with MXFP8 grouped GEMM, so it is
+        # supported wherever MXFP8 is. On Hopper, cuBLASLt 13.6 fixes grouped GEMM algo
+        # selection for block-scaled FP8.
+        return (
+            device_capability >= (10, 0) or cublaslt_version >= 130600
+        ) and split_alignment % 128 == 0
+    if recipe_type.mxfp8():
+        return device_capability >= (10, 0) and split_alignment % 128 == 0
+    if recipe_type.nvfp4():
         return (
             device_capability >= (10, 0)
-            and not recipe.disable_rht
-            and not recipe.row_scaled_activation
-            and recipe.fp8_format == RecipeFormat.E4M3
+            and not disable_rht
+            and not row_scaled_activation
+            and fp8_format == RecipeFormat.E4M3
+            and split_alignment % 128 == 0
         )
     return False
 
@@ -141,6 +182,12 @@ class GroupedLinear(BasicOperation):
     This is equivalent to splitting the input tensor along its first
     dimension, applying a separate ``torch.nn.Linear`` to each split,
     and concatenating along the first dimension.
+
+    The grouped-tensor path is selected automatically where it is
+    supported (see ``is_op_fuser_grouped_tensor_path_supported``). With
+    MXFP8 or FP8 block scaling, it relies on every split size being a
+    multiple of 128, as ``split_alignment`` declares. This is checked only
+    on the device, so other split sizes can produce incorrect results.
 
     Parameters
     ----------
@@ -170,23 +217,22 @@ class GroupedLinear(BasicOperation):
         ``main_grad`` instead of accumulating.
     single_grouped_weight : bool, default = ``False``
         Store all expert weights as one ``GroupedTensor`` parameter ``weight``.
-        EXPERIMENTAL and subject to change. Gated by the
-        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
-        is not set this argument is forced to ``False`` with a warning.
+        EXPERIMENTAL and subject to change. Requires the native grouped-tensor path
+        for the current device, dtype, and quantization recipe.
     delay_wgrad_compute : bool, default = ``False``
         Whether to delay weight gradient computation
     single_grouped_bias : bool, default = ``False``
         If ``True`` (and ``bias=True``), store all expert biases as one ``GroupedTensor``
         parameter named ``bias`` instead of ``bias0``..``bias{N-1}``.
-        EXPERIMENTAL and subject to change. Gated by the
-        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
-        is not set this argument is forced to ``False`` with a warning.
+        EXPERIMENTAL and subject to change. Requires the native grouped-tensor path
+        for the current device, dtype, and quantization recipe.
     scale_bias : bool, default = ``False``
         If ``True`` (and ``bias=True``), expects a probability tensor as an
         additional extra input and adds ``bias * scales`` instead of ``bias``
         in the forward pass. The scale tensor has shape
         ``(total_tokens,)`` and is split according to the split sizes.
-
+    split_alignment : int, default = ``128``
+        Guaranteed alignment of each input split size.
     """
 
     # Operation expects input split sizes (and optionally scales tensor)
@@ -207,6 +253,7 @@ class GroupedLinear(BasicOperation):
         single_grouped_bias: bool = False,
         delay_wgrad_compute: bool = False,
         scale_bias: bool = False,
+        split_alignment: int = 128,
     ) -> None:
         # Decide before BasicOperation.__init__ sizes _extra_input_channels.
         self._scale_bias: bool = scale_bias and bias
@@ -221,12 +268,25 @@ class GroupedLinear(BasicOperation):
         self.num_groups: int = num_groups
         self.in_features: int = in_features
         self.out_features: int = out_features
-        single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
-            single_grouped_weight, single_grouped_bias
-        )
+        warn_if_single_grouped_parameters(single_grouped_weight, single_grouped_bias)
         self.single_grouped_weight: bool = single_grouped_weight
         self.single_grouped_bias: bool = single_grouped_bias
         self.use_bias: bool = bias
+        if not isinstance(split_alignment, int) or isinstance(split_alignment, bool):
+            raise TypeError(
+                f"split_alignment must be an int (got {type(split_alignment).__name__})"
+            )
+        if split_alignment <= 0:
+            raise ValueError(f"split_alignment must be positive (got {split_alignment})")
+        if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) > 0:
+            warnings.warn(
+                "NVTE_CUTEDSL_FUSED_GROUPED_MLP is deprecated; pass "
+                "split_alignment=256 to GroupedLinear instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            split_alignment = 256
+        self.split_alignment: int = split_alignment
         if self.num_groups <= 0:
             raise ValueError(f"Invalid number of groups ({self.num_groups})")
         if self.in_features <= 0:
@@ -666,10 +726,6 @@ class GroupedLinear(BasicOperation):
     def pre_first_fuser_forward(self) -> None:
         super().pre_first_fuser_forward()
 
-        # Initialize params if needed
-        if any(param.device.type == "meta" for param in self.parameters()):
-            self.reset_parameters()
-
         # Check that all weight params are consistent
         if not self.single_grouped_weight:
             dtype = self.weight0.dtype
@@ -1030,10 +1086,7 @@ class GroupedLinear(BasicOperation):
                 weight_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx + 1)
 
         # Get autocast dtype if needed
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
-        else:
-            dtype = weight_param.dtype
+        dtype = maybe_autocast_dtype(default_dtype=weight_param.dtype)
 
         # Extract split sizes from extra input. Keep on GPU for graph safety.
         split_sizes = basic_op_extra_inputs[0][0]
@@ -1061,6 +1114,8 @@ class GroupedLinear(BasicOperation):
         use_grouped_tensor_path = is_op_fuser_grouped_tensor_path_supported(
             recipe,
             dtype,
+            self.split_alignment,
+            device=device,
         )
         if (self.single_grouped_weight or self.single_grouped_bias) and not use_grouped_tensor_path:
             raise RuntimeError(
@@ -1183,10 +1238,7 @@ class GroupedLinear(BasicOperation):
         # ``split_sizes``, offset metadata, and related tensors are routed
         # through ``save_for_backward`` (see ``_fuser_forward_split_quantize``
         # and ``_fuser_forward_grouped_tensor`` for the saved-tensor layout).
-        if torch.is_autocast_enabled():
-            ctx.dtype = torch.get_autocast_dtype("cuda")
-        else:
-            ctx.dtype = weight_param.dtype
+        ctx.dtype = maybe_autocast_dtype(default_dtype=weight_param.dtype)
         ctx.input_requires_grad = requires_grad[0]
         ctx.weight_requires_grad = requires_grad[0] and weight_param.requires_grad
         # Caller-provided backward grad-input buffer.
@@ -1601,7 +1653,7 @@ class GroupedLinear(BasicOperation):
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
                     final_weight_grads[0] = torch.empty(
-                        grouped_shape, dtype=ctx.dtype, device=device
+                        grouped_shape, dtype=weight_grad_dtype(weights, ctx.dtype), device=device
                     )
                     grad_weights = [final_weight_grads[0][idx] for idx in range(num_groups)]
             else:
@@ -1613,7 +1665,7 @@ class GroupedLinear(BasicOperation):
                 else:
                     grad_weights_packed = torch.empty(
                         grouped_shape,
-                        dtype=ctx.dtype,
+                        dtype=weight_grad_dtype(weights, ctx.dtype),
                         device=device,
                     )
                     grad_weights = [grad_weights_packed[i] for i in range(num_groups)]
@@ -1895,7 +1947,7 @@ class GroupedLinear(BasicOperation):
                         shapes=[weight_shape] * num_groups,
                         quantizer=None,
                         device=device,
-                        dtype=dtype,
+                        dtype=weight_grad_dtype(weights, dtype),
                     )
                 final_weight_grads[0] = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
                 wgrad_output = grouped_wgrad
@@ -1908,7 +1960,9 @@ class GroupedLinear(BasicOperation):
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
                     final_weight_grads = [
-                        torch.empty(weight_shape, dtype=dtype, device=device)
+                        torch.empty(
+                            weight_shape, dtype=weight_grad_dtype(weights, dtype), device=device
+                        )
                         for _ in range(num_groups)
                     ]
                 wgrad_output = final_weight_grads

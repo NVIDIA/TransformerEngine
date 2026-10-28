@@ -211,6 +211,35 @@ void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
   });
 }
 
+void group_quantize_nvfp4_row_scaled_impl(const GroupedTensorWrapper &grouped_input_tensor,
+                                          GroupedTensorWrapper &grouped_output_tensor,
+                                          const NVFP4Quantizer *nvfp4_quantizer_cpp,
+                                          const std::optional<TensorWrapper> &noop_flag,
+                                          cudaStream_t stream) {
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_rht,
+             "Grouped row-scaled NVFP4 quantization does not support RHT.");
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_2d_quantization,
+             "Grouped row-scaled NVFP4 quantization does not support 2D quantization.");
+  NVTE_CHECK(!nvfp4_quantizer_cpp->stochastic_rounding,
+             "Grouped row-scaled NVFP4 quantization does not support stochastic rounding.");
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_amax_reduction,
+             "Grouped row-scaled NVFP4 quantization does not support amax reduction.");
+  NVTE_CHECK(nvfp4_quantizer_cpp->nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
+             "Grouped row-scaled NVFP4 quantization does not support 4over6.");
+
+  QuantizationConfigWrapper quant_config_cpp;
+  if (noop_flag.has_value()) {
+    quant_config_cpp.set_noop_tensor(noop_flag->data());
+  }
+  if (transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH")) {
+    quant_config_cpp.set_use_fast_math(true);
+  }
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor.data(), quant_config_cpp,
+                        stream);
+  });
+}
+
 float fp8_max_for_dtype(const DType dtype) {
   if (!is_fp8_dtype(dtype)) {
     NVTE_ERROR("Expected FP8 dtype for grouped current-scaling quantization, got ",
@@ -276,14 +305,15 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
 
 }  // namespace
 
-py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
+py::object group_quantize(const at::Tensor &input, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
                           std::optional<at::Tensor> tensor_offsets,
                           std::optional<at::Tensor> noop_flag, const py::object &output) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
-  NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+  NVTE_CHECK(input.dim() == 2, "Tensor must be 2D");
+  const at::Tensor tensor = input.contiguous();
 
   // No-op flag for CUDA graph weight caching (skip_fp8_weight_update).
   std::optional<TensorWrapper> noop_flag_cpp;
@@ -301,6 +331,26 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
 
   auto quantizer_cpp = convert_quantizer(quantizer);
+
+  const bool row_scaled_nvfp4 =
+      detail::IsNVFP4Quantizers(quantizer.ptr()) &&
+      static_cast<const NVFP4Quantizer *>(quantizer_cpp.get())->row_scaled_nvfp4;
+  if (row_scaled_nvfp4) {
+    NVTE_CHECK(output.is_none(),
+               "group_quantize: output reuse is not supported with row-scaled NVFP4.");
+    if (first_dims.has_value()) {
+      NVTE_CHECK(first_dims->is_contiguous() && first_dims->scalar_type() == at::kLong,
+                 "group_quantize: first_dims must be a contiguous int64 tensor.");
+    } else {
+      NVTE_CHECK(num_tensors > 0 && logical_first_dim % (num_tensors * 128) == 0,
+                 "group_quantize: row-scaled NVFP4 with uniform shapes requires the first "
+                 "dimension (",
+                 logical_first_dim, ") to be a multiple of 128 * num_tensors (", num_tensors, ").");
+      first_dims = at::full({static_cast<int64_t>(num_tensors)},
+                            static_cast<int64_t>(logical_first_dim / num_tensors),
+                            tensor.options().dtype(at::kLong));
+    }
+  }
 
   // Create input GroupedTensor.
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
@@ -370,9 +420,15 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       NVTE_CHECK(!last_dims.has_value(),
                  "group_quantize: varying last dim is not supported with NVFP4.");
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
-                                nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream(),
-                                !nvfp4_quantizer_cpp->disable_second_level_scale);
+      if (row_scaled_nvfp4) {
+        group_quantize_nvfp4_row_scaled_impl(grouped_input_tensor, grouped_output_tensor_cpp,
+                                             nvfp4_quantizer_cpp, noop_flag_cpp,
+                                             at::cuda::getCurrentCUDAStream());
+      } else {
+        group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
+                                  nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream(),
+                                  !nvfp4_quantizer_cpp->disable_second_level_scale);
+      }
       break;
     }
     case GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE: {
@@ -2115,15 +2171,16 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                            [](const py::handle &quantizer) -> bool {
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
-      allocation_method = AllocationMethod::BULK_NVFP4;
       const bool has_row_scaled_nvfp4 =
           std::any_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
                       [](const std::unique_ptr<Quantizer> &quantizer) {
                         return static_cast<NVFP4Quantizer *>(quantizer.get())->row_scaled_nvfp4;
                       });
       if (has_row_scaled_nvfp4) {
+        allocation_method = AllocationMethod::UNFUSED;
         quantization_method = QuantizationMethod::UNFUSED;
       } else {
+        allocation_method = AllocationMethod::BULK_NVFP4;
         quantization_method = QuantizationMethod::FUSED_NVFP4;
       }
     }

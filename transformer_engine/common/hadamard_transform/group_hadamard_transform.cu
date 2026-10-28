@@ -12,8 +12,10 @@
 #include <transformer_engine/hadamard_transform.h>
 #include <transformer_engine/multi_tensor.h>
 
+#include <algorithm>
 #include <cuda/barrier>
 
+#include "common/cast/nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "common/common.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
@@ -582,7 +584,7 @@ void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
                                 static_cast<uint16_t>(random_sign_mask_t), false, stream);
 }
 
-// Grouped-tensor amax without doing hadamard transform
+// Grouped-tensor amax
 void nvte_group_amax(const NVTETensor input, NVTETensor* outputs, const size_t* split_sections,
                      size_t num_tensors, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_amax);
@@ -597,6 +599,30 @@ void nvte_group_amax(const NVTETensor input, NVTETensor* outputs, const size_t* 
     output_list[i] = convertNVTETensorCheck(outputs[i]);
   }
 
+  // Check that tensors have uniform scaling modes
+  const auto scaling_mode = output_list[0]->scaling_mode;
+  for (const auto* t : output_list) {
+    NVTE_CHECK(t->scaling_mode == scaling_mode, "Tensors have inconsistent scaling modes (found ",
+               to_string(scaling_mode), " and ", to_string(t->scaling_mode), ").");
+  }
+
+  // Compute per-row amax if outputs are row-scaled NVFP4 tensors
+  if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
+    auto is_row_scaled_nvfp4 = [](const Tensor* t) -> bool { return t->row_scaled_nvfp4; };
+    const bool all_row_scaled_nvfp4 =
+        std::all_of(output_list.begin(), output_list.end(), is_row_scaled_nvfp4);
+    const bool any_row_scaled_nvfp4 =
+        std::any_of(output_list.begin(), output_list.end(), is_row_scaled_nvfp4);
+    NVTE_CHECK(all_row_scaled_nvfp4 == any_row_scaled_nvfp4,
+               "Output tensors are not consistent between row-scaling and tensor-scaling.");
+    if (all_row_scaled_nvfp4) {
+      dispatch::nvfp4::group_row_amax(*input_tensor, /*noop=*/nullptr, output_list, split_sections,
+                                      num_tensors, stream);
+      return;
+    }
+  }
+
+  // Per-tensor amax
   group_hadamard_transform_amax(*input_tensor, output_list, split_sections, num_tensors, 0, 0, true,
                                 stream);
 }

@@ -14,6 +14,7 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 
+from transformer_engine import te_device_type
 from .torch_version import torch_version
 from ..common import decode_cudnn_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
@@ -262,25 +263,13 @@ def interleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.T
     return x.reshape(shape)
 
 
-def resolve_grouped_linear_single_param_flags(
+def warn_if_single_grouped_parameters(
     single_grouped_weight: bool,
     single_grouped_bias: bool,
-) -> Tuple[bool, bool]:
-    """Gate ``single_grouped_weight`` / ``single_grouped_bias`` on ``NVTE_GROUPED_LINEAR_SINGLE_PARAM``."""
+) -> None:
+    """Warn when a caller selects the experimental single grouped parameter layout."""
     if not (single_grouped_weight or single_grouped_bias):
-        return single_grouped_weight, single_grouped_bias
-
-    env_enabled = int(os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")) > 0
-    if not env_enabled:
-        warnings.warn(
-            f"GroupedLinear was constructed with single_grouped_weight={single_grouped_weight} "
-            f"and single_grouped_bias={single_grouped_bias}, but the "
-            "NVTE_GROUPED_LINEAR_SINGLE_PARAM environment variable is not set. "
-            "Disabling single grouped weight/bias and falling back to per-expert parameters.",
-            UserWarning,
-            stacklevel=3,
-        )
-        return False, False
+        return
 
     warnings.warn(
         "GroupedLinear is using single_grouped_weight/single_grouped_bias. "
@@ -289,7 +278,6 @@ def resolve_grouped_linear_single_param_flags(
         UserWarning,
         stacklevel=3,
     )
-    return single_grouped_weight, single_grouped_bias
 
 
 def attention_mask_func(
@@ -802,12 +790,12 @@ def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
     if device is None:
         # Use default CUDA device
         device = torch.get_default_device()
-        if device.type != "cuda":
-            device = torch.device("cuda", torch.cuda.current_device())
+        if device.type != te_device_type():
+            device = torch.device(te_device_type(), torch.cuda.current_device())
     elif not isinstance(device, torch.device):
         device = torch.device(device)
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+    if device.type == te_device_type() and device.index is None:
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     return device
 
 
@@ -829,7 +817,7 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
     device2 = torch.device(device2)
     if device1.type != device2.type:
         return False
-    if device1.type == "cuda":
+    if device1.type == te_device_type():
         index1 = device1.index
         index2 = device2.index
         if index1 == index2:
@@ -965,15 +953,22 @@ def canonicalize_process_group(
     return group
 
 
+def torch_is_autocast_gpu_enabled() -> bool:
+    """Check whether PyTorch autocast is enabled for the GPU device."""
+    if torch_version() >= (2, 4, 0):
+        return torch.is_autocast_enabled(te_device_type())
+    return torch.is_autocast_enabled()
+
+
 def torch_get_autocast_gpu_dtype() -> torch.dtype:
     """Get PyTorch autocast GPU dtype."""
     if torch_version() >= (2, 4, 0):
-        return torch.get_autocast_dtype("cuda")
+        return torch.get_autocast_dtype(te_device_type())
     return torch.get_autocast_gpu_dtype()
 
 
 if torch_version() >= (2, 4, 0):
-    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type="cuda")
+    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type=te_device_type())
 else:
     gpu_autocast_ctx = torch.cuda.amp.autocast
 

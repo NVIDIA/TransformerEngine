@@ -15,6 +15,7 @@ import torch
 
 import transformer_engine_torch as tex
 
+from transformer_engine import te_device_type
 from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
 from .._quantization_helpers import safe_quantized_repr
 
@@ -54,8 +55,8 @@ class _FromNVFP4Func(torch.autograd.Function):
 
         # ``tex.dequantize`` requires CUDA-resident buffers. If the tensor has
         src_device = tensor.device
-        if src_device.type != "cuda":
-            cuda_tensor = tensor.to(device=torch.device("cuda"))
+        if src_device.type != te_device_type():
+            cuda_tensor = tensor.to(device=torch.device(te_device_type()))
             result = tex.dequantize(cuda_tensor, torch_to_transformer_engine_dtype[dtype])
             return result.to(device=src_device)
         return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
@@ -258,7 +259,9 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             byte_shape = list(self._rowwise_data.size())
             shape = byte_shape[:-1] + [byte_shape[-1] * 2]
         elif self._columnwise_data is not None:
-            warnings.warn("Attempting to get shape of NVFP4 tensor with only column-wise data.")
+            # Dynamo queries columnwise-only fake shapes; warning emission breaks fullgraph tracing.
+            if not torch.compiler.is_compiling():
+                warnings.warn("Attempting to get shape of NVFP4 tensor with only column-wise data.")
             byte_shape = list(self._columnwise_data.size())
             shape = byte_shape[1:-1] + [byte_shape[-1] * 2, byte_shape[0]]
         if shape is None:

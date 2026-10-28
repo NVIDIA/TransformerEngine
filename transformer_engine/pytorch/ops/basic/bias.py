@@ -11,7 +11,9 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
+from transformer_engine import te_device_type
 from ...dynamo import TensorOrQuantized, TensorSpec
+from ...dynamo.fake import fake_bgrad
 from ...quantization import FP8GlobalStateManager
 from ..op import BasicOperation
 from ...utils import canonicalize_device, canonicalize_dtype
@@ -114,23 +116,18 @@ class Bias(BasicOperation):
 
         # Make sure parameter is initialized
         bias = self.bias
-        if bias.device.type != "cuda":
+        if bias.device.type != te_device_type():
             bias = torch.empty_like(bias, device=self.device)
         else:
             bias = bias.to(device=self.device)
 
         # Initialize values
-        bias.zero_()
+        torch.nn.init.zeros_(bias)
 
         # Save updated parameter
         if not isinstance(bias, torch.nn.Parameter):
             bias = torch.nn.Parameter(bias)
         self.bias = bias
-
-    def pre_first_fuser_forward(self) -> None:
-        super().pre_first_fuser_forward()
-        if self.bias.device.type == "meta":
-            self.reset_parameters()
 
     fwd_args_type = BiasFwdArgs
     bwd_args_type = BiasBwdArgs
@@ -194,13 +191,8 @@ class Bias(BasicOperation):
     @classmethod
     def backward_compute_fake(cls, args: BiasBwdArgs):
         dy = args.grad_output
-        dx = None
-        if len(dy.shape) > 1 and args.grad_input_quantizer is not None:
-            dx = TensorSpec(
-                shape=dy.shape,
-                dtype=dy.dtype,
-                device=dy.device,
-                quantizer=args.grad_input_quantizer,
-            )
-        db = TensorSpec(shape=(dy.shape[-1],), dtype=dy.dtype, device=dy.device)
+        quantizer = args.grad_input_quantizer if len(dy.shape) > 1 else None
+        db, dx = fake_bgrad(dy, quantizer)
+        if quantizer is None:
+            dx = None
         return dx, [(db,)], [()]

@@ -14,7 +14,7 @@ Precision Notes:
   global memory. For example, the gradient is required to have the same dtype as the input.
 """
 
-import math
+import warnings
 from typing import Optional, Tuple, Union
 
 import torch
@@ -39,70 +39,22 @@ _QB_HISTOGRAM_MODE_FROM_STRING = {
     "two_kernel": int(QBHistogramMode.TWO_KERNEL),
     "fused_atomic": int(QBHistogramMode.FUSED_ATOMIC),
 }
-_QB_BOUNDS_VALIDATED_VERSION_ATTR = "_nvte_qb_bounds_validated_version"
-_QB_BOUNDS_CAPTURE_VALIDATED_VERSION_ATTR = "_nvte_qb_bounds_capture_validated_version"
 
 
-def mark_qb_bin_bounds_validated(bin_bounds: torch.Tensor) -> None:
-    """Mark the current QB bounds version as valid after a trusted device-side update.
+def mark_qb_bin_bounds_validated(
+    bin_bounds: torch.Tensor,  # pylint: disable=unused-argument
+) -> None:
+    """Deprecated no-op.
 
-    This function validates metadata only; it does not inspect or schedule validation of tensor
-    values. The caller must guarantee finite FP32 bounds with ``lower < upper``. When called during
-    CUDA graph capture, call it immediately after dispatching the trusted in-place update on the
-    same stream. The Python marker itself is not replayed, so every value produced on replay must
-    satisfy the bounds contract for every possible input and control-flow path.
+    QB ``bin_bounds`` values are no longer validated, so there is nothing to mark. This function
+    will be removed in a future release.
     """
-    if not (
-        isinstance(bin_bounds, torch.Tensor)
-        and bin_bounds.is_cuda
-        and bin_bounds.is_contiguous()
-        and bin_bounds.dtype == torch.float32
-        and bin_bounds.shape == (2,)
-    ):
-        raise ValueError("QB bin_bounds must be a contiguous FP32 CUDA tensor with shape [2]")
-    version = bin_bounds._version
-    setattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, version)
-    with torch.cuda.device(bin_bounds.device):
-        capture_validated_version = version if torch.cuda.is_current_stream_capturing() else None
-    setattr(
-        bin_bounds,
-        _QB_BOUNDS_CAPTURE_VALIDATED_VERSION_ATTR,
-        capture_validated_version,
+    warnings.warn(
+        "mark_qb_bin_bounds_validated is deprecated and has no effect because QB bin_bounds "
+        "values are no longer validated. It will be removed in a future release.",
+        category=DeprecationWarning,
+        stacklevel=2,
     )
-
-
-def _validate_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
-    """Validate QB bounds once per PyTorch tensor version."""
-    if not (
-        isinstance(bin_bounds, torch.Tensor)
-        and bin_bounds.is_cuda
-        and bin_bounds.is_contiguous()
-        and bin_bounds.dtype == torch.float32
-        and bin_bounds.shape == (2,)
-    ):
-        # The C++ binding owns metadata validation and its detailed error messages.
-        return False
-
-    version = bin_bounds._version
-    validated_version = getattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, None)
-    capture_validated_version = getattr(bin_bounds, _QB_BOUNDS_CAPTURE_VALIDATED_VERSION_ATTR, None)
-    if validated_version == version and capture_validated_version != version:
-        return True
-    with torch.cuda.device(bin_bounds.device):
-        is_capturing = torch.cuda.is_current_stream_capturing()
-        if validated_version == version and is_capturing:
-            return True
-        if is_capturing:
-            raise RuntimeError(
-                "QB bin_bounds current version must be validated before CUDA graph capture"
-            )
-    lower, upper = bin_bounds.detach().cpu().tolist()
-    if not (math.isfinite(lower) and math.isfinite(upper) and lower < upper):
-        raise ValueError(
-            f"QB bin_bounds values must be finite with lower < upper, got [{lower}, {upper}]"
-        )
-    mark_qb_bin_bounds_validated(bin_bounds)
-    return True
 
 
 def _validate_routing_map_format(
@@ -237,7 +189,6 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
         histogram_mode: int,
     ):
         # pylint: disable=missing-function-docstring
-        bin_bounds_validated = _validate_qb_bin_bounds(bin_bounds)
         (
             probs,
             routing_output,
@@ -254,7 +205,6 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
             histogram,
             bin_bounds,
             histogram_mode,
-            bin_bounds_validated,
         )
         ctx.compiled = False
         if topk_indices is not None:
@@ -474,18 +424,9 @@ def fused_topk_with_score_function(
         ``torch._dynamo.mark_static_address``; otherwise capture may be skipped.
     qb_bin_bounds : torch.Tensor, optional
         FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins. Values must be
-        finite with ``lower < upper``. Eager calls revalidate PyTorch-tracked in-place updates.
-        Under ``torch.compile``, value validation and its CPU synchronization are skipped;
-        tensor metadata is still checked. The caller must guarantee valid values on every call,
-        including after device-side updates; compiled calls do not mark bounds as validated
-        for later eager calls. Before eager CUDA graph capture, validate the current version
-        eagerly or use
-        :func:`mark_qb_bin_bounds_validated` after a trusted device-side update. CUDA graph replay
-        does not execute Python validation or advance PyTorch tensor-version counters. Any bounds
-        update visible to replay, whether issued outside the graph or captured inside it, is
-        therefore trusted and must produce finite values with ``lower < upper`` on every replay.
-        Invalid bounds under ``torch.compile`` or CUDA graph replay may silently produce an
-        incorrect histogram.
+        finite with ``lower < upper``. The values are only read on the device and are not
+        validated, so the tensor may be updated in place at any time, including inside a CUDA
+        graph. Invalid bounds silently produce an incorrect histogram.
     qb_histogram_mode : str, optional
         ``"two_kernel"`` or ``"fused_atomic"``. Must be provided with the two QB tensors.
 
@@ -996,7 +937,6 @@ def _qb_map_forward(
                 histogram,
                 bin_bounds,
                 histogram_mode,
-                True,
             )
         )
     return probs, routing_output, intermediate_output
@@ -1046,7 +986,6 @@ def _qb_indices_forward(
             histogram,
             bin_bounds,
             histogram_mode,
-            True,
         )
     return probs, intermediate_output
 

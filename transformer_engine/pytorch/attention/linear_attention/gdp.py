@@ -47,7 +47,7 @@ tensors follow the cuDNN frontend's transposed convention instead,
 This module is **experimental** and subject to change.
 """
 
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 
@@ -190,7 +190,6 @@ class _GDPKernelAdapter(LinearAttentionKernelAdapter):
 
     def _call_op(
         self,
-        op: Callable,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
@@ -215,7 +214,7 @@ class _GDPKernelAdapter(LinearAttentionKernelAdapter):
             tensor.reshape(-1, *tensor.shape[2:])
             for tensor in (key_layer, value_layer, gates["beta"])
         )
-        return op(
+        return self._op(
             query_layer,
             key_layer,
             value_layer,
@@ -264,8 +263,7 @@ class _GDPKernelAdapter(LinearAttentionKernelAdapter):
         ``initial_state``, for as long as that holds.
         """
         # Checked here rather than in `_validate_gates`, which only sees the
-        # per-token gates, so that a bad shape is reported before the kernel
-        # runtime is imported.
+        # per-token gates.
         self._validate_safe_gate_params(query_layer, a_log, dt_bias)
         return self._run(
             query_layer,
