@@ -49,6 +49,7 @@ from .._common import (
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
+    maybe_autocast_dtype,
     maybe_dequantize,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
@@ -78,6 +79,7 @@ def is_op_fuser_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
     split_alignment: int = 128,
+    device: Optional[torch.device] = None,
 ) -> bool:
     """Whether the op-fuser grouped-tensor path supports this recipe and dtype.
 
@@ -104,11 +106,40 @@ def is_op_fuser_grouped_tensor_path_supported(
       is excluded because cuBLASLt grouped GEMM does not support it.
     * Single grouped parameters have no split-quantize fallback, so callers
       must reject them when this function returns ``False``.
+
+    If device is omitted, the current CUDA device is used.
     """
+    # Recipe objects are not hashable. Resolve the device before the cached call so
+    # support results from different GPUs cannot share a cache entry.
+    device_index = device.index if device is not None else None
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    return _is_op_fuser_grouped_tensor_path_supported(
+        type(recipe) if recipe is not None else None,
+        getattr(recipe, "disable_rht", None),
+        getattr(recipe, "row_scaled_activation", None),
+        getattr(recipe, "fp8_format", None),
+        dtype,
+        split_alignment,
+        device_index,
+    )
+
+
+@functools.lru_cache
+def _is_op_fuser_grouped_tensor_path_supported(
+    recipe_type: Optional[type[Recipe]],
+    disable_rht: Optional[bool],
+    row_scaled_activation: Optional[bool],
+    fp8_format: Optional[RecipeFormat],
+    dtype: torch.dtype,
+    split_alignment: int,
+    device_index: int,
+) -> bool:
+    """Cache routing for a recipe snapshot, dtype, alignment, and CUDA device."""
     if dtype not in (torch.bfloat16, torch.float16):
         return False
 
-    device_capability = get_device_compute_capability()
+    device_capability = get_device_compute_capability(torch.device("cuda", device_index))
     if not (9, 0) <= device_capability <= (11, 0):
         return False
     cublaslt_version = tex.get_cublasLt_version()
@@ -117,27 +148,27 @@ def is_op_fuser_grouped_tensor_path_supported(
     if device_capability < (10, 0) and cublaslt_version < 130400:
         return False
 
-    if recipe is None:
+    if recipe_type is None:
         return True
-    if recipe.custom():
+    if recipe_type.custom():
         return False
-    if recipe.float8_current_scaling():
+    if recipe_type.float8_current_scaling():
         return device_capability >= (10, 0) or cublaslt_version >= 130500
-    if recipe.float8_block_scaling():
+    if recipe_type.float8_block_scaling():
         # Blackwell and newer emulate FP8 block scaling with MXFP8 grouped GEMM, so it is
         # supported wherever MXFP8 is. On Hopper, cuBLASLt 13.6 fixes grouped GEMM algo
         # selection for block-scaled FP8.
         return (
             device_capability >= (10, 0) or cublaslt_version >= 130600
         ) and split_alignment % 128 == 0
-    if recipe.mxfp8():
+    if recipe_type.mxfp8():
         return device_capability >= (10, 0) and split_alignment % 128 == 0
-    if recipe.nvfp4():
+    if recipe_type.nvfp4():
         return (
             device_capability >= (10, 0)
-            and not recipe.disable_rht
-            and not recipe.row_scaled_activation
-            and recipe.fp8_format == RecipeFormat.E4M3
+            and not disable_rht
+            and not row_scaled_activation
+            and fp8_format == RecipeFormat.E4M3
             and split_alignment % 128 == 0
         )
     return False
@@ -1055,10 +1086,7 @@ class GroupedLinear(BasicOperation):
                 weight_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx + 1)
 
         # Get autocast dtype if needed
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
-        else:
-            dtype = weight_param.dtype
+        dtype = maybe_autocast_dtype(default_dtype=weight_param.dtype)
 
         # Extract split sizes from extra input. Keep on GPU for graph safety.
         split_sizes = basic_op_extra_inputs[0][0]
@@ -1087,6 +1115,7 @@ class GroupedLinear(BasicOperation):
             recipe,
             dtype,
             self.split_alignment,
+            device=device,
         )
         if (self.single_grouped_weight or self.single_grouped_bias) and not use_grouped_tensor_path:
             raise RuntimeError(
@@ -1209,10 +1238,7 @@ class GroupedLinear(BasicOperation):
         # ``split_sizes``, offset metadata, and related tensors are routed
         # through ``save_for_backward`` (see ``_fuser_forward_split_quantize``
         # and ``_fuser_forward_grouped_tensor`` for the saved-tensor layout).
-        if torch.is_autocast_enabled():
-            ctx.dtype = torch.get_autocast_dtype("cuda")
-        else:
-            ctx.dtype = weight_param.dtype
+        ctx.dtype = maybe_autocast_dtype(default_dtype=weight_param.dtype)
         ctx.input_requires_grad = requires_grad[0]
         ctx.weight_requires_grad = requires_grad[0] and weight_param.requires_grad
         # Caller-provided backward grad-input buffer.

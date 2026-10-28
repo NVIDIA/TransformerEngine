@@ -319,6 +319,10 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   }
   ret.set_with_gemm_swizzled_scales(with_gemm_swizzled);
 
+  if (py::hasattr(tensor, "_row_scaled_nvfp4")) {
+    ret.set_row_scaled_nvfp4(tensor.attr("_row_scaled_nvfp4").cast<bool>());
+  }
+
   return ret;
 }
 

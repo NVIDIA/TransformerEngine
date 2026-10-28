@@ -130,7 +130,9 @@ std::shared_ptr<CacheEntry<GraphAndTensors>> cache_graph(GraphCache<GraphAndTens
 // Create a cache for each (backend, pass) pair, and either get cached entry or build anew.
 template <Backend kBackend, Pass kPass, auto kCreateGraphFn>
 auto get_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
-  static GraphCache<decltype(kCreateGraphFn(cfg))> cache;
+  // Never destroyed: destroying cached cuDNN plans calls into CUDA, which must not be used during
+  // program termination.
+  static auto &cache = *new GraphCache<decltype(kCreateGraphFn(cfg))>;
   cfg.check_derived();
   return detail::cache_graph(cache, cfg.make_cache_key(kPass), kBackend, kPass, handle,
                              [&] { return kCreateGraphFn(cfg); });
