@@ -2511,9 +2511,7 @@ class Linear(TransformerEngineBaseModule):
 
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
         try:
-            weight, bias, weight_list, bias_list = self._get_weight_and_bias_tensors(
-                defer_concatenation=True
-            )
+            weight, bias, weight_list, bias_list = self._get_weight_and_bias_tensors()
             weight_shape = concat_shape(weight_list) if weight_list else None
             weight_requires_grad = (
                 any(t.requires_grad for t in weight_list) if weight_list else weight.requires_grad
@@ -2814,16 +2812,16 @@ class Linear(TransformerEngineBaseModule):
             fp8_grad=fp8_grad,
         )
 
-    def _get_weight_and_bias_tensors(self, defer_concatenation=False):
+    def _get_weight_and_bias_tensors(self):
         weights = self._get_weight_tensors()
-        weight, weight_list = concat_input(weights, defer=defer_concatenation)
+        weight, weight_list = concat_input(weights, defer=True)
         bias = None
         bias_list = None
         if self.use_bias:
             biases = [getattr(self, name) for name in self.bias_names]
             bias, bias_list = concat_input(
                 biases,
-                defer=defer_concatenation and self.apply_bias and not self.gemm_bias_unfused_add,
+                defer=self.apply_bias and not self.gemm_bias_unfused_add,
             )
         return weight, bias, weight_list, bias_list
 
@@ -2842,7 +2840,11 @@ class Linear(TransformerEngineBaseModule):
 
         assert_warmed_up(self)
         assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export."
-        weight_tensor, bias_tensor, _, _ = self._get_weight_and_bias_tensors()
+        weight_tensor, bias_tensor, weight_list, bias_list = self._get_weight_and_bias_tensors()
+        if weight_list:
+            weight_tensor = torch.cat(weight_list)
+        if bias_list:
+            bias_tensor = torch.cat(bias_list)
         (
             input_quantizer,
             weight_quantizer,

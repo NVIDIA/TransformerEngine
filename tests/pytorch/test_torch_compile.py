@@ -3339,7 +3339,7 @@ def test_te_split_parameters(
                     out = current(inp)
         return out[0] + out[1] if bias_mode == "returned" else out
 
-    def reference_parameters(defer_concatenation=False):
+    def reference_parameters():
         weight = torch.cat([getattr(reference, name) for name in reference.weight_names])
         bias = (
             torch.cat([getattr(reference, name) for name in reference.bias_names])
