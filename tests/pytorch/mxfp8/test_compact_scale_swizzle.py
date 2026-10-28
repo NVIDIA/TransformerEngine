@@ -41,24 +41,18 @@ def _make_tensor_and_reference(shape, rowwise):
     padded_shape = _scale_shape(padded_rows, padded_cols, rowwise, compact=False)
     padded = torch.zeros(padded_shape, dtype=torch.uint8, device="cuda")
     padded[: compact_shape[0], : compact_shape[1]].copy_(scales)
-    reference = swizzle_mxfp8_scale(
-        padded_rows, padded_cols, padded, columnwise=not rowwise
-    )
+    reference = swizzle_mxfp8_scale(padded_rows, padded_cols, padded, columnwise=not rowwise)
 
     tensor = MXFP8Tensor(
         shape=shape,
         dtype=torch.bfloat16,
         device="cuda",
         rowwise_data=torch.empty(shape, dtype=torch.uint8, device="cuda") if rowwise else None,
-        columnwise_data=None
-        if rowwise
-        else torch.empty(shape, dtype=torch.uint8, device="cuda"),
+        columnwise_data=None if rowwise else torch.empty(shape, dtype=torch.uint8, device="cuda"),
         rowwise_scale_inv=scales if rowwise else None,
         columnwise_scale_inv=None if rowwise else scales,
         fp8_dtype=tex.DType.kFloat8E4M3,
-        quantizer=MXFP8Quantizer(
-            tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=not rowwise
-        ),
+        quantizer=MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=not rowwise),
         with_gemm_swizzled_scales=False,
     )
     return tensor, reference

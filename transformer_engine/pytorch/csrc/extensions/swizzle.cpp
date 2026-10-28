@@ -42,8 +42,7 @@ bool is_empty_grouped_tensor_param(const NVTEBasicTensor &t) {
   return t.shape.ndim == 1 && t.shape.data[0] == 0;
 }
 
-NVTEShape padded_scale_shape_for_gemm(NVTEShape shape, NVTEScalingMode scaling_mode,
-                                      bool rowwise) {
+NVTEShape padded_scale_shape_for_gemm(NVTEShape shape, NVTEScalingMode scaling_mode, bool rowwise) {
   if (shape.ndim != 2) return shape;
   const bool scales_are_row_major = rowwise || scaling_mode == NVTE_NVFP4_1D_SCALING;
   if (scales_are_row_major) {
@@ -208,8 +207,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
   for (auto &tensor : tensors_needing_swizzle) {
     const auto scales_nvte =
         (rowwise_usage ? tensor->get_rowwise_scale_inv() : tensor->get_columnwise_scale_inv());
-    const auto shape =
-        padded_scale_shape_for_gemm(scales_nvte.shape, scaling_mode, rowwise_usage);
+    const auto shape = padded_scale_shape_for_gemm(scales_nvte.shape, scaling_mode, rowwise_usage);
     const auto dtype = static_cast<DType>(scales_nvte.dtype);
     const auto dtype_bits = transformer_engine::pytorch::typeToNumBits(dtype);
     const auto size = product(shape, 0, shape.ndim);
