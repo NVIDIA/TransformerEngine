@@ -178,7 +178,7 @@ class _AttentionGraph:
             offsets = cu_padded.to(torch.int64) * data.stride(0)
             self.add(offset_name, offsets, (self.b + 1, 1, 1, 1), (1, 1, 1, 1))
         elif name in ("k", "v") and self.params.get("page_table_k") is not None:
-            order = (0, 2, 1, 3) if fmt == "bshd" else (0, 1, 2, 3)
+            order = {"bshd": (0, 2, 1, 3), "sbhd": (1, 2, 0, 3), "bhsd": (0, 1, 2, 3)}[fmt]
             dim = tuple(data.shape[index] for index in order)
         self.tensors[name] = data
         self.specs[name] = attention_matrix_spec(

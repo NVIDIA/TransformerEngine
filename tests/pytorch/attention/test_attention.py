@@ -478,6 +478,96 @@ def test_fused_attn_query_reuses_runtime_graph(layout, backward, monkeypatch):
     assert queried.workspace_size == 17
 
 
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("q_format", ("bshd", "sbhd", "thd"))
+@pytest.mark.parametrize("kv_format", ("bshd", "sbhd"))
+def test_fused_attn_paged_cache_layout(dtype, q_format, kv_format):
+    """Paged cache dimensions must match support queries and independent FP32 SDPA."""
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    batch, seqlen, heads, groups, dim = 2, 4, 4, 2, 64
+    num_pages, page_size = 6, 128
+    lengths = (203, 137)
+    q_dense = torch.randn(batch, seqlen, heads, dim, device="cuda", dtype=dtype)
+    q = q_dense.transpose(0, 1).contiguous() if q_format == "sbhd" else q_dense
+    if q_format == "thd":
+        q = q.reshape(batch * seqlen, heads, dim)
+    pages = [
+        torch.randn(num_pages, page_size, groups, dim, device="cuda", dtype=dtype) for _ in range(2)
+    ]
+    k, v = [
+        tensor.transpose(0, 1).contiguous() if kv_format == "sbhd" else tensor for tensor in pages
+    ]
+    # Nonconsecutive, distinct K/V mappings also exercise page-table addressing.
+    table_ids = ((3, 0), (5, 2)), ((4, 1), (0, 3))
+    tables = [torch.tensor(ids, device="cuda", dtype=torch.int32) for ids in table_ids]
+    cu_q = torch.tensor((0, seqlen, batch * seqlen), device="cuda", dtype=torch.int32)
+    cu_kv = torch.tensor((0, lengths[0], sum(lengths)), device="cuda", dtype=torch.int32)
+    layout = f"paged_kv_{q_format}_{kv_format}_{kv_format}"
+    te_dtype = DType.kFloat16 if dtype == torch.float16 else DType.kBFloat16
+    config = FusedAttentionParams(
+        is_training=False,
+        qkv_layout=QKVLayout[layout],
+        o_format=QKVFormat[q_format],
+        qkv_dtype=te_dtype,
+        o_dtype=te_dtype,
+        batch_size=batch,
+        num_attn_heads=heads,
+        num_gqa_groups=groups,
+        head_dim_qk=dim,
+        head_dim_v=dim,
+        max_seqlen_q=seqlen,
+        max_seqlen_kv=2 * page_size,
+        num_tokens_q=batch * seqlen if q_format == "thd" else 0,
+        num_pages_k=num_pages,
+        num_pages_v=num_pages,
+        page_size_k=page_size,
+        page_size_v=page_size,
+        max_pages_per_seq_k=2,
+        max_pages_per_seq_v=2,
+        attn_mask_type=AttnMaskType["padding"],
+    )
+    backend, message = get_fused_attn_backend(config)
+    if backend == FusedAttnBackend.No_Backend:
+        pytest.skip(f"Paged fused attention is unsupported for {layout}: {message}")
+    out, _ = fused_attn_fwd(
+        is_training=False,
+        max_seqlen_q=seqlen,
+        max_seqlen_kv=2 * page_size,
+        cu_seqlens_q=cu_q,
+        cu_seqlens_kv=cu_kv,
+        q=q,
+        k=k,
+        v=v,
+        fake_dtype=dtype,
+        fused_attention_backend=backend,
+        page_table_k=tables[0],
+        page_table_v=tables[1],
+        qkv_layout=layout,
+        o_format=q_format,
+        attn_mask_type="padding",
+    )
+    expected = []
+    with sdpa_kernel(SDPBackend.MATH):
+        for index, length in enumerate(lengths):
+            kr, vr = [
+                tensor[list(ids[index])]
+                .reshape(-1, groups, dim)[:length]
+                .float()
+                .transpose(0, 1)
+                .repeat_interleave(heads // groups, dim=0)
+                for tensor, ids in zip(pages, table_ids)
+            ]
+            expected.append(
+                torch.nn.functional.scaled_dot_product_attention(
+                    q_dense[index].float().transpose(0, 1), kr, vr
+                ).transpose(0, 1)
+            )
+    actual = out.transpose(0, 1) if q_format == "sbhd" else out.reshape(q_dense.shape)
+    rtol, atol = (2e-2, 1e-2) if dtype == torch.bfloat16 else (3e-3, 2e-3)
+    torch.testing.assert_close(actual.float(), torch.stack(expected), rtol=rtol, atol=atol)
+
+
 @pytest.mark.parametrize("dtype", (DType.kFloat16, DType.kBFloat16))
 @pytest.mark.parametrize("capability", ((10, 0), (12, 0), (12, 1), (12, 9), (13, 0)))
 @pytest.mark.parametrize("layout", ("bshd_bshd_bshd", "thd_bshd_bshd", "thd_thd_thd"))
