@@ -22,6 +22,7 @@ try:
 except ImportError:  # pragma: no cover
     counters = None
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
+from torch._dynamo.testing import CompileCounterWithBackend
 
 try:
     from torch._opaque_base import OpaqueBaseMeta
@@ -45,6 +46,11 @@ import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.module import (
+    linear as linear_module,
+    layernorm_linear as layernorm_linear_module,
+    layernorm_mlp as layernorm_mlp_module,
+)
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.ops.basic.bias import BiasBwdArgs
@@ -60,7 +66,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
 )
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
-from transformer_engine.pytorch.dynamo.fake import fake_bgrad
+from transformer_engine.pytorch.dynamo.fake import fake_bgrad, fake_norm
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -129,7 +135,8 @@ if fp8_block_scaling_available:
 if mxfp8_available:
     _all_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
-    _all_recipes.append(recipe.NVFP4BlockScaling())
+    # Disable stochastic rounding for exact eager/compiled comparisons.
+    _all_recipes.append(recipe.NVFP4BlockScaling(disable_stochastic_rounding=True))
     _all_recipes.append(nvfp4_4over6())
     _all_recipes.append(nvfp4_row_scaled())
 
@@ -175,30 +182,75 @@ def _assert_no_cudagraph_skips(enabled: bool):
 _EAGER_ATOL, _EAGER_RTOL = 0.0, 0.0
 
 
-def _assert_close_eager_compiled(fn, compiled, model, base):
-    """Run ``fn`` eagerly and ``compiled`` on identical inputs; assert the
-    forward output and the input / weight / bias gradients match."""
+def _flatten_outputs(out):
+    return list(out) if isinstance(out, (tuple, list)) else [out]
+
+
+def _assert_close_eager_compiled(fn, compiled, model, base, *, dynamic_batch=False):
+    """Run ``fn`` eagerly and ``compiled`` on identical inputs; assert every
+    forward output and the input / parameter gradients match."""
     inp_eager = base.detach().clone().requires_grad_(True)
     model.zero_grad(set_to_none=True)
-    out_eager = fn(inp_eager)
-    out_eager.sum().backward()
-    ref_out = out_eager.detach().clone()
-    ref_wgrad = model.weight.grad.detach().clone()
+    outs_eager = _flatten_outputs(fn(inp_eager))
+    sum(o.sum() for o in outs_eager).backward()
+    ref_outs = [o.detach().clone() for o in outs_eager]
     ref_igrad = inp_eager.grad.detach().clone()
-    # bias=False keeps a 0-element ``bias`` around; grad is None then.
-    ref_bgrad = model.bias.grad.detach().clone() if model.bias.grad is not None else None
+    ref_pgrads = {
+        name: p.grad.detach().clone() for name, p in model.named_parameters() if p.grad is not None
+    }
 
     inp_compiled = base.detach().clone().requires_grad_(True)
+    if dynamic_batch:
+        torch._dynamo.mark_dynamic(inp_compiled, 0)
     model.zero_grad(set_to_none=True)
     # Clone before a later cuda-graph replay overwrites the static output buffer.
-    out_compiled = compiled(inp_compiled).clone()
-    out_compiled.sum().backward()
+    outs_compiled = [o.clone() for o in _flatten_outputs(compiled(inp_compiled))]
+    sum(o.sum() for o in outs_compiled).backward()
 
-    torch.testing.assert_close(out_compiled, ref_out, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    assert len(outs_compiled) == len(ref_outs)
+    for out, ref in zip(outs_compiled, ref_outs):
+        torch.testing.assert_close(out, ref, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
     torch.testing.assert_close(inp_compiled.grad, ref_igrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
-    torch.testing.assert_close(model.weight.grad, ref_wgrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
-    if ref_bgrad is not None:
-        torch.testing.assert_close(model.bias.grad, ref_bgrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    pgrads = {name: p.grad for name, p in model.named_parameters() if p.grad is not None}
+    assert pgrads.keys() == ref_pgrads.keys()
+    for name, ref in ref_pgrads.items():
+        torch.testing.assert_close(
+            pgrads[name], ref, atol=_EAGER_ATOL, rtol=_EAGER_RTOL, msg=f"grad mismatch: {name}"
+        )
+
+
+def _run_module_compile_test(model, fp8_recipe, compile_mode, in_features, dtype=torch.bfloat16):
+    device = "cuda"
+
+    def fn(inp):
+        if fp8_recipe is None:
+            return model(inp)
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        warm = torch.randn(32, in_features, dtype=dtype, device=device, requires_grad=True)
+        outs = _flatten_outputs(fn(warm))
+        sum(o.sum() for o in outs).backward()
+        model.zero_grad(set_to_none=True)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    n_iters = 3 if compile_mode == "reduce-overhead" else 1
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(n_iters):
+            base = torch.randn(32, in_features, dtype=dtype, device=device)
+            _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+_LINEAR_MODULES = ["Linear", "LayerNormLinear", "LayerNormMLP"]
+
+
+def _make_module(module, *, dtype=torch.bfloat16, device="cuda", **kwargs):
+    """Small module with dimensions suitable for FP8 GEMMs."""
+    return getattr(te, module)(
+        64, 128 if module == "LayerNormMLP" else 32, params_dtype=dtype, device=device, **kwargs
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1898,6 +1950,75 @@ def test_tensor_spec_create_tensor_compiles(factory, shape):
     assert out.shape == ()
 
 
+@pytest.mark.parametrize("with_optional_shape", [False, True])
+def test_custom_op_symbolic_shape(with_optional_shape):
+    """Shape arguments stay dynamic across the custom-op boundary."""
+    from transformer_engine.pytorch.dynamo.custom_op import register_custom_op_with_autograd
+
+    @dataclasses.dataclass
+    class ShapeArgs:
+        input_: torch.Tensor
+        shape: torch.Size
+        optional_shape: torch.Size | None
+
+    @dataclasses.dataclass
+    class ShapeBwdArgs:
+        grad_output: torch.Tensor | None = None
+        shape: torch.Size | None = None
+
+        def setup_grad_outputs(self, grads):
+            (self.grad_output,) = grads
+
+    def impl(args):
+        assert isinstance(args.shape, torch.Size)
+        shape = args.shape if args.optional_shape is None else args.optional_shape
+        assert isinstance(shape, torch.Size)
+        return args.input_.reshape(shape).clone(), (), None
+
+    def fake_impl(args):
+        shape = args.shape if args.optional_shape is None else args.optional_shape
+        return TensorSpec(shape=shape, dtype=args.input_.dtype, device=args.input_.device), (), None
+
+    def setup_context(bwd_args, fwd_args, *_):
+        bwd_args.shape = fwd_args.input_.shape
+        return ()
+
+    def backward_impl(args):
+        return (args.grad_output.reshape(args.shape).clone(),)
+
+    def backward_fake(args):
+        grad = args.grad_output
+        return (TensorSpec(shape=args.shape, dtype=grad.dtype, device=grad.device),)
+
+    op = register_custom_op_with_autograd(
+        op_name=f"test_symbolic_shape_{with_optional_shape}",
+        input_tensors_for_grad=["input_"],
+        fwd_arg_type=ShapeArgs,
+        fwd_impl=impl,
+        fwd_fake_impl=fake_impl,
+        setup_context=setup_context,
+        bwd_arg_type=ShapeBwdArgs,
+        bwd_impl=backward_impl,
+        bwd_fake_impl=backward_fake,
+    )
+    assert op is not None
+
+    def fn(inp):
+        shape = torch.Size((inp.shape[0], 2, 4))
+        return op(ShapeArgs(inp, shape, shape if with_optional_shape else None))
+
+    counter = CompileCounterWithBackend("aot_eager")
+    compiled = torch.compile(fn, fullgraph=True, backend=counter)
+    for batch in (2, 3, 5):
+        inp = torch.randn(batch, 8, requires_grad=True)
+        torch._dynamo.mark_dynamic(inp, 0)
+        out = compiled(inp)
+        torch.testing.assert_close(out, inp.reshape(batch, 2, 4))
+        out.sum().backward()
+        torch.testing.assert_close(inp.grad, torch.ones_like(inp))
+    assert counter.frame_count == 1
+
+
 def test_to_tensor_spec_plain():
     """``to_tensor_spec`` describes a plain tensor."""
     t = torch.empty(2, 3, dtype=torch.float32)
@@ -1909,11 +2030,19 @@ def test_to_tensor_spec_plain():
 
 
 @pytest.mark.parametrize("factory, shape", _SPEC_QUANTIZERS)
-def test_to_tensor_spec_quantized(factory, shape):
+@pytest.mark.parametrize("swizzled", [False, True])
+def test_to_tensor_spec_quantized(factory, shape, swizzled):
     """``to_tensor_spec`` round-trips a quantized tensor back into a spec."""
     q = factory()
+    has_scale_layout = isinstance(q, (MXFP8Quantizer, NVFP4Quantizer))
+    if has_scale_layout:
+        q.optimize_for_gemm = not swizzled
     tensor = TensorSpec(
-        shape=shape, dtype=torch.bfloat16, quantizer=q, device=torch.device("cpu")
+        shape=shape,
+        dtype=torch.bfloat16,
+        quantizer=q,
+        device=torch.device("cpu"),
+        with_gemm_swizzled_scales=swizzled if has_scale_layout else None,
     ).create_tensor()
 
     spec = to_tensor_spec(tensor)
@@ -1923,13 +2052,45 @@ def test_to_tensor_spec_quantized(factory, shape):
     # Same buffer layout as the original tensor.
     assert spec.inner_names() == tuple(q.inner_tensor_specs(shape))
     # Rebuilding from the derived spec matches the original tensor's structure.
-    assert _signature(spec.create_tensor(), spec.inner_names()) == _signature(
-        tensor, spec.inner_names()
-    )
+    rebuilt = spec.create_tensor()
+    assert _signature(rebuilt, spec.inner_names()) == _signature(tensor, spec.inner_names())
+    if has_scale_layout:
+        assert tensor._with_gemm_swizzled_scales == swizzled
+        assert spec.with_gemm_swizzled_scales == swizzled
+        assert rebuilt._with_gemm_swizzled_scales == swizzled
+        assert spec.quantizer.optimize_for_gemm == q.optimize_for_gemm == (not swizzled)
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize("with_2d_quantization", [False, True])
+@pytest.mark.parametrize("optimize_for_gemm", [False, True])
+@pytest.mark.parametrize(
+    "use_cudnn,shape,compact",
+    [
+        (True, (128, 128), True),
+        (True, (2, 64, 128), True),
+        (True, (64, 128), False),
+        (False, (128, 128), False),
+    ],
+)
+def test_fake_norm_mxfp8_scale_layout(
+    monkeypatch, normalization, with_2d_quantization, optimize_for_gemm, use_cudnn, shape, compact
+):
+    """RMSNorm's 2D MXFP8 fallback preserves the quantizer's scale layout."""
+    monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", str(int(use_cudnn)))
+    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3, with_2d_quantization=with_2d_quantization)
+    quantizer.optimize_for_gemm = optimize_for_gemm
+    inp = TensorSpec(shape=shape, dtype=torch.bfloat16, device=torch.device("cpu"))
+    out, _, _ = fake_norm(inp, quantizer, normalization=normalization)
+    compact = compact and (normalization == "LayerNorm" or not with_2d_quantization)
+    expected = optimize_for_gemm and not compact
+    assert out.create_metadata()["nontensor_kwargs"]["with_gemm_swizzled_scales"] == expected
+    assert out.create_tensor()._with_gemm_swizzled_scales == expected
+    assert quantizer.optimize_for_gemm == optimize_for_gemm
 
 
 # ---------------------------------------------------------------------------
-# te.Linear
+# te.Linear / te.LayerNormLinear / te.LayerNormMLP
 # ---------------------------------------------------------------------------
 
 
@@ -1940,17 +2101,48 @@ def test_to_tensor_spec_quantized(factory, shape):
     [None, *_all_recipes],
     ids=lambda r: "bf16" if r is None else type(r).__name__,
 )
-def test_te_linear_compiles(fp8_recipe, compile_mode):
-    """
-    torch.compile(fullgraph=True) of ``te.Linear`` under every built-in
-    recipe (plus the bf16-only baseline with no autocast), for both the default
-    backend and ``mode="reduce-overhead"`` (CUDA-graph trees).
-    """
-    dtype = torch.bfloat16
-    device = "cuda"
+@pytest.mark.parametrize("module", _LINEAR_MODULES)
+def test_te_modules_compile(module, fp8_recipe, compile_mode):
+    """Fullgraph forward/backward agrees with eager across modules, recipes and modes."""
+    if module == "LayerNormMLP" and getattr(fp8_recipe, "backward_override", None) is not None:
+        pytest.skip("LayerNormMLP does not support backward_override, including in eager mode")
+    model = _make_module(module)
+    _run_module_compile_test(model, fp8_recipe, compile_mode, 64)
 
-    # FP8 GEMMs require leading dimensions divisible by 16.
-    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+_non_2d_cases = [
+    pytest.param((64,), None, id="rank1-bf16"),
+    pytest.param((2, 4, 4, 64), None, id="rank4-bf16"),
+    *(
+        pytest.param(
+            (2, 4, 16, 128) if isinstance(r, recipe.Float8BlockScaling) else (2, 4, 4, 64),
+            r,
+            id=f"rank4-{recipe_id(r)}",
+        )
+        for r in _all_recipes
+    ),
+    *(
+        pytest.param((2, 4, 8, 64), r, id=f"rank4-aligned-{recipe_id(r)}")
+        for r in _all_recipes
+        if isinstance(r, recipe.NVFP4BlockScaling) and not r.disable_rht
+    ),
+]
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize("module", _LINEAR_MODULES)
+@pytest.mark.parametrize("input_shape, fp8_recipe", _non_2d_cases)
+def test_te_modules_compile_non_2d_input(input_shape, fp8_recipe, module, compile_mode):
+    """Compiled modules preserve non-matrix activation shapes and gradients."""
+    if module == "LayerNormMLP" and getattr(fp8_recipe, "backward_override", None) is not None:
+        pytest.skip("LayerNormMLP does not support backward_override, including in eager mode")
+    dtype = torch.bfloat16
+    if isinstance(fp8_recipe, recipe.Float8BlockScaling):
+        out_features = 256 if module == "LayerNormMLP" else 128
+        model = getattr(te, module)(128, out_features, params_dtype=dtype, device="cuda")
+    else:
+        model = _make_module(module, dtype=dtype)
 
     def fn(inp):
         if fp8_recipe is None:
@@ -1962,17 +2154,15 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
     if compile_mode == "reduce-overhead":
         _cudagraph_warmup(
             fn,
-            torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True),
+            torch.randn(input_shape, dtype=dtype, device="cuda", requires_grad=True),
             backward=True,
         )
         model.zero_grad(set_to_none=True)
     compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
 
-    # Iterate a few times so reduce-overhead actually replays a captured graph.
-    n_iters = 3 if compile_mode == "reduce-overhead" else 1
     with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
-        for _ in range(n_iters):
-            base = torch.randn(32, 64, dtype=dtype, device=device)
+        for _ in range(3 if compile_mode == "reduce-overhead" else 1):
+            base = torch.randn(input_shape, dtype=dtype, device="cuda")
             _assert_close_eager_compiled(fn, compiled, model, base)
 
 
@@ -1987,19 +2177,22 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
     + [
         pytest.param(fp8_recipe, shape, id=f"{name}-{shape}")
         for name, fp8_recipe in (
+            ("bf16", None),
+            ("mxfp8", recipe.MXFP8BlockScaling()),
             ("nvfp4", recipe.NVFP4BlockScaling()),
             ("nvfp4-no-rht", recipe.NVFP4BlockScaling(disable_rht=True)),
         )
-        for shape in ((1, 128, 128), (2, 4, 16, 128))
+        for shape in ((1, 128, 128), (128, 1, 128), (2, 4, 16, 128))
     ],
 )
 def test_te_linear_compiles_non_2d_input(fp8_recipe, input_shape, compile_mode):
     """Compiled Linear preserves non-matrix activation shapes in forward and backward."""
     if isinstance(fp8_recipe, recipe.NVFP4BlockScaling) and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
+    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling) and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
     dtype = torch.bfloat16
-    out_features = 32 if fp8_recipe is None else 128
-    model = te.Linear(input_shape[-1], out_features, params_dtype=dtype, device="cuda")
+    model = te.Linear(input_shape[-1], 128, params_dtype=dtype, device="cuda")
 
     def fn(inp):
         if fp8_recipe is None:
@@ -2026,37 +2219,14 @@ def test_te_linear_compiles_non_2d_input(fp8_recipe, input_shape, compile_mode):
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("compile_mode", _compile_modes)
-def test_te_linear_compile_with_quantized_fp8_weight(compile_mode):
-    """torch.compile of Linear with the weight initialized as an FP8 tensor
-    (exercises the wrapper op's ``register_torch_dispatch`` input flattening)."""
-    dtype = torch.bfloat16
-    device = "cuda"
+@pytest.mark.parametrize("module", ["Linear", "LayerNormLinear"])
+def test_te_modules_compile_with_quantized_fp8_weight(module, compile_mode):
+    """FP8 primary weights cross the wrapper-op boundary in both compile modes."""
     fp8_recipe = recipe.Float8CurrentScaling()
-
     with te.quantized_model_init(enabled=True, recipe=fp8_recipe):
-        model = te.Linear(64, 32, params_dtype=dtype, device=device)
-
+        model = _make_module(module)
     assert isinstance(model.weight, te.Float8Tensor)
-
-    def fn(inp):
-        with te.autocast(recipe=fp8_recipe):
-            return model(inp)
-
-    torch._dynamo.reset()
-    if compile_mode == "reduce-overhead":
-        _cudagraph_warmup(
-            fn,
-            torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True),
-            backward=True,
-        )
-        model.zero_grad(set_to_none=True)
-    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
-
-    n_iters = 3 if compile_mode == "reduce-overhead" else 1
-    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
-        for _ in range(n_iters):
-            base = torch.randn(32, 64, dtype=dtype, device=device)
-            _assert_close_eager_compiled(fn, compiled, model, base)
+    _run_module_compile_test(model, fp8_recipe, compile_mode, 64)
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
@@ -2105,7 +2275,7 @@ def test_te_linear_compile_with_fp8_output(compile_mode):
             )
 
 
-# Configs rejected by LinearFwdArgs.compile_unsupported_reason() that a
+# Configs rejected by the modules' early fallback checks that a
 # single-GPU unit test can construct. Distributed-only reasons (fsdp_group,
 # DistributedWeight) and CPU offloading need machinery this file doesn't have;
 # delayed scaling is a hard error (check_recipe_support), tested separately.
@@ -2114,58 +2284,67 @@ def test_te_linear_compile_with_fp8_output(compile_mode):
 # output crossing the graph-break boundary gets a plain-tensor tangent);
 # "no_grad" = forward under no_grad.
 _FALLBACK_CASES = [
-    "fp8_output_differentiable",
-    "fuse_wgrad_accumulation",
-    "delayed_wgrad",
-    "quantized_input",
+    (module, case)
+    for module in _LINEAR_MODULES
+    for case in ("fuse_wgrad_accumulation", "delayed_wgrad")
+] + [
+    ("Linear", "fp8_output_differentiable"),
+    ("Linear", "quantized_input"),
+    ("LayerNormMLP", "checkpoint"),
 ]
 
 
-def _fallback_case(case, dtype, device):
-    """Build ``(model, fn, mode, post_backward, reason)`` for one case."""
+def _fallback_case(module, case, dtype, device):
+    """Build ``(model, fn, mode, post_backward, reason)`` for one fallback case."""
     model_kwargs = {}
     if case == "fuse_wgrad_accumulation":
         model_kwargs["fuse_wgrad_accumulation"] = True
     elif case == "delayed_wgrad":
         model_kwargs["delay_wgrad_compute"] = True
-    model = te.Linear(64, 32, params_dtype=dtype, device=device, **model_kwargs)
+    elif case == "checkpoint":
+        model_kwargs["checkpoint"] = True
+    model = _make_module(module, dtype=dtype, device=device, **model_kwargs)
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    def fn(inp):
+        # Preserve the original Linear BF16 accumulation/delayed-wgrad cases;
+        # the LayerNorm cases exercise those paths under FP8.
+        use_fp8 = module != "Linear" or case in ("fp8_output_differentiable", "quantized_input")
+        with te.autocast(enabled=use_fp8, recipe=fp8_recipe):
+            if case == "fp8_output_differentiable":
+                return model(inp, fp8_output=True).dequantize()
+            return model(inp)
 
     if case == "fp8_output_differentiable":
-        fp8_recipe = recipe.Float8CurrentScaling()
-
-        def fn(inp):
-            with te.autocast(recipe=fp8_recipe):
-                return model(inp, fp8_output=True).dequantize()
-
         return model, fn, "fwd_grad", None, "differentiable fp8_output=True"
     if case == "fuse_wgrad_accumulation":
-        model.weight.main_grad = torch.zeros_like(model.weight, dtype=torch.float32)
-        return model, model, "bwd", None, "fuse_wgrad_accumulation"
+        weights = (
+            (model.fc1_weight, model.fc2_weight) if module == "LayerNormMLP" else (model.weight,)
+        )
+        for weight in weights:
+            weight.main_grad = torch.zeros_like(weight, dtype=torch.float32)
+        return model, fn, "bwd", None, "fuse_wgrad_accumulation"
     if case == "delayed_wgrad":
-        return model, model, "bwd", model.backward_dw, "delayed wgrad compute"
+        return model, fn, "bwd", model.backward_dw, "delayed wgrad compute"
     if case == "quantized_input":
-        fp8_recipe = recipe.Float8CurrentScaling()
-
-        def fn(inp):
-            with te.autocast(recipe=fp8_recipe):
-                return model(inp)
-
         return model, fn, "no_grad", None, "a quantized input tensor"
+    if case == "checkpoint":
+        return model, fn, "bwd", None, "activation checkpointing"
     raise ValueError(case)
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("case", _FALLBACK_CASES)
-def test_te_linear_compile_eager_fallback(case):
+@pytest.mark.parametrize("module,case", _FALLBACK_CASES)
+def test_te_modules_compile_eager_fallback(module, case):
     """Configs unsupported on the compiled custom-op path must fall back to
     eager under ``torch.compile`` -- warning + numerics identical to eager --
     and graph-break with the explicit reason under ``fullgraph=True``."""
     dtype, device = torch.bfloat16, "cuda"
     torch.manual_seed(0)
-    model_ref, fn_ref, mode, post_bwd_ref, _ = _fallback_case(case, dtype, device)
+    model_ref, fn_ref, mode, post_bwd_ref, _ = _fallback_case(module, case, dtype, device)
     torch.manual_seed(0)
-    model, fn, _, post_bwd, reason = _fallback_case(case, dtype, device)
+    model, fn, _, post_bwd, reason = _fallback_case(module, case, dtype, device)
 
     def make_inp():
         torch.manual_seed(1)
@@ -2194,20 +2373,27 @@ def test_te_linear_compile_eager_fallback(case):
         if post_bwd is not None:
             post_bwd()
         torch.testing.assert_close(inp.grad, inp_ref.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
-        # The fallback must also preserve the stateful side effects that define
-        # these cases (main_grad accumulation, delayed wgrad), not just inp.grad.
-        if getattr(model_ref.weight, "main_grad", None) is not None:
-            assert model.weight.grad is None
-            torch.testing.assert_close(
-                model.weight.main_grad,
-                model_ref.weight.main_grad,
-                atol=_EAGER_ATOL,
-                rtol=_EAGER_RTOL,
-            )
-        else:
-            torch.testing.assert_close(
-                model.weight.grad, model_ref.weight.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
-            )
+        # Check both gradients and stateful accumulation for every parameter.
+        ref_params = dict(model_ref.named_parameters())
+        for name, param in model.named_parameters():
+            ref_param = ref_params[name]
+            if getattr(ref_param, "main_grad", None) is not None:
+                assert param.grad is None
+                torch.testing.assert_close(
+                    param.main_grad,
+                    ref_param.main_grad,
+                    atol=_EAGER_ATOL,
+                    rtol=_EAGER_RTOL,
+                    msg=f"main_grad mismatch: {name}",
+                )
+            else:
+                torch.testing.assert_close(
+                    param.grad,
+                    ref_param.grad,
+                    atol=_EAGER_ATOL,
+                    rtol=_EAGER_RTOL,
+                    msg=f"grad mismatch: {name}",
+                )
     torch.testing.assert_close(out.detach(), out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
 
     torch._dynamo.reset()
@@ -2264,14 +2450,17 @@ def test_te_linear_compile_delayed_scaling_raises():
     ],
     ids=recipe_id,
 )
-def test_te_linear_compile_is_first_microbatch(
-    fp8_recipe, compile_mode, deferred_backward, monkeypatch
+@pytest.mark.parametrize("module", _LINEAR_MODULES)
+def test_te_modules_compile_is_first_microbatch(
+    module, fp8_recipe, compile_mode, deferred_backward, monkeypatch
 ):
     """Reuse cached weights across microbatches and refresh after optimizer updates."""
     dtype, device = torch.bfloat16, "cuda"
-    model = te.Linear(128, 128, params_dtype=dtype, device=device)
-    ref_model = te.Linear(128, 128, params_dtype=dtype, device=device)
+    model = getattr(te, module)(128, 128, params_dtype=dtype, device=device)
+    ref_model = getattr(te, module)(128, 128, params_dtype=dtype, device=device)
     ref_model.load_state_dict(model.state_dict())
+    cache_names = ("fc1_weight", "fc2_weight") if module == "LayerNormMLP" else ("weight",)
+    cached_workspaces = {}
 
     def fn(inp, is_first):
         with te.autocast(recipe=fp8_recipe):
@@ -2315,17 +2504,20 @@ def test_te_linear_compile_is_first_microbatch(
                 out = compiled(inp, is_first).clone()
                 torch.testing.assert_close(out, out_ref, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
 
-                workspace = model._fp8_workspaces["weight"]
-                if is_first:
-                    cached_workspace = workspace
-                else:
-                    assert workspace is cached_workspace
-                torch.testing.assert_close(
-                    workspace.dequantize(),
-                    ref_model._fp8_workspaces["weight"].dequantize(),
-                    atol=_EAGER_ATOL,
-                    rtol=_EAGER_RTOL,
-                )
+                for name in cache_names:
+                    workspace = model._fp8_workspaces[name]
+                    if is_first:
+                        if name in cached_workspaces:
+                            assert workspace is not cached_workspaces[name]
+                        cached_workspaces[name] = workspace
+                    else:
+                        assert workspace is cached_workspaces[name]
+                    torch.testing.assert_close(
+                        workspace.dequantize(),
+                        ref_model._fp8_workspaces[name].dequantize(),
+                        atol=_EAGER_ATOL,
+                        rtol=_EAGER_RTOL,
+                    )
 
                 pending.append((out, out_ref, inp, inp_ref))
                 if not deferred_backward or microbatch == 2:
@@ -2346,7 +2538,7 @@ def test_te_linear_compile_is_first_microbatch(
                 for param, ref_param in zip(model.parameters(), ref_model.parameters()):
                     param.add_(param.grad, alpha=-0.001)
                     ref_param.add_(ref_param.grad, alpha=-0.001)
-            del cached_workspace, workspace, out, out_ref, result, ref_result
+            del workspace, out, out_ref, result, ref_result
 
     torch._dynamo.reset()
 
@@ -2403,74 +2595,363 @@ def test_te_linear_compile_train_eval_switch():
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-def test_te_linear_dynamic_shapes():
-    """torch.compile of ``te.Linear`` with a ``mark_dynamic`` batch dimension:
-    one graph must serve all batch sizes -- no recompiles -- and match eager
-    numerically.
-
-    Only the leading (batch/sequence) dims may be dynamic; the last dim is
-    fixed by the weight's ``in_features``.
-    """
-    dtype = torch.bfloat16
-    device = "cuda"
-    in_features, out_features = 64, 32
-    model = te.Linear(in_features, out_features, params_dtype=dtype, device=device)
+@pytest.mark.parametrize(
+    "module,bias_gelu_fusion",
+    [
+        ("Linear", False),
+        ("LayerNormLinear", False),
+        ("LayerNormMLP", False),
+        ("LayerNormMLP", True),
+    ],
+)
+def test_te_modules_dynamic_shapes(module, bias_gelu_fusion):
+    """Batch sizes share the warmed-up outer graph and match eager outputs/gradients."""
+    dtype, device = torch.bfloat16, "cuda"
+    model = _make_module(module, dtype=dtype, device=device)
+    if module == "LayerNormMLP":
+        model.bias_gelu_nvfusion = bias_gelu_fusion
 
     def fn(inp):
         return model(inp)
 
     torch._dynamo.reset()
-    compiled = torch.compile(fn, fullgraph=True)
-
-    batch_sizes = [16, 32, 48]
-
-    # Two warmup calls: the second absorbs the one-time recompile from module
-    # attributes lazily created during call one (e.g. the cached ``is_fsdp2``).
+    # Count the outer graph independently of lazy compilation of fused helpers.
+    compile_counter = CompileCounterWithBackend("inductor")
+    compiled = torch.compile(fn, fullgraph=True, backend=compile_counter)
     for _ in range(2):
-        warm = torch.randn(batch_sizes[0], in_features, dtype=dtype, device=device)
+        warm = torch.randn(16, 64, dtype=dtype, device=device)
         torch._dynamo.mark_dynamic(warm, 0)
         compiled(warm.requires_grad_(True)).sum().backward()
     model.zero_grad(set_to_none=True)
-    unique_graphs_baseline = _dynamo_counter("stats", "unique_graphs")
-    if not unique_graphs_baseline:
-        warnings.warn("unique_graphs counter is stale; skipping the recompile check")
+    frames_after_warmup = compile_counter.frame_count
+    assert frames_after_warmup > 0
 
-    for batch in batch_sizes:
-        inp = torch.randn(batch, in_features, dtype=dtype, device=device, requires_grad=True)
-        # Mark batch dim as dynamic so Dynamo traces once and reuses across batch sizes.
-        torch._dynamo.mark_dynamic(inp, 0)
-        out = compiled(inp)
-        assert out.shape == (batch, out_features), f"wrong output shape for batch={batch}"
-        out.sum().backward()
-        assert inp.grad is not None, f"no input gradient for batch={batch}"
-        assert inp.grad.shape == inp.shape, f"wrong grad shape for batch={batch}"
+    for batch in (16, 32, 48):
+        base = torch.randn(batch, 64, dtype=dtype, device=device)
+        _assert_close_eager_compiled(fn, compiled, model, base, dynamic_batch=True)
 
-        # Verify numerics against eager on each distinct batch size.
-        inp_eager = inp.detach().clone().requires_grad_(True)
-        model.zero_grad(set_to_none=True)
-        out_eager = model(inp_eager)
-        out_eager.sum().backward()
-        torch.testing.assert_close(
-            out.detach(),
-            out_eager.detach(),
-            atol=_EAGER_ATOL,
-            rtol=_EAGER_RTOL,
-            msg=f"forward mismatch at batch={batch}",
-        )
-        torch.testing.assert_close(
-            inp.grad,
-            inp_eager.grad,
-            atol=_EAGER_ATOL,
-            rtol=_EAGER_RTOL,
-            msg=f"dgrad mismatch at batch={batch}",
-        )
+    assert compile_counter.frame_count == frames_after_warmup
 
-    if unique_graphs_baseline:
-        unique_graphs_after = _dynamo_counter("stats", "unique_graphs")
-        assert unique_graphs_after == unique_graphs_baseline, (
-            "Unexpected recompilation(s) across different batch sizes: "
-            f"{unique_graphs_after - unique_graphs_baseline} extra graph(s) compiled"
+
+# ---------------------------------------------------------------------------
+# Module fake/real metadata and LayerNorm variants
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("module", ["LayerNormLinear", "LayerNormMLP"])
+@pytest.mark.parametrize("loss_source", ["output", "normalization", "both"])
+@pytest.mark.parametrize("fp8_recipe", [None, recipe.Float8CurrentScaling()])
+def test_te_layernorm_output_gradients(module, loss_source, fp8_recipe):
+    """Route distinct gradients from each public output to the correct backward field."""
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    model = _make_module(module, return_layernorm_output=True)
+
+    def fn(inp):
+        if fp8_recipe is None:
+            output, norm_output = model(inp)
+        else:
+            with te.autocast(recipe=fp8_recipe):
+                output, norm_output = model(inp)
+        if loss_source == "output":
+            return output
+        if loss_source == "normalization":
+            return norm_output
+        return output, 0.25 * norm_output
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+    base = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda")
+    _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize(
+    "case", ["linear", "layernorm_linear", "mlp_bias_gelu", "mlp_gemm_gelu", "mlp_swiglu"]
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("fp8_recipe", [None, recipe.Float8CurrentScaling()])
+def test_te_modules_fake_matches_real(monkeypatch, case, dtype, bias, fp8_recipe):
+    """Compare fake outputs, saved buffers and gradients against the eager kernels."""
+    from transformer_engine.pytorch.dynamo.custom_op import _parse_arg_type, _spec_view
+
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if fp8_recipe is not None and case == "mlp_gemm_gelu":
+        if dtype == torch.float32 or (dtype == torch.float16 and not bias):
+            pytest.skip(
+                "cuBLAS FP8 GELU requires matching output and auxiliary dtypes (BF16 without bias)"
+            )
+    module_name = case if case in ("linear", "layernorm_linear") else "layernorm_mlp"
+    module = {
+        "linear": linear_module,
+        "layernorm_linear": layernorm_linear_module,
+        "layernorm_mlp": layernorm_mlp_module,
+    }[module_name]
+    checked = []
+
+    def assert_metadata(spec, real):
+        if isinstance(spec, TensorSpec):
+            assert real is not None
+            assert tuple(spec.shape) == tuple(real.shape)
+            assert spec.dtype == to_tensor_spec(real).dtype
+            assert spec.device == real.device
+            names = (
+                tuple(real.__tensor_flatten__()[0])
+                if hasattr(real, "__tensor_flatten__")
+                else ("data",)
+            )
+            assert spec.inner_names() == names
+            for name, fake_inner in zip(names, spec.create_inner_tensors()):
+                real_inner = real if name == "data" else getattr(real, name)
+                assert fake_inner.shape == real_inner.shape
+                assert fake_inner.dtype == real_inner.dtype
+                assert fake_inner.stride() == real_inner.stride()
+        elif isinstance(spec, tuple):
+            assert isinstance(real, tuple) and len(spec) == len(real)
+            for fake_value, real_value in zip(spec, real):
+                assert_metadata(fake_value, real_value)
+        elif isinstance(spec, dict):
+            # No manual FSDP or checkpointing here; [] and None both denote no shards.
+            for key in spec.keys() | real.keys():
+                if key in ("fsdp_shapes", "checkpoint"):
+                    assert not spec.get(key) and not real.get(key)
+                else:
+                    assert spec[key] == real[key]
+        else:
+            assert spec == real
+
+    def checked_impl(direction):
+        real_impl = getattr(module, f"_{module_name}_{direction}_impl")
+        fake_impl = getattr(module, f"_{module_name}_{direction}_fake")
+
+        def wrapper(args):
+            spec_args = _spec_view(args, _parse_arg_type(type(args)).tensor_field_names())
+            # Fake execution may change quantizer usage; leave the real invocation untouched.
+            spec_args = dataclasses.replace(
+                spec_args,
+                **{
+                    field.name: value.copy()
+                    for field in dataclasses.fields(spec_args)
+                    if isinstance(value := getattr(spec_args, field.name), Quantizer)
+                },
+            )
+            expected = fake_impl(spec_args)
+            actual = real_impl(args)
+            assert_metadata(expected, actual)
+            checked.append(direction)
+            return actual
+
+        return wrapper
+
+    for direction in ("forward", "backward"):
+        monkeypatch.setattr(module, f"_{module_name}_{direction}_impl", checked_impl(direction))
+    kwargs = dict(params_dtype=dtype, device="cuda", bias=bias)
+    if case != "linear":
+        kwargs["return_layernorm_output"] = True
+    if case == "linear":
+        model = te.Linear(64, 32, **kwargs)
+    elif case == "layernorm_linear":
+        model = te.LayerNormLinear(64, 32, **kwargs)
+    else:
+        model = te.LayerNormMLP(
+            64, 128, activation="swiglu" if case == "mlp_swiglu" else "gelu", **kwargs
         )
+        model.bias_gelu_nvfusion = case == "mlp_bias_gelu"
+        model.gemm_gelu_fusion = case == "mlp_gemm_gelu"
+    inp = torch.randn(2, 16, 64, dtype=dtype, device="cuda", requires_grad=True)
+    with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+        outs = _flatten_outputs(model(inp))
+    sum(out.sum() for out in outs).backward()
+    assert checked == ["forward", "backward"]
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize(
+    "dtype,bias", [(torch.bfloat16, False), (torch.bfloat16, True), (torch.float16, True)]
+)
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+def test_te_layernorm_mlp_compile_fp8_gemm_gelu(dtype, bias, compile_mode):
+    """Fused FP8 GEMM-GELU must preserve the auxiliary tensor dtype through backward."""
+    model = te.LayerNormMLP(64, 128, params_dtype=dtype, device="cuda", bias=bias)
+    model.gemm_gelu_fusion = True
+    _run_module_compile_test(model, recipe.Float8CurrentScaling(), compile_mode, 64, dtype=dtype)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize(
+    "quantization,disable_rht_fusion",
+    [("mxfp8", False), ("mxfp8_2d", False), ("nvfp4", False), ("nvfp4", True)],
+)
+@pytest.mark.parametrize("module", ["LayerNormLinear", "LayerNormMLP"])
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize(
+    "use_cudnn,input_shape,return_layernorm_output",
+    [
+        (False, (128, 128), False),
+        (True, (128, 128), False),
+        (True, (64, 128), False),
+        (True, (2, 64, 128), False),
+        (True, (128, 128), True),
+    ],
+)
+def test_te_layernorm_compile_scale_layout(
+    monkeypatch,
+    module,
+    normalization,
+    use_cudnn,
+    input_shape,
+    return_layernorm_output,
+    quantization,
+    disable_rht_fusion,
+):
+    """Saved normalization scales retain their layout through compiled backward."""
+    if quantization.startswith("mxfp8") and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if quantization == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", str(int(use_cudnn)))
+    monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_rht_fusion)))
+    model = getattr(te, module)(
+        128,
+        128,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        normalization=normalization,
+        return_layernorm_output=return_layernorm_output,
+    )
+    if quantization == "mxfp8_2d":
+
+        def qfactory(role):
+            return MXFP8Quantizer(
+                tex.DType.kFloat8E4M3,
+                with_2d_quantization=role is not None and role.tensor_type == "input",
+            )
+
+        fp8_recipe = recipe.CustomRecipe(qfactory=qfactory)
+    elif quantization == "mxfp8":
+        fp8_recipe = recipe.MXFP8BlockScaling()
+    else:
+        fp8_recipe = recipe.NVFP4BlockScaling(disable_stochastic_rounding=True)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+    base = torch.randn(input_shape, dtype=torch.bfloat16, device="cuda")
+    _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+@pytest.mark.parametrize("gathered", [False, True])
+@pytest.mark.parametrize("input_shape", [(128, 128), (2, 64, 128)])
+def test_te_layernorm_mlp_fake_gathered_output(
+    monkeypatch, sequence_parallel, gathered, input_shape
+):
+    """The normalization gather is independent of set_parallel_mode."""
+    from transformer_engine.pytorch.dynamo.custom_op import _parse_arg_type, _spec_view
+
+    module = layernorm_mlp_module
+    real_impl = module._layernorm_mlp_forward_impl
+    checked = []
+
+    def checked_impl(args):
+        args = dataclasses.replace(
+            args,
+            sequence_parallel=sequence_parallel,
+            tp_size=2,
+            return_layernorm_output_gathered=gathered,
+        )
+        spec_args = _spec_view(args, _parse_arg_type(type(args)).tensor_field_names())
+        expected = module._layernorm_mlp_forward_fake(spec_args)
+        actual = real_impl(args)
+        for spec, tensor in zip(expected[:2], actual[:2]):
+            assert tuple(spec.shape) == tuple(tensor.shape)
+        checked.append(True)
+        return actual
+
+    # Emulate a two-rank gather while exercising the real normalization and GEMMs.
+    monkeypatch.setattr(module, "get_distributed_world_size", lambda group: 2)
+    monkeypatch.setattr(
+        module,
+        "gather_along_first_dim",
+        lambda tensor, group, quantizer=None: (torch.cat([tensor, tensor]), None),
+    )
+    monkeypatch.setattr(module, "_layernorm_mlp_forward_impl", checked_impl)
+    model = te.LayerNormMLP(
+        128,
+        128,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        set_parallel_mode=False,
+        return_layernorm_output=True,
+    )
+    with torch.no_grad():
+        model(torch.randn(input_shape, dtype=torch.bfloat16, device="cuda"))
+    assert checked == [True]
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize("return_layernorm_output", [False, True])
+@pytest.mark.parametrize("zero_centered_gamma", [False, True])
+def test_te_layernorm_linear_compile_variants(
+    normalization, return_layernorm_output, zero_centered_gamma
+):
+    """Norm-type / returned-norm-output / zero-centered-gamma variants of
+    ``te.LayerNormLinear`` under torch.compile, bf16 and FP8 current scaling."""
+    model = te.LayerNormLinear(
+        64,
+        32,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        normalization=normalization,
+        return_layernorm_output=return_layernorm_output,
+        zero_centered_gamma=zero_centered_gamma,
+    )
+    _run_module_compile_test(model, None, "default", 64)
+    if fp8_available:
+        _run_module_compile_test(model, recipe.Float8CurrentScaling(), "default", 64)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("activation", ["gelu", "swiglu", "relu", "qgeglu"])
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize("return_layernorm_output", [False, True])
+def test_te_layernorm_mlp_compile_variants(activation, normalization, return_layernorm_output):
+    """Activation / norm-type / returned-norm-output variants of
+    ``te.LayerNormMLP`` under torch.compile, bf16 and FP8 current scaling."""
+    model = te.LayerNormMLP(
+        64,
+        128,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        activation=activation,
+        normalization=normalization,
+        return_layernorm_output=return_layernorm_output,
+    )
+    _run_module_compile_test(model, None, "default", 64)
+    if fp8_available:
+        _run_module_compile_test(model, recipe.Float8CurrentScaling(), "default", 64)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("bias", [True, False])
+def test_te_layernorm_mlp_compile_no_bias_or_frozen(bias):
+    """``te.LayerNormMLP`` without biases, and with frozen FC1 weight (exercises
+    the ``None`` saved-tensor / grad slots)."""
+    model = te.LayerNormMLP(64, 128, params_dtype=torch.bfloat16, device="cuda", bias=bias)
+    _run_module_compile_test(model, None, "default", 64)
+    model.fc1_weight.requires_grad_(False)
+    _run_module_compile_test(model, None, "default", 64)
+    if fp8_available:
+        _run_module_compile_test(model, recipe.Float8CurrentScaling(), "default", 64)
 
 
 # --------------------------------------------------------------------------- #
@@ -2912,21 +3393,20 @@ def test_te_ops_bias_compile_with_fp8_input(backward):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
-    "dtype,quantization,shape,disable_rht_fusion,case,grads",
+    "dtype,quantization,shape,disable_rht_fusion",
     [
-        (dtype, quantization, (2, 16, 32), False, case, grads)
-        for dtype in (torch.float16, torch.bfloat16)
-        for quantization in (None, "fp8")
-        for case in ("linear", "bias", "pair", "unfused")
-        for grads in ("all", "input", "weight", "bias", "none")
-    ]
-    + [
-        (torch.bfloat16, "nvfp4", (2, 16, 128), False, "pair", "all"),
-        (torch.bfloat16, "nvfp4", (64, 128), False, "pair", "all"),
-        (torch.bfloat16, "nvfp4", (64, 128), True, "pair", "all"),
-        (torch.bfloat16, "nvfp4-no-rht", (2, 16, 128), False, "pair", "all"),
+        (torch.float16, None, (2, 16, 32), False),
+        (torch.bfloat16, None, (2, 16, 32), False),
+        (torch.float16, "fp8", (2, 16, 32), False),
+        (torch.bfloat16, "fp8", (2, 16, 32), False),
+        (torch.bfloat16, "nvfp4", (2, 16, 128), False),
+        (torch.bfloat16, "nvfp4", (64, 128), False),
+        (torch.bfloat16, "nvfp4", (64, 128), True),
+        (torch.bfloat16, "nvfp4-no-rht", (2, 16, 128), False),
     ],
 )
+@pytest.mark.parametrize("case", ["linear", "bias", "pair", "unfused"])
+@pytest.mark.parametrize("grads", ["all", "input", "weight", "bias", "none"])
 def test_te_ops_linear_bias_compile(
     dtype, quantization, shape, disable_rht_fusion, case, grads, monkeypatch
 ):
@@ -3058,13 +3538,29 @@ def test_te_ops_linear_workspace_fake_mode(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("training", [False, True])
+@pytest.mark.parametrize("initial_device", ["cuda", "cpu", "meta"])
 @pytest.mark.parametrize(
-    "initial_device,quantization",
-    [("cuda", None), ("cpu", None), ("meta", None), ("cuda", "nvfp4"), ("cuda", "nvfp4-no-rht")],
+    "quantization",
+    [
+        None,
+        "fp8",
+        "fp8-block",
+        "mxfp8",
+        "nvfp4",
+        "nvfp4-no-rht",
+        "nvfp4-4over6",
+        "nvfp4-row-scaled",
+    ],
 )
 def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantization):
     """A fresh process prevents earlier GEMMs from hiding lazy workspace allocation."""
-    if quantization is not None and not nvfp4_available:
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "fp8-block" and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if quantization is not None and quantization.startswith("nvfp4") and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
     script = textwrap.dedent(
         """
@@ -3079,17 +3575,27 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
 
         training, initial_device, quantization = sys.argv[1:]
         training = training == "True"
-        is_nvfp4 = quantization != "None"
-        quant_recipe = (
-            recipe.NVFP4BlockScaling(
-                disable_rht=quantization == "nvfp4-no-rht",
+        is_nvfp4 = quantization.startswith("nvfp4")
+        if quantization == "None":
+            quant_recipe = None
+        elif is_nvfp4:
+            row_scaled = quantization == "nvfp4-row-scaled"
+            quant_recipe = recipe.NVFP4BlockScaling(
+                disable_rht=quantization != "nvfp4",
                 disable_stochastic_rounding=True,
+                disable_2d_quantization=row_scaled,
+                row_scaled_activation=row_scaled,
+                nvfp4_4over6="all" if quantization == "nvfp4-4over6" else "none",
+                backward_override="dequantized" if row_scaled else None,
             )
-            if is_nvfp4
-            else None
-        )
-        in_features, out_features = (128, 128) if is_nvfp4 else (32, 64)
-        batch_size = 32
+        else:
+            quant_recipe = {
+                "fp8": recipe.Float8CurrentScaling,
+                "fp8-block": recipe.Float8BlockScaling,
+                "mxfp8": recipe.MXFP8BlockScaling,
+            }[quantization]()
+        in_features, out_features = (128, 128) if quant_recipe is not None else (32, 64)
+        batch_size = 128 if isinstance(quant_recipe, recipe.Float8BlockScaling) else 32
         eager_tols = {"rtol": 0, "atol": 0} if is_nvfp4 else {}
         assert get_cublas_workspace.cache_info().currsize == 0
         linear = te.ops.BasicLinear(

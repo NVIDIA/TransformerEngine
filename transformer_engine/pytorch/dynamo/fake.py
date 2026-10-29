@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 
 from .tensor_spec import TensorSpec
 from ..quantized_tensor import Quantizer
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..utils import get_device_compute_capability
 
@@ -92,3 +93,58 @@ def fake_bgrad(
         )
     )
     return db, dx
+
+
+def fake_activation(
+    input_: TensorSpec,
+    quantizer: Optional[Quantizer] = None,
+    *,
+    gated: bool = False,
+    dtype: Optional[torch.dtype] = None,
+    fused_quantization: bool = True,
+) -> TensorSpec:
+    """Describe an activation output, including optional fused quantization."""
+    shape = (*input_.shape[:-1], input_.shape[-1] // 2 if gated else input_.shape[-1])
+    dtype = dtype or input_.dtype
+    if fused_quantization:
+        return _make_fused_quantization_output_spec(shape, dtype, input_.device, quantizer)
+    return TensorSpec(shape=shape, dtype=dtype, device=input_.device, quantizer=quantizer)
+
+
+@torch.compiler.assume_constant_result
+def _mxfp8_norm_fused_alignment(
+    normalization: str, with_2d_quantization: bool, use_cudnn: bool
+) -> Optional[int]:
+    return tex.mxfp8_norm_fused_alignment(
+        normalization == "RMSNorm", with_2d_quantization, use_cudnn
+    )
+
+
+def fake_norm(
+    input_: TensorSpec,
+    quantizer: Optional[Quantizer] = None,
+    *,
+    normalization: str = "LayerNorm",
+    dtype: Optional[torch.dtype] = None,
+) -> tuple[TensorSpec, Optional[TensorSpec], TensorSpec]:
+    """Describe newly allocated norm output, mean and reciprocal standard deviation."""
+    if normalization not in ("LayerNorm", "RMSNorm"):
+        raise ValueError(f"Unsupported normalization: {normalization}")
+    out = _make_fused_quantization_output_spec(
+        input_.shape, dtype or input_.dtype, input_.device, quantizer
+    )
+    rows, cols = math.prod(input_.shape[:-1]), input_.shape[-1]
+    if isinstance(quantizer, MXFP8Quantizer):
+        use_cudnn = bool(int(os.getenv("NVTE_NORM_FWD_USE_CUDNN", "0") or "0"))
+        alignment = _mxfp8_norm_fused_alignment(
+            normalization, quantizer.with_2d_quantization, use_cudnn
+        )
+        if use_cudnn and alignment is not None and rows % alignment == 0 and cols % alignment == 0:
+            out.with_gemm_swizzled_scales = False
+    mean = (
+        TensorSpec(shape=(rows,), dtype=torch.float32, device=input_.device)
+        if normalization == "LayerNorm"
+        else None
+    )
+    rsigma = TensorSpec(shape=(rows,), dtype=torch.float32, device=input_.device)
+    return out, mean, rsigma

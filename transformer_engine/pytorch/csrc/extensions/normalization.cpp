@@ -10,6 +10,14 @@
 
 namespace transformer_engine::pytorch {
 
+std::optional<size_t> mxfp8_norm_fused_alignment(bool rmsnorm, bool with_2d_quantization,
+                                                 bool use_cudnn) {
+  if (rmsnorm ? with_2d_quantization : !use_cudnn) {
+    return std::nullopt;
+  }
+  return 128;
+}
+
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
                                       const at::Tensor &gamma, const int sm_margin,
@@ -106,9 +114,11 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   if (quantizer.is_none() || IsFloat8Quantizers(quantizer.ptr())) {
     impl = Impl::FULLY_FUSED;
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
-    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
-        inner_size % 128 == 0) {
-      // cuDNN MXFP8 kernel requires full 128x128 tiles
+    const auto mxfp8_quantizer_cpp = static_cast<MXFP8Quantizer *>(quantizer_cpp.get());
+    const auto alignment =
+        mxfp8_norm_fused_alignment(false, mxfp8_quantizer_cpp->with_2d_quantization,
+                                   transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN"));
+    if (alignment && outer_size % *alignment == 0 && inner_size % *alignment == 0) {
       impl = Impl::FULLY_FUSED;
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
@@ -350,9 +360,10 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
     auto mxfp8_quantizer_cpp = dynamic_cast<MXFP8Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(mxfp8_quantizer_cpp != nullptr, "Could not cast to MXFP8 quantizer");
-    // The fused MXFP8 kernels quantize 1D blocks and require full 128x128 tiles
-    if (!mxfp8_quantizer_cpp->with_2d_quantization && outer_size % 128 == 0 &&
-        inner_size % 128 == 0) {
+    const auto alignment =
+        mxfp8_norm_fused_alignment(true, mxfp8_quantizer_cpp->with_2d_quantization,
+                                   transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN"));
+    if (alignment && outer_size % *alignment == 0 && inner_size % *alignment == 0) {
       if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
         impl = Impl::FUSED_NORM_QUANT_UNSWIZZLED;
       } else {

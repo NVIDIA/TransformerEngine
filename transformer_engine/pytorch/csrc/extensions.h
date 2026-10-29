@@ -340,6 +340,9 @@ py::tuple scaled_dsrelu(const at::Tensor &grad, const at::Tensor &input,
  * LayerNorm
  **************************************************************************************************/
 
+std::optional<size_t> mxfp8_norm_fused_alignment(bool rmsnorm, bool with_2d_quantization,
+                                                 bool use_cudnn);
+
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
                                       const at::Tensor &gamma, const int sm_margin,

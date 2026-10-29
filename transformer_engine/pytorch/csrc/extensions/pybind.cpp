@@ -402,6 +402,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
+  m.def("mxfp8_norm_fused_alignment", &transformer_engine::pytorch::mxfp8_norm_fused_alignment,
+        py::arg("rmsnorm"), py::arg("with_2d_quantization"), py::arg("use_cudnn"));
   m.def("layernorm_fwd", &transformer_engine::pytorch::layernorm_fwd, "LayerNorm", py::arg("input"),
         py::arg("weight"), py::arg("bias"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
