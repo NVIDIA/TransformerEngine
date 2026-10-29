@@ -237,11 +237,26 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
   // barrier condition:
   // - leader must arrive (i.e. 1 thread as set above)
   // - TMA hardware substracts bytes from expect_tx counter, must reach zero
+#if __CUDA_ARCH__ >= 1200
+  // sm_12x: use the .shared::cta destination. dst_shmem and mbar are always in the executing
+  // CTA, so both forms copy the same bytes. For .shared::cluster, ptxas emits a run-time branch
+  // whose remote-CTA side calls a driver syscall
+  // (__cuda_syscall_cp_async_bulk_tensor_2d_tile_unicast). The first launch of any kernel that
+  // contains it raises the per-thread stack limit from 1 KB to ~14.6 KB, and the driver keeps
+  // the matching local memory (~1.2 GiB on a 60-SM RTX 5080 Laptop GPU) reserved for the life
+  // of the context.
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cta.global.tile"
+      ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
+      "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
+      : "memory");
+#else
   asm volatile(
       "cp.async.bulk.tensor.2d.shared::cluster.global.tile"
       ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
       "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
       : "memory");
+#endif  // #if __CUDA_ARCH__ >= 1200
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_tensor_2d_global_to_shared is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
