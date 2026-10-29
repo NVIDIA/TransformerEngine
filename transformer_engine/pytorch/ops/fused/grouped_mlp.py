@@ -153,6 +153,29 @@ def _cudnn_frontend_supports_grouped_gemm_srelu_tanh_hadamard() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
+def _cudnn_frontend_supports_grouped_gemm_hadamard_sign_mask() -> bool:
+    """Whether the cuDNN FE grouped GEMM + Hadamard wrapper accepts rht_sign_mask.
+
+    The kernel's post-RHT amax must be computed for the same randomized Hadamard
+    transform the NVFP4 quantizer applies; without the mask it describes the plain
+    transform and the column-wise cast gets a wrong global scale.
+    """
+    if not _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
+        return False
+    try:
+        from cudnn import (  # pylint: disable=import-outside-toplevel
+            grouped_gemm_glu_hadamard_wrapper_sm100,
+        )
+    except ImportError:
+        return False
+    try:
+        signature = inspect.signature(grouped_gemm_glu_hadamard_wrapper_sm100)
+        return "rht_sign_mask" in signature.parameters
+    except (TypeError, ValueError):
+        return False
+
+
+@functools.lru_cache(maxsize=None)
 def _cudnn_frontend_supports_grouped_gemm_situglu() -> bool:
     """Feature-detect complete cuDNN frontend grouped SiTU-GLU support."""
     try:
@@ -1726,6 +1749,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 if self.grouped_gemm_act_hadamard_kernel() is None:
                     # Kernel is not available
                     pass
+                elif (
+                    fc2_input_quantizer.rht_matrix_random_sign_mask_t != 0
+                    and not _cudnn_frontend_supports_grouped_gemm_hadamard_sign_mask()
+                ):
+                    # Kernel would compute the post-RHT amax for the plain Hadamard
+                    # transform while the quantizer applies a randomized one
+                    pass
                 elif self._cudnn_act_func in ("swiglu", "situglu"):
                     kernel_impl = "gemm_act_rht_amax"
                 elif activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
@@ -1853,6 +1883,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         elif kernel_impl == "gemm_act_rht_amax":
             fc1_activation_kwargs["d_dtype"] = torch.bfloat16
             fc1_activation_kwargs["use_tmem_post_rht_amax"] = _use_tmem_post_rht_amax()
+            if _cudnn_frontend_supports_grouped_gemm_hadamard_sign_mask():
+                fc1_activation_kwargs["rht_sign_mask"] = (
+                    fc2_input_quantizer.rht_matrix_random_sign_mask_t
+                )
         elif kernel_impl == "gemm_act_rht_quant":
             fc1_activation_kwargs["d_dtype"] = torch.float4_e2m1fn_x2
             fc1_activation_kwargs["rht_colwise_dtype"] = torch.float4_e2m1fn_x2
