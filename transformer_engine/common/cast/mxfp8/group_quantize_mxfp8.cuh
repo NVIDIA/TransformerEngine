@@ -625,7 +625,8 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     const int64_t *const __restrict__ last_dims_ptr, e8m0_t *const __restrict__ scales_rowwise_ptr,
     e8m0_t *const __restrict__ scales_colwise_ptr, const float *__restrict__ noop,
     float *const __restrict__ dbias_workspace, float *const __restrict__ amax_ptr,
-    const size_t work_blocks_X, const size_t work_blocks_Y) {
+    const size_t work_blocks_X, const size_t work_blocks_Y,
+    const TensorMapStorage *const tensor_maps) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr uint SCALE_DIM_Y = CastTraits::SCALE_DIM_Y;
   constexpr uint SCALE_DIM_X = CastTraits::SCALE_DIM_X;
@@ -785,9 +786,9 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       if (fixed_tensor_id >= num_tensors) {
         return;
       }
-      fixed_rows = g_tensor_maps.rows[fixed_tensor_id];
-      fixed_cols = g_tensor_maps.cols[fixed_tensor_id];
-      fixed_tensor_base = g_tensor_maps.offsets[fixed_tensor_id];
+      fixed_rows = tensor_maps->rows[fixed_tensor_id];
+      fixed_cols = tensor_maps->cols[fixed_tensor_id];
+      fixed_tensor_base = tensor_maps->offsets[fixed_tensor_id];
       if (fixed_rows == 0 || fixed_cols == 0) {
         return;
       }
@@ -907,15 +908,15 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     const size_t dbias_offset_Y = block_offset_Y / TILE_DIM_Y;
 
     const CUtensorMap &tensor_map_input =
-        is_single_tensor ? tensor_map_input_static : g_tensor_maps.input[tensor_id];
+        is_single_tensor ? tensor_map_input_static : tensor_maps->input[tensor_id];
     const CUtensorMap &tensor_map_act_input =
-        is_single_tensor ? tensor_map_act_input_static : g_tensor_maps.act_input[tensor_id];
+        is_single_tensor ? tensor_map_act_input_static : tensor_maps->act_input[tensor_id];
     const CUtensorMap &tensor_map_output_rowwise = is_single_tensor
                                                        ? tensor_map_output_rowwise_static
-                                                       : g_tensor_maps.output_rowwise[tensor_id];
+                                                       : tensor_maps->output_rowwise[tensor_id];
     const CUtensorMap &tensor_map_output_colwise = is_single_tensor
                                                        ? tensor_map_output_colwise_static
-                                                       : g_tensor_maps.output_colwise[tensor_id];
+                                                       : tensor_maps->output_colwise[tensor_id];
 
     if (leading_thread && (!is_single_tensor) && (last_acquired_tensor_id != tensor_id)) {
       fence_acquire_tensormap(&tensor_map_input);
@@ -1304,8 +1305,13 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                         const size_t out_mem = out_rowwise_mem + out_colwise_mem;
                         const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
-                        // Update tensor descriptors before launching the kernel
+                        // Per-invocation tensor-map storage. Allocated with cudaMallocAsync so the
+                        // descriptors live in stream-ordered, per-call storage instead of a file-global
+                        // `static __device__` buffer that concurrent streams would clobber.
+                        TensorMapStorage *tensor_maps_storage = nullptr;
                         if (!is_single_tensor) {
+                          NVTE_CHECK_CUDA(cudaMallocAsync(reinterpret_cast<void **>(&tensor_maps_storage),
+                                                          sizeof(TensorMapStorage), stream));
                           const IType *const input_dptr =
                               reinterpret_cast<const IType *>(input->data.dptr);
                           const IType *const act_input_dptr =
@@ -1324,7 +1330,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                                   tensor_map_output_colwise, input_dptr, act_input_dptr,
                                   output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
                                   first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                                  last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
+                                  last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT,
+                                  tensor_maps_storage);
                         }
 
                         TRANSFORMER_ENGINE_SWITCH_CONDITION(
@@ -1344,7 +1351,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                                   last_logical_dim, launch_config.same_both_rows, offsets_ptr,
                                   first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
                                   scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr,
-                                  launch_config.work_blocks_X, launch_config.work_blocks_Y);
+                                  launch_config.work_blocks_X, launch_config.work_blocks_Y,
+                                  tensor_maps_storage);
                             });
 
                         if constexpr (IS_DBIAS) {
@@ -1355,6 +1363,13 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                         }
 
                         NVTE_CHECK_CUDA(cudaGetLastError());
+
+                        // Release the per-call tensor-map storage. Stream-ordered free: the block
+                        // stays alive until the update and consumer kernels above have finished, and
+                        // the pool will not hand it to another stream in the meantime.
+                        if (tensor_maps_storage != nullptr) {
+                          NVTE_CHECK_CUDA(cudaFreeAsync(tensor_maps_storage, stream));
+                        }
                       });  // NOLINT(*)
               );           // NOLINT(*)
           );               // NOLINT(*)

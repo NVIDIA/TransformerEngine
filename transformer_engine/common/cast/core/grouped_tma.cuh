@@ -43,8 +43,12 @@ struct alignas(128) TensorMapStorage {
   size_t offsets[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 };
 
-// Internal linkage avoids device-link ODR issues when this header is included by multiple .cu TUs.
-static __device__ TensorMapStorage g_tensor_maps;
+// `TensorMapStorage` is per-invocation, not file-global. A `static __device__` instance would be
+// shared by every launch that includes this header, so two `group_quantize` calls running on
+// different CUDA streams would race on the same descriptors (one stream's `update_tma_descriptors`
+// overwrites the tensor maps another stream is still consuming). Instead the launcher allocates a
+// private `TensorMapStorage` with `cudaMallocAsync` and passes it to both kernels, which keeps the
+// storage disjoint across concurrent invocations while remaining stream-ordered and graph-safe.
 
 inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   const size_t cols = t->flat_last_dim();
@@ -119,7 +123,8 @@ __global__ void __launch_bounds__(THREADS_PER_WARP)
                            const int64_t *const __restrict__ offsets_ptr,
                            const int64_t *const __restrict__ first_dims_ptr,
                            const int64_t *const __restrict__ last_dims_ptr, const bool rowwise,
-                           const bool colwise, const bool compute_dactivations) {
+                           const bool colwise, const bool compute_dactivations,
+                           TensorMapStorage *const tensor_maps) {
   const size_t tensor_id = blockIdx.x;
   const size_t rows =
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
@@ -127,9 +132,9 @@ __global__ void __launch_bounds__(THREADS_PER_WARP)
 
   const size_t offset_elts = offsets_ptr[tensor_id];
   if (threadIdx.x == 0) {
-    g_tensor_maps.rows[tensor_id] = rows;
-    g_tensor_maps.cols[tensor_id] = cols;
-    g_tensor_maps.offsets[tensor_id] = offset_elts;
+    tensor_maps->rows[tensor_id] = rows;
+    tensor_maps->cols[tensor_id] = cols;
+    tensor_maps->offsets[tensor_id] = offset_elts;
   }
 
   // Zero-sized groups: skip TMA descriptor update. The main kernel already returns
@@ -141,27 +146,27 @@ __global__ void __launch_bounds__(THREADS_PER_WARP)
 
   if (tensor_id < num_tensors) {
     {
-      CUtensorMap *modified_tensor_map_input = &g_tensor_maps.input[tensor_id];
+      CUtensorMap *modified_tensor_map_input = &tensor_maps->input[tensor_id];
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_input, modified_tensor_map_input, global_data_ptr,
                              rows, cols, sizeof(IType));
     }
     if (compute_dactivations) {
-      CUtensorMap *modified_tensor_map_act_input = &g_tensor_maps.act_input[tensor_id];
+      CUtensorMap *modified_tensor_map_act_input = &tensor_maps->act_input[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(act_input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_act_input, modified_tensor_map_act_input,
                              global_data_ptr, rows, cols, sizeof(IType));
     }
     if (rowwise) {
-      CUtensorMap *modified_tensor_map_output_rowwise = &g_tensor_maps.output_rowwise[tensor_id];
+      CUtensorMap *modified_tensor_map_output_rowwise = &tensor_maps->output_rowwise[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_rowwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_rowwise, modified_tensor_map_output_rowwise,
                              global_data_ptr, rows, cols, sizeof(OType));
     }
     if (colwise) {
-      CUtensorMap *modified_tensor_map_output_colwise = &g_tensor_maps.output_colwise[tensor_id];
+      CUtensorMap *modified_tensor_map_output_colwise = &tensor_maps->output_colwise[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_colwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_colwise, modified_tensor_map_output_colwise,
