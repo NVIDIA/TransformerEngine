@@ -545,9 +545,15 @@ class NVFP4BlockScaling(Recipe):
     disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
     row_scaled_activation : bool, default = False
-             If set to `True`, forward activation quantizers emit row-scaled
-             NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
-             as a vector with one FP32 value per tensor row.
+             If set to `True`, activation and gradient-output quantizers emit
+             row-scaled NVFP4 tensors, while weights keep per-tensor scaling.
+             In this mode, rowwise ``amax`` metadata is stored as a vector with
+             one FP32 value per tensor row and columnwise ``amax`` metadata as a
+             vector with one FP32 value per tensor column. Random Hadamard
+             transforms and stochastic rounding follow the same settings as
+             per-tensor NVFP4. Sequence parallelism, Userbuffers
+             communication overlap, and ``te.ops.GroupedLinear`` are not
+             supported.
     nvfp4_4over6 : {'none', 'weights', 'activations', 'all'}, default = 'none'
              Enable 4over6 adaptive NVFP4 block scaling for selected tensor
              scopes. For each selected FP4 block, quantization compares

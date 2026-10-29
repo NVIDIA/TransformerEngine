@@ -115,6 +115,150 @@ def _nvfp4_row_scaled_gemm_inputs(
     )
 
 
+def _nvfp4_row_scaled_grouped_gemm(
+    A: List[NVFP4TensorStorage],
+    B: List[NVFP4TensorStorage],
+    out: List[torch.Tensor],
+    *,
+    transa: bool,
+    transb: bool,
+    m_splits: Optional[List[int]],
+    bias: Optional[List[torch.Tensor]],
+    grad: bool,
+    accumulate: bool,
+    use_split_accumulator: bool,
+    single_output: bool,
+    workspaces: List[torch.Tensor],
+    math_sm_count: int,
+) -> bool:
+    """Run row-scaled NVFP4 grouped GEMM as one per-tensor grouped GEMM plus output scaling.
+
+    Returns ``False`` without side effects when the configuration is not supported.
+    """
+    num_gemms = len(A)
+    if torch.cuda.is_current_stream_capturing():
+        return False
+    if not all(isinstance(t, NVFP4TensorStorage) for t in itertools.chain(A, B)):
+        return False
+    if any(t._scale_dtype == DType.kFloat8UE5M3 for t in itertools.chain(A, B)):
+        return False
+    a_amax_attr = "_amax_rowwise" if transa else "_amax_columnwise"
+    b_amax_attr = "_amax_columnwise" if transb else "_amax_rowwise"
+    col_scales = [getattr(a, a_amax_attr) for a in A]
+    row_scales = [getattr(b, b_amax_attr) for b in B]
+    if any(s is None or s.dtype != torch.float32 for s in itertools.chain(col_scales, row_scales)):
+        return False
+    row_scales = [s.view(-1) for s in row_scales]
+    col_scales = [s.view(-1) for s in col_scales]
+
+    out_dtype = out[0].dtype
+    if any(o.dtype != out_dtype for o in out):
+        return False
+    if single_output:
+        if m_splits is None or len(m_splits) != num_gemms:
+            return False
+        if any(s.numel() != 1 for s in col_scales):
+            return False
+        if any(s.numel() != m for s, m in zip(row_scales, m_splits)):
+            return False
+        fp32_out = torch.empty_like(out[0], dtype=torch.float32)
+        gemm_out = [fp32_out]
+    else:
+        shape = out[0].shape
+        if len(shape) != 2 or any(o.shape != shape for o in out):
+            return False
+        row_numel = row_scales[0].numel()
+        col_numel = col_scales[0].numel()
+        if row_numel not in (1, shape[0]) or col_numel not in (1, shape[1]):
+            return False
+        if any(s.numel() != row_numel for s in row_scales):
+            return False
+        if any(s.numel() != col_numel for s in col_scales):
+            return False
+        fp32_out = torch.empty((num_gemms, *shape), dtype=torch.float32, device=out[0].device)
+        gemm_out = list(fp32_out.unbind(0))
+
+    ones = get_cached_ones_tensor(1, torch.float32, out[0].device)
+    saved = [(t, t._amax_rowwise, t._amax_columnwise, t._row_scaled_nvfp4) for t in A + B]
+    try:
+        for a in A:
+            setattr(a, a_amax_attr, ones)
+            a._row_scaled_nvfp4 = False
+        for b in B:
+            setattr(b, b_amax_attr, ones)
+            b._row_scaled_nvfp4 = False
+        empty_tensors = [_empty_tensor()] * num_gemms
+        tex.te_general_grouped_gemm(
+            A,
+            transa,
+            B,
+            transb,
+            gemm_out,
+            TE_DType[torch.float32],
+            m_splits,
+            empty_tensors,
+            TE_DType[torch.bfloat16],
+            single_output,
+            empty_tensors,
+            grad,
+            workspaces,
+            workspaces[0].shape[0],
+            False,
+            use_split_accumulator,
+            math_sm_count,
+        )
+    finally:
+        for t, amax_rowwise, amax_columnwise, row_scaled in saved:
+            t._amax_rowwise = amax_rowwise
+            t._amax_columnwise = amax_columnwise
+            t._row_scaled_nvfp4 = row_scaled
+
+    if single_output:
+        fp32_2d = fp32_out.view(-1, fp32_out.shape[-1])
+        total_rows = fp32_2d.shape[0]
+        repeats = torch.tensor(m_splits, dtype=torch.int64, pin_memory=True).to(
+            fp32_out.device, non_blocking=True
+        )
+        col_factor = torch.cat(col_scales).repeat_interleave(repeats, output_size=total_rows)
+        fp32_2d.mul_((torch.cat(row_scales) * col_factor).view(-1, 1))
+        if bias is not None:
+            fp32_2d.add_(
+                torch.stack(bias).repeat_interleave(repeats, dim=0, output_size=total_rows)
+            )
+        if accumulate:
+            out[0].add_(fp32_out.to(dtype=out_dtype))
+        else:
+            out[0].copy_(fp32_out)
+        return True
+
+    row_factor = torch.stack(row_scales).view(num_gemms, -1, 1)
+    col_factor = torch.stack(col_scales).view(num_gemms, 1, -1)
+
+    def _is_empty(t: NVFP4TensorStorage) -> bool:
+        data = t._rowwise_data if t._rowwise_data is not None else t._columnwise_data
+        return data is None or data.numel() == 0
+
+    empty_groups = [i for i in range(num_gemms) if _is_empty(A[i]) or _is_empty(B[i])]
+    for i in empty_groups:
+        row_factor[i].zero_()
+        col_factor[i].zero_()
+    if col_factor.shape[-1] == 1:
+        fp32_out.mul_(row_factor * col_factor)
+    elif row_factor.shape[1] == 1:
+        fp32_out.mul_(col_factor * row_factor)
+    else:
+        fp32_out.mul_(row_factor)
+        fp32_out.mul_(col_factor)
+    if bias is not None:
+        fp32_out.add_(torch.stack(bias).unsqueeze(1))
+    converted = fp32_out if out_dtype == torch.float32 else fp32_out.to(dtype=out_dtype)
+    if accumulate:
+        torch._foreach_add_(list(out), list(converted.unbind(0)))
+    else:
+        torch._foreach_copy_(list(out), list(converted.unbind(0)))
+    return True
+
+
 _NATIVE_GEMM_INPUT_STORAGES = (
     Float8TensorStorage,
     MXFP8TensorStorage,
@@ -998,6 +1142,27 @@ def general_grouped_gemm(
     if isinstance(quantization_params[0], DebugQuantizer):
         use_general_gemm_impl = True
     elif any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in itertools.chain(A, B)):
+        if (
+            not gelu
+            and not (grad and use_bias)
+            and all(q is None for q in quantization_params)
+            and _nvfp4_row_scaled_grouped_gemm(
+                A,
+                B,
+                out,
+                transa=transa,
+                transb=transb,
+                m_splits=m_splits,
+                bias=bias if use_bias else None,
+                grad=grad,
+                accumulate=accumulate,
+                use_split_accumulator=use_split_accumulator,
+                single_output=single_output,
+                workspaces=workspaces,
+                math_sm_count=sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
+            )
+        ):
+            return (out[0] if single_output else out), grad_bias if grad else bias, gelu_input
         use_general_gemm_impl = True
     elif any(
         isinstance(t, NVFP4TensorStorage) and t._scale_dtype == DType.kFloat8UE5M3
@@ -1157,8 +1322,6 @@ def general_grouped_gemm_for_grouped_tensor(
     post_scale_rows = None  # per-row outer scale -> output rows (from B)
     post_scale_cols = None  # per-group per-col outer scale -> output cols (from A)
     if row_scaled:
-        if bias is not None:
-            raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support fused bias.")
         if beta is not None:
             raise NotImplementedError(
                 "Row-scaled NVFP4 grouped GEMM does not support explicit beta; use accumulate."
@@ -1265,11 +1428,12 @@ def general_grouped_gemm_for_grouped_tensor(
             sm_count,
         )
 
+    # Groups with an empty contraction dimension must read back as zeros.
     if is_discrete_out:
-        scratch = [torch.empty_like(o, dtype=torch.float32) for o in out]
+        scratch = [torch.zeros_like(o, dtype=torch.float32) for o in out]
     else:
         scratch = out.copy()
-        scratch.rowwise_data = torch.empty_like(out.rowwise_data, dtype=torch.float32)
+        scratch.rowwise_data = torch.zeros_like(out.rowwise_data, dtype=torch.float32)
         scratch.fake_dtype = torch.float32
     grouped_gemm_impl(
         A,
@@ -1317,16 +1481,23 @@ def general_grouped_gemm_for_grouped_tensor(
         last_dim = out.logical_shape[-1]
         live_rows = out.logical_shape[0]
         flat = scratch.rowwise_data.view(-1, last_dim)[:live_rows]
+        if out.first_dims is None:
+            rows = live_rows // num_tensors
+            repeats = torch.full((num_tensors,), rows, dtype=torch.int64, device=flat.device)
+        else:
+            repeats = out.first_dims
         if post_scale_rows is not None:
             flat.mul_(post_scale_rows.view(-1, 1))
         if post_scale_cols is not None:
             # output_size avoids a host sync under CUDA-graph capture.
             col_scales = post_scale_cols.view(num_tensors, last_dim)
-            if out.first_dims is None:
-                rows = live_rows // num_tensors
-                repeats = torch.full((num_tensors,), rows, dtype=torch.int64, device=flat.device)
-            else:
-                repeats = out.first_dims
             flat.mul_(col_scales.repeat_interleave(repeats, dim=0, output_size=live_rows))
+        if bias is not None:
+            bias_rows = bias.rowwise_data.view(num_tensors, last_dim).repeat_interleave(
+                repeats, dim=0, output_size=live_rows
+            )
+            if bias_scale is not None:
+                bias_rows = bias_rows * bias_scale.view(-1, 1)[:live_rows]
+            flat.add_(bias_rows)
         _store(out.rowwise_data.view(-1, last_dim)[:live_rows], flat)
     return out

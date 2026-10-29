@@ -564,8 +564,6 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_NVFP4_1D_SCALING.");
       NVTE_CHECK(output_tensor->row_scaled_nvfp4,
                  "Grouped NVFP4 quantization is only implemented for row-scaled NVFP4.");
-      NVTE_CHECK(!quant_config_cpp.stochastic_rounding,
-                 "Grouped row-scaled NVFP4 quantization does not support stochastic rounding.");
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                  "Grouped row-scaled NVFP4 quantization does not support 2D quantization.");
       NVTE_CHECK(quant_config_cpp.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,

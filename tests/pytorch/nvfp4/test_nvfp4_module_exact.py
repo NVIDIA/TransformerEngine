@@ -53,11 +53,11 @@ class GetRecipes:
         return nvfp4_recipe
 
     @staticmethod
-    def nvfp4_row_scaled():
+    def nvfp4_row_scaled(with_rht: bool = False, with_2d_quantization: bool = False):
         nvfp4_recipe = recipe.NVFP4BlockScaling()
-        nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
-        nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
-        nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+        nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(random_hadamard_transform=with_rht)
+        nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=with_2d_quantization)
+        nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams(random_hadamard_transform=with_rht)
         # Emit row-scaled (per-token) NVFP4 for the forward activation. In a
         # training Linear this also drives the row-scaled columnwise (transpose)
         # of the activation that the wgrad GEMM consumes in the backward pass.
@@ -69,7 +69,7 @@ class GetRecipes:
         with_rht: bool = False, with_2d_quantization: bool = False, row_scaled: bool = False
     ):
         if row_scaled:
-            return GetRecipes.nvfp4_row_scaled()
+            return GetRecipes.nvfp4_row_scaled(with_rht, with_2d_quantization)
         if with_rht and with_2d_quantization:
             return GetRecipes.nvfp4_rht_and_2d_quantization()
         elif with_rht:
@@ -114,8 +114,6 @@ def get_nvfp4_quantizer_factory(
         if role is None:
             return _default_quantizer()
         if role.tensor_type == "input":
-            # Only the forward activation is row-scaled, mirroring the production
-            # wiring in quantization.py (mode == "forward" and tensor_type != "weight").
             return reference_nvfp4.NVFP4QuantizerRef(
                 dtype=reference_utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
@@ -131,7 +129,13 @@ def get_nvfp4_quantizer_factory(
                 with_rht=False,
             )
         if role.tensor_type == "grad_output":
-            return _default_quantizer()
+            return reference_nvfp4.NVFP4QuantizerRef(
+                dtype=reference_utils.Fp4Formats.E2M1,
+                quant_tile_shape=(1, 16),
+                pow_2_scales=False,
+                with_rht=with_rht,
+                row_scaled_nvfp4=row_scaled,
+            )
         return _default_quantizer()
 
     return factory
@@ -443,10 +447,20 @@ def test_nvfp4_linear_versus_reference(
     ],
 )
 @pytest.mark.parametrize("num_steps", [1, 3], ids=["single_step", "multi_step"])
+@pytest.mark.parametrize("with_rht", [False, True], ids=["no_rht", "with_rht"])
+@pytest.mark.parametrize(
+    "with_2d_quantization", [False, True], ids=["no_2d_quantization", "with_2d_quantization"]
+)
+@pytest.mark.parametrize(
+    "module_class", [te.Linear, te.LayerNormLinear], ids=["Linear", "LayerNormLinear"]
+)
 def test_nvfp4_linear_row_scaled_versus_reference(
     in_features: int,
     out_features: int,
     num_steps: int,
+    with_rht: bool,
+    with_2d_quantization: bool,
+    module_class,
 ):
     """End-to-end row-scaled (per-token) NVFP4 Linear forward + backward.
 
@@ -457,17 +471,131 @@ def test_nvfp4_linear_row_scaled_versus_reference(
     reference quantizer by relative norm (both share the same 4-bit error).
     """
     check_nvfp4_module_versus_reference(
-        module_class=te.Linear,
+        module_class=module_class,
         in_features=in_features,
         out_features=out_features,
         bias=False,
         x_dtype=torch.bfloat16,
         num_steps=num_steps,
-        with_rht=False,
-        with_2d_quantization=False,
+        with_rht=with_rht,
+        with_2d_quantization=with_2d_quantization,
         row_scaled=True,
         rel_tol=2e-2,
     )
+
+
+def _make_default_recipe_module(name: str):
+    hidden_size, ffn_hidden_size = 512, 1024
+    kwargs = dict(params_dtype=torch.bfloat16, device="cuda")
+    if name == "Linear":
+        return te.Linear(hidden_size, ffn_hidden_size, **kwargs)
+    if name == "LayerNormLinear":
+        return te.LayerNormLinear(hidden_size, ffn_hidden_size, **kwargs)
+    if name == "LayerNormMLP":
+        return te.LayerNormMLP(hidden_size, ffn_hidden_size, **kwargs)
+    return te.GroupedLinear(
+        4,
+        hidden_size,
+        ffn_hidden_size,
+        use_grouped_tensor=name == "GroupedLinear_grouped_tensor",
+        **kwargs,
+    )
+
+
+def _run_default_recipe_module(name, state, nvfp4_recipe, x, dy):
+    module = _make_default_recipe_module(name)
+    module.load_state_dict(state)
+    x = x.detach().clone().requires_grad_(True)
+    args = ()
+    if name.startswith("GroupedLinear"):
+        m_splits = [512, 256, 0, 1280]
+        if name == "GroupedLinear_grouped_tensor":
+            m_splits = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+        args = (m_splits,)
+    with te.autocast(enabled=nvfp4_recipe is not None, recipe=nvfp4_recipe):
+        y = module(x, *args)
+    y.backward(dy[..., : y.shape[-1]])
+    results = {"output": y.detach().float(), "input_grad": x.grad.detach().float()}
+    for param_name, param in module.named_parameters():
+        results[param_name] = param.grad.detach().float()
+    return results
+
+
+def _relative_error(native: torch.Tensor, ref: torch.Tensor) -> float:
+    diff = (native - ref).norm().item()
+    denom = ref.norm().item()
+    return diff / denom if denom > 0 else diff
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Linear",
+        "LayerNormLinear",
+        "LayerNormMLP",
+        "GroupedLinear_split_quantize",
+        "GroupedLinear_grouped_tensor",
+    ],
+)
+def test_nvfp4_row_scaled_default_recipe_error_versus_per_tensor(name: str):
+    """Row-scaled NVFP4 with default recipe settings is no less accurate than per-tensor."""
+    reset_rng_states()
+    state = _make_default_recipe_module(name).state_dict()
+    tokens = 2048
+    row_magnitude = torch.exp(torch.randn(tokens, 1, device="cuda"))
+    x = (torch.randn(tokens, 512, device="cuda") * row_magnitude).to(torch.bfloat16)
+    dy = torch.randn(tokens, 1024, device="cuda", dtype=torch.bfloat16)
+
+    reference = _run_default_recipe_module(name, state, None, x, dy)
+    per_tensor = _run_default_recipe_module(name, state, recipe.NVFP4BlockScaling(), x, dy)
+    row_scaled = _run_default_recipe_module(
+        name, state, recipe.NVFP4BlockScaling(row_scaled_activation=True), x, dy
+    )
+
+    for key, ref in reference.items():
+        assert torch.isfinite(row_scaled[key]).all(), f"{key} has non-finite values"
+        err_row_scaled = _relative_error(row_scaled[key], ref)
+        err_per_tensor = _relative_error(per_tensor[key], ref)
+        print(f"{key}: row-scaled {err_row_scaled:.4f}, per-tensor {err_per_tensor:.4f}")
+        assert (
+            err_row_scaled <= 1.25 * err_per_tensor + 1e-6
+        ), f"{key} relative error {err_row_scaled:.4f} exceeds per-tensor {err_per_tensor:.4f}"
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("name", ["Linear", "GroupedLinear"])
+def test_nvfp4_row_scaled_save_original_input(name: str):
+    """Row-scaled NVFP4 falls back to saving the quantized input for wgrad."""
+    reset_rng_states()
+    kwargs = dict(params_dtype=torch.bfloat16, device="cuda")
+
+    def make(save_original_input):
+        if name == "Linear":
+            return te.Linear(512, 1024, save_original_input=save_original_input, **kwargs)
+        return te.GroupedLinear(4, 512, 1024, save_original_input=save_original_input, **kwargs)
+
+    state = make(False).state_dict()
+    x = torch.randn(2048, 512, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn(2048, 1024, device="cuda", dtype=torch.bfloat16)
+    args = ([512, 256, 0, 1280],) if name == "GroupedLinear" else ()
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        row_scaled_activation=True, disable_stochastic_rounding=True
+    )
+
+    results = []
+    for save_original_input in (False, True):
+        module = make(save_original_input)
+        module.load_state_dict(state)
+        inp = x.clone().requires_grad_(True)
+        with te.autocast(enabled=True, recipe=nvfp4_recipe):
+            y = module(inp, *args)
+        y.backward(dy)
+        results.append([y, inp.grad] + [p.grad for p in module.parameters()])
+
+    for native, ref in zip(*results):
+        assert torch.isfinite(native).all()
+        torch.testing.assert_close(native, ref, atol=0, rtol=0)
 
 
 def check_nvfp4_layernorm_linear_versus_reference(

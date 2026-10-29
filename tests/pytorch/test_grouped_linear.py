@@ -33,6 +33,7 @@ from transformer_engine.pytorch.cpp_extensions import (
     general_grouped_gemm_for_grouped_tensor,
 )
 from transformer_engine.pytorch.constants import TE_DType
+import transformer_engine.pytorch.module.grouped_linear as grouped_linear_module
 from transformer_engine.pytorch.module.grouped_linear import (
     _GroupedLinear,
     is_module_grouped_tensor_path_supported,
@@ -104,20 +105,20 @@ def nvfp4_row_scaled():
     return nvfp4_recipe
 
 
-def nvfp4_row_scaled_quantized_backward():
+def nvfp4_row_scaled_quantized_backward(with_rht: bool = False):
     # Same row-scaled activation recipe as nvfp4_row_scaled(), but with
     # backward_override=None so the backward runs in NVFP4 instead of falling back
     # to high precision.
     nvfp4_recipe = recipe.NVFP4BlockScaling(
-        disable_rht=True,
+        disable_rht=not with_rht,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
         row_scaled_activation=True,
         backward_override=None,
     )
-    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(random_hadamard_transform=with_rht)
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
-    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams(random_hadamard_transform=with_rht)
     return nvfp4_recipe
 
 
@@ -406,16 +407,12 @@ def test_grouped_linear_accuracy(
 @pytest.mark.parametrize("num_gemms", [1, 3])
 @pytest.mark.parametrize("bs", [2])
 @pytest.mark.parametrize("bias", all_boolean)
-def test_grouped_linear_row_scaled_quantized_backward(dtype, num_gemms, bs, bias, model="126m"):
-    """Row-scaled NVFP4 GroupedLinear with quantized (non-fallback) NVFP4 backward.
-
-    With ``backward_override=None`` the wgrad is computed in NVFP4: the row-scaled
-    activation becomes operand A of the ``NT`` grouped GEMM, which this PR routes
-    through the per-expert dense ``general_gemm`` loop. GroupedLinear must then
-    match a stack of independent dense ``Linear`` layers bit-for-bit, since both
-    execute the exact same per-expert quantize + GEMM kernels.
-    """
-    recipe_row_scaled = nvfp4_row_scaled_quantized_backward()
+@pytest.mark.parametrize("with_rht", all_boolean)
+def test_grouped_linear_row_scaled_quantized_backward(
+    dtype, num_gemms, bs, bias, with_rht, model="126m"
+):
+    """Row-scaled NVFP4 GroupedLinear with quantized backward matches per-expert Linear."""
+    recipe_row_scaled = nvfp4_row_scaled_quantized_backward(with_rht)
     config = model_configs[model]
     if dtype not in get_nvfp4_inp_supported_dtypes(recipe_row_scaled, dtype):
         pytest.skip(f"Input dtype {dtype} not supported for row-scaled NVFP4.")
@@ -428,6 +425,7 @@ def test_grouped_linear_row_scaled_quantized_backward(dtype, num_gemms, bs, bias
             bias=bias,
             params_dtype=dtype,
             device="cuda",
+            use_grouped_tensor=False,
         )
         .cuda()
         .eval()
@@ -473,8 +471,6 @@ def test_grouped_linear_row_scaled_quantized_backward(dtype, num_gemms, bs, bias
         fuse_wgrad_accumulation=False,
     )
 
-    # GroupedLinear is a per-expert loop over the same dense kernels, so the
-    # forward output, dgrad, and (row-scaled) wgrad must match bit-for-bit.
     for o, o_ref in zip(outputs, outputs_ref):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
@@ -2090,6 +2086,17 @@ def test_grouped_parameter_layout_selected_by_constructor(
         assert isinstance(parameters["bias"], GroupedTensor)
 
 
+@pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
+def test_op_grouped_linear_rejects_row_scaled_nvfp4():
+    op = te.ops.GroupedLinear(2, 128, 128, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
+    split_sizes = torch.tensor([128, 128], device="cuda", dtype=torch.int64)
+    fp8_recipe = recipe.NVFP4BlockScaling(row_scaled_activation=True)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        with pytest.raises(NotImplementedError, match="row_scaled_activation"):
+            op(x, split_sizes)
+
+
 @pytest.mark.parametrize(
     "m_splits,exception",
     [([256, 256], ValueError), (torch.tensor([256, 256]), ValueError)],
@@ -2788,6 +2795,10 @@ def _run_grouped_linear_path(
             marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
         ),
         pytest.param(
+            recipe.NVFP4BlockScaling(disable_stochastic_rounding=True, row_scaled_activation=True),
+            marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
+        ),
+        pytest.param(
             recipe.Float8BlockScaling(),
             marks=pytest.mark.skipif(
                 not _fp8_block_scaling_available, reason=_reason_for_no_fp8_block_scaling
@@ -2800,6 +2811,7 @@ def _run_grouped_linear_path(
         "mxfp8",
         "mxfp8_2d",
         "nvfp4",
+        "nvfp4_row_scaled",
         "fp8_block_scaling",
     ],
 )
@@ -2873,6 +2885,106 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
         assert grouped_tensor_out is not None
         assert legacy_out is not None
         torch.testing.assert_close(grouped_tensor_out.float(), legacy_out.float(), **tols)
+
+
+@pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
+@pytest.mark.parametrize("bias", _ALL_BOOLEAN)
+def test_grouped_linear_row_scaled_nvfp4_selects_grouped_tensor_path(bias, monkeypatch):
+    fp8_recipe = recipe.NVFP4BlockScaling(
+        disable_stochastic_rounding=True, row_scaled_activation=True
+    )
+    dtype = torch.bfloat16
+    if not is_module_grouped_tensor_path_supported(fp8_recipe, dtype):
+        pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
+
+    m_splits = [128, 0, 384]
+    num_gemms = len(m_splits)
+    in_features = 128
+    out_features = 256
+    torch.manual_seed(1234)
+    x_base = (0.1 * torch.randn(sum(m_splits), in_features, device="cuda")).to(dtype)
+    dy = (0.1 * torch.randn(sum(m_splits), out_features, device="cuda")).to(dtype)
+    weights = [
+        (0.1 * torch.randn(out_features, in_features, device="cuda")).to(dtype)
+        for _ in range(num_gemms)
+    ]
+    biases = [(0.1 * torch.randn(out_features, device="cuda")).to(dtype) for _ in range(num_gemms)]
+
+    expected = _run_grouped_linear_path(
+        enable_grouped_tensor_path=True,
+        fp8_recipe=fp8_recipe,
+        bias=bias,
+        fp8_model_params=False,
+        delay_wgrad_compute=False,
+        x_base=x_base,
+        dy=dy,
+        weights=weights,
+        biases=biases,
+        m_splits=m_splits,
+        monkeypatch=monkeypatch,
+    )
+
+    FP8GlobalStateManager.reset()
+    monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
+    grouped_gemm_calls = []
+    grouped_gemm = grouped_linear_module.general_grouped_gemm_for_grouped_tensor
+
+    def counting_grouped_gemm(*args, **kwargs):
+        grouped_gemm_calls.append(1)
+        return grouped_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(
+        grouped_linear_module, "general_grouped_gemm_for_grouped_tensor", counting_grouped_gemm
+    )
+    module = GroupedLinear(
+        num_gemms, in_features, out_features, bias=bias, params_dtype=dtype, device="cuda"
+    )
+    with torch.no_grad():
+        for i in range(num_gemms):
+            getattr(module, f"weight{i}").copy_(weights[i])
+            if bias:
+                getattr(module, f"bias{i}").copy_(biases[i])
+    x = x_base.detach().clone().requires_grad_(True)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y = module(x, m_splits)
+    y.backward(dy)
+
+    assert grouped_gemm_calls
+    outputs = [y, x.grad]
+    for i in range(num_gemms):
+        outputs.append(getattr(module, f"weight{i}").grad)
+        if bias:
+            outputs.append(getattr(module, f"bias{i}").grad)
+    for actual, ref in zip(outputs, expected):
+        torch.testing.assert_close(actual, ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
+def test_grouped_linear_row_scaled_nvfp4_4over6_keeps_split_quantize_path(monkeypatch):
+    fp8_recipe = recipe.NVFP4BlockScaling(row_scaled_activation=True, nvfp4_4over6="weights")
+    dtype = torch.bfloat16
+    assert not is_module_grouped_tensor_path_supported(fp8_recipe, dtype)
+
+    monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
+    grouped_gemm_calls = []
+    grouped_gemm = grouped_linear_module.general_grouped_gemm_for_grouped_tensor
+
+    def counting_grouped_gemm(*args, **kwargs):
+        grouped_gemm_calls.append(1)
+        return grouped_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(
+        grouped_linear_module, "general_grouped_gemm_for_grouped_tensor", counting_grouped_gemm
+    )
+    m_splits = [128, 0, 384]
+    module = GroupedLinear(len(m_splits), 128, 256, params_dtype=dtype, device="cuda")
+    x = torch.randn(sum(m_splits), 128, dtype=dtype, device="cuda", requires_grad=True)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y = module(x, m_splits)
+    y.backward(torch.randn_like(y))
+
+    assert not grouped_gemm_calls
+    assert torch.isfinite(y).all() and torch.isfinite(x.grad).all()
 
 
 def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monkeypatch):

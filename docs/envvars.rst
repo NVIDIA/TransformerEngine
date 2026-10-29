@@ -373,7 +373,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable row-scaled NVFP4 tensors for forward activation quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row instead of a single scalar.
+   :Description: Enable row-scaled NVFP4 tensors for the activation and gradient-output quantizers in the ``NVFP4BlockScaling`` recipe; weights keep per-tensor scaling. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row and columnwise ``amax`` metadata as one FP32 value per tensor column instead of a single scalar. Random Hadamard transforms and stochastic rounding follow the recipe settings as for per-tensor NVFP4. Sequence parallelism, Userbuffers communication overlap, and ``transformer_engine.pytorch.ops.GroupedLinear`` are not supported.
 
 .. envvar:: NVTE_NVFP4_4OVER6
 

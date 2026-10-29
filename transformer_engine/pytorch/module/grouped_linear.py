@@ -75,6 +75,7 @@ from ..tensor import (
     HybridQuantizer,
     IdentityQuantizer,
     MXFP8Quantizer,
+    NVFP4Quantizer,
 )
 from ..quantized_tensor import (
     QuantizedTensorStorage,
@@ -152,10 +153,16 @@ def is_module_grouped_tensor_path_supported(
     if recipe.mxfp8():
         return device_capability >= (10, 0)
     if recipe.nvfp4():
+        if recipe.row_scaled_activation:
+            return (
+                device_capability >= (10, 0)
+                and cublaslt_version >= 130400
+                and recipe.fp8_format == RecipeFormat.E4M3
+                and recipe.nvfp4_4over6 == "none"
+            )
         return (
             device_capability >= (10, 0)
             and not recipe.disable_rht
-            and not recipe.row_scaled_activation
             and recipe.fp8_format == RecipeFormat.E4M3
         )
     return False
@@ -1385,6 +1392,11 @@ class _GroupedLinear(torch.autograd.Function):
             weight_quantizer = weight_quantizers[0]
             if weight_quantizer is None:
                 raise RuntimeError("Quantized grouped compute requires a weight quantizer.")
+            if isinstance(weight_quantizer, NVFP4Quantizer) and not weight_quantizer.with_rht:
+                raise NotImplementedError(
+                    "single_grouped_weight is not supported for NVFP4 without RHT; "
+                    "use per-expert weights."
+                )
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             # forward() already applied _enable_weight_preswizzle(); preserve that decision
             # because not every quantizer and weight shape supports fused quantize-swizzle.
@@ -1682,6 +1694,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                        The native path requires CUDA ``m_splits``. ``None`` preserves the deprecated
                        ``NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM`` environment-variable
                        selection for compatibility. New callers should pass a boolean explicitly.
+                       When neither is set, row-scaled NVFP4 recipes select the native path when
+                       it is supported, copying host ``m_splits`` to the device outside CUDA Graph
+                       capture.
                        With MXFP8 or FP8 block scaling, the native path requires every
                        ``m_splits`` entry to be a multiple of 128. This is checked only on the
                        device, so other split sizes can produce incorrect results.
@@ -1734,6 +1749,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
         self.save_original_input = save_original_input
+        self._use_grouped_tensor_unset = (
+            use_grouped_tensor is None
+            and os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM") is None
+        )
         if use_grouped_tensor is None:
             use_grouped_tensor_env = os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM")
             if use_grouped_tensor_env is not None:
@@ -2395,8 +2414,18 @@ class GroupedLinear(TransformerEngineBaseModule):
                         save_original_input = False
 
             cpu_offloading = is_cpu_offload_enabled()
+            use_grouped_tensor = self.use_grouped_tensor
+            auto_grouped_tensor = (
+                not use_grouped_tensor
+                and self._use_grouped_tensor_unset
+                and _recipe is not None
+                and _recipe.nvfp4()
+                and _recipe.row_scaled_activation
+                and (m_splits.device.type == "cuda" or not torch.cuda.is_current_stream_capturing())
+            )
+            use_grouped_tensor = use_grouped_tensor or auto_grouped_tensor
             use_grouped_tensor_path = False
-            if self.use_grouped_tensor and not (
+            if use_grouped_tensor and not (
                 self.fp8_calibration
                 or debug
                 or cpu_offloading
@@ -2407,7 +2436,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                     self.activation_dtype,
                 )
             if (
-                self.use_grouped_tensor
+                use_grouped_tensor
                 and not use_grouped_tensor_path
                 and (self.single_grouped_weight or use_grouped_bias)
             ):
@@ -2418,6 +2447,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                     " single_grouped_bias to allow the split-quantize fallback."
                 )
             if use_grouped_tensor_path:
+                if auto_grouped_tensor and m_splits.device.type != "cuda":
+                    m_splits = m_splits.to(device=inp.device)
                 if m_splits.device.type != "cuda":
                     raise ValueError(
                         "The native grouped_tensor path requires CUDA m_splits. Pass a CUDA int64 "
