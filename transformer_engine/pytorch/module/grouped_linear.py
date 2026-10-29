@@ -326,6 +326,11 @@ def _grouped_linear_configure_split_quantizers(args: GroupedLinearFwdArgs, weigh
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
         elif isinstance(weights[0], QuantizedTensorStorage):
             args.weight_quantizers = [weight._quantizer for weight in weights]
+            for weight_quantizer in args.weight_quantizers:
+                weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=True if columnwise_usage else None,
+                )
     if args.output_quantizers[0] is not None:
         for output_quantizer in args.output_quantizers:
             output_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1489,11 +1494,13 @@ class _GroupedLinear(torch.autograd.Function):
         for idx, weight in enumerate(weights):
             if isinstance(weight, QuantizedTensorStorage):
                 weight_quantizer = weight._quantizer
-                weight_columnwise_usage = True if columnwise_usage else None
+                weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=True if columnwise_usage else None,
+                )
             else:
                 weight_quantizer = weight_quantizers[idx]
-                weight_columnwise_usage = columnwise_usage
-            weight_quantizer.set_usage(rowwise=True, columnwise=weight_columnwise_usage)
+                weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             weight_fp8, new_workspaces[idx] = quantize_weight(
                 tensor=weight,
                 quantizer=weight_quantizer,
@@ -2052,7 +2059,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_gemms,
             shapes=[(self.out_features, self.in_features)] * self.num_gemms,
-            quantizer=weight_quantizers[0],
+            quantizer=weight_quantizers[0].copy() if weight_quantizers[0] is not None else None,
             dtype=self.params_dtype,
             device=weights[0].device,
         )

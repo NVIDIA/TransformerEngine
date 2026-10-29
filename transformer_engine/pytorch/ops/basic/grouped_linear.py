@@ -596,7 +596,7 @@ class GroupedLinear(BasicOperation):
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_groups,
             shapes=[(self.out_features, self.in_features)] * self.num_groups,
-            quantizer=quantizer,
+            quantizer=quantizer.copy() if quantizer is not None else None,
             dtype=self.weight0.dtype,
             device=self.weight0.device,
         )
@@ -932,7 +932,9 @@ class GroupedLinear(BasicOperation):
         num_groups = self.num_groups
         is_weight_quantized = weight_param.quantizer is not None
         if is_weight_quantized and with_quantized_compute:
-            # GGEMM can use it as it is
+            weight_param.quantizer.set_usage(
+                rowwise=True, columnwise=True if columnwise_usage else None
+            )
             return weight_param
         if is_weight_quantized and not with_quantized_compute:
             # This use-case isnt optimized yet. Involves a per-group
