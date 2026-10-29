@@ -1251,3 +1251,202 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(std::vector<size_t>{1024, 1024}, DType::kFloat32, DType::kFloat8E4M3)
     ),
     swizzled_test_name_generator);
+
+// ============================================================================
+// Compact unswizzled scales.
+//
+// Unswizzled scale_inv tensors need only one entry per MXFP8 block, so callers
+// that shard MXFP8 tensors can pass compact scales without the 128x4 padding
+// TE allocates, as views at any offset into a larger allocation. Quantizing into
+// them must store the same bytes as TE's padded scales and nothing outside the
+// views, including when the tensor dimensions are not multiples of the kernel
+// tiles. Scale rows may also hold more entries than blocks, as in a padded view;
+// only their leading entries are scales. Canary bytes surround every view.
+// ============================================================================
+
+namespace {
+
+constexpr size_t kGuardBytes = 256;
+constexpr uint8_t kCanary = 0xAA;
+
+// Device view of `size` bytes, `offset` bytes past an aligned position, with canary
+// bytes on both sides.
+class GuardedDeviceView {
+  public:
+    GuardedDeviceView(size_t size, size_t offset) : size_(size), start_(kGuardBytes + offset) {
+        NVTE_CHECK_CUDA(cudaMalloc(&base_, total_bytes()));
+        NVTE_CHECK_CUDA(cudaMemset(base_, kCanary, total_bytes()));
+    }
+    ~GuardedDeviceView() { cudaFree(base_); }
+    GuardedDeviceView(const GuardedDeviceView &) = delete;
+    GuardedDeviceView &operator=(const GuardedDeviceView &) = delete;
+
+    void *data() const { return base_ + start_; }
+
+    // Checks that the leading `cols` entries of the view's rows (row stride `stride`) hold
+    // `expected` (rows x cols, row stride `expected_stride`) and that no byte around the
+    // view changed.
+    ::testing::AssertionResult Holds(const uint8_t *expected, size_t rows, size_t cols,
+                                     size_t stride, size_t expected_stride) const {
+        std::vector<uint8_t> host(total_bytes());
+        NVTE_CHECK_CUDA(cudaMemcpy(host.data(), base_, host.size(), cudaMemcpyDeviceToHost));
+        for (size_t i = 0; i < host.size(); ++i) {
+            if ((i < start_ || i >= start_ + size_) && host[i] != kCanary) {
+                return ::testing::AssertionFailure()
+                       << "byte " << static_cast<int64_t>(i) - static_cast<int64_t>(start_)
+                       << " relative to the view was overwritten";
+            }
+        }
+        for (size_t r = 0; r < rows; ++r) {
+            for (size_t c = 0; c < cols; ++c) {
+                const uint8_t got = host[start_ + r * stride + c];
+                const uint8_t want = expected[r * expected_stride + c];
+                if (got != want) {
+                    return ::testing::AssertionFailure()
+                           << "mismatch at (" << r << ", " << c << "): "
+                           << static_cast<int>(got) << " vs. reference "
+                           << static_cast<int>(want);
+                }
+            }
+        }
+        return ::testing::AssertionSuccess();
+    }
+
+  private:
+    size_t total_bytes() const { return start_ + size_ + kGuardBytes; }
+
+    uint8_t *base_ = nullptr;
+    size_t size_;
+    size_t start_;
+};
+
+}  // namespace
+
+class CompactScalesCastMXFP8TestSuite : public ::testing::TestWithParam<
+    std::tuple<ProcessingMethod,
+               std::pair<size_t, size_t>,  // rows, cols
+               transformer_engine::DType,  // input type
+               std::pair<bool, bool>,      // rowwise, colwise
+               size_t,                     // scale view offset from 16-byte alignment
+               std::pair<size_t, size_t>>> {};  // extra scale entries per row (rowwise, colwise)
+
+TEST_P(CompactScalesCastMXFP8TestSuite, TestCompactScales) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    using namespace transformer_engine;
+    using namespace test;
+
+    const ProcessingMethod processing_method = std::get<0>(GetParam());
+    const size_t rows = std::get<1>(GetParam()).first;
+    const size_t cols = std::get<1>(GetParam()).second;
+    const DType itype = std::get<2>(GetParam());
+    const bool rowwise = std::get<3>(GetParam()).first;
+    const bool colwise = std::get<3>(GetParam()).second;
+    const size_t offset = std::get<4>(GetParam());
+    const size_t rowwise_scale_stride = cols / 32 + std::get<5>(GetParam()).first;
+    const size_t colwise_scale_stride = cols + std::get<5>(GetParam()).second;
+    const std::vector<size_t> shape{rows, cols};
+    const DType otype = DType::kFloat8E4M3;
+
+    Tensor input("input", shape, itype);
+    fillUniform(&input);
+
+    // Reference: TE's padded scales. Target: one scale per block, in rows of the given length.
+    Tensor ref("ref", shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
+    GuardedDeviceView rowwise_data(rows * cols, 0);
+    GuardedDeviceView colwise_data(rows * cols, 0);
+    GuardedDeviceView rowwise_scales(rows * rowwise_scale_stride, offset);
+    GuardedDeviceView colwise_scales((rows / 32) * colwise_scale_stride, offset);
+    TensorWrapper compact(NVTE_MXFP8_1D_SCALING);
+    if (rowwise) {
+        compact.set_rowwise_data(rowwise_data.data(), otype, shape);
+        compact.set_rowwise_scale_inv(rowwise_scales.data(), DType::kFloat8E8M0,
+                                      std::vector<size_t>{rows, rowwise_scale_stride});
+    }
+    if (colwise) {
+        compact.set_columnwise_data(colwise_data.data(), otype, shape);
+        compact.set_columnwise_scale_inv(colwise_scales.data(), DType::kFloat8E8M0,
+                                         std::vector<size_t>{rows / 32, colwise_scale_stride});
+    }
+
+    // CAST_DBIAS covers the larger tiles of the generic kernel's dbias variant.
+    auto quantize = [&](NVTETensor output) {
+        if (processing_method == ProcessingMethod::CAST_ONLY) {
+            nvte_quantize(input.data(), output, 0);
+            return;
+        }
+        Tensor dbias("dbias", std::vector<size_t>{ cols }, itype);
+        Tensor workspace;
+        nvte_quantize_dbias(input.data(), output, dbias.data(), workspace.data(), 0);
+        workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+        nvte_quantize_dbias(input.data(), output, dbias.data(), workspace.data(), 0);
+    };
+    quantize(ref.data());
+    quantize(compact.data());
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+    ref.to_cpu();
+    if (rowwise) {
+        EXPECT_TRUE(rowwise_data.Holds(
+            reinterpret_cast<const uint8_t *>(ref.rowwise_cpu_dptr<fp8e4m3>()), rows, cols, cols,
+            cols))
+            << "rowwise data";
+        EXPECT_TRUE(rowwise_scales.Holds(ref.rowwise_cpu_scale_inv_ptr<fp8e8m0>(), rows, cols / 32,
+                                         rowwise_scale_stride,
+                                         ref.rowwise_scale_inv_shape().data[1]))
+            << "rowwise scales";
+    }
+    if (colwise) {
+        EXPECT_TRUE(colwise_data.Holds(
+            reinterpret_cast<const uint8_t *>(ref.columnwise_cpu_dptr<fp8e4m3>()), rows, cols,
+            cols, cols))
+            << "colwise data";
+        EXPECT_TRUE(colwise_scales.Holds(ref.columnwise_cpu_scale_inv_ptr<fp8e8m0>(), rows / 32,
+                                         cols, colwise_scale_stride,
+                                         ref.columnwise_scale_inv_shape().data[1]))
+            << "colwise scales";
+    }
+}
+
+std::string compact_scales_test_name_generator(
+    const testing::TestParamInfo<CompactScalesCastMXFP8TestSuite::ParamType>& info) {
+    const auto &[processing_method, dims, itype, usage, offset, extra] = info.param;
+    std::string name = processing_method == ProcessingMethod::CAST_ONLY ? "CastOnly" : "CastDBias";
+    name += "X" + std::to_string(dims.first) + "x" + std::to_string(dims.second);
+    name += "X" + test::typeName(itype);
+    name += usage.first ? (usage.second ? "XBoth" : "XRowwise") : "XColwise";
+    name += "XOffset" + std::to_string(offset);
+    name += "XExtra" + std::to_string(extra.first) + "x" + std::to_string(extra.second);
+    return name;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    CompactScalesCastMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::Values(ProcessingMethod::CAST_ONLY, ProcessingMethod::CAST_DBIAS),
+        // Rows and columns that are not multiples of the kernel tiles, rows of fewer than
+        // four scales, a single scale per row and column block, and two colwise scale rows
+        // for the register-resident bidimensional kernel.
+        ::testing::Values(std::make_pair<size_t, size_t>(32, 256),
+                          std::make_pair<size_t, size_t>(64, 256),
+                          std::make_pair<size_t, size_t>(96, 128),
+                          std::make_pair<size_t, size_t>(64, 64),
+                          std::make_pair<size_t, size_t>(160, 224),
+                          std::make_pair<size_t, size_t>(512, 96),
+                          std::make_pair<size_t, size_t>(32, 32)),
+        // BF16 and FP16 inputs reach the register-resident and staged specialized kernels.
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(std::make_pair(true, false), std::make_pair(false, true),
+                          std::make_pair(true, true)),
+        ::testing::Values(size_t{0}, size_t{4}),
+        // Compact rows, and longer rows that are unaligned or not packed for the
+        // specialized kernels' scale stores.
+        ::testing::Values(std::make_pair<size_t, size_t>(0, 0),
+                          std::make_pair<size_t, size_t>(0, 1),
+                          std::make_pair<size_t, size_t>(4, 0),
+                          std::make_pair<size_t, size_t>(4, 16))),
+    compact_scales_test_name_generator);
