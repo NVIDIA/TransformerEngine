@@ -36,6 +36,8 @@ def materialize_concat(value: List[torch.Tensor]) -> torch.Tensor:
     if len(value) == 1:
         return value[0]
     first = value[0]
+    if first.shape[0] == 0:
+        return torch.cat(value)
     storage = first.untyped_storage()
     offset = first.storage_offset()
     for tensor in value:

@@ -2352,6 +2352,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 [getattr(self, name) for name in self.bias_names],
                 defer=self.apply_bias and not self.gemm_bias_unfused_add,
             )
+        else:
+            bias = getattr(self, self.bias_names[0])
         return weight, bias, weight_list, bias_list
 
     def onnx_forward(
