@@ -563,6 +563,17 @@ __device__ __forceinline__ float stochastic_round_fp4_e2m1(const float x, const 
   return copysignf(q, (x != x) ? 1.0f : x);
 }
 
+// Software equivalent of cvt.rs.satfinite.e2m1x4.f32 on four consecutive values:
+// value i uses bits [8i, 8i + 8) of rbits and lands in nibble i of the result.
+__device__ __forceinline__ uint16_t stochastic_round_fp4_e2m1x4(const float x0, const float x1,
+                                                                const float x2, const float x3,
+                                                                const uint32_t rbits) {
+  const fp4e2m1x4 packed(make_float4(
+      stochastic_round_fp4_e2m1(x0, rbits), stochastic_round_fp4_e2m1(x1, rbits >> 8),
+      stochastic_round_fp4_e2m1(x2, rbits >> 16), stochastic_round_fp4_e2m1(x3, rbits >> 24)));
+  return *reinterpret_cast<const uint16_t *>(&packed);
+}
+
 #endif  // FP4_TYPE_SUPPORTED
 
 // SIMD like "Fused" cast + multiplication (x2)
