@@ -1310,8 +1310,9 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                         // `static __device__` buffer that concurrent streams would clobber.
                         TensorMapStorage *tensor_maps_storage = nullptr;
                         if (!is_single_tensor) {
-                          NVTE_CHECK_CUDA(cudaMallocAsync(reinterpret_cast<void **>(&tensor_maps_storage),
-                                                          sizeof(TensorMapStorage), stream));
+                          NVTE_CHECK_CUDA(
+                              cudaMallocAsync(reinterpret_cast<void **>(&tensor_maps_storage),
+                                              sizeof(TensorMapStorage), stream));
                           const IType *const input_dptr =
                               reinterpret_cast<const IType *>(input->data.dptr);
                           const IType *const act_input_dptr =

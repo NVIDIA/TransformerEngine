@@ -33,8 +33,9 @@ COLS_PER_GROUP = 1024
 
 def _make_input(seed):
     g = torch.Generator(device="cuda").manual_seed(seed)
-    return torch.randn(ROWS, NUM_GROUPS * COLS_PER_GROUP, device="cuda", dtype=torch.bfloat16,
-                       generator=g)
+    return torch.randn(
+        ROWS, NUM_GROUPS * COLS_PER_GROUP, device="cuda", dtype=torch.bfloat16, generator=g
+    )
 
 
 def _last_dims():

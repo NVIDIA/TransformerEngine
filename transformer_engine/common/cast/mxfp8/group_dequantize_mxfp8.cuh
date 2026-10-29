@@ -82,18 +82,15 @@ struct DequantizeConfig {
 };
 
 template <typename IType, typename OType>
-__global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_tensor_map_input,
-                                       const __grid_constant__ CUtensorMap base_tensor_map_output,
-                                       const IType *const __restrict__ input_data_ptr,
-                                       const OType *const __restrict__ output_data_ptr,
-                                       const ShapeRepresentation shape_rep,
-                                       const size_t num_tensors, const size_t first_logical_dim,
-                                       const size_t last_logical_dim,
-                                       const int64_t *const __restrict__ offsets_ptr,
-                                       const int64_t *const __restrict__ first_dims_ptr,
-                                       const int64_t *const __restrict__ last_dims_ptr,
-                                       CUtensorMap *const tensor_maps_input,
-                                       CUtensorMap *const tensor_maps_output) {
+__global__ void update_tma_descriptors(
+    const __grid_constant__ CUtensorMap base_tensor_map_input,
+    const __grid_constant__ CUtensorMap base_tensor_map_output,
+    const IType *const __restrict__ input_data_ptr, const OType *const __restrict__ output_data_ptr,
+    const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t first_logical_dim,
+    const size_t last_logical_dim, const int64_t *const __restrict__ offsets_ptr,
+    const int64_t *const __restrict__ first_dims_ptr,
+    const int64_t *const __restrict__ last_dims_ptr, CUtensorMap *const tensor_maps_input,
+    CUtensorMap *const tensor_maps_output) {
   const size_t tensor_id = blockIdx.x;
 
   const size_t rows =
@@ -112,8 +109,8 @@ __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_
   if (tensor_id < num_tensors) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
-      modify_base_tensor_map(base_tensor_map_input, &tensor_maps_input[tensor_id],
-                             global_data_ptr, rows, cols, sizeof(IType));
+      modify_base_tensor_map(base_tensor_map_input, &tensor_maps_input[tensor_id], global_data_ptr,
+                             rows, cols, sizeof(IType));
     }
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(output_data_ptr + offset_elts);
@@ -485,10 +482,10 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
           // Update tensor descriptors before launching the kernel
           if (!is_single_tensor) {
             const size_t tmap_bytes = MAX_SUPPORTED_TENSOR_DESCRIPTORS * sizeof(CUtensorMap);
-            NVTE_CHECK_CUDA(cudaMallocAsync(
-                reinterpret_cast<void **>(&tensor_maps_input), tmap_bytes, stream));
-            NVTE_CHECK_CUDA(cudaMallocAsync(
-                reinterpret_cast<void **>(&tensor_maps_output), tmap_bytes, stream));
+            NVTE_CHECK_CUDA(
+                cudaMallocAsync(reinterpret_cast<void **>(&tensor_maps_input), tmap_bytes, stream));
+            NVTE_CHECK_CUDA(cudaMallocAsync(reinterpret_cast<void **>(&tensor_maps_output),
+                                            tmap_bytes, stream));
             const IType *const input_dptr = reinterpret_cast<const IType *>(input_data.dptr);
             OType *const output_dptr = reinterpret_cast<OType *>(output->data.dptr);
 
@@ -514,11 +511,9 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
           // above finish, and the pool won't reuse the block for another stream before then).
           if (tensor_maps_input != nullptr) {
             NVTE_CHECK_CUDA(cudaFreeAsync(tensor_maps_input, stream));
-          }
-          if (tensor_maps_output != nullptr) {
+          } if (tensor_maps_output != nullptr) {
             NVTE_CHECK_CUDA(cudaFreeAsync(tensor_maps_output, stream));
-          }
-          );  // NOLINT(*)
+          });  // NOLINT(*)
   );           // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
