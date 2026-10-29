@@ -202,8 +202,8 @@ class GroupedLinear(BasicOperation):
         in the forward pass. The scale tensor has shape
         ``(total_tokens,)`` and is split according to the split sizes.
     split_alignment : int, default = ``128``
-        Required alignment of each input split size on the grouped-tensor path.
-        Device-side validation also runs during CUDA graph replay.
+        Expected alignment for input split sizes. Split sizes that do not
+        match alignment may produce errors or incorrect results.
     """
 
     # Operation expects input split sizes (and optionally scales tensor)
