@@ -255,7 +255,7 @@ def fused_attn_fwd(
                 if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout : float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
-                dropout must be 0.0 if is_training is False
+                ignored if is_training is False
     fast_zero_fill : bool, default = True
                 if True, initializes the output tensor O to zero using the fast filling method;
                 if False, uses PyTorch's .fill_() method

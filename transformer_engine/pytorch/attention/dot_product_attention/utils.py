@@ -395,6 +395,8 @@ class FusedAttentionParams:
     o_dtype: DType = DType.kBFloat16
     do_dtype: DType = DType.kBFloat16
     dqkv_dtype: DType = DType.kBFloat16
+    # Model precision for backward when NVTE_FP8_DPA_BWD=0.
+    nominal_dtype: Optional[DType] = None
 
     # tensor layouts
     qkv_layout: tex.NVTE_QKV_Layout = tex.NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
@@ -1640,6 +1642,9 @@ def get_attention_backend(
             bias_batch_size, bias_num_heads, bias_seqlen_q, bias_seqlen_kv = (
                 fu_core_attention_bias_shape
             )
+        model_dtype = qkv_dtype
+        if model_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            model_dtype = nominal_dtype if nominal_dtype is not None else torch.bfloat16
         base_fused_attn_kwargs = {
             "is_training": is_training,
             "deterministic": deterministic,
@@ -1658,6 +1663,7 @@ def get_attention_backend(
             "o_dtype": o_type,
             "do_dtype": do_type,
             "dqkv_dtype": dqkv_type,
+            "nominal_dtype": TE_DType[model_dtype],
             "qkv_layout": QKVLayout[spec.qkv_layout],
             "o_format": QKVFormat[o_format],
             "do_format": QKVFormat[do_format],

@@ -220,6 +220,138 @@ def test_fused_attn_backend_message():
     assert message != ""
 
 
+@pytest.mark.parametrize("dtype", (DType.kFloat16, DType.kBFloat16))
+@pytest.mark.parametrize("fp8_recipe", ("delayed", "current", "mxfp8"))
+@pytest.mark.parametrize("fp8_bwd", (None, "0", "1"))
+@pytest.mark.parametrize("layout", ("bshd_bshd_bshd", "bs3hd"))
+@pytest.mark.parametrize("head_dim", (128, 192))
+def test_fused_attn_query_backward_precision(
+    monkeypatch, dtype, fp8_recipe, fp8_bwd, layout, head_dim
+):
+    """Validate the executed backward, including the Frontend 1.29 MXFP8 workaround."""
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    monkeypatch.delenv("NVTE_FP8_DPA_BWD", raising=False)
+    if fp8_bwd is not None:
+        monkeypatch.setenv("NVTE_FP8_DPA_BWD", fp8_bwd)
+    monkeypatch.setattr(cudnn, "__version__", "1.29.0")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (10, 0))
+    is_mxfp8 = fp8_recipe == "mxfp8"
+    delayed = fp8_recipe == "delayed"
+    effective_layout = "bhsd_bhsd_bhsd" if is_mxfp8 and layout == "bs3hd" else layout
+    config = FusedAttentionParams(
+        qkv_layout=QKVLayout[effective_layout],
+        dqkv_layout=QKVLayout[layout],
+        o_format=QKVFormat["bshd"],
+        do_format=QKVFormat["bshd"],
+        qkv_dtype=DType.kFloat8E4M3,
+        o_dtype=DType.kFloat8E4M3 if delayed else dtype,
+        do_dtype=DType.kFloat8E5M2,
+        dqkv_dtype=DType.kFloat8E5M2 if delayed else dtype,
+        nominal_dtype=dtype if delayed else None,
+        scaling_mode=(
+            tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING
+            if is_mxfp8
+            else tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
+        ),
+        batch_size=2,
+        num_attn_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=head_dim,
+        head_dim_v=128,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+    )
+    queries = []
+
+    def entry(attn):
+        queries.append(attn)
+        graph = Mock()
+        for name, count in (
+            ("sdpa_mxfp8", 3),
+            ("sdpa_fp8", 4),
+            ("sdpa_mxfp8_backward", 6),
+            ("sdpa_fp8_backward", 7),
+            ("sdpa_backward", 3),
+        ):
+            getattr(graph, name).return_value = tuple(Mock() for _ in range(count))
+        implementation.build_attention_graph(cudnn, graph, attn.description())
+
+    monkeypatch.setattr(implementation._AttentionGraph, "entry", entry)
+    backend, message = implementation.get_fused_attn_backend(config)
+    assert len(queries) == 2
+    assert queries[0].fp8
+    if is_mxfp8 and head_dim > 128 and fp8_bwd != "0":
+        assert backend == FusedAttnBackend.No_Backend
+        assert "incorrect scale strides" in message
+        return
+    assert backend == FusedAttnBackend.FP8
+    assert message == ""
+    backward = queries[1]
+    if fp8_bwd == "0":
+        expected = implementation._query_graph(
+            replace(
+                config,
+                qkv_dtype=dtype,
+                o_dtype=dtype,
+                do_dtype=dtype,
+                dqkv_dtype=dtype,
+                qkv_layout=QKVLayout[layout],
+            ),
+            True,
+        )
+        assert backward.description() == expected.description()
+        assert not backward.fp8 and not backward.mxfp8
+        assert not any(name.startswith("descale_") for name in backward.specs)
+
+        # Falling back to model precision must still validate backward support.
+        def reject_backward(attn):
+            if attn.backward:
+                raise ValueError("unsupported model-precision backward")
+
+        monkeypatch.setattr(implementation._AttentionGraph, "entry", reject_backward)
+        backend, message = implementation.get_fused_attn_backend(config)
+        assert backend == FusedAttnBackend.No_Backend
+        assert message == "unsupported model-precision backward"
+    else:
+        assert backward.fp8
+        assert backward.mxfp8 == is_mxfp8
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("qkv_format", ("bshd", "sbhd"))
+def test_fused_attn_inference_ignores_dropout(dtype, qkv_format):
+    """Configured inference dropout must match zero-dropout execution and FP32 SDPA."""
+    shape = (2, 128, 4, 64) if qkv_format == "bshd" else (128, 2, 4, 64)
+    q, k, v = [torch.randn(shape, device="cuda", dtype=dtype) for _ in range(3)]
+    cu = torch.arange(3, device="cuda", dtype=torch.int32) * 128
+    kwargs = dict(
+        is_training=False,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        q=q,
+        k=k,
+        v=v,
+        fake_dtype=dtype,
+        fused_attention_backend=FusedAttnBackend.F16_arbitrary_seqlen,
+        qkv_layout="_".join([qkv_format] * 3),
+        o_format=qkv_format,
+        attn_mask_type="causal",
+    )
+    actual, _ = fused_attn_fwd(dropout=0.25, **kwargs)
+    expected, _ = fused_attn_fwd(dropout=0.0, **kwargs)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    order = (0, 2, 1, 3) if qkv_format == "bshd" else (1, 2, 0, 3)
+    reference = torch.nn.functional.scaled_dot_product_attention(
+        *(tensor.float().permute(order) for tensor in (q, k, v)), is_causal=True
+    )
+    rtol, atol = (2e-2, 1e-2) if dtype == torch.bfloat16 else (3e-3, 2e-3)
+    torch.testing.assert_close(actual.float().permute(order), reference, rtol=rtol, atol=atol)
+
+
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
 @pytest.mark.parametrize("qkv_format", ("bshd", "sbhd"))
 def test_fused_attn_python_execution(monkeypatch, dtype, qkv_format):

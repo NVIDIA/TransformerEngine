@@ -8,7 +8,8 @@ The extension is used only to obtain capture-safe Philox state. Tensor allocatio
 graph construction, plan caching, and execution do not use the common attention API.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import os
 import threading
 
 import torch
@@ -391,6 +392,36 @@ def _query_graph(config, backward):
     """Describe a support query without allocating tensors or touching RNG state."""
     from .fused_attn import QKVLayout, QKVFormat, AttnMaskType, AttnBiasType, SoftmaxType
 
+    if (
+        backward
+        and DType.cast(config.qkv_dtype) in (DType.kFloat8E4M3, DType.kFloat8E5M2)
+        and not int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+    ):
+        # FusedAttnFunc saves model-precision Q/K/V and O for this backward.
+        # The gradient layout records the inputs' layout before FP8 quantization.
+        dtype = config.nominal_dtype
+        if dtype is None:
+            dtype = next(
+                (
+                    t
+                    for t in (config.dqkv_dtype, config.o_dtype)
+                    if t in (DType.kFloat16, DType.kBFloat16)
+                ),
+                DType.kBFloat16,
+            )
+        config = replace(
+            config,
+            qkv_dtype=dtype,
+            o_dtype=dtype,
+            do_dtype=dtype,
+            dqkv_dtype=dtype,
+            qkv_layout=(
+                config.dqkv_layout
+                if config.dqkv_layout != tex.NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
+                else config.qkv_layout
+            ),
+        )
+
     def name(mapping, value):
         return next(k for k, v in mapping.items() if v == value)
 
@@ -676,6 +707,8 @@ def get_fused_attn_backend(config):
 def fused_attn_fwd(params):
     """Execute forward; preserve the extension's output and auxiliary tensor order."""
     p = _normalize(params)
+    if not p["is_training"]:
+        p["dropout"] = 0.0
     with torch.cuda.device(p["q"].device):
         p["rng_state"] = tex.fused_attn_rng_state(p["rng_gen"], p["rng_elts_per_thread"])
         attn = _AttentionGraph(p)
