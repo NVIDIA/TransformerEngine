@@ -99,9 +99,8 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
  *  \param[in,out] output           Output grouped tensor.
  *  \param[in]     quant_config     Quantization configuration.
  *  \param[in]     stream           CUDA stream used for the operation.
- *  For MXFP8 groups with varying last dimensions, this entry point uses shared descriptor
- *  storage with a limit of 64 groups. Use nvte_group_quantize_v2 for caller-owned storage
- *  and concurrent execution on different CUDA streams.
+ *  MXFP8 groups with varying last dimensions require caller-owned descriptor storage.
+ *  This entry point rejects those layouts; use nvte_group_quantize_v2 instead.
  */
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                          const NVTEQuantizationConfig quant_config, cudaStream_t stream);
@@ -116,14 +115,17 @@ void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output
  *  regions without overwriting persistent contents.
  *  The workspace is a one-dimensional byte tensor and requires at least one byte even when
  *  the selected kernel does not need temporary storage.
- *  The caller must supply an allocation satisfying the queried requirements. Execution
- *  does not validate the workspace capacity, tensor metadata, or base alignment.
+ *  Execution validates the tensor's declared byte capacity and base alignment.
+ *  The caller is responsible for the actual allocation behind the supplied pointer.
  *
  *  MXFP8 groups with varying last dimensions use the workspace for TMA descriptors and
- *  metadata, removing the legacy 64-group limit. Its data pointer must be 128-byte aligned.
+ *  metadata, without a fixed group-count limit. Its data pointer must be 128-byte aligned.
  *  Contents are rebuilt on every invocation; no initialization is required. Keep the memory
  *  alive until submitted work completes, and for the lifetime of captured graphs that use it.
- *  Concurrent executions must use separate workspaces or be ordered by CUDA synchronization.
+ *  Keep the tensor/catalog when sharing one allocation: registered CUDA streams receive
+ *  private mutable slots, up to nvte_workspace_max_stream_slots(). Slot exhaustion is an
+ *  error without waiting or eviction. Serialize complete host submissions to one catalog.
+ *  Independent graphs require distinct mutable slots, even if captured on the same stream.
  *  Query and allocate the workspace before CUDA graph capture.
  *
  *  \param[in]     input            Input grouped tensor to be cast.
@@ -445,6 +447,7 @@ void nvte_group_quantize_dbias_dsrelu(const NVTEGroupedTensor input,
 /*! \brief Casts input tensor from reduced to higher precision.
  *         In case of the MXFP8 dequantization, the dequantized values are stored to the rowwise
  *         data of the output tensor, regardless of whether the row- or columnwise scaling is used.
+ *         MXFP8 groups with varying last dimensions require nvte_group_dequantize_v2.
  *
  *  \param[in]     input     Input FP8/MXFP8 tensor to be cast.
  *  \param[in,out] output    Output tensor.
@@ -462,6 +465,19 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
  */
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                            cudaStream_t stream);
+
+/*! \brief Dequantizes grouped tensors using caller-owned workspace.
+ *
+ *  Uses the query/allocate/execute protocol and stream-slot lifetime contract of
+ *  nvte_group_quantize_v2. MXFP8 groups with varying last dimensions keep their
+ *  TMA descriptors in the workspace; no descriptor-count limit is imposed.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ */
+void nvte_group_dequantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                              NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Fused grouped requantization. Currently only MXFP8 1D scaling is supported.
  *

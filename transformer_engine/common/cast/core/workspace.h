@@ -91,6 +91,39 @@ inline void bind_dbias_workspace(Workspace &workspace, TensorWrapper *requiremen
                                 requirement->shape());
 }
 
+// A backend receives a view of just its stream's descriptor region, while the
+// public tensor retains the full catalog, immutable regions, and stream mapping.
+template <typename Launch>
+void dispatch_grouped_workspace(NVTETensor workspace, size_t bytes, cudaStream_t stream,
+                                Launch &&launch) {
+  if (workspace == nullptr) {
+    NVTE_CHECK(bytes == 0,
+               "Grouped MXFP8 with varying last dimensions requires caller-owned workspace. "
+               "Use the workspace-enabled _v2 API (e.g. nvte_group_quantize_v2).");
+    launch(nullptr);
+    return;
+  }
+  const auto *tensor = convertNVTETensorCheck(workspace);
+  if (tensor->data.dptr == nullptr) {
+    TensorWrapper requirement;
+    launch(convertNVTETensorCheck(requirement.data()));
+    requirement.set_rowwise_data(nullptr, DType::kByte,
+                                 std::vector<size_t>{std::max(size_t{1}, bytes)});
+    query_workspace(workspace, kGroupedTmaWorkspaceRegion, bytes, requirement,
+                    kNVTEWorkspaceStreamPersistent);
+    return;
+  }
+  auto &storage = execution_workspace(workspace, kGroupedTmaWorkspaceRegion, bytes, stream,
+                                      kNVTEWorkspaceStreamPersistent);
+  void *data = tensor->data.dptr;
+  if (bytes != 0) {
+    const auto region = storage.require_planned(kGroupedTmaWorkspaceRegion, bytes);
+    data = storage.data(region, stream);
+  }
+  TensorWrapper adapter(data, std::vector<size_t>{std::max(size_t{1}, bytes)}, DType::kByte);
+  launch(convertNVTETensorCheck(adapter.data()));
+}
+
 template <typename Launch>
 void dispatch_dbias_workspace(NVTETensor workspace, cudaStream_t stream, Launch &&launch) {
   const auto *tensor = convertNVTETensorCheck(workspace);

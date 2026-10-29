@@ -34,10 +34,8 @@ namespace transformer_engine {
 namespace dispatch {
 namespace common {
 
-constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
-
 // Non-owning workspace view passed by value to the updater and consumer kernels.
-// Null pointers select the original per-translation-unit device symbols.
+// Variable last dimensions require a complete view; direct paths never dereference it.
 struct GroupedTmaStorageView {
   CUtensorMap *input = nullptr;
   CUtensorMap *act_input = nullptr;
@@ -73,6 +71,13 @@ inline size_t get_grouped_tma_workspace_size(size_t num_tensors) {
   return std::max(size_t{1}, workspace_layout.layout.size());
 }
 
+// Constant last dimensions use launch-local descriptors passed by value.
+inline size_t grouped_tma_workspace_bytes(const GroupedTensor &tensor) {
+  return tensor.all_same_shape() || tensor.all_same_last_dim()
+             ? 0
+             : get_grouped_tma_workspace_size(tensor.num_tensors);
+}
+
 inline GroupedTmaStorageView get_grouped_tma_storage(Tensor *workspace, size_t num_tensors) {
   if (num_tensors == 0) {
     return {};
@@ -88,19 +93,6 @@ inline GroupedTmaStorageView get_grouped_tma_storage(Tensor *workspace, size_t n
           view.get<size_t>(workspace_layout.cols),
           view.get<size_t>(workspace_layout.offsets)};
 }
-
-struct alignas(128) TensorMapStorage {
-  alignas(128) CUtensorMap input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  alignas(128) CUtensorMap act_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  alignas(128) CUtensorMap output_rowwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  alignas(128) CUtensorMap output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  size_t rows[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  size_t cols[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  size_t offsets[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-};
-
-// Internal linkage avoids device-link ODR issues when this header is included by multiple .cu TUs.
-static __device__ TensorMapStorage g_tensor_maps;
 
 inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   const size_t cols = t->flat_last_dim();
@@ -178,16 +170,13 @@ __global__ void __launch_bounds__(THREADS_PER_WARP)
                            const bool colwise, const bool compute_dactivations,
                            const GroupedTmaStorageView storage) {
   const size_t tensor_id = blockIdx.x;
-  size_t *const rows_map = storage.rows != nullptr ? storage.rows : g_tensor_maps.rows;
-  size_t *const cols_map = storage.cols != nullptr ? storage.cols : g_tensor_maps.cols;
-  size_t *const offsets_map = storage.offsets != nullptr ? storage.offsets : g_tensor_maps.offsets;
-  CUtensorMap *const input_maps = storage.input != nullptr ? storage.input : g_tensor_maps.input;
-  CUtensorMap *const act_input_maps =
-      storage.act_input != nullptr ? storage.act_input : g_tensor_maps.act_input;
-  CUtensorMap *const rowwise_maps =
-      storage.output_rowwise != nullptr ? storage.output_rowwise : g_tensor_maps.output_rowwise;
-  CUtensorMap *const colwise_maps =
-      storage.output_colwise != nullptr ? storage.output_colwise : g_tensor_maps.output_colwise;
+  size_t *const rows_map = storage.rows;
+  size_t *const cols_map = storage.cols;
+  size_t *const offsets_map = storage.offsets;
+  CUtensorMap *const input_maps = storage.input;
+  CUtensorMap *const act_input_maps = storage.act_input;
+  CUtensorMap *const rowwise_maps = storage.output_rowwise;
+  CUtensorMap *const colwise_maps = storage.output_colwise;
   const size_t rows =
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
