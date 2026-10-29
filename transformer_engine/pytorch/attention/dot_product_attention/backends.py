@@ -26,6 +26,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.utils import (
     attention_mask_func,
+    requires_grad,
     nvtx_range_push,
     nvtx_range_pop,
     get_nvtx_range_context,
@@ -54,6 +55,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_QKV,
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
+from transformer_engine.pytorch.module._common import check_fp8_reduce_and_update
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.attention.custom_ops import (
     convert_bshd_to_thd,
@@ -1577,6 +1579,7 @@ class FusedAttnFwdArgs:
 
     # --- Attention config ---
     is_training: bool
+    is_grad_enabled: bool
     max_seqlen_q: int
     max_seqlen_kv: int
     attn_scale: float
@@ -1661,6 +1664,7 @@ class FusedAttnBwdArgs:
     dQKV_quantizer: Optional[Any] = None
     dO_quantizer: Optional[Any] = None
     dP_quantizer: Optional[Any] = None
+    reduce_and_update_bwd_fp8_tensors: bool = False
 
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
@@ -2420,6 +2424,11 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
         ctx.backward_objects = bwd_args
+        # As in Linear: the module that claims the first-FP8-module flag runs the backward amax
+        # reduction and scale update, so FP8 attention without a Linear-family module in the
+        # autocast region still updates its backward scales.
+        if bwd_args.fp8 and fwd_args.is_grad_enabled and requires_grad(q, k, v):
+            bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
         if fwd_args.return_max_logit:
             return out, max_logit
         return out
@@ -2431,7 +2440,11 @@ class FusedAttnFunc(torch.autograd.Function):
         bwd_args.grad_output = d_out
         bwd_args.setup_saved_tensors(ctx)
         ctx.backward_objects = None
-        return (*_fused_attn_backward_impl(bwd_args), None)
+        reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
+        grads = _fused_attn_backward_impl(bwd_args)
+        if reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
+            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+        return (*grads, None)
 
 
 def _fused_attn_q_shape(args) -> Tuple[int, ...]:
@@ -2915,6 +2928,7 @@ class FusedAttention(torch.nn.Module):
                 packed_qkv=packed_qkv,
                 packed_kv=packed_kv,
                 is_training=self.training,
+                is_grad_enabled=torch.is_grad_enabled(),
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
                 attn_scale=self.softmax_scale,
