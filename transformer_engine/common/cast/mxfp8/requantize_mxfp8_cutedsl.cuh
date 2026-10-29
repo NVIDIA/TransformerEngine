@@ -45,13 +45,13 @@ struct MXFP8RequantConfig {
         .value_or(false);
   }
 
-  std::optional<tvm_ffi_bridge::TVMFFIKernel> get_kernel() const {
+  std::optional<tvm::ffi::Function> get_kernel() const {
     using namespace tvm_ffi_bridge;
     // Shape-specialized keys do not fit the quantization cache's 32-bit ID.
     // Preserve cached TVM handles until process exit, as TVMFFIConfigCache does.
     struct Cache {
       std::shared_mutex mutex;
-      std::unordered_map<std::string, std::optional<TVMFFIKernel>> kernels;
+      std::unordered_map<std::string, std::optional<tvm::ffi::Function>> kernels;
     };
     static auto *cache = new Cache();
     auto &central = TVMFFICentral::getInstance();
@@ -65,10 +65,7 @@ struct MXFP8RequantConfig {
     std::unique_lock<std::shared_mutex> lock(cache->mutex);
     auto it = cache->kernels.find(key);
     if (it != cache->kernels.end()) return it->second;
-    std::optional<TVMFFIKernel> kernel;
-    if (auto fn = central.load_tvm_ffi_function(*this)) {
-      kernel.emplace(make_tvm_ffi_kernel(std::move(*fn)));
-    }
+    auto kernel = central.load_tvm_ffi_function(*this);
     cache->kernels.emplace(key, kernel);
     return kernel;
   }
