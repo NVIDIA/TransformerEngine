@@ -155,9 +155,7 @@ class GroupedLinear(BasicOperation):
     The grouped-tensor path is selected automatically where it is
     supported (see ``is_op_fuser_grouped_tensor_path_supported``). With
     MXFP8 or FP8 block scaling, it relies on every split size being a
-    multiple of 128, as ``split_alignment`` declares. The grouped-tensor path
-    checks the declared alignment in its device-side offset scan, including
-    during CUDA graph replay.
+    multiple of 128, as ``split_alignment`` declares.
 
     Parameters
     ----------
