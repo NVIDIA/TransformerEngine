@@ -270,6 +270,7 @@ list(APPEND transformer_engine_cpp_sources
      normalization/rtc_dispatch.cpp
      normalization/layernorm/ln_api.cpp
      normalization/rmsnorm/rmsnorm_api.cpp
+     util/cuda_context.cpp
      util/cuda_driver.cpp
      util/cuda_nvml.cpp
      util/cuda_runtime.cpp

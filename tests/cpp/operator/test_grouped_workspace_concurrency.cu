@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/cuda_context.h>
 #include <transformer_engine/workspace.h>
 
 #include <array>
@@ -194,3 +195,38 @@ TEST_P(GroupedWorkspaceConcurrency, IndependentStreamSlots) {
 INSTANTIATE_TEST_SUITE_P(OperatorTest, GroupedWorkspaceConcurrency,
                          ::testing::Combine(::testing::Range(0, 11), ::testing::Bool()));
 }  // namespace
+
+TEST(GroupedWorkspaceTest, ContextResetRebuildsTmaDescriptors) {
+  int device = 0;
+  ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
+  cudaDeviceProp properties;
+  ASSERT_EQ(cudaGetDeviceProperties(&properties, device), cudaSuccess);
+  if (properties.major < 10) GTEST_SKIP() << "Grouped MXFP8 requires Blackwell";
+  WorkspaceWrapper workspace;
+  std::vector<unsigned char> expected, expected_scales;
+  for (int cycle = 0; cycle < 3; ++cycle) {
+    {
+      GroupData data(0);
+      workspace.bind(nullptr);
+      nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(), nullptr,
+                             nullptr);
+      Tensor storage("recovered_workspace", std::vector<size_t>{workspace.size()}, DType::kByte);
+      ASSERT_EQ(cudaMemset(storage.rowwise_dptr(), 0xa5, workspace.size()), cudaSuccess);
+      workspace.bind(storage.rowwise_dptr());
+      nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(), nullptr,
+                             nullptr);
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+      const auto output = read_bytes(data.quantized.rowwise_dptr(), data.elements);
+      const auto scales = read_bytes(data.scales.rowwise_dptr(), data.elements / 32);
+      if (cycle == 0) {
+        expected = output;
+        expected_scales = scales;
+      } else {
+        EXPECT_EQ(output, expected);
+        EXPECT_EQ(scales, expected_scales);
+      }
+    }
+    ASSERT_EQ(cudaDeviceReset(), cudaSuccess);
+    nvte_reset_cuda_state(device);
+  }
+}

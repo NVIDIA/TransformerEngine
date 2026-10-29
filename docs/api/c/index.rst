@@ -17,6 +17,7 @@ directly from C/C++, without Python.
    cast_transpose_noop.h <cast_transpose_noop>
    cast.h <cast>
    cudnn.h <cudnn>
+   cuda_context.h <cuda_context>
    fused_attn.h <fused_attn>
    fused_rope.h <fused_rope>
    gemm.h <gemm>

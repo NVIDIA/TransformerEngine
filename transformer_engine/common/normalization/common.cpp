@@ -523,6 +523,10 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
     DType itype, DType otype, const size_t batch_size, const size_t hidden_size,
     const size_t sm_count, const bool zero_centered_gamma, const bool is_aligned,
     const NVTEScalingMode mode, const bool training, const bool gamma_in_weight_dtype) {
+  const int device = cuda::current_device();
+  auto& device_plans = device_plans_[device];
+  if (!device_plans) device_plans = std::make_unique<DevicePlans>(device);
+  auto& normalizationPlanMap = device_plans->plans;
   const DType ctype = DType::kFloat32;
   bool is_tuned = is_aligned && (batch_size % 4 == 0);
   auto key =

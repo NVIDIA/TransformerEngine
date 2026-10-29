@@ -29,15 +29,10 @@ namespace {
 
 /* Use CUDA const memory to store scalar 1 and 0 for cublas usage
 */
-__device__ __constant__ float one_device;
-__device__ __constant__ float zero_device;
+__device__ __constant__ float one_device = 1.0f;
+__device__ __constant__ float zero_device = 0.0f;
 
 inline float *GetScalarOne() {
-  static std::once_flag init_flag;
-  std::call_once(init_flag, []() {
-    float one = 1.0f;
-    NVTE_CHECK_CUDA(cudaMemcpyToSymbol(one_device, &one, sizeof(float)));
-  });
   // return address by cudaGetSymbolAddress
   float *dev_ptr;
   NVTE_CHECK_CUDA(cudaGetSymbolAddress(reinterpret_cast<void **>(&dev_ptr), one_device));
@@ -45,11 +40,6 @@ inline float *GetScalarOne() {
 }
 
 inline float *GetScalarZero() {
-  static std::once_flag init_flag;
-  std::call_once(init_flag, []() {
-    float zero = 0.0f;
-    NVTE_CHECK_CUDA(cudaMemcpyToSymbol(zero_device, &zero, sizeof(float)));
-  });
   // return address by cudaGetSymbolAddress
   float *dev_ptr;
   NVTE_CHECK_CUDA(cudaGetSymbolAddress(reinterpret_cast<void **>(&dev_ptr), zero_device));

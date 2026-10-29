@@ -16,9 +16,20 @@
 #include <vector>
 
 #include "common.h"
+#include "util/cuda_context.h"
 #include "util/workspace.h"
 
 namespace transformer_engine {
+
+// Plans share this object with the active catalog. Abandoning a dead context's
+// event must affect every copy, including snapshots destroyed after recovery.
+struct WorkspaceReadyEvent {
+  cudaEvent_t event = nullptr;
+  cuda_context::Generation context;
+  ~WorkspaceReadyEvent() {
+    if (event != nullptr && context.current()) cudaEventDestroy(event);
+  }
+};
 
 struct WorkspaceRegionRecord {
   std::string name;
@@ -28,7 +39,7 @@ struct WorkspaceRegionRecord {
   size_t slot_stride = 0;
   NVTEWorkspaceLifetime lifetime;
   uint64_t initialized_generation = 0;
-  std::shared_ptr<cudaEvent_t> ready;
+  std::shared_ptr<WorkspaceReadyEvent> ready;
   std::array<bool, kMaxWorkspaceStreamSlots> ready_streams{};
 };
 
@@ -53,7 +64,7 @@ class WorkspacePlan {
 
 // Host-side catalog for a caller-owned device allocation. The owner serializes
 // metadata access and keeps current/retired allocations alive for their users.
-class Workspace {
+class Workspace : public cuda_context::Resource {
  public:
   Workspace() = default;
   Workspace(const Workspace &) = delete;
@@ -78,6 +89,7 @@ class Workspace {
   void initialize(NVTEWorkspaceRegion region, cudaStream_t stream,
                   NVTEWorkspaceInitializer initializer, void *user_data);
   void invalidate(NVTEWorkspaceRegion region);
+  void invalidate_context() noexcept override;
 
  private:
   friend class WorkspacePlan;

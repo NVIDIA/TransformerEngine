@@ -7,8 +7,10 @@
 #ifndef TRANSFORMER_ENGINE_UTIL_HANDLE_MANAGER_H_
 #define TRANSFORMER_ENGINE_UTIL_HANDLE_MANAGER_H_
 
+#include <memory>
 #include <vector>
 
+#include "cuda_context.h"
 #include "cuda_runtime.h"
 #include "logging.h"
 
@@ -23,28 +25,34 @@ class HandleManager {
   }
 
   Handle GetHandle() {
-    static thread_local std::vector<bool> initialized(handles_.size(), false);
     const int device_id = cuda::current_device();
     NVTE_CHECK(0 <= device_id && device_id < handles_.size(), "invalid CUDA device ID");
-    if (!initialized[device_id]) {
-      Create(&(handles_[device_id]));
-      initialized[device_id] = true;
+    auto& slot = handles_[device_id];
+    if (!slot) slot = std::make_unique<Slot>(device_id);
+    if (slot->handle == nullptr) {
+      Handle handle = nullptr;
+      Create(&handle);
+      slot->handle = handle;
     }
-    return handles_[device_id];
-  }
-
-  ~HandleManager() {
-    if (Destroy != nullptr) {
-      for (auto& handle : handles_) {
-        Destroy(handle);
-      }
-    }
+    return slot->handle;
   }
 
  private:
-  HandleManager() : handles_(cuda::num_devices(), nullptr) {}
+  struct Slot : cuda_context::Resource {
+    explicit Slot(int device) { bind_context(device); }
+    ~Slot() override {
+      if (Destroy != nullptr && handle != nullptr) Destroy(handle);
+    }
+    void invalidate_context() noexcept override {
+      // cudnnDestroy may dereference memory released by cudaDeviceReset.
+      handle = nullptr;
+    }
+    Handle handle = nullptr;
+  };
 
-  std::vector<Handle> handles_ = nullptr;
+  HandleManager() : handles_(cuda::num_devices()) {}
+
+  std::vector<std::unique_ptr<Slot>> handles_;
 };
 
 }  // namespace transformer_engine::detail
