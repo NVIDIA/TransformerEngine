@@ -13,7 +13,7 @@ import functools
 import torch
 import transformer_engine_torch as tex
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
 from ..utils import (

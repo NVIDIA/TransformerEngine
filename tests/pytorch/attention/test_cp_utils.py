@@ -1017,6 +1017,116 @@ class TestTHDKernels(unittest.TestCase):
         self.assertTrue(torch.equal(rank0, expected_rank0))
         self.assertTrue(torch.equal(rank1, expected_rank1))
 
+    def test_thd_get_partitioned_indices_shared_memory_boundary(self):
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        if not hasattr(props, "shared_memory_per_block"):
+            self.skipTest(f"PyTorch {torch.__version__} does not expose shared-memory limits")
+        max_shared_docs = props.shared_memory_per_block // 4 - 1
+        for documents in (max_shared_docs, max_shared_docs + 1):
+            for cp_size in (2, 4):
+                cu_seqlens = torch.arange(documents + 1, device="cuda", dtype=torch.int32)
+                cu_seqlens *= 2 * cp_size
+                tokens = torch.arange(
+                    documents * 2 * cp_size, device="cuda", dtype=torch.int32
+                ).view(documents, 2 * cp_size)
+                for rank in range(cp_size):
+                    with self.subTest(documents=documents, cp_size=cp_size, rank=rank):
+                        indices = tex.thd_get_partitioned_indices(
+                            cu_seqlens, tokens.numel(), cp_size, rank
+                        )
+                        expected = tokens[:, [rank, 2 * cp_size - 1 - rank]].reshape(-1)
+                        torch.cuda.synchronize()
+                        self.assertTrue(torch.equal(indices, expected))
+
+    def test_thd_kernels_shared_memory_boundary(self):
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        if not hasattr(props, "shared_memory_per_block"):
+            self.skipTest(f"PyTorch {torch.__version__} does not expose shared-memory limits")
+        for tables in (1, 2):
+            bytes_per_document = 4 * tables
+            for documents in (
+                props.shared_memory_per_block // bytes_per_document - 1,
+                props.shared_memory_per_block // bytes_per_document,
+            ):
+                with self.subTest(tables=tables, documents=documents):
+                    cu = torch.arange(documents + 1, dtype=torch.int32, device="cuda") * 4
+                    total = documents * 4
+                    x = torch.arange(total * 4, dtype=torch.float32, device="cuda").view(
+                        total, 1, 4
+                    )
+                    docs = x.view(documents, 4, 1, 4)
+                    if tables == 2:
+                        out = torch.full_like(x, -1)
+                        expected = out.clone().view_as(docs)
+                        expected[:, :2] = docs[:, :2]
+                        tex.thd_copy_valid_tokens_from_per_split_to_rank_local(out, x, cu, cu // 2)
+                        self.assertTrue(torch.equal(out, expected.reshape_as(out)))
+                        continue
+
+                    reordered = tex.thd_sequence_order_to_cp_rank_order(x, cu, 2, total)
+                    expected = torch.cat(
+                        [docs[:, [rank, 3 - rank]].reshape(-1, 1, 4) for rank in range(2)]
+                    )
+                    self.assertTrue(torch.equal(reordered, expected))
+                    restored = tex.thd_cp_rank_order_to_sequence_order(reordered, cu, 2, total)
+                    self.assertTrue(torch.equal(restored, x))
+                    for half in (0, 1):
+                        actual = tex.thd_read_half_tensor(x, cu, half)
+                        expected = docs[:, 2 * half : 2 * half + 2].reshape_as(actual)
+                        self.assertTrue(torch.equal(actual, expected))
+
+                    for packed in (False, True):
+                        shape = (1, total) if packed else (documents, 1, 4)
+                        half_shape = (1, total // 2) if packed else (documents, 1, 2)
+                        lse = torch.arange(total, dtype=torch.float32, device="cuda").view(shape)
+                        lse /= total
+                        half_lse = tex.thd_read_second_half_lse(
+                            lse, cu, packed, total // 2 if packed else 2
+                        )
+                        expected_half = lse.reshape(documents, 4)[:, 2:].reshape(half_shape)
+                        self.assertTrue(torch.equal(half_lse, expected_half))
+                        expected = lse.clone()
+                        expected.reshape(documents, 4)[:, 2:] = torch.logaddexp(
+                            expected_half.reshape(documents, 2),
+                            torch.zeros_like(expected_half).reshape(documents, 2),
+                        )
+                        tex.thd_second_half_lse_correction(
+                            lse, torch.zeros_like(half_lse), cu, packed
+                        )
+                        torch.testing.assert_close(lse, expected)
+
+                        for second_half in (False, True):
+                            out = torch.full_like(x, 3)
+                            step = torch.ones_like(x[: total // (2 if second_half else 1)])
+                            old_lse = torch.full(shape, 0.5, device="cuda").log()
+                            expected = out.clone().view_as(docs)
+                            expected[:, 2 if second_half else 0 :] *= 0.5
+                            expected[:, 2 if second_half else 0 :] += 1
+                            tex.thd_out_correction(
+                                out,
+                                step,
+                                old_lse,
+                                torch.zeros(shape, device="cuda"),
+                                torch.zeros(half_shape if second_half else shape, device="cuda"),
+                                cu,
+                                second_half,
+                                packed,
+                            )
+                            torch.testing.assert_close(out, expected.reshape_as(out))
+
+                    grad = x.clone()
+                    tex.thd_grad_correction(grad, torch.ones_like(x), cu, "add", "copy")
+                    expected = docs.clone()
+                    expected[:, :2] += 1
+                    expected[:, 2:] = 1
+                    self.assertTrue(torch.equal(grad, expected.reshape_as(grad)))
+                    grad.fill_(-1)
+                    tex.thd_grad_correction(grad, x[: total // 2], cu, "copy", "zero")
+                    expected.zero_()
+                    expected[:, :2] = x[: total // 2].view(documents, 2, 1, 4)
+                    torch.cuda.synchronize()
+                    self.assertTrue(torch.equal(grad, expected.reshape_as(grad)))
+
     def test_thd_copy_valid_tokens_from_per_split_matches_legacy_slice_copy_loop(self):
         cu_seqlens_padded = torch.tensor([2, 6, 12], dtype=torch.int32, device="cuda")
         cu_seqlens = torch.tensor([0, 3, 7], dtype=torch.int32, device="cuda")
