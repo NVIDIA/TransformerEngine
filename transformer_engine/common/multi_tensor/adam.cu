@@ -386,9 +386,18 @@ struct AdamCapturableFunctor {
                                              TensorListMetadata<4> &tl,  // NOLINT(*)
                                              const float beta1, const float beta2, const int *step,
                                              const int bias_correction, const float epsilon,
-                                             const float *lr, adamMode_t mode, const float decay,
-                                             const float *inv_scale) {
+                                             const float *lr_ptr, adamMode_t mode,
+                                             const float decay, const float *inv_scale_ptr) {
     if (*noop_gmem == 1) return;
+
+    // Note: Tensors are accessed through untyped pointers, so the compiler must assume that
+    // any store may alias any other memory access. To keep all of an iteration's loads in
+    // flight together, the device scalars are read once up front and the unscaled gradients
+    // are written back only after all loads are issued (but before the update, which modifies
+    // r_g in L2 mode). Unscaling by 1 is the identity, so the write-back is skipped then.
+    const float lr = *lr_ptr;
+    const float inv_scale = *inv_scale_ptr;
+    const bool write_unscaled_grads = inv_scale != 1.0f;
 
     float beta1_correction = 1.0f, beta2_correction = 1.0f;
     if (bias_correction == 1) {
@@ -428,8 +437,7 @@ struct AdamCapturableFunctor {
       for (int ii = 0; ii < ILP; ii++) {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
-          r_g[ii] = static_cast<MATH_T>(g[i]) * (*inv_scale);
-          g[i] = static_cast<GRAD_T>(r_g[ii]);
+          r_g[ii] = static_cast<MATH_T>(g[i]) * inv_scale;
           r_p[ii] = static_cast<MATH_T>(p[i]);
           r_m[ii] = static_cast<MATH_T>(m[i]);
           r_v[ii] = static_cast<MATH_T>(v[i]);
@@ -438,6 +446,15 @@ struct AdamCapturableFunctor {
           r_p[ii] = MATH_T(0);
           r_m[ii] = MATH_T(0);
           r_v[ii] = MATH_T(0);
+        }
+      }
+      if (write_unscaled_grads) {
+#pragma unroll
+        for (int ii = 0; ii < ILP; ii++) {
+          int i = i_start + threadIdx.x + ii * blockDim.x;
+          if (i < n && i < chunk_size) {
+            g[i] = static_cast<GRAD_T>(r_g[ii]);
+          }
         }
       }
 #pragma unroll
@@ -450,7 +467,7 @@ struct AdamCapturableFunctor {
           MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
           MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
           MATH_T update = next_m_unbiased / denom;
-          r_p[ii] = r_p[ii] - (*lr * update);
+          r_p[ii] = r_p[ii] - (lr * update);
         } else {  // weight decay
           r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
           r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
@@ -458,7 +475,7 @@ struct AdamCapturableFunctor {
           MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
           MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
           MATH_T update = (next_m_unbiased / denom) + (decay * r_p[ii]);
-          r_p[ii] = r_p[ii] - (*lr * update);
+          r_p[ii] = r_p[ii] - (lr * update);
         }
       }
 #pragma unroll
@@ -480,9 +497,14 @@ struct AdamCapturableMasterFunctor {
                                              TensorListMetadata<5> &tl,  // NOLINT(*)
                                              const float beta1, const float beta2, const int *step,
                                              const int bias_correction, const float epsilon,
-                                             const float *lr, adamMode_t mode, const float decay,
-                                             const float *inv_scale) {
+                                             const float *lr_ptr, adamMode_t mode,
+                                             const float decay, const float *inv_scale_ptr) {
     if (*noop_gmem == 1) return;
+
+    // See note in AdamCapturableFunctor
+    const float lr = *lr_ptr;
+    const float inv_scale = *inv_scale_ptr;
+    const bool write_unscaled_grads = inv_scale != 1.0f;
 
     float beta1_correction = 1.0f, beta2_correction = 1.0f;
     if (bias_correction == 1) {
@@ -525,8 +547,7 @@ struct AdamCapturableMasterFunctor {
       for (int ii = 0; ii < ILP; ii++) {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
-          r_g[ii] = static_cast<MATH_T>(g[i]) * (*inv_scale);
-          g[i] = static_cast<GRAD_T>(r_g[ii]);
+          r_g[ii] = static_cast<MATH_T>(g[i]) * inv_scale;
           r_p[ii] = static_cast<MATH_T>(p_master[i]);
           r_m[ii] = static_cast<MATH_T>(m[i]);
           r_v[ii] = static_cast<MATH_T>(v[i]);
@@ -535,6 +556,15 @@ struct AdamCapturableMasterFunctor {
           r_p[ii] = MATH_T(0);
           r_m[ii] = MATH_T(0);
           r_v[ii] = MATH_T(0);
+        }
+      }
+      if (write_unscaled_grads) {
+#pragma unroll
+        for (int ii = 0; ii < ILP; ii++) {
+          int i = i_start + threadIdx.x + ii * blockDim.x;
+          if (i < n && i < chunk_size) {
+            g[i] = static_cast<GRAD_T>(r_g[ii]);
+          }
         }
       }
 #pragma unroll
@@ -547,7 +577,7 @@ struct AdamCapturableMasterFunctor {
           MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
           MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
           MATH_T update = next_m_unbiased / denom;
-          r_p[ii] = r_p[ii] - (*lr * update);
+          r_p[ii] = r_p[ii] - (lr * update);
         } else {  // weight decay
           r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
           r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
@@ -555,7 +585,7 @@ struct AdamCapturableMasterFunctor {
           MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
           MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
           MATH_T update = (next_m_unbiased / denom) + (decay * r_p[ii]);
-          r_p[ii] = r_p[ii] - (*lr * update);
+          r_p[ii] = r_p[ii] - (lr * update);
         }
       }
 #pragma unroll
