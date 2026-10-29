@@ -11,7 +11,7 @@ import os
 import functools
 import torch
 import transformer_engine_torch as tex
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
 from ..utils import ceil_div, get_cached_ones_tensor, get_sm_count, _empty_tensor
 
