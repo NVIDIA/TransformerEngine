@@ -15,30 +15,25 @@ def _is_nan(x):
 
 
 @triton.jit
-def _fold_block_argmax(x, i, offsets, n_cols, run_max, run_idx, run_nan):
+def _fold_block_argmax(x, offsets, n_cols, run_max, run_idx, run_nan):
     """Fold one block of a row into a running argmax with torch.argmax's semantics: NaN counts
     as the maximum, and the first maximum (or the first NaN) wins.
 
-    tl.max(..., return_indices=True) is not NaN-safe (its comparisons are false for NaN, so a
-    block with a NaN can give a pair that is neither the maximum nor the NaN). NaN is therefore
-    found separately and the maximum is taken over the other values. run_max is kept apart from
-    the loss's running maximum, which is unchanged."""
+    The maximum is taken over the non-NaN values and its first index is found with one
+    min-reduction, which is cheaper than tl.max(..., return_indices=True) and, unlike it, safe
+    with NaN. The position of a NaN is only searched for in the first block that has one.
+    run_max is kept apart from the loss's running maximum, which is unchanged."""
     is_nan = _is_nan(x)
-    block_has_nan = tl.max(is_nan.to(tl.int32)) > 0
-    first_nan = tl.min(tl.where(is_nan, offsets, n_cols))
-    block_max, block_idx = tl.max(
-        tl.where(is_nan, float("-inf"), x),
-        axis=0,
-        return_indices=True,
-        return_indices_tie_break_left=True,
-    )
+    x_no_nan = tl.where(is_nan, float("-inf"), x)
+    block_max = tl.max(x_no_nan)
     if run_nan == 0:
+        block_has_nan = tl.max(is_nan.to(tl.int32)) > 0
         if block_has_nan:
-            run_idx = first_nan
+            run_idx = tl.min(tl.where(is_nan, offsets, n_cols))
             run_nan = 1
         elif block_max > run_max:
             # Only a strictly larger maximum replaces an earlier one: first index wins.
-            run_idx = i + block_idx
+            run_idx = tl.min(tl.where(x_no_nan == block_max, offsets, n_cols))
             run_max = block_max
     return run_max, run_idx, run_nan
 
@@ -93,7 +88,7 @@ def cross_entropy_forward_kernel(
         x = x.to(tl.float32)
         if COMPUTE_ARGMAX:
             argmax_max, argmax, argmax_nan = _fold_block_argmax(
-                x, i, offsets, n_cols, argmax_max, argmax, argmax_nan
+                x, offsets, n_cols, argmax_max, argmax, argmax_nan
             )
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
@@ -179,7 +174,7 @@ def cross_entropy_tp_pre_kernel(
         x = x.to(tl.float32)
         if COMPUTE_ARGMAX:
             argmax_max, argmax, argmax_nan = _fold_block_argmax(
-                x, i, offsets, n_cols, argmax_max, argmax, argmax_nan
+                x, offsets, n_cols, argmax_max, argmax, argmax_nan
             )
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
@@ -318,3 +313,110 @@ def cross_entropy_backward_kernel(
         is_target = target_is_local & (offsets == target_col)
         grad -= tl.where(is_target, 1 - label_smoothing, 0.0)
         tl.store(saved_input_ptr + offsets, grad * grad_output, mask=mask)
+
+
+@triton.jit
+def _mxfp8_scale_exponent(amax, MAX_NORM_RCP: tl.constexpr):
+    """E8M0 block scale of TE's MXFP8 cast: amax * (1 / max_norm) in FP32, rounded up to a power
+    of two. Finite gradients give the bytes of TE's cast; non-finite ones are not special-cased."""
+    val = amax * MAX_NORM_RCP
+    bits = val.to(tl.int32, bitcast=True)
+    exponent = (bits >> 23) & 0xFF
+    mantissa = bits & 0x7FFFFF
+    round_up = (mantissa > 0) & (exponent != 0xFE) & ~((exponent == 0) & (mantissa <= 0x400000))
+    return tl.where(round_up, exponent + 1, exponent)
+
+
+@triton.jit
+def _mxfp8_scale_reciprocal(exponent):
+    """2^-(exponent - 127) as FP32, as TE's exp2f_rcp<float> for finite scales."""
+    bits = tl.where(exponent == 254, 0x00400000, (254 - exponent) << 23)
+    return bits.to(tl.float32, bitcast=True)
+
+
+@triton.jit
+def cross_entropy_backward_mxfp8_kernel(
+    saved_input_ptr,
+    Y_ptr,
+    stats_ptr,
+    n_non_ignore_ptr,
+    grad_output_ptr,
+    grad_output_stride,
+    rowwise_data_ptr,
+    rowwise_scale_ptr,
+    rowwise_scale_stride,
+    columnwise_data_ptr,
+    columnwise_scale_ptr,
+    columnwise_scale_stride,
+    n_cols,
+    ignore_idx,
+    reduce_loss: tl.constexpr,
+    label_smoothing: tl.constexpr,
+    ROWWISE: tl.constexpr,
+    COLUMNWISE: tl.constexpr,
+    FP8_E5M2: tl.constexpr,
+    BLOCK_COLS: tl.constexpr,
+):
+    """Single-rank derivative of a 32-row x BLOCK_COLS tile, written as MXFP8.
+
+    The derivative is computed as cross_entropy_backward_kernel computes it and rounded to the
+    input dtype (BF16), then quantized as TE's MXFP8 cast quantizes it: row-wise with 1x32
+    blocks along the vocabulary and column-wise with 32x1 blocks along the tokens."""
+    pid_r = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    rows = (pid_r * 32 + tl.arange(0, 32)).to(tl.int64)
+    cols = pid_c * BLOCK_COLS + tl.arange(0, BLOCK_COLS)
+    offsets = rows[:, None] * n_cols + cols[None, :]
+
+    y = tl.load(Y_ptr + rows)
+    m = tl.load(stats_ptr + rows * 2)
+    d = tl.load(stats_ptr + rows * 2 + 1)
+    grad_output = tl.load(grad_output_ptr + rows * grad_output_stride).to(tl.float32)
+    if reduce_loss:
+        grad_output = grad_output / tl.load(n_non_ignore_ptr)
+
+    eps = label_smoothing / n_cols
+    x = tl.load(saved_input_ptr + offsets).to(tl.float32)
+    grad = tl.exp(x - m[:, None]) / d[:, None] - eps
+    grad -= tl.where(cols[None, :] == y[:, None], 1 - label_smoothing, 0.0)
+    grad = grad * grad_output[:, None]
+    grad = tl.where((y == ignore_idx)[:, None], 0.0, grad)
+    grad = grad.to(saved_input_ptr.dtype.element_ty).to(tl.float32)
+    grad_abs = tl.abs(grad)
+
+    if FP8_E5M2:
+        MAX_NORM_RCP: tl.constexpr = 1.0 / 57344.0
+    else:
+        MAX_NORM_RCP: tl.constexpr = 1.0 / 448.0
+
+    if ROWWISE:
+        N_BLOCKS: tl.constexpr = BLOCK_COLS // 32
+        amax = tl.max(tl.reshape(grad_abs, (32, N_BLOCKS, 32)), axis=2)
+        exponent = _mxfp8_scale_exponent(amax, MAX_NORM_RCP)
+        scaled = tl.reshape(
+            tl.reshape(grad, (32, N_BLOCKS, 32)) * _mxfp8_scale_reciprocal(exponent)[:, :, None],
+            (32, BLOCK_COLS),
+        )
+        if FP8_E5M2:
+            data = scaled.to(tl.float8e5)
+        else:
+            data = scaled.to(tl.float8e4nv)
+        tl.store(rowwise_data_ptr + offsets, data.to(tl.uint8, bitcast=True))
+        scale_cols = pid_c * N_BLOCKS + tl.arange(0, N_BLOCKS)
+        tl.store(
+            rowwise_scale_ptr + rows[:, None] * rowwise_scale_stride + scale_cols[None, :],
+            exponent.to(tl.uint8),
+        )
+
+    if COLUMNWISE:
+        exponent = _mxfp8_scale_exponent(tl.max(grad_abs, axis=0), MAX_NORM_RCP)
+        scaled = grad * _mxfp8_scale_reciprocal(exponent)[None, :]
+        if FP8_E5M2:
+            data = scaled.to(tl.float8e5)
+        else:
+            data = scaled.to(tl.float8e4nv)
+        tl.store(columnwise_data_ptr + offsets, data.to(tl.uint8, bitcast=True))
+        tl.store(
+            columnwise_scale_ptr + pid_r.to(tl.int64) * columnwise_scale_stride + cols,
+            exponent.to(tl.uint8),
+        )
