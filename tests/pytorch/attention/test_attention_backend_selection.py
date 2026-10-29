@@ -11,6 +11,7 @@ import torch
 from packaging.version import Version as PkgVersion
 
 from transformer_engine.pytorch import DotProductAttention
+from transformer_engine.common.utils import cudnn_attention_enabled
 from transformer_engine.pytorch.attention.dot_product_attention import (
     backends as dpa_backends,
     dot_product_attention as dpa_module,
@@ -30,6 +31,7 @@ def isolated_backends(monkeypatch):
         ("NVTE_UNFUSED_ATTN", "1"),
     ):
         monkeypatch.setenv(name, value)
+    monkeypatch.delenv("NVTE_CUDNN_ATTN", raising=False)
     monkeypatch.setattr(
         dpa_module,
         "_attention_backends",
@@ -233,3 +235,32 @@ def _fa4_normalized_kwargs(kwargs):
 def test_fa4_window_sentinel_normalization(sent, expected):
     """Convert only TE's -1 sentinel for both FA4 window argument forms."""
     assert _fa4_normalized_kwargs(sent) == expected
+
+
+@pytest.mark.parametrize(
+    "fused,cudnn,expected",
+    [
+        pytest.param(None, None, 1, id="default"),
+        pytest.param("0", None, 0, id="fused-only"),
+        pytest.param(None, "0", 0, id="cudnn-only"),
+        pytest.param("1", "1", 1, id="both-agree"),
+    ],
+)
+def test_cudnn_attn_alias(monkeypatch, fused, cudnn, expected):
+    for name, value in (("NVTE_FUSED_ATTN", fused), ("NVTE_CUDNN_ATTN", cudnn)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    assert cudnn_attention_enabled() == expected
+
+
+def test_cudnn_attn_alias_conflict(monkeypatch):
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_CUDNN_ATTN", "0")
+    with pytest.raises(ValueError, match="conflicts with NVTE_FUSED_ATTN"):
+        cudnn_attention_enabled()
+
+
+def test_cudnn_attn_alias_invalidates_backend_cache():
+    assert "NVTE_CUDNN_ATTN" in dpa_module._THD_POLICY_BACKEND_ENV_VARS

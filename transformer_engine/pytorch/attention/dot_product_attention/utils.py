@@ -62,6 +62,7 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 from transformer_engine.pytorch.jit import jit_fuser
+from transformer_engine.common.utils import cudnn_attention_enabled
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
@@ -623,7 +624,7 @@ def get_attention_backend(
     use_flash_attention_3 = use_flash_attention and int(os.environ.get("NVTE_FLASH_ATTN_V3", "1"))
     use_flash_attention_4 = use_flash_attention and int(os.environ.get("NVTE_FLASH_ATTN_V4", "1"))
     flash_attention_backend = None
-    use_fused_attention = int(os.environ.get("NVTE_FUSED_ATTN", "1"))
+    use_fused_attention = cudnn_attention_enabled()
     use_unfused_attention = int(os.environ.get("NVTE_UNFUSED_ATTN", "1"))
     if not use_flash_attention_2 and FlashAttentionUtils.is_installed:
         logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0 or NVTE_FLASH_ATTN_V2=0")
@@ -632,7 +633,10 @@ def get_attention_backend(
     if not use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
         logger.debug("Disabling FlashAttention 4 due to NVTE_FLASH_ATTN=0 or NVTE_FLASH_ATTN_V4=0")
     if not use_fused_attention:
-        logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
+        logger.debug(
+            "Disabling cuDNN attention (FusedAttention) due to NVTE_CUDNN_ATTN=0 or"
+            " NVTE_FUSED_ATTN=0"
+        )
     if not use_unfused_attention:
         logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
 
@@ -1926,7 +1930,7 @@ def get_attention_backend(
         flash_attention_backend = FlashAttentionUtils.fa4_version
 
     logger.debug(
-        "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
+        "Available backends = {FlashAttention=%s%s, cuDNN attention (FusedAttention)=%s%s,"
         " UnfusedDotProductAttention=%s}",
         bool(available_backends[0]),
         (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
@@ -1972,7 +1976,9 @@ def get_attention_backend(
     if use_flash_attention:
         selected_backend = f"FlashAttention ({str(flash_attention_backend)})"
     elif use_fused_attention:
-        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
+        selected_backend = (
+            f"cuDNN attention (FusedAttention, sub-backend {int(fused_attention_backend)})"
+        )
     elif use_unfused_attention:
         selected_backend = "UnfusedDotProductAttention"
     logger.debug("Selected backend = %s.", selected_backend)
