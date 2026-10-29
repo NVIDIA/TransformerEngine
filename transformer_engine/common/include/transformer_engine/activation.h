@@ -61,8 +61,23 @@ void nvte_gelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_gelu_v2.
  */
 void nvte_group_gelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_gelu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_gelu_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                        NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes the SiLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -82,8 +97,23 @@ void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_silu_v2.
  */
 void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_silu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_silu_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                        NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Grouped scaled SwiGLU "recompute" fused with MXFP8 columnwise quantization.
  *
@@ -148,8 +178,23 @@ void nvte_relu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_relu_v2.
  */
 void nvte_group_relu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_relu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_relu_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                        NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes the Quick GeLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -169,8 +214,23 @@ void nvte_qgelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_qgelu_v2.
  */
 void nvte_group_qgelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_qgelu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_qgelu_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                         NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes the Squared ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -190,8 +250,23 @@ void nvte_srelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_srelu_v2.
  */
 void nvte_group_srelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_srelu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_srelu_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                         NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes the GeLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -214,9 +289,25 @@ void nvte_dgelu(const NVTETensor grad, const NVTETensor input, NVTETensor output
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_dgelu_v2.
  */
 void nvte_group_dgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
                       NVTETensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_dgelu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] grad Incoming grouped gradient.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_dgelu_v2(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                         NVTEGroupedTensor output, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes the SiLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -239,9 +330,25 @@ void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_dsilu_v2.
  */
 void nvte_group_dsilu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
                       NVTETensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_dsilu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] grad Incoming grouped gradient.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_dsilu_v2(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                         NVTEGroupedTensor output, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes the ReLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -264,9 +371,25 @@ void nvte_drelu(const NVTETensor grad, const NVTETensor input, NVTETensor output
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_drelu_v2.
  */
 void nvte_group_drelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
                       NVTETensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_drelu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] grad Incoming grouped gradient.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_drelu_v2(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                         NVTEGroupedTensor output, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes the Quick GeLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -289,9 +412,25 @@ void nvte_dqgelu(const NVTETensor grad, const NVTETensor input, NVTETensor outpu
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_dqgelu_v2.
  */
 void nvte_group_dqgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
                        NVTETensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_dqgelu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] grad Incoming grouped gradient.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_dqgelu_v2(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                          NVTEGroupedTensor output, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes the Squared ReLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -314,9 +453,25 @@ void nvte_dsrelu(const NVTETensor grad, const NVTETensor input, NVTETensor outpu
  *  \param[in]     input     Input grouped tensor for activation.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
+ *  MXFP8 groups with varying last dimensions require nvte_group_dsrelu_v2.
  */
 void nvte_group_dsrelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
                        NVTETensor output, cudaStream_t stream);
+
+/*! \brief Workspace-aware variant of nvte_group_dsrelu.
+ *
+ *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
+ *  MXFP8 groups with varying last dimensions store descriptors and metadata in
+ *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  \param[in] grad Incoming grouped gradient.
+ *  \param[in] input Input grouped tensor.
+ *  \param[in,out] output Output grouped tensor.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] stream CUDA stream used for the operation.
+ *  \see nvte_group_quantize_v2
+ */
+void nvte_group_dsrelu_v2(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                          NVTEGroupedTensor output, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes the GLU (Gated Linear Unit) activation of the input.
  *         GLU(a,b) = sigmoid(a) * b

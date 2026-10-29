@@ -661,7 +661,17 @@ void performTest(const ProcessingMethod processing_method,
                     }
                 }
             } else {
-                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
+                if (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM) {
+                    nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
+                } else {
+                    EXPECT_THROW(nvte_group_quantize(in_group_tensor, out_group_tensor,
+                                                     quant_config, 0), std::runtime_error);
+                    nvte_group_quantize_v2(in_group_tensor, out_group_tensor, workspace.data(),
+                                           quant_config, 0);
+                    workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+                    nvte_group_quantize_v2(in_group_tensor, out_group_tensor, workspace.data(),
+                                           quant_config, 0);
+                }
             }
             break;
         }
@@ -695,21 +705,25 @@ void performTest(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_ACT: {
-            auto nvte_group_act = &nvte_group_gelu;
-            if (OP == &silu)       { nvte_group_act = &nvte_group_silu; }
-            else if (OP == &relu)  { nvte_group_act = &nvte_group_relu; }
-            else if (OP == &qgelu) { nvte_group_act = &nvte_group_qgelu; }
-            else if (OP == &srelu) { nvte_group_act = &nvte_group_srelu; }
-            nvte_group_act(in_group_tensor, out_group_tensor, 0);
+            auto nvte_group_act = &nvte_group_gelu_v2;
+            if (OP == &silu)       { nvte_group_act = &nvte_group_silu_v2; }
+            else if (OP == &relu)  { nvte_group_act = &nvte_group_relu_v2; }
+            else if (OP == &qgelu) { nvte_group_act = &nvte_group_qgelu_v2; }
+            else if (OP == &srelu) { nvte_group_act = &nvte_group_srelu_v2; }
+            nvte_group_act(in_group_tensor, out_group_tensor, workspace.data(), 0);
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+            nvte_group_act(in_group_tensor, out_group_tensor, workspace.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            auto nvte_group_dact = &nvte_group_dgelu;
-            if (OP == &dsilu)       { nvte_group_dact = &nvte_group_dsilu; }
-            else if (OP == &drelu)  { nvte_group_dact = &nvte_group_drelu; }
-            else if (OP == &dqgelu) { nvte_group_dact = &nvte_group_dqgelu; }
-            else if (OP == &dsrelu) { nvte_group_dact = &nvte_group_dsrelu; }
-            nvte_group_dact(grad_group_tensor, in_group_tensor, out_group_tensor, 0);
+            auto nvte_group_dact = &nvte_group_dgelu_v2;
+            if (OP == &dsilu)       { nvte_group_dact = &nvte_group_dsilu_v2; }
+            else if (OP == &drelu)  { nvte_group_dact = &nvte_group_drelu_v2; }
+            else if (OP == &dqgelu) { nvte_group_dact = &nvte_group_dqgelu_v2; }
+            else if (OP == &dsrelu) { nvte_group_dact = &nvte_group_dsrelu_v2; }
+            nvte_group_dact(grad_group_tensor, in_group_tensor, out_group_tensor, workspace.data(), 0);
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+            nvte_group_dact(grad_group_tensor, in_group_tensor, out_group_tensor, workspace.data(), 0);
             break;
         }
     }

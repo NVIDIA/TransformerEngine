@@ -48,8 +48,22 @@ raises an error without waiting or sharing mutable storage. Serialize host
 submission of each complete operation; kernels in distinct slots remain
 independent on the GPU. Independent graph executions require distinct mutable
 slots or separate workspaces, including graphs captured on the same stream.
-The original
-``nvte_group_quantize`` remains available; its shared descriptor storage limits
-MXFP8 groups with varying last dimensions to 64 and requires serialized use.
+The original ``nvte_group_quantize`` and ``nvte_group_dequantize`` reject MXFP8
+layouts with varying last dimensions. Use their ``_v2`` variants with caller-owned
+workspace for those layouts, including serialized use. There are no shared mutable
+TMA descriptor arrays or implicit device allocations.
+
+``nvte_group_dequantize_v2`` uses the same query/allocate/execute protocol and
+stream-slot catalog. Its descriptor updater and consumer both use the selected
+slot; it supports more than 64 groups. PyTorch grouped quantize and dequantize
+allocate workspace through the framework, including during graph capture. The
+JAX grouped MXFP8 FFI uses v2 with its XLA-owned workspace; its constant last
+dimension uses launch-local descriptors and does not reserve a descriptor region.
+
+Only MXFP8 layouts with varying last dimensions need mutable descriptor arrays.
+Constant last dimensions (uniform shapes or varying first dimensions) pass tensor
+maps by value as kernel parameters. Grouped DBias, including fused activation
+backward, requires a constant last dimension and uses stream-private scratch.
+Other grouped formats do not use these mutable MXFP8 descriptor arrays.
 
 .. doxygenfile:: cast.h

@@ -21,8 +21,6 @@ void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor 
   constexpr bool IS_DACT = false;
   constexpr const NVTEGroupedTensor activation_input = nullptr;
 
-  dispatch::common::dispatch_dbias_workspace(workspace, stream, [&](NVTETensor scratch) {
-    dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
-        input, activation_input, output, dbias, scratch, quant_config, stream);
-  });
+  dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
+      input, activation_input, output, dbias, workspace, quant_config, stream);
 }

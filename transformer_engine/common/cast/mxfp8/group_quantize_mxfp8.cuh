@@ -654,18 +654,13 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     }
   }
 
-  const size_t *const rows_map = storage.rows != nullptr ? storage.rows : g_tensor_maps.rows;
-  const size_t *const cols_map = storage.cols != nullptr ? storage.cols : g_tensor_maps.cols;
-  const size_t *const offsets_map =
-      storage.offsets != nullptr ? storage.offsets : g_tensor_maps.offsets;
-  const CUtensorMap *const input_maps =
-      storage.input != nullptr ? storage.input : g_tensor_maps.input;
-  const CUtensorMap *const act_input_maps =
-      storage.act_input != nullptr ? storage.act_input : g_tensor_maps.act_input;
-  const CUtensorMap *const rowwise_maps =
-      storage.output_rowwise != nullptr ? storage.output_rowwise : g_tensor_maps.output_rowwise;
-  const CUtensorMap *const colwise_maps =
-      storage.output_colwise != nullptr ? storage.output_colwise : g_tensor_maps.output_colwise;
+  const size_t *const rows_map = storage.rows;
+  const size_t *const cols_map = storage.cols;
+  const size_t *const offsets_map = storage.offsets;
+  const CUtensorMap *const input_maps = storage.input;
+  const CUtensorMap *const act_input_maps = storage.act_input;
+  const CUtensorMap *const rowwise_maps = storage.output_rowwise;
+  const CUtensorMap *const colwise_maps = storage.output_colwise;
 
   constexpr bool ROWWISE_SCALING =
       (SCALING_TYPE == ScalingType::ROWWISE) || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
@@ -1186,10 +1181,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
   const size_t num_tensors = input->num_tensors;
   NVTE_CHECK(num_tensors > 0, "A group must contain at least one tensor.");
-  NVTE_CHECK(
-      is_single_tensor || workspace != nullptr || num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-      "Groups with varying last dimensions support at most ", MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-      " tensors without workspace. Use nvte_group_quantize_v2.");
+  NVTE_CHECK(is_single_tensor || workspace != nullptr,
+             "Grouped MXFP8 with varying last dimensions requires workspace.");
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
   const bool use_2d_quantization = quant_config != nullptr && quant_config->mxfp8_2d_quantization;
