@@ -20,8 +20,4 @@ cd $TE_PATH/tests/cpp
 cmake -GNinja -Bbuild .
 cmake --build build
 export OMP_NUM_THREADS=$((NUM_PHYSICAL_CORES / NUM_PARALLEL_JOBS))
-# ctest only records test output in LastTest.log, so print it on failure to show which cases failed
-ctest --test-dir build -j$NUM_PARALLEL_JOBS --output-junit $XML_LOG_DIR/ctest_cppunittest.xml || {
-    cat build/Testing/Temporary/LastTest.log
-    exit 1
-}
+ctest --test-dir build -j$NUM_PARALLEL_JOBS --output-on-failure --output-junit $XML_LOG_DIR/ctest_cppunittest.xml
