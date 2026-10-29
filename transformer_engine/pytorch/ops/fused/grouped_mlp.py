@@ -127,6 +127,32 @@ def _cudnn_frontend_supports_grouped_gemm_srelu_tanh() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
+def _cudnn_frontend_supports_grouped_gemm_srelu_tanh_hadamard() -> bool:
+    """Whether the cuDNN FE grouped GEMM + Hadamard wrapper accepts tanh_clamp_scale.
+
+    With it, the clamped SReLU uses the fused RHT-amax kernel like the unclamped one
+    instead of the plain SReLU kernel plus a separate amax pass. Detected by signature
+    for the same reason as _cudnn_frontend_supports_grouped_gemm_srelu_tanh.
+    """
+    if not (
+        _cudnn_frontend_supports_grouped_gemm_srelu_hadamard()
+        and _cudnn_frontend_supports_grouped_gemm_srelu_tanh()
+    ):
+        return False
+    try:
+        from cudnn import (  # pylint: disable=import-outside-toplevel
+            grouped_gemm_glu_hadamard_wrapper_sm100,
+        )
+    except ImportError:
+        return False
+    try:
+        signature = inspect.signature(grouped_gemm_glu_hadamard_wrapper_sm100)
+        return "tanh_clamp_scale" in signature.parameters
+    except (TypeError, ValueError):
+        return False
+
+
+@functools.lru_cache(maxsize=None)
 def _cudnn_frontend_supports_grouped_gemm_situglu() -> bool:
     """Feature-detect complete cuDNN frontend grouped SiTU-GLU support."""
     try:
@@ -1472,7 +1498,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if unit_activation_scale and num_groups != 1:
             unit_activation_scale = False
 
-        activation_is_srelu = isinstance(activation_op, ScaledSReLU)
+        # The hadamard kernel is the GLU one; it applies the SReLU soft clamp only in
+        # cuDNN frontends whose wrapper accepts tanh_clamp_scale. Without that,
+        # ScaledTanhSReLU keeps the plain SReLU kernel and a separate RHT amax pass --
+        # a performance limitation, not a correctness one.
+        activation_is_srelu = isinstance(activation_op, ScaledSReLU) or (
+            isinstance(activation_op, ScaledTanhSReLU)
+            and _cudnn_frontend_supports_grouped_gemm_srelu_tanh_hadamard()
+        )
         supports_single_group_runtime_offsets = (
             _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op))
         )
