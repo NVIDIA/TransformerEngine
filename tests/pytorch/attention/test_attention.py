@@ -23,6 +23,7 @@ from transformer_engine.pytorch import (
     autocast,
     quantized_model_init,
     DotProductAttention,
+    Linear,
     MultiheadAttention,
     get_device_compute_capability,
     Quantizer,
@@ -2898,19 +2899,14 @@ def _run_dpa_fp8_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
     return outputs
 
 
-@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
-def test_dpa_fp8_bwd_scales_update_without_linear(monkeypatch):
-    """FP8 DotProductAttention as the only TE module in the autocast region still updates its
-    backward delayed-scaling scales; at the initial scale of 1.0 a small dO loses most of dQ/dK."""
+def _use_fused_attn_fp8_or_skip(monkeypatch, config, fp8_recipe):
+    """Select FusedAttention, skipping the test unless it supports the config in FP8 and BF16."""
     # Save the environment and backend cache for teardown before the availability checks touch them.
     for key in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN", "NVTE_FP8_DPA_BWD"):
         monkeypatch.setenv(key, os.environ.get(key, "1"))
     for key, value in _attention_backends.items():
         monkeypatch.setitem(_attention_backends, key, value)
 
-    b, s, h, d = 2, 1024, 6, 128
-    config = ModelConfig(b, s, h, d, attn_mask_type="causal")
-    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID, fp8_dpa=True)
     (_, fused_attn_supported_fp8, _), _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
@@ -2935,6 +2931,16 @@ def test_dpa_fp8_bwd_scales_update_without_linear(monkeypatch):
     monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
     monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1")
     _attention_backends["backend_selection_requires_update"] = True
+
+
+@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
+def test_dpa_fp8_bwd_scales_update_without_linear(monkeypatch):
+    """FP8 DotProductAttention as the only TE module in the autocast region still updates its
+    backward delayed-scaling scales; at the initial scale of 1.0 a small dO loses most of dQ/dK."""
+    b, s, h, d = 2, 1024, 6, 128
+    config = ModelConfig(b, s, h, d, attn_mask_type="causal")
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID, fp8_dpa=True)
+    _use_fused_attn_fp8_or_skip(monkeypatch, config, fp8_recipe)
     reset_rng_states()
 
     dpa = DotProductAttention(h, d, attn_mask_type="causal", qkv_format="bshd")
@@ -2957,6 +2963,49 @@ def test_dpa_fp8_bwd_scales_update_without_linear(monkeypatch):
     for name, grad, grad_ref in (("dq", dq, dq_ref), ("dk", dk, dk_ref)):
         ratio = (grad.float().norm() / grad_ref.float().norm()).item()
         assert 0.8 < ratio < 1.25, f"{name} norm is {ratio:.3f} of the bf16 reference"
+
+
+@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
+@pytest.mark.parametrize("checkpoint_core_attention", [False, True])
+@pytest.mark.parametrize("linear_before_attention", [False, True])
+def test_dpa_fp8_bwd_scales_update_once_per_step(
+    monkeypatch, linear_before_attention, checkpoint_core_attention
+):
+    """With FP8 DotProductAttention and Linear modules in one autocast region, the backward amax
+    reduction and scale update runs once per step, with and without checkpoint_core_attention."""
+    b, s, h, d = 2, 1024, 6, 128
+    config = ModelConfig(b, s, h, d, attn_mask_type="causal")
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID, fp8_dpa=True)
+    _use_fused_attn_fp8_or_skip(monkeypatch, config, fp8_recipe)
+    reset_rng_states()
+
+    dpa = DotProductAttention(h, d, attn_mask_type="causal", qkv_format="bshd")
+    linear_in = Linear(h * d, h * d, params_dtype=torch.bfloat16)
+    linear_out = Linear(h * d, h * d, params_dtype=torch.bfloat16)
+
+    bwd_updates = []
+    update = FP8GlobalStateManager.reduce_and_update_fp8_tensors
+
+    def counting_update(forward=True):
+        if not forward:
+            bwd_updates[-1] += 1
+        update(forward=forward)
+
+    monkeypatch.setattr(FP8GlobalStateManager, "reduce_and_update_fp8_tensors", counting_update)
+
+    for _ in range(2):
+        q, k, v = (
+            torch.randn(b, s, h, d, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+            for _ in range(3)
+        )
+        bwd_updates.append(0)
+        with autocast(enabled=True, recipe=fp8_recipe):
+            if linear_before_attention:
+                q = linear_in(q.view(b, s, h * d)).view(b, s, h, d)
+            out = dpa(q, k, v, checkpoint_core_attention=checkpoint_core_attention)
+            out = linear_out(out)
+        out.backward(torch.randn_like(out))
+    assert bwd_updates == [1, 1], f"backward scale updates per step: {bwd_updates}"
 
 
 attn_mask_type = "causal"

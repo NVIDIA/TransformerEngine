@@ -56,7 +56,10 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.module._common import check_fp8_reduce_and_update
-from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.distributed import (
+    get_distributed_world_size,
+    in_fp8_activation_recompute_phase,
+)
 from transformer_engine.pytorch.attention.custom_ops import (
     convert_bshd_to_thd,
     convert_thd_to_bshd,
@@ -2426,8 +2429,16 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.backward_objects = bwd_args
         # As in Linear: the module that claims the first-FP8-module flag runs the backward amax
         # reduction and scale update, so FP8 attention without a Linear-family module in the
-        # autocast region still updates its backward scales.
-        if bwd_args.fp8 and fwd_args.is_grad_enabled and requires_grad(q, k, v):
+        # autocast region still updates its backward scales. A recomputed attention does not
+        # claim it: with checkpoint_core_attention the first forward runs without grad, so another
+        # module may already own the update, and the recompute's autocast resets the flag.
+        # A checkpointed attention alone in the region therefore gets no backward update.
+        if (
+            bwd_args.fp8
+            and fwd_args.is_grad_enabled
+            and requires_grad(q, k, v)
+            and not in_fp8_activation_recompute_phase()
+        ):
             bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
         if fwd_args.return_max_logit:
             return out, max_logit
