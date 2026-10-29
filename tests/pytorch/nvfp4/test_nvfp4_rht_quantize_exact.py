@@ -44,6 +44,7 @@ def check_quantization_nvfp4_versus_reference(
     with_rht: bool = True,
     with_post_rht_amax: bool = True,
     with_random_sign_mask: bool = True,
+    row_scaled: bool = False,
 ) -> None:
     assert with_rht and with_post_rht_amax, "RHT and post-RHT amax reduction must be enabled."
 
@@ -70,6 +71,7 @@ def check_quantization_nvfp4_versus_reference(
         with_rht=with_rht,
         with_post_rht_amax=with_post_rht_amax,
         with_random_sign_mask=with_random_sign_mask,
+        row_scaled_nvfp4=row_scaled,
     )
     if use_cpp_allocator:
         x_nvfp4_sut = nvfp4_quantizer(x)
@@ -108,6 +110,7 @@ def check_quantization_nvfp4_versus_reference(
         quant_tile_shape=(1, 16),
         with_rht=with_rht,
         with_random_sign_mask=with_random_sign_mask,
+        row_scaled_nvfp4=row_scaled,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
     # Extract data from RefNVFP4Tensor
@@ -129,12 +132,14 @@ def check_quantization_nvfp4_versus_reference(
             ref_quantizer._apply_rht(x.t().contiguous()) if with_rht else x.t().contiguous()
         )
         ref_amax_colwise_t = torch.max(torch.abs(x_t_for_amax)).to(torch.float32).view(1)
+        if row_scaled:
+            ref_amax_colwise_t = x_nvfp4_ref.global_amax_col
 
         # SM120/121 uses TE's native single-K=16 MMA Hadamard arithmetic. cuBLAS may
         # choose a different reduction order (and applies the random-sign matrix in
         # the ATen reference orientation), so use the unfused TE kernel as the exact
         # reference for the fused TE kernel on these architectures.
-        if torch.cuda.get_device_capability() in ((12, 0), (12, 1)):
+        if not row_scaled and torch.cuda.get_device_capability() in ((12, 0), (12, 1)):
             env_name = "NVTE_NVFP4_DISABLE_RHT_CAST_FUSION"
             old_value = os.environ.get(env_name)
             os.environ[env_name] = "1"
@@ -163,7 +168,9 @@ def check_quantization_nvfp4_versus_reference(
         ref_amax_colwise_t = None
 
     if return_rowwise:
-        torch.testing.assert_close(amax_rowwise, ref_amax_rowwise, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(
+            amax_rowwise.reshape(-1), ref_amax_rowwise.reshape(-1), atol=0.0, rtol=0.0
+        )
 
         torch.testing.assert_close(qx, qx_ref, atol=0.0, rtol=0.0)
         # Compare only the valid portion of scale tensors (reference may not have padding)
@@ -172,7 +179,9 @@ def check_quantization_nvfp4_versus_reference(
         torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
     if return_transpose:
-        torch.testing.assert_close(amax_colwise, ref_amax_colwise_t, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(
+            amax_colwise.reshape(-1), ref_amax_colwise_t.reshape(-1), atol=0.0, rtol=0.0
+        )
 
         torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
 
@@ -224,6 +233,7 @@ def check_quantization_nvfp4_versus_reference(
 @pytest.mark.parametrize(
     "with_random_sign_mask", [True, False], ids=["with_random_sign_mask", "no_random_sign_mask"]
 )
+@pytest.mark.parametrize("row_scaled", [False, True], ids=["tensor_scaled", "row_scaled"])
 def test_rht_with_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -231,6 +241,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     quantize_mode: str,
     use_cpp_allocator: bool,
     with_random_sign_mask: bool,
+    row_scaled: bool,
 ) -> None:
 
     if quantize_mode == "rowwise_only":
@@ -240,6 +251,8 @@ def test_rht_with_quantization_block_tiling_versus_reference(
         return_rowwise = True
         return_transpose = True
     elif quantize_mode == "columnwise_only":
+        if row_scaled:
+            pytest.skip("Row-scaled NVFP4 quantization requires rowwise usage")
         return_rowwise = False
         return_transpose = True
     else:
@@ -254,6 +267,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
         return_transpose=return_transpose,
         use_cpp_allocator=use_cpp_allocator,
         with_random_sign_mask=with_random_sign_mask,
+        row_scaled=row_scaled,
     )
 
 

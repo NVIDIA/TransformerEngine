@@ -109,6 +109,9 @@ void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
  *  therefore, this is a graph safe API and the grouped-tensor argument is passed as a single device structure.
  *
  *  \param[in]      input               NVTEGroupedTensor representing grouped input tensors.
+ *  For row-scaled NVFP4 output, the row-wise amax is per row of the input and the column-wise
+ *  amax is per column of the transposed RHT output; random_sign_mask must be 0.
+ *
  *  \param[in,out]  output              NVTEGroupedTensor for output amax (row/col). Only the row-wise and
  *                                      column-wise amaxes are updated.
  *  \param[in]      random_sign_mask    16-bit sign mask for RHT.
@@ -166,6 +169,9 @@ void nvte_group_hadamard_transform_cast_fusion(const NVTETensor input, NVTETenso
  *  \param[in,out]  output            NVTEGroupedTensor for output (row/column-wise quantized results).
  *  \param[in]      hadamard_matrix   Hadamard matrix to use for transformation.
  *  \param[in]      quant_config      Quantization configuration.
+ *  For row-scaled NVFP4 output, the row-wise data is quantized without RHT using per-row amax,
+ *  the column-wise data uses RHT with per-column amax, and quant_workspace may be null.
+ *
  *  \param[in]      quant_workspace   Workspace buffer. Must be at least 4 bytes.
  *  \param[in]      stream            CUDA stream used for the operation.
  */

@@ -184,13 +184,33 @@ compute_nvfp4_scaling_coefficient(const ScaleType decode_scale, const float glob
   }
 }
 
+// Rounds to BF16 to match the unfused RHT path.
+__device__ __forceinline__ void apply_rht_16(IType (&v)[SCALE_DIM],
+                                             const float *__restrict__ rht_matrix) {
+  float x[SCALE_DIM];
+#pragma unroll
+  for (int i = 0; i < SCALE_DIM; ++i) {
+    x[i] = static_cast<float>(v[i]);
+  }
+#pragma unroll
+  for (int c = 0; c < SCALE_DIM; ++c) {
+    float acc = 0.0f;
+#pragma unroll
+    for (int r = 0; r < SCALE_DIM; ++r) {
+      acc = fmaf(x[r], rht_matrix[r * SCALE_DIM + c], acc);
+    }
+    v[c] = static_cast<IType>(acc);
+  }
+}
+
 template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
-          bool ROW_SCALED_NVFP4>
+          bool ROW_SCALED_NVFP4, bool APPLY_COLWISE_RHT = false>
 __device__ __forceinline__ void colwise_scaling(
     const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
     ScaleType *__restrict__ sSFcolwise_ptr, const float S_enc_colwise, const int stage_Y,
     const int stage_X, const int buff_in, const int buff_out_tr, const float *amax_colwise_ptr,
-    const size_t col_offset, const size_t cols, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
+    const size_t col_offset, const size_t cols, RNG_t &rng, uint4 &random_uint4, int &rnd_idx,
+    const float *rht_matrix = nullptr) {
   using scaling_coeff_type = typename SCALING_COEFFICIENT_TYPE<USE_FAST_MATH>::type;
 
   const auto &sIn2x = *reinterpret_cast<const IType2x3D *>(sIn_ptr);
@@ -224,7 +244,18 @@ __device__ __forceinline__ void colwise_scaling(
         ptx::ld_shared_b32(&sIn2x[buff_in][in_thread_offset_Y + i][in_thread_offset_X]);
     rIn[0][i] = elt_pair.x;
     rIn[1][i] = elt_pair.y;
-    ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, elt_pair);
+    if constexpr (!APPLY_COLWISE_RHT) {
+      ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, elt_pair);
+    }
+  }
+  if constexpr (APPLY_COLWISE_RHT) {
+    apply_rht_16(rIn[0], rht_matrix);
+    apply_rht_16(rIn[1], rht_matrix);
+#pragma unroll
+    for (int i = 0; i < SCALE_DIM; ++i) {
+      const IType2 elt_pair = {rIn[0][i], rIn[1][i]};
+      ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, elt_pair);
+    }
   }
   const float block_amax[2] = {static_cast<float>(__habs(thread_amax_2x.x)),
                                static_cast<float>(__habs(thread_amax_2x.y))};

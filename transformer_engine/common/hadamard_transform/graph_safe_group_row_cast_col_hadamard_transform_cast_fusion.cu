@@ -1313,6 +1313,12 @@ void group_row_col_rht_gemm_ntt_w_sfc_graph_safe(
 }  // namespace
 }  // namespace detail
 
+void group_row_scaled_hadamard_transform_cast_graph_safe(const GroupedTensor *input,
+                                                         GroupedTensor *output,
+                                                         const Tensor &hadamard_matrix,
+                                                         const QuantizationConfig &quant_config,
+                                                         cudaStream_t stream);
+
 void group_hadamard_transform_cast_fusion_graph_safe(const GroupedTensor *input,
                                                      GroupedTensor *output,
                                                      const Tensor &hadamard_matrix_,
@@ -1477,8 +1483,6 @@ void nvte_group_hadamard_transform_cast_fusion_graph_safe(
   GroupedTensor *input_tensor = convertNVTEGroupedTensorCheck(input);
   GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
 
-  Tensor *quant_workspace_tensor = convertNVTETensorCheck(quant_workspace);
-
   QuantizationConfig quant_config_cpp;
   if (quant_config != nullptr) {
     quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
@@ -1487,6 +1491,15 @@ void nvte_group_hadamard_transform_cast_fusion_graph_safe(
   if (input_tensor->num_tensors == 0) {
     return;
   }
+
+  if (output_tensor->scaling_mode == NVTE_NVFP4_1D_SCALING && output_tensor->row_scaled_nvfp4) {
+    group_row_scaled_hadamard_transform_cast_graph_safe(input_tensor, output_tensor,
+                                                        *convertNVTETensorCheck(hadamard_matrix),
+                                                        quant_config_cpp, stream);
+    return;
+  }
+
+  Tensor *quant_workspace_tensor = convertNVTETensorCheck(quant_workspace);
 
   // Call the multi-tensor Hadamard transform amax implementation.
   group_hadamard_transform_cast_fusion_graph_safe(

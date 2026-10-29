@@ -543,6 +543,28 @@ void group_hadamard_transform_amax_graph_safe(const GroupedTensor* input, Groupe
 #endif  // CUDA_VERSION >= 12080
 }
 
+void group_row_scaled_hadamard_transform_cast_graph_safe(const GroupedTensor* input,
+                                                         GroupedTensor* output,
+                                                         const Tensor& hadamard_matrix,
+                                                         const QuantizationConfig& quant_config,
+                                                         cudaStream_t stream) {
+  NVTE_CHECK(!quant_config.nvfp4_2d_quantization,
+             "Grouped row-scaled NVFP4 quantization does not support 2D quantization.");
+  NVTE_CHECK(quant_config.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
+             "Grouped row-scaled NVFP4 quantization does not support 4over6.");
+  Tensor dummy_tensor;
+  const Tensor* noop_tensor = &dummy_tensor;
+  if (quant_config.noop_tensor != nullptr) {
+    noop_tensor = convertNVTETensorCheck(quant_config.noop_tensor);
+  }
+  const DType scale_dtype = output->scale_inv.has_data() ? output->scale_inv.dtype
+                                                         : output->columnwise_scale_inv.dtype;
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType,
+      dispatch::nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(
+          input, noop_tensor, output, &quant_config, stream, &hadamard_matrix););
+}
+
 }  // namespace transformer_engine
 
 void nvte_group_hadamard_transform_amax_graph_safe(const NVTEGroupedTensor input,
@@ -555,6 +577,15 @@ void nvte_group_hadamard_transform_amax_graph_safe(const NVTEGroupedTensor input
   GroupedTensor* output_tensor = convertNVTEGroupedTensorCheck(output);
 
   if (input_tensor->num_tensors == 0) {
+    return;
+  }
+
+  if (output_tensor->scaling_mode == NVTE_NVFP4_1D_SCALING && output_tensor->row_scaled_nvfp4) {
+    NVTE_CHECK(random_sign_mask == 0,
+               "Row-scaled NVFP4 does not support rowwise RHT; random_sign_mask must be 0.");
+    dispatch::nvfp4::group_row_amax_graph_safe(input_tensor, /*noop=*/nullptr, output_tensor,
+                                               stream, /*apply_col_rht=*/true,
+                                               static_cast<uint16_t>(random_sign_mask_t));
     return;
   }
 
