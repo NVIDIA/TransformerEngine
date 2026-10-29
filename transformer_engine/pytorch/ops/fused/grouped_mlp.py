@@ -1271,14 +1271,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             self.grouped_gemm_dactivation_kernel()
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         validate_grouped_mlp_dims(fc1, activation, fc2)
-        # Newer cuDNN front-ends accept natural operand layouts, so the forward can
-        # skip building the 3-D/6-D kernel-facing views on every call.
-        self._cudnn_canonical_layouts = getattr(
-            self.grouped_gemm_activation_kernel(), "supports_canonical_layouts", False
-        ) and getattr(self.grouped_gemm_quant_kernel(), "supports_canonical_layouts", False)
-        self._cudnn_canonical_backward = self._cudnn_canonical_layouts and getattr(
-            self.grouped_gemm_dactivation_kernel(), "supports_canonical_layouts", False
-        )
         if not is_glu_activation(activation):
             # grouped_gemm_srelu_wrapper_sm100 and grouped_gemm_dsrelu_wrapper_sm100 are
             # SReLU-specific and do not take GLU ``act_func`` selectors.
@@ -1626,6 +1618,39 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc1_weight_k = fc1_weight_shape[1] // 2 if use_nvfp4 else fc1_weight_shape[1]
         k_sf_divisor = 2 * sf_vec_size if use_nvfp4 else 4 * sf_vec_size
 
+        fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
+        fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
+
+        # Choose kernel implementation for FC1 + act
+        kernel_impl = "gemm_act"
+        if (
+            use_nvfp4
+            and isinstance(fc2_input_quantizer, NVFP4Quantizer)
+            and fc2_input_quantizer.with_rht
+        ):
+            if fc2_input_quantizer.disable_second_level_scale:
+                # Use GEMM + act + RHT + quant kernel if available
+                if self.grouped_gemm_act_hadamard_quant_kernel() is None:
+                    # Kernel is not available
+                    pass
+                elif fc2_input_quantizer.rht_matrix_random_sign_mask_t != 0:
+                    # Kernel does not apply sign mask in RHT
+                    pass
+                elif fc1_bias_packed is not None:
+                    # Kernel has large numerical error with bias
+                    pass
+                elif self._cudnn_act_func == "swiglu":
+                    kernel_impl = "gemm_act_rht_quant"
+            elif fc2_input_quantizer.with_post_rht_amax:
+                # Use GEMM + act + RHT + amax kernel if available
+                if self.grouped_gemm_act_hadamard_kernel() is None:
+                    # Kernel is not available
+                    pass
+                elif self._cudnn_act_func in ("swiglu", "situglu"):
+                    kernel_impl = "gemm_act_rht_amax"
+                elif activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
+                    kernel_impl = "gemm_act_rht_amax"
+
         # Pack data tensors
         # Note: Fused kernel expects tensor with non-contiguous
         # logical dims.
@@ -1637,7 +1662,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         #   sum(m)/128, 4 (block col), k/128, 1)
         # With canonical layouts, cuDNN takes A as (sum(m), k), B as
         # (num_groups, n, k), and scales as the packed buffers as-is.
-        canonical = self._cudnn_canonical_layouts and not use_nvfp4
+        canonical = (
+            kernel_impl == "gemm_act"
+            and not use_nvfp4
+            and getattr(self.grouped_gemm_activation_kernel(), "supports_canonical_layouts", False)
+            and getattr(self.grouped_gemm_quant_kernel(), "supports_canonical_layouts", False)
+        )
         fc1_x_data = grouped_fc1_x.rowwise_data.view(dtype=data_dtype)
         fc1_x_data = fc1_x_data.view(in_shape[0], data_in_k)
         if not canonical:
@@ -1680,9 +1710,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
         current_stream = torch.cuda.current_stream(device.index).cuda_stream
 
-        fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
-        fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
-
         fc1_prob_tensor = None
         if not unit_activation_scale:
             fc1_prob_tensor = (
@@ -1712,36 +1739,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             ).to(torch.float32)
         else:
             fc1_alpha_tensor = alpha_tensor
-
-        # Choose kernel implementation for FC1 + act
-        kernel_impl = "gemm_act"
-        if (
-            use_nvfp4
-            and isinstance(fc2_input_quantizer, NVFP4Quantizer)
-            and fc2_input_quantizer.with_rht
-        ):
-            if fc2_input_quantizer.disable_second_level_scale:
-                # Use GEMM + act + RHT + quant kernel if available
-                if self.grouped_gemm_act_hadamard_quant_kernel() is None:
-                    # Kernel is not available
-                    pass
-                elif fc2_input_quantizer.rht_matrix_random_sign_mask_t != 0:
-                    # Kernel does not apply sign mask in RHT
-                    pass
-                elif fc1_bias_packed is not None:
-                    # Kernel has large numerical error with bias
-                    pass
-                elif self._cudnn_act_func == "swiglu":
-                    kernel_impl = "gemm_act_rht_quant"
-            elif fc2_input_quantizer.with_post_rht_amax:
-                # Use GEMM + act + RHT + amax kernel if available
-                if self.grouped_gemm_act_hadamard_kernel() is None:
-                    # Kernel is not available
-                    pass
-                elif self._cudnn_act_func in ("swiglu", "situglu"):
-                    kernel_impl = "gemm_act_rht_amax"
-                elif activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
-                    kernel_impl = "gemm_act_rht_amax"
 
         # Common kernel arguments
         fc1_activation_kwargs = {
@@ -2512,7 +2509,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Data logical shape: (sum(m), k, 1)
         # Scale logical shape: (32 (block row), 4 (block row),
         #   sum(m)/128, 4 (block col), k/128, 1)
-        canonical = self._cudnn_canonical_backward and not use_nvfp4
+        dactivation_kernel = self.grouped_gemm_dactivation_kernel()
+        canonical = (
+            not use_nvfp4
+            and getattr(dactivation_kernel, "supports_canonical_layouts", False)
+            and getattr(self.grouped_gemm_quant_kernel(), "supports_canonical_layouts", False)
+        )
         fc2_dy_data = grouped_fc2_dy.rowwise_data.view(dtype=data_dtype)
         fc2_dy_data = fc2_dy_data.view(out_shape[0], data_k)
         if not canonical:
@@ -2651,7 +2653,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "discrete_col_sfd": not use_nvfp4,
             "use_dynamic_sched": True,
         }
-        dactivation_kernel = self.grouped_gemm_dactivation_kernel()
         if deterministic_dactivation:
             # Never passed to a wrapper that would reject it -- the check above raises first.
             fc2_dactivation_kwargs["deterministic"] = True
