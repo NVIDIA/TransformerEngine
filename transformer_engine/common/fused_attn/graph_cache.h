@@ -23,6 +23,7 @@
 
 #include "../common.h"
 #include "../cudnn_utils.h"
+#include "../util/cuda_context.h"
 #include "config_and_params.h"
 #include "graph_cache_debug.h"
 
@@ -42,7 +43,9 @@ struct CacheEntry {
 
 // The graph cache; a process-wide map that maps a normalized FusedAttnConfig to a CacheEntry
 template <typename GraphAndTensors>
-struct GraphCache {
+struct GraphCache : cuda_context::Resource {
+  explicit GraphCache(int device) { bind_context(device); }
+  void invalidate_context() noexcept override { entries.clear(); }
   std::mutex mutex;
   std::map<FusedAttnConfig, std::shared_ptr<CacheEntry<GraphAndTensors>>> entries;
 };
@@ -132,9 +135,18 @@ template <Backend kBackend, Pass kPass, auto kCreateGraphFn>
 auto get_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   // Never destroyed: destroying cached cuDNN plans calls into CUDA, which must not be used during
   // program termination.
-  static auto &cache = *new GraphCache<decltype(kCreateGraphFn(cfg))>;
+  using Cache = GraphCache<decltype(kCreateGraphFn(cfg))>;
+  static auto &mutex = *new std::mutex;
+  static auto &devices = *new std::map<int, std::unique_ptr<Cache>>;
   cfg.check_derived();
-  return detail::cache_graph(cache, cfg.make_cache_key(kPass), kBackend, kPass, handle,
+  Cache *cache;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto &entry = devices[cfg.device_id];
+    if (!entry) entry = std::make_unique<Cache>(cfg.device_id);
+    cache = entry.get();
+  }
+  return detail::cache_graph(*cache, cfg.make_cache_key(kPass), kBackend, kPass, handle,
                              [&] { return kCreateGraphFn(cfg); });
 }
 

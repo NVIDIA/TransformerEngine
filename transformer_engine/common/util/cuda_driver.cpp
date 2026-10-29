@@ -8,6 +8,7 @@
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
+#include "cuda_context.h"
 
 namespace transformer_engine {
 
@@ -45,7 +46,9 @@ void *get_symbol(const char *symbol, int cuda_version) {
 }
 
 void ensure_context_exists() {
-  static thread_local bool need_check = []() {
+  static thread_local uint64_t checked_generation = 0;
+  const auto generation = cuda_context::generation();
+  if (checked_generation != generation) {
     CUcontext context;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxGetCurrent, &context);
     if (context == nullptr) {
@@ -56,8 +59,8 @@ void ensure_context_exists() {
       NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
       NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
     }
-    return false;
-  }();
+    checked_generation = generation;
+  }
 }
 
 }  // namespace cuda_driver
