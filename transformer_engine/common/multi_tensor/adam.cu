@@ -923,9 +923,9 @@ void multi_tensor_adam_capturable_cuda(int chunk_size, Tensor noop_flag,
                 multi_tensor_apply<4>(
                     (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
                     AdamCapturableFunctor<p_in_type, g_in_type, moment_type, int64_t>(), stream,
-                    beta1, beta2, reinterpret_cast<int *>(step.data.dptr), bias_correction,
-                    epsilon, reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode,
-                    weight_decay, reinterpret_cast<float *>(inv_scale.data.dptr));)))
+                    beta1, beta2, reinterpret_cast<int *>(step.data.dptr), bias_correction, epsilon,
+                    reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode, weight_decay,
+                    reinterpret_cast<float *>(inv_scale.data.dptr));)))
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         p_in_type_te, p_in_type,
@@ -936,9 +936,9 @@ void multi_tensor_adam_capturable_cuda(int chunk_size, Tensor noop_flag,
                 multi_tensor_apply<4>(
                     BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                     AdamCapturableFunctor<p_in_type, g_in_type, moment_type, int32_t>(), stream,
-                    beta1, beta2, reinterpret_cast<int *>(step.data.dptr), bias_correction,
-                    epsilon, reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode,
-                    weight_decay, reinterpret_cast<float *>(inv_scale.data.dptr));)))
+                    beta1, beta2, reinterpret_cast<int *>(step.data.dptr), bias_correction, epsilon,
+                    reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode, weight_decay,
+                    reinterpret_cast<float *>(inv_scale.data.dptr));)))
   }
 
   NVTE_CHECK_CUDA(cudaGetLastError());
@@ -1001,10 +1001,9 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, Tensor noop_flag,
                     (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
                     AdamCapturableMasterFunctor<p_in_type, g_in_type, float, moment_type,
                                                 int64_t>(),
-                    stream, beta1, beta2, reinterpret_cast<int *>(step.data.dptr),
-                    bias_correction, epsilon, reinterpret_cast<float *>(lr.data.dptr),
-                    (adamMode_t)mode, weight_decay,
-                    reinterpret_cast<float *>(inv_scale.data.dptr));)))
+                    stream, beta1, beta2, reinterpret_cast<int *>(step.data.dptr), bias_correction,
+                    epsilon, reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode,
+                    weight_decay, reinterpret_cast<float *>(inv_scale.data.dptr));)))
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         p_in_type_te, p_in_type,
@@ -1016,10 +1015,9 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, Tensor noop_flag,
                     BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
                     AdamCapturableMasterFunctor<p_in_type, g_in_type, float, moment_type,
                                                 int32_t>(),
-                    stream, beta1, beta2, reinterpret_cast<int *>(step.data.dptr),
-                    bias_correction, epsilon, reinterpret_cast<float *>(lr.data.dptr),
-                    (adamMode_t)mode, weight_decay,
-                    reinterpret_cast<float *>(inv_scale.data.dptr));)))
+                    stream, beta1, beta2, reinterpret_cast<int *>(step.data.dptr), bias_correction,
+                    epsilon, reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode,
+                    weight_decay, reinterpret_cast<float *>(inv_scale.data.dptr));)))
   }
 
   NVTE_CHECK_CUDA(cudaGetLastError());
