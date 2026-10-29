@@ -14,7 +14,7 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from .torch_version import torch_version
 from ..common import decode_cudnn_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
