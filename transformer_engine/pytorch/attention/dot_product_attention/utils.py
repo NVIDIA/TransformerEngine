@@ -3462,6 +3462,26 @@ def mxfp8_transpose_swizzle(fp8_tensors, src_format):
         "sbhd",
     ), f"mxfp8_transpose_swizzle only supports bshd/sbhd, got {src_format!r}."
 
+    fused = _fused_transpose_swizzle_module()
+    if fused is not None and fused.can_fuse_transpose_swizzle(fp8_tensors, src_format):
+        # One kernel per direction that writes the swizzled BHSD layout directly.
+        fused.fused_transpose_swizzle(fp8_tensors, src_format)
+        return
+    _mxfp8_transpose_swizzle_unfused(fp8_tensors, src_format)
+
+
+@functools.lru_cache(maxsize=None)
+def _fused_transpose_swizzle_module():
+    """The Triton BHSD permute + swizzle of MXFP8 scales, or None without Triton."""
+    try:
+        from transformer_engine.pytorch.triton import mxfp8_bhsd_swizzle
+    except ImportError:
+        return None
+    return mxfp8_bhsd_swizzle
+
+
+def _mxfp8_transpose_swizzle_unfused(fp8_tensors, src_format):
+    """mxfp8_transpose_swizzle with separate BHSD permute and GEMM swizzle kernels."""
     rs_list = [t._rowwise_scale_inv for t in fp8_tensors]
     cs_list = [t._columnwise_scale_inv for t in fp8_tensors]
 
