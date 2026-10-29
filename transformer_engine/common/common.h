@@ -545,6 +545,9 @@ struct GroupedTensor {
    */
   bool with_gemm_swizzled_scales = false;
 
+  /*! \brief Whether NVFP4 data uses row scaling instead of tensor scaling */
+  bool row_scaled_nvfp4 = false;
+
   /*! Map from NVTEGroupedTensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
       sizeof(NVTEBasicTensor),  // kNVTEGroupedRowwiseData
@@ -557,7 +560,8 @@ struct GroupedTensor {
       sizeof(NVTEBasicTensor),  // kNVTEGroupedFirstDims
       sizeof(NVTEBasicTensor),  // kNVTEGroupedLastDims
       sizeof(NVTEBasicTensor),  // kNVTEGroupedTensorOffsets
-      sizeof(uint8_t)           // kNVTEGroupedWithGEMMSwizzledScales
+      sizeof(uint8_t),          // kNVTEGroupedWithGEMMSwizzledScales
+      sizeof(uint8_t)           // kNVTEGroupedRowScaledNVFP4
   };
 
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
@@ -575,7 +579,8 @@ struct GroupedTensor {
         tensor_offsets(nullptr, std::vector<size_t>{0}, DType::kInt64),
         logical_shape(nvte_make_shape(nullptr, 1)),
         nvte_tensor(0),
-        with_gemm_swizzled_scales(false) {}
+        with_gemm_swizzled_scales(false),
+        row_scaled_nvfp4(false) {}
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
 
@@ -628,6 +633,7 @@ struct GroupedTensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
     with_gemm_swizzled_scales = false;
+    row_scaled_nvfp4 = false;
   }
 };
 
