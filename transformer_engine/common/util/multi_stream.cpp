@@ -11,42 +11,85 @@
 
 #include <transformer_engine/multi_stream.h>
 
+#include <atomic>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 
+#include "cuda_context.h"
 #include "cuda_runtime.h"
 #include "logging.h"
 
 namespace transformer_engine::detail {
 
+namespace {
+struct ComputeResources : cuda_context::Resource {
+  struct Slot {
+    std::atomic<cudaStream_t> stream{nullptr};
+    std::atomic<cudaEvent_t> event{nullptr};
+  };
+  explicit ComputeResources(int device) : slots(nvte_get_num_compute_streams()) {
+    bind_context(device);
+  }
+  void invalidate_context() noexcept override {
+    for (auto &slot : slots) {
+      slot.stream.store(nullptr, std::memory_order_release);
+      slot.event.store(nullptr, std::memory_order_release);
+    }
+  }
+  std::mutex mutex;
+  std::vector<Slot> slots;
+};
+
+ComputeResources &compute_resources() {
+  static auto &mutex = *new std::mutex;
+  static auto &devices = *new std::map<int, std::unique_ptr<ComputeResources>>;
+  int device;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
+  static thread_local std::map<int, ComputeResources *> local;
+  const auto found = local.find(device);
+  if (found != local.end()) return *found->second;
+  std::lock_guard<std::mutex> lock(mutex);
+  auto &resources = devices[device];
+  if (!resources) resources = std::make_unique<ComputeResources>(device);
+  local.emplace(device, resources.get());
+  return *resources;
+}
+}  // namespace
+
 cudaStream_t get_compute_stream(int idx) {
   const size_t num_streams = nvte_get_num_compute_streams();
   NVTE_CHECK(0 <= idx && idx < num_streams, "Invalid compute stream (requested idx ", idx,
              ", but there are ", num_streams, " streams)");
-  static std::vector<cudaStream_t> streams(num_streams);
-  static std::once_flag stream_init_flag;
-  auto init = [&]() {
-    for (size_t i = 0; i < num_streams; i++) {
-      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&streams[i], cudaStreamNonBlocking, -1));
-    }
-  };
-  std::call_once(stream_init_flag, init);
-  return streams[idx];
+  auto &resources = compute_resources();
+  auto &cached = resources.slots[idx].stream;
+  auto stream = cached.load(std::memory_order_acquire);
+  if (stream != nullptr) return stream;
+  std::lock_guard<std::mutex> lock(resources.mutex);
+  stream = cached.load(std::memory_order_acquire);
+  if (stream == nullptr) {
+    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, -1));
+    cached.store(stream, std::memory_order_release);
+  }
+  return stream;
 }
 
 cudaEvent_t get_compute_stream_event(int idx) {
   const size_t num_streams = nvte_get_num_compute_streams();
   NVTE_CHECK(0 <= idx && idx < num_streams, "Invalid compute stream (requested idx ", idx,
              ", but there are ", num_streams, " streams)");
-  static std::vector<cudaEvent_t> events(num_streams);
-  static std::once_flag event_init_flag;
-  auto init = [&]() {
-    for (size_t i = 0; i < num_streams; i++) {
-      NVTE_CHECK_CUDA(cudaEventCreate(&events[i]));
-    }
-  };
-  std::call_once(event_init_flag, init);
-  return events[idx];
+  auto &resources = compute_resources();
+  auto &cached = resources.slots[idx].event;
+  auto event = cached.load(std::memory_order_acquire);
+  if (event != nullptr) return event;
+  std::lock_guard<std::mutex> lock(resources.mutex);
+  event = cached.load(std::memory_order_acquire);
+  if (event == nullptr) {
+    NVTE_CHECK_CUDA(cudaEventCreate(&event));
+    cached.store(event, std::memory_order_release);
+  }
+  return event;
 }
 
 int get_num_compute_streams() {
