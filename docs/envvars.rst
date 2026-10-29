@@ -216,6 +216,114 @@ backend-selection overview.
    :Default: ``1``
    :Description: Enable or disable FlashAttention 4 (the ``flash-attn-4`` package) for DotProductAttention, without affecting FlashAttention 2 or 3. When set to ``0``, FlashAttention 4 will not be used even if it is installed.
 
+
+.. envvar:: NVTE_FUSED_ATTN_FROST
+
+   :Default: ``0``
+   :Values: ``0``, ``1``, ``2``
+   :Description: Experimental cuDNN OSS (FROST) backward provider for fused
+                 attention on SM100. ``1`` attempts the OSS provider and retains
+                 the cuDNN backend for unsupported declarations. ``2`` requires
+                 the OSS provider and reports an error instead of falling back;
+                 use it to verify benchmark routing. Forward remains cuDNN.
+                 Requires a TE build with ``NVTE_WITH_CUTEDSL=1``
+                 (CMake: ``-DNVTE_WITH_CUTEDSL=ON``),
+                 ``NVTE_ENABLE_CUTEDSL_BACKEND=1``,
+                 ``CUDNN_FRONTEND_ENABLE_FROST_ENGINES=1``, CuTeDSL 4.8 or newer
+                 with its CUDA 13 compiler flavor (``nvidia-cutlass-dsl[cu13]``),
+                 and a compatible ``nvidia-cudnn-frontend`` Python installation.
+
+   The initial contract covers BF16, separate Q/K/V, D128/D256, nondeterministic
+   backward, no dropout, no bias/sinks, and unmasked or top-left causal attention.
+   D256 also supports bottom-right causal attention when ``max_seqlen_q <=
+   max_seqlen_kv``. Q-longer-than-KV uniform THD declarations use the backend
+   in mode ``1`` and report unsupported OSS backward in mode ``2``. Dense BSHD
+   Q-longer-than-KV calls are rejected by the existing forward path.
+   D128 bottom-right declarations retain the backend fallback (or fail in strict mode).
+   BSHD lengths must be multiples of 128. D128 also supports native packed THD
+   with device lengths and physical origins. D256 THD requires the separate
+   uniform-layout promise below. Other layouts, masks and dtypes retain their
+   existing route in mode ``1``. Kernel support does not establish performance
+   for every context-parallel communication type.
+
+   Python builds the cuDNN graph and registers its compiled native function on
+   the first call for a declaration and device. Subsequent C++ calls pass the
+   current pointers, stream and framework-owned workspace directly through
+   TVM-FFI. The complete backward chain retains all required scratch
+   initialization and gradient reductions. Warm up before CUDA graph capture.
+
+   This draft depends on the prepared-plan contract in cuDNN Frontend
+   `PR 1688 <https://github.com/NVIDIA/cudnn-frontend/pull/1688>`_
+   (development dependency revision ``333278627eb2ccffc5f47da26d733f87a2d0a8aa``).
+   That contract is not yet a stable public C++ export API. The adapter checks
+   its operand order and metadata before publishing a native entry; an ABI
+   mismatch reports an error. Install the compatible FE source in the same
+   Python environment as TE. An older wheel is not equivalent to this dependency.
+
+   A dedicated SM100 regression target is available as
+   ``TE_PATH=/path/to/TransformerEngine XML_LOG_DIR=/logs bash
+   qa/L1_pytorch_frost_unittest/test.sh``. Provision the compatible FE source,
+   CUDA 13 CuTeDSL dependencies, pytest, and a TE build with the bridge enabled
+   before invoking it. The target fails for missing capabilities, skipped tests,
+   or missing isolated metadata-guard cases. Qualified L0 lanes can also set
+   ``NVTE_FROST_TEST_REQUIRED=1`` to invoke it from the PyTorch L0 launcher;
+   ordinary L0 lanes do not acquire these experimental dependencies.
+
+.. envvar:: NVTE_FUSED_ATTN_FROST_ALLGATHER
+
+   :Default: ``0``
+   :Values: ``0``, ``1``
+   :Description: Experimental D256 BF16 THD backward adaptation for causal
+                 AllGather with equal-length sequences and CP sizes 2, 4 or 8.
+                 Requires ``NVTE_FUSED_ATTN_FROST_UNIFORM=1`` and a cuDNN OSS
+                 D256 engine with `FE PR 1690
+                 <https://github.com/NVIDIA/cudnn-frontend/pull/1690>`_. The graph
+                 retains full Q/K/V buffers and their batch pitch; Q/O/dO/dQ
+                 pointers select the current half-sequence, and packed Stats
+                 are read at the corresponding physical origin. Sequence
+                 lengths and origins are validated on the GPU on every call.
+                 This adds no Q/K/V layout-copy kernel. Existing THD gradient
+                 initialization remains necessary for unused physical rows.
+                 Other gapped or unequal THD layouts remain unsupported.
+
+.. envvar:: NVTE_FUSED_ATTN_FROST_UNIFORM
+
+   :Default: ``0``
+   :Values: ``0``, ``1``
+   :Description: For D256 THD only, promise that every actual Q/KV sequence fills
+                 its declared maximum length and that physical token origins
+                 are the corresponding compact cumulative offsets (or the
+                 supported per-step pitches and origins when
+                 ``NVTE_FUSED_ATTN_FROST_ALLGATHER=1``). This allows
+                 an equivalent dense OSS backward declaration. TE checks the
+                 promise on the GPU on every invocation and converts the packed
+                 FP32 Stats into the dense layout on the same stream. A violated
+                 promise raises a device error; it is not an unchecked hint.
+                 Unequal THD and other gapped layouts must leave this option disabled.
+
+   D128 uses native THD and does not need this promise. The option does not alter
+   attention precision, masks, communication or the public fused-attention API.
+
+.. envvar:: NVTE_FUSED_ATTN_FROST_D128_NOZERO
+
+   :Default: ``0``
+   :Values: ``0``, ``1``
+   :Description: Omit the three PyTorch dQ/dK/dV output fills when the D128
+                 FROST backward chain overwrites every physical output row.
+                 Requires strict routing (``NVTE_FUSED_ATTN_FROST=2``), BF16,
+                 separate Q/K/V, grouped-query attention, and square compact
+                 equal-length THD with lengths divisible by 128. Native and
+                 fallback modes, rectangular shapes, and unequal layouts retain
+                 the existing initialization. Internal FROST scratch
+                 initialization and grouped-gradient reductions are unchanged.
+
+   Enabling this option promises that device sequence lengths and physical
+   origins match the compact declaration. TE checks that promise on the GPU
+   on every execution, including CUDA graph replay. Invalid metadata raises a
+   device error before output may be used. D128 retains its native THD graph;
+   this option does not require ``NVTE_FUSED_ATTN_FROST_UNIFORM`` or change
+   attention precision, masks, communication, or output allocation sizes.
+
 .. envvar:: NVTE_FUSED_ATTN
 
    :Type: ``int`` (0 or 1)
