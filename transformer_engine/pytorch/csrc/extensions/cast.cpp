@@ -691,6 +691,77 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
 
+std::tuple<at::Tensor, at::Tensor> nvfp4_group_hadamard_amax(const at::Tensor &tensor,
+                                                             py::handle quantizer,
+                                                             const size_t num_tensors,
+                                                             std::optional<at::Tensor> first_dims,
+                                                             std::optional<at::Tensor> last_dims,
+                                                             std::optional<at::Tensor> tensor_offsets) {
+  using namespace transformer_engine::pytorch::detail;
+  init_extension();
+
+  NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+  NVTE_CHECK(!last_dims.has_value(),
+             "nvfp4_group_hadamard_amax: varying last dim is not supported with NVFP4.");
+  NVTE_CHECK(first_dims.has_value() && tensor_offsets.has_value(),
+             "nvfp4_group_hadamard_amax: first_dims and tensor_offsets are required.");
+  NVTE_CHECK(first_dims->is_cuda() && first_dims->scalar_type() == at::kLong &&
+                 first_dims->numel() == static_cast<int64_t>(num_tensors),
+             "nvfp4_group_hadamard_amax: first_dims must be an int64 CUDA tensor with one "
+             "entry per group.");
+  NVTE_CHECK(tensor_offsets->is_cuda() && tensor_offsets->scalar_type() == at::kLong &&
+                 tensor_offsets->numel() == static_cast<int64_t>(num_tensors + 1),
+             "nvfp4_group_hadamard_amax: tensor_offsets must be an int64 CUDA tensor with "
+             "num_tensors + 1 entries.");
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  NVTE_CHECK(IsNVFP4Quantizers(quantizer.ptr()),
+             "nvfp4_group_hadamard_amax only supports NVFP4 quantizers.");
+  NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+  NVTE_CHECK(nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax,
+             "nvfp4_group_hadamard_amax expects the NVFP4 RHT recipe with post-RHT amax.");
+
+  std::vector<size_t> logical_shape;
+  for (const auto &d : tensor.sizes()) {
+    logical_shape.push_back(d);
+  }
+  const auto float_opts = at::TensorOptions().dtype(at::kFloat).device(tensor.device());
+  auto rowwise_amax = at::zeros({static_cast<int64_t>(num_tensors)}, float_opts);
+  auto columnwise_amax = at::zeros({static_cast<int64_t>(num_tensors)}, float_opts);
+  if (logical_shape[0] == 0 || logical_shape[1] == 0) {
+    return {rowwise_amax, columnwise_amax};
+  }
+
+  const auto input_dtype = GetTransformerEngineDType(tensor.scalar_type());
+  auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
+  grouped_input_tensor.set_rowwise_data(tensor.data_ptr(), input_dtype, getTensorShape(tensor));
+
+  // The amax launcher derives which amax to compute from the storage the output declares:
+  // row-wise data requests the pre-RHT amax and column-wise data the post-RHT (transposed)
+  // amax. It only ever writes the amax buffers, so alias the input as both and allocate no
+  // quantized storage.
+  auto grouped_amax_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
+  grouped_amax_tensor.set_rowwise_data(tensor.data_ptr(), input_dtype, getTensorShape(tensor));
+  grouped_amax_tensor.set_columnwise_data(tensor.data_ptr(), input_dtype,
+                                          getTensorShape(tensor));
+  grouped_amax_tensor.set_amax(rowwise_amax.data_ptr(), DType::kFloat32,
+                               getTensorShape(rowwise_amax));
+  grouped_amax_tensor.set_columnwise_amax(columnwise_amax.data_ptr(), DType::kFloat32,
+                                          getTensorShape(columnwise_amax));
+  grouped_amax_tensor.set_first_dims(first_dims->data_ptr(), DType::kInt64,
+                                     getTensorShape(*first_dims));
+  grouped_amax_tensor.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
+                                         getTensorShape(*tensor_offsets));
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_hadamard_transform_amax_graph_safe(
+        grouped_input_tensor.data(), grouped_amax_tensor.data(), 0,
+        nvfp4_quantizer_cpp->rht_matrix_random_sign_mask_t, at::cuda::getCurrentCUDAStream());
+  });
+
+  return {rowwise_amax, columnwise_amax};
+}
+
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
                                 std::optional<at::Tensor> last_dims,

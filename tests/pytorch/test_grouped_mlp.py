@@ -2854,9 +2854,18 @@ class TestGroupedMLPFusedOp:
         if bias:
             torch.testing.assert_close(on["fc1_db"], off["fc1_db"], **tols)
             torch.testing.assert_close(on["fc2_db"], off["fc2_db"], **tols)
-        assert_close_rms(
-            on["fc2_dw"], off["fc2_dw"], rtol=self._RECOMPUTE_FC2_WGRAD_RMS_TOL[quantization]
-        )
+        # The dSReLU kernel regenerates fc2_x bit-exactly from the saved pre-activation and
+        # the NVFP4 backward re-quantizes it with the forward amax, so FC2's weight gradient
+        # matches bitwise. Plain SReLU needs a cuDNN frontend whose Hadamard-fused kernel
+        # rounds the accumulator through C's dtype before the activation; older versions
+        # regenerate a tensor that differs by a few BF16 ulps, hence the tolerance. MXFP8
+        # quantizes the regenerated tensor inside the dSReLU kernel with its own scales.
+        if quantization == "nvfp4_rht" and activation == "scaled_tanh_srelu":
+            torch.testing.assert_close(on["fc2_dw"], off["fc2_dw"], rtol=0, atol=0)
+        else:
+            assert_close_rms(
+                on["fc2_dw"], off["fc2_dw"], rtol=self._RECOMPUTE_FC2_WGRAD_RMS_TOL[quantization]
+            )
 
     @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
     def test_grouped_mlp_caller_buffers(
