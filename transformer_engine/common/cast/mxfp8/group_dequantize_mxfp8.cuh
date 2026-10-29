@@ -28,8 +28,11 @@ namespace mxfp8 {
 namespace group_dequantize_kernel {
 
 constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
-__device__ alignas(128) CUtensorMap g_tensor_maps_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-__device__ alignas(128) CUtensorMap g_tensor_maps_output[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
+
+// Per-invocation tensor-map storage (not file-global): a `static __device__` array here would be
+// shared by every dequantize launch that includes this header, so calls on different CUDA streams
+// would race on the descriptors. The launcher allocates private arrays with `cudaMallocAsync` and
+// passes them to both kernels, keeping concurrent invocations disjoint.
 
 // Reuse helper types and functions from common namespace
 using common::fence_acquire_tensormap;
@@ -88,7 +91,9 @@ __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_
                                        const size_t last_logical_dim,
                                        const int64_t *const __restrict__ offsets_ptr,
                                        const int64_t *const __restrict__ first_dims_ptr,
-                                       const int64_t *const __restrict__ last_dims_ptr) {
+                                       const int64_t *const __restrict__ last_dims_ptr,
+                                       CUtensorMap *const tensor_maps_input,
+                                       CUtensorMap *const tensor_maps_output) {
   const size_t tensor_id = blockIdx.x;
 
   const size_t rows =
@@ -107,12 +112,12 @@ __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_
   if (tensor_id < num_tensors) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
-      modify_base_tensor_map(base_tensor_map_input, &g_tensor_maps_input[tensor_id],
+      modify_base_tensor_map(base_tensor_map_input, &tensor_maps_input[tensor_id],
                              global_data_ptr, rows, cols, sizeof(IType));
     }
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(output_data_ptr + offset_elts);
-      modify_base_tensor_map(base_tensor_map_output, &g_tensor_maps_output[tensor_id],
+      modify_base_tensor_map(base_tensor_map_output, &tensor_maps_output[tensor_id],
                              global_data_ptr, rows, cols, sizeof(OType));
     }
   }
@@ -127,7 +132,9 @@ __global__ void __launch_bounds__(128)
                                   const int64_t *const __restrict__ offsets_ptr,
                                   const int64_t *const __restrict__ first_dims_ptr,
                                   const int64_t *const __restrict__ last_dims_ptr,
-                                  const e8m0_t *const __restrict__ scales_ptr) {
+                                  const e8m0_t *const __restrict__ scales_ptr,
+                                  const CUtensorMap *const tensor_maps_input,
+                                  const CUtensorMap *const tensor_maps_output) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr size_t CHUNK_DIM_Y = DequantizeConfig::CHUNK_DIM_Y;
   constexpr size_t CHUNK_DIM_X = DequantizeConfig::CHUNK_DIM_X;
@@ -211,9 +218,9 @@ __global__ void __launch_bounds__(128)
 
   // Select TMA descriptors (static for single tensor, per-tensor for multi-tensor)
   const CUtensorMap &tensor_map_input =
-      is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[tensor_id];
+      is_single_tensor ? tensor_map_input_static : tensor_maps_input[tensor_id];
   const CUtensorMap &tensor_map_output =
-      is_single_tensor ? tensor_map_output_static : g_tensor_maps_output[tensor_id];
+      is_single_tensor ? tensor_map_output_static : tensor_maps_output[tensor_id];
 
   if (!is_single_tensor) {
     fence_acquire_tensormap(&tensor_map_input);
@@ -470,26 +477,48 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
                                SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim, 0,
                                typeToNumBits(output->dtype()));
 
+          // Per-invocation tensor-map storage (see note above). Allocated with cudaMallocAsync so
+          // concurrent dequantize calls on different streams never share descriptor state.
+          CUtensorMap *tensor_maps_input = nullptr;
+          CUtensorMap *tensor_maps_output = nullptr;
+
           // Update tensor descriptors before launching the kernel
           if (!is_single_tensor) {
+            const size_t tmap_bytes = MAX_SUPPORTED_TENSOR_DESCRIPTORS * sizeof(CUtensorMap);
+            NVTE_CHECK_CUDA(cudaMallocAsync(
+                reinterpret_cast<void **>(&tensor_maps_input), tmap_bytes, stream));
+            NVTE_CHECK_CUDA(cudaMallocAsync(
+                reinterpret_cast<void **>(&tensor_maps_output), tmap_bytes, stream));
             const IType *const input_dptr = reinterpret_cast<const IType *>(input_data.dptr);
             OType *const output_dptr = reinterpret_cast<OType *>(output->data.dptr);
 
             update_tma_descriptors<IType, OType><<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
                 tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
                 num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                last_dims_ptr);
+                last_dims_ptr, tensor_maps_input, tensor_maps_output);
           }
 
           if (use_rowwise_scaling) {
             group_dequantize_mxfp8_kernel<IType, OType, true><<<grid, block, 0, stream>>>(
                 tensor_map_input, tensor_map_output, shape_rep, num_tensors, first_logical_dim,
-                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr);
+                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr,
+                tensor_maps_input, tensor_maps_output);
           } else {
             group_dequantize_mxfp8_kernel<IType, OType, false><<<grid, block, 0, stream>>>(
                 tensor_map_input, tensor_map_output, shape_rep, num_tensors, first_logical_dim,
-                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr);
-          });  // NOLINT(*)
+                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr,
+                tensor_maps_input, tensor_maps_output);
+          }
+
+          // Release the per-call tensor-map storage (stream-ordered; stays alive until the kernels
+          // above finish, and the pool won't reuse the block for another stream before then).
+          if (tensor_maps_input != nullptr) {
+            NVTE_CHECK_CUDA(cudaFreeAsync(tensor_maps_input, stream));
+          }
+          if (tensor_maps_output != nullptr) {
+            NVTE_CHECK_CUDA(cudaFreeAsync(tensor_maps_output, stream));
+          }
+          );  // NOLINT(*)
   );           // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
