@@ -2364,12 +2364,9 @@ class TestBasicOps:
             requires_grad=False,
         )
 
-        # Plain PyTorch implementation. The op computes in FP32 and rounds
-        # the result to the input dtype, so the reference does the same.
-        y_ref = (x_ref.float() * torch.nn.functional.silu(g_ref.float())).to(dtype)
-        y_ref.backward(dy_ref.to(dtype))
-        dx_ref = x_ref.grad.to(dtype)
-        dg_ref = g_ref.grad.to(dtype)
+        # Plain PyTorch implementation
+        y_ref = x_ref * torch.nn.functional.silu(g_ref)
+        y_ref.backward(dy_ref)
 
         # Implementation with fusible operation
         op = te_ops.SiLUGate()
@@ -2380,12 +2377,9 @@ class TestBasicOps:
         tols = dtype_tols(dtype)
 
         # Check results
-        y_test = y_test.to(dtype=torch.float64, device="cpu")
-        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        dg_test = g_test.grad.to(dtype=torch.float64, device="cpu")
-        torch.testing.assert_close(y_test, y_ref.to(dtype=torch.float64, device="cpu"), **tols)
-        torch.testing.assert_close(dx_test, dx_ref.to(dtype=torch.float64, device="cpu"), **tols)
-        torch.testing.assert_close(dg_test, dg_ref.to(dtype=torch.float64, device="cpu"), **tols)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(g_test, g_ref, **tols)
 
     @pytest.mark.parametrize("in_shape", ((1, 37, 16, 128), (6, 16, 64)))
     @pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
@@ -2454,11 +2448,6 @@ class TestBasicOps:
         var_ref = x_ref.square().mean(dim=-1, keepdim=True)
         gamma_ref = 1 + w_ref if zero_centered_gamma else w_ref
         n_ref = x_ref * torch.rsqrt(eps + var_ref) * gamma_ref
-        # The op rounds the normalized output and its gradient to the input
-        # dtype around the gate (as the unfused Megatron path does), so the
-        # reference does too.
-        n_ref = n_ref + (n_ref.to(dtype).to(n_ref.dtype) - n_ref).detach()
-        n_ref.register_hook(lambda grad: grad.to(dtype).to(grad.dtype))
         y_ref = n_ref * torch.nn.functional.silu(g_ref)
         y_ref.backward(dy_ref)
 
@@ -2481,14 +2470,10 @@ class TestBasicOps:
         tols = dtype_tols(dtype)
 
         # Check results
-        y_test = y_test.to(dtype=torch.float64, device="cpu")
-        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
-        dg_test = g_test.grad.to(dtype=torch.float64, device="cpu")
-        torch.testing.assert_close(y_test, y_ref, **tols)
-        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
-        torch.testing.assert_close(dw_test, w_ref.grad, **tols)
-        torch.testing.assert_close(dg_test, g_ref.grad, **tols)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(w_test, w_ref, **tols)
+        assert_close_grads(g_test, g_ref, **tols)
 
     @pytest.mark.parametrize("in_shape", ((32,), (6, 16, 64), (32, 64)))
     @pytest.mark.parametrize("dtype", _dtypes)
