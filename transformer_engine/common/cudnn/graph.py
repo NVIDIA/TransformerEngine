@@ -192,10 +192,17 @@ class CacheDiagnostics:
         self.framework = framework
         self.events = Counter()
         self.times = Counter()
+        self._level = None
         atexit.register(self.summary)
 
+    def level(self):
+        """Return the debug level, resolved from the environment on first use."""
+        if self._level is None:
+            self._level = self._resolve_level()
+        return self._level
+
     @staticmethod
-    def level():
+    def _resolve_level():
         """Resolve the existing debug level and rank filter."""
         setting = os.getenv("NVTE_FUSED_ATTN_CACHE_DEBUG", "0")
         level, _, ranks = setting.partition(":")
