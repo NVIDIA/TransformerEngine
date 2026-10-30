@@ -415,7 +415,7 @@ def fused_topk_with_score_function(
         bit ``(e % 8)`` of byte ``(e / 8)`` set when token ``t`` routes to expert
         ``e`` (LSB-first / little-endian packing along the expert axis).
     topk_indices : torch.Tensor, optional
-        Optional output buffer with shape [*logits.shape[:-1], topk]. When provided, its dtype
+        Optional output buffer with shape ``[*logits.shape[:-1], topk]``. When provided, its dtype
         controls the dense index output dtype and the routing map is not materialized.
         The buffer is overwritten and returned in both eager and compiled execution.
         Its contents must remain unchanged until the corresponding backward completes.
@@ -444,7 +444,7 @@ def fused_topk_with_score_function(
         - BYTEMAP: ``bool[*logits.shape[:-1], num_experts]``
         - BITMAP_U8: ``uint8[*logits.shape[:-1], ceil(num_experts/8)]``,
           LSB-first bit-packed.
-        - Dense indices: [*logits.shape[:-1], topk], with the dtype of ``topk_indices``.
+        - Dense indices: ``[*logits.shape[:-1], topk]``, with the dtype of ``topk_indices``.
     """
     if logits.dtype == torch.float64:
         raise ValueError("Current TE does not support float64 router type.")
@@ -558,6 +558,7 @@ def fused_compute_score_for_moe_aux_loss(
     """
     Fused compute scores for MoE aux loss, subset of the fused_topk_with_score_function.
     Supports ``torch.compile(fullgraph=True)`` for forward and backward.
+
     Parameters
     ----------
     logits : torch.Tensor in fp32/bf16/fp16
@@ -688,6 +689,7 @@ def fused_moe_aux_loss(
     """
     Fused MoE aux loss.
     Supports ``torch.compile(fullgraph=True)`` with either form of ``total_num_tokens``.
+
     Parameters
     ----------
     probs : torch.Tensor in fp32/bf16/fp16
