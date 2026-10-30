@@ -186,8 +186,9 @@ def test_mxfp8_partial_kernels_sharded(h, w, bounds, with_columnwise):
         else:
             assert (col == sentinel).all()
 
-        out_row = torch.full((end - start,), 0x5A, dtype=torch.uint8, device="cuda")
-        out_col = torch.full_like(out_row, 0x5A)
+        out_row_full = torch.full((h * w,), 0x5A, dtype=torch.uint8, device="cuda")
+        out_col_full = torch.full_like(out_row_full, 0x5A)
+        out_row, out_col = out_row_full[start:end], out_col_full[start:end]
         tex.mxfp8_scaling_partial_cast(
             inp,
             out_row,
@@ -205,6 +206,8 @@ def test_mxfp8_partial_kernels_sharded(h, w, bounds, with_columnwise):
             torch.testing.assert_close(out_col, out_col_ref, atol=0, rtol=0)
         else:
             assert (out_col == 0x5A).all()
+        for out_full in (out_row_full, out_col_full):
+            assert (out_full[:start] == 0x5A).all() and (out_full[end:] == 0x5A).all()
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
