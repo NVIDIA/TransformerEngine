@@ -2,16 +2,18 @@
 #
 # See LICENSE for license information.
 
-"""MLA RoPE for DSv3 671B - Triton forward and backward kernels.
+"""Fused MLA RoPE kernels (DeepSeekV3-style decoupled RoPE/NoPE).
 
-Source: Megatron-LM megatron/core/fusions/fused_mla_yarn_rope_apply.py
-Falls back to pure PyTorch when Triton is unavailable.
+The query kernel rotates the trailing ``head_dim_rope`` slice; the KV
+kernel builds the key (nope | broadcast-rotated shared rope head) and value
+tensors in a single pass. Falls back to pure PyTorch when Triton is unavailable
+or for the ``bshd`` layout.
 
-Note: DSv3 uses YaRN-scaled RoPE for long-context extrapolation. This test
-intentionally uses plain RoPE (base=10000) because it only validates MXFP8
-attention path wiring, tensor shapes, forward/backward flow, and relative BF16
-vs MXFP8 behavior. Both reference and MXFP8 paths use the same RoPE tables.
-"""
+The rope slice is read interleaved (checkpoint layout) and written in NeoX
+half-split layout."""
+
+import math
+from typing import Optional, Tuple
 
 import torch
 
@@ -23,25 +25,101 @@ try:
 except ImportError:
     HAVE_TRITON = False
 
-HEAD_DIM_ROPE = 64
-HEAD_DIM_NOPE = 128
-HEAD_DIM_V = 128
-ROTARY_BASE = 10000
+__all__ = [
+    "build_rope_tables",
+    "apply_mla_rope_q",
+    "apply_mla_rope_kv",
+    "yarn_mscale",
+    "yarn_concentration_factor",
+]
+
+
+def _yarn_correction_dim(num_rotations, dim, base, max_pos):
+    return (dim * math.log(max_pos / (num_rotations * 2 * math.pi))) / (2 * math.log(base))
+
+
+def _yarn_correction_range(beta_fast, beta_slow, dim, base, max_pos, round_to_int=True):
+    low = _yarn_correction_dim(beta_fast, dim, base, max_pos)
+    high = _yarn_correction_dim(beta_slow, dim, base, max_pos)
+    if round_to_int:
+        low, high = math.floor(low), math.ceil(high)
+    return max(low, 0), min(high, dim - 1)
+
+
+def _yarn_linear_ramp(low, high, dim, device):
+    if low == high:
+        high += 0.001
+    ramp = (torch.arange(dim, dtype=torch.float32, device=device) - low) / (high - low)
+    return torch.clamp(ramp, 0, 1)
+
+
+def yarn_mscale(scale: float, mscale: float = 1.0) -> float:
+    """YaRN attention temperature factor ``0.1 * mscale * ln(scale) + 1`` (1 for scale <= 1)."""
+    if scale <= 1:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+
+def yarn_concentration_factor(scaling_factor: float, mscale: float, mscale_all_dim: float) -> float:
+    """Factor multiplied into cos/sin tables."""
+    return yarn_mscale(scaling_factor, mscale) / yarn_mscale(scaling_factor, mscale_all_dim)
 
 
 def build_rope_tables(
     seq_len: int,
-    emb_dim: int = HEAD_DIM_ROPE,
-    base: int = ROTARY_BASE,
-    device: torch.device = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    inv_freq = 1.0 / (
-        base ** (torch.arange(0, emb_dim, 2, dtype=torch.float32, device=device) / emb_dim)
-    )
+    emb_dim: int,
+    base: float = 10000.0,
+    device: Optional[torch.device] = None,
+    scaling_factor: Optional[float] = None,
+    original_max_position_embeddings: int = 4096,
+    beta_fast: float = 32.0,
+    beta_slow: float = 1.0,
+    mscale: float = 1.0,
+    mscale_all_dim: float = 0.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build cosine/sine tables for :func:`apply_mla_rope_q` and :func:`apply_mla_rope_kv`.
+
+    Parameters
+    ----------
+    seq_len : int
+        Number of sequence positions.
+    emb_dim : int
+        Positive, even number of rotary channels; excludes the non-rotary channels.
+    base : float, default = 10000.0
+        Base for the rotary frequencies.
+    device : torch.device, optional
+        Table device; ``None`` uses the default PyTorch device.
+    scaling_factor : float, optional
+        YaRN context-extension factor; ``None`` selects unscaled RoPE.
+    original_max_position_embeddings : int, default = 4096
+        Original context length used to determine the YaRN frequency ramp.
+    beta_fast, beta_slow : float, default = 32.0, 1.0
+        Rotation-count boundaries of the YaRN interpolation ramp.
+    mscale, mscale_all_dim : float, default = 1.0, 0.0
+        YaRN magnitude coefficients. Tables are multiplied by the ratio of
+        ``yarn_mscale(scaling_factor, mscale)`` to
+        ``yarn_mscale(scaling_factor, mscale_all_dim)``.
+
+    Returns
+    -------
+    tuple of torch.Tensor
+        Contiguous FP32 ``(cos_table, sin_table)``, each of shape
+        ``[seq_len, emb_dim]`` with duplicated halves for NeoX layout.
+    """
+    exponent = torch.arange(0, emb_dim, 2, dtype=torch.float32, device=device) / emb_dim
+    inv_freq = 1.0 / (base**exponent)
+    factor = 1.0
+    if scaling_factor is not None:
+        low, high = _yarn_correction_range(
+            beta_fast, beta_slow, emb_dim, base, original_max_position_embeddings
+        )
+        extra_mask = 1.0 - _yarn_linear_ramp(low, high, emb_dim // 2, device)
+        inv_freq = (inv_freq / scaling_factor) * (1 - extra_mask) + inv_freq * extra_mask
+        factor = yarn_concentration_factor(scaling_factor, mscale, mscale_all_dim)
     t = torch.arange(seq_len, device=device, dtype=torch.float32)
     freqs = torch.outer(t, inv_freq)
     freqs = torch.cat([freqs, freqs], dim=-1)
-    return torch.cos(freqs).contiguous(), torch.sin(freqs).contiguous()
+    return (torch.cos(freqs) * factor).contiguous(), (torch.sin(freqs) * factor).contiguous()
 
 
 if HAVE_TRITON:
@@ -69,20 +147,9 @@ if HAVE_TRITON:
                 ) * this_seq_len // 2
         return token_idx
 
-    @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_H": 1}),
-            triton.Config({"BLOCK_H": 2}),
-            triton.Config({"BLOCK_H": 4}),
-            triton.Config({"BLOCK_H": 8}),
-            triton.Config({"BLOCK_H": 16}),
-            triton.Config({"BLOCK_H": 32}),
-            triton.Config({"BLOCK_H": 64}),
-            triton.Config({"BLOCK_H": 128}),
-        ],
-        key=["emb_dim", "head_num"],
-        restore_value=["Q"],
-    )
+    _AUTOTUNE_CONFIGS = [triton.Config({"BLOCK_H": h}) for h in (1, 2, 4, 8, 16, 32, 64, 128)]
+
+    @triton.autotune(configs=_AUTOTUNE_CONFIGS, key=["emb_dim", "head_num"], restore_value=["Q"])
     @triton.jit
     def rotary_fwd_q_kernel(
         Q,
@@ -100,6 +167,7 @@ if HAVE_TRITON:
         cp_size,
         BLOCK_H: tl.constexpr,
     ):
+        """In-place RoPE fwd on the trailing rope slice of q."""
         pid_m = tl.program_id(axis=0)
         pid_head = tl.program_id(axis=1)
         if cu_seqlens_q is None:
@@ -129,20 +197,7 @@ if HAVE_TRITON:
         tl.store(Q + x_left_off, x_left, mask=mask)
         tl.store(Q + x_right_off, x_right, mask=mask)
 
-    @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_H": 1}),
-            triton.Config({"BLOCK_H": 2}),
-            triton.Config({"BLOCK_H": 4}),
-            triton.Config({"BLOCK_H": 8}),
-            triton.Config({"BLOCK_H": 16}),
-            triton.Config({"BLOCK_H": 32}),
-            triton.Config({"BLOCK_H": 64}),
-            triton.Config({"BLOCK_H": 128}),
-        ],
-        key=["emb_dim", "head_num"],
-        restore_value=["DO"],
-    )
+    @triton.autotune(configs=_AUTOTUNE_CONFIGS, key=["emb_dim", "head_num"], restore_value=["DO"])
     @triton.jit
     def rotary_bwd_q_kernel(
         DO,
@@ -160,6 +215,7 @@ if HAVE_TRITON:
         cp_size,
         BLOCK_H: tl.constexpr,
     ):
+        """In-place RoPE bwd on the trailing rope slice of dq."""
         pid_m = tl.program_id(axis=0)
         pid_head = tl.program_id(axis=1)
         if cu_seqlens_q is None:
@@ -189,19 +245,7 @@ if HAVE_TRITON:
         tl.store(DO + x_1_off, x_1, mask=mask)
         tl.store(DO + x_2_off, x_2, mask=mask)
 
-    @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_H": 1}),
-            triton.Config({"BLOCK_H": 2}),
-            triton.Config({"BLOCK_H": 4}),
-            triton.Config({"BLOCK_H": 8}),
-            triton.Config({"BLOCK_H": 16}),
-            triton.Config({"BLOCK_H": 32}),
-            triton.Config({"BLOCK_H": 64}),
-            triton.Config({"BLOCK_H": 128}),
-        ],
-        key=["emb_dim", "k_dim", "v_dim", "head_num"],
-    )
+    @triton.autotune(configs=_AUTOTUNE_CONFIGS, key=["emb_dim", "k_dim", "v_dim", "head_num"])
     @triton.jit
     def rotary_fwd_kv_kernel(
         KV,
@@ -228,6 +272,7 @@ if HAVE_TRITON:
         cp_size,
         BLOCK_H: tl.constexpr,
     ):
+        """Fwd: build (key, value) from kv and the shared rotated rope head."""
         pid_m = tl.program_id(axis=0)
         pid_head = tl.program_id(axis=1)
         if cu_seqlens_kv is None:
@@ -268,19 +313,7 @@ if HAVE_TRITON:
         tl.store(K_ptr + x_left_off, x_left, mask=mask)
         tl.store(K_ptr + x_right_off, x_right, mask=mask)
 
-    @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_H": 1}),
-            triton.Config({"BLOCK_H": 2}),
-            triton.Config({"BLOCK_H": 4}),
-            triton.Config({"BLOCK_H": 8}),
-            triton.Config({"BLOCK_H": 16}),
-            triton.Config({"BLOCK_H": 32}),
-            triton.Config({"BLOCK_H": 64}),
-            triton.Config({"BLOCK_H": 128}),
-        ],
-        key=["emb_dim", "k_dim", "v_dim", "head_num"],
-    )
+    @triton.autotune(configs=_AUTOTUNE_CONFIGS, key=["emb_dim", "k_dim", "v_dim", "head_num"])
     @triton.jit
     def rotary_bwd_kv_kernel(
         dK,
@@ -307,6 +340,7 @@ if HAVE_TRITON:
         cp_size,
         BLOCK_H: tl.constexpr,
     ):
+        """Bwd: scatter (dk, dv) into dkv and reduce rope-slice grads into demb."""
         pid_m = tl.program_id(axis=0)
         pid_head = tl.program_id(axis=1)
         if cu_seqlens_kv is None:
@@ -357,19 +391,25 @@ if HAVE_TRITON:
             tl.store(dEMB_ptr + tl.arange(0, emb_dim // 2) * 2, x_1)
             tl.store(dEMB_ptr + tl.arange(0, emb_dim // 2) * 2 + 1, x_2)
 
-    def _flattened_token_stride(tensor: torch.Tensor) -> int:
-        if tensor.dim() == 4:
-            return tensor.stride(1)
-        return tensor.stride(0)
+    def _token_stride(tensor: torch.Tensor) -> int:
+        return tensor.stride(1) if tensor.dim() == 4 else tensor.stride(0)
 
     class _MLARoPEQTriton(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, q, cos, sin, head_dim_nope, head_dim_rope):
-            s, b, nheads, _ = q.shape
-            total = s * b
+        """RoPE on the trailing rope slice of q [s, b, h, nope+rope]."""
 
-            grid_q = lambda META: (total, triton.cdiv(nheads, META["BLOCK_H"]))
-            rotary_fwd_q_kernel[grid_q](
+        @staticmethod
+        def forward(ctx, q, cos, sin, head_dim_nope, head_dim_rope, in_place):
+            """Rotate the rope slice of q."""
+            if in_place:
+                ctx.mark_dirty(q)
+            else:
+                q = q.clone(memory_format=torch.contiguous_format)
+            s, b, nheads, _ = q.shape
+
+            def grid(meta):
+                return (s * b, triton.cdiv(nheads, meta["BLOCK_H"]))
+
+            rotary_fwd_q_kernel[grid](
                 q,
                 cos,
                 sin,
@@ -379,54 +419,58 @@ if HAVE_TRITON:
                 b,
                 None,
                 None,
-                _flattened_token_stride(q),
+                _token_stride(q),
                 q.stride(2),
                 0,
                 1,
             )
-
             ctx.save_for_backward(cos, sin)
-            ctx.head_dim_nope = head_dim_nope
-            ctx.head_dim_rope = head_dim_rope
-            ctx.nheads = nheads
-            ctx.s = s
-            ctx.b = b
+            ctx.dims = (s, b, nheads, head_dim_nope, head_dim_rope)
             return q
 
         @staticmethod
         def backward(ctx, dq):
+            """Counter-rotate the rope slice of dq."""
             cos, sin = ctx.saved_tensors
-            s, b, nheads = ctx.s, ctx.b, ctx.nheads
-            total = s * b
+            dq = dq.clone(memory_format=torch.contiguous_format)
+            s, b, nheads, head_dim_nope, head_dim_rope = ctx.dims
 
-            grid_q = lambda META: (total, triton.cdiv(nheads, META["BLOCK_H"]))
-            rotary_bwd_q_kernel[grid_q](
+            def grid(meta):
+                return (s * b, triton.cdiv(nheads, meta["BLOCK_H"]))
+
+            rotary_bwd_q_kernel[grid](
                 dq,
                 cos,
                 sin,
-                ctx.head_dim_nope,
-                ctx.head_dim_rope,
+                head_dim_nope,
+                head_dim_rope,
                 nheads,
                 b,
                 None,
                 None,
-                _flattened_token_stride(dq),
+                _token_stride(dq),
                 dq.stride(2),
                 0,
                 1,
             )
-            return dq, None, None, None, None
+            return dq, None, None, None, None, None
 
     class _MLARoPEKVTriton(torch.autograd.Function):
+        """kv [s, b, h, nope+v] + shared rope head [s, b, 1, rope] -> (k, v)."""
+
         @staticmethod
         def forward(ctx, kv, k_pos_emb, cos, sin, head_dim_nope, head_dim_rope, head_dim_v):
+            """Build (k, v) from kv and the shared rope head."""
+            if not kv.is_contiguous():
+                kv = kv.contiguous()
             s, b, nheads, _ = kv.shape
-            total = s * b
-
             o_key = kv.new_empty(s, b, nheads, head_dim_nope + head_dim_rope)
             o_value = kv.new_empty(s, b, nheads, head_dim_v)
-            grid_kv = lambda META: (total, triton.cdiv(nheads, META["BLOCK_H"]))
-            rotary_fwd_kv_kernel[grid_kv](
+
+            def grid(meta):
+                return (s * b, triton.cdiv(nheads, meta["BLOCK_H"]))
+
+            rotary_fwd_kv_kernel[grid](
                 kv,
                 k_pos_emb,
                 o_key,
@@ -440,37 +484,34 @@ if HAVE_TRITON:
                 b,
                 None,
                 None,
-                _flattened_token_stride(kv),
+                _token_stride(kv),
                 kv.stride(2),
-                _flattened_token_stride(k_pos_emb),
-                _flattened_token_stride(o_key),
+                _token_stride(k_pos_emb),
+                _token_stride(o_key),
                 o_key.stride(2),
-                _flattened_token_stride(o_value),
+                _token_stride(o_value),
                 o_value.stride(2),
                 0,
                 1,
             )
-
             ctx.save_for_backward(cos, sin)
-            ctx.head_dim_nope = head_dim_nope
-            ctx.head_dim_rope = head_dim_rope
-            ctx.head_dim_v = head_dim_v
-            ctx.nheads = nheads
-            ctx.s = s
-            ctx.b = b
+            ctx.dims = (s, b, nheads, head_dim_nope, head_dim_rope, head_dim_v)
             return o_key, o_value
 
         @staticmethod
         def backward(ctx, dk_out, dv_out):
+            """Gradients for (kv, k_pos_emb) from (dk, dv)."""
             cos, sin = ctx.saved_tensors
-            s, b, nheads = ctx.s, ctx.b, ctx.nheads
-            ndp, ndr, ndv = ctx.head_dim_nope, ctx.head_dim_rope, ctx.head_dim_v
-            total = s * b
-
+            s, b, nheads, ndp, ndr, ndv = ctx.dims
+            dk_out = dk_out.contiguous()
+            dv_out = dv_out.contiguous()
             d_kv = dk_out.new_empty(s, b, nheads, ndp + ndv)
             d_emb = dk_out.new_empty(s, b, 1, ndr)
-            grid_kv = lambda META: (total, triton.cdiv(nheads, META["BLOCK_H"]))
-            rotary_bwd_kv_kernel[grid_kv](
+
+            def grid(meta):
+                return (s * b, triton.cdiv(nheads, meta["BLOCK_H"]))
+
+            rotary_bwd_kv_kernel[grid](
                 dk_out,
                 dv_out,
                 d_kv,
@@ -484,185 +525,156 @@ if HAVE_TRITON:
                 b,
                 None,
                 None,
-                _flattened_token_stride(dk_out),
+                _token_stride(dk_out),
                 dk_out.stride(2),
-                _flattened_token_stride(dv_out),
+                _token_stride(dv_out),
                 dv_out.stride(2),
-                _flattened_token_stride(d_kv),
+                _token_stride(d_kv),
                 d_kv.stride(2),
-                _flattened_token_stride(d_emb),
+                _token_stride(d_emb),
                 0,
                 1,
             )
             return d_kv, d_emb, None, None, None, None, None
 
 
-def _apply_mla_rope_q_with_tables(
-    q: torch.Tensor,
-    cos_table: torch.Tensor,
-    sin_table: torch.Tensor,
-    head_dim_nope: int = HEAD_DIM_NOPE,
-    head_dim_rope: int = HEAD_DIM_ROPE,
-) -> torch.Tensor:
-    if HAVE_TRITON:
-        return _MLARoPEQTriton.apply(
-            q,
-            cos_table,
-            sin_table,
-            head_dim_nope,
-            head_dim_rope,
-        )
-    return _apply_pytorch_q(q, cos_table, sin_table, head_dim_nope, head_dim_rope)
-
-
-def _apply_mla_rope_kv_with_tables(
-    kv: torch.Tensor,
-    k_pos_emb: torch.Tensor,
-    cos_table: torch.Tensor,
-    sin_table: torch.Tensor,
-    head_dim_nope: int = HEAD_DIM_NOPE,
-    head_dim_rope: int = HEAD_DIM_ROPE,
-    head_dim_v: int = HEAD_DIM_V,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if HAVE_TRITON:
-        return _MLARoPEKVTriton.apply(
-            kv,
-            k_pos_emb,
-            cos_table,
-            sin_table,
-            head_dim_nope,
-            head_dim_rope,
-            head_dim_v,
-        )
-    return _apply_pytorch_kv(
-        kv,
-        k_pos_emb,
-        cos_table,
-        sin_table,
-        head_dim_nope,
-        head_dim_rope,
-        head_dim_v,
-    )
+def _rotate_interleaved_to_neox(x, cos_table, sin_table, seq_dim):
+    shape = [1, 1, 1, cos_table.shape[-1]]
+    shape[seq_dim] = cos_table.shape[0]
+    cos_ = cos_table.view(shape).to(x.dtype)
+    sin_ = sin_table.view(shape).to(x.dtype)
+    half = x.shape[-1] // 2
+    x_1 = x[..., 0::2]
+    x_2 = x[..., 1::2]
+    x_left = x_1 * cos_[..., :half] - x_2 * sin_[..., :half]
+    x_right = x_2 * cos_[..., half:] + x_1 * sin_[..., half:]
+    return torch.cat((x_left, x_right), dim=-1)
 
 
 def apply_mla_rope_q(
     q: torch.Tensor,
-    head_dim_nope: int = HEAD_DIM_NOPE,
-    head_dim_rope: int = HEAD_DIM_ROPE,
-    base: int = ROTARY_BASE,
-    cos_table: torch.Tensor | None = None,
-    sin_table: torch.Tensor | None = None,
+    cos_table: torch.Tensor,
+    sin_table: torch.Tensor,
+    head_dim_nope: int,
+    head_dim_rope: int,
+    tensor_format: str = "sbhd",
+    in_place: bool = False,
 ) -> torch.Tensor:
-    if cos_table is None or sin_table is None:
-        s = q.shape[0]
-        cos_table, sin_table = build_rope_tables(
-            s,
-            emb_dim=head_dim_rope,
-            base=base,
-            device=q.device,
-        )
-    return _apply_mla_rope_q_with_tables(
-        q,
-        cos_table,
-        sin_table,
-        head_dim_nope,
-        head_dim_rope,
+    """Rotate the trailing query channels, preserving the non-rotary prefix.
+
+    Parameters
+    ----------
+    q : torch.Tensor
+        CUDA query tensor of shape ``[s, b, h, head_dim_nope + head_dim_rope]``
+        for ``sbhd``, or ``[b, s, h, head_dim_nope + head_dim_rope]`` for ``bshd``.
+    cos_table, sin_table : torch.Tensor
+        Contiguous FP32 tables of shape ``[s, head_dim_rope]`` on the same device
+        as ``q``, as returned by :func:`build_rope_tables`.
+    head_dim_nope, head_dim_rope : int
+        Number of non-rotary and rotary channels per head.
+    tensor_format : {"sbhd", "bshd"}, default = "sbhd"
+        Input and output layout.
+    in_place : bool, default = False
+        Rotate ``q`` in place instead of allocating an output. Requires a contiguous
+        ``sbhd`` input and a power-of-two rotary dimension of at least two.
+        Supported in eager mode only.
+
+    Returns
+    -------
+    torch.Tensor
+        Rotated queries with the same shape and dtype as ``q``.
+
+    Notes
+    -----
+    Triton is used for ``sbhd`` when ``head_dim_rope`` is a power of two and
+    at least two; other supported layouts/dimensions use PyTorch operations.
+    The Triton path computes gradients for ``q`` only; treat the tables as constants.
+
+    The default path leaves ``q`` and incoming backward gradients unchanged.
+    With ``in_place=True``, ``q`` must have no other consumers that need its
+    original values, and PyTorch's usual in-place autograd rules apply. In
+    particular, views of custom autograd Function outputs cannot be mutated.
+    """
+    use_triton = (
+        HAVE_TRITON
+        and tensor_format == "sbhd"
+        and head_dim_rope >= 2
+        and _is_power_of_two(head_dim_rope)
     )
+    if in_place and (not use_triton or not q.is_contiguous()):
+        raise ValueError("in_place=True requires contiguous sbhd input and Triton RoPE support")
+    if in_place and torch.compiler.is_compiling():
+        raise RuntimeError("in_place=True is not supported under torch.compile")
+    if use_triton:
+        return _MLARoPEQTriton.apply(
+            q, cos_table, sin_table, head_dim_nope, head_dim_rope, in_place
+        )
+    seq_dim = 0 if tensor_format == "sbhd" else 1
+    q_rope = _rotate_interleaved_to_neox(q[..., head_dim_nope:], cos_table, sin_table, seq_dim)
+    return torch.cat((q[..., :head_dim_nope], q_rope), dim=-1)
 
 
 def apply_mla_rope_kv(
     kv: torch.Tensor,
     k_pos_emb: torch.Tensor,
-    head_dim_nope: int = HEAD_DIM_NOPE,
-    head_dim_rope: int = HEAD_DIM_ROPE,
-    head_dim_v: int = HEAD_DIM_V,
-    base: int = ROTARY_BASE,
-    cos_table: torch.Tensor | None = None,
-    sin_table: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if cos_table is None or sin_table is None:
-        s = kv.shape[0]
-        cos_table, sin_table = build_rope_tables(
-            s,
-            emb_dim=head_dim_rope,
-            base=base,
-            device=kv.device,
+    cos_table: torch.Tensor,
+    sin_table: torch.Tensor,
+    head_dim_nope: int,
+    head_dim_rope: int,
+    head_dim_v: int,
+    tensor_format: str = "sbhd",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Assemble keys and values using a shared rotary key head.
+
+    Parameters
+    ----------
+    kv : torch.Tensor
+        CUDA tensor of shape ``[s, b, h, head_dim_nope + head_dim_v]`` for
+        ``sbhd``, or ``[b, s, h, head_dim_nope + head_dim_v]`` for ``bshd``.
+        Each head contains the non-rotary key channels followed by value channels.
+    k_pos_emb : torch.Tensor
+        Shared rotary key channels of shape ``[s, b, 1, head_dim_rope]`` for
+        ``sbhd``, or ``[b, s, 1, head_dim_rope]`` for ``bshd``, matching the
+        device and dtype of ``kv``. Triton requires a contiguous last dimension
+        and ``stride(0) == b * stride(1)``.
+    cos_table, sin_table : torch.Tensor
+        Contiguous FP32 tables of shape ``[s, head_dim_rope]`` on the same device
+        as ``kv``, as returned by :func:`build_rope_tables`.
+    head_dim_nope, head_dim_rope, head_dim_v : int
+        Number of non-rotary key, rotary key and value channels per head.
+    tensor_format : {"sbhd", "bshd"}, default = "sbhd"
+        Input and output layout.
+
+    Returns
+    -------
+    tuple of torch.Tensor
+        Contiguous ``(k, v)`` in the selected layout and input dtype. The last
+        dimensions are ``head_dim_nope + head_dim_rope`` for ``k`` and
+        ``head_dim_v`` for ``v``. The rotated shared key head is broadcast to all heads.
+
+    Notes
+    -----
+    Triton is used for ``sbhd`` when all three head dimensions are powers of two
+    and ``head_dim_rope >= 2``; other supported layouts/dimensions use PyTorch.
+    Inputs are preserved. The Triton path computes gradients for ``kv`` and
+    ``k_pos_emb`` only; treat the tables as constants.
+    """
+    if (
+        HAVE_TRITON
+        and tensor_format == "sbhd"
+        and head_dim_rope >= 2
+        and all(_is_power_of_two(dim) for dim in (head_dim_nope, head_dim_rope, head_dim_v))
+    ):
+        return _MLARoPEKVTriton.apply(
+            kv, k_pos_emb, cos_table, sin_table, head_dim_nope, head_dim_rope, head_dim_v
         )
-    return _apply_mla_rope_kv_with_tables(
-        kv,
-        k_pos_emb,
-        cos_table,
-        sin_table,
-        head_dim_nope,
-        head_dim_rope,
-        head_dim_v,
-    )
-
-
-def apply_mla_rope(
-    q: torch.Tensor,
-    kv: torch.Tensor,
-    k_pos_emb: torch.Tensor,
-    head_dim_nope: int = HEAD_DIM_NOPE,
-    head_dim_rope: int = HEAD_DIM_ROPE,
-    head_dim_v: int = HEAD_DIM_V,
-    base: int = ROTARY_BASE,
-    cos_table: torch.Tensor | None = None,
-    sin_table: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if cos_table is None or sin_table is None:
-        s = q.shape[0]
-        cos_table, sin_table = build_rope_tables(
-            s,
-            emb_dim=head_dim_rope,
-            base=base,
-            device=q.device,
-        )
-    q = _apply_mla_rope_q_with_tables(q, cos_table, sin_table, head_dim_nope, head_dim_rope)
-    k, v = _apply_mla_rope_kv_with_tables(
-        kv,
-        k_pos_emb,
-        cos_table,
-        sin_table,
-        head_dim_nope,
-        head_dim_rope,
-        head_dim_v,
-    )
-    return q, k, v
-
-
-def _rotate_interleaved_to_neox(
-    x: torch.Tensor, cos_table: torch.Tensor, sin_table: torch.Tensor
-) -> torch.Tensor:
-    cos_ = cos_table[:, None, None, :].to(x.dtype)
-    sin_ = sin_table[:, None, None, :].to(x.dtype)
-    half_dim = x.shape[-1] // 2
-    x_1 = x[..., 0::2]
-    x_2 = x[..., 1::2]
-    x_left = x_1 * cos_[..., :half_dim] - x_2 * sin_[..., :half_dim]
-    x_right = x_2 * cos_[..., half_dim:] + x_1 * sin_[..., half_dim:]
-    return torch.cat((x_left, x_right), dim=-1)
-
-
-def _apply_pytorch_q(q, cos_table, sin_table, head_dim_nope, head_dim_rope):
-    q_nope = q[..., :head_dim_nope]
-    q_rope = q[..., head_dim_nope : head_dim_nope + head_dim_rope]
-    q_rope = _rotate_interleaved_to_neox(q_rope, cos_table, sin_table)
-    return torch.cat((q_nope, q_rope), dim=-1)
-
-
-def _apply_pytorch_kv(
-    kv,
-    k_pos_emb,
-    cos_table,
-    sin_table,
-    head_dim_nope,
-    head_dim_rope,
-    head_dim_v,
-):
+    seq_dim = 0 if tensor_format == "sbhd" else 1
     k_nope = kv[..., :head_dim_nope]
     v = kv[..., head_dim_nope : head_dim_nope + head_dim_v]
-    k_rope = _rotate_interleaved_to_neox(k_pos_emb, cos_table, sin_table).expand(
-        -1, -1, kv.shape[2], -1
-    )
-    return torch.cat((k_nope, k_rope), dim=-1), v
+    k_rope = _rotate_interleaved_to_neox(k_pos_emb, cos_table, sin_table, seq_dim)
+    k_rope = k_rope.expand(*k_nope.shape[:-1], -1)
+    return torch.cat((k_nope, k_rope), dim=-1), v.contiguous()
+
+
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and value & (value - 1) == 0
