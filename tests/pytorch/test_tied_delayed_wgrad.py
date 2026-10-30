@@ -279,7 +279,8 @@ def test_tied_grouped_linear_ops_gradients(set_to_none, backward_dw_order, packe
         pytest.skip("packed grouped weights require a supported GPU and cuBLASLt")
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1" if packed else "0")
     torch.manual_seed(9)
-    num_groups, hidden_size, tokens_per_group, microbatches = 2, 16, 16, 2
+    # Split sizes must be multiples of te.ops.GroupedLinear's default split_alignment (128).
+    num_groups, hidden_size, tokens_per_group, microbatches = 2, 16, 128, 2
     delayed = nn.ModuleList(
         [
             te.ops.GroupedLinear(
