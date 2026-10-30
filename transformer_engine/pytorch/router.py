@@ -16,7 +16,7 @@ Precision Notes:
 
 import functools
 import warnings
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
@@ -127,6 +127,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         )
         if topk_indices is not None:
             routing_output = topk_indices
+        ctx.compiled = False
         if topk_indices is not None:
             ctx.mark_dirty(topk_indices)
         ctx.mark_non_differentiable(routing_output)
@@ -140,9 +141,22 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         return probs, routing_output
 
     @staticmethod
-    def backward(ctx, grad_probs, _):
+    def backward(ctx, grad_probs, _, _grad_intermediate=None):
         # pylint: disable=missing-function-docstring
         routing_map, intermediate_output = ctx.saved_tensors
+        if ctx.compiled:
+            grad_logits = _topk_backward(
+                routing_map,
+                intermediate_output,
+                grad_probs,
+                ctx.topk,
+                ctx.use_pre_softmax,
+                ctx.scaling_factor,
+                ctx.score_function,
+                ctx.routing_map_format,
+                ctx.use_dense_indices,
+            )
+            return grad_logits, None, None, None, None, None, None, None, None, None
         if not grad_probs.is_contiguous():
             grad_probs = grad_probs.contiguous()
         grad_logits = torch.empty_like(grad_probs)
@@ -195,10 +209,12 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
             bin_bounds,
             histogram_mode,
         )
+        ctx.compiled = False
         if topk_indices is not None:
             routing_output = topk_indices
-            ctx.mark_dirty(topk_indices)
-        ctx.mark_dirty(histogram)
+            ctx.mark_dirty(topk_indices, histogram)
+        else:
+            ctx.mark_dirty(histogram)
         ctx.mark_non_differentiable(routing_output, histogram_output)
         ctx.save_for_backward(routing_output, intermediate_output)
         ctx.topk = topk
@@ -208,9 +224,22 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
         return probs, routing_output, histogram_output
 
     @staticmethod
-    def backward(ctx, grad_probs, _, _histogram_grad):
+    def backward(ctx, grad_probs, _, _histogram_grad, _grad_intermediate=None):
         # pylint: disable=missing-function-docstring
         routing_output, intermediate_output = ctx.saved_tensors
+        if ctx.compiled:
+            grad_logits = _topk_backward(
+                routing_output,
+                intermediate_output,
+                grad_probs,
+                ctx.topk,
+                False,
+                ctx.scaling_factor,
+                "sigmoid",
+                ctx.routing_map_format,
+                ctx.use_dense_indices,
+            )
+            return grad_logits, None, None, None, None, None, None, None, None
         if not grad_probs.is_contiguous():
             grad_probs = grad_probs.contiguous()
         grad_logits = torch.empty_like(grad_probs)
@@ -229,6 +258,123 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
         return grad_logits, None, None, None, None, None, None, None, None
 
 
+class _CompiledFusedTopkScoreFunction(FusedTopkScoreFunction):
+    """
+    Fused Topk with Score Function router.
+    Currently, support "softmax", "sigmoid" and "sqrtsoftplus".
+    """
+
+    @staticmethod
+    def forward(
+        logits: torch.Tensor,
+        topk: int,
+        use_pre_softmax: bool,
+        num_groups: Optional[int],
+        group_topk: Optional[int],
+        scaling_factor: Optional[float],
+        score_function: str,
+        expert_bias: Optional[torch.Tensor],
+        routing_map_format: int,
+        topk_indices: Optional[torch.Tensor],
+    ):
+        # pylint: disable=missing-function-docstring
+        probs, routing_output, intermediate_output = _topk_forward(
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            routing_map_format,
+            topk_indices,
+        )
+        return probs, routing_output, intermediate_output
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        # pylint: disable=missing-function-docstring
+        (
+            _,
+            ctx.topk,
+            ctx.use_pre_softmax,
+            _,
+            _,
+            ctx.scaling_factor,
+            ctx.score_function,
+            _,
+            ctx.routing_map_format,
+            topk_indices,
+        ) = inputs
+        _, routing_output, intermediate_output = output
+        ctx.compiled = True
+        if topk_indices is not None:
+            ctx.mark_dirty(topk_indices)
+        ctx.mark_non_differentiable(routing_output, intermediate_output)
+        ctx.set_materialize_grads(False)
+        ctx.save_for_backward(routing_output, intermediate_output)
+        ctx.use_dense_indices = topk_indices is not None
+
+
+class _CompiledFusedTopkScoreFunctionQB(FusedTopkScoreFunctionQB):
+    """Kimi K3 QB router with histogram accumulation."""
+
+    @staticmethod
+    def forward(
+        logits: torch.Tensor,
+        topk: int,
+        scaling_factor: Optional[float],
+        expert_bias: torch.Tensor,
+        routing_map_format: int,
+        topk_indices: Optional[torch.Tensor],
+        histogram: torch.Tensor,
+        bin_bounds: torch.Tensor,
+        histogram_mode: int,
+    ):
+        # pylint: disable=missing-function-docstring
+        probs, routing_output, intermediate_output = _qb_forward(
+            logits,
+            topk,
+            scaling_factor,
+            expert_bias,
+            routing_map_format,
+            topk_indices,
+            histogram,
+            bin_bounds,
+            histogram_mode,
+        )
+        histogram_output = histogram
+        if topk_indices is not None:
+            routing_output = topk_indices
+        return probs, routing_output, histogram_output, intermediate_output
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        # pylint: disable=missing-function-docstring
+        (
+            _,
+            ctx.topk,
+            ctx.scaling_factor,
+            _,
+            ctx.routing_map_format,
+            topk_indices,
+            histogram,
+            _,
+            _,
+        ) = inputs
+        _, routing_output, histogram_output, intermediate_output = output
+        ctx.compiled = True
+        if topk_indices is not None:
+            ctx.mark_dirty(topk_indices, histogram)
+        else:
+            ctx.mark_dirty(histogram)
+        ctx.mark_non_differentiable(routing_output, histogram_output, intermediate_output)
+        ctx.set_materialize_grads(False)
+        ctx.save_for_backward(routing_output, intermediate_output)
+        ctx.use_dense_indices = topk_indices is not None
+
+
 def fused_topk_with_score_function(
     logits: torch.Tensor,
     topk: int,
@@ -245,7 +391,7 @@ def fused_topk_with_score_function(
     qb_histogram_mode: Optional[str] = None,
 ):
     """
-    Fused topk with score function router.
+    Fused topk with score function router. Supports ``torch.compile(fullgraph=True)``.
 
     Parameters
     ----------
@@ -269,10 +415,16 @@ def fused_topk_with_score_function(
         bit ``(e % 8)`` of byte ``(e / 8)`` set when token ``t`` routes to expert
         ``e`` (LSB-first / little-endian packing along the expert axis).
     topk_indices : torch.Tensor, optional
-        Optional output buffer with shape [num_tokens, topk]. When provided, its dtype
+        Optional output buffer with shape ``[*logits.shape[:-1], topk]``. When provided, its dtype
         controls the dense index output dtype and the routing map is not materialized.
+        The buffer is overwritten and returned in both eager and compiled execution.
+        Its contents must remain unchanged until the corresponding backward completes.
+        For automatic CUDA graph replay, use a module buffer or
+        ``torch._dynamo.mark_static_address``; otherwise capture may be skipped.
     qb_histogram : torch.Tensor, optional
-        Caller-owned int32 ``[num_experts, num_bins]`` histogram accumulated in place.
+        Caller-owned int32 ``[num_experts, num_bins]`` histogram accumulated in place in eager
+        and compiled execution. For automatic CUDA graph replay, use a module buffer or
+        ``torch._dynamo.mark_static_address``; otherwise capture may be skipped.
     qb_bin_bounds : torch.Tensor, optional
         FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins. Values must be
         finite with ``lower < upper``. The values are only read on the device and are not
@@ -292,6 +444,7 @@ def fused_topk_with_score_function(
         - BYTEMAP: ``bool[*logits.shape[:-1], num_experts]``
         - BITMAP_U8: ``uint8[*logits.shape[:-1], ceil(num_experts/8)]``,
           LSB-first bit-packed.
+        - Dense indices: ``[*logits.shape[:-1], topk]``, with the dtype of ``topk_indices``.
     """
     if logits.dtype == torch.float64:
         raise ValueError("Current TE does not support float64 router type.")
@@ -314,7 +467,12 @@ def fused_topk_with_score_function(
                 "qb_histogram_mode must be 'two_kernel' or 'fused_atomic', "
                 f"got {qb_histogram_mode!r}"
             )
-        probs, routing_output, _ = FusedTopkScoreFunctionQB.apply(
+        function = (
+            _CompiledFusedTopkScoreFunctionQB
+            if torch.compiler.is_compiling()
+            else FusedTopkScoreFunctionQB
+        )
+        outputs = function.apply(
             logits,
             topk,
             scaling_factor,
@@ -325,8 +483,11 @@ def fused_topk_with_score_function(
             qb_bin_bounds,
             mode,
         )
-        return probs, routing_output
-    return FusedTopkScoreFunction.apply(
+        return outputs[:2]
+    function = (
+        _CompiledFusedTopkScoreFunction if torch.compiler.is_compiling() else FusedTopkScoreFunction
+    )
+    outputs = function.apply(
         logits,
         topk,
         use_pre_softmax,
@@ -338,6 +499,7 @@ def fused_topk_with_score_function(
         routing_map_format,
         topk_indices,
     )
+    return outputs[:2]
 
 
 class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
@@ -395,6 +557,8 @@ def fused_compute_score_for_moe_aux_loss(
 ):
     """
     Fused compute scores for MoE aux loss, subset of the fused_topk_with_score_function.
+    Supports ``torch.compile(fullgraph=True)`` for forward and backward.
+
     Parameters
     ----------
     logits : torch.Tensor in fp32/bf16/fp16
@@ -414,6 +578,9 @@ def fused_compute_score_for_moe_aux_loss(
         Same shape as ``logits``.
     """
     routing_map_format = _validate_routing_map_format(routing_map_format)
+    if torch.compiler.is_compiling():
+        scores, routing_map, _ = _score_forward(logits, topk, score_function, routing_map_format)
+        return routing_map, scores
     return FusedComputeScoresForMoEAuxLoss.apply(logits, topk, score_function, routing_map_format)
 
 
@@ -432,12 +599,11 @@ def _get_cached_moe_aux_loss_workspace(device_index: int, _stream_handle: int) -
     return torch.empty(shape, dtype=dtype, device=device_index)
 
 
-def _get_moe_aux_loss_workspace(device: torch.device) -> torch.Tensor:
-    """Reuse eager scratch; give captured operations private graph-pool storage."""
+def _get_moe_aux_loss_workspace(device: torch.device, *, cache: bool = True) -> torch.Tensor:
+    """Reuse eager scratch; give compiled or captured operations private storage."""
     with torch.cuda.device(device):
-        if torch.cuda.is_current_stream_capturing():
-            # Allocate only during capture, never on replay. Do not cache graph-pool
-            # storage: a graph may replay concurrently with eager work or another graph.
+        if not cache or torch.cuda.is_current_stream_capturing():
+            # CUDA Graph warmup can also allocate from the graph pool before capture.
             shape, dtype = _get_moe_aux_loss_workspace_config()
             return torch.empty(shape, dtype=dtype, device=device)
         stream = torch.cuda.current_stream(device)
@@ -522,6 +688,7 @@ def fused_moe_aux_loss(
 ) -> torch.Tensor:
     """
     Fused MoE aux loss.
+    Supports ``torch.compile(fullgraph=True)`` with either form of ``total_num_tokens``.
 
     Parameters
     ----------
@@ -550,6 +717,499 @@ def fused_moe_aux_loss(
     aux_loss : torch.Tensor.
         A scalar tensor in the same dtype as the "probs".
     """
+    if torch.compiler.is_compiling():
+        token_count = total_num_tokens if isinstance(total_num_tokens, torch.Tensor) else None
+        count = 0 if token_count is not None else total_num_tokens
+        aux_loss, _ = _aux_loss_forward(
+            probs, tokens_per_expert, count, token_count, num_experts, topk, coeff, deterministic
+        )
+        return aux_loss
     return FusedAuxLoss.apply(
         probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff, deterministic
     )
+
+
+def _routing_map_fake(logits, routing_map_format):
+    if routing_map_format == _ROUTING_MAP_FORMAT_FROM_STRING["bitmap_u8"]:
+        return logits.new_empty(
+            (*logits.shape[:-1], (logits.shape[-1] + 7) // 8), dtype=torch.uint8
+        )
+    return logits.new_empty(logits.shape, dtype=torch.bool)
+
+
+def _topk_forward(
+    logits,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
+    expert_bias,
+    routing_map_format,
+    topk_indices,
+):
+    if topk_indices is None:
+        return _topk_map_forward(
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            routing_map_format,
+        )
+    probs, intermediate_output = _topk_indices_forward(
+        logits,
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        expert_bias,
+        routing_map_format,
+        topk_indices,
+    )
+    return probs, topk_indices, intermediate_output
+
+
+def _qb_forward(
+    logits,
+    topk,
+    scaling_factor,
+    expert_bias,
+    routing_map_format,
+    topk_indices,
+    histogram,
+    bin_bounds,
+    histogram_mode,
+):
+    if topk_indices is None:
+        return _qb_map_forward(
+            logits,
+            topk,
+            scaling_factor,
+            expert_bias,
+            routing_map_format,
+            histogram,
+            bin_bounds,
+            histogram_mode,
+        )
+    probs, intermediate_output = _qb_indices_forward(
+        logits,
+        topk,
+        scaling_factor,
+        expert_bias,
+        routing_map_format,
+        topk_indices,
+        histogram,
+        bin_bounds,
+        histogram_mode,
+    )
+    return probs, topk_indices, intermediate_output
+
+
+@torch.library.custom_op("te_moe::router_topk_map_fwd", mutates_args=())
+def _topk_map_forward(
+    logits: torch.Tensor,
+    topk: int,
+    use_pre_softmax: bool,
+    num_groups: Optional[int],
+    group_topk: Optional[int],
+    scaling_factor: Optional[float],
+    score_function: str,
+    expert_bias: Optional[torch.Tensor],
+    routing_map_format: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        return tex.fused_topk_with_score_function_fwd(
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            routing_map_format,
+            None,
+        )
+
+
+@_topk_map_forward.register_fake
+def _topk_map_forward_fake(
+    logits,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
+    expert_bias,
+    routing_map_format,
+):
+    del (
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        expert_bias,
+    )
+    return (
+        logits.new_empty(logits.shape),
+        _routing_map_fake(logits, routing_map_format),
+        logits.new_empty(logits.shape, dtype=torch.float32),
+    )
+
+
+@torch.library.custom_op("te_moe::router_topk_indices_fwd", mutates_args=("topk_indices",))
+def _topk_indices_forward(
+    logits: torch.Tensor,
+    topk: int,
+    use_pre_softmax: bool,
+    num_groups: Optional[int],
+    group_topk: Optional[int],
+    scaling_factor: Optional[float],
+    score_function: str,
+    expert_bias: Optional[torch.Tensor],
+    routing_map_format: int,
+    topk_indices: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        probs, _, intermediate_output = tex.fused_topk_with_score_function_fwd(
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            routing_map_format,
+            topk_indices,
+        )
+    return probs, intermediate_output
+
+
+@_topk_indices_forward.register_fake
+def _topk_indices_forward_fake(
+    logits,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
+    expert_bias,
+    routing_map_format,
+    topk_indices,
+):
+    del topk, use_pre_softmax, num_groups, group_topk, scaling_factor
+    del score_function, expert_bias, routing_map_format, topk_indices
+    return torch.empty_like(logits), torch.empty_like(logits, dtype=torch.float32)
+
+
+@torch.library.custom_op("te_moe::router_topk_bwd", mutates_args=())
+def _topk_backward(
+    routing_map: torch.Tensor,
+    intermediate_output: torch.Tensor,
+    grad_probs: torch.Tensor,
+    topk: int,
+    use_pre_softmax: bool,
+    scaling_factor: Optional[float],
+    score_function: str,
+    routing_map_format: int,
+    use_dense_indices: bool = False,
+) -> torch.Tensor:
+    grad_probs = grad_probs.contiguous()
+    grad_logits = torch.empty_like(grad_probs)
+    with torch.cuda.device(grad_probs.device):
+        tex.fused_topk_with_score_function_bwd(
+            routing_map,
+            intermediate_output,
+            grad_probs,
+            grad_logits,
+            topk,
+            use_pre_softmax,
+            scaling_factor,
+            score_function,
+            use_dense_indices,
+            routing_map_format,
+        )
+    return grad_logits
+
+
+@_topk_backward.register_fake
+def _topk_backward_fake(
+    routing_map,
+    intermediate_output,
+    grad_probs,
+    topk,
+    use_pre_softmax,
+    scaling_factor,
+    score_function,
+    routing_map_format,
+    use_dense_indices=False,
+):
+    del routing_map, intermediate_output, topk, use_pre_softmax, scaling_factor
+    del score_function, routing_map_format, use_dense_indices
+    return grad_probs.new_empty(grad_probs.shape)
+
+
+@torch.library.custom_op("te_moe::router_qb_map_fwd", mutates_args=("histogram",))
+def _qb_map_forward(
+    logits: torch.Tensor,
+    topk: int,
+    scaling_factor: Optional[float],
+    expert_bias: torch.Tensor,
+    routing_map_format: int,
+    histogram: torch.Tensor,
+    bin_bounds: torch.Tensor,
+    histogram_mode: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        probs, routing_output, intermediate_output, _, _ = (
+            tex.fused_topk_with_score_function_qb_fwd(
+                logits,
+                topk,
+                scaling_factor,
+                expert_bias,
+                routing_map_format,
+                None,
+                histogram,
+                bin_bounds,
+                histogram_mode,
+            )
+        )
+    return probs, routing_output, intermediate_output
+
+
+@_qb_map_forward.register_fake
+def _qb_map_forward_fake(
+    logits,
+    topk,
+    scaling_factor,
+    expert_bias,
+    routing_map_format,
+    histogram,
+    bin_bounds,
+    histogram_mode,
+):
+    del topk, scaling_factor, expert_bias, histogram, bin_bounds, histogram_mode
+    return (
+        logits.new_empty(logits.shape),
+        _routing_map_fake(logits, routing_map_format),
+        logits.new_empty(logits.shape, dtype=torch.float32),
+    )
+
+
+@torch.library.custom_op(
+    "te_moe::router_qb_indices_fwd", mutates_args=("topk_indices", "histogram")
+)
+def _qb_indices_forward(
+    logits: torch.Tensor,
+    topk: int,
+    scaling_factor: Optional[float],
+    expert_bias: torch.Tensor,
+    routing_map_format: int,
+    topk_indices: torch.Tensor,
+    histogram: torch.Tensor,
+    bin_bounds: torch.Tensor,
+    histogram_mode: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        probs, _, intermediate_output, _, _ = tex.fused_topk_with_score_function_qb_fwd(
+            logits,
+            topk,
+            scaling_factor,
+            expert_bias,
+            routing_map_format,
+            topk_indices,
+            histogram,
+            bin_bounds,
+            histogram_mode,
+        )
+    return probs, intermediate_output
+
+
+@_qb_indices_forward.register_fake
+def _qb_indices_forward_fake(
+    logits,
+    topk,
+    scaling_factor,
+    expert_bias,
+    routing_map_format,
+    topk_indices,
+    histogram,
+    bin_bounds,
+    histogram_mode,
+):
+    del topk, scaling_factor, expert_bias, routing_map_format, topk_indices
+    del histogram, bin_bounds, histogram_mode
+    return torch.empty_like(logits), torch.empty_like(logits, dtype=torch.float32)
+
+
+@torch.library.custom_op("te_moe::router_score_fwd", mutates_args=())
+def _score_forward(
+    logits: torch.Tensor,
+    topk: int,
+    score_function: str,
+    routing_map_format: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        return tex.fused_score_for_moe_aux_loss_fwd(
+            logits, topk, score_function, routing_map_format
+        )
+
+
+@_score_forward.register_fake
+def _score_forward_fake(logits, topk, score_function, routing_map_format):
+    del topk, score_function
+    return (
+        logits.new_empty(logits.shape, dtype=torch.float32),
+        _routing_map_fake(logits, routing_map_format),
+        logits.new_empty(logits.shape, dtype=torch.float32),
+    )
+
+
+@torch.library.custom_op("te_moe::router_score_bwd", mutates_args=())
+def _score_backward(
+    intermediate_output: torch.Tensor,
+    grad_scores: torch.Tensor,
+    topk: int,
+    score_function: str,
+    logits_dtype: torch.dtype,
+) -> torch.Tensor:
+    grad_scores = grad_scores.contiguous()
+    grad_logits = grad_scores.new_empty(grad_scores.shape, dtype=logits_dtype)
+    with torch.cuda.device(grad_scores.device):
+        tex.fused_score_for_moe_aux_loss_bwd(
+            intermediate_output, grad_scores, grad_logits, topk, score_function
+        )
+    return grad_logits
+
+
+@_score_backward.register_fake
+def _score_backward_fake(intermediate_output, grad_scores, topk, score_function, logits_dtype):
+    del intermediate_output, topk, score_function
+    return grad_scores.new_empty(grad_scores.shape, dtype=logits_dtype)
+
+
+def _score_setup_context(ctx, inputs, output):
+    logits, ctx.topk, ctx.score_function, _ = inputs
+    ctx.logits_dtype = logits.dtype
+    _, routing_map, intermediate_output = output
+    ctx.mark_non_differentiable(routing_map, intermediate_output)
+    ctx.save_for_backward(intermediate_output)
+
+
+def _score_autograd(ctx, grad_scores, _grad_map, _grad_intermediate):
+    (intermediate_output,) = ctx.saved_tensors
+    grad_logits = _score_backward(
+        intermediate_output, grad_scores, ctx.topk, ctx.score_function, ctx.logits_dtype
+    )
+    return grad_logits, None, None, None
+
+
+_score_forward.register_autograd(_score_autograd, setup_context=_score_setup_context)
+
+
+@torch.library.custom_op("te_moe::router_aux_loss_fwd", mutates_args=())
+def _aux_loss_forward(
+    probs: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    total_num_tokens: int,
+    token_count: Optional[torch.Tensor],
+    num_experts: int,
+    topk: int,
+    coeff: float,
+    deterministic: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(probs.device):
+        workspace = (
+            _get_moe_aux_loss_workspace(probs.device, cache=False) if deterministic else None
+        )
+        if token_count is not None:
+            return tex.fused_moe_aux_loss_fwd_graph_safe(
+                probs,
+                tokens_per_expert,
+                token_count,
+                num_experts,
+                probs.shape[0],
+                probs.shape[1],
+                topk,
+                coeff,
+                deterministic,
+                workspace,
+            )
+        return tex.fused_moe_aux_loss_fwd(
+            probs,
+            tokens_per_expert,
+            total_num_tokens,
+            num_experts,
+            probs.shape[0],
+            probs.shape[1],
+            topk,
+            coeff,
+            deterministic,
+            workspace,
+        )
+
+
+@_aux_loss_forward.register_fake
+def _aux_loss_forward_fake(
+    probs,
+    tokens_per_expert,
+    total_num_tokens,
+    token_count,
+    num_experts,
+    topk,
+    coeff,
+    deterministic,
+):
+    del tokens_per_expert, total_num_tokens, token_count, num_experts, topk, coeff, deterministic
+    return probs.new_empty(()), probs.new_empty((2,), dtype=torch.float32)
+
+
+@torch.library.custom_op("te_moe::router_aux_loss_bwd", mutates_args=())
+def _aux_loss_backward(
+    const_buf: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    num_rows: int,
+    num_cols: int,
+    grad_aux_loss: torch.Tensor,
+) -> torch.Tensor:
+    with torch.cuda.device(grad_aux_loss.device):
+        return tex.fused_moe_aux_loss_bwd(
+            const_buf, tokens_per_expert, num_rows, num_cols, grad_aux_loss
+        )
+
+
+@_aux_loss_backward.register_fake
+def _aux_loss_backward_fake(const_buf, tokens_per_expert, num_rows, num_cols, grad_aux_loss):
+    del const_buf, tokens_per_expert
+    return grad_aux_loss.new_empty((num_rows, num_cols))
+
+
+def _aux_loss_setup_context(ctx, inputs, output):
+    probs, tokens_per_expert, _, _, _, _, _, _ = inputs
+    _, const_buf = output
+    ctx.num_rows, ctx.num_cols = probs.shape
+    ctx.mark_non_differentiable(const_buf)
+    ctx.save_for_backward(const_buf, tokens_per_expert)
+
+
+def _aux_loss_autograd(ctx, grad_aux_loss, _grad_const):
+    const_buf, tokens_per_expert = ctx.saved_tensors
+    grad_probs = _aux_loss_backward(
+        const_buf, tokens_per_expert, ctx.num_rows, ctx.num_cols, grad_aux_loss
+    )
+    return grad_probs, None, None, None, None, None, None, None
+
+
+_aux_loss_forward.register_autograd(_aux_loss_autograd, setup_context=_aux_loss_setup_context)
