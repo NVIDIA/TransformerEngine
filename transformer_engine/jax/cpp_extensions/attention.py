@@ -255,9 +255,7 @@ class FusedAttnHelper:
                     if self.fp8
                     else NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
                 )
-            except (ValueError, ImportError, RuntimeError) as exc:
-                # ImportError: frontend package missing; RuntimeError: Python/C++ frontend
-                # version mismatch. Either way, fall back rather than fail backend selection.
+            except ValueError as exc:
                 message = str(exc)
 
         AttentionLogging.setup_logging()

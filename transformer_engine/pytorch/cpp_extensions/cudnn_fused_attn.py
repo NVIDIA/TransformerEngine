@@ -679,6 +679,7 @@ def get_fused_attn_backend(config):
     """Select an attention backend by validating the Python frontend graphs."""
     from .fused_attn import FusedAttnBackend
 
+    cudnn = _import_cudnn_frontend()
     if config.bias_type == tex.NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS:
         return FusedAttnBackend.No_Backend, "Fused attention does not support pre-scale bias."
     if DType.cast(config.qkv_dtype) not in (
@@ -689,7 +690,6 @@ def get_fused_attn_backend(config):
     ):
         return FusedAttnBackend.No_Backend, f"Unsupported QKV dtype qkv_dtype={config.qkv_dtype}."
     try:
-        cudnn = _import_cudnn_frontend()
         fwd = _query_graph(config, False)
         reason = _support_reason(
             config, fwd, cudnn.backend_version(), torch.cuda.get_device_capability()
@@ -700,13 +700,8 @@ def get_fused_attn_backend(config):
         if config.is_training:
             _query_graph(config, True).entry()
         return FusedAttnBackend.FP8 if fwd.fp8 else FusedAttnBackend.F16_arbitrary_seqlen, ""
-    except (ImportError, ValueError, RuntimeError) as exc:
+    except (cudnn.cudnnGraphNotSupportedError, ValueError) as exc:
         return FusedAttnBackend.No_Backend, str(exc)
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        # cudnnGraphNotSupportedError and other frontend errors derive directly from Exception.
-        if type(exc).__module__.startswith("cudnn"):
-            return FusedAttnBackend.No_Backend, str(exc)
-        raise
 
 
 def fused_attn_fwd(params):
