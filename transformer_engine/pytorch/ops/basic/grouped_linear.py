@@ -68,17 +68,26 @@ from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias_dscales,
 )
 
-
 # Keys for passing caller-provided output and grad-input buffers to a grouped
 # linear (or fused grouped MLP) through Sequential's ``op_kwargs``.
 OUTPUT_BUFFER_KEY = "output"
 GRAD_INPUT_BUFFER_KEY = "grad_input"
 
 
-def _default_split_alignment(recipe: Optional[Recipe]) -> int:
-    """Choose the split-size alignment required by grouped quantization."""
-    if recipe is not None and (recipe.mxfp8() or recipe.nvfp4() or recipe.float8_block_scaling()):
-        return 128
+def _default_split_alignment(
+    recipe: Optional[Recipe], device: Optional[torch.device] = None
+) -> int:
+    """Choose the split-size alignment required by grouped quantization and GEMM."""
+    if recipe is not None:
+        if recipe.mxfp8() or recipe.nvfp4() or recipe.float8_block_scaling():
+            return 128
+        if recipe.float8_current_scaling():
+            if device is None:
+                device = torch.device("cuda", torch.cuda.current_device())
+            if (9, 0) <= get_device_compute_capability(device) < (10, 0):
+                # Hopper uses transposed FP8 columnwise data for wgrad, making each
+                # split the cuBLASLt leading dimension (16-byte alignment required).
+                return 16
     return 1
 
 
@@ -118,11 +127,11 @@ def is_op_fuser_grouped_tensor_path_supported(
     """
     # Recipe objects are not hashable. Resolve the device before the cached call so
     # support results from different GPUs cannot share a cache entry.
-    if split_alignment is None:
-        split_alignment = _default_split_alignment(recipe)
     device_index = device.index if device is not None else None
     if device_index is None:
         device_index = torch.cuda.current_device()
+    if split_alignment is None:
+        split_alignment = _default_split_alignment(recipe, torch.device("cuda", device_index))
     return _is_op_fuser_grouped_tensor_path_supported(
         type(recipe) if recipe is not None else None,
         getattr(recipe, "disable_rht", None),
@@ -241,7 +250,8 @@ class GroupedLinear(BasicOperation):
         ``(total_tokens,)`` and is split according to the split sizes.
     split_alignment : int or None, default = ``None``
         Expected alignment for input split sizes. If omitted, the alignment
-        is 128 for MXFP8, NVFP4, and FP8 block scaling, and 1 otherwise.
+        is 128 for MXFP8, NVFP4, and FP8 block scaling, 16 for FP8 current
+        scaling on Hopper, and 1 otherwise.
         An explicit positive integer is used for every compute mode.
     """
 
@@ -359,12 +369,14 @@ class GroupedLinear(BasicOperation):
 
         self._apply_delay_wgrad_param_hooks()
 
-    def _resolve_split_alignment(self, recipe: Optional[Recipe]) -> int:
+    def _resolve_split_alignment(
+        self, recipe: Optional[Recipe], device: Optional[torch.device] = None
+    ) -> int:
         """Resolve the declared alignment for the active compute recipe."""
         if self.split_alignment is not None:
             # The constructor has already applied any environment override.
             return self.split_alignment
-        return _default_split_alignment(recipe)
+        return _default_split_alignment(recipe, device)
 
     def register_parameter(
         self,
@@ -1130,7 +1142,7 @@ class GroupedLinear(BasicOperation):
         # quantization recipe. Otherwise we fall back to the legacy
         # ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
         recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
-        split_alignment = self._resolve_split_alignment(recipe)
+        split_alignment = self._resolve_split_alignment(recipe, device)
         use_grouped_tensor_path = is_op_fuser_grouped_tensor_path_supported(
             recipe,
             dtype,
