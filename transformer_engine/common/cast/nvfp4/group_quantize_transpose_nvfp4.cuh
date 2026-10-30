@@ -513,13 +513,10 @@ inline void group_row_amax_graph_safe(const GroupedTensor *input, const Tensor *
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       do_row, DO_ROW,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          do_col, DO_COL,
-          TRANSFORMER_ENGINE_SWITCH_CONDITION(apply_col_rht, APPLY_COL_RHT, {
-            auto kernel =
-                group_compute_fused_amax_graph_safe_kernel<DO_ROW, DO_COL,
-                                                           APPLY_COL_RHT && DO_COL>;
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 dshmem_size);
+          do_col, DO_COL, TRANSFORMER_ENGINE_SWITCH_CONDITION(apply_col_rht, APPLY_COL_RHT, {
+            auto kernel = group_compute_fused_amax_graph_safe_kernel < DO_ROW, DO_COL,
+                 APPLY_COL_RHT && DO_COL > ;
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
             kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, row_amax_all,
                                                          col_amax_all, offsets_ptr, num_tensors,
                                                          noop_ptr, cols, rht_sign_mask_t);
@@ -1565,11 +1562,10 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
 
     if constexpr (RETURN_TRANSPOSE) {
       colwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4,
-                      APPLY_COLWISE_RHT>(sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr,
-                                         /*S_enc_colwise=*/1.0f, stage_Y, stage_X, buff_in,
-                                         buff_out_tr, col_amax_base,
-                                         static_cast<size_t>(block_offset_X), cols, rng,
-                                         random_uint4, rnd_idx, sRHT);
+                      APPLY_COLWISE_RHT>(
+          sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr,
+          /*S_enc_colwise=*/1.0f, stage_Y, stage_X, buff_in, buff_out_tr, col_amax_base,
+          static_cast<size_t>(block_offset_X), cols, rng, random_uint4, rnd_idx, sRHT);
     }
 
     // Make the encode-helper SMEM writes visible before the scatter.
@@ -1848,16 +1844,15 @@ inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const T
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   with_gemm_swizzled, WITH_GEMM_SWIZZLED_SCALES,
                   TRANSFORMER_ENGINE_SWITCH_CONDITION(apply_colwise_rht, APPLY_COLWISE_RHT, {
-                    const int out_mem_colwise_data =
-                        RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
+                    const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
                     const int out_scales_transpose_mem =
                         RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
                     const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
                                             out_mem_colwise_data + buff_size_scales +
                                             out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
-                    auto kernel = group_row_scaled_cast_nvfp4_graph_safe_kernel<
-                        ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE,
-                        WITH_GEMM_SWIZZLED_SCALES, APPLY_COLWISE_RHT && RETURN_TRANSPOSE>;
+                    auto kernel = group_row_scaled_cast_nvfp4_graph_safe_kernel < ScaleType,
+                         USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE,
+                         WITH_GEMM_SWIZZLED_SCALES, APPLY_COLWISE_RHT && RETURN_TRANSPOSE > ;
                     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
                     kernel<<<grid, block, dshmem_size, stream>>>(

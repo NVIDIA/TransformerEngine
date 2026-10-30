@@ -557,8 +557,8 @@ void group_row_scaled_hadamard_transform_cast_graph_safe(const GroupedTensor* in
   if (quant_config.noop_tensor != nullptr) {
     noop_tensor = convertNVTETensorCheck(quant_config.noop_tensor);
   }
-  const DType scale_dtype = output->scale_inv.has_data() ? output->scale_inv.dtype
-                                                         : output->columnwise_scale_inv.dtype;
+  const DType scale_dtype =
+      output->scale_inv.has_data() ? output->scale_inv.dtype : output->columnwise_scale_inv.dtype;
   TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
       scale_dtype, ScaleType,
       dispatch::nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(
