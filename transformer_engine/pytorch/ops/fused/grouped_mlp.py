@@ -60,6 +60,7 @@ from .._common import (
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
+    maybe_autocast_dtype,
     maybe_dequantize,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
@@ -1381,10 +1382,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             assert fc2_op.weight0.is_routed_expert and fc2_op.weight0.weight_list is not None
 
         device = fc1_weight_param.device
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
-        else:
-            dtype = fc1_weight_param.dtype
+        dtype = maybe_autocast_dtype(default_dtype=fc1_weight_param.dtype)
 
         # Check which grads are required
         requires_grad = any(ctx.requires_grad for ctx in basic_op_ctxs)
@@ -1491,6 +1489,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     torch.int64,
                 ],
                 bulk_allocate=True,
+                split_alignment=256,
             )
 
         # Prepare FC1 grouped weight tensor for fused kernels.

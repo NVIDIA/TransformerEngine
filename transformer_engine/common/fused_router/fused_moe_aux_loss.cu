@@ -37,12 +37,13 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
 
   // Grid-stride over rows so that every row is processed exactly once.
   // Each thread processes a subset of columns.
-  for (int col = threadIdx.x; col < num_cols; col += blockDim.x) {
+  for (int64_t col = threadIdx.x; col < num_cols; col += blockDim.x) {
     CompType col_sum = CompType(0);
 
     // Accumulate probs over the rows assigned to this CTA (grid-stride).
-    for (int row = blockIdx.x; row < num_rows; row += gridDim.x) {
-      col_sum += CompType(probs[row * num_cols + col]);
+#pragma unroll 4
+    for (int64_t row = blockIdx.x; row < num_rows; row += gridDim.x) {
+      col_sum += CompType(probs[static_cast<int>(row) * num_cols + static_cast<int>(col)]);
     }
 
     // Multiply by the token count for this expert.
@@ -89,6 +90,9 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 cudaStream_t stream) {
   NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_rows) * num_cols <= INT_MAX,
+             "num_rows * num_cols exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_rows) * num_cols);
   // Sequence aux loss batches independent sequences along the expert dimension.
   NVTE_CHECK(num_cols % num_experts == 0, "Number of input columns (", num_cols,
              ") must be a multiple of number of experts (", num_experts, ").");
@@ -144,10 +148,11 @@ __global__ void fused_moe_aux_loss_forward_kernel_graph_safe(
     int num_experts, int num_rows, int num_cols, int topk, float coeff, float* Coeff_buf) {
   // Reduction body matches the scalar-input kernel above.
   CompType thread_sum = CompType(0);
-  for (int col = threadIdx.x; col < num_cols; col += blockDim.x) {
+  for (int64_t col = threadIdx.x; col < num_cols; col += blockDim.x) {
     CompType col_sum = CompType(0);
-    for (int row = blockIdx.x; row < num_rows; row += gridDim.x) {
-      col_sum += CompType(probs[row * num_cols + col]);
+#pragma unroll 4
+    for (int64_t row = blockIdx.x; row < num_rows; row += gridDim.x) {
+      col_sum += CompType(probs[static_cast<int>(row) * num_cols + static_cast<int>(col)]);
     }
     col_sum *= CompType(tokens_per_expert[col]);
     thread_sum += col_sum;
@@ -182,6 +187,9 @@ void fused_moe_aux_loss_forward_kernel_launcher_graph_safe(
     float* Coeff_buf, cudaStream_t stream) {
   NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_rows) * num_cols <= INT_MAX,
+             "num_rows * num_cols exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_rows) * num_cols);
   NVTE_CHECK(num_cols % num_experts == 0, "Number of input columns (", num_cols,
              ") must be a multiple of number of experts (", num_experts, ").");
 
@@ -231,18 +239,20 @@ __global__ void fused_moe_aux_loss_backward_kernel(const float* Const_buf,
                                                    const IndexType* tokens_per_expert, int num_rows,
                                                    int num_cols, DataType* grad_aux_loss,
                                                    DataType* grad_probs) {
-  int global_warp_num = gridDim.x * blockDim.x / kThreadsPerWarp;
-  int global_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / kThreadsPerWarp;
+  int64_t global_warp_num = static_cast<int64_t>(gridDim.x) * blockDim.x / kThreadsPerWarp;
+  int64_t global_warp_id =
+      (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
 
   // Loop: for all positions in each row
-  for (int i = lane_id; i < num_cols; i += kThreadsPerWarp) {
+  for (int64_t i = lane_id; i < num_cols; i += kThreadsPerWarp) {
     float C_coeff = Const_buf[0];
     CompType tokens_per_expert_i = static_cast<CompType>(tokens_per_expert[i]);
     CompType grad_aux_loss_value = static_cast<CompType>(grad_aux_loss[0]);
     // Loop: for all rows
-    for (int j = global_warp_id; j < num_rows; j += global_warp_num) {
-      grad_probs[j * num_cols + i] = C_coeff * tokens_per_expert_i * grad_aux_loss_value;
+    for (int64_t j = global_warp_id; j < num_rows; j += global_warp_num) {
+      grad_probs[static_cast<int>(j) * num_cols + static_cast<int>(i)] =
+          C_coeff * tokens_per_expert_i * grad_aux_loss_value;
     }
   }
 }
@@ -252,9 +262,12 @@ void fused_moe_aux_loss_backward_kernel_launcher(const float* Const_buf,
                                                  const IndexType* tokens_per_expert, int num_rows,
                                                  int num_cols, DataType* grad_aux_loss,
                                                  DataType* grad_probs, cudaStream_t stream) {
+  NVTE_CHECK(static_cast<int64_t>(num_rows) * num_cols <= INT_MAX,
+             "num_rows * num_cols exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_rows) * num_cols);
   // Meta data for the kernel
   int block_size = 256;
-  int grid_size = (num_rows + block_size - 1) / block_size;
+  int grid_size = (static_cast<int64_t>(num_rows) + block_size - 1) / block_size;
   fused_moe_aux_loss_backward_kernel<DataType, IndexType><<<grid_size, block_size, 0, stream>>>(
       Const_buf, tokens_per_expert, num_rows, num_cols, grad_aux_loss, grad_probs);
   NVTE_CHECK_CUDA(cudaGetLastError());

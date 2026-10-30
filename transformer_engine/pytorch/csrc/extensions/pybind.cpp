@@ -149,7 +149,7 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
         py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
-        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
+        py::arg("bin_bounds"), py::arg("histogram_mode"),
         "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
@@ -625,7 +625,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("splits_to_offsets_multi", &transformer_engine::pytorch::splits_to_offsets_multi,
         "Compute multiple scaled inclusive-scan offsets from a split-sizes vector",
         py::arg("split_sizes"), py::arg("device"), py::kw_only(), py::arg("strides"),
-        py::arg("include_leading_zero"), py::arg("dtypes"), py::arg("bulk_allocate") = false);
+        py::arg("include_leading_zero"), py::arg("dtypes"), py::arg("bulk_allocate") = false,
+        py::arg("split_alignment") = 1);
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
 

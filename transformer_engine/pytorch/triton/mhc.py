@@ -25,6 +25,7 @@ from transformer_engine.common.triton.mhc import (
     _mhc_sinkhorn_bwd_fused,
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
+from transformer_engine.pytorch.device import te_device_type
 
 ENFORCE_DETERMINISTIC = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
 
@@ -50,7 +51,7 @@ def _init_tma_allocator():
     def alloc_fn(
         size: int, alignment: int, stream: Optional[int]
     ):  # pylint: disable=unused-argument
-        return torch.empty(size, device="cuda", dtype=torch.int8)
+        return torch.empty(size, device=te_device_type(), dtype=torch.int8)
 
     triton.set_allocator(alloc_fn)
     _tma_allocator_initialized = True

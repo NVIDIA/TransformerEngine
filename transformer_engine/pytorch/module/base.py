@@ -21,6 +21,7 @@ from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.device import te_device_type
 from ._common import _ParameterInitMeta, noop_cat, sum_bias_grad
 from .._extra_state import (
     extra_state_pickle_advisory,
@@ -63,6 +64,7 @@ from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
+    torch_is_autocast_gpu_enabled,
     get_device_compute_capability,
     get_nvtx_range_context,
     nvtx_range_push,
@@ -146,7 +148,7 @@ def get_dummy_wgrad(
 
     # The dummy goes on the current device (the one the backward pass runs on), and the cache
     # is keyed by it so that a dummy is never returned for a weight on another device.
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device(te_device_type(), torch.cuda.current_device())
     if zero_tensor and not zero:
         return torch._efficientzerotensor(shape, dtype=dtype, device=device)
     key = (*shape, dtype, device)
@@ -1554,7 +1556,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not unsafe_pickle_extra_state_enabled():
                 raise RuntimeError(extra_state_pickle_advisory(context))
             state.seek(0)
-            state = torch.load(state, map_location="cuda", weights_only=False)
+            state = torch.load(state, map_location=te_device_type(), weights_only=False)
         else:
             raise RuntimeError("Unsupported checkpoint format.")
 
@@ -1598,7 +1600,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
-        if torch.is_autocast_enabled():
+        if torch_is_autocast_gpu_enabled():
             self.fast_setattr("activation_dtype", torch_get_autocast_gpu_dtype())
             return
         dtype = inp.dtype
@@ -1718,9 +1720,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
-            if not inp.is_cuda:
+            if inp.device.type != te_device_type():
                 raise RuntimeError(
-                    f"TransformerEngine needs CUDA. Got input on device: {inp.device}"
+                    f"TransformerEngine needs {te_device_type()}. Got input on device: {inp.device}"
                 )
 
             if self.tp_size > 1:
@@ -1934,7 +1936,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             param = param._local_tensor if is_dtensor else param
             # Ensure parameter is on a real device
             if param.device == torch.device("meta"):
-                param = torch.empty_like(param, device="cuda")
+                param = torch.empty_like(param, device=te_device_type())
             # Initialize the parameter values on device
             init_fn = self.param_init_meta[name].init_fn
             get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker
