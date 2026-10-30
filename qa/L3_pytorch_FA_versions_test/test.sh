@@ -37,14 +37,31 @@ export FLASH_ATTN_CUDA_ARCHS=$sm_arch
 # FA4: routine tests are here; sm100+ only; non-CP and CP
 FA2_SOURCE_VERSION="2.8.4"
 FA2_SOURCE_COMMIT="1fc0221183e799363001394a12dd9e78e15f5dda"
+FA2_SOURCE_GENCODE_ARCHS="80 90 100 110 120 121"
+# FA2 names only family base archs, and a base build covers the rest of its major
+# family, so sm103/sm107 run the compute_100f cubin that "100" produces.
+fa2_arch=$(( sm_arch / 10 * 10 ))
+case " $FA2_SOURCE_GENCODE_ARCHS " in
+  *" $sm_arch "*) fa2_arch=$sm_arch ;;
+esac
+FA2_versions=()
+case " $FA2_SOURCE_GENCODE_ARCHS " in
+  *" $fa2_arch "*)
+    FA2_versions=("$FA2_SOURCE_VERSION")
+    export FLASH_ATTN_CUDA_ARCHS=$fa2_arch
+    [ "$fa2_arch" = "$sm_arch" ] \
+      || echo "Building FA2 for sm${fa2_arch} on sm${sm_arch} (FA2 has no --gencode for sm${sm_arch})"
+    ;;
+  *) echo "Skipping FA2 on sm${sm_arch} as FA2 has no --gencode for this arch" ;;
+esac
 CP_FA_VERSION=""
 if [ $sm_arch -gt 90 ]
 then
-  FA_versions=(2.8.4 4.0.0b33)
+  FA_versions=("${FA2_versions[@]}" 4.0.0b33)
   CP_FA_VERSION="4.0.0b33"
 elif [ $sm_arch -eq 90 ]
 then
-  FA_versions=(2.8.4 3.0.0b1)
+  FA_versions=("${FA2_versions[@]}" 3.0.0b1)
   CP_FA_VERSION="3.0.0b1"
 else
   error_exit "No L3 FlashAttention generation is defined for sm${sm_arch}"

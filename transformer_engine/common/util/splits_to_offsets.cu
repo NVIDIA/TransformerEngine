@@ -18,6 +18,7 @@ namespace transformer_engine::splits_to_offsets {
 namespace {
 
 constexpr size_t kThreadsPerBlock = 256;
+constexpr size_t kSmallThreadsPerBlock = 128;
 
 struct KernelArgs {
   static constexpr size_t kMaxNumOutputs = 8;
@@ -29,6 +30,7 @@ struct KernelArgs {
   int64_t strides[kMaxNumOutputs] = {};
   bool include_leading_zero[kMaxNumOutputs] = {};
   size_t num_outputs = 0;
+  size_t split_alignment = 1;
 };
 
 __device__ __forceinline__ int64_t load_split_size(const void *__restrict__ split_sizes,
@@ -58,7 +60,8 @@ __device__ __forceinline__ void store_output(void *__restrict__ output, DType dt
   }
 }
 
-__global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
+template <size_t kScanThreads>
+__global__ void __launch_bounds__(kScanThreads) kernel(KernelArgs args) {
   const size_t tid = threadIdx.x;
 
   // Fill leading zeros if needed
@@ -71,7 +74,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
   }
 
   // Workspace for prefix sum chunk
-  __shared__ int64_t block_scan[kThreadsPerBlock];
+  __shared__ int64_t block_scan[kScanThreads];
 
   // Sum from previous chunks
   __shared__ int64_t chunk_prefix;
@@ -81,19 +84,35 @@ __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
   __syncthreads();
 
   // Perform prefix sum in chunks
-  for (size_t chunk_start = 0; chunk_start < args.num_splits; chunk_start += kThreadsPerBlock) {
+  for (size_t chunk_start = 0; chunk_start < args.num_splits; chunk_start += kScanThreads) {
     const size_t idx = chunk_start + tid;
 
-    // Load input from global memory into shared memory
-    if (idx < args.num_splits) {
-      block_scan[tid] = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
-    } else {
-      block_scan[tid] = 0;
+    // Validate before the scan. All threads leave together so no thread waits at a barrier
+    // after another thread has trapped on invalid split metadata.
+    const int64_t split =
+        idx < args.num_splits ? load_split_size(args.split_sizes, args.split_sizes_dtype, idx) : 0;
+    if (args.split_alignment > 1) {
+      const size_t alignment_mask = args.split_alignment - 1;
+      bool misaligned;
+      if ((args.split_alignment & alignment_mask) == 0) {
+        misaligned = (static_cast<size_t>(split) & alignment_mask) != 0;
+      } else {
+        misaligned = static_cast<size_t>(split) % args.split_alignment != 0;
+      }
+      const bool invalid = idx < args.num_splits && (split < 0 || misaligned);
+      if (__syncthreads_or(invalid)) {
+        if (tid == 0) {
+          NVTE_DEVICE_ERROR("Grouped split size is not divisible by split_alignment.");
+          __trap();  // NVTE_DEVICE_ERROR's assert is compiled out of release builds.
+        }
+        return;
+      }
     }
+    block_scan[tid] = split;
     __syncthreads();
 
     // Prefix sum in shared memory
-    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
+    for (size_t offset = 1; offset < kScanThreads; offset <<= 1) {
       const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
       __syncthreads();
       block_scan[tid] += addend;
@@ -112,7 +131,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) kernel(KernelArgs args) {
 
     // Update sum for later chunks
     __syncthreads();
-    if (tid == kThreadsPerBlock - 1) {
+    if (tid == kScanThreads - 1) {
       chunk_prefix += block_scan[tid];
     }
     __syncthreads();
@@ -187,7 +206,11 @@ void nvte_splits_to_offsets(const int64_t *split_sizes, int64_t *output, size_t 
   args.strides[0] = stride;
   args.include_leading_zero[0] = true;
   args.num_outputs = 1;
-  s2o::kernel<<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
+  if (num_splits <= s2o::kSmallThreadsPerBlock) {
+    s2o::kernel<s2o::kSmallThreadsPerBlock><<<1, s2o::kSmallThreadsPerBlock, 0, stream>>>(args);
+  } else {
+    s2o::kernel<s2o::kThreadsPerBlock><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -230,10 +253,19 @@ void nvte_splits_to_offsets_2d(const NVTETensor first_dims, const NVTETensor las
 void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
                                   const int64_t *strides, const int *include_leading_zero,
                                   size_t num_outputs, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_splits_to_offsets_multi);
+  nvte_splits_to_offsets_multi_v2(split_sizes, 1, outputs, strides, include_leading_zero,
+                                  num_outputs, stream);
+}
+
+void nvte_splits_to_offsets_multi_v2(NVTETensor split_sizes, size_t split_alignment,
+                                     NVTETensor *outputs, const int64_t *strides,
+                                     const int *include_leading_zero, size_t num_outputs,
+                                     cudaStream_t stream) {
+  NVTE_API_CALL(nvte_splits_to_offsets_multi_v2);
   using namespace transformer_engine;
   namespace s2o = transformer_engine::splits_to_offsets;
 
+  NVTE_CHECK(split_alignment > 0, "split_alignment must be positive.");
   if (num_outputs == 0) {
     return;
   }
@@ -279,6 +311,7 @@ void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
     args.split_sizes_dtype = split_sizes_dtype;
     args.num_splits = num_splits;
     args.num_outputs = chunk_size;
+    args.split_alignment = split_alignment;
     for (size_t i = 0; i < chunk_size; ++i) {
       const size_t out_idx = chunk_start + i;
       args.outputs[i] = output_tensors[out_idx]->data.dptr;
@@ -286,7 +319,11 @@ void nvte_splits_to_offsets_multi(NVTETensor split_sizes, NVTETensor *outputs,
       args.strides[i] = strides[out_idx];
       args.include_leading_zero[i] = include_leading_zero[out_idx] != 0;
     }
-    s2o::kernel<<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
+    if (num_splits <= s2o::kSmallThreadsPerBlock) {
+      s2o::kernel<s2o::kSmallThreadsPerBlock><<<1, s2o::kSmallThreadsPerBlock, 0, stream>>>(args);
+    } else {
+      s2o::kernel<s2o::kThreadsPerBlock><<<1, s2o::kThreadsPerBlock, 0, stream>>>(args);
+    }
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
