@@ -14,7 +14,7 @@ import transformer_engine
 from transformer_engine.common import load_framework_extension
 from transformer_engine.pytorch.torch_version import torch_version
 
-assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
+assert torch_version() >= (2, 8), f"Minimum torch version 2.8 required. Found {torch_version()}."
 
 load_framework_extension("torch")
 
@@ -144,51 +144,39 @@ except AttributeError:
 # ``transformer_engine/common/util/pybind_helper.h``) so its pickle
 # stream encodes as ``(tex.DType, (int,))`` and only the class itself
 # needs to be allow-listed below.
-try:
-    from torch.serialization import add_safe_globals
-    import transformer_engine_torch as tex
+from torch.serialization import add_safe_globals
+import transformer_engine_torch as tex
 
-    add_safe_globals(
-        [
-            # Storage mixins (used during pickling of internal-only tensors)
-            QuantizedTensorStorage,
-            Float8TensorStorage,
-            MXFP8TensorStorage,
-            NVFP4TensorStorage,
-            Float8BlockwiseQTensorStorage,
-            HybridQuantizedTensorStorage,
-            IdentityTensorStorage,
-            # Quantizer types embedded in metadata
-            Quantizer,
-            Float8Quantizer,
-            Float8CurrentScalingQuantizer,
-            MXFP8Quantizer,
-            NVFP4Quantizer,
-            Float8BlockQuantizer,
-            HybridQuantizer,
-            IdentityQuantizer,
-            # Python IntEnum used as Quantizer.dtype.
-            DType,
-            # pybind11 enum used as Quantizer.dtype.
-            # Kept for backward compatibility.
-            tex.DType,
-            # __reduce_ex__ reconstructors (module-level functions).
-            _make_float8_tensor_in_reduce_ex,
-            _make_mxfp8_tensor_in_reduce_ex,
-            _make_nvfp4_tensor_in_reduce_ex,
-            _make_float8_blockwise_tensor_in_reduce_ex,
-            _make_hybrid_quantized_tensor_in_reduce_ex,
-            _make_identity_tensor_in_reduce_ex,
-        ]
-    )
-except (ImportError, AttributeError):
-    import warnings as _warnings
-
-    _warnings.warn(
-        "transformer_engine: torch.serialization.add_safe_globals is "
-        "unavailable on this PyTorch version (added in 2.4). DCP "
-        "checkpointing of QuantizedTensor weights with FSDP2 will not "
-        "work; upgrade to PyTorch >= 2.4 to enable it.",
-        RuntimeWarning,
-        stacklevel=2,
-    )
+add_safe_globals(
+    [
+        # Storage mixins (used during pickling of internal-only tensors)
+        QuantizedTensorStorage,
+        Float8TensorStorage,
+        MXFP8TensorStorage,
+        NVFP4TensorStorage,
+        Float8BlockwiseQTensorStorage,
+        HybridQuantizedTensorStorage,
+        IdentityTensorStorage,
+        # Quantizer types embedded in metadata
+        Quantizer,
+        Float8Quantizer,
+        Float8CurrentScalingQuantizer,
+        MXFP8Quantizer,
+        NVFP4Quantizer,
+        Float8BlockQuantizer,
+        HybridQuantizer,
+        IdentityQuantizer,
+        # Python IntEnum used as Quantizer.dtype.
+        DType,
+        # pybind11 enum used as Quantizer.dtype.
+        # Kept for backward compatibility.
+        tex.DType,
+        # __reduce_ex__ reconstructors (module-level functions).
+        _make_float8_tensor_in_reduce_ex,
+        _make_mxfp8_tensor_in_reduce_ex,
+        _make_nvfp4_tensor_in_reduce_ex,
+        _make_float8_blockwise_tensor_in_reduce_ex,
+        _make_hybrid_quantized_tensor_in_reduce_ex,
+        _make_identity_tensor_in_reduce_ex,
+    ]
+)

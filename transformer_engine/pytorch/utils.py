@@ -15,7 +15,6 @@ import numpy as np
 import torch
 
 from transformer_engine.pytorch.device import te_device_type
-from .torch_version import torch_version
 from ..common import decode_cudnn_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
@@ -955,22 +954,15 @@ def canonicalize_process_group(
 
 def torch_is_autocast_gpu_enabled() -> bool:
     """Check whether PyTorch autocast is enabled for the GPU device."""
-    if torch_version() >= (2, 4, 0):
-        return torch.is_autocast_enabled(te_device_type())
-    return torch.is_autocast_enabled()
+    return torch.is_autocast_enabled(te_device_type())
 
 
 def torch_get_autocast_gpu_dtype() -> torch.dtype:
     """Get PyTorch autocast GPU dtype."""
-    if torch_version() >= (2, 4, 0):
-        return torch.get_autocast_dtype(te_device_type())
-    return torch.get_autocast_gpu_dtype()
+    return torch.get_autocast_dtype(te_device_type())
 
 
-if torch_version() >= (2, 4, 0):
-    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type=te_device_type())
-else:
-    gpu_autocast_ctx = torch.cuda.amp.autocast
+gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type=te_device_type())
 
 
 _torch_dtype_to_np_typestr_dict = {
