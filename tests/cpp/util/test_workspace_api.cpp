@@ -48,12 +48,12 @@ TEST(WorkspaceApiTest, EmptyAndOptionalRegions) {
 }
 
 TEST(WorkspaceApiTest, QueryIsIsolatedAndCanBeDiscarded) {
-  // Each unaligned request needs padding; scratch has one copy per stream slot.
+  // Each unaligned request needs padding; every region has one copy.
   constexpr size_t kScratchBytes = kWorkspaceAlignment + 1;
-  constexpr size_t kScratchSlotStride = PaddedBytes(kScratchBytes);
+  constexpr size_t kScratchPaddedBytes = PaddedBytes(kScratchBytes);
   constexpr size_t kTableBytes = 2 * kWorkspaceAlignment + 1;
   constexpr size_t kTablePaddedBytes = PaddedBytes(kTableBytes);
-  constexpr size_t kTableOffset = kMaxWorkspaceStreamSlots * kScratchSlotStride;
+  constexpr size_t kTableOffset = kScratchPaddedBytes;
   constexpr size_t kWorkspaceBytes = kTableOffset + kTablePaddedBytes;
   WorkspaceWrapper workspace;
   {
@@ -69,12 +69,12 @@ TEST(WorkspaceApiTest, QueryIsIsolatedAndCanBeDiscarded) {
 }
 
 TEST(WorkspaceApiTest, AppendingTablesPreservesScratchOffsets) {
-  // Each unaligned request needs padding; scratch has one copy per stream slot.
+  // Each unaligned request needs padding; every region has one copy.
   constexpr size_t kScratchBytes = kWorkspaceAlignment + 1;
-  constexpr size_t kScratchSlotStride = PaddedBytes(kScratchBytes);
+  constexpr size_t kScratchPaddedBytes = PaddedBytes(kScratchBytes);
   constexpr size_t kTableBytes = 2 * kWorkspaceAlignment + 1;
   constexpr size_t kTablePaddedBytes = PaddedBytes(kTableBytes);
-  constexpr size_t kTableOffset = kMaxWorkspaceStreamSlots * kScratchSlotStride;
+  constexpr size_t kTableOffset = kScratchPaddedBytes;
   constexpr size_t kWorkspaceBytes = kTableOffset + kTablePaddedBytes;
   WorkspaceWrapper workspace;
   auto first = workspace.plan();
@@ -96,13 +96,12 @@ TEST(WorkspaceApiTest, AppendingTablesPreservesScratchOffsets) {
 
 TEST(WorkspaceApiTest, GrowingScratchPreservesPersistentTable) {
   constexpr size_t kInitialRegionBytes = kWorkspaceAlignment / 2;
-  constexpr size_t kOriginalBytes = (kMaxWorkspaceStreamSlots + 1) * kWorkspaceAlignment;
+  constexpr size_t kOriginalBytes = 2 * kWorkspaceAlignment;
   constexpr size_t kGrownScratchBytes = 2 * kWorkspaceAlignment + 1;
-  constexpr size_t kGrownScratchSlotStride = PaddedBytes(kGrownScratchBytes);
-  // Growth appends all scratch copies after the original scratch copies and shared table.
+  constexpr size_t kGrownScratchPaddedBytes = PaddedBytes(kGrownScratchBytes);
+  // Growth appends new scratch after the original scratch and immutable table.
   constexpr size_t kGrownScratchOffset = kOriginalBytes;
-  constexpr size_t kExtendedBytes =
-      kGrownScratchOffset + kMaxWorkspaceStreamSlots * kGrownScratchSlotStride;
+  constexpr size_t kExtendedBytes = kGrownScratchOffset + kGrownScratchPaddedBytes;
   constexpr float kCachedTableValue = 7.5f;
   WorkspaceWrapper workspace;
   auto first = workspace.plan();
@@ -219,11 +218,10 @@ TEST(WorkspaceApiTest, GrowingPersistentRegionInvalidatesOnlyThatRegion) {
 TEST(WorkspaceApiTest, ExplicitMigrationAfterNewBinding) {
   constexpr size_t kTableBytes = kWorkspaceAlignment / 2;
   constexpr size_t kScratchBytes = kWorkspaceAlignment;
-  constexpr size_t kOriginalBytes = kWorkspaceAlignment + kMaxWorkspaceStreamSlots * kScratchBytes;
+  constexpr size_t kOriginalBytes = kWorkspaceAlignment + kScratchBytes;
   constexpr size_t kDescriptorBytes = 2 * kWorkspaceAlignment + 1;
-  constexpr size_t kDescriptorSlotStride = PaddedBytes(kDescriptorBytes);
-  constexpr size_t kExtendedBytes =
-      kOriginalBytes + kMaxWorkspaceStreamSlots * kDescriptorSlotStride;
+  constexpr size_t kDescriptorPaddedBytes = PaddedBytes(kDescriptorBytes);
+  constexpr size_t kExtendedBytes = kOriginalBytes + kDescriptorPaddedBytes;
   constexpr float kCachedTableValue = 7.5f;
   constexpr unsigned char kUninitializedByte = 0xcc;
   WorkspaceWrapper workspace;
@@ -256,7 +254,7 @@ TEST(WorkspaceApiTest, ExplicitMigrationAfterNewBinding) {
 }
 
 TEST(WorkspaceApiTest, CommitPreservesInitializationEnqueuedAfterSnapshot) {
-  constexpr size_t kExtendedBytes = (1 + kMaxWorkspaceStreamSlots) * kWorkspaceAlignment;
+  constexpr size_t kExtendedBytes = 2 * kWorkspaceAlignment;
   WorkspaceWrapper workspace;
   auto first = workspace.plan();
   const auto table = first.require("gelu", kWorkspaceAlignment, kNVTEWorkspacePersistent);
@@ -269,56 +267,27 @@ TEST(WorkspaceApiTest, CommitPreservesInitializationEnqueuedAfterSnapshot) {
   EXPECT_TRUE(workspace.initialized(table));
 }
 
-TEST(WorkspaceApiTest, StreamSlotsFollowFirstUseNotHandleOrder) {
+TEST(WorkspaceApiTest, MutableRegionsHaveOneCopy) {
   constexpr size_t kScratchBytes = kWorkspaceAlignment + 1;
-  constexpr size_t kScratchSlotStride = PaddedBytes(kScratchBytes);
-  constexpr size_t kDescriptorBytes = kWorkspaceAlignment;
-  constexpr size_t kDescriptorSlotStride = kWorkspaceAlignment;
-  // Mutable copies are contiguous per region; the immutable table has a single copy.
-  constexpr size_t kDescriptorsOffset = kMaxWorkspaceStreamSlots * kScratchSlotStride;
-  constexpr size_t kTableOffset =
-      kDescriptorsOffset + kMaxWorkspaceStreamSlots * kDescriptorSlotStride;
+  constexpr size_t kDescriptorsOffset = PaddedBytes(kScratchBytes);
+  constexpr size_t kTableOffset = kDescriptorsOffset + kWorkspaceAlignment;
   constexpr size_t kWorkspaceBytes = kTableOffset + kWorkspaceAlignment;
   WorkspaceWrapper workspace;
   auto plan = workspace.plan();
   const auto scratch = plan.require("scratch", kScratchBytes);
-  const auto descriptors = plan.require("tma", kDescriptorBytes, kNVTEWorkspaceStreamPersistent);
+  const auto descriptors = plan.require("tma", kWorkspaceAlignment, kNVTEWorkspaceStreamPersistent);
   const auto table = plan.require("gelu", kWorkspaceAlignment, kNVTEWorkspacePersistent);
   alignas(kWorkspaceAlignment) std::array<unsigned char, kWorkspaceBytes> data{};
   workspace.commit(plan, data.data());
-  EXPECT_EQ(workspace.info(descriptors).offset, kDescriptorsOffset);
-  EXPECT_EQ(workspace.info(table).offset, kTableOffset);
   EXPECT_EQ(workspace.size(), kWorkspaceBytes);
-  std::array<cudaStream_t, kMaxWorkspaceStreamSlots> streams{};
-  for (auto &stream : streams) {
-    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
-  }
-  EXPECT_EQ(nvte_workspace_max_stream_slots(), kMaxWorkspaceStreamSlots);
-  // Deliberately register the last-created stream first and include stream zero.
-  std::vector<cudaStream_t> order{streams.back(), nullptr};
-  for (int i = kMaxWorkspaceStreamSlots - 2; i > 0; --i) order.push_back(streams[i]);
-  ASSERT_EQ(order.size(), kMaxWorkspaceStreamSlots);
-  for (size_t slot = 0; slot < order.size(); ++slot) {
-    EXPECT_EQ(workspace.stream_slot(order[slot]), slot);
-    EXPECT_EQ(workspace.get(scratch, order[slot]),
-              workspace.get(scratch) + slot * kScratchSlotStride);
-    EXPECT_EQ(workspace.get(descriptors, order[slot]),
-              workspace.get(descriptors) + slot * kDescriptorSlotStride);
-    EXPECT_EQ(workspace.get(table, order[slot]), workspace.get(table));
-  }
-  for (size_t slot = order.size(); slot-- > 0;) {
-    EXPECT_EQ(workspace.stream_slot(order[slot]), slot);
-  }
-  EXPECT_THROW(workspace.begin_use(streams.front()), std::runtime_error);
-  EXPECT_EQ(workspace.stream_slot(order.front()), 0);
-  // Rebinding resets mapping, including when the numerical address is unchanged.
-  workspace.bind(data.data());
-  EXPECT_EQ(workspace.stream_slot(streams.front()), 0);
-  for (auto stream : streams) EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+  EXPECT_EQ(workspace.get(scratch), data.data());
+  EXPECT_EQ(workspace.get(descriptors), data.data() + kDescriptorsOffset);
+  EXPECT_EQ(workspace.get(table), data.data() + kTableOffset);
+  EXPECT_EQ(workspace.info(descriptors).size, kWorkspaceAlignment);
 }
 
 TEST(WorkspaceApiTest, InvalidationAndInitializationProtocol) {
-  constexpr size_t kWorkspaceBytes = (1 + kMaxWorkspaceStreamSlots) * kWorkspaceAlignment;
+  constexpr size_t kWorkspaceBytes = 2 * kWorkspaceAlignment;
   WorkspaceWrapper workspace;
   auto plan = workspace.plan();
   const auto table = plan.require("gelu", kWorkspaceAlignment, kNVTEWorkspacePersistent);
@@ -336,26 +305,8 @@ TEST(WorkspaceApiTest, InvalidationAndInitializationProtocol) {
   EXPECT_THROW(workspace.get(workspace.num_regions() + 1), std::runtime_error);
 }
 
-TEST(WorkspaceApiTest, RecreatedStreamDoesNotReuseRetiredSlot) {
-  WorkspaceWrapper workspace;
-  auto plan = workspace.plan();
-  plan.require("scratch", kWorkspaceAlignment);
-  alignas(kWorkspaceAlignment)
-      std::array<unsigned char, kWorkspaceAlignment * kMaxWorkspaceStreamSlots>
-          data{};
-  workspace.commit(plan, data.data());
-  cudaStream_t first, second;
-  ASSERT_EQ(cudaStreamCreateWithFlags(&first, cudaStreamNonBlocking), cudaSuccess);
-  EXPECT_EQ(workspace.stream_slot(first), 0);
-  ASSERT_EQ(cudaStreamDestroy(first), cudaSuccess);
-  ASSERT_EQ(cudaStreamCreateWithFlags(&second, cudaStreamNonBlocking), cudaSuccess);
-  // CUDA may recycle the handle address; its unique ID still identifies a new stream.
-  EXPECT_EQ(workspace.stream_slot(second), 1);
-  EXPECT_EQ(cudaStreamDestroy(second), cudaSuccess);
-}
-
 TEST(WorkspaceApiTest, ForeignAndStalePlansAreRejected) {
-  constexpr size_t kScratchReservationBytes = kMaxWorkspaceStreamSlots * kWorkspaceAlignment;
+  constexpr size_t kScratchReservationBytes = kWorkspaceAlignment;
   WorkspaceWrapper workspace, other;
   auto first = workspace.plan();
   auto stale = workspace.plan();
@@ -382,13 +333,13 @@ TEST(WorkspaceApiTest, InvalidRequirementsLeavePlanUnchanged) {
   EXPECT_THROW(plan.require("dbias", 1, kNVTEWorkspaceScratch, kNonPowerOfTwoAlignment),
                std::runtime_error);
   EXPECT_THROW(plan.require("huge", std::numeric_limits<size_t>::max()), std::runtime_error);
-  EXPECT_EQ(plan.size(), kMaxWorkspaceStreamSlots * kWorkspaceAlignment);
+  EXPECT_EQ(plan.size(), kWorkspaceAlignment);
   workspace.commit(plan);
   EXPECT_EQ(nvte_workspace_num_regions(workspace.data()), 1);
 }
 
 TEST(WorkspaceApiTest, MoveOnlyWrappersPreservePlanAndBinding) {
-  constexpr size_t kScratchReservationBytes = kMaxWorkspaceStreamSlots * kWorkspaceAlignment;
+  constexpr size_t kScratchReservationBytes = kWorkspaceAlignment;
   static_assert(!std::is_copy_constructible<WorkspaceWrapper>::value);
   static_assert(!std::is_copy_constructible<WorkspacePlanWrapper>::value);
   WorkspaceWrapper original;
@@ -438,7 +389,7 @@ TEST(WorkspaceApiTest, PlainTensorWrapperOwnsCatalogAndByteRequirements) {
 }
 
 TEST(WorkspaceApiTest, ExistingTensorStorageCanAcquireCatalog) {
-  constexpr size_t kScratchReservationBytes = kMaxWorkspaceStreamSlots * kWorkspaceAlignment;
+  constexpr size_t kScratchReservationBytes = kWorkspaceAlignment;
   alignas(kWorkspaceAlignment) std::array<unsigned char, kScratchReservationBytes> data{};
   TensorWrapper tensor(data.data(), std::vector<size_t>{data.size()}, DType::kByte);
   WorkspacePlanWrapper plan(tensor.data());

@@ -32,21 +32,9 @@ bool same_block(const WorkspaceBlock &a, const WorkspaceBlock &b) {
 
 void reserve_region(WorkspaceLayout &layout, WorkspaceRegionRecord &region, size_t bytes,
                     size_t alignment) {
-  WorkspaceLayout proposed = layout;
-  const auto first = proposed.add_bytes(bytes, alignment);
-  size_t stride = 0;
-  if (region.lifetime != kNVTEWorkspacePersistent) {
-    for (int slot = 1; slot < kMaxWorkspaceStreamSlots; ++slot) {
-      const auto next = proposed.add_bytes(bytes, alignment);
-      if (slot == 1) stride = next.offset - first.offset;
-    }
-  }
-  region.block = first;
-  region.slot_stride = stride;
+  region.block = layout.add_bytes(bytes, alignment);
   region.initialized_generation = 0;
   region.ready.reset();
-  region.ready_streams.fill(false);
-  layout = proposed;
 }
 
 uint64_t next_counter(uint64_t value) {
@@ -117,7 +105,6 @@ void Workspace::commit(const WorkspacePlan &plan) {
     if (same_block(regions[i].block, regions_[i].block)) {
       regions[i].initialized_generation = regions_[i].initialized_generation;
       regions[i].ready = regions_[i].ready;
-      regions[i].ready_streams = regions_[i].ready_streams;
     }
   }
   regions_ = std::move(regions);
@@ -133,13 +120,9 @@ void Workspace::bind(void *data) {
   bound_ = true;
   generation_ = generation;
   revision_ = revision;
-  device_ = -1;
-  num_streams_ = 0;
-  stream_ids_.fill(0);
   for (auto &region : regions_) {
     region.initialized_generation = 0;
     region.ready.reset();
-    region.ready_streams.fill(false);
   }
 }
 
@@ -177,16 +160,6 @@ void *Workspace::data(NVTEWorkspaceRegion region) const {
   return data_ + entry.block.offset;
 }
 
-void *Workspace::data(NVTEWorkspaceRegion region, cudaStream_t stream) {
-  if (region == 0) return nullptr;
-  const auto slot = stream_slot(stream);
-  const auto &entry = record(region);
-  if (entry.lifetime == kNVTEWorkspacePersistent && initialized(region)) {
-    initialize(region, stream, nullptr, nullptr);
-  }
-  return static_cast<char *>(data(region)) + slot * entry.slot_stride;
-}
-
 NVTEWorkspaceRegion Workspace::require_planned(const char *name, size_t bytes) const {
   if (bytes == 0) {
     return 0;
@@ -195,25 +168,6 @@ NVTEWorkspaceRegion Workspace::require_planned(const char *name, size_t bytes) c
   NVTE_CHECK(region != 0 && record(region).block.size >= bytes, "Workspace region '", name,
              "' needs an empty-tensor size query before execution.");
   return region;
-}
-
-size_t Workspace::stream_slot(cudaStream_t stream) {
-  NVTE_CHECK(bound_ && data_ != nullptr, "Bind workspace storage before registering streams.");
-  int device;
-  unsigned long long id;  // NOLINT(runtime/int): required by cudaStreamGetId.
-  NVTE_CHECK_CUDA(cudaGetDevice(&device));
-  NVTE_CHECK(device_ < 0 || device_ == device, "A workspace must be used on one CUDA device.");
-  NVTE_CHECK_CUDA(cudaStreamGetId(stream, &id));
-  for (size_t slot = 0; slot < num_streams_; ++slot) {
-    if (stream_ids_[slot] == id) return slot;
-  }
-  NVTE_CHECK(num_streams_ < kMaxWorkspaceStreamSlots, "Workspace supports at most ",
-             kMaxWorkspaceStreamSlots,
-             " registered CUDA streams per allocation; slots are not "
-             "evicted or shared. Prepare a separate workspace for additional streams.");
-  device_ = device;
-  stream_ids_[num_streams_] = id;
-  return num_streams_++;
 }
 
 bool Workspace::initialized(NVTEWorkspaceRegion region) const {
@@ -229,7 +183,7 @@ void Workspace::mark_initialized(NVTEWorkspaceRegion region, cudaStream_t stream
   NVTE_CHECK(entry.lifetime == kNVTEWorkspacePersistent,
              "Only shared immutable workspace regions have initialization state.");
   NVTE_CHECK(!initialized(region), "Immutable workspace region is already initialized.");
-  const auto slot = stream_slot(stream);
+  NVTE_CHECK(bound_ && data_ != nullptr, "Bind workspace storage before initialization.");
   cudaStreamCaptureStatus capture;
   NVTE_CHECK_CUDA(cudaStreamIsCapturing(stream, &capture));
   NVTE_CHECK(capture == cudaStreamCaptureStatusNone,
@@ -241,8 +195,6 @@ void Workspace::mark_initialized(NVTEWorkspaceRegion region, cudaStream_t stream
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(ready.get(), cudaEventDisableTiming));
   NVTE_CHECK_CUDA(cudaEventRecord(*ready, stream));
   entry.ready = std::move(ready);
-  entry.ready_streams.fill(false);
-  entry.ready_streams[slot] = true;
   entry.initialized_generation = generation_;
 }
 
@@ -251,35 +203,29 @@ void Workspace::initialize(NVTEWorkspaceRegion region, cudaStream_t stream,
   auto &entry = record(region);
   NVTE_CHECK(entry.lifetime == kNVTEWorkspacePersistent,
              "Only shared immutable workspace regions support lazy initialization.");
-  const auto slot = stream_slot(stream);
+  NVTE_CHECK(bound_ && data_ != nullptr, "Bind workspace storage before initialization.");
   cudaStreamCaptureStatus capture;
   NVTE_CHECK_CUDA(cudaStreamIsCapturing(stream, &capture));
-  if (initialized(region) && entry.ready_streams[slot]) {
+  if (initialized(region)) {
     if (capture != cudaStreamCaptureStatusNone) {
-      // A graph can be replayed on another stream. A wait enqueued before
-      // capture is not part of that graph, so initialization must be complete.
+      // Initialization is outside the graph. Require completion so replay
+      // never depends on uncaptured work remaining on the original stream.
       NVTE_CHECK(cudaEventQuery(*entry.ready) == cudaSuccess,
                  "Complete immutable workspace initialization before CUDA graph capture.");
     }
     return;
   }
   NVTE_CHECK(capture == cudaStreamCaptureStatusNone,
-             "Prepare immutable workspace regions on every consuming stream before capture.");
-  if (!initialized(region)) {
-    NVTE_CHECK(initializer != nullptr, "An uninitialized region requires an initializer.");
-    initializer(data(region), entry.block.size, stream, user_data);
-    mark_initialized(region, stream);
-  } else {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, *entry.ready, 0));
-    entry.ready_streams[slot] = true;
-  }
+             "Initialize immutable workspace regions before CUDA graph capture.");
+  NVTE_CHECK(initializer != nullptr, "An uninitialized region requires an initializer.");
+  initializer(data(region), entry.block.size, stream, user_data);
+  mark_initialized(region, stream);
 }
 
 void Workspace::invalidate(NVTEWorkspaceRegion region) {
   auto &entry = record(region);
   entry.initialized_generation = 0;
   entry.ready.reset();
-  entry.ready_streams.fill(false);
 }
 
 }  // namespace transformer_engine
@@ -338,23 +284,10 @@ NVTEWorkspaceRegionInfo nvte_workspace_get_region_info(NVTETensor workspace,
 void *nvte_workspace_get_region_data(NVTETensor workspace, NVTEWorkspaceRegion region) {
   return convertNVTETensorToWorkspace(workspace).data(region);
 }
-void *nvte_workspace_get_region_data_on_stream(NVTETensor workspace, NVTEWorkspaceRegion region,
-                                               cudaStream_t stream) {
-  return convertNVTETensorToWorkspace(workspace).data(region, stream);
-}
-size_t nvte_workspace_get_stream_slot(NVTETensor workspace, cudaStream_t stream) {
-  return convertNVTETensorToWorkspace(workspace).stream_slot(stream);
-}
-size_t nvte_workspace_max_stream_slots(void) {
-  return transformer_engine::kMaxWorkspaceStreamSlots;
-}
 void nvte_workspace_initialize_region(NVTETensor workspace, NVTEWorkspaceRegion region,
                                       cudaStream_t stream, NVTEWorkspaceInitializer initializer,
                                       void *user_data) {
   convertNVTETensorToWorkspace(workspace).initialize(region, stream, initializer, user_data);
-}
-void nvte_workspace_begin_use(NVTETensor workspace, cudaStream_t stream) {
-  convertNVTETensorToWorkspace(workspace).begin_use(stream);
 }
 int nvte_workspace_region_initialized(NVTETensor workspace, NVTEWorkspaceRegion region) {
   return convertNVTETensorToWorkspace(workspace).initialized(region);

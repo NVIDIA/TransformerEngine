@@ -122,10 +122,9 @@ void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output
  *  metadata, without a fixed group-count limit. Its data pointer must be 128-byte aligned.
  *  Contents are rebuilt on every invocation; no initialization is required. Keep the memory
  *  alive until submitted work completes, and for the lifetime of captured graphs that use it.
- *  Keep the tensor/catalog when sharing one allocation: registered CUDA streams receive
- *  private mutable slots, up to nvte_workspace_max_stream_slots(). Slot exhaustion is an
- *  error without waiting or eviction. Serialize complete host submissions to one catalog.
- *  Independent graphs require distinct mutable slots, even if captured on the same stream.
+ *  Each workspace is used by one CUDA stream. The caller supplies separate allocations
+ *  for independently executing streams and serializes host access to each catalog.
+ *  Independent graphs require separate mutable storage, even if captured on the same stream.
  *  Query and allocate the workspace before CUDA graph capture.
  *
  *  \param[in]     input            Input grouped tensor to be cast.
@@ -468,7 +467,7 @@ void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
 
 /*! \brief Dequantizes grouped tensors using caller-owned workspace.
  *
- *  Uses the query/allocate/execute protocol and stream-slot lifetime contract of
+ *  Uses the query/allocate/execute protocol and single-stream lifetime contract of
  *  nvte_group_quantize_v2. MXFP8 groups with varying last dimensions keep their
  *  TMA descriptors in the workspace; no descriptor-count limit is imposed.
  *  \param[in] input Input grouped tensor.

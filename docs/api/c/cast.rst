@@ -31,8 +31,8 @@ distinguish execution from a query. MXFP8 groups with varying last dimensions
 store their tensor-map descriptors and metadata in the workspace and support
 more than 64 groups. No initialization is needed, and a sufficiently large
 workspace can be reused for subsequent calls.
-The query reserves private descriptor/metadata storage for every supported stream
-slot. Execution validates the tensor's declared byte capacity and base alignment;
+The query reserves one copy of the descriptor/metadata storage for the supplied
+stream. Execution validates the tensor's declared byte capacity and base alignment;
 the caller is responsible for the actual allocation behind the pointer.
 
 Each descriptor and metadata array starts on a 128-byte boundary. Workspace size
@@ -41,21 +41,19 @@ requirements rather than hard-code sizes. See :doc:`workspace` for layout,
 persistent table, growth, and CUDA Graph lifetime contracts.
 
 Allocate before CUDA graph capture. Keep the workspace alive until all uses
-complete, including captured graph executions. Keep the same tensor/catalog to
-share one allocation across streams: streams receive distinct slots in first-use
-order, up to ``nvte_workspace_max_stream_slots()`` (currently four). Slot exhaustion
-raises an error without waiting or sharing mutable storage. Serialize host
-submission of each complete operation; kernels in distinct slots remain
-independent on the GPU. Independent graph executions require distinct mutable
-slots or separate workspaces, including graphs captured on the same stream.
+complete, including captured graph executions. Use one workspace per CUDA stream;
+the framework or application allocates separate memory for independently executing
+streams. TE does not track streams or partition the allocation into stream slots.
+Serialize host access to each catalog and order all GPU uses of its mutable
+storage. Independently executing graphs also require separate workspaces.
 The original ``nvte_group_quantize`` and ``nvte_group_dequantize`` reject MXFP8
 layouts with varying last dimensions. Use their ``_v2`` variants with caller-owned
 workspace for those layouts, including serialized use. There are no shared mutable
 TMA descriptor arrays or implicit device allocations.
 
 ``nvte_group_dequantize_v2`` uses the same query/allocate/execute protocol and
-stream-slot catalog. Its descriptor updater and consumer both use the selected
-slot; it supports more than 64 groups. PyTorch grouped quantize and dequantize
+region catalog. Its descriptor updater and consumer use the same caller-owned
+region; it supports more than 64 groups. PyTorch grouped quantize and dequantize
 allocate workspace through the framework, including during graph capture. The
 JAX grouped MXFP8 FFI uses v2 with its XLA-owned workspace; its constant last
 dimension uses launch-local descriptors and does not reserve a descriptor region.
@@ -63,7 +61,7 @@ dimension uses launch-local descriptors and does not reserve a descriptor region
 Only MXFP8 layouts with varying last dimensions need mutable descriptor arrays.
 Constant last dimensions (uniform shapes or varying first dimensions) pass tensor
 maps by value as kernel parameters. Grouped DBias, including fused activation
-backward, requires a constant last dimension and uses stream-private scratch.
+backward, requires a constant last dimension and uses the supplied workspace scratch.
 Other grouped formats do not use these mutable MXFP8 descriptor arrays.
 
 .. doxygenfile:: cast.h

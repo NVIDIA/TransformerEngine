@@ -69,7 +69,8 @@ void nvte_group_gelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.
  *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
@@ -105,7 +106,8 @@ void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.
  *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
@@ -186,7 +188,8 @@ void nvte_group_relu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.
  *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
@@ -222,7 +225,8 @@ void nvte_group_qgelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, c
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.
  *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
@@ -258,7 +262,8 @@ void nvte_group_srelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, c
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.
  *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
@@ -298,7 +303,8 @@ void nvte_group_dgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor inpu
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] grad Incoming grouped gradient.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.
@@ -339,7 +345,8 @@ void nvte_group_dsilu(const NVTEGroupedTensor grad, const NVTEGroupedTensor inpu
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] grad Incoming grouped gradient.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.
@@ -380,7 +387,8 @@ void nvte_group_drelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor inpu
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] grad Incoming grouped gradient.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.
@@ -421,7 +429,8 @@ void nvte_group_dqgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor inp
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] grad Incoming grouped gradient.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.
@@ -462,7 +471,8 @@ void nvte_group_dsrelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor inp
  *
  *  Use the empty-tensor query/allocate/execute protocol of nvte_group_quantize_v2.
  *  MXFP8 groups with varying last dimensions store descriptors and metadata in
- *  private stream slots. Keep the workspace alive for all submitted work and graphs.
+ *  the caller-owned workspace. Use a separate workspace per independently executing stream.
+ *  Keep the workspace alive for all submitted work and graphs.
  *  \param[in] grad Incoming grouped gradient.
  *  \param[in] input Input grouped tensor.
  *  \param[in,out] output Output grouped tensor.

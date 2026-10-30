@@ -61,10 +61,9 @@ inline void query_workspace(NVTETensor workspace, const char *name, size_t bytes
 }
 
 // A fresh tensor over a scratch-only allocation can reconstruct the operation's
-// layout. Multi-stream reuse must retain the tensor/catalog so stream slots are
-// shared by all calls, including calls from different host threads.
+// layout. Keep the tensor/catalog for persistent contents or multiple regions.
+// The caller provides separate allocations for independently executing streams.
 inline Workspace &execution_workspace(NVTETensor workspace, const char *name, size_t bytes,
-                                      cudaStream_t stream,
                                       NVTEWorkspaceLifetime lifetime = kNVTEWorkspaceScratch) {
   const auto *tensor = convertNVTETensorCheck(workspace);
   auto &storage = convertNVTETensorToWorkspace(workspace);
@@ -78,24 +77,19 @@ inline Workspace &execution_workspace(NVTETensor workspace, const char *name, si
              "Workspace tensor is smaller than the queried allocation requirement.");
   NVTE_CHECK(reinterpret_cast<uintptr_t>(tensor->data.dptr) % storage.alignment() == 0,
              "Workspace allocation does not satisfy the queried base alignment.");
-  // Nonempty regions register/resolve the stream once in data(region, stream).
-  if (bytes == 0) storage.begin_use(stream);
   return storage;
 }
 
-inline void bind_dbias_workspace(Workspace &workspace, TensorWrapper *requirement,
-                                 cudaStream_t stream) {
+inline void bind_dbias_workspace(Workspace &workspace, TensorWrapper *requirement) {
   const auto region =
       workspace.require_planned(kDBiasWorkspaceRegion, workspace_requirement_bytes(*requirement));
-  requirement->set_rowwise_data(workspace.data(region, stream), requirement->dtype(),
-                                requirement->shape());
+  requirement->set_rowwise_data(workspace.data(region), requirement->dtype(), requirement->shape());
 }
 
-// A backend receives a view of just its stream's descriptor region, while the
-// public tensor retains the full catalog, immutable regions, and stream mapping.
+// A backend receives a view of its descriptor region, while the public tensor
+// retains the full catalog and immutable regions.
 template <typename Launch>
-void dispatch_grouped_workspace(NVTETensor workspace, size_t bytes, cudaStream_t stream,
-                                Launch &&launch) {
+void dispatch_grouped_workspace(NVTETensor workspace, size_t bytes, Launch &&launch) {
   if (workspace == nullptr) {
     NVTE_CHECK(bytes == 0,
                "Grouped MXFP8 with varying last dimensions requires caller-owned workspace. "
@@ -113,19 +107,19 @@ void dispatch_grouped_workspace(NVTETensor workspace, size_t bytes, cudaStream_t
                     kNVTEWorkspaceStreamPersistent);
     return;
   }
-  auto &storage = execution_workspace(workspace, kGroupedTmaWorkspaceRegion, bytes, stream,
+  auto &storage = execution_workspace(workspace, kGroupedTmaWorkspaceRegion, bytes,
                                       kNVTEWorkspaceStreamPersistent);
   void *data = tensor->data.dptr;
   if (bytes != 0) {
     const auto region = storage.require_planned(kGroupedTmaWorkspaceRegion, bytes);
-    data = storage.data(region, stream);
+    data = storage.data(region);
   }
   TensorWrapper adapter(data, std::vector<size_t>{std::max(size_t{1}, bytes)}, DType::kByte);
   launch(convertNVTETensorCheck(adapter.data()));
 }
 
 template <typename Launch>
-void dispatch_dbias_workspace(NVTETensor workspace, cudaStream_t stream, Launch &&launch) {
+void dispatch_dbias_workspace(NVTETensor workspace, Launch &&launch) {
   const auto *tensor = convertNVTETensorCheck(workspace);
   if (tensor->data.dptr == nullptr) {
     TensorWrapper requirement;
@@ -139,9 +133,9 @@ void dispatch_dbias_workspace(NVTETensor workspace, cudaStream_t stream, Launch 
   // may include final alignment padding and have a different shape.
   TensorWrapper adapter;
   launch(adapter.data());
-  auto &storage = execution_workspace(workspace, kDBiasWorkspaceRegion,
-                                      workspace_requirement_bytes(adapter), stream);
-  bind_dbias_workspace(storage, &adapter, stream);
+  auto &storage =
+      execution_workspace(workspace, kDBiasWorkspaceRegion, workspace_requirement_bytes(adapter));
+  bind_dbias_workspace(storage, &adapter);
   launch(adapter.data());
 }
 

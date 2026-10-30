@@ -523,7 +523,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
 
   // Only grouped MXFP8 needs TMA descriptor storage
   if (workspace_tensor != nullptr && scaling_mode != NVTE_MXFP8_1D_SCALING) {
-    common::dispatch_grouped_workspace(workspace, 0, stream, [&](Tensor *scratch) {
+    common::dispatch_grouped_workspace(workspace, 0, [&](Tensor *scratch) {
       if (scratch->data.dptr == nullptr) return;
       group_quantize_fwd_helper<IS_ACT, ParamOP, OP>(input, output, quant_config, stream);
     });
@@ -552,8 +552,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     }
     case NVTE_MXFP8_1D_SCALING: {
       common::dispatch_grouped_workspace(
-          workspace, common::grouped_tma_workspace_bytes(*output_tensor), stream,
-          [&](Tensor *scratch) {
+          workspace, common::grouped_tma_workspace_bytes(*output_tensor), [&](Tensor *scratch) {
             mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
                 input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor, scratch,
                 &quant_config_cpp, stream);
@@ -679,12 +678,11 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
             &quant_config_cpp, stream);
       };
       if constexpr (IS_DBIAS) {
-        common::dispatch_dbias_workspace(workspace, stream, [&](NVTETensor scratch) {
-          launch(convertNVTETensorCheck(scratch));
-        });
+        common::dispatch_dbias_workspace(
+            workspace, [&](NVTETensor scratch) { launch(convertNVTETensorCheck(scratch)); });
       } else {
         common::dispatch_grouped_workspace(
-            workspace, common::grouped_tma_workspace_bytes(*output_tensor), stream, launch);
+            workspace, common::grouped_tma_workspace_bytes(*output_tensor), launch);
       }
       break;
     }
@@ -695,7 +693,7 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
       // (mirrors MXFP8); those also handle the two-call workspace sizing protocol.
       GroupedTensor *dbias_arg = IS_DBIAS ? dbias_tensor : nullptr;
       Tensor *workspace_arg = IS_DBIAS ? workspace_tensor : nullptr;
-      common::dispatch_dbias_workspace(workspace, stream, [&](NVTETensor scratch) {
+      common::dispatch_dbias_workspace(workspace, [&](NVTETensor scratch) {
         workspace_arg = convertNVTETensorCheck(scratch);
         if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
           fp8_blockwise::group_quantize_blockwise_1d(
