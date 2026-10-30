@@ -4,6 +4,7 @@
 
 import os
 import random
+from unittest.mock import Mock
 from typing import Dict, List, Optional, Sequence
 
 import pytest
@@ -59,6 +60,35 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 seed = 1234
 reset_rng_states()
+
+
+@pytest.mark.parametrize("has_skip", [False, True])
+@pytest.mark.parametrize("capturing", [False, True])
+def test_grouped_linear_skip_update_capture_short_circuit(monkeypatch, has_skip, capturing):
+    """Only an active capture skip tensor may override first-microbatch accumulation."""
+    FP8GlobalStateManager.reset()
+    module = GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16)
+    x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
+    skip = torch.ones(1, device="cuda") if has_skip else None
+    monkeypatch.setattr(
+        FP8GlobalStateManager.quantization_state, "skip_fp8_weight_update_tensor", skip
+    )
+    capture = Mock(return_value=capturing)
+    monkeypatch.setattr(FP8GlobalStateManager, "fp8_graph_capturing", capture)
+    original = _GroupedLinear.forward
+    seen = []
+
+    def forward(ctx, inp, fwd_args, *args):
+        seen.append((fwd_args.is_first_microbatch, fwd_args.skip_fp8_weight_update))
+        return original(ctx, inp, fwd_args, *args)
+
+    monkeypatch.setattr(_GroupedLinear, "forward", forward)
+    with torch.no_grad():
+        module(x, [128, 128], is_first_microbatch=True)
+    assert capture.call_count == int(has_skip)
+    assert seen[0][0] == (not (has_skip and capturing))
+    assert seen[0][1] is (skip if capturing else None)
+
 
 NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
 
@@ -2310,6 +2340,161 @@ def test_single_grouped_primary_mxfp8_bypasses_weight_workspace():
     assert "weight" not in grouped_linear._fp8_workspaces
 
 
+@pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
+@pytest.mark.parametrize("primary_fp8", [False, True])
+@pytest.mark.parametrize("save_original_input", [False, True])
+def test_grouped_runtime_usage_transitions(primary_fp8, save_original_input):
+    """Preserve primary usages and rebuild missing columnwise workspaces after inference."""
+    from transformer_engine.pytorch.distributed import activation_recompute_forward
+
+    fp8_recipe = recipe.MXFP8BlockScaling()
+    if not is_module_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
+        pytest.skip("Native MXFP8 grouped GEMM is unavailable.")
+    FP8GlobalStateManager.reset()
+    with quantized_model_init(enabled=primary_fp8, recipe=fp8_recipe):
+        module = GroupedLinear(
+            2,
+            128,
+            128,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            single_grouped_weight=True,
+            use_grouped_tensor=True,
+            save_original_input=save_original_input,
+        )
+    splits = torch.tensor([128, 128], device="cuda")
+    x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    def run(*, grad_enabled=True, first=False):
+        with torch.set_grad_enabled(grad_enabled), autocast(enabled=True, recipe=fp8_recipe):
+            return module(x, splits, is_first_microbatch=first)
+
+    run(first=True).sum().backward()
+    reference_grad = x.grad.clone()
+    reference_wgrad = module.weight.grad.clone()
+    weight_q = module.weight.quantizer if primary_fp8 else module._get_weight_quantizers()[0]
+    assert weight_q.columnwise_usage
+    module.eval()
+    run(grad_enabled=False, first=True)
+    # Persistent parameters retain columnwise usage; temporary workspaces follow this call.
+    assert weight_q.columnwise_usage == primary_fp8
+    # Force a rowwise-only workspace, as on a first inference microbatch.
+    if not primary_fp8:
+        module._fp8_workspaces.clear()
+        run(grad_enabled=False, first=True)
+        assert module._fp8_workspaces["weight"].columnwise_data is None
+    module.train()
+    module.weight.grad = None
+    x.grad = None
+    # Keep two forwards alive before either backward; quantizers are shared references.
+    y1, y2 = run(), run()
+    assert weight_q.columnwise_usage
+    y1.sum().backward()
+    y2.sum().backward()
+    torch.testing.assert_close(x.grad, 2 * reference_grad, rtol=1e-2, atol=5e-3)
+    torch.testing.assert_close(module.weight.grad, 2 * reference_wgrad, rtol=1e-2, atol=5e-3)
+    with activation_recompute_forward(activation_recompute=True, recompute_phase=False):
+        run(grad_enabled=False, first=True)
+    assert weight_q.columnwise_usage
+    with activation_recompute_forward(activation_recompute=True, recompute_phase=True):
+        run().sum().backward()
+    assert weight_q.columnwise_usage
+    module.weight.requires_grad_(False)
+    run().sum().backward()
+    input_q = module.quantizers["scaling_fwd"][module._offsets["input"]]
+    assert not input_q.columnwise_usage
+
+
+@pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
+def test_grouped_runtime_recipe_rebuild():
+    """Recipe rebuilds replace cached quantizers while preserving saved forwards."""
+    recipes = [
+        recipe.MXFP8BlockScaling(),
+        recipe.Float8CurrentScaling(),
+        recipe.MXFP8BlockScaling(),
+    ]
+    if not all(is_module_grouped_tensor_path_supported(r, torch.bfloat16) for r in recipes):
+        pytest.skip("Required native grouped GEMM recipes are unavailable.")
+    FP8GlobalStateManager.reset()
+    module = GroupedLinear(
+        2,
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        single_grouped_weight=True,
+        use_grouped_tensor=True,
+    )
+    reference = GroupedLinear(
+        2,
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        use_grouped_tensor=True,
+    )
+    reference.load_state_dict(module.state_dict())
+    x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    ref_x = x.detach().clone().requires_grad_(True)
+    splits = torch.tensor([128, 128], device="cuda")
+    pending = []
+    workspaces = []
+    for fp8_recipe in recipes:
+        with autocast(enabled=True, recipe=fp8_recipe):
+            y = module(x, splits, is_first_microbatch=True)
+            ref_y = reference(ref_x, splits, is_first_microbatch=True)
+        pending.append((y, ref_y))
+        workspace = module._fp8_workspaces["weight"]
+        assert workspace.quantizer is module._get_weight_quantizers()[0]
+        assert all(workspace.quantizer is not old.quantizer for old in workspaces)
+        workspaces.append(workspace)
+    for y, ref_y in reversed(pending):
+        torch.testing.assert_close(y, ref_y, rtol=1e-2, atol=5e-3)
+        y.sum().backward()
+        ref_y.sum().backward()
+    torch.testing.assert_close(x.grad, ref_x.grad, rtol=1e-2, atol=5e-3)
+    ref_wgrad = torch.stack([reference.weight0.grad, reference.weight1.grad])
+    torch.testing.assert_close(module.weight.grad, ref_wgrad, rtol=1e-2, atol=5e-3)
+
+
+@pytest.mark.parametrize(
+    "use_grouped_tensor,single_bias", [(False, False), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("use_bias", [False, True])
+def test_grouped_linear_return_bias_with_frozen_weights(use_grouped_tensor, single_bias, use_bias):
+    """A trainable returned bias keeps the output differentiable when input/weight are frozen."""
+    if use_grouped_tensor and not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
+        pytest.skip("Native grouped GEMM is unavailable.")
+    module = GroupedLinear(
+        2,
+        128,
+        128,
+        bias=use_bias,
+        return_bias=True,
+        params_dtype=torch.bfloat16,
+        single_grouped_weight=single_bias,
+        single_grouped_bias=single_bias,
+        use_grouped_tensor=use_grouped_tensor,
+    )
+    for weight in _grouped_linear_weight_params(module):
+        weight.requires_grad_(False)
+    x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
+    splits = torch.tensor([128, 128], device="cuda" if use_grouped_tensor else "cpu")
+    y, biases = module(x, splits)
+    assert y.requires_grad == use_bias
+    if not use_bias:
+        assert isinstance(biases, list) and len(biases) == 2
+        assert all(b.numel() == 0 for b in biases)
+        return
+    params = _grouped_linear_bias_params(module)
+    returned = [biases] if single_bias else biases
+    assert len(returned) == len(params)
+    assert all(value is param for value, param in zip(returned, params))
+    (y.sum() + sum(value.sum() for value in returned)).backward()
+    for param in params:
+        torch.testing.assert_close(param.grad, torch.ones_like(param.grad), rtol=0, atol=0)
+
+
 def _clone_outputs(outputs):
     return [None if out is None else out.detach().clone() for out in outputs]
 
@@ -3145,8 +3330,200 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4():
         )
 
 
-def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch):
+@pytest.mark.parametrize(
+    "use_grouped_tensor,single_weight,single_bias",
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (True, False, True),
+        (True, True, True),
+    ],
+    ids=["split", "grouped-discrete", "single-weight", "single-bias", "single-both"],
+)
+@pytest.mark.parametrize(
+    "recipe_name", ["bf16", "delayed", "current", "mxfp8", "high_precision", "dequantized"]
+)
+@pytest.mark.parametrize("freeze_weight", [False, True])
+@pytest.mark.parametrize("input_requires_grad", [False, True])
+@pytest.mark.parametrize("delay_wgrad", [False, True])
+@pytest.mark.parametrize("grad_storage", ["grad", "preallocated_grad", "main_grad"])
+def test_grouped_linear_bias_gradient_accumulation(
+    use_grouped_tensor,
+    single_weight,
+    single_bias,
+    recipe_name,
+    freeze_weight,
+    input_requires_grad,
+    delay_wgrad,
+    grad_storage,
+):
+    """Bias gradients accumulate during main backward, independently of deferred/frozen weights."""
+    if recipe_name == "bf16":
+        fp8_recipe = None
+    elif recipe_name == "delayed":
+        fp8_recipe = recipe.DelayedScaling()
+    elif recipe_name == "current":
+        fp8_recipe = recipe.Float8CurrentScaling()
+        # Use exact power-of-two scales for the analytical FP32 main_grad reference.
+        fp8_recipe.fp8_quant_fwd_inp = recipe.QParams(power_2_scale=True)
+        fp8_recipe.fp8_quant_fwd_weight = recipe.QParams(power_2_scale=True)
+        fp8_recipe.fp8_quant_bwd_grad = recipe.QParams(power_2_scale=True)
+    else:
+        if not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        fp8_recipe = recipe.MXFP8BlockScaling(
+            backward_override=None if recipe_name == "mxfp8" else recipe_name
+        )
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if use_grouped_tensor and not is_module_grouped_tensor_path_supported(
+        fp8_recipe, torch.bfloat16
+    ):
+        pytest.skip("Recipe is unsupported by the native grouped-tensor path")
+
+    FP8GlobalStateManager.reset()
+    module = GroupedLinear(
+        2,
+        128,
+        128,
+        bias=True,
+        params_dtype=torch.bfloat16,
+        use_grouped_tensor=use_grouped_tensor,
+        single_grouped_weight=single_weight,
+        single_grouped_bias=single_bias,
+        delay_wgrad_compute=delay_wgrad,
+        fuse_wgrad_accumulation=grad_storage == "main_grad",
+    )
+    weights = _grouped_linear_weight_params(module)
+    biases = _grouped_linear_bias_params(module)
+    with torch.no_grad():
+        for param in weights:
+            data = param.rowwise_data if isinstance(param, GroupedTensor) else param
+            data.fill_(0.125)
+            param.requires_grad_(not freeze_weight)
+        for param in biases:
+            data = param.rowwise_data if isinstance(param, GroupedTensor) else param
+            data.fill_(0.5)
+
+    hook_calls = {id(param): 0 for param in module.parameters()}
+    flat_main_grad = torch.zeros(2 * 128 * 128, device="cuda", dtype=torch.float32)
+    weight_views = flat_main_grad.view(2, 128, 128)
+    weight_views = [weight_views] if single_weight else list(weight_views.unbind())
+    main_grad_ptrs = []
+    if grad_storage == "main_grad":
+        # Model MCore's ownership: weight GEMM accumulates into an external flat buffer,
+        # while parameter hooks move unfused grads to main_grad and clear the handoff.
+        for param, view in zip(weights, weight_views):
+            param.main_grad = view
+            param.grad_added_to_main_grad = False
+            param.overwrite_main_grad = False
+            main_grad_ptrs.append(view.data_ptr())
+        for param in biases:
+            param.main_grad = torch.zeros(param.shape, device="cuda", dtype=torch.float32)
+            param.grad_added_to_main_grad = False
+
+        def accumulate(param):
+            hook_calls[id(param)] += 1
+            if param.grad is not None and not param.grad_added_to_main_grad:
+                param.main_grad.add_(param.grad)
+            param.grad = None
+
+        for param in module.parameters():
+            if not param.requires_grad:
+                continue
+            if getattr(param, "skip_backward_post_hook", False):
+                module.register_wgrad_accumulation_and_reduce_hooks(
+                    lambda param=param: accumulate(param)
+                )
+            else:
+                param.register_post_accumulate_grad_hook(accumulate)
+    elif grad_storage == "preallocated_grad":
+        for param in biases:
+            param.grad = torch.zeros(param.shape, device="cuda", dtype=param.dtype)
+
+    splits = torch.tensor([128, 128], dtype=torch.int64, device="cuda")
+    total_scale = 0
+    try:
+        # Decreasing dY avoids delayed-scaling overflow from a larger second amax.
+        # Powers of two make output and gradients exactly representable in all tested recipes.
+        for step, scale in enumerate((2, 1)):
+            total_scale += scale
+            for param in weights:
+                param.grad = None
+            x = torch.full(
+                (256, 128),
+                0.25,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=input_requires_grad,
+            )
+            with autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+                y = module(x, splits, is_first_microbatch=step == 0)
+            torch.testing.assert_close(y, torch.full_like(y, 4.5), rtol=0, atol=0)
+            y.backward(torch.full_like(y, scale))
+            if input_requires_grad:
+                torch.testing.assert_close(
+                    x.grad, torch.full_like(x.grad, 16 * scale), rtol=0, atol=0
+                )
+            else:
+                assert x.grad is None
+
+            def check_bias_grads():
+                for param in biases:
+                    grad = param.main_grad if grad_storage == "main_grad" else param.grad
+                    assert grad is not None, "bias gradient was not returned by main backward"
+                    torch.testing.assert_close(
+                        grad, torch.full_like(grad, 128 * total_scale), rtol=0, atol=0
+                    )
+                    if grad_storage == "main_grad":
+                        assert param.grad is None
+                        assert hook_calls[id(param)] == step + 1
+
+            check_bias_grads()
+            if delay_wgrad:
+                module.backward_dw()
+                check_bias_grads()  # Deferred weight hooks must not add dbias a second time.
+            for param in weights:
+                if freeze_weight:
+                    assert param.grad is None
+                    continue
+                grad = param.main_grad if grad_storage == "main_grad" else param.grad
+                assert grad is not None
+                expected = 32 * (total_scale if grad_storage == "main_grad" else scale)
+                torch.testing.assert_close(grad, torch.full_like(grad, expected), rtol=0, atol=0)
+            if grad_storage == "main_grad":
+                assert [param.main_grad.data_ptr() for param in weights] == main_grad_ptrs
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.parametrize("device", ["cuda", "meta"])
+@pytest.mark.parametrize("single_weight", [False, True])
+@pytest.mark.parametrize("single_bias", [False, True])
+def test_grouped_linear_delayed_wgrad_hook_ownership(device, single_weight, single_bias):
+    """Only weight hooks are deferred, including before meta parameters are materialized."""
+    module = GroupedLinear(
+        2,
+        128,
+        128,
+        bias=True,
+        device=device,
+        params_dtype=torch.bfloat16,
+        use_grouped_tensor=True,
+        single_grouped_weight=single_weight,
+        single_grouped_bias=single_bias,
+        delay_wgrad_compute=True,
+    )
+    for name, param in module.named_parameters():
+        assert getattr(param, "skip_backward_post_hook", False) == name.startswith("weight")
+
+
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch, backward_override):
     """Delayed wgrad reports when a grouped-tensor request used the legacy path."""
+    if backward_override is not None and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
     monkeypatch.setattr(
         "transformer_engine.pytorch.module.grouped_linear.is_module_grouped_tensor_path_supported",
         lambda *_args, **_kwargs: False,
@@ -3161,10 +3538,14 @@ def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch):
         delay_wgrad_compute=True,
         use_grouped_tensor=True,
     )
-    x = torch.randn(16, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
-    m_splits = torch.tensor([8, 8], dtype=torch.int64, device="cuda")
+    x = torch.randn(64, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    m_splits = torch.tensor([32, 32], dtype=torch.int64, device="cuda")
 
-    grouped_linear(x, m_splits).sum().backward()
+    with autocast(
+        enabled=backward_override is not None,
+        recipe=recipe.MXFP8BlockScaling(backward_override=backward_override),
+    ):
+        grouped_linear(x, m_splits).sum().backward()
     with pytest.raises(
         RuntimeError,
         match="implicit fallback is unsupported with delay_wgrad_compute=True",

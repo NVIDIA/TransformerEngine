@@ -34,6 +34,7 @@ add_executable(test_operator
                test_scaled_activation.cu
                test_normalization.cu
                test_normalization_mxfp8.cu
+               test_fused_moe_aux_loss.cpp
                test_memset.cu
                test_splits_to_offsets.cu
                test_multi_cast_transpose.cu
@@ -58,4 +59,11 @@ target_compile_options(test_operator PRIVATE -O2 -fopenmp)
 # Keep all operator tests in one process so CUDA initialization and, when enabled,
 # the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
 # TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
-add_test(NAME test_operator COMMAND test_operator)
+# For debugging, configure with NVTE_TEST_DEBUG_CPP_UT_IN_PARALLEL=1 to register each GoogleTest case as
+# its own ctest test, so failures are reported per case and can be selected with `ctest -R`.
+if("$ENV{NVTE_TEST_DEBUG_CPP_UT_IN_PARALLEL}" STREQUAL "1")
+  include(GoogleTest)
+  gtest_discover_tests(test_operator DISCOVERY_TIMEOUT 600 DISCOVERY_MODE PRE_TEST)
+else()
+  add_test(NAME test_operator COMMAND test_operator)
+endif()
