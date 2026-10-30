@@ -17,7 +17,6 @@ from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_QKV_Format
-from transformer_engine_jax import nvte_get_qkv_format
 from transformer_engine_jax import NVTE_Softmax_Type
 
 from . import cpp_extensions as tex
@@ -33,6 +32,7 @@ class AttnBiasType(Enum):
     NO_BIAS = NVTE_Bias_Type.NVTE_NO_BIAS
     PRE_SCALE_BIAS = NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS
     POST_SCALE_BIAS = NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
+    ALIBI = NVTE_Bias_Type.NVTE_ALIBI
 
 
 class AttnMaskType(Enum):
@@ -139,7 +139,7 @@ class QKVLayout(Enum):
         """
         Return the corresponding qkv_format (BSHD, SBHD, THD)
         """
-        return QKVFormat(nvte_get_qkv_format(self.value))
+        return QKVFormat.THD if self.is_thd() else QKVFormat.BSHD
 
     def is_qkvpacked(self):
         """
@@ -348,6 +348,7 @@ def is_fused_attn_kernel_available(
     bias_seqlen_q: Optional[int] = None,
     bias_seqlen_kv: Optional[int] = None,
     max_segments_per_seq: int = 1,
+    fp8: bool | str = False,
 ):
     """
     To check whether the fused attention kernel is supported.
@@ -384,6 +385,7 @@ def is_fused_attn_kernel_available(
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
             max_segments_per_seq=max_segments_per_seq,
+            fp8=fp8,
         )
 
     helper = make_helper(attn_mask_type)
@@ -1142,6 +1144,7 @@ def _legacy_fused_attn(
     context_parallel_axis: str = "",
     softmax_offset: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
+    fp8: bool | str = False,
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -1236,6 +1239,7 @@ def _legacy_fused_attn(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         return_max_logit=return_max_logit,
+        fp8=fp8,
     )
 
     return output
@@ -1262,6 +1266,7 @@ def fused_attn_thd(
     context_parallel_axis: str = "",
     softmax_offset: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
+    fp8: bool | str = False,
 ):
     """
     Deprecated THD fused attn, please use fusd_attn with SequenceDescriptor
@@ -1317,6 +1322,7 @@ def fused_attn_thd(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         return_max_logit=return_max_logit,
+        fp8=fp8,
     )
 
     return output
@@ -1324,7 +1330,7 @@ def fused_attn_thd(
 
 @partial(
     jax.custom_vjp,
-    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20),
 )
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
@@ -1347,6 +1353,8 @@ def _fused_attn(
     context_checkpoint_name: str = "context",
     stripe_size: int | None = None,
     return_max_logit: bool = False,
+    fp8: bool | str = False,
+    quantized_qkv=None,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -1369,6 +1377,8 @@ def _fused_attn(
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        fp8=fp8,
+        quantized_qkv=quantized_qkv,
     )
     return output
 
@@ -1394,6 +1404,8 @@ def _fused_attn_fwd_rule(
     context_checkpoint_name,
     stripe_size,
     return_max_logit,
+    fp8,
+    quantized_qkv=None,
 ):
     output, softmax_aux, rng_state, max_logit = tex.fused_attn_fwd(
         qkv,
@@ -1415,6 +1427,8 @@ def _fused_attn_fwd_rule(
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        fp8=fp8,
+        quantized_qkv=quantized_qkv,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -1429,6 +1443,7 @@ def _fused_attn_fwd_rule(
         rng_state,
         softmax_offset,
         output,
+        quantized_qkv,
     )
 
 
@@ -1448,6 +1463,7 @@ def _fused_attn_bwd_rule(
     context_checkpoint_name,
     stripe_size,
     return_max_logit,
+    fp8,
     ctx,
     dz,
 ):
@@ -1462,6 +1478,7 @@ def _fused_attn_bwd_rule(
         rng_state,
         softmax_offset,
         output,
+        quantized_qkv,
     ) = ctx
     grad_qkv, grad_bias, grad_softmax_offset = tex.fused_attn_bwd(
         qkv,
@@ -1485,8 +1502,10 @@ def _fused_attn_bwd_rule(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
+        fp8=fp8,
+        quantized_qkv=quantized_qkv,
     )
-    if attn_bias_type == AttnBiasType.NO_BIAS:
+    if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
         grad_bias = None
     if softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX:
         grad_softmax_offset = None
@@ -1494,6 +1513,7 @@ def _fused_attn_bwd_rule(
         grad_qkv,
         grad_bias,
         grad_softmax_offset,
+        None,
         None,
         None,
     )
@@ -1555,6 +1575,23 @@ def _fused_attn_score_mod_bwd_rule(config, context_checkpoint_name, ctx, dz):
 _fused_attn_score_mod.defvjp(_fused_attn_score_mod_fwd_rule, _fused_attn_score_mod_bwd_rule)
 
 
+def quantize_attention_qkv(qkv):
+    """Quantize separate BSHD Q/K/V into attention-ready BHSD MXFP8 tensor pairs.
+
+    The returned ``ScaledTensor2x`` operands can be passed as ``quantized_qkv``
+    to :func:`fused_attn`. Both directions are quantized independently from the
+    original operands. Quantized buffers are non-differentiable auxiliary data;
+    attention gradients flow to the original ``qkv`` arrays.
+    """
+    from .cpp_extensions.mxfp8_attention import quantize_qkv
+
+    if len(qkv) != 3 or any(x.ndim != 4 for x in qkv):
+        raise ValueError("quantize_attention_qkv requires three separate BSHD arrays.")
+    if any(x.dtype not in (jnp.float16, jnp.bfloat16) for x in qkv):
+        raise ValueError("quantize_attention_qkv requires FP16/BF16 operands.")
+    return quantize_qkv(qkv)
+
+
 def fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -1580,6 +1617,8 @@ def fused_attn(
     score_mod_tensors: Optional[Mapping[str, Any]] = None,
     score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
     return_max_logit: bool = False,
+    fp8: bool | str = False,
+    quantized_qkv=None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1636,6 +1675,15 @@ def fused_attn(
             non-differentiable auxiliary inputs.
         score_mod_bprop_tensors (Optional[Mapping[str, Any]]): Additional tensors or
             Python/NumPy scalars made available to `score_mod_bprop`.
+        fp8 (bool | str): True enables tensor-scaled cuDNN FP8 SDPA; "mxfp8"
+            enables MXFP8 block-scaled attention on SM100 or later. Outputs and
+            gradients retain the input FP16/BF16 dtype. MXFP8 uses E4M3 operands
+            in both passes, with independent scales along the contraction axes.
+        quantized_qkv (Optional[Tuple[ScaledTensor2x, ...]]): Prequantized MXFP8
+            Q/K/V, each with independent unswizzled BHSD rowwise/columnwise data
+            and E8M0 scales. Requires ``fp8="mxfp8"``. The original ``qkv``
+            supplies shapes, model dtype, gradient targets and FP16/BF16 backward
+            operands. See :func:`quantize_attention_qkv`.
         return_max_logit (bool): If True, also return per-head maximum attention logits
             with shape ``[h]``.
     Returns:
@@ -1673,6 +1721,32 @@ def fused_attn(
                              AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
                              QKVLayout.T3HD, 0.125, 0, True, 3)
     """
+    if fp8 not in (False, True, "mxfp8"):
+        raise ValueError('fp8 must be False, True, or "mxfp8".')
+    if quantized_qkv is not None:
+        if fp8 != "mxfp8":
+            raise ValueError('quantized_qkv requires fp8="mxfp8".')
+        if not isinstance(sequence_descriptor, SequenceDescriptor):
+            raise ValueError("quantized_qkv requires a SequenceDescriptor.")
+        from .cpp_extensions.mxfp8_attention import prequantized_buffers
+
+        # Keep auxiliary buffers as plain arrays across the custom VJP. The
+        # quantized tensor constructors validate real arrays, whereas JAX may
+        # reconstruct cotangent pytrees with opaque sentinel leaves.
+        quantized_qkv = prequantized_buffers(qkv, quantized_qkv, qkv_layout)
+    if fp8 == "mxfp8":
+        if qkv_layout.is_thd():
+            raise ValueError("MXFP8 attention does not support THD format.")
+        from .sharding import is_mesh_available, global_mesh_resource, get_mesh_axis_size
+
+        if is_mesh_available():
+            cp_axis = context_parallel_axis or global_mesh_resource().cp_resource
+            if get_mesh_axis_size(cp_axis) > 1:
+                from .cpp_extensions.mxfp8_attention import context_parallel_qkv
+
+                qkv = context_parallel_qkv(qkv, quantized_qkv, qkv_layout)
+                qkv_layout = QKVLayout.BSHD_BSHD_BSHD
+                quantized_qkv = None
     if score_mod is None:
         score_mod_only_args = [
             name
@@ -1686,6 +1760,8 @@ def fused_attn(
         if score_mod_only_args:
             raise ValueError(f"{', '.join(score_mod_only_args)} require score_mod to be provided.")
     else:
+        if fp8:
+            raise ValueError("FP8 is not supported with score_mod fused_attn.")
         if return_max_logit:
             raise ValueError("return_max_logit is not supported with score_mod fused_attn.")
         tex.validate_fused_attn_score_mod(
@@ -1748,6 +1824,7 @@ def fused_attn(
             context_parallel_axis=context_parallel_axis,
             softmax_offset=softmax_offset,
             return_max_logit=return_max_logit,
+            fp8=fp8,
         )
     if max_segments_per_seq > 1 and not qkv_layout.is_thd():
         warnings.warn(
@@ -1779,5 +1856,7 @@ def fused_attn(
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        fp8=fp8,
+        quantized_qkv=quantized_qkv,
     )
     return output

@@ -8,6 +8,8 @@ from typing import List, Union, Tuple
 import torch
 import transformer_engine_torch as tex
 
+from transformer_engine.common.cudnn.graph import uses_ragged_attention_graph
+
 from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.utils import (
     get_cudnn_version,
@@ -1840,7 +1842,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         softmax_lse_in_packed_format = False
         if qkv_format == "thd":
             if use_fused_attention:
-                softmax_lse_in_packed_format = get_device_compute_capability() != (12, 0)
+                capability = get_device_compute_capability()
+                softmax_lse_in_packed_format = uses_ragged_attention_graph(
+                    10 * capability[0] + capability[1]
+                )
             else:
                 softmax_lse_in_packed_format = (
                     fa_utils.v2_6_0_plus or use_flash_attn_3 or use_flash_attn_4
