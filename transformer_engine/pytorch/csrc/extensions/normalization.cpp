@@ -12,9 +12,9 @@ namespace transformer_engine::pytorch {
 
 namespace {
 
-std::optional<std::pair<size_t, bool>> normalization_output_layout(const std::string &normalization,
-                                                                   const Quantizer &quantizer,
-                                                                   bool use_cudnn) {
+// (row/column alignment, swizzled scales); nullopt keeps the quantizer's default layout.
+std::optional<std::pair<size_t, bool>> normalization_scale_layout_override_impl(
+    const std::string &normalization, const Quantizer &quantizer, bool use_cudnn) {
   NVTE_CHECK(normalization == "LayerNorm" || normalization == "RMSNorm",
              "Unsupported normalization: ", normalization);
   const auto *mxfp8 = dynamic_cast<const MXFP8Quantizer *>(&quantizer);
@@ -27,13 +27,14 @@ std::optional<std::pair<size_t, bool>> normalization_output_layout(const std::st
 
 }  // namespace
 
-std::optional<std::pair<size_t, bool>> normalization_fwd_output_layout(
+std::optional<std::pair<size_t, bool>> normalization_scale_layout_override(
     const std::string &normalization, py::handle quantizer, bool use_cudnn) {
   init_extension();
   if (!detail::IsMXFP8Quantizers(quantizer.ptr())) {
     return std::nullopt;
   }
-  return normalization_output_layout(normalization, *convert_quantizer(quantizer), use_cudnn);
+  return normalization_scale_layout_override_impl(normalization, *convert_quantizer(quantizer),
+                                                  use_cudnn);
 }
 
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
@@ -132,7 +133,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   if (quantizer.is_none() || IsFloat8Quantizers(quantizer.ptr())) {
     impl = Impl::FULLY_FUSED;
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
-    const auto layout = normalization_output_layout(
+    const auto layout = normalization_scale_layout_override_impl(
         "LayerNorm", *quantizer_cpp, transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN"));
     if (layout && outer_size % layout->first == 0 && inner_size % layout->first == 0) {
       impl = Impl::FULLY_FUSED;
@@ -374,7 +375,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   if (quantizer.is_none() || IsFloat8Quantizers(quantizer.ptr())) {
     impl = Impl::FULLY_FUSED;
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
-    const auto layout = normalization_output_layout(
+    const auto layout = normalization_scale_layout_override_impl(
         "RMSNorm", *quantizer_cpp, transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN"));
     if (layout && outer_size % layout->first == 0 && inner_size % layout->first == 0) {
       if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {

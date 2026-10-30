@@ -402,8 +402,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
-  m.def("normalization_fwd_output_layout",
-        &transformer_engine::pytorch::normalization_fwd_output_layout, py::arg("normalization"),
+  m.def("normalization_scale_layout_override",
+        &transformer_engine::pytorch::normalization_scale_layout_override, py::arg("normalization"),
         py::arg("quantizer"), py::arg("use_cudnn"));
   m.def("layernorm_fwd", &transformer_engine::pytorch::layernorm_fwd, "LayerNorm", py::arg("input"),
         py::arg("weight"), py::arg("bias"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),

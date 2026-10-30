@@ -340,7 +340,7 @@ py::tuple scaled_dsrelu(const at::Tensor &grad, const at::Tensor &input,
  * LayerNorm
  **************************************************************************************************/
 
-std::optional<std::pair<size_t, bool>> normalization_fwd_output_layout(
+std::optional<std::pair<size_t, bool>> normalization_scale_layout_override(
     const std::string &normalization, py::handle quantizer, bool use_cudnn);
 
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
