@@ -1483,23 +1483,34 @@ def general_grouped_gemm_for_grouped_tensor(
         last_dim = out.logical_shape[-1]
         live_rows = out.logical_shape[0]
         flat = scratch.rowwise_data.view(-1, last_dim)[:live_rows]
+        dst = out.rowwise_data.view(-1, last_dim)[:live_rows]
+        live_mask = None
         if out.first_dims is None:
             rows = live_rows // num_tensors
             repeats = torch.full((num_tensors,), rows, dtype=torch.int64, device=flat.device)
         else:
-            repeats = out.first_dims
+            # Spare capacity rows past sum(first_dims) form a trailing group so that
+            # repeat_interleave can use output_size without a host sync.
+            used_rows = out.first_dims.sum()
+            repeats = torch.cat((out.first_dims, (live_rows - used_rows).view(1)))
+            live_mask = (torch.arange(live_rows, device=flat.device) < used_rows).view(-1, 1)
+
+        def _per_row(per_group: torch.Tensor) -> torch.Tensor:
+            if live_mask is not None:
+                per_group = torch.cat((per_group, per_group.new_zeros(1, last_dim)))
+            return per_group.repeat_interleave(repeats, dim=0, output_size=live_rows)
+
         if post_scale_rows is not None:
             flat.mul_(post_scale_rows.view(-1, 1))
         if post_scale_cols is not None:
-            # output_size avoids a host sync under CUDA-graph capture.
-            col_scales = post_scale_cols.view(num_tensors, last_dim)
-            flat.mul_(col_scales.repeat_interleave(repeats, dim=0, output_size=live_rows))
+            flat.mul_(_per_row(post_scale_cols.view(num_tensors, last_dim)))
         if bias is not None:
-            bias_rows = bias.rowwise_data.view(num_tensors, last_dim).repeat_interleave(
-                repeats, dim=0, output_size=live_rows
-            )
+            bias_rows = _per_row(bias.rowwise_data.view(num_tensors, last_dim))
             if bias_scale is not None:
                 bias_rows = bias_rows * bias_scale.view(-1, 1)[:live_rows]
             flat.add_(bias_rows)
-        _store(out.rowwise_data.view(-1, last_dim)[:live_rows], flat)
+        if live_mask is not None:
+            fill = 0.0 if row_scaled_accumulate else dst.to(flat.dtype)
+            flat = torch.where(live_mask, flat, fill)
+        _store(dst, flat)
     return out

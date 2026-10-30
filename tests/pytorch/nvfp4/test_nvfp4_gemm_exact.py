@@ -1228,3 +1228,77 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_output_capacity(
 
     for got, ref in zip(actual, expected):
         torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize("use_bias", [False, True])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_spare_capacity(accumulate: bool, use_bias: bool):
+    """Rows past sum(first_dims) stay unchanged; live rows match a full-size output."""
+    if not _row_scaled_grouped_tensor_gemm_supported():
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(37)
+    device = torch.device("cuda")
+    m_splits = [128, 0, 256]
+    num_gemms = len(m_splits)
+    k, n = 256, 256
+    live_rows = sum(m_splits)
+    capacity = live_rows + 128
+    out_dtype = torch.bfloat16
+
+    weights = _make_row_scaled_grouped_activation([n] * num_gemms, k, columnwise=False)
+    tokens = torch.randn(capacity, k, dtype=torch.bfloat16, device=device)
+    activation = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False, tokens=tokens)
+    reference_activation = _make_row_scaled_grouped_activation(
+        m_splits, k, columnwise=False, tokens=tokens[:live_rows].clone()
+    )
+
+    bias = None
+    if use_bias:
+        bias = GroupedTensor.make_grouped_tensor(
+            num_tensors=num_gemms,
+            first_dims=None,
+            last_dims=None,
+            logical_first_dim=num_gemms,
+            logical_last_dim=n,
+            quantizer=None,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        bias.rowwise_data.copy_(torch.randn(num_gemms * n, dtype=torch.bfloat16, device=device))
+
+    initial = torch.randn(capacity * n, dtype=out_dtype, device=device)
+    grouped_out = GroupedTensor.make_grouped_tensor(
+        num_tensors=num_gemms,
+        first_dims=torch.tensor(m_splits, device=device, dtype=torch.int64),
+        last_dims=None,
+        logical_first_dim=capacity,
+        logical_last_dim=n,
+        quantizer=None,
+        device=device,
+        dtype=out_dtype,
+    )
+    grouped_out.rowwise_data.copy_(initial)
+    reference_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
+    reference_out.rowwise_data.copy_(initial[: live_rows * n])
+
+    general_grouped_gemm_for_grouped_tensor(
+        weights, activation, grouped_out, layout="TN", accumulate=accumulate, bias=bias
+    )
+    general_grouped_gemm_for_grouped_tensor(
+        weights,
+        reference_activation,
+        reference_out,
+        layout="TN",
+        accumulate=accumulate,
+        bias=bias,
+    )
+
+    result = grouped_out.rowwise_data.view(capacity, n)
+    torch.testing.assert_close(
+        result[:live_rows], reference_out.rowwise_data.view(live_rows, n), atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        result[live_rows:], initial.view(capacity, n)[live_rows:], atol=0.0, rtol=0.0
+    )

@@ -116,9 +116,9 @@ def is_module_grouped_tensor_path_supported(
       13.5+ required for FP8 per-tensor current scaling on Hopper, and 13.6+
       required for FP8 block scaling on Hopper.
     * FP32 is unsupported by the cuBLASLt grouped GEMM.
-    * With MXFP8 or FP8 block scaling, every split size must be a multiple of
-      128. This is checked only on the device, so other split sizes can produce
-      incorrect results.
+    * With MXFP8, FP8 block scaling, or NVFP4, every split size must be a
+      multiple of 128. This is checked only on the device, so other split sizes
+      can produce incorrect results.
 
     Runtime-only restrictions such as debug mode, CPU offloading, calibration,
     output quantization, and backend selection are checked separately by
@@ -1118,7 +1118,9 @@ def _grouped_linear_graph_safe_backward(
     if args.fp8:
         grad_output_quantizer = args.grad_output_quantizers[0]
         grad_output_quantizer.set_usage(
-            rowwise=args.requires_dgrad,
+            rowwise=(
+                args.requires_dgrad or getattr(grad_output_quantizer, "row_scaled_nvfp4", False)
+            ),
             columnwise=args.weights_requires_grad,
         )
         grad_output_quantizer.optimize_for_gemm = True
@@ -1724,9 +1726,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                        ``NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM`` environment-variable
                        selection for compatibility. New callers should pass a boolean explicitly.
                        When neither is set, row-scaled NVFP4 recipes select the native path when
-                       it is supported, copying host ``m_splits`` to the device outside CUDA Graph
-                       capture.
-                       With MXFP8 or FP8 block scaling, the native path requires every
+                       it is supported and the feature dimensions and token count are multiples
+                       of 128. Host ``m_splits`` must also be multiples of 128 and are copied to
+                       the device outside CUDA Graph capture.
+                       With MXFP8, FP8 block scaling, or NVFP4, the native path requires every
                        ``m_splits`` entry to be a multiple of 128. This is checked only on the
                        device, so other split sizes can produce incorrect results.
 
@@ -2450,9 +2453,15 @@ class GroupedLinear(TransformerEngineBaseModule):
                 and _recipe is not None
                 and _recipe.nvfp4()
                 and _recipe.row_scaled_activation
+                and self.in_features % 128 == 0
+                and self.out_features % 128 == 0
+                and (inp.numel() // self.in_features) % 128 == 0
                 and (
                     m_splits.device.type == te_device_type()
-                    or not torch.cuda.is_current_stream_capturing()
+                    or (
+                        not torch.cuda.is_current_stream_capturing()
+                        and bool((m_splits % 128 == 0).all())
+                    )
                 )
             )
             use_grouped_tensor = use_grouped_tensor or auto_grouped_tensor

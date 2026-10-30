@@ -2960,6 +2960,119 @@ def test_grouped_linear_row_scaled_nvfp4_4over6_keeps_split_quantize_path(monkey
     assert torch.isfinite(y).all() and torch.isfinite(x.grad).all()
 
 
+@pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
+@pytest.mark.parametrize(
+    "m_splits, in_features, out_features",
+    [
+        ([96, 160], 128, 128),
+        ([64, 64], 128, 128),
+        ([32, 32], 128, 128),
+        ([128, 128], 128, 192),
+        ([128, 128], 192, 128),
+    ],
+)
+def test_grouped_linear_row_scaled_nvfp4_unaligned_shapes_keep_split_quantize_path(
+    m_splits, in_features, out_features, monkeypatch
+):
+    fp8_recipe = recipe.NVFP4BlockScaling(
+        disable_stochastic_rounding=True, row_scaled_activation=True
+    )
+    dtype = torch.bfloat16
+    if not is_module_grouped_tensor_path_supported(fp8_recipe, dtype):
+        pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
+
+    num_gemms = len(m_splits)
+    torch.manual_seed(1234)
+    x_base = (0.1 * torch.randn(sum(m_splits), in_features, device="cuda")).to(dtype)
+    dy = (0.1 * torch.randn(sum(m_splits), out_features, device="cuda")).to(dtype)
+    weights = [
+        (0.1 * torch.randn(out_features, in_features, device="cuda")).to(dtype)
+        for _ in range(num_gemms)
+    ]
+
+    expected = _run_grouped_linear_path(
+        enable_grouped_tensor_path=False,
+        fp8_recipe=fp8_recipe,
+        bias=False,
+        fp8_model_params=False,
+        delay_wgrad_compute=False,
+        x_base=x_base,
+        dy=dy,
+        weights=weights,
+        biases=None,
+        m_splits=m_splits,
+        monkeypatch=monkeypatch,
+    )
+
+    FP8GlobalStateManager.reset()
+    monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
+    grouped_gemm_calls = []
+    grouped_gemm = grouped_linear_module.general_grouped_gemm_for_grouped_tensor
+
+    def counting_grouped_gemm(*args, **kwargs):
+        grouped_gemm_calls.append(1)
+        return grouped_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(
+        grouped_linear_module, "general_grouped_gemm_for_grouped_tensor", counting_grouped_gemm
+    )
+    module = GroupedLinear(
+        num_gemms, in_features, out_features, bias=False, params_dtype=dtype, device="cuda"
+    )
+    with torch.no_grad():
+        for i in range(num_gemms):
+            getattr(module, f"weight{i}").copy_(weights[i])
+    x = x_base.detach().clone().requires_grad_(True)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y = module(x, m_splits)
+    y.backward(dy)
+
+    assert not grouped_gemm_calls
+    outputs = [y, x.grad] + [getattr(module, f"weight{i}").grad for i in range(num_gemms)]
+    for actual, ref in zip(outputs, expected):
+        torch.testing.assert_close(actual, ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
+@pytest.mark.parametrize("bias", _ALL_BOOLEAN)
+def test_grouped_linear_row_scaled_nvfp4_weight_only_backward(bias):
+    fp8_recipe = recipe.NVFP4BlockScaling(
+        disable_stochastic_rounding=True, row_scaled_activation=True
+    )
+    dtype = torch.bfloat16
+    if not is_module_grouped_tensor_path_supported(fp8_recipe, dtype):
+        pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
+
+    m_splits = torch.tensor([128, 0, 384], dtype=torch.int64, device="cuda")
+    num_gemms = m_splits.numel()
+    torch.manual_seed(1234)
+    x_base = (0.1 * torch.randn(512, 128, device="cuda")).to(dtype)
+    dy = (0.1 * torch.randn(512, 256, device="cuda")).to(dtype)
+    module = GroupedLinear(
+        num_gemms,
+        128,
+        256,
+        bias=bias,
+        params_dtype=dtype,
+        device="cuda",
+        use_grouped_tensor=True,
+    )
+
+    def run(input_requires_grad):
+        FP8GlobalStateManager.reset()
+        module.zero_grad(set_to_none=True)
+        x = x_base.detach().clone().requires_grad_(input_requires_grad)
+        with autocast(enabled=True, recipe=fp8_recipe):
+            y = module(x, m_splits)
+        y.backward(dy)
+        return [p.grad.clone() for p in module.parameters()]
+
+    expected = run(True)
+    actual = run(False)
+    for got, ref in zip(actual, expected):
+        torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+
 def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monkeypatch):
     if not is_module_grouped_tensor_path_supported(
         None,
