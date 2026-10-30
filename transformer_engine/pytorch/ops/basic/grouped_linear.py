@@ -252,7 +252,6 @@ class GroupedLinear(BasicOperation):
         Expected alignment for input split sizes. If omitted, the alignment
         is 128 for MXFP8, NVFP4, and FP8 block scaling, 16 for FP8 current
         scaling on Hopper, and 1 otherwise.
-        An explicit positive integer is used for every compute mode.
     """
 
     # Operation expects input split sizes (and optionally scales tensor)

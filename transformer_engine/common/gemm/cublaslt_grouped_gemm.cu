@@ -632,6 +632,10 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     NVTE_CHECK(shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
     const size_t first_dim = shape[0];
     const size_t last_dim = shape[1];
+    const size_t leading_dim = storage_transposed ? first_dim : last_dim;
+    NVTE_CHECK((leading_dim * typeToNumBits(data.dtype)) % 128 == 0, "Grouped GEMM: ", name,
+               "_list tensor ", i, " leading dimension (", leading_dim,
+               ") must span a multiple of 16 bytes.");
     if (storage_transposed) {
       args.rows[i] = static_cast<int>(first_dim);
       args.cols[i] = static_cast<int>(last_dim);
