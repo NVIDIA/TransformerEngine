@@ -21,7 +21,7 @@ from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from ._common import _ParameterInitMeta, noop_cat, sum_bias_grad
 from .._extra_state import (
     extra_state_pickle_advisory,
