@@ -16,7 +16,6 @@ from torch.nn import init
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from transformer_engine.pytorch.device import te_device_type
 from .base import (
@@ -38,7 +37,6 @@ from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
-    set_jit_fusion_options,
     warmup_jit_bias_gelu_all_dtypes,
 )
 from ..utils import (
@@ -2280,8 +2278,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
-                   Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
-                   is used.
+                   When set to ``None``, standard all-reduce is used.
     checkpoint : bool, default = False
                 whether to use selective activation checkpointing, where activations are not saved for bwd,
                 and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
@@ -2407,13 +2404,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.ub_bulk_dgrad = False
             self.ub_bulk_wgrad = False
 
-        if self.symmetric_ar_type is not None:
-            assert torch_version() >= (
-                2,
-                7,
-                0,
-            ), "Torch version must be at least 2.7 to use symmetric memory"
-
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
@@ -2496,12 +2486,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
-        if self.bias_gelu_nvfusion:
-            set_jit_fusion_options()
-            if seq_length and micro_batch_size:
-                warmup_jit_bias_gelu_all_dtypes(
-                    self.size_per_partition, seq_length, micro_batch_size
-                )
+        if self.bias_gelu_nvfusion and seq_length and micro_batch_size:
+            warmup_jit_bias_gelu_all_dtypes(self.size_per_partition, seq_length, micro_batch_size)
         if self.wgrad_store.delay_wgrad_compute():
             for name, param in self.named_parameters():
                 if name in ["fc1_weight", "fc2_weight", "fc1_bias", "fc2_bias"]:

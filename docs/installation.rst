@@ -52,8 +52,8 @@ pip - from GitHub
 Additional Prerequisites
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. [For PyTorch support] `PyTorch <https://pytorch.org/>`__ with GPU support.
-2. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.4.7.
+1. [For PyTorch support] `PyTorch <https://pytorch.org/>`__ with GPU support, version >= 2.8.
+2. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.5.3.
 
 Installation (stable release)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

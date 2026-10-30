@@ -15,7 +15,6 @@ from torch.nn import init
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from transformer_engine.pytorch.device import te_device_type
 from .base import (
@@ -1651,8 +1650,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
-                   Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
-                   is used.
+                   When set to ``None``, standard all-reduce is used.
     """
 
     def __init__(
@@ -1789,13 +1787,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.ub_overlap_rs_dgrad = self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad
             self.ub_bulk_dgrad = False
             self.ub_bulk_wgrad = False
-
-        if self.symmetric_ar_type is not None:
-            assert torch_version() >= (
-                2,
-                7,
-                0,
-            ), "Torch version must be at least 2.7 to use symmetric memory"
 
         self.eps = eps
         layer_norm_weight = torch.nn.Parameter(

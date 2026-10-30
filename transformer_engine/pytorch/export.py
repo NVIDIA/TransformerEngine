@@ -10,8 +10,6 @@ import torch
 
 
 _IN_ONNX_EXPORT_MODE = False
-TORCH_MAJOR = int(torch.__version__.split(".")[0])
-TORCH_MINOR = int(torch.__version__.split(".")[1])
 
 
 @contextmanager
@@ -34,8 +32,6 @@ def onnx_export(enabled: bool = False) -> Generator[None, None, None]:
 
     global _IN_ONNX_EXPORT_MODE
     onnx_export_state = _IN_ONNX_EXPORT_MODE
-    if (TORCH_MAJOR, TORCH_MINOR) < (2, 4):
-        raise RuntimeError("ONNX export is not supported for PyTorch versions less than 2.4")
     try:
         _IN_ONNX_EXPORT_MODE = enabled
         yield
@@ -56,16 +52,16 @@ def assert_warmed_up(module: torch.nn.Module) -> None:
     )
 
 
-if TORCH_MAJOR == 2 and TORCH_MINOR >= 4 or TORCH_MAJOR > 2:
-    # pylint: disable=unused-import
-    from .onnx_extensions import (
-        torch_onnx_gemm_inf_op,
-        onnx_quantize_fp8_op,
-        onnx_dequantize_fp8_op,
-        onnx_quantize_mxfp8_op,
-        onnx_dequantize_mxfp8_op,
-        onnx_layernorm,
-        onnx_attention_mask_func,
-        onnx_gemm,
-        te_translation_table,
-    )
+# Imported last because onnx_extensions imports from this module.
+# pylint: disable=unused-import,wrong-import-position
+from .onnx_extensions import (
+    torch_onnx_gemm_inf_op,
+    onnx_quantize_fp8_op,
+    onnx_dequantize_fp8_op,
+    onnx_quantize_mxfp8_op,
+    onnx_dequantize_mxfp8_op,
+    onnx_layernorm,
+    onnx_attention_mask_func,
+    onnx_gemm,
+    te_translation_table,
+)
