@@ -4680,8 +4680,10 @@ class TestGroupedMLPBf16FusedOp:
                 shard = getattr(fc, f"weight{idx}")
                 ref_grad = getattr(ref_fc, f"weight{idx}").grad
                 assert shard.grad_added_to_main_grad is True
+                # Distributed wgrads are computed in main_grad's dtype (FP32) before the
+                # reduce-scatter, so they match the BF16 reference once rounded to BF16.
                 torch.testing.assert_close(
-                    shard.main_grad, ref_grad[: shard.shape[0]].float(), rtol=0, atol=0
+                    shard.main_grad.bfloat16(), ref_grad[: shard.shape[0]], rtol=0, atol=0
                 )
 
     @pytest.mark.parametrize(
@@ -5015,3 +5017,49 @@ class TestGroupedMLPBf16FusedOp:
                 torch.testing.assert_close(
                     shard.main_grad, torch.zeros_like(shard.main_grad), rtol=0, atol=0
                 )
+
+    @pytest.mark.parametrize("frozen", ("fc1", "fc2"))
+    def test_frozen_layer_gets_no_weight_grad(self, frozen: str) -> None:
+        """Only trainable layers compute wgrads, even with main_grad fusion.
+
+        The frozen layer has no ``main_grad`` buffer, which a wgrad for it would need.
+        The trainable layer's wgrads must match a run with both layers trainable.
+        """
+        self._skip_unless_bf16_fusion()
+        torch.manual_seed(0)
+        num_groups = 2
+        ops = _bf16_mlp_ops(num_groups=num_groups, accumulate_into_main_grad=True)
+        ref_ops = _bf16_mlp_ops(num_groups=num_groups, accumulate_into_main_grad=True)
+        for fc, ref_fc in ((ops[0], ref_ops[0]), (ops[2], ref_ops[2])):
+            ref_fc.load_state_dict(fc.state_dict())
+        frozen_fc = ops[0] if frozen == "fc1" else ops[2]
+        for fc_ops in (ops, ref_ops):
+            for fc in (fc_ops[0], fc_ops[2]):
+                for idx in range(num_groups):
+                    weight = getattr(fc, f"weight{idx}")
+                    if fc is frozen_fc:
+                        weight.requires_grad_(False)
+                        continue
+                    weight.main_grad = torch.zeros_like(weight, dtype=torch.float32)
+                    weight.overwrite_main_grad = False
+                    weight.grad_added_to_main_grad = False
+
+        split_sizes, x0, probs = _bf16_mlp_inputs(ops, num_groups)
+        dy = torch.randn(x0.shape[0], ops[2].out_features, dtype=torch.bfloat16, device="cuda")
+        for fc_ops in (ops, ref_ops):
+            y = te.ops.Sequential(*fc_ops)(
+                x0.clone().requires_grad_(True), split_sizes, probs, split_sizes
+            )
+            y.backward(dy)
+
+        trainable = ops[2] if frozen == "fc1" else ops[0]
+        ref_trainable = ref_ops[2] if frozen == "fc1" else ref_ops[0]
+        for idx in range(num_groups):
+            frozen_weight = getattr(frozen_fc, f"weight{idx}")
+            assert frozen_weight.grad is None and not hasattr(frozen_weight, "main_grad")
+            torch.testing.assert_close(
+                getattr(trainable, f"weight{idx}").main_grad,
+                getattr(ref_trainable, f"weight{idx}").main_grad,
+                rtol=0,
+                atol=0,
+            )

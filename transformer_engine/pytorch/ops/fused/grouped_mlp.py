@@ -3876,7 +3876,21 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
                 "The BF16 fused grouped MLP does not accept a pre-quantized GroupedTensor "
                 "input; that layout only arises on the block-scaled path."
             )
-        input_ = input_.reshape(-1, fc1_weight_shape[1])
+        # The kernels take 2-D (tokens, features) operands and 1-D per-token scales.
+        if input_.dim() != 2 or input_.size(1) != fc1_weight_shape[1]:
+            raise ValueError(
+                f"{self.__class__.__name__} expects a 2-D (tokens, {fc1_weight_shape[1]}) input,"
+                f" but got shape {tuple(input_.size())}. Flatten the leading dimensions."
+            )
+        scale_inputs = [("activation scales", basic_op_extra_inputs[1][0])]
+        if fc2_op._scale_bias:
+            scale_inputs.append(("FC2 bias scales", basic_op_extra_inputs[2][1]))
+        for name, scale_input in scale_inputs:
+            if scale_input.dim() != 1:
+                raise ValueError(
+                    f"{self.__class__.__name__} expects 1-D (tokens,) {name}, but got shape"
+                    f" {tuple(scale_input.size())}. Flatten them."
+                )
         in_shape = list(input_.size())
         total_tokens = in_shape[0]
 
@@ -3902,9 +3916,8 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
         requires_grad = any(ctx.requires_grad for ctx in basic_op_ctxs)
         input_requires_grad = requires_grad
         fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
-        weight_requires_grad = requires_grad and (
-            fc1_weight_param.requires_grad or fc2_weight_param.requires_grad
-        )
+        fc1_weight_requires_grad = requires_grad and fc1_weight_param.requires_grad
+        fc2_weight_requires_grad = requires_grad and fc2_weight_param.requires_grad
 
         # cuDNN padded offsets (int32) and dbias offsets (int64, leading zero).
         fc1_split_sizes = basic_op_extra_inputs[0][0]
@@ -3926,6 +3939,7 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
             include_leading_zero=[False, True],
             dtypes=[torch.int32, torch.int64],
             bulk_allocate=True,
+            split_alignment=_BF16_M_ALIGNMENT,
         )
 
         # Routing probability as float32 (M,), saved for the dGLU.
@@ -4014,8 +4028,8 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
             )
 
         if requires_grad:
-            saved_fc1_x = fc1_x if weight_requires_grad else None
-            saved_fc2_x = fc2_in if weight_requires_grad else None
+            saved_fc1_x = fc1_x if fc1_weight_requires_grad else None
+            saved_fc2_x = fc2_in if fc2_weight_requires_grad else None
             if is_cpu_offload_enabled():
                 offload_tensors = [
                     t for t in (saved_fc1_x, activation_in, saved_fc2_x) if t is not None
@@ -4035,11 +4049,12 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
             )
             fc1_ctx.dtype = dtype
             fc1_ctx.input_requires_grad = input_requires_grad
-            fc1_ctx.weight_requires_grad = weight_requires_grad
+            fc1_ctx.weight_requires_grad = fc1_weight_requires_grad
+            fc1_ctx.scales_dtype = scales.dtype
             fc1_ctx.unit_activation_scale = unit_activation_scale
             fc2_ctx.dtype = dtype
             fc2_ctx.input_requires_grad = input_requires_grad
-            fc2_ctx.weight_requires_grad = weight_requires_grad
+            fc2_ctx.weight_requires_grad = fc2_weight_requires_grad
 
         return fc2_out, [(), (), ()]
 
@@ -4137,7 +4152,9 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
         fc2_weights = _bf16_materialize_distributed(fc2_op, for_backward=True)
         if empty_batch:
             fc1_dy = fc2_dy.new_empty((0, fc1_weight_shape[0]))
-            grad_scales = None if unit_activation_scale else fc2_dy.new_empty((0,))
+            grad_scales = None
+            if not unit_activation_scale:
+                grad_scales = fc2_dy.new_empty((0,), dtype=fc1_ctx.scales_dtype)
             fc1_dbias = (
                 fc2_dy.new_zeros((num_groups, fc1_weight_shape[0])) if fc1_op.has_bias else None
             )
@@ -4172,7 +4189,7 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
             if not unit_activation_scale:
                 grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
                 if grad_scales is not None:
-                    grad_scales = grad_scales.to(dtype=dtype)
+                    grad_scales = grad_scales.to(dtype=fc1_ctx.scales_dtype)
             fc1_dbias = None
             if fc1_op.has_bias and fc2_dgrad_kernel_out["dbias_tensor"] is not None:
                 fc1_dbias = fc2_dgrad_kernel_out["dbias_tensor"].squeeze(-1).to(dtype=dtype)
