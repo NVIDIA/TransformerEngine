@@ -150,7 +150,7 @@ General
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: Use CuTeDSL kernel implementations when available. This requires that Transformer Engine was built with ``NVTE_WITH_CUTEDSL=1``.
-                 It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
+                 It also requires ``apache-tvm-ffi`` and ``nvidia-cutlass-dsl>=4.8.0`` to be installed and you are using CPython 3.10 or later.
                  If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
 
 .. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
