@@ -232,7 +232,8 @@ class GroupedLinear(BasicOperation):
         ``(total_tokens,)`` and is split according to the split sizes.
     split_alignment : int, default = ``128``
         Expected alignment for input split sizes. Split sizes that do not
-        match alignment may produce errors or incorrect results.
+        match alignment may produce errors or incorrect results during
+        quantized compute. Unquantized compute does not require alignment.
     """
 
     # Operation expects input split sizes (and optionally scales tensor)
@@ -1399,7 +1400,7 @@ class GroupedLinear(BasicOperation):
             include_leading_zero=[False, True, True, True],
             dtypes=[torch.int32, torch.int64, torch.int64, torch.int64],
             bulk_allocate=True,
-            split_alignment=self.split_alignment,
+            split_alignment=self.split_alignment if with_quantized_compute else 1,
         )
         split_points = grouped_tensor_offsets[0]
         base_split_offsets = grouped_tensor_offsets[1]

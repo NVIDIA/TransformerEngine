@@ -1432,9 +1432,7 @@ class TestFuser:
         if op_type == "rmsnorm":
             return te_ops.RMSNorm(size, **kwargs)
         if op_type == "grouped_linear":
-            return te_ops.GroupedLinear(
-                num_groups, size, size, bias=True, split_alignment=size, **kwargs
-            )
+            return te_ops.GroupedLinear(num_groups, size, size, bias=True, **kwargs)
         if op_type == "linear":
             return te_ops.Linear(size, size, bias=True, **kwargs)
         if op_type == "sequential":
