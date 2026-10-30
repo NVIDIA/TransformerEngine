@@ -1043,8 +1043,8 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
     # Parameter attributes
     device = params[0][0].device
     # Every shard can be empty on a rank. Master weights are cast to the model dtype in
-    # quantize_master_weights, so use that as the fallback: the amax buffer below is
-    # all-reduced and its dtype has to agree with the ranks that do own a shard.
+    # quantize_master_weights, so use that as the fallback dtype of the amax buffer below on
+    # ranks that own no shard.
     master_weight_dtype = params[0][0].dtype
     for _, master_weight, _, _ in params:
         if master_weight is not None:
@@ -1078,21 +1078,22 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
             cu_colwise_amax_sizes[-1] + colwise_shape[0] * colwise_shape[1]
         )
 
-    # Create a contiguous buffer to store amaxes temporarily, so we can perform all all-reduce
-    # NCCL kernels at once.
+    # Create contiguous buffers for the local amaxes and the scales computed from them, so a
+    # single all-reduce covers every weight.
     packed_amaxes = torch.zeros(
         cu_rowwise_amax_sizes[-1] + cu_colwise_amax_sizes[-1],
         dtype=master_weight_dtype,
         device=device,
     )
+    packed_scale_invs = torch.empty(packed_amaxes.numel(), dtype=torch.uint8, device=device)
 
     # ---------------------------------------------------------------------------------------------
     # Step 1: Iterate through all the none empty master weights and compute amax of them. Store the
     #         amaxes in a contiguous buffer. If a block of a master weight is empty, the
     #         corresponding amax will be set to 0.
     # ---------------------------------------------------------------------------------------------
-    amaxes_rowwise, scale_invs_rowwise = [], []
-    amaxes_colwise, scale_invs_colwise = [], []
+    amaxes_rowwise, scale_invs_rowwise, packed_scale_invs_rowwise = [], [], []
+    amaxes_colwise, scale_invs_colwise, packed_scale_invs_colwise = [], [], []
     for i, (model_weight, master_weight, start_offset, _) in enumerate(params):
         rowwise_shape = model_weight._rowwise_scale_inv.shape
         colwise_shape = (
@@ -1108,6 +1109,12 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
         amax_colwise = packed_amaxes[colwise_start:colwise_end].reshape(colwise_shape)
         amaxes_rowwise.append(amax_rowwise)
         amaxes_colwise.append(amax_colwise)
+        packed_scale_invs_rowwise.append(
+            packed_scale_invs[rowwise_start:rowwise_end].reshape(rowwise_shape)
+        )
+        packed_scale_invs_colwise.append(
+            packed_scale_invs[colwise_start:colwise_end].reshape(colwise_shape)
+        )
         scale_invs_rowwise.append(model_weight._rowwise_scale_inv)
         # Empty tensors mark an omitted direction without allocating a GPU payload.
         scale_invs_colwise.append(
@@ -1129,20 +1136,27 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
             )
 
     # ---------------------------------------------------------------------------------------------
-    # Step 2: Perform all-reduce on packed_amaxes to get the global amax.
-    # ---------------------------------------------------------------------------------------------
-    torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
-
-    # ---------------------------------------------------------------------------------------------
-    # Step 3: Update scales and scale_invs.
+    # Step 2: Compute the E8M0 scale_invs of the local amaxes and all-reduce them with MAX. The
+    #         E8M0 encoding is non-decreasing in the amax, with 0 for an amax of 0, so the max of
+    #         the local scale_invs is the scale_inv of the global amax, at one byte per block.
     # ---------------------------------------------------------------------------------------------
     multi_tensor_applier(
         multi_tensor_compute_scale_inv_e8m0,
         None,  # dummy_overflow_buf
         [
             amaxes_rowwise + [amax for amax in amaxes_colwise if amax.numel()],
-            scale_invs_rowwise + [scale for scale in scale_invs_colwise if scale.numel()],
+            packed_scale_invs_rowwise
+            + [scale for scale in packed_scale_invs_colwise if scale.numel()],
         ],
+    )
+    torch.distributed.all_reduce(packed_scale_invs, op=torch.distributed.ReduceOp.MAX, group=group)
+
+    # ---------------------------------------------------------------------------------------------
+    # Step 3: Copy the reduced scale_invs into the model weights.
+    # ---------------------------------------------------------------------------------------------
+    torch._foreach_copy_(
+        scale_invs_rowwise + [scale for scale in scale_invs_colwise if scale.numel()],
+        packed_scale_invs_rowwise + [scale for scale in packed_scale_invs_colwise if scale.numel()],
     )
 
     # ---------------------------------------------------------------------------------------------
