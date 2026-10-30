@@ -144,10 +144,9 @@ except AttributeError:
 # ``transformer_engine/common/util/pybind_helper.h``) so its pickle
 # stream encodes as ``(tex.DType, (int,))`` and only the class itself
 # needs to be allow-listed below.
-from torch.serialization import add_safe_globals
-import transformer_engine_torch as tex
+import transformer_engine_torch as tex  # pylint: disable=wrong-import-order
 
-add_safe_globals(
+torch.serialization.add_safe_globals(
     [
         # Storage mixins (used during pickling of internal-only tensors)
         QuantizedTensorStorage,
