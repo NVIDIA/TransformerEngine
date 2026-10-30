@@ -31,7 +31,7 @@ except ImportError:
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.triton.pad import pad_columnwise_scale_inv
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from .torch_version import torch_version
 from .utils import (
     is_non_tn_fp8_gemm_supported,

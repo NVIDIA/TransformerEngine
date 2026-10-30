@@ -11,7 +11,7 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from ...dynamo import TensorOrQuantized, TensorSpec
 from ...dynamo.fake import fake_bgrad
 from ...quantization import FP8GlobalStateManager
