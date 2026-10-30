@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+
 from collections.abc import Iterable, Sequence
 import io
 import os
@@ -5706,3 +5707,103 @@ class TestTrainingLoops:
             quantization=quantization,
             recipe=recipe,
         )
+
+    @pytest.mark.parametrize("quantization", (None, "mxfp8", "fp8_current_scaling"))
+    def test_grouped_linear_training_loop(
+        self,
+        *,
+        stages: Sequence[str] = ("train", "infer", "train", "infer"),
+        num_groups: int = 3,
+        weight_shape: tuple[int, int] = (128, 128),
+        dtype: Optional[torch.dtype] = None,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+    ) -> None:
+        """Training loops with grouped linear op."""
+        if dtype is None:
+            dtype = torch.bfloat16 if is_bf16_available() else torch.float32
+
+        # Tensor shapes
+        split_sizes = [128 * (1 + group_idx % 2) for group_idx in range(num_groups)]
+        splits = torch.tensor(split_sizes, dtype=torch.int64, device=device)
+        out_features, in_features = weight_shape
+        in_shape = [sum(split_sizes), in_features]
+        out_shape = in_shape[:-1] + [out_features]
+
+        # Quantization recipe
+        quantized_compute = quantization is not None
+        recipe = make_recipe(quantization)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(quantization, dims=out_shape)
+
+        # Initialize weights
+        with te.quantized_model_init(enabled=quantized_compute, recipe=recipe):
+            module = te_ops.GroupedLinear(
+                num_groups,
+                in_features,
+                out_features,
+                bias=False,
+                dtype=dtype,
+                device=device,
+            )
+        weights = list(module.parameters())
+        assert len(weights) == len(split_sizes)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+        if quantization is not None:
+            tols = quantization_tols(quantization)
+
+        # Training loop stages
+        for stage in stages:
+            training = stage == "train"
+            if training:
+                with torch.no_grad():
+                    # Update parameters with random values to simulate
+                    # optimizer step or FSDP param all-gather
+                    for weight in weights:
+                        weight.copy_(torch.empty_like(weight).uniform_())
+                        weight.grad = None
+
+            # Forward reference implementation
+            x_ref, x_test = make_reference_and_test_tensors(
+                in_shape,
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+                requires_grad=training,
+            )
+            weights_ref = [to_cpu(weight) for weight in weights]
+            outputs_ref = [
+                torch.nn.functional.linear(x_part, weight_ref)
+                for x_part, weight_ref in zip(torch.split(x_ref, split_sizes), weights_ref)
+            ]
+            y_ref = torch.cat(outputs_ref)
+
+            # Grouped linear forward
+            with (
+                torch.inference_mode(not training),
+                te.autocast(enabled=quantized_compute, recipe=recipe),
+            ):
+                y_test = module(x_test, splits)
+
+            # Backward pass
+            if training:
+                dy_ref, dy_test = make_reference_and_test_tensors(
+                    out_shape,
+                    quantization=quantization,
+                    test_dtype=dtype,
+                    test_device=device,
+                    requires_grad=False,
+                )
+                y_ref.backward(dy_ref)
+                y_test.backward(dy_test)
+
+            # Check results
+            assert_close(y_test, y_ref, **tols)
+            if training:
+                assert_close_grads(x_test, x_ref, **tols)
+                for weight, weight_ref in zip(weights, weights_ref):
+                    assert_close_grads(weight, weight_ref, **tols)

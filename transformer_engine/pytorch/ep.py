@@ -318,6 +318,7 @@ class EpBuffer:
         "handle_mem",
         "top_k",
         "alignment",
+        "topk_idx_dtype",
         "max_tokens_per_rank",
         "recv_capacity_per_rank",
         "hidden_dim",
@@ -361,6 +362,7 @@ class EpBuffer:
             )
         self.top_k = int(top_k)
         self.alignment = alignment
+        self.topk_idx_dtype = torch.int32
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self.recv_capacity_per_rank = (
             None if recv_capacity_per_rank is None else int(recv_capacity_per_rank)
@@ -432,6 +434,8 @@ def _dispatch_op(
     topk_weights: torch.Tensor,
     recv_tokens: torch.Tensor,
     recv_topk_weights: torch.Tensor,
+    top_k: int,
+    alignment: int,
     tokens_scale_inv: Optional[torch.Tensor] = None,
     recv_scale_inv: Optional[torch.Tensor] = None,
 ) -> None:
@@ -442,6 +446,8 @@ def _dispatch_op(
         topk_weights,
         recv_tokens,
         recv_topk_weights,
+        top_k,
+        alignment,
         tokens_scale_inv,
         recv_scale_inv,
     )
@@ -508,8 +514,11 @@ def _combine_op(
     handle_mem: torch.Tensor,
     expert_out: torch.Tensor,
     result: torch.Tensor,
+    top_k: int,
+    alignment: int,
+    topk_idx_dtype: torch.dtype,
 ) -> None:
-    tex.ep_combine(handle_mem, expert_out, result)
+    tex.ep_combine(handle_mem, expert_out, result, top_k, alignment, topk_idx_dtype)
 
 
 @_combine_op.register_fake
@@ -528,8 +537,20 @@ def _dispatch_bwd_op(
     g_recv_topk_weights: torch.Tensor,
     grad_tokens: torch.Tensor,
     grad_topk_weights: torch.Tensor,
+    top_k: int,
+    alignment: int,
+    topk_idx_dtype: torch.dtype,
 ) -> None:
-    tex.ep_dispatch_bwd(handle_mem, grad, g_recv_topk_weights, grad_tokens, grad_topk_weights)
+    tex.ep_dispatch_bwd(
+        handle_mem,
+        grad,
+        g_recv_topk_weights,
+        grad_tokens,
+        grad_topk_weights,
+        top_k,
+        alignment,
+        topk_idx_dtype,
+    )
 
 
 @_dispatch_bwd_op.register_fake
@@ -546,10 +567,22 @@ def _combine_bwd_op(
     handle_mem: torch.Tensor,
     grad: torch.Tensor,
     grad_expert_out: torch.Tensor,
+    top_k: int,
+    alignment: int,
+    topk_idx_dtype: torch.dtype,
     grad_scale_inv: Optional[torch.Tensor] = None,
     grad_expert_out_scale_inv: Optional[torch.Tensor] = None,
 ) -> None:
-    tex.ep_combine_bwd(handle_mem, grad, grad_expert_out, grad_scale_inv, grad_expert_out_scale_inv)
+    tex.ep_combine_bwd(
+        handle_mem,
+        grad,
+        grad_expert_out,
+        top_k,
+        alignment,
+        topk_idx_dtype,
+        grad_scale_inv,
+        grad_expert_out_scale_inv,
+    )
 
 
 @_combine_bwd_op.register_fake
@@ -569,6 +602,7 @@ def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
     device otherwise) with the per-step recv total; graph mode reads it device-side
     to detect overflow.
     """
+    buffer.topk_idx_dtype = topk_idx.dtype
     torch.ops.transformer_engine_ep.prepare(
         buffer.handle_mem,
         buffer.top_k,
@@ -590,13 +624,22 @@ def _ep_dispatch_raw(
 ) -> None:
     """Raw dispatch; no autograd, no prepare. Caller must run ep_prepare first."""
     tex.ep_dispatch(
-        buffer.handle_mem, topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights
+        buffer.handle_mem,
+        topk_idx,
+        tokens,
+        topk_weights,
+        recv_tokens,
+        recv_topk_weights,
+        buffer.top_k,
+        buffer.alignment,
     )
 
 
 def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.Tensor) -> None:
     """Raw combine; no autograd. Caller pre-weights expert_out."""
-    tex.ep_combine(buffer.handle_mem, expert_out, result)
+    tex.ep_combine(
+        buffer.handle_mem, expert_out, result, buffer.top_k, buffer.alignment, buffer.topk_idx_dtype
+    )
 
 
 # autograd.Function wrappers
@@ -615,6 +658,7 @@ class _DispatchState:
     tokens_T_flat: int
     topk_T_flat: int
     top_k: int
+    layer_args: tuple
     hidden_dim: int
     eager: bool
     is_scaled: bool
@@ -650,6 +694,7 @@ def _ep_prepare_and_dispatch_fwd(
     total_recv_tokens = buffer.total_recv_tokens
     top_k = buffer.top_k
     alignment = buffer.alignment
+    buffer.topk_idx_dtype = topk_idx.dtype
     eager = buffer.eager
     num_recv_tokens = buffer.recv_capacity_per_rank
     payload_dtype = buffer.payload_dtype
@@ -720,6 +765,7 @@ def _ep_prepare_and_dispatch_fwd(
         tokens_T_flat=tokens_data.shape[0],
         topk_T_flat=topk_weights.numel() // topk_weights.shape[-1],
         top_k=topk_weights.shape[-1],
+        layer_args=(top_k, alignment, topk_idx.dtype),
         hidden_dim=hidden,
         eager=eager,
         is_scaled=is_scaled,
@@ -760,7 +806,12 @@ def _ep_dispatch_bwd(
     # Eager is not graph-capturable, so call the backend op directly and skip torch.library.
     if state.eager:
         tex.ep_dispatch_bwd(
-            handle_mem, g_recv_tokens, g_recv_topk_weights, grad_tokens, grad_topk_weights
+            handle_mem,
+            g_recv_tokens,
+            g_recv_topk_weights,
+            grad_tokens,
+            grad_topk_weights,
+            *state.layer_args,
         )
     else:
         torch.ops.transformer_engine_ep.dispatch_bwd(
@@ -769,6 +820,7 @@ def _ep_dispatch_bwd(
             g_recv_topk_weights,
             grad_tokens,
             grad_topk_weights,
+            *state.layer_args,
         )
     return (
         grad_tokens.view(state.tokens_shape),
@@ -841,6 +893,7 @@ class _CombineState:
     The autograd wrapper stashes this on ctx; other callers keep it however they manage state."""
 
     handle_mem: torch.Tensor
+    layer_args: tuple
     grad_out: Optional[torch.Tensor]
     bwd_quant_recipe: object
     token_counts: torch.Tensor
@@ -863,15 +916,17 @@ def _ep_combine_fwd(
     owns context handling."""
 
     handle_mem = buffer.handle_mem
+    layer_args = (buffer.top_k, buffer.alignment, buffer.topk_idx_dtype)
     eager = buffer.eager
     device = expert_out.device
     result = torch.empty(num_local_tokens, buffer.hidden_dim, dtype=expert_out.dtype, device=device)
     if eager:
-        tex.ep_combine(handle_mem, expert_out, result)
+        tex.ep_combine(handle_mem, expert_out, result, *layer_args)
     else:
-        torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
+        torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result, *layer_args)
     state = _CombineState(
         handle_mem=handle_mem,
+        layer_args=layer_args,
         grad_out=grad_out,
         bwd_quant_recipe=bwd_quant_recipe,
         token_counts=buffer.tokens_per_expert,
@@ -900,9 +955,11 @@ def _ep_combine_bwd(state: "_CombineState", g_result: torch.Tensor):
                 state.expert_out_shape, state.expert_out_dtype, state.device, state.zero_copy
             )
         if state.eager:
-            tex.ep_combine_bwd(handle_mem, g_result, grad_expert_out, None, None)
+            tex.ep_combine_bwd(handle_mem, g_result, grad_expert_out, *state.layer_args, None, None)
         else:
-            torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
+            torch.ops.transformer_engine_ep.combine_bwd(
+                handle_mem, g_result, grad_expert_out, *state.layer_args
+            )
     else:
         from .tensor.mxfp8_tensor import MXFP8Quantizer
 
@@ -929,10 +986,22 @@ def _ep_combine_bwd(state: "_CombineState", g_result: torch.Tensor):
         g_data_fp8 = g_data.view(torch.float8_e4m3fn)
         ge_data_fp8 = ge_data.view(torch.float8_e4m3fn)
         if state.eager:
-            tex.ep_combine_bwd(handle_mem, g_data_fp8, ge_data_fp8, grad_scale_inv, ge_scale_inv)
+            tex.ep_combine_bwd(
+                handle_mem,
+                g_data_fp8,
+                ge_data_fp8,
+                *state.layer_args,
+                grad_scale_inv,
+                ge_scale_inv,
+            )
         else:
             torch.ops.transformer_engine_ep.combine_bwd(
-                handle_mem, g_data_fp8, ge_data_fp8, grad_scale_inv, ge_scale_inv
+                handle_mem,
+                g_data_fp8,
+                ge_data_fp8,
+                *state.layer_args,
+                grad_scale_inv,
+                ge_scale_inv,
             )
         grad_expert_out = _make_grouped_mxfp8(
             ge_data, ge_scale_inv, state.token_counts, mx._fp8_dtype, state.expert_out_dtype
