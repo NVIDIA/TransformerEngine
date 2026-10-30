@@ -13,6 +13,7 @@ import random
 import sys
 import types
 from typing import Optional
+from unittest.mock import Mock
 
 import pytest
 
@@ -488,6 +489,87 @@ class TestGroupedLinearOp:
             op.register_parameter(f"weight{group_idx}", None)
 
         assert grouped_weight.skip_backward_post_hook
+
+    @pytest.mark.parametrize("num_groups", [1, 8])
+    @pytest.mark.parametrize("accumulate_into_main_grad", [False, True])
+    @pytest.mark.parametrize("delay_wgrad_compute", [False, True])
+    def test_wgrad_storage_and_hooks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        num_groups: int,
+        accumulate_into_main_grad: bool,
+        delay_wgrad_compute: bool,
+    ) -> None:
+        """Check independent wgrad storage, external main_grad views, and delayed hooks."""
+        from transformer_engine.pytorch.ops.basic import grouped_linear as gl
+
+        if not is_op_fuser_grouped_tensor_path_supported(None, torch.bfloat16):
+            pytest.skip("Native grouped GEMM is unavailable.")
+        op = te.ops.GroupedLinear(
+            num_groups,
+            128,
+            128,
+            bias=False,
+            device="cuda",
+            dtype=torch.bfloat16,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            delay_wgrad_compute=delay_wgrad_compute,
+        )
+        model = te.ops.Sequential(op)
+        flat = torch.full((num_groups, 128, 128), 0.25, device="cuda", dtype=torch.float32)
+        weights = [getattr(op, f"weight{i}") for i in range(num_groups)]
+        for i, weight in enumerate(weights):
+            with torch.no_grad():
+                weight.fill_(1)
+            if accumulate_into_main_grad:
+                # Use views of an external flat buffer to check that GEMM preserves aliases.
+                weight.main_grad = flat[i]
+                weight.overwrite_main_grad = False
+                weight.grad_added_to_main_grad = False
+        x = torch.full(
+            (num_groups * 128, 128), 0.125, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        splits = torch.full((num_groups,), 128, device="cuda", dtype=torch.int64)
+        seen = []
+        original = gl.general_grouped_gemm_for_grouped_tensor
+
+        def gemm(a, b, out, **kwargs):
+            if kwargs.get("layout") == "NT":
+                assert len(out) == num_groups
+                num_storages = len({g.untyped_storage().data_ptr() for g in out})
+                assert num_storages == (1 if accumulate_into_main_grad else num_groups)
+                assert len({g.data_ptr() for g in out}) == num_groups
+                if accumulate_into_main_grad:
+                    assert out[0].data_ptr() == flat.data_ptr()
+                else:
+                    assert all(g._base is None for g in out)
+                seen.append(out)
+            return original(a, b, out, **kwargs)
+
+        monkeypatch.setattr(gl, "general_grouped_gemm_for_grouped_tensor", gemm)
+        hook = Mock()
+        op.register_wgrad_accumulation_and_reduce_hooks(hook)
+        y = model(x, splits)
+        torch.testing.assert_close(y, torch.full_like(y, 16), rtol=0, atol=0)
+        y.backward(torch.full_like(y, 0.5))
+        if delay_wgrad_compute:
+            assert not seen
+            hook.assert_not_called()
+            op.backward_dw()
+            hook.assert_called_once()
+        assert len(seen) == 1
+        if accumulate_into_main_grad:
+            MegatronTrainingHelper.verify_main_grad_accumulation(
+                weights,
+                expected_main_grads=[torch.full_like(flat[i], 8.25) for i in range(num_groups)],
+            )
+            for i, weight in enumerate(weights):
+                assert weight.main_grad.data_ptr() == flat[i].data_ptr()
+        else:
+            for weight in weights:
+                torch.testing.assert_close(
+                    weight.grad, torch.full_like(weight.grad, 8), rtol=0, atol=0
+                )
 
     def test_single_grouped_bias_uses_registered_packed_storage(self) -> None:
         """The grouped bias compute view must alias the registered trainable parent."""
