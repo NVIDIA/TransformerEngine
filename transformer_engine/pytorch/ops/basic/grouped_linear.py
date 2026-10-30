@@ -1111,6 +1111,11 @@ class GroupedLinear(BasicOperation):
         # quantization recipe. Otherwise we fall back to the legacy
         # ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
         recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        if recipe is not None and recipe.nvfp4() and recipe.row_scaled_activation:
+            raise NotImplementedError(
+                "Row-scaled NVFP4 (row_scaled_activation=True) is not supported by "
+                "te.ops.GroupedLinear. Use transformer_engine.pytorch.GroupedLinear instead."
+            )
         use_grouped_tensor_path = is_op_fuser_grouped_tensor_path_supported(
             recipe,
             dtype,

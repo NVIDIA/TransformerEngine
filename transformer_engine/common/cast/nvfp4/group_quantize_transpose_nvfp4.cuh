@@ -26,6 +26,7 @@
 #include "../core/grouped_layout.cuh"
 #include "core_nvfp4.cuh"
 #include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
+#include "swizzle.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -102,18 +103,31 @@ static __global__ void group_fused_amax_zero_kernel(GroupedFusedAmaxArgs args, c
 }
 
 // Shared amax body; host-split and graph-safe kernels differ only in the prologue.
-template <bool DO_ROW, bool DO_COL>
+template <bool DO_ROW, bool DO_COL, bool APPLY_COL_RHT = false>
 __device__ __forceinline__ void group_compute_fused_amax_body(const CUtensorMap &tensor_map_input,
                                                               float *const row_amax_out,
                                                               float *const col_amax_out,
-                                                              const int split_start) {
+                                                              const int split_start,
+                                                              const uint16_t rht_sign_mask_t = 0) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   using IType = __nv_bfloat16;
   using IType2 = ptx::FPx2<IType>;
   using IType3D = IType[FA_BUFFS_NUM][FA_TILE_DIM_Y][FA_TILE_DIM_X];
+  constexpr int RHT_DIM = quantize_transpose_tuned_kernel::SCALE_DIM;
+  static_assert(FA_TILE_DIM_Y % RHT_DIM == 0, "Amax tile must hold whole RHT blocks.");
 
   const bool leading_thread = (threadIdx.x == 0);
   const int tid = threadIdx.x;
+
+  __shared__ float sRHT[APPLY_COL_RHT ? RHT_DIM * RHT_DIM : 1];
+  if constexpr (APPLY_COL_RHT) {
+    for (int i = tid; i < RHT_DIM * RHT_DIM; i += FA_THREADS_NUM) {
+      const int r = i / RHT_DIM;
+      const int c = i % RHT_DIM;
+      const bool negative = ((__popc(r & c) ^ (rht_sign_mask_t >> r)) & 1) != 0;
+      sRHT[i] = negative ? -0.25f : 0.25f;
+    }
+  }
   const int block_offset_Y = blockIdx.y * FA_CHUNK_DIM_Y;
   const int block_offset_X = blockIdx.x * FA_CHUNK_DIM_X;
   const int local_row = block_offset_Y - split_start + tid;
@@ -217,10 +231,26 @@ __device__ __forceinline__ void group_compute_fused_amax_body(const CUtensorMap 
     if constexpr (DO_COL) {
       if (stage_X == my_col_stage_X) {
         float local_max = col_partial;
+        if constexpr (APPLY_COL_RHT) {
 #pragma unroll
-        for (int e = 0; e < FA_TILE_DIM_Y; ++e) {
-          const IType v = sIn[buff_in][e][my_col_in_subtile];
-          local_max = fmaxf(local_max, fabsf(static_cast<float>(v)));
+          for (int blk = 0; blk < FA_TILE_DIM_Y / RHT_DIM; ++blk) {
+            IType v[RHT_DIM];
+#pragma unroll
+            for (int e = 0; e < RHT_DIM; ++e) {
+              v[e] = sIn[buff_in][blk * RHT_DIM + e][my_col_in_subtile];
+            }
+            quantize_transpose_tuned_kernel::apply_rht_16(v, sRHT);
+#pragma unroll
+            for (int e = 0; e < RHT_DIM; ++e) {
+              local_max = fmaxf(local_max, fabsf(static_cast<float>(v[e])));
+            }
+          }
+        } else {
+#pragma unroll
+          for (int e = 0; e < FA_TILE_DIM_Y; ++e) {
+            const IType v = sIn[buff_in][e][my_col_in_subtile];
+            local_max = fmaxf(local_max, fabsf(static_cast<float>(v)));
+          }
         }
         col_partial = local_max;
       }
@@ -299,13 +329,13 @@ static __global__ void group_fused_amax_zero_graph_safe_kernel(float *row_amax_a
 
 // Graph-safe: per-expert outputs and row start derived on device from offsets;
 // CTAs past the live row sum noop.
-template <bool DO_ROW, bool DO_COL>
+template <bool DO_ROW, bool DO_COL, bool APPLY_COL_RHT>
 __global__ void __launch_bounds__(FA_THREADS_NUM)
     group_compute_fused_amax_graph_safe_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                                float *const row_amax_all, float *const col_amax_all,
                                                const int64_t *const __restrict__ offsets_ptr,
                                                const size_t num_tensors, const float *noop,
-                                               const size_t cols) {
+                                               const size_t cols, const uint16_t rht_sign_mask_t) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -323,8 +353,8 @@ __global__ void __launch_bounds__(FA_THREADS_NUM)
   float *const row_amax_out = DO_ROW ? row_amax_all + split_start : nullptr;
   float *const col_amax_out = DO_COL ? col_amax_all + tensor_id * cols : nullptr;
 
-  group_compute_fused_amax_body<DO_ROW, DO_COL>(tensor_map_input, row_amax_out, col_amax_out,
-                                                split_start);
+  group_compute_fused_amax_body<DO_ROW, DO_COL, APPLY_COL_RHT>(
+      tensor_map_input, row_amax_out, col_amax_out, split_start, rht_sign_mask_t);
 #else
   NVTE_DEVICE_ERROR("Grouped fused amax kernel requires SM 10.0+ (Blackwell).");
 #endif  // __CUDA_ARCH__ >= 1000
@@ -420,7 +450,9 @@ inline void group_row_amax(const Tensor &input, const Tensor *noop,
 // output->tensor_offsets, amax goes to the contiguous rowwise [sum_M] / columnwise
 // [num_tensors * K] buffers. BF16-only, VARYING_FIRST_DIM.
 inline void group_row_amax_graph_safe(const GroupedTensor *input, const Tensor *noop,
-                                      GroupedTensor *output, cudaStream_t stream) {
+                                      GroupedTensor *output, cudaStream_t stream,
+                                      const bool apply_col_rht = false,
+                                      const uint16_t rht_sign_mask_t = 0) {
 #if FP4_TYPE_SUPPORTED
   using namespace group_row_scaled_amax_kernel;
 
@@ -479,12 +511,16 @@ inline void group_row_amax_graph_safe(const GroupedTensor *input, const Tensor *
   const dim3 block(FA_THREADS_NUM, 1, 1);
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      do_row, DO_ROW, TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
-        auto kernel = group_compute_fused_amax_graph_safe_kernel<DO_ROW, DO_COL>;
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-        kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, row_amax_all, col_amax_all,
-                                                     offsets_ptr, num_tensors, noop_ptr, cols);
-      }));
+      do_row, DO_ROW,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          do_col, DO_COL, TRANSFORMER_ENGINE_SWITCH_CONDITION(apply_col_rht, APPLY_COL_RHT, {
+            auto kernel = group_compute_fused_amax_graph_safe_kernel < DO_ROW, DO_COL,
+                 APPLY_COL_RHT && DO_COL > ;
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+            kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, row_amax_all,
+                                                         col_amax_all, offsets_ptr, num_tensors,
+                                                         noop_ptr, cols, rht_sign_mask_t);
+          })));
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
@@ -1390,22 +1426,31 @@ using namespace ptx;
 
 #if FP4_TYPE_SUPPORTED
 
-template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE>
+template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
+          bool RETURN_TRANSPOSE, bool WITH_GEMM_SWIZZLED_SCALES, bool APPLY_COLWISE_RHT>
 __device__ __forceinline__ void group_row_scaled_cast_body(
     const CUtensorMap &tensor_map_input, uint8_t *const q_row_base, ScaleType *const s_dec_row_base,
     const float *const row_amax_base, uint8_t *const q_col_base, ScaleType *const s_dec_col_base,
     const float *const col_amax_base, const size_t scale_stride_col, const int M_t,
     const int local_row_base, const int ctaid_X, const int ctaid_Y, const size_t cols,
-    const size_t scale_stride_row) {
+    const size_t scale_stride_row, const size_t *rng_state, const IType *rht_matrix) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  constexpr bool USE_STOCHASTIC_ROUNDING = false;  // row-scaled rejects SR
   constexpr bool ROW_SCALED_NVFP4 = true;
 
-  // SR off: the RNG stays inert (random_uint4 is never consumed); it exists only
-  // to satisfy the shared encode-helper signatures.
+  __shared__ float sRHT[APPLY_COLWISE_RHT ? SCALE_DIM * SCALE_DIM : 1];
+  if constexpr (APPLY_COLWISE_RHT) {
+    for (int i = threadIdx.x; i < SCALE_DIM * SCALE_DIM; i += THREADS_NUM) {
+      sRHT[i] = static_cast<float>(rht_matrix[i]);
+    }
+  }
+
+  const size_t rng_sequence =
+      threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
+  const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
+  const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
   RNG_t rng;
-  rng.init(0, 0, 0);
-  uint4 random_uint4 = uint4{0, 0, 0, 0};
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
   int rnd_idx = 0;
 
   const bool leading_thread = (threadIdx.x == 0);
@@ -1516,10 +1561,11 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
         random_uint4, rnd_idx);
 
     if constexpr (RETURN_TRANSPOSE) {
-      colwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
-          sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, /*S_enc_colwise=*/1.0f, stage_Y, stage_X, buff_in,
-          buff_out_tr, col_amax_base, static_cast<size_t>(block_offset_X), cols, rng, random_uint4,
-          rnd_idx);
+      colwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4,
+                      APPLY_COLWISE_RHT>(
+          sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr,
+          /*S_enc_colwise=*/1.0f, stage_Y, stage_X, buff_in, buff_out_tr, col_amax_base,
+          static_cast<size_t>(block_offset_X), cols, rng, random_uint4, rnd_idx, sRHT);
     }
 
     // Make the encode-helper SMEM writes visible before the scatter.
@@ -1570,8 +1616,18 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
          row += THREADS_NUM) {
       ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFrowwise[row]);
       const size_t local_row = static_cast<size_t>(local_row_base) + row;
-      const size_t scale_idx = local_row * scale_stride_row + scales_block_offset_X_rowwise;
-      scales_vec.store_to_elts(&s_dec_row_base[scale_idx], 0, SCALES_PER_CHUNK_X);
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        const ScaleType *scales = reinterpret_cast<const ScaleType *>(&scales_vec);
+#pragma unroll
+        for (int k = 0; k < SCALES_PER_CHUNK_X; ++k) {
+          const size_t col = scales_block_offset_X_rowwise + k;
+          s_dec_row_base[swizzle::gemm_swizzled_scale_idx(local_row, col, scale_stride_row)] =
+              scales[k];
+        }
+      } else {
+        const size_t scale_idx = local_row * scale_stride_row + scales_block_offset_X_rowwise;
+        scales_vec.store_to_elts(&s_dec_row_base[scale_idx], 0, SCALES_PER_CHUNK_X);
+      }
     }
   }
   if constexpr (RETURN_TRANSPOSE) {
@@ -1582,8 +1638,17 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
          row_tr += THREADS_NUM) {
       ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);
       const size_t global_col = static_cast<size_t>(block_offset_X) + row_tr;
-      const size_t scale_idx = global_col * scale_stride_col + local_block_offset_M;
-      scales_vec.store_to_elts(&s_dec_col_base[scale_idx], 0, SCALES_PER_CHUNK_Y);
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        const ScaleType *scales = reinterpret_cast<const ScaleType *>(&scales_vec);
+#pragma unroll
+        for (int k = 0; k < SCALES_PER_CHUNK_Y; ++k) {
+          s_dec_col_base[swizzle::gemm_swizzled_scale_idx(global_col, local_block_offset_M + k,
+                                                          scale_stride_col)] = scales[k];
+        }
+      } else {
+        const size_t scale_idx = global_col * scale_stride_col + local_block_offset_M;
+        scales_vec.store_to_elts(&s_dec_col_base[scale_idx], 0, SCALES_PER_CHUNK_Y);
+      }
     }
   }
 
@@ -1599,13 +1664,15 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
 }
 
 // Grid covers the input capacity; CTAs past the live row sum noop.
-template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE>
+template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
+          bool RETURN_TRANSPOSE, bool WITH_GEMM_SWIZZLED_SCALES, bool APPLY_COLWISE_RHT>
 __global__ void __launch_bounds__(THREADS_NUM) group_row_scaled_cast_nvfp4_graph_safe_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input, uint8_t *const q_row_all,
     ScaleType *const s_dec_row_all, const float *const row_amax_all, uint8_t *const q_col_all,
     ScaleType *const s_dec_col_all, const float *const col_amax_all,
     const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
-    const size_t num_tensors, const float *noop, const size_t cols, const size_t scale_stride_row) {
+    const size_t num_tensors, const float *noop, const size_t cols, const size_t scale_stride_row,
+    const size_t *rng_state, const IType *rht_matrix) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -1639,10 +1706,11 @@ __global__ void __launch_bounds__(THREADS_NUM) group_row_scaled_cast_nvfp4_graph
       RETURN_TRANSPOSE ? s_dec_col_all + (cols / SCALE_DIM) * row_start : nullptr;
   const float *const col_amax_base = RETURN_TRANSPOSE ? col_amax_all + tensor_id * cols : nullptr;
 
-  group_row_scaled_cast_body<ScaleType, USE_FAST_MATH, RETURN_TRANSPOSE>(
+  group_row_scaled_cast_body<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE,
+                             WITH_GEMM_SWIZZLED_SCALES, APPLY_COLWISE_RHT>(
       tensor_map_input, q_row_base, s_dec_row_base, row_amax_base, q_col_base, s_dec_col_base,
       col_amax_base, scale_stride_col, M_t, local_row_base, ctaid_X, ctaid_Y, cols,
-      scale_stride_row);
+      scale_stride_row, rng_state, rht_matrix);
 #else
   NVTE_DEVICE_ERROR("Grouped row-scaled NVFP4 cast kernel requires SM 10.0+ (Blackwell).");
 #endif  // __CUDA_ARCH__ >= 1000
@@ -1656,21 +1724,45 @@ template <typename ScaleType>
 inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const Tensor *noop,
                                              GroupedTensor *output,
                                              const QuantizationConfig *quant_config,
-                                             cudaStream_t stream) {
+                                             cudaStream_t stream,
+                                             const Tensor *rht_matrix = nullptr) {
 #if FP4_TYPE_SUPPORTED
   using namespace group_row_scaled_cast_kernel;
   using namespace quantize_transpose_tuned_kernel;
 
   NVTE_CHECK(input->dtype() == DType::kBFloat16,
              "Grouped row-scaled NVFP4 cast requires BF16 input.");
+  const bool apply_colwise_rht = rht_matrix != nullptr;
+  if (apply_colwise_rht) {
+    NVTE_CHECK(output->has_columnwise_data(), "Columnwise RHT requires columnwise output.");
+    NVTE_CHECK(rht_matrix->dtype() == DType::kBFloat16, "Columnwise RHT matrix must be BF16.");
+    NVTE_CHECK(
+        rht_matrix->dim() == 2 && rht_matrix->shape()[0] == 16 && rht_matrix->shape()[1] == 16,
+        "Columnwise RHT matrix must have shape [16, 16].");
+  }
+  const IType *rht_matrix_ptr =
+      apply_colwise_rht ? reinterpret_cast<const IType *>(rht_matrix->data.dptr) : nullptr;
   NVTE_CHECK(output->all_same_last_dim() || output->all_same_shape(),
              "Graph-safe grouped row-scaled NVFP4 cast only supports a common last dimension "
              "(VARYING_FIRST_DIM).");
 
   const bool use_fast_math = quant_config ? quant_config->use_fast_math : false;
+  const bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
 
   checkCuDriverContext(stream);
   CheckNoopTensor(*noop, "cast_noop");
+
+  const size_t *rng_state = nullptr;
+  if (use_stochastic_rounding) {
+    NVTE_CHECK(quant_config->rng_state != nullptr,
+               "Stochastic rounding requires an RNG state in the quantization config.");
+    const Tensor &rng_state_tensor = *convertNVTETensor(quant_config->rng_state);
+    NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
+               "RNG state should contain 2 64-bit values.");
+    NVTE_CHECK(rng_state_tensor.data.shape == Shape{2},
+               "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
+    rng_state = reinterpret_cast<const size_t *>(rng_state_tensor.data.dptr);
+  }
 
   const size_t num_tensors = input->num_tensors;
   const size_t capacity_rows = input->logical_shape.data[0];
@@ -1684,6 +1776,7 @@ inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const T
              TunableConfig::CHUNK_DIM_Y, " (got ", capacity_rows, ").");
 
   const bool return_transpose = output->has_columnwise_data();
+  const bool with_gemm_swizzled = output->with_gemm_swizzled_scales;
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Graph-safe cast requires rowwise scales.");
   NVTE_CHECK(output->amax.dptr != nullptr, "Graph-safe cast requires rowwise amax.");
   // Per-row scale stride, from a 2D [rows, stride] scale or a flat 1D buffer.
@@ -1743,22 +1836,30 @@ inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const T
   const dim3 block(THREADS_NUM, 1, 1);
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_fast_math, USE_FAST_MATH,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-        const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
-        const int out_scales_transpose_mem = RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
-        const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
-                                out_mem_colwise_data + buff_size_scales + out_scales_transpose_mem +
-                                TMA_SHMEM_ALIGNMENT;
-        auto kernel = group_row_scaled_cast_nvfp4_graph_safe_kernel<ScaleType, USE_FAST_MATH,
-                                                                    RETURN_TRANSPOSE>;
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-        kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, q_row_all, s_dec_row_all,
-                                                     row_amax_all, q_col_all, s_dec_col_all,
-                                                     col_amax_all, offsets_ptr, first_dims_ptr,
-                                                     num_tensors, noop_ptr, cols, scale_stride_row);
-      }));
+      use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          use_fast_math, USE_FAST_MATH,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              return_transpose, RETURN_TRANSPOSE,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  with_gemm_swizzled, WITH_GEMM_SWIZZLED_SCALES,
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(apply_colwise_rht, APPLY_COLWISE_RHT, {
+                    const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
+                    const int out_scales_transpose_mem =
+                        RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
+                    const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
+                                            out_mem_colwise_data + buff_size_scales +
+                                            out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+                    auto kernel = group_row_scaled_cast_nvfp4_graph_safe_kernel < ScaleType,
+                         USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE,
+                         WITH_GEMM_SWIZZLED_SCALES, APPLY_COLWISE_RHT && RETURN_TRANSPOSE > ;
+                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+                    kernel<<<grid, block, dshmem_size, stream>>>(
+                        tensor_map_input, q_row_all, s_dec_row_all, row_amax_all, q_col_all,
+                        s_dec_col_all, col_amax_all, offsets_ptr, first_dims_ptr, num_tensors,
+                        noop_ptr, cols, scale_stride_row, rng_state, rht_matrix_ptr);
+                  })))));
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
