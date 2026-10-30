@@ -1593,8 +1593,7 @@ inline void launch_grouped_gemm_setup(
   // cuBLASLt grouped GEMM requires 16-byte aligned matrix dimensions and pointers.
   // Check the uniform feature dimension before constructing per-group layouts and pointers.
   auto check_uniform_last_dim_alignment = [](const TensorShapeInfo &meta,
-                                             transformer_engine::DType dtype,
-                                             const char *operand) {
+                                             transformer_engine::DType dtype, const char *operand) {
     if (meta.last_dims != nullptr) return;
     const size_t bits_per_elem = transformer_engine::typeToNumBits(dtype);
     NVTE_CHECK((static_cast<size_t>(meta.uniform_last) * bits_per_elem) % 128 == 0,
