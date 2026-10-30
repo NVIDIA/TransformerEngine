@@ -2098,15 +2098,18 @@ def test_fake_norm_mxfp8_scale_layout(
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize(
     "fp8_recipe",
-    [
-        None,
-        *_all_recipes,
-        recipe.CustomRecipe(
-            qfactory=lambda _role: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
+    [None, *_all_recipes]
+    + (
+        [
+            recipe.CustomRecipe(
+                qfactory=lambda _role: Float8CurrentScalingQuantizer(
+                    tex.DType.kFloat8E4M3, device="cuda"
+                )
             )
-        ),
-    ],
+        ]
+        if fp8_available
+        else []
+    ),
     ids=lambda r: "bf16" if r is None else type(r).__name__,
 )
 @pytest.mark.parametrize("module", _LINEAR_MODULES)
