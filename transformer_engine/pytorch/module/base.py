@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Base modules and utilities for TransformerEngine PyTorch API"""
+import functools
 import io
 import math
 import os
@@ -20,6 +21,7 @@ from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.device import te_device_type
 from ._common import _ParameterInitMeta, noop_cat, sum_bias_grad
 from .._extra_state import (
     extra_state_pickle_advisory,
@@ -62,6 +64,7 @@ from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
+    torch_is_autocast_gpu_enabled,
     get_device_compute_capability,
     get_nvtx_range_context,
     nvtx_range_push,
@@ -145,7 +148,7 @@ def get_dummy_wgrad(
 
     # The dummy goes on the current device (the one the backward pass runs on), and the cache
     # is keyed by it so that a dummy is never returned for a weight on another device.
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device(te_device_type(), torch.cuda.current_device())
     if zero_tensor and not zero:
         return torch._efficientzerotensor(shape, dtype=dtype, device=device)
     key = (*shape, dtype, device)
@@ -810,6 +813,63 @@ def fill_userbuffers_buffer_for_all_gather(
 
     # Unsupported data format
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
+
+
+@functools.lru_cache(maxsize=None)
+def _cublasmp_keeps_gathered_input() -> bool:
+    """Whether the loaded cuBLASMp leaves the gathered all-gather GEMM input at the start of its workspace
+
+    cuBLASMp 0.11.0 and newer do; earlier versions keep it elsewhere.
+
+    """
+    return tex.nvte_cublasmp_version() >= 1100
+
+
+def get_cublasmp_all_gather_output(
+    comm,
+    local_tensor: torch.Tensor | QuantizedTensorStorage,
+    quantizer: Optional[Quantizer],
+    process_group,
+) -> Optional[torch.Tensor | QuantizedTensorStorage]:
+    """Get the tensor gathered by the last cuBLASMp all-gather GEMM
+
+    cuBLASMp leaves the gathered input at the start of its workspace,
+    which ``comm.get_buffer`` views. As with the Userbuffers buffer of
+    ``fill_userbuffers_buffer_for_all_gather``, the returned tensor
+    uses that memory and is overwritten by the next operation with
+    ``comm`` on any rank. ``local_tensor`` must be the input of that
+    GEMM.
+
+    Returns ``None`` for formats that wgrad cannot use as gathered
+    (anything but unquantized and per-tensor FP8 data) and with
+    cuBLASMp versions before 0.11.0, which keep the gathered input
+    elsewhere; callers all-gather those separately.
+
+    """
+    if not _cublasmp_keeps_gathered_input():
+        return None
+    if isinstance(local_tensor, Float8TensorStorage):
+        local_data = local_tensor._data
+    elif isinstance(local_tensor, QuantizedTensorStorage):
+        return None
+    else:
+        local_data = local_tensor
+    if local_data is None:
+        return None
+    global_shape = list(local_data.size())
+    global_shape[0] *= torch.distributed.get_world_size(process_group)
+    global_data = comm.get_buffer(shape=global_shape)
+    if global_data.dtype != local_data.dtype:
+        return None
+    if not isinstance(local_tensor, Float8TensorStorage):
+        return global_data
+    return Float8TensorStorage(
+        data=global_data,
+        fp8_scale_inv=local_tensor._scale_inv,
+        fp8_dtype=local_tensor._fp8_dtype,
+        fake_dtype=local_tensor._dtype,
+        quantizer=quantizer,
+    )
 
 
 def _is_weight_workspace_valid(
@@ -1496,7 +1556,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not unsafe_pickle_extra_state_enabled():
                 raise RuntimeError(extra_state_pickle_advisory(context))
             state.seek(0)
-            state = torch.load(state, map_location="cuda", weights_only=False)
+            state = torch.load(state, map_location=te_device_type(), weights_only=False)
         else:
             raise RuntimeError("Unsupported checkpoint format.")
 
@@ -1540,7 +1600,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
-        if torch.is_autocast_enabled():
+        if torch_is_autocast_gpu_enabled():
             self.fast_setattr("activation_dtype", torch_get_autocast_gpu_dtype())
             return
         dtype = inp.dtype
@@ -1660,9 +1720,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
-            if not inp.is_cuda:
+            if inp.device.type != te_device_type():
                 raise RuntimeError(
-                    f"TransformerEngine needs CUDA. Got input on device: {inp.device}"
+                    f"TransformerEngine needs {te_device_type()}. Got input on device: {inp.device}"
                 )
 
             if self.tp_size > 1:
@@ -1876,7 +1936,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             param = param._local_tensor if is_dtensor else param
             # Ensure parameter is on a real device
             if param.device == torch.device("meta"):
-                param = torch.empty_like(param, device="cuda")
+                param = torch.empty_like(param, device=te_device_type())
             # Initialize the parameter values on device
             init_fn = self.param_init_meta[name].init_fn
             get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker

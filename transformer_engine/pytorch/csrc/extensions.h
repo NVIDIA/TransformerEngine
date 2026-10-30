@@ -43,8 +43,7 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
                                       std::optional<float> scaling_factor, at::Tensor expert_bias,
                                       int routing_map_format,
                                       std::optional<at::Tensor> topk_indices, at::Tensor histogram,
-                                      at::Tensor bin_bounds, int histogram_mode,
-                                      bool bin_bounds_validated = false);
+                                      at::Tensor bin_bounds, int histogram_mode);
 
 void fused_topk_with_score_function_bwd(
     at::Tensor routing_map, at::Tensor intermediate_output, at::Tensor grad_probs,
@@ -557,7 +556,7 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
 std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
     const at::Tensor &split_sizes, const c10::Device &device, const std::vector<int64_t> &strides,
     const std::vector<bool> &include_leading_zero, const std::vector<at::ScalarType> &dtypes,
-    bool bulk_allocate_outputs);
+    bool bulk_allocate_outputs, size_t split_alignment);
 
 at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
                                     const c10::Device &device);
@@ -807,7 +806,7 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t 
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
-class CommOverlapHelper : torch::CustomClassHolder {
+class CommOverlapHelper {
  public:
   // Shared ownership of an ncclComm_t. The deleter calls ncclCommDestroy when
   // the last reference (held by the helper and/or any CommOverlap consumers)
@@ -844,11 +843,14 @@ class CommOverlapHelper : torch::CustomClassHolder {
   NcclCommSharedPtr get_nccl_comm(std::string comm_name);
 };
 
-class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
+class CommOverlap : public transformer_engine::CommOverlapBase {
  private:
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+  // cuBLASMp: shape and dtype of the buffer view returned by get_buffer()
+  std::vector<size_t> _cublasmp_buffer_shape;
+  at::ScalarType _cublasmp_buffer_dtype{at::kByte};
 
  public:
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -862,6 +864,8 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   // the construction-time warmup matmul that primes cuBLASMp's lazy NCCL
   // window registrations and workspace allocation so subsequent matmuls
   // (including those captured in CUDA graphs) avoid the unsafe lazy paths.
+  // get_buffer() returns a view of cuBLASMp's workspace with `buffer_shape`
+  // and `buffer_dtype`: after an all-gather GEMM, it holds the gathered input.
   CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
               transformer_engine::CommOverlapType comm_type,
               const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -879,11 +883,14 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
 };  // CommOverlap
 
-class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
+class CommOverlapP2P : public transformer_engine::CommOverlapP2PBase {
  private:
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+  // cuBLASMp: shape and dtype of the buffer view returned by get_buffer()
+  std::vector<size_t> _cublasmp_buffer_shape;
+  at::ScalarType _cublasmp_buffer_dtype{at::kByte};
 
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,

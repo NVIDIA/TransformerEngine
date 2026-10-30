@@ -14,16 +14,17 @@ from transformer_engine.common.cudnn.graph import (
     check_graph_support,
     compile_graph,
 )
+from transformer_engine.pytorch.device import te_device_type
 
 _handles = threading.local()
 
 
 def _get_cudnn_current_stream_handle(cudnn, device):
     """Get a thread-local, device-specific handle on PyTorch's current stream."""
-    if device.type != "cuda":
-        raise ValueError(f"cuDNN attention requires CUDA tensors, got {device}.")
+    if device.type != te_device_type():
+        raise ValueError(f"cuDNN attention requires {te_device_type()} tensors, got {device}.")
     if device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     if not hasattr(_handles, "by_device"):
         _handles.by_device = {}
     with torch.cuda.device(device):
@@ -54,6 +55,8 @@ def _finalize_cudnn_graph(graph):
 def _execute_cudnn_graph(graph, variant_pack, workspace_size, device):
     """Execute on the current stream using framework-owned workspace."""
     cudnn = _import_cudnn_frontend()
+    if device.type == te_device_type() and device.index is None:
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     workspace = torch.empty(workspace_size, device=device, dtype=torch.uint8)
     graph.execute(
         variant_pack,

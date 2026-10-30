@@ -17,8 +17,10 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
+from transformer_engine.pytorch.device import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
+    get_cublasmp_all_gather_output,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -1182,12 +1184,13 @@ def _layernorm_linear_backward_impl(
         # Grad input tensor has been computed...
         # --------------------------------------------------
 
-        # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and
-        # does not preserve it for wgrad. Userbuffers leaves the gathered
-        # tensor in its persistent buffer; cuBLASMp does not, so we gather
-        # here. Route through the same FP8-aware all-gather as the
-        # non-overlap path in
-        # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
+        # cuBLASMp's AG+GEMM leaves the gathered grad_output at the start of
+        # its workspace, as Userbuffers leaves it in its persistent buffer,
+        # so wgrad reuses it for unquantized and per-tensor FP8 data. A
+        # delayed wgrad runs after the workspace is reused, and other formats
+        # need data the dgrad GEMM did not gather, so those gather here.
+        # Route through the same FP8-aware all-gather as the non-overlap path
+        # in ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
         # the grad_output quantizer. Columnwise data needed for wgrad is
         # produced by ``update_usage(columnwise_usage=True)`` further below.
         if (
@@ -1196,13 +1199,23 @@ def _layernorm_linear_backward_impl(
             and args.ub_obj_gradout is not None
             and args.ub_obj_gradout.with_cublasmp()
         ):
-            if args.grad_output_quantizer is not None:
-                set_quantizer_usage_for_wgrad_all_gather(args.grad_output_quantizer)
-            grad_output, _ = gather_along_first_dim(
-                grad_output,
-                args.tp_group,
-                quantizer=args.grad_output_quantizer,
-            )
+            grad_output_total = None
+            if not (args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute()):
+                grad_output_total = get_cublasmp_all_gather_output(
+                    args.ub_obj_gradout,
+                    grad_output,
+                    args.grad_output_quantizer,
+                    args.tp_group,
+                )
+            if grad_output_total is None:
+                if args.grad_output_quantizer is not None:
+                    set_quantizer_usage_for_wgrad_all_gather(args.grad_output_quantizer)
+                grad_output_total, _ = gather_along_first_dim(
+                    grad_output,
+                    args.tp_group,
+                    quantizer=args.grad_output_quantizer,
+                )
+            grad_output = grad_output_total
 
         # --------------------------------------------------
         # Compute grad weight
@@ -1588,7 +1601,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -1662,7 +1675,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         return_layernorm_output_gathered: bool = False,
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         zero_centered_gamma: bool = False,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,

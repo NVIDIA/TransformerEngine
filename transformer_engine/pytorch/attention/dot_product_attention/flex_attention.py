@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
+from transformer_engine.pytorch.device import te_device_type
 
 from transformer_engine.common.cudnn.attention import (
     AttentionOptions,
@@ -84,7 +85,7 @@ def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
 
 def _score_mod_device_key(device: torch.device) -> Tuple[Any, ...]:
     """Normalize a tensor device for graph cache keys."""
-    if device.type == "cuda":
+    if device.type == te_device_type():
         index = device.index
         if index is None:
             index = torch.cuda.current_device()
