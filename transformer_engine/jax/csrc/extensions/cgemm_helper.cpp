@@ -133,6 +133,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK_CUDA(cudaMalloc(&handler._device_barrier, sizeof(int)));
 
   handler._initialize = true;
+  handler.bind_context(handler.local_device_ids_within_process.front());
 
   // Bootstrap UB/cuBlasMp via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
@@ -164,6 +165,11 @@ int GetCgemmNumMaxStreams() {
 CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape,
                                                           DType dtype,
                                                           JAXX_Collective_Op collective_op) {
+  int device;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
+  auto &cache = devices_[device];
+  if (!cache) cache = std::make_unique<DevicePlans>(device);
+  auto &plan_map = cache->plans;
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
 
@@ -266,6 +272,30 @@ CommunicatorHandler::~CommunicatorHandler() {
   for (const auto &file_path : _nccl_id_file_name) {
     std::remove(file_path.c_str());
   }
+}
+
+void CommunicatorHandler::check_context_loss() const {
+  NVTE_CHECK(!_initialize,
+             "Active JAX collective-GEMM communicators must be released before context loss; "
+             "the XLA/NCCL runtime cannot be recovered by a TE cache reset.");
+}
+
+void CommunicatorHandler::release_context() {
+  if (!_initialize) return;
+  for (auto &comm : tp_comms) {
+    if (comm != nullptr) {
+      NVTE_CHECK_NCCL(ncclCommDestroy(comm));
+      comm = nullptr;
+    }
+  }
+  if (_device_barrier != nullptr) {
+    NVTE_CHECK_CUDA(cudaFree(_device_barrier));
+    _device_barrier = nullptr;
+  }
+  for (const auto &path : _nccl_id_file_name) std::remove(path.c_str());
+  _nccl_id_file_name.clear();
+  tp_comms.clear();
+  _initialize = false;
 }
 
 }  // namespace jax

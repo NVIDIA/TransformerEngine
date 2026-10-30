@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file cuda_context.h
- *  \brief Explicit invalidation of common-library state after CUDA context loss.
+ *  \brief Explicit release and invalidation of registered CUDA-dependent state.
  */
 
 #ifndef TRANSFORMER_ENGINE_CUDA_CONTEXT_H_
@@ -35,8 +35,50 @@ extern "C" {
  */
 void nvte_reset_cuda_state(int device);
 
-/*! Host-only generation for a device, initially one. Reset publishes its new
- *  generation with release ordering after invalidation. A generation change
+/*! Release TE resources while the device's primary CUDA context is still
+ *  usable. This supports in-process restarts which preserve the CUDA context,
+ *  and optional cleanup before externally destroying a context. Stop all TE
+ *  calls, finish GPU work, retire captured graphs, and release framework-owned
+ *  TE resources before calling. Communicators must remain alive through cleanup.
+ *  This call does not reset CUDA, framework allocators, model tensors, or RNG.
+ *  Operations recreate released resources lazily. Cleanup errors propagate;
+ *  after such an error the caller must finish cleanup before resuming work.
+ */
+void nvte_release_cuda_state(int device);
+
+/*! Process-wide release/acquire notification, advanced after release or reset
+ *  mutates state on any device, including a release reporting partial failure.
+ *  Comparing this is a cheap way to decide
+ *  whether a per-device generation query is needed. It is not a resource pin.
+ */
+uint64_t nvte_get_cuda_state_version(void);
+
+/*! Callbacks for framework bindings which own context-dependent state. All
+ *  callbacks run at an externally serialized lifecycle boundary; they must not
+ *  register new resources or re-enter lifecycle APIs. Check callbacks must not
+ *  mutate state. C++ check/release callbacks may throw; invalidate must not.
+ *  Release order is ascending (plans precede library handles and streams).
+ */
+typedef void (*NVTECudaStateCallback)(void *user_data);
+typedef struct {
+  NVTECudaStateCallback check_context_loss;
+  NVTECudaStateCallback check_release;
+  NVTECudaStateCallback release;
+  NVTECudaStateCallback invalidate;
+  int release_order;
+} NVTECudaStateCallbacks;
+typedef struct NVTECudaStateRegistrationImpl *NVTECudaStateRegistration;
+
+/*! Register stable user_data without querying CUDA. Keep it alive until
+ *  unregister returns. Registration/destruction is serialized with TE calls.
+ *  Callbacks may unregister other resources they destroy during cleanup.
+ */
+NVTECudaStateRegistration nvte_register_cuda_state(int device, NVTECudaStateCallbacks callbacks,
+                                                   void *user_data);
+void nvte_unregister_cuda_state(NVTECudaStateRegistration registration);
+
+/*! Host-only resource generation for a device, initially one. Release/reset
+ *  publishes its new generation after cleanup. A generation change
  *  invalidates externally cached TE stream/event handles too. Reading a
  *  generation does not pin resources or permit racing reset with TE operations.
  */

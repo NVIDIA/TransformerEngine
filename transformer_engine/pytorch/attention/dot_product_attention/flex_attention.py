@@ -17,6 +17,21 @@ _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
 _SCORE_MOD_UNCACHEABLE = object()
 
 
+def _release_cuda_state(device):
+    """Destroy device-scoped cuDNN plans before their borrowed Python handles."""
+    # Forward and backward keys put the query metadata at different positions;
+    # both metadata tuples end with the normalized CUDA device pair.
+    for key in tuple(_cudnn_score_mod_graph_cache):
+        query_meta = key[6] if key[0] == "fwd" else key[7]
+        if query_meta[-1] == ("cuda", device):
+            del _cudnn_score_mod_graph_cache[key]
+    key = torch.device("cuda", device)
+    handle = _cudnn_score_mod_handles.get(key)
+    if handle is not None:
+        _import_cudnn_frontend().destroy_handle(handle)
+        del _cudnn_score_mod_handles[key]
+
+
 def _import_cudnn_frontend():
     """Import the cuDNN frontend Python package."""
     try:

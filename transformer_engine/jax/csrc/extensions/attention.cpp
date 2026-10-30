@@ -19,6 +19,7 @@
 
 #include "../extensions.h"
 #include "common/cudnn_utils.h"
+#include "common/util/cuda_state_registration.h"
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -937,14 +938,38 @@ using ScoreModGraphPtr = std::shared_ptr<cudnn_frontend::graph::Graph>;
 
 std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash> &
 getScoreModeGraphCache() {
-  static std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash>
-      cache;
+  static auto &cache =
+      *new std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash>;
   return cache;
 }
 
 std::mutex &getScoreModGraphCacheMutex() {
   static std::mutex mutex;
   return mutex;
+}
+
+struct ScoreModCacheLifetime : cuda_context::FrontendResource {
+  explicit ScoreModCacheLifetime(int device) : device(device) { bind_context(device); }
+  void release_context() override {
+    std::lock_guard<std::mutex> lock(getScoreModGraphCacheMutex());
+    auto &cache = getScoreModeGraphCache();
+    for (auto it = cache.begin(); it != cache.end();) {
+      if (it->first.device_id == device)
+        it = cache.erase(it);
+      else
+        ++it;
+    }
+  }
+  void invalidate_context() noexcept override { release_context(); }
+  int device;
+};
+
+void track_score_mod_cache(int device) {
+  static auto &mutex = *new std::mutex;
+  static auto &owners = *new std::unordered_map<int, std::unique_ptr<ScoreModCacheLifetime>>;
+  std::lock_guard<std::mutex> lock(mutex);
+  auto &owner = owners[device];
+  if (!owner) owner = std::make_unique<ScoreModCacheLifetime>(device);
 }
 
 ScoreModGraphCacheKey GetScoreModGraphCacheKey(Dictionary &attrs) {
@@ -968,6 +993,7 @@ ScoreModGraphCacheKey GetScoreModGraphCacheKey(Dictionary &attrs) {
 
 ScoreModGraphPtr GetScoreModGraph(cudaStream_t stream, Dictionary &attrs) {
   const auto key = GetScoreModGraphCacheKey(attrs);
+  track_score_mod_cache(key.device_id);
   {
     std::lock_guard<std::mutex> lock(getScoreModGraphCacheMutex());
     auto &cache = getScoreModeGraphCache();

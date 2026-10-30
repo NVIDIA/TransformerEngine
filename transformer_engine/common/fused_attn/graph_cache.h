@@ -46,6 +46,7 @@ template <typename GraphAndTensors>
 struct GraphCache : cuda_context::Resource {
   explicit GraphCache(int device) { bind_context(device); }
   void invalidate_context() noexcept override { entries.clear(); }
+  void release_context() override { entries.clear(); }
   std::mutex mutex;
   std::map<FusedAttnConfig, std::shared_ptr<CacheEntry<GraphAndTensors>>> entries;
 };
@@ -139,11 +140,14 @@ auto get_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   static auto &mutex = *new std::mutex;
   static auto &devices = *new std::map<int, std::unique_ptr<Cache>>;
   cfg.check_derived();
+  // Backend queries allow -1 to mean the current device. Registration needs
+  // the actual ordinal even when the query's cache key keeps that sentinel.
+  const int device = cfg.device_id < 0 ? cuda::current_device() : cfg.device_id;
   Cache *cache;
   {
     std::lock_guard<std::mutex> lock(mutex);
-    auto &entry = devices[cfg.device_id];
-    if (!entry) entry = std::make_unique<Cache>(cfg.device_id);
+    auto &entry = devices[device];
+    if (!entry) entry = std::make_unique<Cache>(device);
     cache = entry.get();
   }
   return detail::cache_graph(*cache, cfg.make_cache_key(kPass), kBackend, kPass, handle,

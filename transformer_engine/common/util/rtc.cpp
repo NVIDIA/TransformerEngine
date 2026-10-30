@@ -84,6 +84,13 @@ struct Kernel::DeviceKernel : cuda_context::Resource {
     module = null_module;
     function = null_function;
   }
+  int release_order() const override { return 200; }
+  void release_context() override {
+    if (module == null_module) return;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleUnload, module);
+    module = null_module;
+    function = null_function;
+  }
   int device;
   std::mutex mutex;
   CUmodule module = null_module;

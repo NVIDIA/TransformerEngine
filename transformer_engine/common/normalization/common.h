@@ -243,6 +243,7 @@ class NormalizationPlanRegistry {
   struct DevicePlans : cuda_context::Resource {
     explicit DevicePlans(int device) { bind_context(device); }
     void invalidate_context() noexcept override { plans.clear(); }
+    void release_context() override { plans.clear(); }
     std::unordered_map<TupleKeyType, std::unique_ptr<NormalizationPlanBase>, TupleHash> plans;
   };
   std::unordered_map<int, std::unique_ptr<DevicePlans>> device_plans_;

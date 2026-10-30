@@ -13,7 +13,6 @@
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/normalization.h>
 
-#include <array>
 #include <atomic>
 #include <cmath>
 #include <future>
@@ -128,6 +127,28 @@ TEST_F(ContextResetTest, OtherThreadsCudnnHandleRecovers) {
   reset();
 }
 
+TEST_F(ContextResetTest, FinishedThreadsReturnHandlesForReleaseAndReuse) {
+  cudnnHandle_t first = nullptr, second = nullptr;
+  std::thread([&]() {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    first = nvte_get_cudnn_handle();
+  }).join();
+  std::thread([&]() {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    second = nvte_get_cudnn_handle();
+  }).join();
+  ASSERT_NE(first, nullptr);
+  // Deliberate handoff of the same live cached handle to a subsequent thread.
+  EXPECT_EQ(first, second);
+  nvte_release_cuda_state(0);
+  std::thread([&]() {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    auto handle = nvte_get_cudnn_handle();
+    EXPECT_EQ(cudnnSetStream(handle, nvte_get_compute_stream(0)), CUDNN_STATUS_SUCCESS);
+  }).join();
+  nvte_release_cuda_state(0);
+}
+
 TEST_F(ContextResetTest, CudnnNormalizationPlanRecoversNumerically) {
   nvte_enable_cudnn_norm_fwd(true);
   constexpr size_t hidden = 128, rows = 4;
@@ -209,5 +230,63 @@ TEST_F(ContextResetTest, CublasGemmRecoversNumerically) {
     for (auto value : actual) EXPECT_EQ(value, 2.0f * dim * (cycle + 1));
     reset();
   }
+}
+
+struct CallbackOwner {
+  NVTECudaStateRegistration child = nullptr;
+  int calls = 0;
+  static void invalidate(void *data) {
+    auto &self = *static_cast<CallbackOwner *>(data);
+    ++self.calls;
+    nvte_unregister_cuda_state(self.child);
+    self.child = nullptr;
+  }
+  static void reject(void *) { throw std::runtime_error("resource requires pre-loss cleanup"); }
+};
+
+TEST(CudaContextHostTest, CallbackPreflightAndNestedUnregister) {
+  CallbackOwner parent, child;
+  const NVTECudaStateCallbacks normal{nullptr, nullptr, CallbackOwner::invalidate,
+                                      CallbackOwner::invalidate, 0};
+  parent.child = nvte_register_cuda_state(0, normal, &child);
+  auto registration = nvte_register_cuda_state(0, normal, &parent);
+  const NVTECudaStateCallbacks rejecting{CallbackOwner::reject, nullptr, CallbackOwner::invalidate,
+                                         CallbackOwner::invalidate, 0};
+  auto rejected = nvte_register_cuda_state(0, rejecting, &child);
+  const auto initial = nvte_get_cuda_context_generation(0);
+  EXPECT_THROW(nvte_reset_cuda_state(0), std::runtime_error);
+  EXPECT_EQ(nvte_get_cuda_context_generation(0), initial);
+  EXPECT_EQ(parent.calls, 0);
+  EXPECT_EQ(child.calls, 0);
+  nvte_unregister_cuda_state(rejected);
+  nvte_reset_cuda_state(0);
+  EXPECT_EQ(parent.calls, 1);
+  EXPECT_EQ(nvte_get_cuda_context_generation(0), initial + 1);
+  nvte_unregister_cuda_state(registration);
+}
+
+TEST_F(ContextResetTest, LiveReleaseRecreatesStreamsAndLibraryHandles) {
+  auto &manager = rtc::KernelManager::instance();
+  constexpr auto code = R"(__global__ void recovered(int *p, int value) { *p = value; })";
+  manager.compile("live release test", "recovered", code, "recovered.cu");
+  int *storage = nullptr;
+  ASSERT_EQ(cudaMalloc(&storage, sizeof(int)), cudaSuccess);
+  for (int cycle = 0; cycle < 4; ++cycle) {
+    auto stream = nvte_get_compute_stream(0);
+    auto event = nvte_get_compute_stream_event(0);
+    auto handle = nvte_get_cudnn_handle();
+    ASSERT_EQ(cudnnSetStream(handle, stream), CUDNN_STATUS_SUCCESS);
+    manager.launch("live release test", 1, 1, 0, stream, storage, cycle);
+    ASSERT_EQ(cudaEventRecord(event, stream), cudaSuccess);
+    ASSERT_EQ(cudaEventSynchronize(event), cudaSuccess);
+    int value = -1;
+    ASSERT_EQ(cudaMemcpy(&value, storage, sizeof(int), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(value, cycle);
+    const auto previous = nvte_get_cuda_context_generation(0);
+    nvte_release_cuda_state(0);
+    EXPECT_EQ(nvte_get_cuda_context_generation(0), previous + 1);
+    EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+  }
+  ASSERT_EQ(cudaFree(storage), cudaSuccess);
 }
 }  // namespace

@@ -38,6 +38,19 @@ struct ComputeResources : cuda_context::Resource {
       slot.event.store(nullptr, std::memory_order_release);
     }
   }
+  int release_order() const override { return 300; }
+  void release_context() override {
+    for (auto &slot : slots) {
+      if (auto event = slot.event.load(std::memory_order_acquire)) {
+        NVTE_CHECK_CUDA(cudaEventDestroy(event));
+        slot.event.store(nullptr, std::memory_order_release);
+      }
+      if (auto stream = slot.stream.load(std::memory_order_acquire)) {
+        NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+        slot.stream.store(nullptr, std::memory_order_release);
+      }
+    }
+  }
   std::mutex mutex;
   std::vector<Slot> slots;
 };

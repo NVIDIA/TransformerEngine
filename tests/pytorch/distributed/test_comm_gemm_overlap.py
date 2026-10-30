@@ -87,6 +87,23 @@ def _assert_subprocess_succeeded(result):
         )
 
 
+@pytest.mark.skipif(tex.ubuf_built_with_mpi(), reason="Lifecycle test uses torchrun bootstrap")
+def test_cuda_state_cleanup():
+    """Exercise retained-owner errors and repeated Userbuffers bootstrap/cleanup."""
+    test_env = dict(os.environ)
+    test_env["PYTHONPATH"] = str(TEST_ROOT.parents[2]) + os.pathsep + test_env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        ["torchrun", "--standalone", "--nproc_per_node=2", str(TEST_ROOT / "run_cuda_context.py")],
+        env=test_env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=240,
+    )
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
+    assert "CUDA STATE CLEANUP PASSED" in result.stdout
+
+
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
 if not tex.device_supports_multicast():
     os.environ["UB_SKIPMC"] = "1"

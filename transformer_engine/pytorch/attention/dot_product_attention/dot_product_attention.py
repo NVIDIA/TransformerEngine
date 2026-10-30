@@ -110,6 +110,19 @@ _alibi_cache = {
     "_alibi_bias_require_update": False,
 }
 
+
+def _release_cuda_state(device):
+    """Drop global ALiBi tensors while retaining other devices' entries."""
+    for key, dirty in (
+        ("_alibi_slopes", "_alibi_slopes_require_update"),
+        ("_alibi_bias", "_alibi_bias_require_update"),
+    ):
+        tensor = _alibi_cache[key]
+        if tensor is not None and tensor.device.type == "cuda" and tensor.device.index == device:
+            _alibi_cache[key] = None
+            _alibi_cache[dirty] = True
+
+
 # Sequence-ID validation synchronizes once to report malformed policy metadata. Share
 # successful validations across DPA layers, and retain only a small number of recent
 # policy sets so dynamically constructed batches do not grow the cache without bound.

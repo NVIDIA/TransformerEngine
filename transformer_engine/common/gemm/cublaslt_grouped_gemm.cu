@@ -29,6 +29,10 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
   NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
 }
 
+inline void DestroyCublasHandle(cublasLtHandle_t handle) {
+  NVTE_CHECK_CUBLAS(cublasLtDestroy(handle));
+}
+
 }  // namespace
 
 // MXFP8 support for grouped GEMM requires cuBLAS 13.3+
@@ -1102,7 +1106,8 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                                  const GroupedGemmConfig &config, void *cublas_workspace_ptr,
                                  cudaStream_t stream) {
   using cublasHandleManager =
-      transformer_engine::detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
+      transformer_engine::detail::HandleManager<cublasLtHandle_t, CreateCublasHandle,
+                                                DestroyCublasHandle>;
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
   cublasOperation_t op_A = A_sel.trans ? CUBLAS_OP_T : CUBLAS_OP_N;
