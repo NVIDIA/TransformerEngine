@@ -91,30 +91,6 @@ __global__ void __launch_bounds__(kScanThreads) kernel(KernelArgs args) {
     // after another thread has trapped on invalid split metadata.
     const int64_t split =
         idx < args.num_splits ? load_split_size(args.split_sizes, args.split_sizes_dtype, idx) : 0;
-    bool invalid = idx < args.num_splits && split < 0;
-    if (args.split_alignment > 1) {
-      const size_t alignment_mask = args.split_alignment - 1;
-      bool misaligned;
-      if ((args.split_alignment & alignment_mask) == 0) {
-        misaligned = (static_cast<size_t>(split) & alignment_mask) != 0;
-      } else {
-        misaligned = static_cast<size_t>(split) % args.split_alignment != 0;
-      }
-      invalid |= idx < args.num_splits && misaligned;
-    }
-    if (__syncthreads_or(invalid)) {
-      if (tid == 0) {
-        NVTE_DEVICE_ERROR(
-            "Grouped split size must be nonnegative and divisible by split_alignment.");
-        __trap();  // NVTE_DEVICE_ERROR's assert is compiled out of release builds.
-      }
-      return;
-    }
-    block_scan[tid] = split;
-    // Validate before the scan. All threads leave together so no thread waits at a barrier
-    // after another thread has trapped on invalid split metadata.
-    const int64_t split =
-        idx < args.num_splits ? load_split_size(args.split_sizes, args.split_sizes_dtype, idx) : 0;
     block_scan[tid] = split;
     bool invalid = idx < args.num_splits && split < 0;
     if (args.split_alignment > 1) {

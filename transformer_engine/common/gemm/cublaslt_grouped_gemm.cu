@@ -1590,6 +1590,25 @@ inline void launch_grouped_gemm_setup(
   const size_t c_elem_size = transformer_engine::typeToSize(c_dtype);
   const size_t d_elem_size = transformer_engine::typeToSize(d_dtype);
 
+  // cuBLASLt grouped GEMM requires 16-byte aligned matrix dimensions and pointers.
+  // Check the uniform feature dimension before constructing per-group layouts and pointers.
+  auto check_uniform_last_dim_alignment = [](const TensorShapeInfo &meta,
+                                             transformer_engine::DType dtype,
+                                             const char *operand) {
+    if (meta.last_dims != nullptr) return;
+    const size_t bits_per_elem = transformer_engine::typeToNumBits(dtype);
+    NVTE_CHECK((static_cast<size_t>(meta.uniform_last) * bits_per_elem) % 128 == 0,
+               "Grouped GEMM: ", operand, " uniform last dimension (", meta.uniform_last,
+               ") must span a multiple of 16 bytes.");
+  };
+  if (!a_is_discrete) {
+    check_uniform_last_dim_alignment(A_meta, A_sel.dtype, "A");
+  }
+  check_uniform_last_dim_alignment(B_meta, B_sel.dtype, "B");
+  if (!d_is_discrete) {
+    check_uniform_last_dim_alignment(D_meta, d_dtype, "D");
+  }
+
   const int threads_per_block = 256;
   const int num_blocks = (num_tensors + threads_per_block - 1) / threads_per_block;
 

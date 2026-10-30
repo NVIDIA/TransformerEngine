@@ -1142,16 +1142,17 @@ def fuse_grouped_mlp_ops(
             except (TypeError, ValueError):
                 matches_pattern = False
 
-        if matches_pattern and (
-            window[0].split_alignment % 256 != 0 or window[2].split_alignment % 256 != 0
-        ):
-            warnings.warn(
-                "Grouped MLP fusion was skipped because both GroupedLinear operations "
-                "require split_alignment to be divisible by 256 "
-                f"(got {window[0].split_alignment} and {window[2].split_alignment}).",
-                stacklevel=2,
-            )
-            matches_pattern = False
+        if matches_pattern:
+            fc1_alignment = window[0]._resolve_split_alignment(recipe)
+            fc2_alignment = window[2]._resolve_split_alignment(recipe)
+            if fc1_alignment % 256 != 0 or fc2_alignment % 256 != 0:
+                warnings.warn(
+                    "Grouped MLP fusion was skipped because both GroupedLinear operations "
+                    "require split_alignment to be divisible by 256 "
+                    f"(got {fc1_alignment} and {fc2_alignment}).",
+                    stacklevel=2,
+                )
+                matches_pattern = False
 
         if matches_pattern:
             op = fused_op_cls(
