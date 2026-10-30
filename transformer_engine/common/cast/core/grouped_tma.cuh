@@ -22,8 +22,11 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <cstdint>
+
 #include "../../common.h"
 #include "../../util/ptx.cuh"
+#include "../../util/workspace.h"
 #include "../../utils.cuh"
 #include "grouped_layout.cuh"
 
@@ -31,20 +34,65 @@ namespace transformer_engine {
 namespace dispatch {
 namespace common {
 
-constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
-
-struct alignas(128) TensorMapStorage {
-  alignas(128) CUtensorMap input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  alignas(128) CUtensorMap act_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  alignas(128) CUtensorMap output_rowwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  alignas(128) CUtensorMap output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  size_t rows[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  size_t cols[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  size_t offsets[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
+// Non-owning workspace view passed by value to the updater and consumer kernels.
+// Variable last dimensions require a complete view; direct paths never dereference it.
+struct GroupedTmaStorageView {
+  CUtensorMap *input = nullptr;
+  CUtensorMap *act_input = nullptr;
+  CUtensorMap *output_rowwise = nullptr;
+  CUtensorMap *output_colwise = nullptr;
+  size_t *rows = nullptr;
+  size_t *cols = nullptr;
+  size_t *offsets = nullptr;
 };
 
-// Internal linkage avoids device-link ODR issues when this header is included by multiple .cu TUs.
-static __device__ TensorMapStorage g_tensor_maps;
+// Each region, including metadata arrays with odd element counts, starts on
+// its own 128-byte boundary. Query and execution share this layout definition.
+struct GroupedTmaWorkspaceLayout {
+  explicit GroupedTmaWorkspaceLayout(size_t num_tensors) {
+    input = layout.add<CUtensorMap>(num_tensors);
+    act_input = layout.add<CUtensorMap>(num_tensors);
+    output_rowwise = layout.add<CUtensorMap>(num_tensors);
+    output_colwise = layout.add<CUtensorMap>(num_tensors);
+    rows = layout.add<size_t>(num_tensors);
+    cols = layout.add<size_t>(num_tensors);
+    offsets = layout.add<size_t>(num_tensors);
+  }
+
+  WorkspaceLayout layout;
+  WorkspaceBlock input, act_input, output_rowwise, output_colwise;
+  WorkspaceBlock rows, cols, offsets;
+};
+
+inline size_t get_grouped_tma_workspace_size(size_t num_tensors) {
+  const GroupedTmaWorkspaceLayout workspace_layout(num_tensors);
+  // A nonempty allocation distinguishes execution from a workspace size query,
+  // including layouts that do not use descriptors.
+  return std::max(size_t{1}, workspace_layout.layout.size());
+}
+
+// Constant last dimensions use launch-local descriptors passed by value.
+inline size_t grouped_tma_workspace_bytes(const GroupedTensor &tensor) {
+  return tensor.all_same_shape() || tensor.all_same_last_dim()
+             ? 0
+             : get_grouped_tma_workspace_size(tensor.num_tensors);
+}
+
+inline GroupedTmaStorageView get_grouped_tma_storage(Tensor *workspace, size_t num_tensors) {
+  if (num_tensors == 0) {
+    return {};
+  }
+  // The caller is responsible for the allocation size and alignment returned by the query.
+  const GroupedTmaWorkspaceLayout workspace_layout(num_tensors);
+  const WorkspaceView view(workspace->data.dptr, workspace_layout.layout);
+  return {view.get<CUtensorMap>(workspace_layout.input),
+          view.get<CUtensorMap>(workspace_layout.act_input),
+          view.get<CUtensorMap>(workspace_layout.output_rowwise),
+          view.get<CUtensorMap>(workspace_layout.output_colwise),
+          view.get<size_t>(workspace_layout.rows),
+          view.get<size_t>(workspace_layout.cols),
+          view.get<size_t>(workspace_layout.offsets)};
+}
 
 inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   const size_t cols = t->flat_last_dim();
@@ -119,17 +167,25 @@ __global__ void __launch_bounds__(THREADS_PER_WARP)
                            const int64_t *const __restrict__ offsets_ptr,
                            const int64_t *const __restrict__ first_dims_ptr,
                            const int64_t *const __restrict__ last_dims_ptr, const bool rowwise,
-                           const bool colwise, const bool compute_dactivations) {
+                           const bool colwise, const bool compute_dactivations,
+                           const GroupedTmaStorageView storage) {
   const size_t tensor_id = blockIdx.x;
+  size_t *const rows_map = storage.rows;
+  size_t *const cols_map = storage.cols;
+  size_t *const offsets_map = storage.offsets;
+  CUtensorMap *const input_maps = storage.input;
+  CUtensorMap *const act_input_maps = storage.act_input;
+  CUtensorMap *const rowwise_maps = storage.output_rowwise;
+  CUtensorMap *const colwise_maps = storage.output_colwise;
   const size_t rows =
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
   const size_t offset_elts = offsets_ptr[tensor_id];
   if (threadIdx.x == 0) {
-    g_tensor_maps.rows[tensor_id] = rows;
-    g_tensor_maps.cols[tensor_id] = cols;
-    g_tensor_maps.offsets[tensor_id] = offset_elts;
+    rows_map[tensor_id] = rows;
+    cols_map[tensor_id] = cols;
+    offsets_map[tensor_id] = offset_elts;
   }
 
   // Zero-sized groups: skip TMA descriptor update. The main kernel already returns
@@ -141,27 +197,27 @@ __global__ void __launch_bounds__(THREADS_PER_WARP)
 
   if (tensor_id < num_tensors) {
     {
-      CUtensorMap *modified_tensor_map_input = &g_tensor_maps.input[tensor_id];
+      CUtensorMap *modified_tensor_map_input = &input_maps[tensor_id];
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_input, modified_tensor_map_input, global_data_ptr,
                              rows, cols, sizeof(IType));
     }
     if (compute_dactivations) {
-      CUtensorMap *modified_tensor_map_act_input = &g_tensor_maps.act_input[tensor_id];
+      CUtensorMap *modified_tensor_map_act_input = &act_input_maps[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(act_input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_act_input, modified_tensor_map_act_input,
                              global_data_ptr, rows, cols, sizeof(IType));
     }
     if (rowwise) {
-      CUtensorMap *modified_tensor_map_output_rowwise = &g_tensor_maps.output_rowwise[tensor_id];
+      CUtensorMap *modified_tensor_map_output_rowwise = &rowwise_maps[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_rowwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_rowwise, modified_tensor_map_output_rowwise,
                              global_data_ptr, rows, cols, sizeof(OType));
     }
     if (colwise) {
-      CUtensorMap *modified_tensor_map_output_colwise = &g_tensor_maps.output_colwise[tensor_id];
+      CUtensorMap *modified_tensor_map_output_colwise = &colwise_maps[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_colwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_colwise, modified_tensor_map_output_colwise,

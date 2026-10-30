@@ -18,6 +18,7 @@
 
 #include "../common.h"
 #include "../extensions.h"
+#include "../workspace.h"
 #include "common.h"
 
 namespace transformer_engine::pytorch {
@@ -222,10 +223,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
         py::arg("dtype"), py::arg("device"), py::arg("pin_memory"));
+  py::class_<transformer_engine::pytorch::WorkspaceOwner,
+             std::shared_ptr<transformer_engine::pytorch::WorkspaceOwner>>(m, "Workspace")
+      .def(py::init<>())
+      .def_property_readonly("size", &transformer_engine::pytorch::WorkspaceOwner::size)
+      .def_property_readonly("capacity", &transformer_engine::pytorch::WorkspaceOwner::capacity)
+      .def_property_readonly_static("max_stream_slots",
+                                    [](py::object) { return nvte_workspace_max_stream_slots(); })
+      .def_property_readonly("generation",
+                             &transformer_engine::pytorch::WorkspaceOwner::generation);
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
-        py::arg("noop_flag") = py::none(), py::arg("output") = py::none());
+        py::arg("noop_flag") = py::none(), py::arg("output") = py::none(),
+        py::arg("workspace") = nullptr);
   m.def("group_scaled_swiglu", transformer_engine::pytorch::group_scaled_swiglu,
         "Grouped scaled SwiGLU recompute fused with columnwise MXFP8 quantization",
         py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),

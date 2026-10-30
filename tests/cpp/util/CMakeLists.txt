@@ -5,6 +5,9 @@
 add_executable(test_util
                test_nvrtc.cpp
                test_string.cpp
+               test_workspace.cpp
+               test_workspace_api.cpp
+               test_workspace_gpu.cu
                ../test_common.cu)
 
 
