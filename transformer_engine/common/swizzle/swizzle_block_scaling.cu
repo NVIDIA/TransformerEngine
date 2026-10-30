@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../common.h"
+#include "../util/cuda_context.h"
 #include "../util/cuda_runtime.h"
 #include "../util/logging.h"
 #include "transformer_engine/transformer_engine.h"
@@ -455,8 +456,8 @@ void enable_table_smem(const size_t smem_bytes, const size_t num_tensors) {
   NVTE_CHECK(smem_bytes <= max_smem_bytes, "Too many tensors (", num_tensors,
              ") to convert FP8 block scaling to MXFP8 scales: needs ", smem_bytes,
              " bytes of shared memory, but the device allows ", max_smem_bytes, ".");
-  static std::vector<std::once_flag> flags(cuda::num_devices());
-  std::call_once(flags[device], [&]() {
+  static std::vector<cuda_context::InitializationFlag> flags(cuda::num_devices());
+  flags[device].call(device, [&]() {
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(grouped_swizzle_block_scaling_to_mxfp8_kernel<kIs2D>,
                                          cudaFuncAttributeMaxDynamicSharedMemorySize,
                                          static_cast<int>(max_smem_bytes)));

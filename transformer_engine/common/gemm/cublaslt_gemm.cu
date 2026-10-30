@@ -62,6 +62,10 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
   NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
 }
 
+inline void DestroyCublasHandle(cublasLtHandle_t handle) {
+  NVTE_CHECK_CUBLAS(cublasLtDestroy(handle));
+}
+
 /* Parameters for cuBLAS GEMM
  *
  * cuBLAS follows the BLAS convention of column-major ordering. This
@@ -314,7 +318,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 
 namespace transformer_engine {
 
-using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
+using cublasHandleManager =
+    detail::HandleManager<cublasLtHandle_t, CreateCublasHandle, DestroyCublasHandle>;
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
@@ -1077,7 +1082,8 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
 
 namespace transformer_engine {
 
-using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
+using cublasHandleManager =
+    detail::HandleManager<cublasLtHandle_t, CreateCublasHandle, DestroyCublasHandle>;
 
 void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHandle(); }
 

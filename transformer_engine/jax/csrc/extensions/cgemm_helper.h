@@ -20,6 +20,7 @@
 #include "../extensions.h"
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 #include "common/util/cuda_runtime.h"
+#include "common/util/cuda_state_registration.h"
 #include "common/util/logging.h"
 #include "transformer_engine/comm_gemm_overlap.h"
 
@@ -27,7 +28,7 @@ namespace transformer_engine {
 namespace jax {
 
 // Configuration singleton for CGEMM parameters
-class CgemmConfig {
+class CgemmConfig : public cuda_context::FrontendResource {
  public:
   int num_max_streams;
   int gemm_priority;
@@ -48,6 +49,9 @@ class CgemmConfig {
     config.use_ce = _use_ce;
     config.aggregate_ag = _aggregate_ag;
     config.use_cublasmp = _use_cublasmp;
+    int device;
+    NVTE_CHECK_CUDA(cudaGetDevice(&device));
+    config.bind_context(device);
   }
 
   static CgemmConfig &get(bool is_initialized = true) {
@@ -62,6 +66,9 @@ class CgemmConfig {
   CgemmConfig &operator=(const CgemmConfig &) = delete;
 
  private:
+  void release_context() override { _initialized = false; }
+  void invalidate_context() noexcept override { _initialized = false; }
+  int release_order() const override { return 800; }
   CgemmConfig() = default;
   ~CgemmConfig() = default;
   bool _initialized = false;
@@ -75,7 +82,7 @@ class CollectiveGemmPlanRegistry;
 // Two scenarios:
 // 1. Single process multiple devices: TP domain = process (num_devices_per_process == tp_size)
 // 2. Single process single device: TP domain spans processes (num_devices_per_process == 1)
-class CommunicatorHandler {
+class CommunicatorHandler : public cuda_context::FrontendResource {
  public:
   int num_total_devices = -1;
   int num_devices_per_process = -1;
@@ -152,6 +159,10 @@ class CommunicatorHandler {
  private:
   CommunicatorHandler();
   ~CommunicatorHandler();
+  void check_context_loss() const override;
+  void release_context() override;
+  void invalidate_context() noexcept override {}
+  int release_order() const override { return 900; }
 
   bool _initialize = false;
   int *_device_barrier = nullptr;
@@ -174,7 +185,13 @@ class CollectiveGemmPlanRegistry {
   CollectiveGemmPlanRegistry(const CollectiveGemmPlanRegistry &) = delete;
   CollectiveGemmPlanRegistry &operator=(const CollectiveGemmPlanRegistry &) = delete;
 
-  std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_map;
+  struct DevicePlans : cuda_context::FrontendResource {
+    explicit DevicePlans(int device) { bind_context(device); }
+    void release_context() override { plans.clear(); }
+    void invalidate_context() noexcept override { plans.clear(); }
+    std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plans;
+  };
+  std::unordered_map<int, std::unique_ptr<DevicePlans>> devices_;
 };
 
 // Function declarations

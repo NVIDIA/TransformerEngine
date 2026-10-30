@@ -192,3 +192,5 @@ except (ImportError, AttributeError):
         RuntimeWarning,
         stacklevel=2,
     )
+
+from .cuda_context import release_cuda_state, reset_cuda_state

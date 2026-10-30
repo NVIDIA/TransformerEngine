@@ -15,6 +15,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
+from .._cuda_state import device_cache
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
 from ..utils import (
     canonicalize_process_group,
@@ -91,7 +92,7 @@ def get_hadamard_matrix(hadamard_dimension: int, device: int) -> torch.Tensor:
     )
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=1)
 def get_rht_matrix(with_random_sign_mask: bool, device: int) -> torch.Tensor:
     """Construct matrix used in random Hadamard transform."""
     hadamard_dimension = 16

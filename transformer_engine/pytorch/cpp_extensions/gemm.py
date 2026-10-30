@@ -13,6 +13,7 @@ import warnings
 import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.device import te_device_type
+from .._cuda_state import device_cache
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
 from ..utils import (
     ceil_div,
@@ -57,7 +58,7 @@ def get_cublas_workspace_size_bytes() -> None:
     return 4_194_304
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=0)
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
     """Returns workspace for cublas GEMM."""
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
@@ -241,7 +242,7 @@ def _cudnn_grouped_gemm_quant_kernel() -> Callable:
     return grouped_gemm_quant_wrapper_sm100
 
 
-@functools.lru_cache
+@device_cache(device_arg=1, maxsize=128)
 def _get_cached_offsets_tensor(
     value: int,
     device: torch.device,
@@ -1169,19 +1170,19 @@ def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
     return tex.get_grouped_gemm_setup_workspace_size(num_tensors)
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=1)
 def _get_fp32_ones_tensor(num_tensors: int, device: torch.device) -> torch.Tensor:
     """Cached ones tensor."""
     return torch.ones(num_tensors, dtype=torch.float32, device=device)
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=1)
 def _get_fp32_zeros_tensor(num_tensors: int, device: torch.device) -> torch.Tensor:
     """Cached zeros tensor."""
     return torch.zeros(num_tensors, dtype=torch.float32, device=device)
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=0)
 def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Tensor:
     """Persistent setup workspace (per-group pointer/dim arrays) for grouped-tensor GEMM."""
     return torch.empty(
@@ -1191,7 +1192,7 @@ def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Te
     )
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=0)
 def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
     """Persistent cuBLAS workspace for the grouped-tensor GEMM path, one per GEMM layout.
 

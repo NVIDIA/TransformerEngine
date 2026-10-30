@@ -75,6 +75,13 @@ _print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 _cu_seqlens_cache = {}
 
 
+def _release_cuda_state(device):
+    """Release device-resident sequence metadata at a serialized restart boundary."""
+    from ..._cuda_state import clear_tensor_cache  # pylint: disable=import-outside-toplevel
+
+    clear_tensor_cache(_cu_seqlens_cache, device)
+
+
 class AttentionLogging:
     """
     Manage logging for attention module

@@ -86,6 +86,8 @@ void CreateCuDNNHandle(cudnnHandle_t* handle) {
   NVTE_CHECK_CUDNN(cudnnCreate(handle));
 }
 
+void DestroyCuDNNHandle(cudnnHandle_t handle) { NVTE_CHECK_CUDNN(cudnnDestroy(handle)); }
+
 }  // namespace detail
 
 }  // namespace transformer_engine

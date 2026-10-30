@@ -8,6 +8,7 @@
 #include "cgemm_helper.h"
 #include "common/util/cuda_runtime.h"
 #include "ffi_collectives.h"  // FfiRequestCliqueHandler (borrowed-comm prepare)
+#include "transformer_engine/cuda_context.h"
 #include "transformer_engine/gemm.h"
 
 namespace transformer_engine {
@@ -159,6 +160,23 @@ pybind11::dict Registrations() {
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
+  m.def("release_cuda_state", &nvte_release_cuda_state, pybind11::arg("device"),
+        pybind11::call_guard<pybind11::gil_scoped_release>());
+  m.def("reset_cuda_state", &nvte_reset_cuda_state, pybind11::arg("device"),
+        pybind11::call_guard<pybind11::gil_scoped_release>());
+  m.def("get_cuda_context_generation", &nvte_get_cuda_context_generation, pybind11::arg("device"));
+  m.def(
+      "synchronize_cuda_device",
+      [](int device) {
+        int previous;
+        NVTE_CHECK_CUDA(cudaGetDevice(&previous));
+        NVTE_CHECK_CUDA(cudaSetDevice(device));
+        const auto status = cudaDeviceSynchronize();
+        const auto restore = cudaSetDevice(previous);
+        NVTE_CHECK_CUDA(status);
+        NVTE_CHECK_CUDA(restore);
+      },
+      pybind11::arg("device"), pybind11::call_guard<pybind11::gil_scoped_release>());
   m.def("registrations", &Registrations);
   m.def("get_fused_attn_backend", &GetFusedAttnBackend, "Get Fused Attention backend",
         pybind11::arg("fused_attn_params"));

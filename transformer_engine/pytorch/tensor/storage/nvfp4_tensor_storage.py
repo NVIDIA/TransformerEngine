@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 from collections.abc import Iterable
-import functools
 import math
 from typing import Annotated, Any, Dict, Optional, Tuple, Union
 import warnings
@@ -21,9 +20,10 @@ from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 from ...utils import _empty_tensor
+from ..._cuda_state import device_cache
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=0)
 def _fp4_e2m1_vals(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Values representable in FP4 E2M1 format"""
     return torch.tensor(

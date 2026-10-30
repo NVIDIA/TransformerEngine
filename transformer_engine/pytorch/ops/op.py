@@ -14,7 +14,9 @@ from typing import Any, Callable, Optional
 
 import torch
 
+
 from transformer_engine.common.recipe import Recipe
+from .._cuda_state import register_module
 from .._extra_state import is_stateless_recipe, should_load_extra_state_pickle
 from ..quantization import (
     FP8GlobalStateManager,
@@ -342,7 +344,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
+        register_module(self)
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        register_module(self)
 
     def _lock_extra_tensor_channels(self) -> None:
         """Freeze channel routing after an OperationFuser has captured it."""

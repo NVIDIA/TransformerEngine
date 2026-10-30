@@ -6,6 +6,14 @@
 Jax
 ===
 
+CUDA state lifecycle
+--------------------
+
+See :doc:`c/cuda_context` for restart boundaries, ordering and context-loss limits.
+
+.. autoapifunction:: transformer_engine.jax.release_cuda_state
+.. autoapifunction:: transformer_engine.jax.reset_cuda_state
+
 Pre-defined Variable of Logical Axes
 ------------------------------------
 Variables are available in `transformer_engine.jax.sharding`.
