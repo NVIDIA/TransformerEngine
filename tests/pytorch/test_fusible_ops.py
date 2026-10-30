@@ -2472,7 +2472,7 @@ class TestBasicOps:
         # Check results
         assert_close(y_test, y_ref, **tols)
         assert_close_grads(x_test, x_ref, **tols)
-        assert_close_grads(w_test, w_ref, **tols)
+        assert_close_grads(op.weight, w_ref, **tols)
         assert_close_grads(g_test, g_ref, **tols)
 
     @pytest.mark.parametrize("in_shape", ((32,), (6, 16, 64), (32, 64)))
