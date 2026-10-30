@@ -130,13 +130,9 @@ class Kernel {
   std::string mangled_name_;
   /*! \brief  Compiled assembly, either in PTX or cubin format */
   std::string compiled_code_;
-  /*! CUDA module for each CUDA device */
-  std::vector<CUmodule> modules_;
-  /*! CUDA function for each CUDA device */
-  std::vector<CUfunction> functions_;
-
-  /*! Flags for thread-safe kernel initialization */
-  std::unique_ptr<std::vector<std::once_flag>> init_flags_;
+  struct DeviceKernel;
+  /*! Stable, registered owners of loaded modules; compiled bytes survive reset. */
+  std::vector<std::unique_ptr<DeviceKernel>> devices_;
 
   /*! \brief Uninitialized CUDA module */
   static constexpr CUmodule null_module = static_cast<CUmodule>(nullptr);

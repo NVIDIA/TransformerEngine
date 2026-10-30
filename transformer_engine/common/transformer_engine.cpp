@@ -25,6 +25,7 @@
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
+#include "workspace.h"
 #ifdef NVTE_WITH_CUTEDSL
 #include "tvm_ffi_bridge.h"
 #endif
@@ -819,6 +820,7 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
   NVTE_CHECK(t != nullptr, "Tensor is not allocated.");
   switch (param_name) {
     case kNVTERowwiseData:
+      if (t->workspace) t->workspace->bind(param->data_ptr);
       t->data = *param;
       break;
     case kNVTEColumnwiseData:
@@ -890,6 +892,7 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
   switch (param) {
     case kNVTERowwiseData: {
       const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      if (t.workspace) t.workspace->bind(basic_tensor->data_ptr);
       t.data = *basic_tensor;
       break;
     }

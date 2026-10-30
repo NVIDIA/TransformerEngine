@@ -215,6 +215,12 @@ void perform_test(ShapeRep shape_rep, BlockDim block_dim, ScalingDir dir,
   quant_config.set_force_pow_2_scales(force_pow_2_scales);
   quant_config.set_amax_epsilon(epsilon);
   nvte_group_quantize(in_gt, out_gt, quant_config, 0);
+  Tensor workspace;
+  nvte_group_quantize_v2(in_gt, out_gt, workspace.data(), quant_config, 0);
+  ASSERT_EQ(workspace.dtype(), DType::kByte);
+  ASSERT_EQ(workspace.rowwise_shape().data[0], 1);
+  workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+  nvte_group_quantize_v2(in_gt, out_gt, workspace.data(), quant_config, 0);
   cudaDeviceSynchronize();
   ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 

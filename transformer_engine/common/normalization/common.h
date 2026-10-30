@@ -240,8 +240,12 @@ class NormalizationPlanRegistry {
   NormalizationPlanRegistry(const NormalizationPlanRegistry&) = delete;
   NormalizationPlanRegistry& operator=(const NormalizationPlanRegistry&) = delete;
 
-  std::unordered_map<TupleKeyType, std::unique_ptr<NormalizationPlanBase>, TupleHash>
-      normalizationPlanMap;
+  struct DevicePlans : cuda_context::Resource {
+    explicit DevicePlans(int device) { bind_context(device); }
+    void invalidate_context() noexcept override { plans.clear(); }
+    std::unordered_map<TupleKeyType, std::unique_ptr<NormalizationPlanBase>, TupleHash> plans;
+  };
+  std::unordered_map<int, std::unique_ptr<DevicePlans>> device_plans_;
 };
 
 using byte = uint8_t;

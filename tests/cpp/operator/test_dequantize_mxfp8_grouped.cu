@@ -230,7 +230,16 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
   }
 
   // Run grouped dequantize
-  nvte_group_dequantize(in_group_tensor, out_group_tensor, 0);
+  if (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM) {
+    nvte_group_dequantize(in_group_tensor, out_group_tensor, 0);
+  } else {
+    EXPECT_THROW(nvte_group_dequantize(in_group_tensor, out_group_tensor, 0), std::runtime_error);
+  }
+  TensorWrapper requirement;
+  nvte_group_dequantize_v2(in_group_tensor, out_group_tensor, requirement.data(), 0);
+  Tensor workspace("workspace", requirement.shape(), requirement.dtype());
+  requirement.set_rowwise_data(workspace.rowwise_dptr(), requirement.dtype(), requirement.shape());
+  nvte_group_dequantize_v2(in_group_tensor, out_group_tensor, requirement.data(), 0);
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);

@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../common.h"
+#include "core/workspace.h"
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
 #include "fp8/group_amax_fp8.cuh"
@@ -27,12 +28,32 @@ void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
+void nvte_group_quantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                            NVTETensor workspace, const NVTEQuantizationConfig quant_config,
+                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_quantize_v2);
+  using namespace transformer_engine;
+  convertNVTETensorCheck(workspace);
+  constexpr bool IS_ACT = false;
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream,
+                                                              workspace);
+}
+
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                            cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_dequantize);
   using namespace transformer_engine;
   dispatch::group_dequantize_helper(*convertNVTEGroupedTensorCheck(input),
                                     convertNVTEGroupedTensorCheck(output), stream);
+}
+
+void nvte_group_dequantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                              NVTETensor workspace, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_dequantize_v2);
+  using namespace transformer_engine;
+  convertNVTETensorCheck(workspace);
+  dispatch::group_dequantize_helper(*convertNVTEGroupedTensorCheck(input),
+                                    convertNVTEGroupedTensorCheck(output), stream, workspace);
 }
 
 void nvte_group_compute_scale_from_amax(NVTEGroupedTensor output,

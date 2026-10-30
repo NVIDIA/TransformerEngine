@@ -4,23 +4,31 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cmath>
-#include <cstring>
-#include <memory>
-#include <iomanip>
-#include <iostream>
-#include <random>
-
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
-
 #include <transformer_engine/cast.h>
+#include <transformer_engine/workspace.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <random>
+
 #include "../test_common.h"
+#include "util/workspace.h"
 
 using namespace transformer_engine;
 
 namespace {
+
+// Cross two alignment boundaries so persistent-region checks also cover an unaligned tail.
+constexpr size_t kPersistentTableBytes = 2 * kWorkspaceAlignment + 1;
+// A recognizable nonzero sentinel detects writes into the shared immutable region.
+constexpr unsigned char kPersistentTableFillByte = 0x5a;
 
 template <typename IT, typename OT, typename CT>
 void compute_ref_cast_dbias(const IT *input_h,
@@ -56,7 +64,7 @@ void compute_ref_cast_dbias(const IT *input_h,
 }
 
 template <typename IType, typename OType>
-void performTest(const std::vector<size_t>& shape) {
+void performTest(const std::vector<size_t>& shape, bool use_workspace_descriptor = false) {
   using namespace test;
   using CType = fp32;
 
@@ -88,24 +96,55 @@ void performTest(const std::vector<size_t>& shape) {
                          N, H);
 
   Tensor workspace;
+  TensorWrapper descriptor;
+  NVTEWorkspaceRegion persistent_region = 0;
 
-  nvte_quantize_dbias(input.data(),
-                      output_c.data(),
-                      dbias.data(),
-                      workspace.data(),
-                      0);
+  if (use_workspace_descriptor) {
+    WorkspacePlanWrapper plan(descriptor.data());
+    persistent_region =
+        plan.require("test.activation", kPersistentTableBytes, kNVTEWorkspacePersistent);
+    nvte_workspace_commit_plan(descriptor.data(), plan.data());
+    nvte_quantize_dbias(input.data(), output_c.data(), dbias.data(), descriptor.data(), 0);
+    const auto scratch = nvte_workspace_find_region(descriptor.data(), "te.dbias", nullptr, 0);
+    ASSERT_NE(scratch, 0);
+    EXPECT_NE(scratch, persistent_region);
+    workspace = Tensor("workspace", descriptor.shape(), descriptor.dtype());
+    descriptor.set_rowwise_data(workspace.rowwise_dptr(), descriptor.dtype(), descriptor.shape());
+    ASSERT_EQ(cudaMemset(nvte_workspace_get_region_data(descriptor.data(), persistent_region),
+                         kPersistentTableFillByte, kPersistentTableBytes),
+              cudaSuccess);
+    nvte_workspace_mark_region_initialized(descriptor.data(), persistent_region, nullptr);
+    nvte_quantize_dbias(input.data(), output_c.data(), dbias.data(), descriptor.data(), 0);
+  } else {
 
-  workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+    nvte_quantize_dbias(input.data(),
+                        output_c.data(),
+                        dbias.data(),
+                        workspace.data(),
+                        0);
 
-  nvte_quantize_dbias(input.data(),
-                      output_c.data(),
-                      dbias.data(),
-                      workspace.data(),
-                      0);
+    workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
+    nvte_quantize_dbias(input.data(),
+                        output_c.data(),
+                        dbias.data(),
+                        workspace.data(),
+                        0);
+
+  }
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  if (persistent_region != 0) {
+    std::vector<unsigned char> table(kPersistentTableBytes);
+    ASSERT_EQ(cudaMemcpy(table.data(),
+                         nvte_workspace_get_region_data(descriptor.data(), persistent_region),
+                         table.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_TRUE(std::all_of(table.begin(), table.end(),
+                            [](unsigned char x) { return x == kPersistentTableFillByte; }));
+    EXPECT_TRUE(nvte_workspace_region_initialized(descriptor.data(), persistent_region));
+  }
 
   if (isFp8Type(otype)) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
@@ -144,6 +183,14 @@ std::vector<std::vector<size_t>> test_cases = {
 class CastDBiasTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
                                                                       transformer_engine::DType,
                                                                       std::vector<size_t>>> {};
+
+TEST(OperatorTest_CastDBias, WorkspaceDescriptorPreservesPersistentRegion) {
+    using namespace test;
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    performTest<bf16, fp8e4m3>({128, 128}, /*use_workspace_descriptor=*/true);
+}
 
 TEST_P(CastDBiasTestSuite, TestCastDBias) {
     using namespace transformer_engine;

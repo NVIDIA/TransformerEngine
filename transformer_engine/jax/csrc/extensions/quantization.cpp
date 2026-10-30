@@ -614,7 +614,21 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_
   out_grouped.set_with_gemm_swizzled_scales(true);
 
   QuantizationConfigWrapper quant_config{};
-  nvte_group_quantize(in_grouped.data(), out_grouped.data(), quant_config, stream);
+  // This FFI only varies the first dimension, so descriptors are launch-local.
+  // The v2 query requests one byte and its empty catalog writes no device data;
+  // reuse the existing XLA-owned metadata allocation for that nonempty binding.
+  // Query first so any future descriptor reservation fails before overlapping the
+  // group sizes/offsets instead of silently corrupting their storage.
+  TensorWrapper workspace;
+  nvte_group_quantize_v2(in_grouped.data(), out_grouped.data(), workspace.data(), quant_config,
+                         stream);
+  NVTE_CHECK(workspace.dtype() == DType::kByte && workspace.shape().ndim == 1 &&
+                 workspace.shape().data[0] == 1,
+             "GroupedQuantizeV2 FFI requires separate workspace for dynamic TMA descriptors.");
+  workspace.set_rowwise_data(int64_workspace->untyped_data(), DType::kByte,
+                             std::vector<size_t>{product(int64_workspace->dimensions())});
+  nvte_group_quantize_v2(in_grouped.data(), out_grouped.data(), workspace.data(), quant_config,
+                         stream);
 
   return ffi_with_cuda_error_check();
 }

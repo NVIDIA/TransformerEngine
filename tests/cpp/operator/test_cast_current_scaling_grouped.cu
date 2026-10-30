@@ -298,6 +298,12 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
   nvte_group_compute_amax_with_config(in_group_tensor, out_group_tensor, quant_config, 0);
   nvte_group_compute_scale_from_amax(out_group_tensor, quant_config, 0);
   nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
+  Tensor workspace;
+  nvte_group_quantize_v2(in_group_tensor, out_group_tensor, workspace.data(), quant_config, 0);
+  ASSERT_EQ(workspace.dtype(), DType::kByte);
+  ASSERT_EQ(workspace.rowwise_shape().data[0], 1);
+  workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+  nvte_group_quantize_v2(in_group_tensor, out_group_tensor, workspace.data(), quant_config, 0);
 
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   auto err = cudaGetLastError();

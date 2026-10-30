@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "../common.h"
+#include "../util/cuda_context.h"
 #include "../util/cuda_driver.h"
 #include "../util/cuda_runtime.h"
 #include "../util/string.h"
@@ -63,33 +64,40 @@ bool is_enabled() {
   return is_enabled_;
 }
 
-Kernel::Kernel(std::string mangled_name, std::string compiled_code)
-    : mangled_name_{std::move(mangled_name)},
-      compiled_code_{std::move(compiled_code)},
-      modules_(cuda::num_devices(), null_module),
-      functions_(cuda::num_devices(), null_function),
-      init_flags_{std::make_unique<std::vector<std::once_flag>>(cuda::num_devices())} {}
-
-Kernel::~Kernel() {
-  for (int device_id = 0; device_id < static_cast<int>(modules_.size()); ++device_id) {
-    // Unload CUDA modules if needed
-    if (modules_[device_id] != null_module) {
-      CUdevice device;
-      CUcontext context;
-      if (cuda_driver::call("cuDeviceGet", &device, device_id) != CUDA_SUCCESS) {
-        continue;
-      }
-      if (cuda_driver::call("cuDevicePrimaryCtxRetain", &context, device) != CUDA_SUCCESS) {
-        continue;
-      }
-      if (cuda_driver::call("cuCtxSetCurrent", context) != CUDA_SUCCESS) {
-        continue;
-      }
-      cuda_driver::call("cuModuleUnload", modules_[device_id]);
-      cuda_driver::call("cuDevicePrimaryCtxRelease", device);
+struct Kernel::DeviceKernel : cuda_context::Resource {
+  explicit DeviceKernel(int device) : device(device) { bind_context(device); }
+  ~DeviceKernel() override {
+    if (module == null_module) return;
+    CUdevice gpu;
+    CUcontext context;
+    if (cuda_driver::call("cuDeviceGet", &gpu, device) != CUDA_SUCCESS) return;
+    if (cuda_driver::call("cuDevicePrimaryCtxRetain", &context, gpu) != CUDA_SUCCESS) return;
+    CUcontext previous;
+    if (cuda_driver::call("cuCtxGetCurrent", &previous) == CUDA_SUCCESS &&
+        cuda_driver::call("cuCtxSetCurrent", context) == CUDA_SUCCESS) {
+      cuda_driver::call("cuModuleUnload", module);
+      cuda_driver::call("cuCtxSetCurrent", previous);
     }
+    cuda_driver::call("cuDevicePrimaryCtxRelease", gpu);
+  }
+  void invalidate_context() noexcept override {
+    module = null_module;
+    function = null_function;
+  }
+  int device;
+  std::mutex mutex;
+  CUmodule module = null_module;
+  CUfunction function = null_function;
+};
+
+Kernel::Kernel(std::string mangled_name, std::string compiled_code)
+    : mangled_name_{std::move(mangled_name)}, compiled_code_{std::move(compiled_code)} {
+  for (int device = 0; device < cuda::num_devices(); ++device) {
+    devices_.push_back(std::make_unique<DeviceKernel>(device));
   }
 }
+
+Kernel::~Kernel() = default;
 
 Kernel::Kernel(Kernel&& other) noexcept { swap(*this, other); }
 
@@ -103,36 +111,34 @@ void swap(Kernel& first, Kernel& second) noexcept {
   using std::swap;
   swap(first.mangled_name_, second.mangled_name_);
   swap(first.compiled_code_, second.compiled_code_);
-  swap(first.modules_, second.modules_);
-  swap(first.functions_, second.functions_);
-  swap(first.init_flags_, second.init_flags_);
+  swap(first.devices_, second.devices_);
 }
 
 CUfunction Kernel::get_function(int device_id) {
-  // Load kernel on device if needed
-  auto load_on_device = [&]() {
-    // Set driver context to proper device
-    CUdevice device;
-    CUcontext context;
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, device_id);
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
+  auto& kernel = *devices_.at(device_id);
+  std::lock_guard<std::mutex> lock(kernel.mutex);
+  if (kernel.function != null_function) return kernel.function;
+  CUdevice device;
+  CUcontext context, previous;
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, device_id);
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxGetCurrent, &previous);
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
+  try {
     NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
-
-    // Load function into driver context
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx, &modules_[device_id], compiled_code_.c_str(),
-                                0,         // numOptions
-                                nullptr,   // options
-                                nullptr);  // optionValues
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleGetFunction, &functions_[device_id], modules_[device_id],
+    if (kernel.module == null_module) {
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx, &kernel.module, compiled_code_.c_str(), 0,
+                                  nullptr, nullptr);
+    }
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleGetFunction, &kernel.function, kernel.module,
                                 mangled_name_.c_str());
-
-    // Reset driver context
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
-  };
-  std::call_once(init_flags_->at(device_id), load_on_device);
-
-  // Return CUDA function
-  return functions_[device_id];
+  } catch (...) {
+    cuda_driver::call("cuCtxSetCurrent", previous);
+    cuda_driver::call("cuDevicePrimaryCtxRelease", device);
+    throw;
+  }
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, previous);
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
+  return kernel.function;
 }
 
 void Kernel::set_function_cache_config(int device_id, CUfunc_cache cache_config) {

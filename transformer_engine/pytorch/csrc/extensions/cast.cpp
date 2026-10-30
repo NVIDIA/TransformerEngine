@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "../extensions.h"
+#include "../workspace.h"
 #include "common.h"
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
@@ -32,6 +33,17 @@ namespace transformer_engine {
 namespace pytorch {
 
 namespace {
+
+// The framework allocation stays alive through submission. The caching allocator
+// tracks its creating stream and retains graph-private allocations during capture.
+void quantize_grouped_with_workspace(NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                     NVTEQuantizationConfig config, cudaStream_t stream) {
+  TensorWrapper requirement;
+  nvte_group_quantize_v2(input, output, requirement.data(), config, stream);
+  auto storage = allocateSpace(requirement.shape(), requirement.dtype());
+  requirement.set_rowwise_data(storage.data_ptr(), requirement.dtype(), requirement.shape());
+  nvte_group_quantize_v2(input, output, requirement.data(), config, stream);
+}
 
 std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   const auto &shape = tensor.shape();
@@ -235,8 +247,8 @@ void group_quantize_nvfp4_row_scaled_impl(const GroupedTensorWrapper &grouped_in
     quant_config_cpp.set_use_fast_math(true);
   }
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor.data(), quant_config_cpp,
-                        stream);
+    quantize_grouped_with_workspace(grouped_input_tensor.data(), grouped_output_tensor.data(),
+                                    quant_config_cpp, stream);
   });
 }
 
@@ -308,7 +320,8 @@ void compute_grouped_fp8_current_scaling_amax_and_scale(
 py::object group_quantize(const at::Tensor &input, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
                           std::optional<at::Tensor> tensor_offsets,
-                          std::optional<at::Tensor> noop_flag, const py::object &output) {
+                          std::optional<at::Tensor> noop_flag, const py::object &output,
+                          const std::shared_ptr<WorkspaceOwner> &workspace) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -407,6 +420,10 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
     grouped_quantization_mode = GroupedQuantizationMode::FP8_BLOCKWISE_GROUPED_QUANTIZE;
   }
 
+  NVTE_CHECK(
+      !workspace || grouped_quantization_mode == GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE,
+      "Explicit Workspace currently supports grouped MXFP8 quantization.");
+
   if (empty_input_buffer) {
     // early return for empty input buffer
     // just return the output tensor as is
@@ -441,8 +458,9 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
         quant_config_cpp.set_noop_tensor(noop_flag_cpp->data());
       }
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+        quantize_grouped_with_workspace(grouped_input_tensor.data(),
+                                        grouped_output_tensor_cpp.data(), quant_config_cpp,
+                                        at::cuda::getCurrentCUDAStream());
       });
       break;
     }
@@ -454,8 +472,15 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
       }
       quant_config_cpp.set_mxfp8_2d_quantization(mxfp8_quantizer_cpp->with_2d_quantization);
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+        const auto stream = at::cuda::getCurrentCUDAStream(tensor.get_device());
+        if (workspace) {
+          workspace->quantize_grouped(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                                      quant_config_cpp, tensor.get_device(), stream);
+        } else {
+          quantize_grouped_with_workspace(grouped_input_tensor.data(),
+                                          grouped_output_tensor_cpp.data(), quant_config_cpp,
+                                          stream);
+        }
       });
       break;
     }
@@ -469,8 +494,9 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
         quant_config_cpp.set_noop_tensor(noop_flag_cpp->data());
       }
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+        quantize_grouped_with_workspace(grouped_input_tensor.data(),
+                                        grouped_output_tensor_cpp.data(), quant_config_cpp,
+                                        at::cuda::getCurrentCUDAStream());
       });
       break;
     }
@@ -760,11 +786,9 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                               grouped_dbias.data(), workspace_nvte.data(), quant_config_cpp,
                               stream);
   });
-  if (workspace_nvte.ndim() > 0 && workspace_nvte.numel() > 0) {
-    at::Tensor workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
-    workspace_nvte = makeTransformerEngineTensor(workspace_torch.data_ptr(), workspace_nvte.shape(),
-                                                 workspace_nvte.dtype());
-  }
+  at::Tensor workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+  workspace_nvte.set_rowwise_data(workspace_torch.data_ptr(), workspace_nvte.dtype(),
+                                  workspace_nvte.shape());
   NVTE_SCOPED_GIL_RELEASE({
     nvte_group_quantize_dbias(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
                               grouped_dbias.data(), workspace_nvte.data(), quant_config_cpp,
@@ -873,7 +897,13 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
                               tensor_offsets, logical_first_dim, logical_last_dim);
 
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_dequantize(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());
+    const auto stream = at::cuda::getCurrentCUDAStream();
+    TensorWrapper workspace_nvte;
+    nvte_group_dequantize_v2(input_cpp.data(), out_cpp.data(), workspace_nvte.data(), stream);
+    auto workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+    workspace_nvte.set_rowwise_data(workspace_torch.data_ptr(), workspace_nvte.dtype(),
+                                    workspace_nvte.shape());
+    nvte_group_dequantize_v2(input_cpp.data(), out_cpp.data(), workspace_nvte.data(), stream);
   });
 
   return py::reinterpret_borrow<py::object>(out_py);
