@@ -472,7 +472,7 @@ def _prepare_moe_input(
 # MoE invocation. NCCL EP permits a smaller token count than the bootstrap
 # maximum, but the dispatch receive capacity itself must match exactly.
 
-_te_ep_bootstrap_signature: Optional[Tuple[int, int, int, int, int]] = None
+_te_ep_bootstrap_signature: Optional[Tuple[int, int, int, int, int, Any]] = None
 
 
 def record_ep_bootstrap_signature_for_moe(
@@ -481,6 +481,7 @@ def record_ep_bootstrap_signature_for_moe(
     recv_capacity_per_rank: int,
     hidden_dim: int,
     ep_size: int,
+    max_token_dtype: Any = jnp.bfloat16,
 ) -> None:
     """Record the params passed to ``ep_bootstrap`` so the per-call check
     in ``_moe_fwd_rule`` can verify compatibility. Call this once per
@@ -493,6 +494,7 @@ def record_ep_bootstrap_signature_for_moe(
         recv_capacity_per_rank,
         hidden_dim,
         ep_size,
+        jnp.dtype(max_token_dtype),
     )
 
 
@@ -502,6 +504,7 @@ def _te_ep_assert_compatible_bootstrap(
     recv_capacity_per_rank: int,
     hidden_dim: int,
     ep_size: int,
+    token_dtype: Any,
 ) -> None:
     """Verify a prior eager ``ep_bootstrap`` is compatible with this call."""
     if _te_ep_bootstrap_signature is None:
@@ -512,7 +515,15 @@ def _te_ep_assert_compatible_bootstrap(
             " transformer_engine.jax.moe.record_ep_bootstrap_signature_for_moe(...)"
             " with the same params, before invoking moe()."
         )
-    b_num_experts, b_max_tpr, b_recv_pr, b_hidden, b_ep_size = _te_ep_bootstrap_signature
+    b_num_experts, b_max_tpr, b_recv_pr, b_hidden, b_ep_size, b_token_dtype = (
+        _te_ep_bootstrap_signature
+    )
+    if jnp.dtype(token_dtype).itemsize > b_token_dtype.itemsize:
+        raise ValueError(
+            f"moe() token dtype {jnp.dtype(token_dtype)} is wider than the EP group's"
+            f" bootstrap max_token_dtype={b_token_dtype}; pass a wider max_token_dtype to"
+            " ep_bootstrap and record_ep_bootstrap_signature_for_moe."
+        )
     if (
         num_experts != b_num_experts
         or hidden_dim != b_hidden
@@ -1415,6 +1426,7 @@ def _moe_fwd_rule(
             recv_capacity_per_rank=recv_pr,
             hidden_dim=H,
             ep_size=num_ep,
+            token_dtype=x.dtype,
         )
 
         if not data_parallelism_axes:

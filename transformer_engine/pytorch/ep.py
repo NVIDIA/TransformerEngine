@@ -365,6 +365,13 @@ class EpBuffer:
         self.recv_capacity_per_rank = (
             None if recv_capacity_per_rank is None else int(recv_capacity_per_rank)
         )
+        max_token_dtype = _BOOTSTRAP_SETTINGS["payload_dtype"]
+        if payload_dtype.itemsize > max_token_dtype.itemsize:
+            raise ValueError(
+                f"EpBuffer payload_dtype={payload_dtype} is wider than the group's"
+                f" bootstrap-time max_token_dtype={max_token_dtype}; staging buffers were"
+                " not sized for it."
+            )
         self.hidden_dim = int(hidden_dim)
         self.num_local_experts = int(num_local_experts)
         self.payload_dtype = payload_dtype
@@ -632,7 +639,7 @@ def _ep_prepare_and_dispatch_fwd(
     from the host count; otherwise recv uses the buffer static recv capacity. Returns the recv
     output (a per-expert GroupedTensor for MXFP8, else the raw recv tokens), the recv topk weights,
     and a _DispatchState for backward. No autograd; the caller owns context handling."""
-    _require_bf16("dispatch input", tokens)
+    _require_payload_dtype("dispatch input", tokens, buffer.payload_dtype)
     tokens_scale_inv = None
     if buffer.dispatch_fwd_quant_recipe is not None:
         from .tensor.mxfp8_tensor import MXFP8Quantizer
@@ -888,7 +895,7 @@ def _ep_combine_bwd(state: "_CombineState", g_result: torch.Tensor):
     """Scatter the result-grad to expert positions and return the expert_out grad. High-precision
     sends the grad as-is; a quantized recipe (MXFP8 today) quantizes it and returns a per-expert
     GroupedTensor. No autograd; the caller owns context handling."""
-    _require_bf16("combine backward grad_output", g_result)
+    _require_payload_dtype("combine backward grad_output", g_result, state.expert_out_dtype)
     if not g_result.is_contiguous():
         g_result = g_result.contiguous()
     handle_mem = state.handle_mem
@@ -982,16 +989,17 @@ class _EpCombine(torch.autograd.Function):
 # Public high-level wrappers
 
 
-# NCCL EP inputs are bfloat16; MXFP8 is applied internally via the buffer's dispatch_fwd_quant_recipe.
-def _require_bf16(name: str, t: torch.Tensor) -> None:
+# NCCL EP payloads carry the buffer's configured payload_dtype (recv/combine buffers are allocated
+# as it); MXFP8 is applied internally via the buffer's dispatch_fwd_quant_recipe.
+def _require_payload_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
     if (
         not isinstance(t, torch.Tensor)
         or isinstance(t, QuantizedTensorStorage)
-        or t.dtype is not torch.bfloat16
+        or t.dtype is not expected
     ):
         raise TypeError(
-            f"NCCL EP requires {name} to be a plain BF16 tensor, "
-            f"got {type(t).__name__} with dtype={getattr(t, 'dtype', None)}."
+            f"NCCL EP requires {name} to be a plain tensor of the buffer's payload_dtype "
+            f"({expected}), got {type(t).__name__} with dtype={getattr(t, 'dtype', None)}."
         )
 
 
@@ -1142,11 +1150,13 @@ def ep_dispatch(
     recv_tokens: Optional[torch.Tensor] = None,
     recv_topk_weights: Optional[torch.Tensor] = None,
 ):
-    """Prepare + dispatch with autograd. ``tokens`` is bfloat16; ``topk_idx`` is int32 or int64.
+    """Prepare + dispatch with autograd. ``tokens`` matches the buffer's ``payload_dtype`` (bf16 by
+    default; fp16/fp32 when the EP group and buffer were configured for it); ``topk_idx`` is int32 or
+    int64.
 
     When the buffer's ``dispatch_fwd_quant_recipe`` is set (``MXFP8BlockScaling`` only for now), tokens
     are quantized internally and recv is returned as a per-expert ``GroupedTensor``; otherwise recv
-    stays bfloat16. A pre-quantized ``tokens`` is not accepted.
+    stays the buffer's payload dtype. A pre-quantized ``tokens`` is not accepted.
 
     ``recv_tokens`` / ``recv_topk_weights`` are the recv outputs: pass caller-owned buffers
     (symm-mem-backed under zero-copy) or leave them None to allocate. For MXFP8 the recv data and
@@ -1165,10 +1175,10 @@ def ep_dispatch(
         )
     if isinstance(tokens, QuantizedTensor):
         raise NotImplementedError(
-            "NCCL EP dispatch takes a bfloat16 input and quantizes internally when the buffer's "
-            "dispatch_fwd_quant_recipe is set; a pre-quantized tensor is not accepted."
+            "NCCL EP dispatch takes a high-precision input and quantizes internally when the "
+            "buffer's dispatch_fwd_quant_recipe is set; a pre-quantized tensor is not accepted."
         )
-    _require_bf16("tokens", tokens)
+    _require_payload_dtype("tokens", tokens, buffer.payload_dtype)
     if buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
         raise ValueError(
             "eager mode sizes the recv outputs from the per-step recv-token total "
@@ -1216,7 +1226,7 @@ def ep_combine(
     capture a graph. Result shape is (num_local_tokens, hidden_dim); num_local_tokens defaults to
     buffer.max_tokens_per_rank.
     """
-    _require_bf16("expert_out", expert_out)
+    _require_payload_dtype("expert_out", expert_out, buffer.payload_dtype)
     if buffer.eager and grad_out is not None:
         raise ValueError(
             "eager mode sizes the combine grad target per step and cannot use a "
