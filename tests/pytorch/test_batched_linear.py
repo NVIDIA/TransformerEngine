@@ -353,7 +353,7 @@ def test_init_method_and_rng_tracker(deferred_init: bool) -> None:
         assert all(param.device.type == "meta" for param in op.parameters())
         op.reset_parameters()
 
-    inp = torch.randn(32, 2, 32, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    inp = torch.randn(2, 32, 32, dtype=torch.bfloat16, device="cuda", requires_grad=True)
     output = op(inp)
     output.sum().backward()
 
@@ -386,7 +386,7 @@ def test_quantized_weight_deferred_init() -> None:
     assert all(param.device.type == "meta" for param in op.parameters())
     op.reset_parameters()
 
-    inp = torch.randn(32, 2, 32, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    inp = torch.randn(2, 32, 32, dtype=torch.bfloat16, device="cuda", requires_grad=True)
     with te.autocast(enabled=True, recipe=recipe):
         output = op(inp)
     output.sum().backward()
@@ -404,7 +404,7 @@ def test_quantized_weight_inference() -> None:
     """Inference primary weight needs only row-wise compact MXFP8 data."""
     recipe = make_recipe("mxfp8")
     weight = torch.rand(2, 96, 160, device="cuda", dtype=torch.bfloat16)
-    inp = torch.rand(96, 2, 160, device="cuda", dtype=torch.bfloat16)
+    inp = torch.rand(2, 96, 160, device="cuda", dtype=torch.bfloat16)
 
     with torch.no_grad(), te.quantized_model_init(enabled=True, recipe=recipe):
         op = te_ops.BatchedLinear(
@@ -418,7 +418,7 @@ def test_quantized_weight_inference() -> None:
     op.requires_grad_(False)
     with torch.no_grad():
         op.weight.copy_(weight)
-    reference = torch.einsum("...gd,grd->...gr", inp, op.weight.dequantize())
+    reference = torch.einsum("g...d,grd->g...r", inp, op.weight.dequantize())
 
     assert op.weight._rowwise_data is not None
     assert op.weight._columnwise_data is None
@@ -440,7 +440,7 @@ def test_rejects_backward_override(backward_override: str) -> None:
         dtype=torch.bfloat16,
         device="cuda",
     )
-    inp = torch.randn(32, 2, 32, dtype=torch.bfloat16, device="cuda")
+    inp = torch.randn(2, 32, 32, dtype=torch.bfloat16, device="cuda")
     recipe = transformer_engine.common.recipe.MXFP8BlockScaling(backward_override=backward_override)
     with pytest.raises(ValueError, match="does not support backward_override"):
         with te.autocast(enabled=True, recipe=recipe):

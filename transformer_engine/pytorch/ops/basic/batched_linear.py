@@ -61,7 +61,7 @@ class BatchedLinear(BasicOperation):
         Input feature dimension (``D``).
     out_features : int
         Output feature dimension (``R``).
-    input_batch_dim : {0, -2}, default = -2
+    input_batch_dim : {0, -2}, default = 0
         Position of the batch dimension in the input. The weight's batch
         dimension is always its first dimension.
     bias : bool, default = True
@@ -98,7 +98,7 @@ class BatchedLinear(BasicOperation):
         in_features: int,
         out_features: int,
         *,
-        input_batch_dim: int = -2,
+        input_batch_dim: int = 0,
         bias: bool = True,
         device: Optional[torch.device | str] = None,
         dtype: Optional[torch.dtype] = None,

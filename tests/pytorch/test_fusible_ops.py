@@ -1442,7 +1442,7 @@ class TestFuser:
             in_shape = (size * num_groups, size)
             extra_inputs.append(torch.full((num_groups,), size, dtype=torch.int, device=device))
         if op_type == "batched_linear":
-            in_shape = (size, num_groups, size)
+            in_shape = (num_groups, size, size)
         x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
         x_ref = x.detach().clone().requires_grad_()
 
@@ -1503,7 +1503,7 @@ class TestFuser:
             in_shape = (size * num_groups, size)
             extra_inputs.append(torch.full((num_groups,), size, dtype=torch.int, device=device))
         if op_type == "batched_linear":
-            in_shape = (size, num_groups, size)
+            in_shape = (num_groups, size, size)
         if quantization is None:
             pytest.skip("Quantization scheme is not specified")
         if op_type == "grouped_linear" and quantization == "nvfp4_4over6":
