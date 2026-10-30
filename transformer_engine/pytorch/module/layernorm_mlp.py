@@ -570,9 +570,7 @@ def _layernorm_mlp_forward_impl(
     if fp8:
         assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
 
-    activation_func = _act_func(
-        activation, dbias_fusion=fp8 and args.recipe_dbias_dact_fusion
-    )[0]
+    activation_func = _act_func(activation, dbias_fusion=fp8 and args.recipe_dbias_dact_fusion)[0]
 
     # Cast for native AMP
     inputmat = cast_if_needed(inputmat, activation_dtype)
