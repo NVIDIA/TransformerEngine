@@ -14,7 +14,6 @@ import transformer_engine_torch as tex
 
 from .tensor_spec import TensorSpec
 from ..quantized_tensor import Quantizer
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..utils import get_device_compute_capability
 
@@ -112,12 +111,11 @@ def fake_activation(
 
 
 @torch.compiler.assume_constant_result
-def _mxfp8_norm_fused_alignment(
-    normalization: str, with_2d_quantization: bool, use_cudnn: bool
-) -> Optional[int]:
-    return tex.mxfp8_norm_fused_alignment(
-        normalization == "RMSNorm", with_2d_quantization, use_cudnn
-    )
+def _normalization_fwd_output_layout(
+    normalization: str, quantizer: Quantizer, use_cudnn: bool
+) -> Optional[tuple[int, bool]]:
+    """Return the alignment and scale-layout override for a normalization output."""
+    return tex.normalization_fwd_output_layout(normalization, quantizer, use_cudnn)
 
 
 def fake_norm(
@@ -134,13 +132,13 @@ def fake_norm(
         input_.shape, dtype or input_.dtype, input_.device, quantizer
     )
     rows, cols = math.prod(input_.shape[:-1]), input_.shape[-1]
-    if isinstance(quantizer, MXFP8Quantizer):
-        use_cudnn = bool(int(os.getenv("NVTE_NORM_FWD_USE_CUDNN", "0") or "0"))
-        alignment = _mxfp8_norm_fused_alignment(
-            normalization, quantizer.with_2d_quantization, use_cudnn
-        )
-        if use_cudnn and alignment is not None and rows % alignment == 0 and cols % alignment == 0:
-            out.with_gemm_swizzled_scales = False
+    if quantizer is not None:
+        use_cudnn = bool(int(os.environ.get("NVTE_NORM_FWD_USE_CUDNN", "0") or "0"))
+        layout = _normalization_fwd_output_layout(normalization, quantizer, use_cudnn)
+        if layout is not None:
+            alignment, with_gemm_swizzled_scales = layout
+            if rows % alignment == 0 and cols % alignment == 0:
+                out.with_gemm_swizzled_scales = with_gemm_swizzled_scales
     mean = (
         TensorSpec(shape=(rows,), dtype=torch.float32, device=input_.device)
         if normalization == "LayerNorm"

@@ -254,9 +254,10 @@ class LayerNormMLPFwdArgs:
     fp8: bool
     fp8_calibration: bool
     backward_override: Optional[str]
+    fprop_use_split_accumulator: bool
     dgrad_use_split_accumulator: bool
     wgrad_use_split_accumulator: bool
-    # Recipe properties the backward needs (the recipe itself can't cross the op boundary).
+    # The recipe itself can't cross the op boundary.
     recipe_float8_block_scaling: bool
     recipe_custom: bool
     recipe_dbias_dact_fusion: bool
@@ -570,7 +571,7 @@ def _layernorm_mlp_forward_impl(
         assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
 
     activation_func = _act_func(
-        activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+        activation, dbias_fusion=fp8 and args.recipe_dbias_dact_fusion
     )[0]
 
     # Cast for native AMP
@@ -578,7 +579,7 @@ def _layernorm_mlp_forward_impl(
     ln_weight_cast = cast_if_needed(ln_weight, activation_dtype)
     if ln_bias is not None:
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
-    if is_cpu_offload_enabled():
+    if cpu_offloading:
         start_offload(inputmat)
 
     tp_world_size = get_distributed_world_size(tp_group)
@@ -597,11 +598,7 @@ def _layernorm_mlp_forward_impl(
     ub_overlap_rs = ub_overlap_rs and is_grad_enabled
 
     # Choose whether to use GEMM kernel with split accumulator
-    use_split_accumulator = _2X_ACC_FPROP
-    if fp8:
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if hasattr(recipe, "fp8_gemm_fprop"):
-            use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+    use_split_accumulator = args.fprop_use_split_accumulator
 
     # Configure quantizer for norm output
     if fp8:
@@ -847,12 +844,11 @@ def _layernorm_mlp_forward_impl(
     else:
         fc1_out, *_ = fc1_outputs
         if fp8:
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if recipe.float8_block_scaling():
+            if args.recipe_float8_block_scaling:
                 # tex.quantize does not support GELU fusion for blockwise
                 act_out = activation_func(fc1_out, None, **act_params)
                 act_out = tex.quantize(act_out, fc2_input_quantizer)
-            elif recipe.custom():
+            elif args.recipe_custom:
                 # tex.quantize does not support custom quantizers
                 act_out = activation_func(fc1_out, None, **act_params)
                 act_out = fc2_input_quantizer(act_out)
@@ -3190,6 +3186,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc1_weight_workspace = self._fp8_workspaces.get(cache_name_fc1)
                 fc2_weight_workspace = self._fp8_workspaces.get(cache_name_fc2)
 
+            fprop_use_split_accumulator = _2X_ACC_FPROP
             dgrad_use_split_accumulator = _2X_ACC_DGRAD
             wgrad_use_split_accumulator = _2X_ACC_WGRAD
             recipe_float8_block_scaling = False
@@ -3198,6 +3195,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if self.fp8:
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
                 backward_override = _recipe.backward_override
+                if hasattr(_recipe, "fp8_gemm_fprop"):
+                    fprop_use_split_accumulator = _recipe.fp8_gemm_fprop.use_split_accumulator
                 if hasattr(_recipe, "fp8_gemm_dgrad"):
                     dgrad_use_split_accumulator = _recipe.fp8_gemm_dgrad.use_split_accumulator
                 if hasattr(_recipe, "fp8_gemm_wgrad"):
@@ -3300,6 +3299,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fp8=self.fp8,
                 fp8_calibration=self.fp8_calibration,
                 backward_override=backward_override,
+                fprop_use_split_accumulator=fprop_use_split_accumulator,
                 dgrad_use_split_accumulator=dgrad_use_split_accumulator,
                 wgrad_use_split_accumulator=wgrad_use_split_accumulator,
                 recipe_float8_block_scaling=recipe_float8_block_scaling,

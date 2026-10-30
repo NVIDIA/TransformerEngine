@@ -156,6 +156,7 @@ class LayerNormLinearFwdArgs:
     fp8: bool
     fp8_calibration: bool
     backward_override: Optional[str]
+    fprop_use_split_accumulator: bool
     dgrad_use_split_accumulator: bool
     wgrad_use_split_accumulator: bool
     debug: bool
@@ -379,7 +380,7 @@ def _layernorm_linear_forward_impl(
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
     nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
 
-    if is_cpu_offload_enabled():
+    if cpu_offloading:
         start_offload(inputmat)
 
     tp_world_size = get_distributed_world_size(tp_group)
@@ -561,11 +562,7 @@ def _layernorm_linear_forward_impl(
             weight_quantizer.calibrate(weight)
 
     # Choose whether to use GEMM kernel with split accumulator
-    use_split_accumulator = _2X_ACC_FPROP
-    if fp8:
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if hasattr(recipe, "fp8_gemm_fprop"):
-            use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+    use_split_accumulator = args.fprop_use_split_accumulator
 
     # Configure output quantizer
     if output_quantizer is not None:
@@ -2504,11 +2501,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
             if cache_name is not None and not (use_compiled_op and is_first_microbatch):
                 weight_workspace = self._fp8_workspaces.get(cache_name)
 
+            fprop_use_split_accumulator = _2X_ACC_FPROP
             dgrad_use_split_accumulator = _2X_ACC_DGRAD
             wgrad_use_split_accumulator = _2X_ACC_WGRAD
             if self.fp8:
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
                 backward_override = _recipe.backward_override
+                if hasattr(_recipe, "fp8_gemm_fprop"):
+                    fprop_use_split_accumulator = _recipe.fp8_gemm_fprop.use_split_accumulator
                 if hasattr(_recipe, "fp8_gemm_dgrad"):
                     dgrad_use_split_accumulator = _recipe.fp8_gemm_dgrad.use_split_accumulator
                 if hasattr(_recipe, "fp8_gemm_wgrad"):
@@ -2595,6 +2595,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 fp8=self.fp8,
                 fp8_calibration=self.fp8_calibration,
                 backward_override=backward_override,
+                fprop_use_split_accumulator=fprop_use_split_accumulator,
                 dgrad_use_split_accumulator=dgrad_use_split_accumulator,
                 wgrad_use_split_accumulator=wgrad_use_split_accumulator,
                 debug=debug,

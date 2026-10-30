@@ -2076,13 +2076,13 @@ def test_to_tensor_spec_quantized(factory, shape, swizzled):
 def test_fake_norm_mxfp8_scale_layout(
     monkeypatch, normalization, with_2d_quantization, optimize_for_gemm, use_cudnn, shape, compact
 ):
-    """RMSNorm's 2D MXFP8 fallback preserves the quantizer's scale layout."""
+    """2D MXFP8 fallback preserves the quantizer's scale layout."""
     monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", str(int(use_cudnn)))
     quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3, with_2d_quantization=with_2d_quantization)
     quantizer.optimize_for_gemm = optimize_for_gemm
     inp = TensorSpec(shape=shape, dtype=torch.bfloat16, device=torch.device("cpu"))
     out, _, _ = fake_norm(inp, quantizer, normalization=normalization)
-    compact = compact and (normalization == "LayerNorm" or not with_2d_quantization)
+    compact = compact and not with_2d_quantization
     expected = optimize_for_gemm and not compact
     assert out.create_metadata()["nontensor_kwargs"]["with_gemm_swizzled_scales"] == expected
     assert out.create_tensor()._with_gemm_swizzled_scales == expected
@@ -2098,7 +2098,15 @@ def test_fake_norm_mxfp8_scale_layout(
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize(
     "fp8_recipe",
-    [None, *_all_recipes],
+    [
+        None,
+        *_all_recipes,
+        recipe.CustomRecipe(
+            qfactory=lambda _role: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            )
+        ),
+    ],
     ids=lambda r: "bf16" if r is None else type(r).__name__,
 )
 @pytest.mark.parametrize("module", _LINEAR_MODULES)

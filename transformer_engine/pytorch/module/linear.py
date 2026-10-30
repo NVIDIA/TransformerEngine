@@ -143,8 +143,11 @@ class LinearFwdArgs:
     fp8_output: bool
     save_original_input: bool
     backward_override: Optional[str]
+    fprop_use_split_accumulator: bool
     dgrad_use_split_accumulator: bool
     wgrad_use_split_accumulator: bool
+    recipe_custom: bool
+    fp8_recompute_forward: bool
     custom: bool
     debug: bool
 
@@ -324,7 +327,7 @@ def _linear_forward_impl(
         # to reuse the high-precision DPA output saved by attention backward. Validate
         # the resolved quantizer since this is not necessarily an informed user opt-in.
         if isinstance(input_quantizer, Float8Quantizer):
-            if FP8GlobalStateManager.get_fp8_recipe().custom():
+            if args.recipe_custom:
                 warnings.warn(
                     "save_original_input is incompatible with delayed-scaling quantizers "
                     "(Float8Quantizer). Disabling save_original_input for this module.",
@@ -448,7 +451,7 @@ def _linear_forward_impl(
             inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
         inputmat_total = inputmat
 
-    if is_cpu_offload_enabled():
+    if cpu_offloading:
         start_offload(inputmat)
     nvtx_range_pop(f"{nvtx_label}.input_cast_comm")
     # ------------------------------------------------------
@@ -477,10 +480,7 @@ def _linear_forward_impl(
             if backward_override is not None:
                 columnwise_usage = False
             if not columnwise_usage:
-                columnwise_usage = (
-                    is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                )
+                columnwise_usage = args.fp8_recompute_forward
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
         elif isinstance(weight, QuantizedTensor):
             weight_quantizer = weight._quantizer
@@ -519,11 +519,7 @@ def _linear_forward_impl(
             weight_quantizer.calibrate(weight)
 
     # Choose whether to use GEMM kernel with split accumulator
-    use_split_accumulator = _2X_ACC_FPROP
-    if fp8:
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if hasattr(recipe, "fp8_gemm_fprop"):
-            use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+    use_split_accumulator = args.fprop_use_split_accumulator
 
     # Configure output quantizer
     if output_quantizer is not None:
@@ -770,10 +766,7 @@ def _linear_forward_fake(
             if args.backward_override is not None:
                 columnwise_usage = False
             if not columnwise_usage:
-                columnwise_usage = (
-                    is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                )
+                columnwise_usage = args.fp8_recompute_forward
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
         elif weight.is_quantized:
             weight_quantizer = weight.quantizer
@@ -2364,15 +2357,20 @@ class Linear(TransformerEngineBaseModule):
             if cache_name is not None and not (use_compiled_op and is_first_microbatch):
                 weight_workspace = self._fp8_workspaces.get(cache_name)
 
+            fprop_use_split_accumulator = _2X_ACC_FPROP
             dgrad_use_split_accumulator = _2X_ACC_DGRAD
             wgrad_use_split_accumulator = _2X_ACC_WGRAD
+            recipe_custom = False
             if self.fp8:
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
                 backward_override = _recipe.backward_override
+                if hasattr(_recipe, "fp8_gemm_fprop"):
+                    fprop_use_split_accumulator = _recipe.fp8_gemm_fprop.use_split_accumulator
                 if hasattr(_recipe, "fp8_gemm_dgrad"):
                     dgrad_use_split_accumulator = _recipe.fp8_gemm_dgrad.use_split_accumulator
                 if hasattr(_recipe, "fp8_gemm_wgrad"):
                     wgrad_use_split_accumulator = _recipe.fp8_gemm_wgrad.use_split_accumulator
+                recipe_custom = _recipe.custom()
             else:
                 backward_override = None
             custom = is_custom(input_quantizer) or is_custom(weight_quantizer)
@@ -2428,8 +2426,14 @@ class Linear(TransformerEngineBaseModule):
                 fp8_output=fp8_output,
                 save_original_input=self.save_original_input,
                 backward_override=backward_override,
+                fprop_use_split_accumulator=fprop_use_split_accumulator,
                 dgrad_use_split_accumulator=dgrad_use_split_accumulator,
                 wgrad_use_split_accumulator=wgrad_use_split_accumulator,
+                recipe_custom=recipe_custom,
+                fp8_recompute_forward=(
+                    is_fp8_activation_recompute_enabled()
+                    and not in_fp8_activation_recompute_phase()
+                ),
                 custom=custom,
                 debug=debug,
                 # weight-workspace caching
