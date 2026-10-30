@@ -129,17 +129,17 @@ void check_symm_mem_required(const at::Tensor& t, const char* name) {
 #endif
 }
 
-// Validates a topk_idx dtype is int32 or int64 and returns the matching TE dtype.
-DType check_topk_idx_scalar_type(at::ScalarType dtype) {
+// Returns the TE dtype for a topk_idx torch dtype; errors unless int32 or int64.
+DType get_topk_idx_te_dtype(at::ScalarType dtype) {
   NVTE_CHECK(dtype == at::kLong || dtype == at::kInt,
              "topk_idx must be int32 or int64; got dtype=", c10::toString(dtype));
   return GetTransformerEngineDType(dtype);
 }
 
-// Validates topk_idx is a contiguous int32 or int64 tensor and returns the matching TE dtype.
-DType check_topk_idx_dtype(at::Tensor topk_idx) {
+// Returns the TE dtype of topk_idx; errors unless it is contiguous int32 or int64.
+DType get_contiguous_topk_idx_te_dtype(at::Tensor topk_idx) {
   NVTE_CHECK(topk_idx.is_contiguous(), "topk_idx must be contiguous");
-  return check_topk_idx_scalar_type(topk_idx.scalar_type());
+  return get_topk_idx_te_dtype(topk_idx.scalar_type());
 }
 
 using Shape = std::vector<size_t>;
@@ -213,9 +213,6 @@ void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t nu
       .num_topk = static_cast<int>(num_topk),
       .drop_on_overflow = drop_on_overflow ? 1 : 0,
   };
-  // PyTorch uses the *_v2 ops, which rebind a handle from handle_mem on every call, so the handle
-  // cache is not needed. Must precede nvte_ep_initialize; the cap is read on first use.
-  setenv("NVTE_EP_HANDLE_CACHE_SIZE", "0", 1);
   // Release the GIL only around the native init. It must stay held while pybind11 casts
   // the ``max_token_dtype`` object above and destroys the by-value ``pybind11::object``
   // parameter on return; releasing it across those trips pybind11's dec_ref GIL assertion.
@@ -264,7 +261,7 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
                 at::Tensor total_recv_tokens) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
-  auto idx_dtype = check_topk_idx_dtype(topk_idx);
+  auto idx_dtype = get_contiguous_topk_idx_te_dtype(topk_idx);
   // NCCL EP requires all prepare int output counters to share a dtype.
   NVTE_CHECK(tokens_per_expert.scalar_type() == at::kLong, "tokens_per_expert must be int64");
   NVTE_CHECK(total_recv_tokens.scalar_type() == at::kLong, "total_recv_tokens must be int64");
@@ -302,7 +299,7 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
   NVTE_CHECK(topk_weights.dim() >= 2, "topk_weights must be at least 2D [..., top_k]");
   NVTE_CHECK(recv_tokens.dim() >= 2, "recv_tokens must be at least 2D [..., recv_pr, H]");
-  auto idx_dtype = check_topk_idx_dtype(topk_idx);
+  auto idx_dtype = get_contiguous_topk_idx_te_dtype(topk_idx);
   NVTE_CHECK(tokens.is_contiguous(), "tokens must be contiguous");
   NVTE_CHECK(topk_weights.is_contiguous(), "topk_weights must be contiguous");
   NVTE_CHECK(recv_tokens.is_contiguous(), "recv_tokens must be contiguous");
@@ -403,7 +400,7 @@ void ep_prepare_and_dispatch_fused(at::Tensor handle_mem, at::Tensor topk_idx, a
   NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
   NVTE_CHECK(topk_weights.dim() >= 2, "topk_weights must be at least 2D [..., top_k]");
   NVTE_CHECK(recv_tokens.dim() >= 2, "recv_tokens must be at least 2D [..., recv_pr, H]");
-  auto idx_dtype = check_topk_idx_dtype(topk_idx);
+  auto idx_dtype = get_contiguous_topk_idx_te_dtype(topk_idx);
   NVTE_CHECK(tokens.is_contiguous(), "tokens must be contiguous");
   NVTE_CHECK(topk_weights.is_contiguous(), "topk_weights must be contiguous");
   NVTE_CHECK(topk_weights.scalar_type() == at::kFloat, "topk_weights must be float32");
@@ -591,7 +588,7 @@ void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result,
 
   NVTECommWindow expert_out_win = maybe_make_window(expert_out);
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
-                                  check_topk_idx_scalar_type(topk_idx_dtype));
+                                  get_topk_idx_te_dtype(topk_idx_dtype));
   nvte_ep_combine_v2(handle_mem_te.data(), expert_out_te.data(), expert_out_win, result_te.data(),
                      &layer_cfg, stream);
 }
@@ -636,7 +633,7 @@ void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_t
   NVTECommWindow grad_win = maybe_make_window(grad);
   NVTECommWindow g_recv_w_win = maybe_make_window(g_recv_topk_weights);
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
-                                  check_topk_idx_scalar_type(topk_idx_dtype));
+                                  get_topk_idx_te_dtype(topk_idx_dtype));
   nvte_ep_dispatch_bwd_v2(handle_mem_te.data(), grad_te.data(), grad_win, g_recv_w_te.data(),
                           g_recv_w_win, grad_tokens_te.data(), grad_topk_w_te.data(), &layer_cfg,
                           stream);
@@ -710,7 +707,7 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
     grad_expert_out_win.scale_offset = gesi_win.offset;
   }
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
-                                  check_topk_idx_scalar_type(topk_idx_dtype));
+                                  get_topk_idx_te_dtype(topk_idx_dtype));
   nvte_ep_combine_bwd_v2(handle_mem_te.data(), grad_te.data(), grad_win, grad_expert_out_te.data(),
                          grad_expert_out_win, &layer_cfg, stream);
 }

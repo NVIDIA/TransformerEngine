@@ -11,14 +11,14 @@
  *  Per layer: call nvte_ep_handle_mem_size(layer_cfg) for the buffer size;
  *  allocate handle_mem as a kByte NVTETensor. Per step: nvte_ep_prepare seeds
  *  routing, then nvte_ep_dispatch / nvte_ep_combine / _bwd consume it.
- *  Max live handles: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 = unlimited; 0 disables
- *  the cache, so handle_mem may be relocated between calls; the JAX and PyTorch extensions
- *  set 0). The *_v2 ops take the layer config explicitly, bind from handle_mem, and are
- *  required when the cache is disabled.
+ *  The handle cache is disabled by default, so handle_mem may be relocated between calls.
+ *  The *_v2 ops take the layer config explicitly and bind from handle_mem; they do not use
+ *  the cache.
  *
- *  Deprecated: the handle cache, NVTE_EP_HANDLE_CACHE_SIZE and the non-v2 per-step ops
- *  (nvte_ep_dispatch, nvte_ep_combine, nvte_ep_dispatch_bwd, nvte_ep_combine_bwd) will be
- *  removed in TE 3.0. Use the *_v2 ops.
+ *  Deprecated: the handle cache, NVTE_EP_HANDLE_CACHE_SIZE (max live handles; -1 = unlimited;
+ *  default 0 = disabled) and the non-v2 per-step ops (nvte_ep_dispatch, nvte_ep_combine,
+ *  nvte_ep_dispatch_bwd, nvte_ep_combine_bwd) will be removed in TE 3.0. The non-v2 ops
+ *  require the cache to be enabled via NVTE_EP_HANDLE_CACHE_SIZE. Use the *_v2 ops.
  */
 
 #ifndef TRANSFORMER_ENGINE_EP_H_
