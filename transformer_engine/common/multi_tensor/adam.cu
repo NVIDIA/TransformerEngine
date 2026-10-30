@@ -390,11 +390,6 @@ struct AdamCapturableFunctor {
                                              const float decay, const float *inv_scale_ptr) {
     if (*noop_gmem == 1) return;
 
-    // Note: Tensors are accessed through untyped pointers, so the compiler must assume that
-    // any store may alias any other memory access. To keep all of an iteration's loads in
-    // flight together, the device scalars are read once up front and the unscaled gradients
-    // are written back only after all loads are issued (but before the update, which modifies
-    // r_g in L2 mode). Unscaling by 1 is the identity, so the write-back is skipped then.
     const float lr = *lr_ptr;
     const float inv_scale = *inv_scale_ptr;
     const bool write_unscaled_grads = inv_scale != 1.0f;
@@ -501,7 +496,6 @@ struct AdamCapturableMasterFunctor {
                                              const float decay, const float *inv_scale_ptr) {
     if (*noop_gmem == 1) return;
 
-    // See note in AdamCapturableFunctor
     const float lr = *lr_ptr;
     const float inv_scale = *inv_scale_ptr;
     const bool write_unscaled_grads = inv_scale != 1.0f;
