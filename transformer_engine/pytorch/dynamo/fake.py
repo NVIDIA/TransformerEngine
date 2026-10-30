@@ -111,11 +111,11 @@ def fake_activation(
 
 
 @torch.compiler.assume_constant_result
-def _normalization_scale_layout_override(
+def _normalization_scale_layout(
     normalization: str, quantizer: Quantizer, use_cudnn: bool
 ) -> Optional[tuple[int, bool]]:
     """Return (alignment, swizzled scales), or None to keep the quantizer's layout."""
-    return tex.normalization_scale_layout_override(normalization, quantizer, use_cudnn)
+    return tex.normalization_scale_layout(normalization, quantizer, use_cudnn)
 
 
 def fake_norm(
@@ -134,7 +134,7 @@ def fake_norm(
     rows, cols = math.prod(input_.shape[:-1]), input_.shape[-1]
     if quantizer is not None:
         use_cudnn = bool(int(os.environ.get("NVTE_NORM_FWD_USE_CUDNN", "0") or "0"))
-        layout = _normalization_scale_layout_override(normalization, quantizer, use_cudnn)
+        layout = _normalization_scale_layout(normalization, quantizer, use_cudnn)
         if layout is not None:
             alignment, with_gemm_swizzled_scales = layout
             if rows % alignment == 0 and cols % alignment == 0:
