@@ -11,7 +11,7 @@ import pickle
 import warnings
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, Union
 from contextlib import contextmanager
 from types import MethodType
 
@@ -1395,7 +1395,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def _enable_weight_preswizzle(
         self,
         quantizer: Quantizer,
-        weight: torch.Tensor,
+        weight: Optional[torch.Tensor],
+        *,
+        weight_shape: Optional[Sequence[int]] = None,
     ) -> bool:
         """Whether to fuse scale-factor swizzling into weight quantization.
 
@@ -1412,7 +1414,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if isinstance(quantizer, MXFP8Quantizer):
             return True
         if isinstance(quantizer, NVFP4Quantizer):
-            rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+            shape = weight.shape if weight_shape is None else weight_shape
+            rows, cols = math.prod(shape[:-1]), shape[-1]
             arch_supported = get_device_compute_capability() >= (10, 0)
             if quantizer.with_rht:
                 return arch_supported and rows % 64 == 0 and cols % 128 == 0
