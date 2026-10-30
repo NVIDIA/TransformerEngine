@@ -20,6 +20,7 @@
 #include "../../util/math.h"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
+#include "specialized/gated_bidim.cuh"
 #include "swizzle.cuh"
 
 namespace transformer_engine {
@@ -846,6 +847,22 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
                     NVTE_CHECK_CUDA(
                         cudaMemsetAsync(output->columnwise_scale_inv.dptr, 0,
                                         output->columnwise_scale_inv.buffer_size_bytes(), stream));
+                  }
+                }
+              }
+
+              // gated_bidim replaces the kernel below for SwiGLU and its gradient from BF16 to
+              // E4M3 or E5M2 in both directions (see gated_bidim::can_use), writing the same
+              // bytes.
+              if constexpr (std::is_same_v<IType, bf16> &&
+                            (std::is_same_v<OType, fp8e4m3> || std::is_same_v<OType, fp8e5m2>) &&
+                            std::is_same_v<ParamOP, Empty>) {
+                if constexpr (ActOP == &silu<fp32, fp32> &&
+                              (!IS_BWD || DActOP == &dsilu<fp32, fp32>)) {
+                  if (gated_bidim::can_use(gated_input, grad, *output, IS_BWD)) {
+                    gated_bidim::quantize<IS_BWD, OType, WITH_GEMM_SWIZZLED_SCALES>(
+                        gated_input, grad, output, stream);
+                    return;
                   }
                 }
               }

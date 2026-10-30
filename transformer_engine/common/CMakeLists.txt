@@ -331,6 +331,7 @@ list(APPEND transformer_engine_cuda_sources
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      fused_attn/flash_attn.cu
+     activation/activation_table.cu
      activation/gelu.cu
      activation/gelu_dbias.cu
      activation/gelu_grouped.cu
@@ -771,7 +772,9 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
-  list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+  # activation_table.cu builds the tables from util/math.h, so it takes the kernels' flags.
+  list(APPEND nvte_sources_with_fast_math activation/activation_table.cu
+                                          activation/gelu.cu
                                           activation/gelu_dbias.cu
                                           activation/gelu_grouped.cu
                                           activation/gelu_grouped_bwd.cu
