@@ -25,7 +25,8 @@
 namespace transformer_engine::pytorch {
 
 // Framework owner for callers that keep a workspace across operations. Each
-// instance belongs to one device, with private common-layer slots per stream.
+// instance is used on one device and one CUDA stream. Callers provide a separate
+// owner for each independently executing stream.
 // Retired tensors remain alive for graphs
 // that captured earlier bindings; keep the owner alive for those graphs too.
 class WorkspaceOwner {
@@ -57,7 +58,7 @@ class WorkspaceOwner {
       NVTE_CHECK(capture_status == cudaStreamCaptureStatusNone,
                  "Prepare Workspace with the required shapes before CUDA graph capture.");
       // A changed layout needs fresh storage even when spare capacity exists:
-      // old streams/graphs can still be using the previous slot addresses.
+      // captured graphs can still be using the previous allocation.
       if (bytes > reserved_bytes_ || !storage_.defined()) {
         constexpr size_t max_bytes = std::numeric_limits<int64_t>::max();
         NVTE_CHECK(bytes <= max_bytes, "Workspace is too large for a PyTorch tensor.");

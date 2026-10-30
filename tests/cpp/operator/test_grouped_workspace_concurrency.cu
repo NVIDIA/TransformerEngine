@@ -25,6 +25,7 @@ using test::Tensor;
 constexpr size_t kGroups = 65;
 constexpr size_t kTile = 128;
 constexpr int kReplays = 20;
+constexpr int kStreams = 4;
 
 struct GroupData {
   std::vector<int64_t> rows, cols, offsets;
@@ -96,7 +97,7 @@ std::vector<unsigned char> read_bytes(void *data, size_t bytes) {
 // reference shared mutable device symbols when the last dimension varied.
 class GroupedWorkspaceConcurrency : public ::testing::TestWithParam<std::tuple<int, bool>> {};
 
-TEST_P(GroupedWorkspaceConcurrency, IndependentStreamSlots) {
+TEST_P(GroupedWorkspaceConcurrency, IndependentWorkspaces) {
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) GTEST_SKIP();
   const int operation = std::get<0>(GetParam());
   const bool capture = std::get<1>(GetParam());
@@ -109,12 +110,13 @@ TEST_P(GroupedWorkspaceConcurrency, IndependentStreamSlots) {
   const std::array<Backward, 5> backward = {nvte_group_dgelu_v2, nvte_group_dsilu_v2,
                                             nvte_group_drelu_v2, nvte_group_dqgelu_v2,
                                             nvte_group_dsrelu_v2};
-  std::array<std::unique_ptr<GroupData>, kMaxWorkspaceStreamSlots> data;
-  std::array<cudaStream_t, kMaxWorkspaceStreamSlots> streams{};
-  std::array<cudaGraph_t, kMaxWorkspaceStreamSlots> graphs{};
-  std::array<cudaGraphExec_t, kMaxWorkspaceStreamSlots> executions{};
-  std::array<std::vector<unsigned char>, kMaxWorkspaceStreamSlots> expected, expected_scales;
-  TensorWrapper workspace;
+  std::array<std::unique_ptr<GroupData>, kStreams> data;
+  std::array<cudaStream_t, kStreams> streams{};
+  std::array<cudaGraph_t, kStreams> graphs{};
+  std::array<cudaGraphExec_t, kStreams> executions{};
+  std::array<std::vector<unsigned char>, kStreams> expected, expected_scales;
+  std::array<TensorWrapper, kStreams> workspaces;
+  std::array<std::unique_ptr<Tensor>, kStreams> storage;
   auto launch = [&](int index, NVTETensor scratch, cudaStream_t stream) {
     auto &group = *data[index];
     if (operation < 5) {
@@ -126,7 +128,7 @@ TEST_P(GroupedWorkspaceConcurrency, IndependentStreamSlots) {
       nvte_group_dequantize_v2(group.output.data(), group.dequant_output.data(), scratch, stream);
     }
   };
-  for (int i = 0; i < kMaxWorkspaceStreamSlots; ++i) {
+  for (int i = 0; i < kStreams; ++i) {
     data[i] = std::make_unique<GroupData>(i);
     ASSERT_EQ(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking), cudaSuccess);
     if (operation == 10) {
@@ -140,12 +142,13 @@ TEST_P(GroupedWorkspaceConcurrency, IndependentStreamSlots) {
                              nullptr, streams[i]);
       ASSERT_EQ(cudaStreamSynchronize(streams[i]), cudaSuccess);
     }
+    auto &workspace = workspaces[i];
     launch(i, workspace.data(), streams[i]);
+    storage[i] = std::make_unique<Tensor>("workspace", workspace.shape(), workspace.dtype());
+    workspace.set_rowwise_data(storage[i]->rowwise_dptr(), workspace.dtype(), workspace.shape());
   }
-  Tensor storage("workspace", workspace.shape(), workspace.dtype());
-  workspace.set_rowwise_data(storage.rowwise_dptr(), workspace.dtype(), workspace.shape());
-  for (int i = 0; i < kMaxWorkspaceStreamSlots; ++i) {
-    launch(i, workspace.data(), streams[i]);
+  for (int i = 0; i < kStreams; ++i) {
+    launch(i, workspaces[i].data(), streams[i]);
     ASSERT_EQ(cudaStreamSynchronize(streams[i]), cudaSuccess);
     expected[i] =
         operation == 10
@@ -154,12 +157,12 @@ TEST_P(GroupedWorkspaceConcurrency, IndependentStreamSlots) {
     expected_scales[i] = read_bytes(data[i]->scales.rowwise_dptr(), data[i]->elements / 32);
     if (capture) {
       ASSERT_EQ(cudaStreamBeginCapture(streams[i], cudaStreamCaptureModeRelaxed), cudaSuccess);
-      launch(i, workspace.data(), streams[i]);
+      launch(i, workspaces[i].data(), streams[i]);
       ASSERT_EQ(cudaStreamEndCapture(streams[i], &graphs[i]), cudaSuccess);
       ASSERT_EQ(cudaGraphInstantiate(&executions[i], graphs[i], nullptr, nullptr, 0), cudaSuccess);
     }
   }
-  for (int i = 0; i < kMaxWorkspaceStreamSlots; ++i) {
+  for (int i = 0; i < kStreams; ++i) {
     // Prevent a missing consumer launch from passing with the warmup's output.
     ASSERT_EQ(cudaMemsetAsync(operation == 10 ? data[i]->dequantized.rowwise_dptr()
                                               : data[i]->quantized.rowwise_dptr(),
@@ -167,15 +170,15 @@ TEST_P(GroupedWorkspaceConcurrency, IndependentStreamSlots) {
               cudaSuccess);
   }
   for (int repeat = 0; repeat < kReplays; ++repeat) {
-    for (int i = kMaxWorkspaceStreamSlots - 1; i >= 0; --i) {
+    for (int i = kStreams - 1; i >= 0; --i) {
       if (capture) {
         ASSERT_EQ(cudaGraphLaunch(executions[i], streams[i]), cudaSuccess);
       } else {
-        launch(i, workspace.data(), streams[i]);
+        launch(i, workspaces[i].data(), streams[i]);
       }
     }
   }
-  for (int i = 0; i < kMaxWorkspaceStreamSlots; ++i) {
+  for (int i = 0; i < kStreams; ++i) {
     ASSERT_EQ(cudaStreamSynchronize(streams[i]), cudaSuccess);
     EXPECT_EQ(read_bytes(operation == 10 ? data[i]->dequantized.rowwise_dptr()
                                          : data[i]->quantized.rowwise_dptr(),

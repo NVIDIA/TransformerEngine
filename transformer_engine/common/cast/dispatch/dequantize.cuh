@@ -66,7 +66,7 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
     case NVTE_MXFP8_1D_SCALING: {
       if (is_supported_by_CC_100()) {
         common::dispatch_grouped_workspace(
-            workspace, common::grouped_tma_workspace_bytes(input), stream,
+            workspace, common::grouped_tma_workspace_bytes(input),
             [&](Tensor *scratch) { mxfp8::group_dequantize(&input, output, stream, scratch); });
       } else {
         NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");
@@ -75,7 +75,7 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
     }
     case NVTE_BLOCK_SCALING_1D:
     case NVTE_BLOCK_SCALING_2D: {
-      common::dispatch_grouped_workspace(workspace, 0, stream, [&](Tensor *scratch) {
+      common::dispatch_grouped_workspace(workspace, 0, [&](Tensor *scratch) {
         if (scratch != nullptr && scratch->data.dptr == nullptr) return;
         fp8_blockwise::group_dequantize(&input, output, stream);
       });

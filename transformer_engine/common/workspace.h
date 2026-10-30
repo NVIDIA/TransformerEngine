@@ -9,7 +9,6 @@
 
 #include <transformer_engine/workspace.h>
 
-#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -24,12 +23,9 @@ struct WorkspaceRegionRecord {
   std::string name;
   std::vector<unsigned char> key;
   WorkspaceBlock block;
-  // Additional stream slots follow block at this stride; zero for shared tables.
-  size_t slot_stride = 0;
   NVTEWorkspaceLifetime lifetime;
   uint64_t initialized_generation = 0;
   std::shared_ptr<cudaEvent_t> ready;
-  std::array<bool, kMaxWorkspaceStreamSlots> ready_streams{};
 };
 
 class Workspace;
@@ -51,7 +47,7 @@ class WorkspacePlan {
   std::vector<WorkspaceRegionRecord> regions_;
 };
 
-// Host-side catalog for a caller-owned device allocation. The owner serializes
+// Host-side catalog for a caller-owned, single-stream device allocation. The owner serializes
 // metadata access and keeps current/retired allocations alive for their users.
 class Workspace {
  public:
@@ -68,11 +64,8 @@ class Workspace {
   NVTEWorkspaceRegion find(const char *name, const void *key = nullptr, size_t key_size = 0) const;
   NVTEWorkspaceRegionInfo info(NVTEWorkspaceRegion region) const;
   void *data(NVTEWorkspaceRegion region) const;
-  void *data(NVTEWorkspaceRegion region, cudaStream_t stream);
   // Check the host reservation, never the size of the caller's allocation.
   NVTEWorkspaceRegion require_planned(const char *name, size_t bytes) const;
-  size_t stream_slot(cudaStream_t stream);
-  void begin_use(cudaStream_t stream) { stream_slot(stream); }
   bool initialized(NVTEWorkspaceRegion region) const;
   void mark_initialized(NVTEWorkspaceRegion region, cudaStream_t stream);
   void initialize(NVTEWorkspaceRegion region, cudaStream_t stream,
@@ -90,9 +83,6 @@ class Workspace {
   bool bound_ = false;
   uint64_t revision_ = 0;
   uint64_t generation_ = 0;
-  int device_ = -1;
-  size_t num_streams_ = 0;
-  std::array<uint64_t, kMaxWorkspaceStreamSlots> stream_ids_{};
 };
 
 }  // namespace transformer_engine

@@ -27,16 +27,15 @@ typedef struct NVTEWorkspacePlanImpl *NVTEWorkspacePlan;
 typedef uint64_t NVTEWorkspaceRegion;
 
 typedef enum {
-  /*! Temporary mutable storage, replicated for each stream slot. */
+  /*! Temporary mutable storage for the workspace's stream. */
   kNVTEWorkspaceScratch = 0,
-  /*! Shared immutable storage, initialized once per allocation/key. */
+  /*! Immutable storage, initialized once per allocation/key. */
   kNVTEWorkspacePersistent = 1,
-  /*! Retained mutable storage, replicated for each stream slot. */
+  /*! Retained mutable storage for the workspace's stream. */
   kNVTEWorkspaceStreamPersistent = 2,
 } NVTEWorkspaceLifetime;
 
-/*! Per-slot region reservation, in bytes; offset describes slot zero. Shared
- *  immutable regions have one copy, mutable regions have one copy per stream.
+/*! Region reservation, in bytes. Each region has exactly one copy.
  *  Name/key pointers are borrowed until the next
  *  layout commit or workspace destruction. Keys are compared byte for byte;
  *  producers must use a canonical encoding without uninitialized structure padding.
@@ -54,6 +53,9 @@ typedef struct {
 /*! Workspace metadata is attached lazily to an ordinary NVTETensor. Use
  *  nvte_create_tensor/nvte_destroy_tensor or TensorWrapper for its lifetime.
  *  Committing sets its rowwise shape/dtype to the required byte storage.
+ *  Each workspace is used by one CUDA stream. The caller manages stream selection,
+ *  ordering, and separate allocations for independent streams. Host access to a
+ *  workspace, including complete operation submission, must be serialized.
  *  Setting rowwise data through either tensor setter binds a new generation,
  *  even for the same address. Keep the tensor alive for all plans and uses.
  */
@@ -99,19 +101,10 @@ NVTEWorkspaceRegion nvte_workspace_find_region(NVTETensor workspace, const char 
                                                const void *key, size_t key_size);
 NVTEWorkspaceRegionInfo nvte_workspace_get_region_info(NVTETensor workspace,
                                                        NVTEWorkspaceRegion region);
-/*! Resolve base + offset (slot zero for mutable storage). Region zero is NULL.
- *  Use the stream-aware accessor for concurrent mutable consumers.
+/*! Resolve base + offset. Region zero is NULL. A workspace is used by one
+ *  CUDA stream; callers provide separate storage for independent streams.
  */
 void *nvte_workspace_get_region_data(NVTETensor workspace, NVTEWorkspaceRegion region);
-
-/*! Resolve the stream's private region, or a shared immutable region. Registers
- *  streams in first-use order, comparing CUDA stream IDs rather than handles or
- *  numeric ordering. Host calls using one workspace must be serialized.
- */
-void *nvte_workspace_get_region_data_on_stream(NVTETensor workspace, NVTEWorkspaceRegion region,
-                                               cudaStream_t stream);
-size_t nvte_workspace_get_stream_slot(NVTETensor workspace, cudaStream_t stream);
-size_t nvte_workspace_max_stream_slots(void);
 
 /*! Host callback that enqueues initialization on the supplied CUDA stream.
  *  It must not synchronize the device, re-enter this workspace, or retain data
@@ -121,25 +114,14 @@ size_t nvte_workspace_max_stream_slots(void);
  */
 typedef void (*NVTEWorkspaceInitializer)(void *data, size_t bytes, cudaStream_t stream,
                                          void *user_data);
-/*! Enqueue initialization once per binding/reservation, then establish table
- *  readiness in this stream with an event. Other streams wait only for the table
- *  producer, never for its later consumers. Prepare on every consuming stream
- *  before graph capture, with GPU initialization complete. No device allocation
- *  or host/GPU synchronization.
+/*! Enqueue initialization once per binding/reservation on the workspace's stream.
+ *  Later consumers on that stream are ordered after the initializer. Complete
+ *  initialization before graph capture. No device allocation or synchronization.
  */
 void nvte_workspace_initialize_region(NVTETensor workspace, NVTEWorkspaceRegion region,
                                       cudaStream_t stream, NVTEWorkspaceInitializer initializer,
                                       void *user_data);
 
-/*! Register a CUDA stream for this allocation generation. Up to
- *  nvte_workspace_max_stream_slots() distinct streams receive private mutable
- *  storage. Exceeding this limit throws without waiting or evicting a slot.
- *  Slots remain reserved until rebinding. Calls query stream identity but add no
- *  GPU dependencies. Host access, including an operation's complete enqueue
- *  sequence, is serialized by the caller. Prepare before graph capture; graphs
- *  retain their private storage even when replayed on another stream.
- */
-void nvte_workspace_begin_use(NVTETensor workspace, cudaStream_t stream);
 /*! True means initialization and its readiness event were enqueued for the
  *  current generation, not GPU completion. Only shared immutable regions can be
  *  marked initialized. Enqueue the producer successfully before marking; marking
@@ -154,10 +136,6 @@ void nvte_workspace_invalidate_region(NVTETensor workspace, NVTEWorkspaceRegion 
 }  // extern "C"
 
 namespace transformer_engine {
-
-/*! Maximum registered streams per workspace allocation. Slots are never evicted. */
-inline constexpr int kMaxWorkspaceStreamSlots = 4;
-static_assert(kMaxWorkspaceStreamSlots > 0, "Workspace requires at least one stream slot.");
 
 /*! Move-only owner of a layout plan, with no ownership of device storage. */
 class WorkspacePlanWrapper {
@@ -220,15 +198,9 @@ class WorkspaceWrapper {
   NVTEWorkspaceRegionInfo info(NVTEWorkspaceRegion region) const {
     return nvte_workspace_get_region_info(data(), region);
   }
-  void begin_use(cudaStream_t stream) { nvte_workspace_begin_use(data(), stream); }
-  size_t stream_slot(cudaStream_t stream) { return nvte_workspace_get_stream_slot(data(), stream); }
   template <typename T = unsigned char>
   T *get(NVTEWorkspaceRegion region) const {
     return static_cast<T *>(nvte_workspace_get_region_data(data(), region));
-  }
-  template <typename T = unsigned char>
-  T *get(NVTEWorkspaceRegion region, cudaStream_t stream) {
-    return static_cast<T *>(nvte_workspace_get_region_data_on_stream(data(), region, stream));
   }
   void initialize(NVTEWorkspaceRegion region, cudaStream_t stream,
                   NVTEWorkspaceInitializer initializer, void *user_data = nullptr) {

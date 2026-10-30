@@ -954,12 +954,12 @@ class TestGroupedTensor:
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     @pytest.mark.parametrize("capture", [False, True])
-    def test_group_quantize_workspace_owner_multiple_streams(self, capture: bool) -> None:
-        """One allocation isolates every stream's mutable descriptors and metadata."""
-        workspace = tex.Workspace()
+    def test_group_quantize_separate_workspaces_for_streams(self, capture: bool) -> None:
+        """The caller supplies an independent workspace for each stream."""
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=True)
-        streams = [torch.cuda.Stream() for _ in range(workspace.max_stream_slots)]
+        streams = [torch.cuda.Stream() for _ in range(5)]
+        workspaces = [tex.Workspace() for _ in streams]
         num_tensors = 65
         inputs, metadata, expected = [], [], []
         for index in range(len(streams)):
@@ -977,17 +977,19 @@ class TestGroupedTensor:
             expected.append(tex.group_quantize(tensor, quantizer, num_tensors, rows, cols))
         torch.cuda.synchronize()
         outputs, graphs = [], []
-        # Register streams in reverse creation order. The same shapes/group count
-        # reuse one allocation, irrespective of stream handle values.
+        # Each owner allocates only the storage needed by its stream.
         for index in reversed(range(len(streams))):
             with torch.cuda.stream(streams[index]):
                 outputs.append(
                     tex.group_quantize(
-                        inputs[index], quantizer, num_tensors, *metadata[index], workspace=workspace
+                        inputs[index],
+                        quantizer,
+                        num_tensors,
+                        *metadata[index],
+                        workspace=workspaces[index],
                     )
                 )
-        generation = workspace.generation
-        assert generation == 1
+        assert all(workspace.generation == 1 for workspace in workspaces)
         for stream in streams:
             stream.synchronize()
         if capture:
@@ -996,7 +998,11 @@ class TestGroupedTensor:
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph, stream=stream):
                     outputs[index] = tex.group_quantize(
-                        inputs[index], quantizer, num_tensors, *metadata[index], workspace=workspace
+                        inputs[index],
+                        quantizer,
+                        num_tensors,
+                        *metadata[index],
+                        workspace=workspaces[index],
                     )
                 graphs.append(graph)
         for _ in range(20):
@@ -1010,25 +1016,22 @@ class TestGroupedTensor:
                             quantizer,
                             num_tensors,
                             *metadata[index],
-                            workspace=workspace,
+                            workspace=workspaces[index],
                         )
         for stream in streams:
             stream.synchronize()
-        assert workspace.generation == generation
+        assert all(workspace.generation == 1 for workspace in workspaces)
         for actual, reference in zip(outputs, expected):
             for name in ("rowwise_data", "columnwise_data", "scale_inv", "columnwise_scale_inv"):
                 assert torch.equal(getattr(actual, name), getattr(reference, name)), name
-        extra = torch.cuda.Stream()
-        with torch.cuda.stream(extra), pytest.raises(RuntimeError, match="registered CUDA streams"):
-            tex.group_quantize(inputs[0], quantizer, num_tensors, *metadata[0], workspace=workspace)
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_group_quantize_workspace_growth_keeps_old_graph_slots(self) -> None:
-        """Growth preserves old graph storage while a new stream uses the new layout."""
+    def test_group_quantize_workspace_growth_keeps_old_graph_storage(self) -> None:
+        """Growth preserves storage used by graphs captured on the owner's stream."""
         workspace = tex.Workspace()
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=True)
-        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        stream = torch.cuda.Stream()
         results, references, graphs, sources = [], [], [], []
         for index, count in enumerate((3, 129)):
             first, last = [128] * count, [128] * count
@@ -1042,19 +1045,19 @@ class TestGroupedTensor:
             cols = torch.tensor(last, device="cuda", dtype=torch.int64)
             sources.append((tensor, rows, cols))
             references.append(tex.group_quantize(tensor, quantizer, count, rows, cols))
-            streams[index].wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(streams[index]):
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
                 tex.group_quantize(tensor, quantizer, count, rows, cols, workspace=workspace)
-            streams[index].synchronize()
+            stream.synchronize()
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=streams[index]):
+            with torch.cuda.graph(graph, stream=stream):
                 results.append(
                     tex.group_quantize(tensor, quantizer, count, rows, cols, workspace=workspace)
                 )
             graphs.append(graph)
         assert workspace.generation == 2
         for _ in range(10):
-            for stream, graph in zip(streams, graphs):
+            for graph in graphs:
                 with torch.cuda.stream(stream):
                     graph.replay()
         torch.cuda.synchronize()

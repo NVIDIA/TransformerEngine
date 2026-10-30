@@ -10,9 +10,9 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
-#include <thread>
 
 #include "util/workspace.h"
 
@@ -32,7 +32,7 @@ __global__ void consume_table(const int *table, int *output) {
   output[threadIdx.x] = table[threadIdx.x] * kConsumerMultiplier;
 }
 
-__global__ void hold_stream(int *gate, unsigned long long max_cycles) {
+__global__ void hold_stream(int *gate, uint64_t max_cycles) {
   const auto start = clock64();
   while (atomicAdd(gate, 0) == 0 && clock64() - start < max_cycles)
     __nanosleep(kGatePollSleepNanoseconds);
@@ -73,43 +73,38 @@ class WorkspaceGpuTest : public ::testing::Test {
     ASSERT_EQ(cudaMalloc(&buffer_, workspace.size()), cudaSuccess);
     workspace.bind(buffer_);
   }
-  std::array<cudaStream_t, kMaxWorkspaceStreamSlots + 1> streams_{};
+  std::array<cudaStream_t, 2> streams_{};
   void *buffer_ = nullptr;
 };
 
-TEST_F(WorkspaceGpuTest, SharedLazyTableAcrossStreamsAndGenerations) {
+TEST_F(WorkspaceGpuTest, LazyTableAcrossGenerations) {
   WorkspaceWrapper workspace;
   auto plan = workspace.plan();
   const auto table = plan.require("activation", kTableBytes, kNVTEWorkspacePersistent);
   const auto scratch = plan.require("scratch", kTableBytes);
   allocate(workspace, plan);
   Initializer initializer;
+  auto stream = streams_[0];
   for (int iteration = 0; iteration < 3; ++iteration) {
     if (iteration == 1) workspace.bind(buffer_);
     if (iteration == 2) workspace.invalidate(table);
     ++initializer.value;
-    for (int slot = 0; slot < kMaxWorkspaceStreamSlots; ++slot) {
-      auto stream = streams_[kMaxWorkspaceStreamSlots - slot - 1];
-      workspace.initialize(table, stream, Initializer::enqueue, &initializer);
-      consume_table<<<1, kTableElements, 0, stream>>>(workspace.get<int>(table, stream),
-                                                      workspace.get<int>(scratch, stream));
-    }
+    workspace.initialize(table, stream, Initializer::enqueue, &initializer);
+    workspace.initialize(table, stream, Initializer::enqueue, &initializer);
+    consume_table<<<1, kTableElements, 0, stream>>>(workspace.get<int>(table),
+                                                    workspace.get<int>(scratch));
     EXPECT_EQ(initializer.calls, iteration + 1);
-    for (int slot = 0; slot < kMaxWorkspaceStreamSlots; ++slot) {
-      auto stream = streams_[kMaxWorkspaceStreamSlots - slot - 1];
-      ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
-      std::array<int, kTableElements> output;
-      ASSERT_EQ(cudaMemcpy(output.data(), workspace.get<int>(scratch, stream), sizeof(output),
-                           cudaMemcpyDeviceToHost),
-                cudaSuccess);
-      for (auto value : output) EXPECT_EQ(value, kConsumerMultiplier * initializer.value);
-    }
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    std::array<int, kTableElements> output;
+    ASSERT_EQ(cudaMemcpy(output.data(), workspace.get<int>(scratch), sizeof(output),
+                         cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    for (auto value : output) EXPECT_EQ(value, kConsumerMultiplier * initializer.value);
   }
 }
 
-TEST_F(WorkspaceGpuTest, TableReadinessDoesNotWaitForProducerConsumers) {
+TEST_F(WorkspaceGpuTest, CaptureRejectsPendingInitialization) {
   constexpr auto kGateTimeout = std::chrono::seconds(5);
-  constexpr auto kStatusPollInterval = std::chrono::milliseconds(1);
   // cudaDevAttrClockRate is in kHz, so cycles = clock_khz * elapsed milliseconds.
   constexpr auto kGateTimeoutMilliseconds =
       std::chrono::duration_cast<std::chrono::milliseconds>(kGateTimeout).count();
@@ -123,7 +118,6 @@ TEST_F(WorkspaceGpuTest, TableReadinessDoesNotWaitForProducerConsumers) {
   WorkspaceWrapper workspace;
   auto plan = workspace.plan();
   const auto table = plan.require("activation", kTableBytes, kNVTEWorkspacePersistent);
-  const auto scratch = plan.require("scratch", kTableBytes);
   allocate(workspace, plan);
   int *gate = nullptr;
   ASSERT_EQ(cudaMalloc(&gate, sizeof(int)), cudaSuccess);
@@ -141,29 +135,10 @@ TEST_F(WorkspaceGpuTest, TableReadinessDoesNotWaitForProducerConsumers) {
     EXPECT_EQ(cudaFree(address), cudaSuccess);
   };
   std::unique_ptr<int, decltype(release)> gate_guard(gate, release);
-  cudaEvent_t producer_done, consumer_done;
-  ASSERT_EQ(cudaEventCreateWithFlags(&producer_done, cudaEventDisableTiming), cudaSuccess);
-  ASSERT_EQ(cudaEventCreateWithFlags(&consumer_done, cudaEventDisableTiming), cudaSuccess);
   Initializer initializer;
-  workspace.initialize(table, streams_[0], Initializer::enqueue, &initializer);
   hold_stream<<<1, 1, 0, streams_[0]>>>(
-      gate, static_cast<unsigned long long>(clock_khz) * kGateTimeoutMilliseconds);
-  ASSERT_EQ(cudaEventRecord(producer_done, streams_[0]), cudaSuccess);
-  workspace.initialize(table, streams_[1], Initializer::enqueue, &initializer);
-  consume_table<<<1, kTableElements, 0, streams_[1]>>>(workspace.get<int>(table, streams_[1]),
-                                                       workspace.get<int>(scratch, streams_[1]));
-  ASSERT_EQ(cudaEventRecord(consumer_done, streams_[1]), cudaSuccess);
-  const auto deadline = std::chrono::steady_clock::now() + kGateTimeout;
-  cudaError_t consumer_status;
-  do {
-    consumer_status = cudaEventQuery(consumer_done);
-    if (consumer_status != cudaErrorNotReady) break;
-    std::this_thread::sleep_for(kStatusPollInterval);
-  } while (std::chrono::steady_clock::now() < deadline);
-  const auto producer_status = cudaEventQuery(producer_done);
-  // A pre-capture wait is not retained by a graph replayed on another stream.
-  // Re-enqueue a table producer behind the gate and reject capture until ready.
-  workspace.invalidate(table);
+      gate, static_cast<uint64_t>(clock_khz) * kGateTimeoutMilliseconds);
+  // Initialization is queued behind the gate on the workspace's stream.
   fill_table<<<1, kTableElements, 0, streams_[0]>>>(workspace.get<int>(table), initializer.value);
   workspace.mark_initialized(table, streams_[0]);
   ASSERT_EQ(cudaStreamBeginCapture(streams_[0], cudaStreamCaptureModeRelaxed), cudaSuccess);
@@ -174,49 +149,39 @@ TEST_F(WorkspaceGpuTest, TableReadinessDoesNotWaitForProducerConsumers) {
   EXPECT_EQ(cudaGraphDestroy(empty), cudaSuccess);
   // Always release the gate before assertions/cleanup, including on regression.
   gate_guard.reset();
-  EXPECT_EQ(consumer_status, cudaSuccess);
-  EXPECT_EQ(producer_status, cudaErrorNotReady);
-  EXPECT_EQ(initializer.calls, 1);
-  EXPECT_EQ(cudaEventDestroy(producer_done), cudaSuccess);
-  EXPECT_EQ(cudaEventDestroy(consumer_done), cudaSuccess);
+  EXPECT_EQ(initializer.calls, 0);
 }
 
-TEST_F(WorkspaceGpuTest, PreparedImmutableTableSupportsIndependentGraphs) {
+TEST_F(WorkspaceGpuTest, PreparedImmutableTableSupportsGraph) {
   WorkspaceWrapper workspace;
   auto plan = workspace.plan();
   const auto table = plan.require("activation", kTableBytes, kNVTEWorkspacePersistent);
   const auto scratch = plan.require("scratch", kTableBytes);
   allocate(workspace, plan);
   Initializer initializer;
-  std::array<cudaGraph_t, kMaxWorkspaceStreamSlots> graphs{};
-  std::array<cudaGraphExec_t, kMaxWorkspaceStreamSlots> executables{};
-  for (int slot = 0; slot < kMaxWorkspaceStreamSlots; ++slot) {
-    workspace.initialize(table, streams_[slot], Initializer::enqueue, &initializer);
-    ASSERT_EQ(cudaStreamSynchronize(streams_[slot]), cudaSuccess);
-    ASSERT_EQ(cudaStreamBeginCapture(streams_[slot], cudaStreamCaptureModeRelaxed), cudaSuccess);
-    workspace.initialize(table, streams_[slot], Initializer::enqueue, &initializer);
-    consume_table<<<1, kTableElements, 0, streams_[slot]>>>(
-        workspace.get<int>(table, streams_[slot]), workspace.get<int>(scratch, streams_[slot]));
-    ASSERT_EQ(cudaStreamEndCapture(streams_[slot], &graphs[slot]), cudaSuccess);
-    ASSERT_EQ(cudaGraphInstantiate(&executables[slot], graphs[slot], nullptr, nullptr, 0),
-              cudaSuccess);
-  }
+  auto stream = streams_[0];
+  workspace.initialize(table, stream, Initializer::enqueue, &initializer);
+  ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+  cudaGraph_t graph;
+  cudaGraphExec_t executable;
+  ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed), cudaSuccess);
+  workspace.initialize(table, stream, Initializer::enqueue, &initializer);
+  consume_table<<<1, kTableElements, 0, stream>>>(workspace.get<int>(table),
+                                                  workspace.get<int>(scratch));
+  ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
+  ASSERT_EQ(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0), cudaSuccess);
   constexpr int kGraphReplays = 5;
   for (int repeat = 0; repeat < kGraphReplays; ++repeat) {
-    for (int slot = 0; slot < kMaxWorkspaceStreamSlots; ++slot) {
-      ASSERT_EQ(cudaGraphLaunch(executables[slot], streams_[slot]), cudaSuccess);
-    }
+    ASSERT_EQ(cudaGraphLaunch(executable, stream), cudaSuccess);
   }
-  for (int slot = 0; slot < kMaxWorkspaceStreamSlots; ++slot) {
-    ASSERT_EQ(cudaStreamSynchronize(streams_[slot]), cudaSuccess);
-    std::array<int, kTableElements> output;
-    ASSERT_EQ(cudaMemcpy(output.data(), workspace.get<int>(scratch, streams_[slot]), sizeof(output),
-                         cudaMemcpyDeviceToHost),
-              cudaSuccess);
-    for (auto value : output) EXPECT_EQ(value, kConsumerMultiplier * initializer.value);
-    EXPECT_EQ(cudaGraphExecDestroy(executables[slot]), cudaSuccess);
-    EXPECT_EQ(cudaGraphDestroy(graphs[slot]), cudaSuccess);
-  }
+  ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+  std::array<int, kTableElements> output;
+  ASSERT_EQ(cudaMemcpy(output.data(), workspace.get<int>(scratch), sizeof(output),
+                       cudaMemcpyDeviceToHost),
+            cudaSuccess);
+  for (auto value : output) EXPECT_EQ(value, kConsumerMultiplier * initializer.value);
+  EXPECT_EQ(cudaGraphExecDestroy(executable), cudaSuccess);
+  EXPECT_EQ(cudaGraphDestroy(graph), cudaSuccess);
   EXPECT_EQ(initializer.calls, 1);
 }
 
