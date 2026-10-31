@@ -68,17 +68,33 @@ from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias_dscales,
 )
 
-
 # Keys for passing caller-provided output and grad-input buffers to a grouped
 # linear (or fused grouped MLP) through Sequential's ``op_kwargs``.
 OUTPUT_BUFFER_KEY = "output"
 GRAD_INPUT_BUFFER_KEY = "grad_input"
 
 
+def _default_split_alignment(
+    recipe: Optional[Recipe], device: Optional[torch.device] = None
+) -> int:
+    """Choose the split-size alignment required by grouped quantization and GEMM."""
+    if recipe is not None:
+        if recipe.mxfp8() or recipe.nvfp4() or recipe.float8_block_scaling():
+            return 128
+        if recipe.float8_current_scaling():
+            if device is None:
+                device = torch.device("cuda", torch.cuda.current_device())
+            if (9, 0) <= get_device_compute_capability(device) < (10, 0):
+                # Hopper uses transposed FP8 columnwise data for wgrad, making each
+                # split the cuBLASLt leading dimension (16-byte alignment required).
+                return 16
+    return 1
+
+
 def is_op_fuser_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
-    split_alignment: int = 128,
+    split_alignment: Optional[int] = None,
     device: Optional[torch.device] = None,
 ) -> bool:
     """Whether the op-fuser grouped-tensor path supports this recipe and dtype.
@@ -114,6 +130,8 @@ def is_op_fuser_grouped_tensor_path_supported(
     device_index = device.index if device is not None else None
     if device_index is None:
         device_index = torch.cuda.current_device()
+    if split_alignment is None:
+        split_alignment = _default_split_alignment(recipe, torch.device("cuda", device_index))
     return _is_op_fuser_grouped_tensor_path_supported(
         type(recipe) if recipe is not None else None,
         getattr(recipe, "disable_rht", None),
@@ -185,7 +203,7 @@ class GroupedLinear(BasicOperation):
 
     The grouped-tensor path is selected automatically where it is
     supported (see ``is_op_fuser_grouped_tensor_path_supported``). With
-    MXFP8 or FP8 block scaling, it relies on every split size being a
+    MXFP8, NVFP4, or FP8 block scaling, it relies on every split size being a
     multiple of 128, as ``split_alignment`` declares.
 
     Parameters
@@ -230,9 +248,10 @@ class GroupedLinear(BasicOperation):
         additional extra input and adds ``bias * scales`` instead of ``bias``
         in the forward pass. The scale tensor has shape
         ``(total_tokens,)`` and is split according to the split sizes.
-    split_alignment : int, default = ``128``
-        Expected alignment for input split sizes. Split sizes that do not
-        match alignment may produce errors or incorrect results.
+    split_alignment : int or None, default = ``None``
+        Expected alignment for input split sizes. If omitted, the alignment
+        is 128 for MXFP8, NVFP4, and FP8 block scaling, 16 for FP8 current
+        scaling on Hopper, and 1 otherwise.
     """
 
     # Operation expects input split sizes (and optionally scales tensor)
@@ -253,7 +272,7 @@ class GroupedLinear(BasicOperation):
         single_grouped_bias: bool = False,
         delay_wgrad_compute: bool = False,
         scale_bias: bool = False,
-        split_alignment: int = 128,
+        split_alignment: Optional[int] = None,
     ) -> None:
         # Decide before BasicOperation.__init__ sizes _extra_input_channels.
         self._scale_bias: bool = scale_bias and bias
@@ -272,12 +291,13 @@ class GroupedLinear(BasicOperation):
         self.single_grouped_weight: bool = single_grouped_weight
         self.single_grouped_bias: bool = single_grouped_bias
         self.use_bias: bool = bias
-        if not isinstance(split_alignment, int) or isinstance(split_alignment, bool):
-            raise TypeError(
-                f"split_alignment must be an int (got {type(split_alignment).__name__})"
-            )
-        if split_alignment <= 0:
-            raise ValueError(f"split_alignment must be positive (got {split_alignment})")
+        if split_alignment is not None:
+            if not isinstance(split_alignment, int) or isinstance(split_alignment, bool):
+                raise TypeError(
+                    f"split_alignment must be an int (got {type(split_alignment).__name__})"
+                )
+            if split_alignment <= 0:
+                raise ValueError(f"split_alignment must be positive (got {split_alignment})")
         if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) > 0:
             warnings.warn(
                 "NVTE_CUTEDSL_FUSED_GROUPED_MLP is deprecated; pass "
@@ -286,7 +306,7 @@ class GroupedLinear(BasicOperation):
                 stacklevel=2,
             )
             split_alignment = 256
-        self.split_alignment: int = split_alignment
+        self.split_alignment: Optional[int] = split_alignment
         if self.num_groups <= 0:
             raise ValueError(f"Invalid number of groups ({self.num_groups})")
         if self.in_features <= 0:
@@ -347,6 +367,15 @@ class GroupedLinear(BasicOperation):
         self._accumulate_into_main_grad: bool = accumulate_into_main_grad
 
         self._apply_delay_wgrad_param_hooks()
+
+    def _resolve_split_alignment(
+        self, recipe: Optional[Recipe], device: Optional[torch.device] = None
+    ) -> int:
+        """Resolve the declared alignment for the active compute recipe."""
+        if self.split_alignment is not None:
+            # The constructor has already applied any environment override.
+            return self.split_alignment
+        return _default_split_alignment(recipe, device)
 
     def register_parameter(
         self,
@@ -1120,10 +1149,11 @@ class GroupedLinear(BasicOperation):
         # quantization recipe. Otherwise we fall back to the legacy
         # ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
         recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        split_alignment = self._resolve_split_alignment(recipe, device)
         use_grouped_tensor_path = is_op_fuser_grouped_tensor_path_supported(
             recipe,
             dtype,
-            self.split_alignment,
+            split_alignment,
             device=device,
         )
         if (self.single_grouped_weight or self.single_grouped_bias) and not use_grouped_tensor_path:
@@ -1147,6 +1177,7 @@ class GroupedLinear(BasicOperation):
                 split_sizes=split_sizes,
                 scales=scales,
                 with_quantized_compute=with_quantized_compute,
+                split_alignment=split_alignment,
                 input_quantizer=self.get_quantizer("forward", 0),
                 weight_quantizers=weight_quantizers,
                 dtype=dtype,
@@ -1390,6 +1421,7 @@ class GroupedLinear(BasicOperation):
         split_sizes: torch.Tensor,
         scales: Optional[torch.Tensor],
         with_quantized_compute: bool,
+        split_alignment: int,
         input_quantizer: Optional[Quantizer],
         weight_quantizers: Sequence[Optional[Quantizer]],
         dtype: torch.dtype,
@@ -1407,7 +1439,7 @@ class GroupedLinear(BasicOperation):
             include_leading_zero=[False, True, True, True],
             dtypes=[torch.int32, torch.int64, torch.int64, torch.int64],
             bulk_allocate=True,
-            split_alignment=self.split_alignment,
+            split_alignment=split_alignment,
         )
         split_points = grouped_tensor_offsets[0]
         base_split_offsets = grouped_tensor_offsets[1]
