@@ -1,0 +1,103 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+"""Learned projections and normalization around cuDNN compression."""
+
+import torch
+
+from transformer_engine.pytorch.module import Linear, RMSNorm
+
+from .dsa_cudnn import compress
+
+
+class Compressor(torch.nn.Module):
+    """Project KV/gates, compress token windows with cuDNN, and apply RMSNorm.
+
+    Non-overlapping compression combines each block of ``ratio`` tokens into
+    one compressed KV entry. Overlapping compression mixes the current block
+    with the entire preceding block to create one compressed KV entry, using
+    separate learned KV/gate projections for the current and preceding blocks.
+    Neighboring compressed KV entries therefore share an entire source block,
+    but use different projections of its tokens.
+    Weights are computed per KV channel as ``softmax(gates + position_bias)``.
+
+    For ``ratio=2`` and ``[a b c d e f g h i j k]``:
+
+    - Non-overlapping windows: ``[a b]``, ``[c d]``, ``[e f]``, ``[g h]``, ``[i j]``.
+    - Overlapping windows: ``[a b]``, ``[a b c d]``, ``[c d e f]``,
+      ``[e f g h]``, ``[g h i j]``.
+
+    The first overlapping entry masks the missing previous block. Both modes emit
+    ``floor(length / ratio)`` entries per sequence; incomplete trailing blocks
+    (``k`` here) are excluded from compression. In DSv4Attention, these tokens
+    remain available through local sliding-window attention.
+
+    Accept batch-major ``[B,S,D]`` or packed ``[T,D]`` hidden states with
+    token/compressed prefixes. Return ``[total_comp,width]`` rows before RoPE,
+    plus projected head weights when ``weight_width`` is nonzero in fused mode.
+    """
+
+    def __init__(
+        self,
+        hidden_size,
+        width,
+        ratio,
+        overlap,
+        eps,
+        device,
+        params_dtype,
+        *,
+        fused=False,
+        weight_width=0,
+    ):
+        super().__init__()
+        if weight_width and not fused:
+            raise ValueError("weight_width requires fused=True.")
+        projected = width * (2 if overlap else 1)
+        kw = {"bias": False, "device": device, "params_dtype": params_dtype}
+        if fused:
+            # Fuse the KV, gate, and optional index-weight projections of x.
+            # Keep one contiguous weight for the shared projection call.
+            self.fused_proj = Linear(hidden_size, 2 * projected + weight_width, **kw)
+        else:
+            self.kv_proj = Linear(hidden_size, projected, **kw)
+            self.gate_proj = Linear(hidden_size, projected, **kw)
+        self.position_bias = torch.nn.Parameter(
+            torch.zeros(ratio, projected, device=device, dtype=params_dtype)
+        )
+        self.kv_norm = RMSNorm(width, eps=eps, device=device, dtype=params_dtype)
+        self.ratio, self.overlap = ratio, overlap
+        self.projected, self.weight_width = projected, weight_width
+
+    def forward(self, x, cu_seqlens, cu_seqlens_comp, *, total_comp):
+        """Project and compress KV entries, returning optional fused index weights."""
+        if hasattr(self, "fused_proj"):
+            projected = self.fused_proj(x)
+            widths = (
+                (self.projected, self.projected, self.weight_width)
+                if self.weight_width
+                else (self.projected, self.projected)
+            )
+            parts = projected.split(widths, dim=-1)
+            kv, gate = parts[:2]
+        else:
+            kv, gate = self.kv_proj(x), self.gate_proj(x)
+        compressed_kv = compress(
+            kv.reshape(-1, self.projected).contiguous(),
+            gate.reshape(-1, self.projected).contiguous(),
+            # cuDNN requires FP32 bias; the cast preserves gradients to the parameter.
+            self.position_bias.float(),
+            cu_seqlens,
+            cu_seqlens_comp,
+            ratio=self.ratio,
+            overlap=self.overlap,
+            total_comp=total_comp,
+        )
+        if x.ndim == 2:
+            # cuDNN only guarantees valid rows below the final prefix. Clear
+            # unused capacity before RMSNorm so it cannot poison weight gradients.
+            valid = torch.arange(total_comp, device=x.device) < cu_seqlens_comp[-1]
+            compressed_kv = compressed_kv.masked_fill(~valid[:, None], 0)
+        compressed = self.kv_norm(compressed_kv)
+        return (compressed, parts[2]) if self.weight_width else compressed
