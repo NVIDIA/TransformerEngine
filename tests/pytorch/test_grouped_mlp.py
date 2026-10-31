@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import nullcontext
 import functools
 import os
 import math
@@ -12,6 +13,7 @@ import random
 import sys
 import types
 from typing import Optional
+from unittest.mock import Mock
 
 import pytest
 
@@ -21,7 +23,9 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.ops.fused.grouped_mlp as grouped_mlp_module
 from transformer_engine.pytorch.ops.fuser import OperationFuser
+from transformer_engine.pytorch.ops._common import is_quantized_tensor
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
+    GroupedMLP_CuTeGEMMGLU,
     _cudnn_frontend_supports_grouped_gemm_situglu,
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_at_least,
@@ -38,10 +42,12 @@ from transformer_engine.pytorch import (
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
     MXFP8Quantizer,
+    MXFP8Tensor,
     NVFP4Quantizer,
     QuantizerRole,
     is_bf16_available,
 )
+from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
@@ -483,6 +489,87 @@ class TestGroupedLinearOp:
             op.register_parameter(f"weight{group_idx}", None)
 
         assert grouped_weight.skip_backward_post_hook
+
+    @pytest.mark.parametrize("num_groups", [1, 8])
+    @pytest.mark.parametrize("accumulate_into_main_grad", [False, True])
+    @pytest.mark.parametrize("delay_wgrad_compute", [False, True])
+    def test_wgrad_storage_and_hooks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        num_groups: int,
+        accumulate_into_main_grad: bool,
+        delay_wgrad_compute: bool,
+    ) -> None:
+        """Check independent wgrad storage, external main_grad views, and delayed hooks."""
+        from transformer_engine.pytorch.ops.basic import grouped_linear as gl
+
+        if not is_op_fuser_grouped_tensor_path_supported(None, torch.bfloat16):
+            pytest.skip("Native grouped GEMM is unavailable.")
+        op = te.ops.GroupedLinear(
+            num_groups,
+            128,
+            128,
+            bias=False,
+            device="cuda",
+            dtype=torch.bfloat16,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            delay_wgrad_compute=delay_wgrad_compute,
+        )
+        model = te.ops.Sequential(op)
+        flat = torch.full((num_groups, 128, 128), 0.25, device="cuda", dtype=torch.float32)
+        weights = [getattr(op, f"weight{i}") for i in range(num_groups)]
+        for i, weight in enumerate(weights):
+            with torch.no_grad():
+                weight.fill_(1)
+            if accumulate_into_main_grad:
+                # Use views of an external flat buffer to check that GEMM preserves aliases.
+                weight.main_grad = flat[i]
+                weight.overwrite_main_grad = False
+                weight.grad_added_to_main_grad = False
+        x = torch.full(
+            (num_groups * 128, 128), 0.125, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        splits = torch.full((num_groups,), 128, device="cuda", dtype=torch.int64)
+        seen = []
+        original = gl.general_grouped_gemm_for_grouped_tensor
+
+        def gemm(a, b, out, **kwargs):
+            if kwargs.get("layout") == "NT":
+                assert len(out) == num_groups
+                num_storages = len({g.untyped_storage().data_ptr() for g in out})
+                assert num_storages == (1 if accumulate_into_main_grad else num_groups)
+                assert len({g.data_ptr() for g in out}) == num_groups
+                if accumulate_into_main_grad:
+                    assert out[0].data_ptr() == flat.data_ptr()
+                else:
+                    assert all(g._base is None for g in out)
+                seen.append(out)
+            return original(a, b, out, **kwargs)
+
+        monkeypatch.setattr(gl, "general_grouped_gemm_for_grouped_tensor", gemm)
+        hook = Mock()
+        op.register_wgrad_accumulation_and_reduce_hooks(hook)
+        y = model(x, splits)
+        torch.testing.assert_close(y, torch.full_like(y, 16), rtol=0, atol=0)
+        y.backward(torch.full_like(y, 0.5))
+        if delay_wgrad_compute:
+            assert not seen
+            hook.assert_not_called()
+            op.backward_dw()
+            hook.assert_called_once()
+        assert len(seen) == 1
+        if accumulate_into_main_grad:
+            MegatronTrainingHelper.verify_main_grad_accumulation(
+                weights,
+                expected_main_grads=[torch.full_like(flat[i], 8.25) for i in range(num_groups)],
+            )
+            for i, weight in enumerate(weights):
+                assert weight.main_grad.data_ptr() == flat[i].data_ptr()
+        else:
+            for weight in weights:
+                torch.testing.assert_close(
+                    weight.grad, torch.full_like(weight.grad, 8), rtol=0, atol=0
+                )
 
     def test_single_grouped_bias_uses_registered_packed_storage(self) -> None:
         """The grouped bias compute view must alias the registered trainable parent."""
@@ -3288,6 +3375,475 @@ class TestGroupedMLPFusedOp:
         else:
             for graph_grad, param in zip(graph_param_grads, reference_module.parameters()):
                 assert_close(graph_grad, param.grad, **tols)
+
+    # (group_size, tokens_per_group): token counts chosen so the quantized inputs' byte sizes
+    # never coincide with a weight's, which the saved-tensor counting below relies on.
+    @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+    @pytest.mark.parametrize("group_size,tokens_per_group", ((1, 768), (4, 256)))
+    def test_nvfp4_saves_columnwise_inputs_only(
+        self,
+        group_size: int,
+        tokens_per_group: int,
+        *,
+        hidden_size: int = 256,
+        glu_interleave_size: int = 32,
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cuda",
+    ) -> None:
+        """The fused grouped MLP must not save the NVFP4 rowwise input copies for backward.
+
+        Every wgrad path (the cuDNN grouped kernel, the single-group dense GEMM and the generic
+        grouped GEMM fallback) reads only the columnwise tiles (data and scales) of the saved FC1
+        and FC2 inputs, so the rowwise copies are dead after forward. Saving them doubled the
+        activation memory held (and offloaded) for the quantized inputs.
+
+        Checked through ``saved_tensors_hooks``: the saved set must hold exactly one FP4 data
+        tensor and one scale tensor per quantized input. Grouped storage is saved as its raw
+        buffers; the single-group dense path (cuDNN frontend >= 1.27) instead saves a
+        ``GroupedTensor`` wrapper whose buffers are inspected directly.
+
+        Weights require grad here: with frozen weights the input quantizers skip the columnwise
+        copy and the fused op's ``mark_grouped_tensor`` call rejects the input before the pruning
+        is reached.
+        """
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("Fused grouped MLP (CuTeDSL) is not supported on this system")
+
+        total_tokens = group_size * tokens_per_group
+        split_sizes = torch.tensor([tokens_per_group] * group_size, dtype=torch.int, device=device)
+        # The fused grouped MLP requires a split alignment divisible by 256 (the default is 128).
+        fc1 = te.ops.GroupedLinear(
+            group_size,
+            hidden_size,
+            2 * hidden_size,
+            bias=False,
+            device=device,
+            dtype=dtype,
+            split_alignment=256,
+        )
+        fc2 = te.ops.GroupedLinear(
+            group_size,
+            hidden_size,
+            hidden_size,
+            bias=False,
+            device=device,
+            dtype=dtype,
+            split_alignment=256,
+        )
+        module = te.ops.Sequential(
+            fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
+        )
+        x = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+        x.requires_grad_()
+        probs = torch.rand((total_tokens,), dtype=dtype, device=device)
+        dy = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+
+        saved = []
+
+        def pack(t):
+            if isinstance(t, GroupedTensor):
+                # Dense single-group path: the wrapper is saved whole, so count its buffers.
+                assert t.rowwise_data is None, "rowwise FP4 input data was saved"
+                assert t.scale_inv is None, "rowwise FP4 input scales were saved"
+                for buf in (t.columnwise_data, t.columnwise_scale_inv):
+                    if buf is not None:
+                        saved.append((buf.dtype, buf.numel()))
+            elif isinstance(t, torch.Tensor):
+                saved.append((t.dtype, t.numel()))
+            return t
+
+        with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+            with te.autocast(enabled=True, recipe=make_recipe("nvfp4_rht")):
+                y = module(x, split_sizes, probs, split_sizes)
+        forward_ops = module._module_groups[0]._forward_ops
+        assert isinstance(forward_ops[0][0], te.ops.fused.GroupedMLP_CuTeGEMMGLU)
+
+        # Byte counts that identify the quantized FC1/FC2 inputs (both are [tokens, hidden_size]
+        # in NVFP4: 2 elements per byte, one E4M3 scale per 16 elements). Weights have other
+        # sizes.
+        fp4_data_numel = total_tokens * hidden_size // 2
+        fp4_scale_numel = total_tokens * hidden_size // 16
+        n_data = sum(1 for d, n in saved if d == torch.uint8 and n == fp4_data_numel)
+        n_scale = sum(1 for d, n in saved if d == torch.uint8 and n == fp4_scale_numel)
+        # One columnwise data + one columnwise scale tensor per quantized input (FC1 x, FC2 x).
+        assert n_data == 2, f"expected 2 FP4 input data tensors saved, got {n_data}"
+        assert n_scale == 2, f"expected 2 FP4 input scale tensors saved, got {n_scale}"
+
+        # Backward still runs on what was saved.
+        y.backward(dy)
+        assert x.grad is not None and torch.isfinite(x.grad).all()
+        for p in module.parameters():
+            assert p.grad is not None and torch.isfinite(p.grad).all()
+
+
+# ---------------------------------------------------------------------------------------------
+# DistributedWeight dispatch in the fused grouped MLP.
+#
+# ``test_ops_grouped_linear_distributed_weight.py`` covers the unfused ``ops.GroupedLinear``
+# path. The fused op has its own weight plumbing, so it is covered here with the same kind of
+# in-repo fake:
+#
+#   * A DistributedWeight whose shards are plain BF16 (e.g. a Megatron GTP expert under a
+#     per-module MXFP8 recipe, which creates no native-quantized params) gathers as BF16. The
+#     fused op must gather *before* quantizing in forward, and in backward must quantize the
+#     re-gathered BF16 weight before the dgrad GEMMs read quantized storage.
+#   * A DistributedWeight whose shards are native-quantized gathers as quantized tensors, which
+#     must pass through unchanged (no re-quantization).
+#
+# The per-module recipe is MXFP8 entered inside a global NVFP4 autocast, mirroring how Megatron
+# applies a ``--te-precision-config-file`` override around a fused expert MLP.
+#
+# As in the unfused test, the fakes apply distinct power-of-two scales in the materialize hooks
+# so the gathered weights are observably the ones the GEMMs consumed. A power-of-two scale
+# commutes exactly through MXFP8 quantization (E8M0 block scales shift, E4M3 data is unchanged)
+# and through BF16 rounding, so the scale relations below hold bit-exactly. FC1 gets no forward
+# scale because the activation between the two GEMMs is nonlinear.
+# ---------------------------------------------------------------------------------------------
+
+# Distinct powers of two: each commutes exactly through quantization and BF16 rounding.
+_DIST_FC1_BWD_SCALE = 2.0
+_DIST_FC2_FWD_SCALE = 4.0
+_DIST_FC2_BWD_SCALE = 8.0
+
+
+def _mxfp8_quantize(tensor: torch.Tensor) -> MXFP8Tensor:
+    """Native-quantized stand-in: both usages, like a shard the module's own quantizer created."""
+    quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    return quantizer(tensor)
+
+
+class _FakeDistWeight(torch.nn.Parameter):
+    """Single-process fake DistributedWeight shard of a routed-expert group.
+
+    Every shard of the group is one of these (as with a real implementer such as GTP); only the
+    leader (``weight0``) carries ``weight_list``/``_group`` and is called back by the op.
+    ``materialize_group_for_forward`` / ``materialize_group_for_backward`` return the whole
+    group's "gathered" weights scaled by ``fwd_scale`` / ``bwd_scale``: plain BF16 tensors (a
+    BF16 shard all-gather) or MXFP8 tensors when ``gather_quantized`` (a native-quantized shard
+    all-gather). ``finalize_group_grads`` models the main-grad contract: accumulate the wgrads
+    into each shard's ``main_grad`` in-place and return dummies that the op discards.
+    ``grad_buffer`` hands the wgrad GEMM a fresh full-shape buffer in the compute dtype.
+    """
+
+    is_distributed_weight = True
+    # The fused op only takes the distributed path for a routed-expert group leader.
+    is_routed_expert = True
+
+    def _gathered(self, scale: float):
+        gathered = [w.detach() * scale for w in self._group]
+        if self.gather_quantized:
+            gathered = [_mxfp8_quantize(w) for w in gathered]
+        return gathered
+
+    def materialize_group_for_forward(self):
+        self.calls["fwd"] += 1
+        return self._gathered(self.fwd_scale)
+
+    def materialize_group_for_backward(self, **kwargs):
+        self.calls["bwd"] += 1
+        return self._gathered(self.bwd_scale)
+
+    def finalize_group_grads(self, wgrads, **kwargs):
+        self.calls["finalize"] += 1
+        wl = list(wgrads) if isinstance(wgrads, (list, tuple)) else [wgrads]
+        for w, g in zip(self._group, wl):
+            w.main_grad.add_(g.to(w.main_grad.dtype))
+            w.grad_added_to_main_grad = True
+        return [torch.zeros_like(g) for g in wl]
+
+    def grad_buffer(self):
+        return torch.empty_like(self.data)
+
+
+def _make_fake_dist_leader(op, num_gemms, *, fwd_scale, bwd_scale, gather_quantized):
+    """Turn ``op.weight{i}`` into fake distributed shards; return the leader (``weight0``)."""
+    shards = []
+    for i in range(num_gemms):
+        shard = _FakeDistWeight(getattr(op, f"weight{i}").data)
+        shard.main_grad = torch.zeros_like(shard, dtype=torch.float32)
+        shard.grad_added_to_main_grad = False  # DDP initializes this on every param
+        setattr(op, f"weight{i}", shard)
+        shards.append(shard)
+    leader = shards[0]
+    leader.calls = {"fwd": 0, "bwd": 0, "finalize": 0}
+    leader.fwd_scale = fwd_scale
+    leader.bwd_scale = bwd_scale
+    leader.gather_quantized = gather_quantized
+    leader._group = shards
+    leader.weight_list = shards  # routed-expert group membership, asserted by the op
+    return leader
+
+
+def _skip_unless_fused_mxfp8_supported(device: str, dtype: torch.dtype) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if not GroupedMLP_CuTeGEMMGLU.is_supported():
+        pytest.skip("Fused grouped MLP (CuTeDSL) is not supported on this system")
+    if dtype != torch.bfloat16:
+        pytest.skip("Fused grouped MLP requires BF16 data")
+
+
+def _make_dist_grouped_mlp(
+    group_size, hidden_size, split_alignment, glu_interleave_size, dtype, device
+):
+    fc1 = te.ops.GroupedLinear(
+        group_size,
+        hidden_size,
+        2 * hidden_size,
+        bias=False,
+        device=device,
+        dtype=dtype,
+        split_alignment=split_alignment,
+    )
+    fc2 = te.ops.GroupedLinear(
+        group_size,
+        hidden_size,
+        hidden_size,
+        bias=False,
+        device=device,
+        dtype=dtype,
+        split_alignment=split_alignment,
+    )
+    module = te.ops.Sequential(
+        fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
+    )
+    return module, fc1, fc2
+
+
+def _assert_fused(module) -> None:
+    forward_ops = module._module_groups[0]._forward_ops
+    assert len(forward_ops) == 1
+    assert isinstance(forward_ops[0][0], GroupedMLP_CuTeGEMMGLU)
+
+
+class TestGroupedMLPDistributedWeight:
+    """DistributedWeight (e.g. GTP) dispatch in the fused grouped MLP; see the notes above."""
+
+    @pytest.mark.parametrize("outer_recipe", (None, "nvfp4"))
+    @pytest.mark.parametrize("gather_quantized", (False, True))
+    def test_fused_grouped_mlp_distributed_weight(
+        self,
+        outer_recipe,
+        gather_quantized,
+        *,
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+        glu_interleave_size: int = 32,
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cuda",
+    ) -> None:
+        """Fused grouped MLP with distributed weights: gather-then-quantize in fwd and bwd.
+
+        ``gather_quantized=False`` is the BF16-shard case (per-module MXFP8 without
+        native-quantized params); ``gather_quantized=True`` is the native-quantized-shard case,
+        whose gathered tensors must pass through. ``outer_recipe="nvfp4"`` wraps the per-module
+        MXFP8 autocast in a global NVFP4 one, as Megatron does for an overridden expert MLP.
+        """
+        _skip_unless_fused_mxfp8_supported(device, dtype)
+        if outer_recipe == "nvfp4" and not nvfp4_available:
+            pytest.skip(reason_for_no_nvfp4)
+        torch.manual_seed(0)
+
+        split_sizes = torch.tensor(
+            [split_alignment, 2 * split_alignment, split_alignment, 2 * split_alignment],
+            dtype=torch.int,
+            device=device,
+        )
+        assert split_sizes.numel() == group_size
+        total_tokens = int(split_sizes.sum().item())
+
+        module, fc1, fc2 = _make_dist_grouped_mlp(
+            group_size, hidden_size, split_alignment, glu_interleave_size, dtype, device
+        )
+        reference, ref_fc1, ref_fc2 = _make_dist_grouped_mlp(
+            group_size, hidden_size, split_alignment, glu_interleave_size, dtype, device
+        )
+        reference.load_state_dict(module.state_dict())
+
+        fc1_leader = _make_fake_dist_leader(
+            fc1,
+            group_size,
+            fwd_scale=1.0,
+            bwd_scale=_DIST_FC1_BWD_SCALE,
+            gather_quantized=gather_quantized,
+        )
+        fc2_leader = _make_fake_dist_leader(
+            fc2,
+            group_size,
+            fwd_scale=_DIST_FC2_FWD_SCALE,
+            bwd_scale=_DIST_FC2_BWD_SCALE,
+            gather_quantized=gather_quantized,
+        )
+
+        x = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+        x.requires_grad_(True)
+        ref_x = x.detach().clone().requires_grad_(True)
+        probs = torch.rand((total_tokens,), dtype=dtype, device=device)
+        dy = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+
+        mxfp8_recipe = make_recipe("mxfp8")
+        outer = make_recipe(outer_recipe) if outer_recipe is not None else None
+
+        def _run(mod, inp):
+            outer_ctx = (
+                te.autocast(enabled=True, recipe=outer) if outer is not None else nullcontext()
+            )
+            # Per-module MXFP8 override entered inside the global autocast (Megatron's pattern).
+            with outer_ctx, te.autocast(enabled=True, recipe=mxfp8_recipe):
+                y = mod(inp, split_sizes, probs, split_sizes)
+            y.backward(dy)
+            return y.detach()
+
+        out = _run(module, x)
+        ref_out = _run(reference, ref_x)
+
+        # The CuTeDSL fused op was formed on both (not the unfused fallback).
+        _assert_fused(module)
+        _assert_fused(reference)
+
+        # Every dispatch hook fired on both groups.
+        for leader in (fc1_leader, fc2_leader):
+            assert (
+                leader.calls["fwd"] > 0 and leader.calls["bwd"] > 0 and leader.calls["finalize"] > 0
+            )
+
+        # fwd used the gathered FC2 weights (scale commutes exactly through quantization).
+        torch.testing.assert_close(out, _DIST_FC2_FWD_SCALE * ref_out, rtol=0, atol=0)
+        # dgrad used the re-gathered FC2 and FC1 weights.
+        torch.testing.assert_close(
+            x.grad, _DIST_FC1_BWD_SCALE * _DIST_FC2_BWD_SCALE * ref_x.grad, rtol=0, atol=0
+        )
+        # wgrads were reduce-scattered into main_grad: FC2's does not depend on the weight
+        # scales, FC1's sees the FC2-backward scale through the activation gradient.
+        tols = dtype_tols(dtype)
+        for i in range(group_size):
+            fc2_w, ref_fc2_w = getattr(fc2, f"weight{i}"), getattr(ref_fc2, f"weight{i}")
+            fc1_w, ref_fc1_w = getattr(fc1, f"weight{i}"), getattr(ref_fc1, f"weight{i}")
+            torch.testing.assert_close(fc2_w.main_grad.to(dtype), ref_fc2_w.grad, **tols)
+            torch.testing.assert_close(
+                fc1_w.main_grad.to(dtype), _DIST_FC2_BWD_SCALE * ref_fc1_w.grad, **tols
+            )
+            for w in (fc1_w, fc2_w):
+                assert w.grad_added_to_main_grad is True
+                assert w.grad is not None, "distributed weights receive a dummy .grad"
+
+    def test_quantize_unquantized_weights_passes_through_quantized(
+        self,
+        *,
+        group_size: int = 2,
+        hidden_size: int = 128,
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cuda",
+    ) -> None:
+        """Already-quantized gathered weights are returned as-is; plain ones are quantized."""
+        from transformer_engine.pytorch.ops.fused.grouped_mlp import _quantize_unquantized_weights
+
+        _skip_unless_fused_mxfp8_supported(device, dtype)
+        torch.manual_seed(0)
+        module, fc1, fc2 = _make_dist_grouped_mlp(group_size, hidden_size, 256, 32, dtype, device)
+        split_sizes = torch.tensor([256] * group_size, dtype=torch.int, device=device)
+        total_tokens = int(split_sizes.sum().item())
+        x = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+        probs = torch.rand((total_tokens,), dtype=dtype, device=device)
+
+        # A forward initializes the op's per-expert weight quantizers for the recipe.
+        with te.autocast(enabled=True, recipe=make_recipe("mxfp8")):
+            module(x, split_sizes, probs, split_sizes)
+            pre_quantized = _mxfp8_quantize(fc2.weight0.detach())
+            plain = fc2.weight1.detach()
+            quantizers = [fc2.get_quantizer("forward", 2 * idx + 1) for idx in range(group_size)]
+            out = _quantize_unquantized_weights(
+                [pre_quantized, plain], quantizers, rowwise=True, columnwise=True
+            )
+
+        assert out[0] is pre_quantized, "quantized gathered weight must pass through unchanged"
+        assert is_quantized_tensor(out[1]), "BF16 gathered weight must be quantized"
+        torch.testing.assert_close(
+            out[1]._rowwise_data, _mxfp8_quantize(plain)._rowwise_data, rtol=0, atol=0
+        )
+
+    @pytest.mark.parametrize("later_recipe", (None, "nvfp4"), ids=["no-recipe", "nvfp4"])
+    def test_backward_after_recipe_change(
+        self,
+        later_recipe,
+        *,
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+        glu_interleave_size: int = 32,
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cuda",
+    ) -> None:
+        """Backward must quantize re-gathered BF16 weights with the quantizers saved in forward.
+
+        A later forward under another recipe (or none) resets the ops' quantizers before the
+        earlier backward runs, as with pipelined microbatches or a module shared across recipe
+        scopes. Read from the live op, backward would hit ``None`` (``later_recipe=None``) or
+        quantize the MXFP8 graph's weights in the wrong format (``later_recipe="nvfp4"``).
+        """
+        _skip_unless_fused_mxfp8_supported(device, dtype)
+        if later_recipe == "nvfp4" and not nvfp4_available:
+            pytest.skip(reason_for_no_nvfp4)
+        torch.manual_seed(0)
+
+        split_sizes = torch.tensor(
+            [split_alignment, 2 * split_alignment, split_alignment, 2 * split_alignment],
+            dtype=torch.int,
+            device=device,
+        )
+        assert split_sizes.numel() == group_size
+        total_tokens = int(split_sizes.sum().item())
+
+        module, fc1, fc2 = _make_dist_grouped_mlp(
+            group_size, hidden_size, split_alignment, glu_interleave_size, dtype, device
+        )
+        reference, ref_fc1, ref_fc2 = _make_dist_grouped_mlp(
+            group_size, hidden_size, split_alignment, glu_interleave_size, dtype, device
+        )
+        reference.load_state_dict(module.state_dict())
+        for fc in (fc1, fc2, ref_fc1, ref_fc2):
+            # BF16 shards: the gathered weights are what backward has to quantize.
+            _make_fake_dist_leader(
+                fc, group_size, fwd_scale=1.0, bwd_scale=1.0, gather_quantized=False
+            )
+
+        x = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+        x.requires_grad_(True)
+        ref_x = x.detach().clone().requires_grad_(True)
+        probs = torch.rand((total_tokens,), dtype=dtype, device=device)
+        dy = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+        mxfp8_recipe = make_recipe("mxfp8")
+
+        with te.autocast(enabled=True, recipe=mxfp8_recipe):
+            out = module(x, split_sizes, probs, split_sizes)
+            ref_out = reference(ref_x, split_sizes, probs, split_sizes)
+        _assert_fused(module)
+        ref_out.backward(dy)
+
+        # Another forward on the same module before its backward, under a different recipe.
+        later_ctx = (
+            te.autocast(enabled=True, recipe=make_recipe(later_recipe))
+            if later_recipe is not None
+            else nullcontext()
+        )
+        with torch.no_grad(), later_ctx:
+            module(x, split_sizes, probs, split_sizes)
+        if later_recipe is None:
+            assert fc1.get_quantizer("forward", 1) is None, "later forward did not reset quantizers"
+        else:
+            assert not isinstance(fc1.get_quantizer("forward", 1), MXFP8Quantizer)
+
+        out.backward(dy)
+
+        torch.testing.assert_close(out, ref_out, rtol=0, atol=0)
+        torch.testing.assert_close(x.grad, ref_x.grad, rtol=0, atol=0)
+        for i in range(group_size):
+            for fc, ref_fc in ((fc1, ref_fc1), (fc2, ref_fc2)):
+                w, ref_w = getattr(fc, f"weight{i}"), getattr(ref_fc, f"weight{i}")
+                torch.testing.assert_close(w.main_grad, ref_w.main_grad, rtol=0, atol=0)
 
 
 class TestGroupedMLPDeterminism:

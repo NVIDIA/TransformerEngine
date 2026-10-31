@@ -13,6 +13,7 @@ import functools
 import torch
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
 from ..utils import (
@@ -796,7 +797,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 qt._amax_rowwise,
                 qt._amax_columnwise,
             ):
-                if t is not None and t.is_cuda:
+                if t is not None and t.device.type == te_device_type():
                     t.record_stream(stream)
             return None
 
@@ -954,7 +955,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         """
 
         # Tensor device
-        new_device = tensor.device if tensor.is_cuda else self.device
+        new_device = tensor.device if tensor.device.type == te_device_type() else self.device
         if not devices_match(new_device, tensor.device):
             tensor = tensor.to(device=new_device)
 

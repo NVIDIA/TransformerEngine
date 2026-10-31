@@ -985,14 +985,24 @@ def _register_base_op(
     ``pack_result``.
     """
 
+    def _pack_on_input_device(result: Any, flat: Sequence[Any]) -> List[torch.Tensor]:
+        device = torch.device("cpu")
+        for tensor in tree_flatten(flat)[0]:
+            if isinstance(tensor, torch.Tensor) and tensor.device.type != "cpu":
+                device = tensor.device
+                break
+        # Keep None sentinels on the op device for CUDA Graph partitioning.
+        with device:
+            return pack_result(result)
+
     def _impl(*flat: Any) -> List[torch.Tensor]:
         obj = plan.unpack(dict(zip(plan.slot_names, flat)))
-        return pack_result(impl(obj))
+        return _pack_on_input_device(impl(obj), flat)
 
     def _fake(*flat: Any) -> List[torch.Tensor]:
         obj = plan.unpack(dict(zip(plan.slot_names, flat)))
         spec_obj = _spec_view(obj, plan.tensor_field_names())
-        return pack_result(fake_impl(spec_obj))
+        return _pack_on_input_device(fake_impl(spec_obj), flat)
 
     op = torch.library.custom_op(
         f"{_TE_OP_NAMESPACE}::{op_name}", _impl, mutates_args=(), schema=schema_str, tags=tags

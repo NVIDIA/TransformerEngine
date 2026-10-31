@@ -11,6 +11,7 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.device import te_device_type
 from ...dynamo import TensorOrQuantized, TensorSpec
 from ...dynamo.fake import fake_bgrad
 from ...quantization import FP8GlobalStateManager
@@ -115,7 +116,7 @@ class Bias(BasicOperation):
 
         # Make sure parameter is initialized
         bias = self.bias
-        if bias.device.type != "cuda":
+        if bias.device.type != te_device_type():
             bias = torch.empty_like(bias, device=self.device)
         else:
             bias = bias.to(device=self.device)

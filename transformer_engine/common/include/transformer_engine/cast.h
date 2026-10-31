@@ -93,6 +93,7 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
  *         The type of quantized tensor in the output depends on the scaling mode of the output
  *         tensor. See file level comments.
  *         For grouped tensors with a varying last dimension, the last dimension must be a multiple of 128.
+ *         NVFP4 output requires row scaling, BF16 input, and dimensions that are multiples of 128.
  *
  *  \param[in]     input            Input grouped tensor to be cast.
  *  \param[in,out] output           Output grouped tensor.
@@ -494,22 +495,7 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
                                          const NVTEQuantizationConfig quant_config,
                                          cudaStream_t stream);
 
-/*! \brief Computes per-expert rowwise and/or columnwise amax for a grouped
- *         row-scaled NVFP4 input in a single kernel launch.
- *
- *  The input is one packed (sum_M, K) BF16 buffer; `split_sections` gives the
- *  per-expert row counts (each a multiple of 128) and K must also be a multiple
- *  of 128. For expert i the rowwise amax [M_i] is written to `outputs[i]->amax`
- *  and the columnwise amax [K] to `outputs[i]->columnwise_amax`, whichever are
- *  allocated; experts may opt into either direction independently (a null buffer
- *  is skipped).
- *
- *  \param[in]      input           Packed grouped input tensor (BF16).
- *  \param[in,out]  outputs         Per-expert output tensors receiving the amax vectors.
- *  \param[in]      split_sections  Per-expert row counts.
- *  \param[in]      num_tensors     Number of output tensors.
- *  \param[in]      stream          CUDA stream used for the operation.
- */
+/*! \deprecated Use nvte_group_amax instead. */
 void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
                                    const size_t *split_sections, size_t num_tensors,
                                    cudaStream_t stream);
