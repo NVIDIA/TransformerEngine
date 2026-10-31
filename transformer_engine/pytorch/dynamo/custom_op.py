@@ -18,7 +18,7 @@ The autograd-free API preserves nested tensor results; the autograd-wired API
 keeps its saved-tensor and context-metadata contract.
 
 A ``torch.library`` custom op is narrower: it only accepts flat schema slots
-(tensors plus opaque objects) and returns a flat ``Tensor[]``.
+(tensors, symbolic shapes and opaque objects) and returns a flat ``Tensor[]``.
 
 Bridging the two takes three parts (below): a parsed per-op *arg plan* maps the
 args dataclass onto the op's input slots; a per-trace *output plan*, parsed from
@@ -37,7 +37,8 @@ on each call. The kinds -- and how each represents its field as op inputs:
   * ``TENSOR_OR_QUANTIZED`` -- a field that may be a plain tensor, a bare
     quantized storage, or ``None``: three slots (the tensor, its flat inner
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
-  * ``SIMPLE`` -- every remaining simple value (scalars, enums, sizes,
+  * ``SHAPE`` -- a ``torch.Size`` / ``Optional[torch.Size]``: one ``SymInt[]`` slot.
+  * ``SIMPLE`` -- every remaining simple value (scalars, enums,
     quantizers -- value-opaque constants baked into the graph -- and nested
     collections of them), gathered into one shared ``OpaqueValueBundle`` slot.
   * ``PROCESS_GROUP`` -- rides in the shared bundle too, as its c10d registry
@@ -66,8 +67,8 @@ Autograd, registered on the op, drives backward:
     forward state + ``ctx_attrs`` (e.g. saved-tensor aliases) and return the
     tensors to persist; the plan's output ranges are stashed on ``ctx``;
   * on ``backward()`` the incoming flat grads are sliced per user output from the
-    stashed plan (a ``grad_outputs`` field on the backward args receives the
-    whole tuple; otherwise ``grad_output`` receives the first output's grad),
+    stashed plan and passed in forward-output order to the backward
+    container's ``setup_grad_outputs`` method,
     the container's optional ``setup_saved_tensors`` hook restores the saved
     tensors, then the *backward op* runs the real ``bwd_impl`` and returns the
     flat grads (``bwd_fake_impl`` is its data-free fake).
@@ -397,6 +398,7 @@ class _FieldKind(Enum):
 
     TENSOR = "tensor"  # one ``Tensor`` / ``Tensor?`` slot
     TENSOR_OR_QUANTIZED = "tensor_or_quantized"  # 3 slots: tensor / inner / meta
+    SHAPE = "shape"  # one ``SymInt[]`` / ``SymInt[]?`` slot
     PROCESS_GROUP = "process_group"  # c10d group name inside the shared bundle
     SIMPLE = "simple"  # value carried verbatim inside the shared bundle
     UNSUPPORTED = "unsupported"  # no slots; only a trivial value may cross
@@ -475,6 +477,9 @@ def _is_simple_annot(annot: Any) -> bool:
     if get_origin(annot) in (tuple, list):
         inner = [a for a in get_args(annot) if a is not Ellipsis]
         return bool(inner) and all(_is_simple_annot(a) for a in inner)
+    if get_origin(annot) is dict:
+        args = get_args(annot)
+        return len(args) == 2 and args[0] is str and (args[1] is Any or _is_simple_annot(args[1]))
     return False
 
 
@@ -491,6 +496,9 @@ def _parse_field(name: str, annot: Any) -> _FieldPlan:
     if stripped is torch.Tensor:
         slot = _SlotSpec(name, "Tensor?" if is_optional else "Tensor")
         return _FieldPlan(name, _FieldKind.TENSOR, (slot,))
+    if stripped is torch.Size:
+        slot = _SlotSpec(name, "SymInt[]?" if is_optional else "SymInt[]")
+        return _FieldPlan(name, _FieldKind.SHAPE, (slot,))
     # A union mixing tensor types with anything else is a malformed signature
     # (e.g. a bare quantized-storage Optional, or Tensor | int): reject it at
     # registration instead of silently degrading to an unsupported field.
@@ -631,7 +639,7 @@ class _ArgPlan:
         for field in self.fields:
             value = getattr(obj, field.name, None)
             match field.kind:
-                case _FieldKind.TENSOR:
+                case _FieldKind.TENSOR | _FieldKind.SHAPE:
                     slots[field.slots[0].name] = value
                 case _FieldKind.TENSOR_OR_QUANTIZED:
                     _pack_tensor_or_quantized(field, value, slots)
@@ -667,6 +675,9 @@ class _ArgPlan:
             match field.kind:
                 case _FieldKind.TENSOR:
                     kwargs[field.name] = slots[field.slots[0].name]
+                case _FieldKind.SHAPE:
+                    value = slots[field.slots[0].name]
+                    kwargs[field.name] = None if value is None else torch.Size(value)
                 case _FieldKind.TENSOR_OR_QUANTIZED:
                     kwargs[field.name] = _unpack_tensor_or_quantized(field, slots)
                 case _FieldKind.PROCESS_GROUP:
@@ -1029,12 +1040,11 @@ def _register_autograd_for_op(
     the saved tuple + ``ctx_attrs`` to the module's ``setup_context`` and stashes
     the plan on ``ctx`` so backward can slice its grads per user output.
     """
-    bwd_takes_grad_tuple = any(f.name == "grad_outputs" for f in bwd_plan.fields)
+
+    tensor_list_positions = tuple(offset + 1 for offset in fwd_plan.tensor_or_quantized_offsets())
 
     def _setup_context(ctx, inputs, output):
-        ctx.fwd_tensor_list_lengths = {
-            i: len(value) for i, value in enumerate(inputs) if isinstance(value, list)
-        }
+        ctx.fwd_tensor_list_lengths = {i: len(inputs[i]) for i in tensor_list_positions}
         fwd_obj = fwd_plan.unpack(dict(zip(fwd_plan.slot_names, inputs)))
         spec_obj = _spec_view(fwd_obj, fwd_plan.tensor_field_names())
 
@@ -1069,10 +1079,7 @@ def _register_autograd_for_op(
         ctx.tensor_objects = None
         user_grads = _slice_user_grads(ctx.output_ranges, grad_outputs[0])
         ctx.output_ranges = None
-        if bwd_takes_grad_tuple:
-            bwd_obj.grad_outputs = tuple(user_grads)
-        else:
-            bwd_obj.grad_output = user_grads[0]
+        bwd_obj.setup_grad_outputs(user_grads)
         kwargs = bwd_plan.pack(bwd_obj)
         bwd_args_flat = [kwargs[name] for name in bwd_plan.slot_names]
         grads = [_decode_none(g) for g in bwd_op(*bwd_args_flat)]
@@ -1359,6 +1366,9 @@ def register_custom_op_with_autograd(
       non-differentiable input).
     * ``bwd_fake_impl(bwd_args)`` -- data-free twin of ``bwd_impl`` returning
       :class:`TensorSpec` grads.
+    * ``bwd_arg_type.setup_grad_outputs(grads)`` -- assign incoming gradients
+      to the container's fields. Receives one entry per forward user output,
+      in return order, including auxiliary outputs such as weight workspaces.
     * ``bwd_arg_type.setup_saved_tensors(ctx)`` -- optional hook; skipped if
       absent.
 
@@ -1367,10 +1377,8 @@ def register_custom_op_with_autograd(
     forward state and returns the tensors to persist; the framework saves them
     via ``ctx.save_for_backward``. Before ``bwd_impl`` runs, the framework
     restores them into the container's tensor fields through the
-    ``setup_saved_tensors`` hook and sets the incoming gradient directly --
-    into a ``grad_outputs`` field (tuple, one grad per user output) if
-    ``bwd_arg_type`` declares one, else into ``grad_output`` (the first user
-    output's grad) -- so ``bwd_impl`` receives a fully-populated
+    ``setup_saved_tensors`` hook and passes the incoming gradients to
+    ``setup_grad_outputs``, so ``bwd_impl`` receives a fully-populated
     ``bwd_arg_type``.
 
     Registration touches experimental ``torch.library`` / opaque-object APIs

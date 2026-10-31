@@ -50,6 +50,8 @@ from ..utils import (
     clear_tensor_data,
     needs_quantized_gemm,
     get_nvtx_range_context,
+    warn_compile_eager_fallback,
+    warn_if_compile_disabled,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -73,9 +75,11 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
+    compile_unsupported_quantizer_reason,
     sum_bias_grad,
     apply_normalization,
     check_fp8_reduce_and_update,
+    fake_quantized_weight,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
@@ -87,12 +91,18 @@ from ..cpu_offload import (
     mark_activation_offload,
 )
 from ..quantized_tensor import (
+    QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
     restore_from_func_ctx,
 )
-from ..dynamo import TensorOrQuantized
+from ..dynamo.fake import fake_activation, fake_norm
+from ..dynamo import (
+    TensorSpec,
+    TensorOrQuantized,
+    register_custom_op_with_autograd,
+)
 from ..cpp_extensions import (
     general_gemm,
 )
@@ -102,8 +112,10 @@ from ...debug.pytorch.debug_state import TEDebugState
 __all__ = ["LayerNormMLP"]
 
 
-def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
-    if recipe is None:
+def _get_act_func_supported_list(
+    recipe: Optional[Recipe] = None, dbias_fusion: Optional[bool] = None
+):
+    if dbias_fusion is False or (dbias_fusion is None and recipe is None):
         # bf16 (recipe is None):
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
@@ -119,7 +131,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
             "swiglu": (tex.swiglu, tex.dswiglu, None),
             "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
         }
-    if recipe.delayed() or recipe.mxfp8():
+    if dbias_fusion is True or recipe.delayed() or recipe.mxfp8():
         # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
         # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
         return {
@@ -162,16 +174,24 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
     raise NotImplementedError(f"Unhandled recipe type {recipe}")
 
 
-def _act_func(activation: str, recipe: Optional[Recipe] = None):
+def _act_func(
+    activation: str, recipe: Optional[Recipe] = None, dbias_fusion: Optional[bool] = None
+):
     # based on each quantization mode, we have different kernel fusion supported:
     # bf16 (recipe is None): [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
     # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
     # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
     # Per-tensor current scaling or fp8 blockwise scaling: []
-    funcs = _get_act_func_supported_list(recipe)
+    funcs = _get_act_func_supported_list(recipe, dbias_fusion)
     if activation not in funcs:
         raise NotImplementedError("Activation type " + activation + " is not supported!")
     return funcs[activation]
+
+
+# Activations whose output halves the last dim (gated linear units).
+_GATED_ACTIVATIONS = frozenset(
+    {"geglu", "glu", "qgeglu", "reglu", "sreglu", "swiglu", "clamped_swiglu"}
+)
 
 
 @dataclass(slots=True)
@@ -234,8 +254,13 @@ class LayerNormMLPFwdArgs:
     fp8: bool
     fp8_calibration: bool
     backward_override: Optional[str]
+    fprop_use_split_accumulator: bool
     dgrad_use_split_accumulator: bool
     wgrad_use_split_accumulator: bool
+    # The recipe itself can't cross the op boundary.
+    recipe_float8_block_scaling: bool
+    recipe_custom: bool
+    recipe_dbias_dact_fusion: bool
     debug: bool
 
     # --- Weight-workspace caching ---
@@ -356,7 +381,9 @@ class LayerNormMLPBwdArgs:
     # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
-    fp8_recipe: Optional[Any] = None
+    recipe_float8_block_scaling: bool = False
+    recipe_custom: bool = False
+    recipe_dbias_dact_fusion: bool = False
     dgrad_use_split_accumulator: bool = _2X_ACC_DGRAD
     wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
@@ -399,6 +426,10 @@ class LayerNormMLPBwdArgs:
 
     # --- Per-backward scratch state (populated inside the backward impl) ---
     ub_obj_gradout: Optional[Any] = None
+
+    def setup_grad_outputs(self, grads: Sequence[Any]) -> None:
+        """Unpack gradients in forward-output order, ignoring weight workspaces."""
+        self.grad_output, self.grad_ln_out, _, _ = grads
 
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
@@ -539,16 +570,14 @@ def _layernorm_mlp_forward_impl(
     if fp8:
         assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
 
-    activation_func = _act_func(
-        activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-    )[0]
+    activation_func = _act_func(activation, dbias_fusion=fp8 and args.recipe_dbias_dact_fusion)[0]
 
     # Cast for native AMP
     inputmat = cast_if_needed(inputmat, activation_dtype)
     ln_weight_cast = cast_if_needed(ln_weight, activation_dtype)
     if ln_bias is not None:
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
-    if is_cpu_offload_enabled():
+    if cpu_offloading:
         start_offload(inputmat)
 
     tp_world_size = get_distributed_world_size(tp_group)
@@ -567,11 +596,7 @@ def _layernorm_mlp_forward_impl(
     ub_overlap_rs = ub_overlap_rs and is_grad_enabled
 
     # Choose whether to use GEMM kernel with split accumulator
-    use_split_accumulator = _2X_ACC_FPROP
-    if fp8:
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if hasattr(recipe, "fp8_gemm_fprop"):
-            use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+    use_split_accumulator = args.fprop_use_split_accumulator
 
     # Configure quantizer for norm output
     if fp8:
@@ -817,12 +842,11 @@ def _layernorm_mlp_forward_impl(
     else:
         fc1_out, *_ = fc1_outputs
         if fp8:
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if recipe.float8_block_scaling():
+            if args.recipe_float8_block_scaling:
                 # tex.quantize does not support GELU fusion for blockwise
                 act_out = activation_func(fc1_out, None, **act_params)
                 act_out = tex.quantize(act_out, fc2_input_quantizer)
-            elif recipe.custom():
+            elif args.recipe_custom:
                 # tex.quantize does not support custom quantizers
                 act_out = activation_func(fc1_out, None, **act_params)
                 act_out = fc2_input_quantizer(act_out)
@@ -1168,7 +1192,9 @@ def _layernorm_mlp_setup_ctx(
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
-    bwd_args.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+    bwd_args.recipe_float8_block_scaling = fwd_args.recipe_float8_block_scaling
+    bwd_args.recipe_custom = fwd_args.recipe_custom
+    bwd_args.recipe_dbias_dact_fusion = fwd_args.recipe_dbias_dact_fusion
     bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
     bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
     bwd_args.backward_override = fwd_args.backward_override
@@ -1630,7 +1656,7 @@ def _layernorm_mlp_backward_impl(
 
             # Whether to set grad arg in general_gemm
             grad_arg = True
-            if args.fp8 and args.fp8_recipe.float8_block_scaling():
+            if args.fp8 and args.recipe_float8_block_scaling:
                 grad_arg = False
 
             # Arguments to include in wgrad GEMM closure
@@ -1676,7 +1702,7 @@ def _layernorm_mlp_backward_impl(
 
                 # Update grad bias if needed
                 if fc2_bias_grad is None:
-                    if args.fp8 and args.fp8_recipe.float8_block_scaling() and fc2_bias is not None:
+                    if args.fp8 and args.recipe_float8_block_scaling and fc2_bias is not None:
                         # BGRAD not fused with GEMM for float8 blockwise gemm.
                         fc2_bias_grad_ = sum_bias_grad(act_out)
                     fc2_bias_grad = fc2_bias_grad_
@@ -1709,12 +1735,13 @@ def _layernorm_mlp_backward_impl(
             fc1_bias_grad = sum_bias_grad(dact)
             dact = args.fc1_grad_output_quantizer(dact)
         elif (
-            _act_func(args.activation, args.fp8_recipe if args.fp8 else None)[2] is not None
+            _act_func(args.activation, dbias_fusion=args.fp8 and args.recipe_dbias_dact_fusion)[2]
+            is not None
             and args.fp8
         ):
             # Fusion: gemm, bias + gelu + quantize
             dbias_dact_quantize_func = _act_func(
-                args.activation, args.fp8_recipe if args.fp8 else None
+                args.activation, dbias_fusion=args.fp8 and args.recipe_dbias_dact_fusion
             )[2]
             fc1_bias_grad, dact = dbias_dact_quantize_func(
                 fc2_dgrad,
@@ -1726,7 +1753,7 @@ def _layernorm_mlp_backward_impl(
             # Fusion: gemm + gelu,
             if not fc2_dgrad_gemm_gelu_fusion:
                 activation_func_bwd = _act_func(
-                    args.activation, args.fp8_recipe if args.fp8 else None
+                    args.activation, dbias_fusion=args.fp8 and args.recipe_dbias_dact_fusion
                 )[1]
                 dact = activation_func_bwd(
                     fc2_dgrad, fc1_out.to(args.activation_dtype), None, **act_params
@@ -1739,7 +1766,7 @@ def _layernorm_mlp_backward_impl(
                         args.fc1_grad_output_quantizer,
                         (Float8BlockQuantizer, IdentityQuantizer),
                     )
-                    or args.fp8_recipe.custom()
+                    or args.recipe_custom
                 ):
                     fc1_bias_grad = sum_bias_grad(dact)
                     dact = args.fc1_grad_output_quantizer(dact)
@@ -2071,6 +2098,420 @@ def _layernorm_mlp_backward_impl(
     )
 
 
+def _layernorm_mlp_forward_fake(
+    args: LayerNormMLPFwdArgs,
+) -> Tuple[
+    TensorSpec,
+    Optional[TensorSpec],
+    Optional[TensorSpec],
+    Optional[TensorSpec],
+    Optional[Tuple[Any, ...]],
+    Optional[Dict],
+]:
+    """Shape/metadata-only twin of :func:`_layernorm_mlp_forward_impl` for
+    torch.compile (no args.activation checkpointing: that path falls back to eager)."""
+    if args.fsdp_group is not None and args.is_grad_enabled:
+        raise NotImplementedError(
+            "Compile-time LayerNormMLP forward does not support manual TE FSDP "
+            "(fsdp_group is not None); use FSDP2 or MCore FSDP."
+        )
+    if args.checkpoint and args.is_grad_enabled:
+        raise NotImplementedError(
+            "Compile-time LayerNormMLP forward does not support args.activation checkpointing"
+        )
+
+    fc1_weight_quantizer = args.fc1_weight_quantizer
+    fc2_weight_quantizer = args.fc2_weight_quantizer
+    fp8_or_debug = args.fp8 or args.debug
+    bias_gelu_fusion = args.bias_gelu_fusion
+    gemm_gelu_fusion = args.gemm_gelu_fusion
+    device = args.inp.device
+
+    in_features = args.ln_weight.shape[0]
+    fc1_out_features = args.fc1_weight.shape[0]
+    fc2_out_features = args.fc2_weight.shape[0]
+    inp_leading = args.inp.shape[0] if len(args.inp.shape) > 1 else 1
+    gemm_leading_shape = (
+        (inp_leading * args.tp_size, *args.inp.shape[1:-1])
+        if args.sequence_parallel
+        else tuple(args.inp.shape[:-1])
+    )
+    inputmat_aliases_inp = args.inp.dtype == args.activation_dtype
+    ln_weight_aliases = args.ln_weight.dtype == args.activation_dtype
+
+    backwards_needs_fc1_input = args.fc1_weight_requires_grad and args.is_grad_enabled
+
+    # Norm output quantizer usage -- mirrors the impl; the ln_out spec must be
+    # taken now, before the later rowwise-only usage for the all-gather.
+    if args.fp8:
+        if args.fc1_input_quantizer is None:
+            raise ValueError("Missing quantizer for FC1 input tensor")
+        args.fc1_input_quantizer.set_usage(rowwise=True, columnwise=backwards_needs_fc1_input)
+        if args.sequence_parallel and args.fc1_input_quantizer.supports_only_rowwise_all_gather():
+            args.fc1_input_quantizer.set_usage(columnwise=False)
+    custom = is_custom(args.fc1_input_quantizer)
+    hybrid = isinstance(args.fc1_input_quantizer, HybridQuantizer)
+    identity = isinstance(args.fc1_input_quantizer, IdentityQuantizer)
+    with_quantized_norm = (
+        args.fp8
+        and not args.debug
+        and not args.return_layernorm_output
+        and not args.return_layernorm_output_gathered
+        and not custom
+        and not hybrid
+        and not identity
+    )
+    # A custom quantizer's ln_out stays in high precision on the plain
+    # all-gather path (only the gathered copy is quantized).
+    ln_out_quantized = fp8_or_debug and not (
+        args.sequence_parallel and not args.return_layernorm_output_gathered and custom
+    )
+    ln_out, mu, rsigma = fake_norm(
+        args.inp,
+        args.fc1_input_quantizer if with_quantized_norm else None,
+        normalization=args.normalization,
+        dtype=args.activation_dtype,
+    )
+    if ln_out_quantized and not with_quantized_norm:
+        ln_out = TensorSpec(
+            shape=ln_out.shape,
+            dtype=args.activation_dtype,
+            quantizer=args.fc1_input_quantizer,
+            device=device,
+        )
+    if args.sequence_parallel and fp8_or_debug:
+        args.fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
+    ln_out_return_is_total = args.sequence_parallel and args.return_layernorm_output_gathered
+    ln_out_rebound = ln_out_quantized and not with_quantized_norm
+
+    # ------------------------------------------------------
+    # Weights -- mirror ``quantize_weight`` / ``cast_if_needed``.
+    # ------------------------------------------------------
+    new_fc1_weight_workspace = None
+    new_fc2_weight_workspace = None
+    if fp8_or_debug:
+        if args.fc1_weight.is_quantized and not args.debug:
+            fc1_weight_quantizer = args.fc1_weight.quantizer
+        elif fc1_weight_quantizer is not None:
+            fc1_weight_quantizer.set_usage(
+                rowwise=True, columnwise=args.is_grad_enabled and not args.is_fsdp2
+            )
+        if args.fc2_weight.is_quantized and not args.debug:
+            fc2_weight_quantizer = args.fc2_weight.quantizer
+        elif fc2_weight_quantizer is not None:
+            fc2_weight_quantizer.set_usage(
+                rowwise=True, columnwise=args.is_grad_enabled and not args.is_fsdp2
+            )
+        fc1_weight_final, new_fc1_weight_workspace, fc1_wt_alias = fake_quantized_weight(
+            args.fc1_weight,
+            fc1_weight_quantizer,
+            args.fc1_weight_workspace,
+            activation_dtype=args.activation_dtype,
+            cache_weight=args.cache_weight,
+        )
+        fc2_weight_final, new_fc2_weight_workspace, fc2_wt_alias = fake_quantized_weight(
+            args.fc2_weight,
+            fc2_weight_quantizer,
+            args.fc2_weight_workspace,
+            activation_dtype=args.activation_dtype,
+            cache_weight=args.cache_weight,
+        )
+        fc1_wt_alias = (
+            None if fc1_wt_alias is None else fc1_wt_alias.replace("weight", "fc1_weight")
+        )
+        fc2_wt_alias = (
+            None if fc2_wt_alias is None else fc2_wt_alias.replace("weight", "fc2_weight")
+        )
+    else:
+        fc1_weight_final = TensorSpec(
+            shape=tuple(args.fc1_weight.shape),
+            dtype=args.activation_dtype,
+            device=args.fc1_weight.device,
+        )
+        fc2_weight_final = TensorSpec(
+            shape=tuple(args.fc2_weight.shape),
+            dtype=args.activation_dtype,
+            device=args.fc2_weight.device,
+        )
+        fc1_wt_alias = "fc1_weight" if args.fc1_weight.dtype == args.activation_dtype else None
+        fc2_wt_alias = "fc2_weight" if args.fc2_weight.dtype == args.activation_dtype else None
+
+    # Bias cast: cuBLAS has no FP8 GEMM with FP32 bias.
+    bias_dtype = args.activation_dtype
+    if fp8_or_debug and args.activation_dtype == torch.float32:
+        bias_dtype = torch.bfloat16
+    fc1_bias_aliases = args.fc1_bias is not None and args.fc1_bias.dtype == bias_dtype
+    fc2_bias_aliases = args.fc2_bias is not None and args.fc2_bias.dtype == bias_dtype
+
+    # ------------------------------------------------------
+    # FC1 GEMM + args.activation (see the impl for the fusion rules).
+    # ------------------------------------------------------
+    if args.activation != "gelu":
+        gemm_gelu_fusion = bias_gelu_fusion = False
+    else:
+        if not args.fp8:
+            gemm_gelu_fusion = True
+        if gemm_gelu_fusion and bias_gelu_fusion:
+            gemm_gelu_fusion = False
+    if args.debug:
+        gemm_gelu_fusion = False
+    fc1_out = None
+    fc1_out_without_bias = None
+    if bias_gelu_fusion:
+        fc1_out_without_bias = TensorSpec(
+            shape=(*gemm_leading_shape, fc1_out_features),
+            dtype=args.activation_dtype,
+            device=device,
+        )
+    else:
+        # generic_gemm stores the pre-GELU auxiliary output in the bias dtype
+        # for low-precision inputs, defaulting to BF16 when there is no bias.
+        fc1_out_dtype = args.activation_dtype
+        if gemm_gelu_fusion and args.fp8:
+            fc1_out_dtype = bias_dtype if args.fc1_bias is not None else torch.bfloat16
+        fc1_out = TensorSpec(
+            shape=(*gemm_leading_shape, fc1_out_features),
+            dtype=fc1_out_dtype,
+            device=device,
+        )
+    act_out = fake_activation(
+        fc1_out_without_bias if bias_gelu_fusion else fc1_out,
+        args.fc2_input_quantizer if fp8_or_debug else None,
+        gated=args.activation in _GATED_ACTIVATIONS,
+        dtype=args.activation_dtype,
+        fused_quantization=(
+            args.fp8
+            and not args.debug
+            and not gemm_gelu_fusion
+            and not args.recipe_float8_block_scaling
+            and not args.recipe_custom
+        ),
+    )
+    if args.fc2_output_quantizer is not None:
+        args.fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)
+
+    # ------------------------------------------------------
+    # Outputs.
+    # ------------------------------------------------------
+    requires_grad = args.is_grad_enabled and args.any_requires_grad()
+    out_leading = inp_leading
+    if args.sequence_parallel and not args.set_parallel_mode:
+        out_leading = inp_leading * args.tp_size
+    fc2_out = TensorSpec(
+        shape=(
+            (fc2_out_features,)
+            if len(args.inp.shape) == 1
+            else (out_leading, *tuple(args.inp.shape[1:-1]), fc2_out_features)
+        ),
+        dtype=args.activation_dtype,
+        quantizer=args.fc2_output_quantizer,
+        requires_grad=requires_grad,
+        device=device,
+    )
+    ln_out_for_return = None
+    if args.return_layernorm_output:
+        ln_leading = inp_leading
+        if ln_out_return_is_total:
+            ln_leading = inp_leading * args.tp_size
+        ln_out_for_return = TensorSpec(
+            shape=(
+                (ln_leading, *tuple(args.inp.shape[1:]))
+                if len(args.inp.shape) > 1
+                else (in_features,)
+            ),
+            dtype=args.activation_dtype,
+            requires_grad=requires_grad,
+            device=device,
+        )
+
+    # ------------------------------------------------------
+    # Backward state -- saved-tensor layout (see the impl).
+    # ------------------------------------------------------
+    tensors_to_save_from_forward = None
+    ctx_attrs = None
+    if args.is_grad_enabled:
+        if not args.fc1_weight_requires_grad:
+            ln_out = None
+        if not args.fc2_weight_requires_grad:
+            act_out = None
+        fc1_wt_save = fc1_weight_final
+        fc2_wt_save = fc2_weight_final
+        if args.is_fsdp2:
+            if fc1_wt_alias != "fc1_weight":
+                fc1_wt_save, fc1_wt_alias = None, None
+            if fc2_wt_alias != "fc2_weight":
+                fc2_wt_save, fc2_wt_alias = None, None
+        ln_out_alias = (
+            "ln_out"
+            if args.return_layernorm_output
+            and ln_out is not None
+            and not ln_out_return_is_total
+            and not ln_out_rebound
+            else None
+        )
+        saved_tensor_aliases = (
+            "inp" if inputmat_aliases_inp else None,
+            "ln_weight" if ln_weight_aliases else None,
+            ln_out_alias,
+            fc1_wt_alias,
+            "fc1_weight",
+            "fc1_bias" if fc1_bias_aliases else None,
+            None,
+            None,
+            None,
+            fc2_wt_alias,
+            "fc2_weight",
+            "fc2_bias" if fc2_bias_aliases else None,
+            None,
+            None,
+        )
+        saved = (
+            TensorSpec(shape=tuple(args.inp.shape), dtype=args.activation_dtype, device=device),
+            TensorSpec(
+                shape=tuple(args.ln_weight.shape), dtype=args.activation_dtype, device=device
+            ),
+            ln_out,
+            fc1_wt_save,
+            None,
+            (
+                None
+                if args.fc1_bias is None
+                else TensorSpec(shape=tuple(args.fc1_bias.shape), dtype=bias_dtype, device=device)
+            ),
+            fc1_out,
+            fc1_out_without_bias,
+            act_out,
+            fc2_wt_save,
+            None,
+            (
+                None
+                if args.fc2_bias is None
+                else TensorSpec(shape=tuple(args.fc2_bias.shape), dtype=bias_dtype, device=device)
+            ),
+            mu,
+            rsigma,
+        )
+        tensors_to_save_from_forward = tuple(
+            None if alias is not None else spec for alias, spec in zip(saved_tensor_aliases, saved)
+        )
+        ctx_attrs = {
+            "saved_tensor_aliases": saved_tensor_aliases,
+            "fsdp_shapes": None,
+            "is_recomputation": False,
+        }
+
+    return (
+        fc2_out,
+        ln_out_for_return,
+        new_fc1_weight_workspace,
+        new_fc2_weight_workspace,
+        tensors_to_save_from_forward,
+        ctx_attrs,
+    )
+
+
+def _layernorm_mlp_backward_fake(
+    args: LayerNormMLPBwdArgs,
+) -> Tuple[Optional[TensorSpec], ...]:
+    """Allocation-free fake of :func:`_layernorm_mlp_backward_impl` on
+    ``TensorSpec``. Returns ``(dgrad, dgamma, dbeta, fc1_wgrad, fc1_bias_grad,
+    fc2_wgrad, fc2_bias_grad)`` specs with rank-local shapes."""
+    if args.fsdp_group is not None:
+        raise NotImplementedError(
+            "Fake LayerNormMLP backward does not support manual TE FSDP "
+            "(fsdp_group is not None); use FSDP2 or MCore FSDP."
+        )
+    out_dtype = args.activation_dtype
+    device = args.grad_output.device
+    in_features = args.ln_weight.shape[-1]
+    fc1_out_features = args.fc1_weight.shape[0]
+    fc2_out_features, act_features = args.fc2_weight.shape
+
+    if args.fc1_grad_output_quantizer is not None:
+        args.fc1_grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+
+    dgrad = None
+    if args.requires_dgrad:
+        inp_leading = args.grad_output.shape[0]
+        if args.sequence_parallel and not args.set_parallel_mode:
+            inp_leading = inp_leading // args.tp_size
+        dgrad = TensorSpec(
+            shape=(
+                (in_features,)
+                if len(args.grad_output.shape) == 1
+                else (inp_leading, *args.grad_output.shape[1:-1], in_features)
+            ),
+            dtype=out_dtype,
+            device=device,
+        )
+
+    # The norm backward always runs; its grads take the saved (cast) ln_weight dtype.
+    dgamma = TensorSpec(shape=(in_features,), dtype=args.ln_weight.dtype, device=device)
+    dbeta = None
+    if args.normalization == "LayerNorm":
+        dbeta = TensorSpec(shape=(in_features,), dtype=args.ln_weight.dtype, device=device)
+
+    fc1_wgrad = None
+    if args.fc1_weight_requires_grad and not args.fuse_wgrad_accumulation:
+        fc1_wgrad = TensorSpec(
+            shape=(fc1_out_features, in_features),
+            dtype=out_dtype,
+            quantizer=args.fc1_grad_weight_quantizer,
+            device=device,
+        )
+    fc1_bias_grad = None
+    # FP8, debug and the fused bias-gelu path always produce it; in high
+    # precision it is fused into the FC1 wgrad GEMM or summed when only the
+    # bias needs a grad.
+    if args.fc1_bias is not None and any(
+        (
+            args.fp8,
+            args.debug,
+            args.bias_gelu_fusion,
+            args.fc1_weight_requires_grad,
+            args.fc1_bias_requires_grad,
+        )
+    ):
+        fc1_bias_grad = TensorSpec(shape=(fc1_out_features,), dtype=out_dtype, device=device)
+
+    fc2_wgrad = None
+    if args.fc2_weight_requires_grad and not args.fuse_wgrad_accumulation:
+        fc2_wgrad = TensorSpec(
+            shape=(fc2_out_features, act_features),
+            dtype=out_dtype,
+            quantizer=args.fc2_grad_weight_quantizer,
+            device=device,
+        )
+    fc2_bias_grad = None
+    fp8_bwd = args.fp8 and args.backward_override is None
+    if args.use_bias and (args.fc2_weight_requires_grad or fp8_bwd):
+        fc2_bias_grad = TensorSpec(shape=(fc2_out_features,), dtype=out_dtype, device=device)
+
+    return dgrad, dgamma, dbeta, fc1_wgrad, fc1_bias_grad, fc2_wgrad, fc2_bias_grad
+
+
+# Custom op used under ``torch.compile``.
+_layernorm_mlp_op = register_custom_op_with_autograd(
+    op_name="layernorm_mlp",
+    input_tensors_for_grad=[
+        "inp",
+        "ln_weight",
+        "ln_bias",
+        "fc1_weight",
+        "fc1_bias",
+        "fc2_weight",
+        "fc2_bias",
+    ],
+    fwd_arg_type=LayerNormMLPFwdArgs,
+    fwd_impl=_layernorm_mlp_forward_impl,
+    fwd_fake_impl=_layernorm_mlp_forward_fake,
+    setup_context=_layernorm_mlp_setup_ctx,
+    bwd_arg_type=LayerNormMLPBwdArgs,
+    bwd_impl=_layernorm_mlp_backward_impl,
+    bwd_fake_impl=_layernorm_mlp_backward_fake,
+)
+
+
 class _LayerNormMLP(torch.autograd.Function):
     """LayerNormMLP semi-top level module
     Calls custom cuda extensions.
@@ -2141,8 +2582,9 @@ class _LayerNormMLP(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Backward pass: compute gradients and reduce FP8 scaling factors."""
         bwd_args: LayerNormMLPBwdArgs = ctx.backward_objects
-        bwd_args.grad_output = grad_output
-        bwd_args.grad_ln_out = grad_ln_out
+        bwd_args.setup_grad_outputs(
+            (grad_output, grad_ln_out, _grad_fc1_weight_workspace, _grad_fc2_weight_workspace)
+        )
         with get_nvtx_range_context("_LayerNormMLP_backward"):
             _layernorm_mlp_recompute(bwd_args, ctx)
         (
@@ -2171,6 +2613,18 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_bias_grad,
             None,  # fwd_args
         )
+
+
+@no_torch_dynamo()
+def _layernorm_mlp_eager(
+    tensors: Tuple[Optional[torch.Tensor], ...],
+    fwd_args: LayerNormMLPFwdArgs,
+    is_grad_enabled: bool,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Run ``_LayerNormMLP`` eagerly, bypassing Dynamo."""
+    if is_grad_enabled:
+        return _LayerNormMLP.apply(*tensors, fwd_args)
+    return _LayerNormMLP.forward(None, *tensors, fwd_args)
 
 
 class LayerNormMLP(TransformerEngineBaseModule):
@@ -2603,7 +3057,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 if self.set_parallel_mode:
                     setattr(self.fc2_bias, "sequence_parallel", self.sequence_parallel)
 
-    @no_torch_dynamo()
     def forward(
         self,
         inp: torch.Tensor,
@@ -2629,6 +3082,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
+
+                             Under ``torch.compile``, the FP8 weight cache is replaced on
+                             the first microbatch and reused on subsequent microbatches.
+                             ``fuse_wgrad_accumulation=True`` remains unsupported.
+                             With ``mode="reduce-overhead"``, call
+                             ``torch.compiler.cudagraph_mark_step_begin()`` once before
+                             each minibatch to keep the cache live across its microbatches.
         """
         is_grad_enabled = torch.is_grad_enabled()
 
@@ -2703,28 +3163,45 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
                 self.fast_setattr("bias_gelu_nvfusion", False)
 
+            use_compiled_op = torch.compiler.is_compiling() and _layernorm_mlp_op is not None
+            if _layernorm_mlp_op is None and torch.compiler.is_compiling():
+                warn_if_compile_disabled()
+            if use_compiled_op:
+                # Process groups cross the op boundary separately from quantizers.
+                for quantizer in (fc1_input_quantizer, fc2_grad_output_quantizer):
+                    if getattr(quantizer, "amax_reduction_group", None) is not None:
+                        set_quantizer_amax_reduction_group(quantizer, None)
+
             cache_name_fc1 = (
                 None if (is_first_microbatch is None or self.is_fsdp2) else "fc1_weight"
             )
             cache_name_fc2 = (
                 None if (is_first_microbatch is None or self.is_fsdp2) else "fc2_weight"
             )
-            fc1_weight_workspace = (
-                self._fp8_workspaces.get(cache_name_fc1) if cache_name_fc1 is not None else None
-            )
-            fc2_weight_workspace = (
-                self._fp8_workspaces.get(cache_name_fc2) if cache_name_fc2 is not None else None
-            )
+            fc1_weight_workspace = None
+            fc2_weight_workspace = None
+            if cache_name_fc1 is not None and not (use_compiled_op and is_first_microbatch):
+                fc1_weight_workspace = self._fp8_workspaces.get(cache_name_fc1)
+                fc2_weight_workspace = self._fp8_workspaces.get(cache_name_fc2)
 
+            fprop_use_split_accumulator = _2X_ACC_FPROP
             dgrad_use_split_accumulator = _2X_ACC_DGRAD
             wgrad_use_split_accumulator = _2X_ACC_WGRAD
+            recipe_float8_block_scaling = False
+            recipe_custom = False
+            recipe_dbias_dact_fusion = False
             if self.fp8:
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
                 backward_override = _recipe.backward_override
+                if hasattr(_recipe, "fp8_gemm_fprop"):
+                    fprop_use_split_accumulator = _recipe.fp8_gemm_fprop.use_split_accumulator
                 if hasattr(_recipe, "fp8_gemm_dgrad"):
                     dgrad_use_split_accumulator = _recipe.fp8_gemm_dgrad.use_split_accumulator
                 if hasattr(_recipe, "fp8_gemm_wgrad"):
                     wgrad_use_split_accumulator = _recipe.fp8_gemm_wgrad.use_split_accumulator
+                recipe_float8_block_scaling = _recipe.float8_block_scaling()
+                recipe_custom = _recipe.custom()
+                recipe_dbias_dact_fusion = _recipe.delayed() or _recipe.mxfp8()
             else:
                 backward_override = None
 
@@ -2744,6 +3221,24 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_bias_tensor = (
                 fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None
             )
+            if use_compiled_op:
+                fallback_reason = self._compile_eager_fallback_reason(
+                    inp,
+                    skip_fp8_weight_update,
+                    fp8_output,
+                    is_grad_enabled,
+                    debug,
+                    quantizers,
+                )
+                if fallback_reason is not None:
+                    warn_compile_eager_fallback(fallback_reason)
+                    torch._dynamo.graph_break(
+                        msg=f"te.LayerNormMLP falling back to eager: {fallback_reason}"
+                    )
+                    use_compiled_op = False
+
+            wgrad_store = None if use_compiled_op else self.wgrad_store
+
             fwd_args = LayerNormMLPFwdArgs(
                 # tensors
                 inp=inp,
@@ -2802,8 +3297,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fp8=self.fp8,
                 fp8_calibration=self.fp8_calibration,
                 backward_override=backward_override,
+                fprop_use_split_accumulator=fprop_use_split_accumulator,
                 dgrad_use_split_accumulator=dgrad_use_split_accumulator,
                 wgrad_use_split_accumulator=wgrad_use_split_accumulator,
+                recipe_float8_block_scaling=recipe_float8_block_scaling,
+                recipe_custom=recipe_custom,
+                recipe_dbias_dact_fusion=recipe_dbias_dact_fusion,
                 debug=debug,
                 # weight-workspace caching
                 is_first_microbatch=is_first_microbatch,
@@ -2827,7 +3326,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 is_fsdp2=self.is_fsdp2,
                 # weight-grad scheduling
                 fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-                wgrad_store=self.wgrad_store,
+                wgrad_store=wgrad_store,
                 # activation checkpointing
                 checkpoint=self.checkpoint,
                 fp8_meta=self.fp8_meta if self.checkpoint else None,
@@ -2837,28 +3336,21 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 is_grad_enabled=is_grad_enabled,
             )
 
-            if is_grad_enabled:
-                out, ln_out, new_fc1_ws, new_fc2_ws = _LayerNormMLP.apply(
-                    inp,
-                    self.layer_norm_weight,
-                    self.layer_norm_bias,
-                    fc1_weight,
-                    fc1_bias,
-                    fc2_weight,
-                    fc2_bias_tensor,
-                    fwd_args,
-                )
+            if use_compiled_op:
+                out, ln_out, new_fc1_ws, new_fc2_ws = _layernorm_mlp_op(fwd_args)
             else:
-                out, ln_out, new_fc1_ws, new_fc2_ws = _LayerNormMLP.forward(
-                    None,
-                    inp,
-                    self.layer_norm_weight,
-                    self.layer_norm_bias,
-                    fc1_weight,
-                    fc1_bias,
-                    fc2_weight,
-                    fc2_bias_tensor,
+                out, ln_out, new_fc1_ws, new_fc2_ws = _layernorm_mlp_eager(
+                    (
+                        inp,
+                        self.layer_norm_weight,
+                        self.layer_norm_bias,
+                        fc1_weight,
+                        fc1_bias,
+                        fc2_weight,
+                        fc2_bias_tensor,
+                    ),
                     fwd_args,
+                    is_grad_enabled,
                 )
 
             if new_fc1_ws is not None and cache_name_fc1 is not None:
@@ -2883,6 +3375,44 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if self.return_layernorm_output:
             return out, ln_out
         return out
+
+    def _compile_eager_fallback_reason(
+        self,
+        inp: torch.Tensor,
+        skip_fp8_weight_update: Optional[torch.Tensor],
+        fp8_output: bool,
+        is_grad_enabled: bool,
+        debug: bool,
+        quantizers: Sequence[Optional[Quantizer]],
+    ) -> Optional[str]:
+        """Return a fallback reason after preparing the forward quantizers."""
+        if debug:
+            return "debug instrumentation (nvidia-dlfw-inspect)"
+        if self.checkpoint and is_grad_enabled:
+            return "activation checkpointing (checkpoint=True)"
+        if isinstance(inp, (QuantizedTensor, QuantizedTensorStorage)):
+            return "a quantized input tensor"
+        if self.fsdp_group is not None:
+            return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
+        if (
+            fp8_output
+            and is_grad_enabled
+            and (inp.requires_grad or any(p.requires_grad for p in self.parameters()))
+        ):
+            return "differentiable fp8_output=True"
+        if is_cpu_offload_enabled():
+            return "CPU activation offloading"
+        # A queued store can be enabled between forward and backward.
+        if self.wgrad_store is not None and (
+            self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute()
+        ):
+            return "delayed wgrad compute (wgrad_store)"
+        if self.fuse_wgrad_accumulation:
+            return "fuse_wgrad_accumulation (main_grad)"
+        fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        if fp8 and skip_fp8_weight_update is not None:
+            return "GPU-controlled FP8 weight cache updates"
+        return compile_unsupported_quantizer_reason(quantizers)
 
     def _get_quantizers(self, fp8_output, is_grad_enabled):
         if self.fp8:
