@@ -2378,6 +2378,149 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
+    @pytest.mark.parametrize("in_shape", ((1, 37, 16, 128), (6, 16, 64)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    def test_silu_gate(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+    ) -> None:
+        """SiLU gate"""
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        # Signed gates cover SiLU's negative side, where its derivative changes sign
+        g_ref, g_test = make_reference_and_test_tensors(
+            in_shape,
+            min=-6.0,
+            max=4.0,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = x_ref * torch.nn.functional.silu(g_ref)
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.SiLUGate()
+        y_test = op(x_test, g_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+
+        # Check results
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(g_test, g_ref, **tols)
+
+    @pytest.mark.parametrize("in_shape", ((1, 37, 16, 128), (6, 16, 64)))
+    @pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
+    @pytest.mark.parametrize("zero_centered_gamma", (False, True))
+    @pytest.mark.parametrize("gate_layout", ("contiguous", "strided"))
+    def test_rmsnorm_silu_gate(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        eps: float = 1e-6,
+        zero_centered_gamma: bool,
+        gate_layout: str,
+    ) -> None:
+        """RMSNorm with SiLU gate"""
+
+        # Skip unsupported BF16
+        if dtype == torch.bfloat16 and not is_bf16_available():
+            pytest.skip("BF16 requires sm_80 or higher")
+
+        # Make input and weight shapes consistent
+        in_shape = list(in_shape)
+        weight_shape = (in_shape[-1],)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            weight_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Gate tensor, optionally a non-contiguous view of a larger tensor
+        if gate_layout == "contiguous":
+            g_ref, g_test = make_reference_and_test_tensors(
+                in_shape,
+                min=-6.0,
+                max=4.0,
+                test_dtype=dtype,
+                test_device=device,
+            )
+        else:
+            g_base_ref, g_base_test = make_reference_and_test_tensors(
+                [*in_shape[:-1], 2 * in_shape[-1]],
+                test_dtype=dtype,
+                test_device=device,
+            )
+            g_ref = g_base_ref[..., ::2]
+            g_test = g_base_test[..., ::2]
+            g_ref.retain_grad()
+            g_test.retain_grad()
+            assert not g_test.is_contiguous()
+
+        # Plain PyTorch implementation
+        var_ref = x_ref.square().mean(dim=-1, keepdim=True)
+        gamma_ref = 1 + w_ref if zero_centered_gamma else w_ref
+        n_ref = x_ref * torch.rsqrt(eps + var_ref) * gamma_ref
+        y_ref = n_ref * torch.nn.functional.silu(g_ref)
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.RMSNorm(
+            weight_shape,
+            eps=eps,
+            device=device,
+            dtype=dtype,
+            zero_centered_gamma=zero_centered_gamma,
+        )
+        with torch.no_grad():
+            op.weight.copy_(w_test)
+            del w_test
+        forward = te_ops.Sequential(op, te_ops.SiLUGate())
+        y_test = forward(x_test, g_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+
+        # Check results
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(op.weight, w_ref, **tols)
+        assert_close_grads(g_test, g_ref, **tols)
+
     @pytest.mark.parametrize("in_shape", ((32,), (6, 16, 64), (32, 64)))
     @pytest.mark.parametrize("dtype", _dtypes)
     def test_l2normalization(
