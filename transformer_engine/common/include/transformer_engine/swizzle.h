@@ -31,6 +31,39 @@ extern "C" {
  */
 void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Pack and swizzle MXFP8 scaling factors for strided batched GEMM.
+ *
+ *  \param[in]     input       Input MXFP8 tensor with compact row-wise scale_inv.
+ *  \param[out]    output      E8M0 tensor for packed, GEMM-swizzled scaling factors.
+ *  \param[in]     batch_dim   GEMM batch dimension. Only the first or penultimate dimension is
+ *                             supported.
+ *  \param[in]     batch_in_features
+ *                             Whether compact scales were produced from a 2D view with batches
+ *                             concatenated in the feature dimension. This is supported only for
+ *                             a penultimate batch dimension.
+ *  \param[in]     stream      CUDA stream used for the operation.
+ *
+ *  Output scales are laid out as [batch0_swizzled_scales][batch1_swizzled_scales]... and are
+ *  intended only for nvte_cublas_gemm_strided_batched_mxfp8.
+ */
+void nvte_pack_mxfp8_scales_for_batched_gemm(const NVTETensor input, NVTETensor output,
+                                             int64_t batch_dim, int batch_in_features,
+                                             cudaStream_t stream);
+
+/*! \brief Pack and swizzle column-wise MXFP8 scaling factors for strided batched GEMM.
+ *
+ *  \param[in]     input       Input MXFP8 tensor with compact column-wise scale_inv.
+ *  \param[out]    output      E8M0 tensor for packed, GEMM-swizzled scaling factors.
+ *  \param[in]     batch_dim   GEMM batch dimension. Only the first or penultimate dimension is
+ *                             supported.
+ *  \param[in]     stream      CUDA stream used for the operation.
+ *
+ *  Output scales are laid out as [batch0_swizzled_scales][batch1_swizzled_scales]... and are
+ *  intended only for nvte_cublas_gemm_strided_batched_mxfp8.
+ */
+void nvte_pack_mxfp8_columnwise_scales_for_batched_gemm(const NVTETensor input, NVTETensor output,
+                                                        int64_t batch_dim, cudaStream_t stream);
+
 /*! \brief Swizzling scaling factors into the required interleaved layout for GEMM
  *
  *  \param[in]     inputs                  Input tensors with non-swizzled scale_inv.

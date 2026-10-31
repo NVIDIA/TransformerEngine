@@ -212,6 +212,79 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
                          const NVTETensor B, const float *beta, const NVTETensor C, NVTETensor D,
                          NVTETensor workspace, NVTEMatmulConfig config, cudaStream_t stream);
 
+/*! \brief Compute a strided batched matrix multiplication.
+ *
+ * This is an experimental low-level interface. Each tensor holds a
+ * batch of matrices and is flattened to 3D based on its batch dim:
+ * with batch_dim=0, [G, ..., C] is interpreted as [G, R, C], and with
+ * batch_dim=-2, [..., G, C] is interpreted as [R, G, C]. Each batch
+ * entry is a row-major [R, C] matrix. The GEMM dims are inferred
+ * from the tensor shapes and transpose flags. A and B must be
+ * high-precision tensors. See
+ * nvte_cublas_gemm_strided_batched_mxfp8 for MXFP8.
+ *
+ * Following the same convention as nvte_cublas_gemm, this computes
+ * for each batch entry (with matrices in row-major order):
+ *  - `D_i = alpha * op(B_i) * op(A_i) + beta * C_i`
+ *
+ *  \param[in]  transa       Whether to transpose A matrix.
+ *  \param[in]  transb       Whether to transpose B matrix.
+ *  \param[in]  alpha        Scaling factor applied to matmul output.
+ *  \param[in]  A            A matrix batch.
+ *  \param[in]  batch_dim_a  Batch dim of A (0 or -2).
+ *  \param[in]  B            B matrix batch.
+ *  \param[in]  batch_dim_b  Batch dim of B (0 or -2).
+ *  \param[in]  beta         Scaling factor applied to C matrix.
+ *  \param[in]  C            C matrix batch. Must have the same shape as D.
+ *  \param[out] D            Output matrix batch.
+ *  \param[in]  batch_dim_d  Batch dim of C and D (0 or -2).
+ *  \param[in]  workspace    Workspace tensor.
+ *  \param[in]  config       Additional configuration.
+ *  \param[in]  stream       CUDA stream used for the operation.
+ */
+void nvte_cublas_gemm_strided_batched(int transa, int transb, const float *alpha,
+                                      const NVTETensor A, int batch_dim_a, const NVTETensor B,
+                                      int batch_dim_b, const float *beta, const NVTETensor C,
+                                      NVTETensor D, int batch_dim_d, NVTETensor workspace,
+                                      NVTEMatmulConfig config, cudaStream_t stream);
+
+/*! \brief Compute a strided batched matrix multiplication with MXFP8 inputs.
+ *
+ * This is an experimental low-level interface. It is the same as
+ * nvte_cublas_gemm_strided_batched, except that A and B are each
+ * passed as FP8 data and E8M0 scaling factors. MXFP8 scales are
+ * along the reduction dimension, so the data must be the row-wise
+ * MXFP8 data for transposed A and non-transposed B, and the
+ * column-wise MXFP8 data otherwise. The scaling factors must be
+ * packed by batch and GEMM-swizzled, as produced by
+ * nvte_pack_mxfp8_scales_for_batched_gemm or
+ * nvte_pack_mxfp8_columnwise_scales_for_batched_gemm.
+ *
+ *  \param[in]  transa       Whether to transpose A matrix.
+ *  \param[in]  transb       Whether to transpose B matrix.
+ *  \param[in]  alpha        Scaling factor applied to matmul output.
+ *  \param[in]  A_data       A matrix batch (FP8).
+ *  \param[in]  A_scale_inv  Packed, swizzled scaling factors for A (E8M0).
+ *  \param[in]  batch_dim_a  Batch dim of A (0 or -2).
+ *  \param[in]  B_data       B matrix batch (FP8).
+ *  \param[in]  B_scale_inv  Packed, swizzled scaling factors for B (E8M0).
+ *  \param[in]  batch_dim_b  Batch dim of B (0 or -2).
+ *  \param[in]  beta         Scaling factor applied to C matrix.
+ *  \param[in]  C            C matrix batch. Must have the same shape as D.
+ *  \param[out] D            Output matrix batch.
+ *  \param[in]  batch_dim_d  Batch dim of C and D (0 or -2).
+ *  \param[in]  workspace    Workspace tensor.
+ *  \param[in]  config       Additional configuration.
+ *  \param[in]  stream       CUDA stream used for the operation.
+ */
+void nvte_cublas_gemm_strided_batched_mxfp8(int transa, int transb, const float *alpha,
+                                            const NVTETensor A_data, const NVTETensor A_scale_inv,
+                                            int batch_dim_a, const NVTETensor B_data,
+                                            const NVTETensor B_scale_inv, int batch_dim_b,
+                                            const float *beta, const NVTETensor C, NVTETensor D,
+                                            int batch_dim_d, NVTETensor workspace,
+                                            NVTEMatmulConfig config, cudaStream_t stream);
+
 /*! \brief Compute matrix multiplication of 2 matrices, potentially fused with other operations,
  * allowing for using a scaling factor for the GEMM result and the accumulation input (deprecated)
  *
