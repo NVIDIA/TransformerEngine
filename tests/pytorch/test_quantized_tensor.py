@@ -1277,7 +1277,7 @@ class TestMXFP8Tensor:
         torch.testing.assert_close(exported.scale_inv, expected.scale_inv, rtol=0, atol=0)
 
     def test_mxfp8_export_components_of_quantized_weight(self) -> None:
-        """MXFP8 export of a quantized parameter after a training step"""
+        """MXFP8 export of a quantized parameter follows its optimizer updates"""
         recipe = transformer_engine.common.recipe.MXFP8BlockScaling()
         with te.quantized_model_init(enabled=True, recipe=recipe):
             linear = te.Linear(128, 256, params_dtype=torch.bfloat16, device="cuda")
@@ -1291,12 +1291,33 @@ class TestMXFP8Tensor:
         data, scale_inv = weight.export_components()
 
         assert data.data_ptr() == weight._rowwise_data.data_ptr()
+        decoded_before_step = _decode_mxfp8_components(data, scale_inv)
         torch.testing.assert_close(
-            _decode_mxfp8_components(data, scale_inv),
-            weight.dequantize(dtype=torch.float32),
-            rtol=0,
-            atol=0,
+            decoded_before_step, weight.dequantize(dtype=torch.float32), rtol=0, atol=0
         )
+
+        # FusedAdam writes the updated master weights back into the parameter's
+        # buffers, so the exported views must now hold the new values and scales
+        optimizer = te.optimizers.FusedAdam(
+            [weight],
+            lr=0.1,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+            use_decoupled_grad=True,
+        )
+        weight.decoupled_grad = torch.randn(weight.shape, dtype=torch.float32, device="cuda")
+        optimizer.step()
+        quantizer = weight._quantizer.copy()
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        expected = quantizer(
+            optimizer.get_unscaled_state(weight, "master_param")
+        ).export_components()
+
+        torch.testing.assert_close(
+            data.view(torch.uint8), expected.data.view(torch.uint8), rtol=0, atol=0
+        )
+        torch.testing.assert_close(scale_inv, expected.scale_inv, rtol=0, atol=0)
+        assert not torch.equal(_decode_mxfp8_components(data, scale_inv), decoded_before_step)
 
 
 @pytest.mark.parametrize("quantization", _quantization_list)
