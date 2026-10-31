@@ -34,6 +34,7 @@ from transformer_engine.pytorch.quantization import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
 )
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
@@ -53,6 +54,7 @@ from transformer_engine.pytorch.distributed import (
     graph_safe_rng_available,
 )
 from transformer_engine.pytorch.jit import no_torch_dynamo
+from transformer_engine.pytorch.utils import SplitAlongDim
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.attention.inference import InferenceParams
 
@@ -538,6 +540,18 @@ def _unpack_packed_qkv(
             f" dimension, got strides {tuple(packed.stride())}."
         )
 
+    def _unpack(packed: torch.Tensor, num: int) -> Tuple[torch.Tensor, ...]:
+        # With select, autograd would build each view's gradient as a zero-filled tensor of
+        # the packed shape and sum them. SplitAlongDim instead returns the backend's packed
+        # gradient buffer when the view gradients alias it, or concatenates them otherwise.
+        # Its backward inspects data pointers, which dynamo cannot trace.
+        if torch.compiler.is_compiling() or isinstance(packed, QuantizedTensorStorage):
+            return tuple(packed.select(qkv_interleave_dim, i) for i in range(num))
+        return tuple(
+            x.squeeze(qkv_interleave_dim)
+            for x in SplitAlongDim.apply(packed, qkv_interleave_dim, [1] * num)
+        )
+
     def _packed_layout(fmt: str, num: int) -> str:
         # bshd + 3 @ -3 -> bs3hd; bshd + 3 @ -2 -> bsh3d; thd + 2 @ -2 -> th2d
         pos = len(fmt) + qkv_interleave_dim + 1
@@ -560,9 +574,7 @@ def _unpack_packed_qkv(
                 f"qkv_layer must have size 3 at dim {qkv_interleave_dim}"
                 f" (qkv_interleave_dim), got shape {tuple(qkv_layer.shape)}."
             )
-        query_layer, key_layer, value_layer = (
-            qkv_layer.select(qkv_interleave_dim, i) for i in range(3)
-        )
+        query_layer, key_layer, value_layer = _unpack(qkv_layer, 3)
         return query_layer, key_layer, value_layer, _packed_layout(qkv_format, 3)
 
     if query_layer is None:
@@ -584,7 +596,7 @@ def _unpack_packed_qkv(
             f"kv_layer must have size 2 at dim {qkv_interleave_dim}"
             f" (qkv_interleave_dim), got shape {tuple(kv_layer.shape)}."
         )
-    key_layer, value_layer = (kv_layer.select(qkv_interleave_dim, i) for i in range(2))
+    key_layer, value_layer = _unpack(kv_layer, 2)
     return (
         query_layer,
         key_layer,
