@@ -29,7 +29,7 @@ from typing import Optional
 
 import torch
 from transformer_engine.pytorch.quantization import QuantizerRole
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from ..constants import DType
 
 

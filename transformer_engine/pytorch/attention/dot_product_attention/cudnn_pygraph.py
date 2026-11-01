@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import torch
 from packaging.version import InvalidVersion, Version as PkgVersion
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 
 # The cuDNN FROST SDPA engines in (forward, backward) order, named once so that frost, which
 # pins one of them, and flex, which bars both, cannot drift apart.
