@@ -14,6 +14,7 @@ from transformer_engine.jax.attention import (
     AttnMaskType,
     AttnSoftmaxType,
     QKVLayout,
+    SequenceDescriptor,
     is_fused_attn_kernel_available,
 )
 from transformer_engine_jax import get_device_compute_capability
@@ -47,7 +48,13 @@ def test_bshd_gqa_swa_runs():
 def test_bshd_gqa_swa_matches_baseline():
     import attention
 
-    attention.compare_te_to_baseline()
+    # The native baseline materializes fp32 attention scores, so at the tutorial's 4K
+    # sequence its backward pass needs a ~49 GiB buffer, which does not fit when CI runs
+    # several test workers per GPU. Compare on a 1K prefix instead (1/16 of the memory).
+    seq = 1024
+    qkv = tuple(t[:, :seq] for t in attention.qkv)
+    seq_desc = SequenceDescriptor.from_seqlens(jnp.full((attention.batch,), seq, dtype=jnp.int32))
+    attention.compare_te_to_baseline(qkv, attention.dout[:, :seq], seq_desc)
 
 
 @requires_hopper_or_newer
