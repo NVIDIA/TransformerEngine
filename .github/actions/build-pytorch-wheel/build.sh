@@ -65,16 +65,26 @@ if [[ "${SMOKE_TEST:-false}" == "true" ]]; then
         echo "Release version is required for the install smoke test" >&2
         exit 1
     fi
-    pip install --no-cache-dir "transformer-engine==${release_version}" "$built_wheel"
 
-    cuda_stub_dir=$(mktemp -d)
-    test -f /usr/local/cuda/lib64/stubs/libcuda.so
-    ln -s /usr/local/cuda/lib64/stubs/libcuda.so "$cuda_stub_dir/libcuda.so.1"
-    (
-        cd /tmp
-        LD_LIBRARY_PATH="$cuda_stub_dir:${LD_LIBRARY_PATH:-}" python -c \
-            "import transformer_engine.pytorch; print('Transformer Engine import OK')"
-    )
+    # A GitHub release can precede the PyPI upload of the packages that this check installs.
+    # Missing packages must not block the upload of a wheel that passed the checks above.
+    cuda_major=$(python -c "import torch; print(torch.version.cuda.split('.')[0])" | tail -n 1)
+    if pip install --dry-run --no-deps --only-binary=:all: \
+        "transformer-engine==${release_version}" \
+        "transformer_engine_cu${cuda_major}==${release_version}"; then
+        pip install --no-cache-dir "transformer-engine==${release_version}" "$built_wheel"
+
+        cuda_stub_dir=$(mktemp -d)
+        test -f /usr/local/cuda/lib64/stubs/libcuda.so
+        ln -s /usr/local/cuda/lib64/stubs/libcuda.so "$cuda_stub_dir/libcuda.so.1"
+        (
+            cd /tmp
+            LD_LIBRARY_PATH="$cuda_stub_dir:${LD_LIBRARY_PATH:-}" python -c \
+                "import transformer_engine.pytorch; print('Transformer Engine import OK')"
+        )
+    else
+        echo "::warning::Skipped the install smoke test: PyPI has no Transformer Engine ${release_version} packages for this platform."
+    fi
 fi
 
 mv "$built_wheel" "dist/$wheel_name"
