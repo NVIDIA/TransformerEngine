@@ -11,8 +11,15 @@ import os
 import functools
 import torch
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.device import te_device_type
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
-from ..utils import ceil_div, get_cached_ones_tensor, get_sm_count, _empty_tensor
+from ..utils import (
+    ceil_div,
+    get_cached_ones_tensor,
+    get_device_compute_capability,
+    get_sm_count,
+    _empty_tensor,
+)
 
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
@@ -983,7 +990,8 @@ def general_grouped_gemm(
 
     if grad and use_bias:
         grad_bias = [
-            torch.empty(B[i].size(1), dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
+            torch.empty(B[i].size(1), dtype=out[0].dtype, device=te_device_type())
+            for i in range(num_gemms)
         ]
     else:
         grad_bias = empty_tensors
@@ -1187,7 +1195,7 @@ def general_grouped_gemm_for_grouped_tensor(
 
     # Hopper (SM90) uses a single shared alpha/beta scalar;
     # Blackwell+ (SM100) supports per-group alpha/beta arrays.
-    per_group = torch.cuda.get_device_capability() >= (10, 0)
+    per_group = get_device_compute_capability() >= (10, 0)
     num_alphabeta = num_tensors if per_group else 1
 
     if alpha is None:

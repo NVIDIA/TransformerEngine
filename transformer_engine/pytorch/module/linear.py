@@ -16,6 +16,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 
+from transformer_engine.pytorch.device import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_cublasmp_all_gather_output,
@@ -211,11 +212,8 @@ class LinearFwdArgs:
             # A quantized dgrad can't cross the op boundary: grads are packed
             # one plain Tensor[] slot each (_pack_bwd_result).
             return "a quantized input grad (fp8_grad=True)"
-        if self.cache_weight and self.fp8:
-            # The cached workspace is updated in place on the first microbatch,
-            # which the functional op (mutates_args=()) can't express. Without
-            # FP8 no workspace exists, so is_first_microbatch is inert.
-            return "FP8 weight caching (is_first_microbatch)"
+        if self.fp8 and self.skip_fp8_weight_update is not None:
+            return "GPU-controlled FP8 weight cache updates"
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"
         for quantizer in (
@@ -1958,7 +1956,7 @@ class Linear(TransformerEngineBaseModule):
                       values as split sizes along dim 0. The resulting parameters will have
                       names that end in ``_weight`` or ``_bias``, so trailing underscores are
                       stripped from any provided names.
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -2034,7 +2032,7 @@ class Linear(TransformerEngineBaseModule):
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,
@@ -2345,7 +2343,7 @@ class Linear(TransformerEngineBaseModule):
         from torch._subclasses.fake_tensor import is_fake
 
         weight = getattr(self, self.weight_names[0], None)
-        if weight is None or weight.device.type != "cuda":
+        if weight is None or weight.device.type != te_device_type():
             return
         if is_fake(weight) or detect_fake_mode():
             return
@@ -2389,6 +2387,13 @@ class Linear(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
+
+                             Under ``torch.compile``, the FP8 weight cache is replaced on
+                             the first microbatch and reused on subsequent microbatches.
+                             ``fuse_wgrad_accumulation=True`` remains unsupported.
+                             With ``mode="reduce-overhead"``, call
+                             ``torch.compiler.cudagraph_mark_step_begin()`` once before
+                             each minibatch to keep the cache live across its microbatches.
         """
         is_grad_enabled = torch.is_grad_enabled()
 
@@ -2415,7 +2420,7 @@ class Linear(TransformerEngineBaseModule):
 
         if torch.compiler.is_compiling() and _linear_op is not None:
             reason = self._compile_eager_fallback_reason(
-                inp, is_first_microbatch, fp8_output, fp8_grad, is_grad_enabled, debug
+                inp, skip_fp8_weight_update, fp8_output, fp8_grad, is_grad_enabled, debug
             )
             if reason is not None:
                 # A break inside the try/finally below would skip the whole frame.
@@ -2460,9 +2465,10 @@ class Linear(TransformerEngineBaseModule):
                         set_quantizer_amax_reduction_group(quantizer, None)
 
             cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
-            weight_workspace = (
-                self._fp8_workspaces.get(cache_name) if cache_name is not None else None
-            )
+            # A compiled refresh must not pass the old cache into the functional op.
+            weight_workspace = None
+            if cache_name is not None and not (use_compiled_op and is_first_microbatch):
+                weight_workspace = self._fp8_workspaces.get(cache_name)
 
             dgrad_use_split_accumulator = _2X_ACC_DGRAD
             wgrad_use_split_accumulator = _2X_ACC_WGRAD
@@ -2659,7 +2665,7 @@ class Linear(TransformerEngineBaseModule):
     def _compile_eager_fallback_reason(
         self,
         inp: torch.Tensor,
-        is_first_microbatch: Optional[bool],
+        skip_fp8_weight_update: Optional[torch.Tensor],
         fp8_output: bool,
         fp8_grad: bool,
         is_grad_enabled: bool,
@@ -2698,8 +2704,8 @@ class Linear(TransformerEngineBaseModule):
             and not (self.ub_overlap_rs_dgrad or self.ub_bulk_wgrad)
         ):
             return "a quantized input grad (fp8_grad=True)"
-        if fp8 and is_first_microbatch is not None and not self.is_fsdp2:
-            return "FP8 weight caching (is_first_microbatch)"
+        if fp8 and skip_fp8_weight_update is not None:
+            return "GPU-controlled FP8 weight cache updates"
         return None
 
     @torch._dynamo.disable

@@ -99,6 +99,39 @@ Recipe availability
 Mixture of Experts (MoE) functions
 ----------------------------------
 
+See :doc:`Mixture of Experts <../features/mixture_of_experts/mixture_of_experts>` for an overview of
+how these functions fit together. ``GroupedLinear`` (the grouped GEMM used for the
+expert layers) is documented above with the other modules.
+
+.. autoapifunction:: transformer_engine.pytorch.moe_permute
+
+.. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs
+
+.. autoapifunction:: transformer_engine.pytorch.moe_permute_and_pad_with_probs
+
+.. autoapifunction:: transformer_engine.pytorch.moe_unpermute
+
+.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
+
+.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
+
+.. autoapifunction:: transformer_engine.pytorch.router.fused_topk_with_score_function
+
+.. autoapifunction:: transformer_engine.pytorch.router.fused_compute_score_for_moe_aux_loss
+
+.. autoapifunction:: transformer_engine.pytorch.router.fused_moe_aux_loss
+
+Expert parallelism
+~~~~~~~~~~~~~~~~~~
+
+NCCL-based dispatch and combine for experts sharded across ranks. See
+:doc:`Expert parallelism <../features/mixture_of_experts/mixture_of_experts>`.
+
+``MoeDispatch`` and ``MoeCombine`` can wrap the local expert operations in a
+``transformer_engine.pytorch.ops.Sequential``. They share an ``EpConfig`` and
+an ``EpBuffer``; the guide shows how to connect the per-expert counts and
+routing weights through the sequence's extra-tensor channels.
+
 ``MoeDispatch`` and ``MoeCombine`` use a local PyTorch backend when constructed
 without an ``EpBuffer``. Set ``ep_group=None`` in ``EpConfig`` for EP=1; an
 omitted ``alignment`` then defaults to 0, while distributed groups default to
@@ -107,21 +140,21 @@ experts must be local; BF16 tokens and FP32 routing weights are supported.
 Quantized communication and receive-capacity overflow policies require a
 different backend.
 
-.. autoapiclass:: transformer_engine.pytorch.ep.EpConfig
-
 .. autoapiclass:: transformer_engine.pytorch.ops.MoeDispatch
 
 .. autoapiclass:: transformer_engine.pytorch.ops.MoeCombine
 
-.. autoapifunction:: transformer_engine.pytorch.moe_permute
+.. autoapiclass:: transformer_engine.pytorch.ep.EpConfig
 
-.. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs
+.. autoapifunction:: transformer_engine.pytorch.ep.ep_bootstrap
 
-.. autoapifunction:: transformer_engine.pytorch.moe_unpermute
+.. autoapifunction:: transformer_engine.pytorch.ep.ep_finalize
 
-.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
+.. autoapiclass:: transformer_engine.pytorch.ep.EpBuffer
 
-.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
+.. autoapifunction:: transformer_engine.pytorch.ep.ep_dispatch
+
+.. autoapifunction:: transformer_engine.pytorch.ep.ep_combine
 
 
 Communication-computation overlap
