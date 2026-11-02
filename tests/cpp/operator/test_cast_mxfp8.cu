@@ -122,11 +122,12 @@ void compute_ref(const ProcessingMethod processing_method,
 
             if (rowwise) {
                 for (size_t i = i_min; i < i_max; ++i) {
-                    float block_amax = 0.0f;
+                    // An all-NaN block has a NaN amax; the kernel counts OOB elements as 0
+                    float block_amax = (j_max - j_min == tile_size_X) ? NAN : 0.0f;
 
                     for (size_t j = j_min; j < j_max; ++j) {
                         const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                        block_amax = std::fmax(block_amax, std::abs(cache_buffer[cache_idx]));
                     }
 
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
@@ -143,11 +144,12 @@ void compute_ref(const ProcessingMethod processing_method,
             }
             if (colwise) {
                 for (size_t j = j_min; j < j_max; ++j) {
-                    float block_amax = 0.0f;
+                    // An all-NaN block has a NaN amax; the kernel counts OOB elements as 0
+                    float block_amax = (i_max - i_min == tile_size_Y) ? NAN : 0.0f;
 
                     for (size_t i = i_min; i < i_max; ++i) {
                         const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                        block_amax = std::fmax(block_amax, std::abs(cache_buffer[cache_idx]));
                     }
 
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());

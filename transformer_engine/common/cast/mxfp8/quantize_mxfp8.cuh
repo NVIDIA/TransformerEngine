@@ -183,6 +183,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   float block_amax = 0.0f;
 
+  // Seed MXFP8-block amaxes with NaN: the NaN-ignoring max keeps it only for an all-NaN block,
+  // which then gets the NaN scale 0xFF. 2D keeps 0 since its warp reduction assumes amax >= 0.
+  const float block_amax_seed = kIs2DBlockScaling ? 0.0f : __int_as_float(0x7FC00000);
+
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[STAGES];
@@ -241,13 +245,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     float thread_amax = 0.0f;
     if constexpr (COLWISE_SCALING) {
       const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
-      thread_amax = 0.0f;
+      thread_amax = block_amax_seed;
       float in_compute_colwise[BUFF_DIM_Y];
       IType in_colwise_IType[BUFF_DIM_Y];
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (USE_HALF_PRECISION) {
-        IType thread_amax_f16 = static_cast<IType>(0.0f);
+        IType thread_amax_f16 = static_cast<IType>(block_amax_seed);
 #pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
           const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
@@ -284,9 +288,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           if constexpr (COMPUTE_ACTIVATIONS) {
             const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y + i >= rows);
             const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
-            if (!out_of_bounds) {
-              thread_amax = fmaxf(thread_amax, fabsf(elt));
-            }
+            // OOB counts as 0 (like TMA zero-fill without activations), so it clears the NaN seed
+            thread_amax = fmaxf(thread_amax, out_of_bounds ? 0.0f : fabsf(elt));
           } else {
             // If no activation, elt is 0 so we can safely do this
             thread_amax = fmaxf(thread_amax, fabsf(elt));
@@ -365,7 +368,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (ROWWISE_SCALING) {
       const size_t shmem_offset_base_rowwise =
           buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
-      thread_amax = 0.0f;
+      thread_amax = block_amax_seed;
       float in_compute_rowwise[SCALE_DIM_X];
       Vec<IType, PACK_SIZE> in_cached[WAVES];
 
@@ -374,7 +377,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (USE_HALF_PRECISION) {
-        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+        IType2 thread_amax_2x = {static_cast<IType>(block_amax_seed),
+                                 static_cast<IType>(block_amax_seed)};
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
@@ -392,7 +396,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       } else if constexpr (IS_CACHED_ACT_OP) {
         // ensures that all writes to cache made in the section above are visible to all threads
         __syncthreads();
-        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+        IType2 thread_amax_2x = {static_cast<IType>(block_amax_seed),
+                                 static_cast<IType>(block_amax_seed)};
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
@@ -420,6 +425,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                                              in_cached[w].data.elt[e + 1]};
                 ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
               }
+            }
+          } else {
+            // OOB counts as 0, so it clears the NaN seed
+            if constexpr (std::is_same_v<IType, float>) {
+              thread_amax = fmaxf(thread_amax, 0.0f);
+            } else {
+              const IType2 zero_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+              ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, zero_2x);
             }
           }
         }
@@ -467,9 +480,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               const bool swizzled_col_out_of_bounds =
                   (block_offset_X + swizzled_thread_idx >= cols);
               const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
-              if (!out_of_bounds) {
-                thread_amax = fmaxf(thread_amax, fabsf(elt));
-              }
+              // OOB counts as 0, so it clears the NaN seed
+              thread_amax = fmaxf(thread_amax, out_of_bounds ? 0.0f : fabsf(elt));
             } else {
               // If no activation, elt is 0 so we can safely do this
               thread_amax = fmaxf(thread_amax, fabsf(elt));
@@ -550,7 +562,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
 
     __builtin_assume(block_amax >= 0);
-    __builtin_assume(thread_amax >= 0);
+    // thread_amax is NaN for an all-NaN block; fmaxf drops it from the tensor amax
+    __builtin_assume(!(thread_amax < 0));
     block_amax = fmaxf(block_amax, thread_amax);
 
     // Wait for shared memory writes to be visible to TMA engine.
