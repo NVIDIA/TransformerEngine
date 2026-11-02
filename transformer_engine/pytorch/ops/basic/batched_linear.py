@@ -333,8 +333,6 @@ class BatchedLinear(BasicOperation):
             )
         if input_.dtype not in _HIGH_PRECISION_DTYPES:
             raise ValueError(f"BatchedLinear input has unsupported dtype {input_.dtype}")
-        if not input_.is_contiguous():
-            raise ValueError("BatchedLinear requires a contiguous input tensor")
         if input_.ndim < 2:
             raise ValueError(
                 f"BatchedLinear input must have at least two dimensions (got {input_.ndim})"

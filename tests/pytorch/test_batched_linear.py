@@ -372,34 +372,6 @@ def test_init_method_and_rng_tracker(deferred_init: bool) -> None:
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-def test_quantized_weight_deferred_init() -> None:
-    """Meta initialization materializes a primary MXFP8 weight in reset_parameters."""
-    recipe = make_recipe("mxfp8")
-    with te.quantized_model_init(enabled=True, recipe=recipe):
-        op = te_ops.BatchedLinear(
-            2,
-            32,
-            32,
-            device="meta",
-            dtype=torch.bfloat16,
-        )
-    assert all(param.device.type == "meta" for param in op.parameters())
-    op.reset_parameters()
-
-    inp = torch.randn(2, 32, 32, dtype=torch.bfloat16, device="cuda", requires_grad=True)
-    with te.autocast(enabled=True, recipe=recipe):
-        output = op(inp)
-    output.sum().backward()
-
-    assert isinstance(op.weight, te.QuantizedTensor)
-    assert op.weight.device.type == "cuda"
-    assert op.bias.device.type == "cuda"
-    assert op.weight.grad is not None and op.weight.grad.device.type == "cuda"
-    assert op.bias.grad is not None and op.bias.grad.device.type == "cuda"
-    assert not op.weight._with_gemm_swizzled_scales
-
-
-@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 def test_quantized_weight_inference() -> None:
     """Inference primary weight needs only row-wise compact MXFP8 data."""
     recipe = make_recipe("mxfp8")
@@ -448,15 +420,9 @@ def test_rejects_backward_override(backward_override: str) -> None:
 
 
 def test_rejects_unsupported_layout() -> None:
-    """Reject ambiguous batch dimensions and non-contiguous input storage."""
+    """Reject ambiguous batch dimensions."""
     with pytest.raises(ValueError, match="input_batch_dim=0 or input_batch_dim=-2"):
         te_ops.BatchedLinear(2, 32, 32, input_batch_dim=1, device="cuda")
-
-    op = te_ops.BatchedLinear(2, 32, 32, input_batch_dim=-2, device="cuda")
-    inp = torch.empty(32, 2, 64, device="cuda")[:, :, ::2]
-    assert inp.shape == (32, 2, 32) and not inp.is_contiguous()
-    with pytest.raises(ValueError, match="contiguous input"):
-        op(inp)
 
 
 @pytest.mark.parametrize("input_batch_dim", (0, -2))

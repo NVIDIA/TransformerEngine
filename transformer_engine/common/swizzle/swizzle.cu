@@ -2019,8 +2019,8 @@ void pack_mxfp8_scales_for_batched_gemm(const Tensor* input, Tensor* output, int
              "Input rows must be divisible by the GEMM batch count.");
   const int64_t rows_per_batch = total_rows / batch_count;
   const int64_t scale_cols = features / MXFP8_BLOCK_SIZE;
-  const int64_t padded_rows = static_cast<int64_t>(round_up_to_multiple(rows_per_batch, 128));
-  const int64_t padded_scale_cols = static_cast<int64_t>(round_up_to_multiple(scale_cols, 4));
+  const int64_t padded_rows = static_cast<int64_t>(DIVUP_TO_MULTIPLE(rows_per_batch, 128));
+  const int64_t padded_scale_cols = static_cast<int64_t>(DIVUP_TO_MULTIPLE(scale_cols, 4));
   const int64_t output_batch_stride = padded_rows * padded_scale_cols;
   const int64_t output_numel = batch_count * output_batch_stride;
 
@@ -2088,8 +2088,8 @@ void pack_mxfp8_columnwise_scales_for_batched_gemm(const Tensor* input, Tensor* 
              MXFP8_BLOCK_SIZE, ".");
   const int64_t scale_rows_per_batch = rows_per_batch / MXFP8_BLOCK_SIZE;
   const int64_t padded_scale_rows =
-      static_cast<int64_t>(round_up_to_multiple(scale_rows_per_batch, 4));
-  const int64_t padded_features = static_cast<int64_t>(round_up_to_multiple(features, 128));
+      static_cast<int64_t>(DIVUP_TO_MULTIPLE(scale_rows_per_batch, 4));
+  const int64_t padded_features = static_cast<int64_t>(DIVUP_TO_MULTIPLE(features, 128));
   const int64_t output_batch_stride = padded_scale_rows * padded_features;
   const int64_t output_numel = batch_count * output_batch_stride;
 
