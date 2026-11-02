@@ -43,8 +43,7 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
                                       std::optional<float> scaling_factor, at::Tensor expert_bias,
                                       int routing_map_format,
                                       std::optional<at::Tensor> topk_indices, at::Tensor histogram,
-                                      at::Tensor bin_bounds, int histogram_mode,
-                                      bool bin_bounds_validated = false);
+                                      at::Tensor bin_bounds, int histogram_mode);
 
 void fused_topk_with_score_function_bwd(
     at::Tensor routing_map, at::Tensor intermediate_output, at::Tensor grad_probs,
@@ -59,15 +58,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
 void fused_score_for_moe_aux_loss_bwd(at::Tensor intermediate_output, at::Tensor grad_scores,
                                       at::Tensor grad_logits, int topk, std::string score_function);
 
-std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
-                                                          at::Tensor tokens_per_expert,
-                                                          int total_num_tokens, int num_experts,
-                                                          int num_rows, int num_cols, int topk,
-                                                          float coeff);
+std::pair<std::vector<size_t>, DType> get_moe_aux_loss_workspace_config();
+
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(
+    at::Tensor probs, at::Tensor tokens_per_expert, int total_num_tokens, int num_experts,
+    int num_rows, int num_cols, int topk, float coeff, bool deterministic = false,
+    std::optional<at::Tensor> workspace = std::nullopt);
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_graph_safe(
     at::Tensor probs, at::Tensor tokens_per_expert, at::Tensor total_num_tokens, int num_experts,
-    int num_rows, int num_cols, int topk, float coeff);
+    int num_rows, int num_cols, int topk, float coeff, bool deterministic = false,
+    std::optional<at::Tensor> workspace = std::nullopt);
 
 at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
                                   int num_cols, at::Tensor grad_aux_loss);
@@ -219,21 +220,26 @@ void nvfp4_multi_tensor_compute_partial_amax(
     std::vector<int64_t> w_list, std::vector<int64_t> start_offset_list, int64_t block_len);
 
 void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output, int64_t tile_rows,
-                               int64_t tile_cols, int64_t rows_padded, int64_t block_len);
+                               int64_t tile_cols, int64_t rows_padded, int64_t block_len,
+                               DType scale_dtype = DType::kFloat8E4M3);
 
-void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax);
+void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax,
+                                   const DType scale_dtype = DType::kFloat8E4M3);
 
 void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax, at::Tensor per_block_scale,
                        at::Tensor target_scale, at::Tensor target_amax, int64_t tile_rows,
-                       int64_t tile_cols, int64_t rows_padded, int64_t block_len);
+                       int64_t tile_cols, int64_t rows_padded, int64_t block_len,
+                       const DType scale_dtype = DType::kFloat8E4M3);
 
 void nvfp4_multi_tensor_fused_scale(
     std::vector<at::Tensor> block_amax_list, std::vector<at::Tensor> global_amax_list,
     std::vector<at::Tensor> per_block_scale_list, std::vector<at::Tensor> target_scale_list,
     std::vector<at::Tensor> target_amax_list, std::vector<int64_t> tile_rows_list,
-    std::vector<int64_t> tile_cols_list, std::vector<int64_t> rows_padded_list, int64_t block_len);
+    std::vector<int64_t> tile_cols_list, std::vector<int64_t> rows_padded_list, int64_t block_len,
+    const DType scale_dtype = DType::kFloat8E4M3);
 
-void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale);
+void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale,
+                                const DType scale_dtype = DType::kFloat8E4M3);
 
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
@@ -519,14 +525,15 @@ void nvfp4_2d_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, si
 
 void nvfp4_2d_partial_cast(const at::Tensor &inp, py::handle out, const at::Tensor &scale,
                            const at::Tensor &global_scale, size_t h, size_t w, size_t start_offset,
-                           size_t block_len);
+                           size_t block_len, const DType scale_dtype = DType::kFloat8E4M3);
 
 void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
                                         std::vector<at::Tensor> out_list,
                                         std::vector<at::Tensor> scale_list,
                                         std::vector<at::Tensor> global_scale_list,
                                         std::vector<int64_t> h_list, std::vector<int64_t> w_list,
-                                        std::vector<int64_t> start_offset_list, int64_t block_len);
+                                        std::vector<int64_t> start_offset_list, int64_t block_len,
+                                        const DType scale_dtype = DType::kFloat8E4M3);
 void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
                                         at::Tensor amax_colwise, int rows, int cols,
                                         size_t start_offset);
@@ -564,6 +571,10 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
                                    const NVTE_QKV_Format qkv_format, const bool interleaved,
                                    const int cp_size, const int cp_rank);
 
+std::tuple<py::object, py::object> fused_mla_kv_rope_mxfp8(
+    const at::Tensor &kv, const at::Tensor &k_rope, const at::Tensor &cos, const at::Tensor &sin,
+    const int64_t v_head_dim, py::handle key_quantizer, py::handle value_quantizer);
+
 /***************************************************************************************************
  * Miscellaneous
  **************************************************************************************************/
@@ -576,7 +587,7 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
 std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
     const at::Tensor &split_sizes, const c10::Device &device, const std::vector<int64_t> &strides,
     const std::vector<bool> &include_leading_zero, const std::vector<at::ScalarType> &dtypes,
-    bool bulk_allocate_outputs);
+    bool bulk_allocate_outputs, size_t split_alignment);
 
 at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
                                     const c10::Device &device);
@@ -755,6 +766,7 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
 
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
+                 int64_t top_k, int64_t dispatch_output_per_expert_alignment,
                  std::optional<at::Tensor> tokens_scale_inv = std::nullopt,
                  std::optional<at::Tensor> recv_scale_inv = std::nullopt);
 
@@ -776,12 +788,16 @@ std::vector<at::Tensor> ep_prepare_and_dispatch(
     std::optional<at::Tensor> recv_scale_inv = std::nullopt,
     std::optional<at::Tensor> tokens_scale_inv = std::nullopt);
 
-void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
+void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result, int64_t top_k,
+                int64_t dispatch_output_per_expert_alignment, at::ScalarType topk_idx_dtype);
 
 void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,
-                     at::Tensor grad_tokens, at::Tensor grad_topk_weights);
+                     at::Tensor grad_tokens, at::Tensor grad_topk_weights, int64_t top_k,
+                     int64_t dispatch_output_per_expert_alignment, at::ScalarType topk_idx_dtype);
 
 void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expert_out,
+                    int64_t top_k, int64_t dispatch_output_per_expert_alignment,
+                    at::ScalarType topk_idx_dtype,
                     std::optional<at::Tensor> grad_scale_inv = std::nullopt,
                     std::optional<at::Tensor> grad_expert_out_scale_inv = std::nullopt);
 
@@ -826,7 +842,7 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t 
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
-class CommOverlapHelper : torch::CustomClassHolder {
+class CommOverlapHelper {
  public:
   // Shared ownership of an ncclComm_t. The deleter calls ncclCommDestroy when
   // the last reference (held by the helper and/or any CommOverlap consumers)
@@ -863,11 +879,14 @@ class CommOverlapHelper : torch::CustomClassHolder {
   NcclCommSharedPtr get_nccl_comm(std::string comm_name);
 };
 
-class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
+class CommOverlap : public transformer_engine::CommOverlapBase {
  private:
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+  // cuBLASMp: shape and dtype of the buffer view returned by get_buffer()
+  std::vector<size_t> _cublasmp_buffer_shape;
+  at::ScalarType _cublasmp_buffer_dtype{at::kByte};
 
  public:
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -881,6 +900,8 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   // the construction-time warmup matmul that primes cuBLASMp's lazy NCCL
   // window registrations and workspace allocation so subsequent matmuls
   // (including those captured in CUDA graphs) avoid the unsafe lazy paths.
+  // get_buffer() returns a view of cuBLASMp's workspace with `buffer_shape`
+  // and `buffer_dtype`: after an all-gather GEMM, it holds the gathered input.
   CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
               transformer_engine::CommOverlapType comm_type,
               const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -898,11 +919,14 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
 };  // CommOverlap
 
-class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
+class CommOverlapP2P : public transformer_engine::CommOverlapP2PBase {
  private:
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+  // cuBLASMp: shape and dtype of the buffer view returned by get_buffer()
+  std::vector<size_t> _cublasmp_buffer_shape;
+  at::ScalarType _cublasmp_buffer_dtype{at::kByte};
 
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,

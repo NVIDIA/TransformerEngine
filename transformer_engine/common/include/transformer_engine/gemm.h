@@ -54,6 +54,14 @@ enum NVTEMatmulConfigAttribute {
   kNVTEMatmulConfigUseSplitAccumulator = 5,
   /*! Number of streaming multiprocessors to use in GEMM kernel. */
   kNVTEMatmulConfigSMCount = 6,
+  /*! Whether alpha and beta are device pointers. Default: false.
+   *
+   *  Known bugs: only supported with NVFP4, NVFP4 amaxes are ignored when alpha and beta are device pointers.
+   *
+   *  \todo Generalize to all tensor formats
+   *  \todo Correctly handle NVFP4 amaxes when alpha and beta are device pointers
+   */
+  kNVTEMatmulConfigAlphaBetaOnDevice = 7,
   kNVTEMatmulConfigNumAttributes
 };
 
@@ -88,6 +96,9 @@ enum NVTEGroupedMatmulConfigAttribute {
   kNVTEGroupedMatmulConfigUseSplitAccumulator = 4,
   kNVTEGroupedMatmulConfigNumAttributes
 };
+
+/*! \brief Get the cuBLASLt version that Transformer Engine was built against. */
+int nvte_get_cublaslt_build_version();
 
 /*! \brief Create a matrix multiplication configuration. */
 NVTEMatmulConfig nvte_create_matmul_config();
@@ -563,6 +574,13 @@ class MatmulConfigWrapper {
   void set_sm_count(int sm_count) {
     const auto val = static_cast<int32_t>(sm_count);
     nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigSMCount, &val, sizeof(val));
+  }
+
+  /*! \brief Set whether alpha and beta are device pointers. */
+  void set_alpha_beta_on_device(bool alpha_beta_on_device) {
+    const auto val = static_cast<uint8_t>(alpha_beta_on_device);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigAlphaBetaOnDevice, &val,
+                                     sizeof(val));
   }
 
  private:

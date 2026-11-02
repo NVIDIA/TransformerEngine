@@ -1018,6 +1018,9 @@ __device__ __forceinline__ T warp_allreduce_sum(T x) {
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 using e8m0_t = uint8_t;
+#if CUDA_VERSION >= 13040
+using fp8ue5m3 = __nv_fp8_ue5m3;
+#endif
 
 enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENSIONAL = 2 };
 

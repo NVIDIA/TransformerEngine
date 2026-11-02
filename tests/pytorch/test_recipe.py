@@ -564,7 +564,7 @@ def test_nvfp4_row_scaled_quantizer_roles(
 
     def expected_e4m3_max(tensor_type):
         if not expected_use_4over6(tensor_type):
-            return 448
+            return 0
         if nvfp4_4over6_e4m3_use_256 == "all":
             return 256
         if nvfp4_4over6_e4m3_use_256 == "weights":
@@ -573,7 +573,9 @@ def test_nvfp4_row_scaled_quantizer_roles(
         if nvfp4_4over6_e4m3_use_256 == "activations":
             if tensor_type != "weight":
                 return 256
-        return 448
+        if nvfp4_4over6_e4m3_use_256 == "none":
+            return 448
+        return 0
 
     forward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
@@ -624,7 +626,7 @@ def test_nvfp4_row_scaled_quantizer_roles(
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
     assert [q.nvfp4_use_4over6 for q in backward_quantizers] == [False, False]
-    assert [q.nvfp4_e4m3_max for q in backward_quantizers] == [448, 448]
+    assert [q.nvfp4_e4m3_max for q in backward_quantizers] == [0, 0]
     assert [q.nvfp4_4over6_err_mode for q in backward_quantizers] == [nvfp4_4over6_err_mode] * 2
     assert [q.stochastic_rounding for q in backward_quantizers] == [True, True]
     assert [q.with_rht for q in backward_quantizers] == [False, False]
@@ -780,3 +782,69 @@ def test_stateful_unknown_or_malformed_pickled_extra_state_requires_opt_in(paylo
 
     monkeypatch.setenv(UNSAFE_PICKLE_EXTRA_STATE_ENV, "1")
     assert should_load_extra_state_pickle(payload, "test")
+
+
+@pytest.mark.parametrize("use_power_2_scales", [False, True])
+def test_float8_current_scaling_quant_params_follow_constructor(use_power_2_scales):
+    recipe = Float8CurrentScaling(use_power_2_scales=use_power_2_scales)
+    for qparams in (
+        recipe.fp8_quant_fwd_inp,
+        recipe.fp8_quant_fwd_weight,
+        recipe.fp8_quant_bwd_grad,
+    ):
+        assert qparams.power_2_scale == use_power_2_scales
+
+
+@pytest.mark.parametrize("use_f32_scales", [False, True])
+def test_float8_block_scaling_quant_params_follow_constructor(use_f32_scales):
+    recipe = Float8BlockScaling(use_f32_scales=use_f32_scales)
+    for qparams in (
+        recipe.fp8_quant_fwd_inp,
+        recipe.fp8_quant_fwd_weight,
+        recipe.fp8_quant_bwd_grad,
+    ):
+        assert qparams.power_2_scale == (not use_f32_scales)
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [Float8CurrentScaling(use_power_2_scales=True), Float8BlockScaling(use_f32_scales=True)],
+    ids=["current_scaling", "block_scaling"],
+)
+def test_fp8_recipe_unpickle_rebuilds_missing_quant_params(recipe):
+    state = dict(recipe.__dict__)
+    for name in ("fp8_quant_fwd_inp", "fp8_quant_fwd_weight", "fp8_quant_bwd_grad"):
+        del state[name]
+    restored = recipe.__class__.__new__(recipe.__class__)
+    restored.__setstate__(state)
+    assert restored.fp8_quant_fwd_inp.power_2_scale == recipe.fp8_quant_fwd_inp.power_2_scale
+    assert restored.fp8_quant_fwd_weight.power_2_scale == recipe.fp8_quant_fwd_weight.power_2_scale
+    assert restored.fp8_quant_bwd_grad.power_2_scale == recipe.fp8_quant_bwd_grad.power_2_scale
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+@pytest.mark.parametrize(
+    "role", ["fp8_quant_fwd_inp", "fp8_quant_fwd_weight", "fp8_quant_bwd_grad"]
+)
+def test_float8_block_scaling_non_pow2_scales_arch_support(role):
+    """Non-power-of-2 FP8 block scales are rejected on Blackwell and newer, accepted on Hopper."""
+    fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling()
+    setattr(
+        fp8_recipe,
+        role,
+        transformer_engine.common.recipe.QParams(power_2_scale=False, amax_epsilon=0.0),
+    )
+    if torch.cuda.get_device_capability() >= (10, 0):
+        with pytest.raises(RuntimeError, match="power-of-2"):
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                pass
+    else:
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            pass
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+def test_float8_block_scaling_default_recipe_supported():
+    """The default FP8 block-scaling recipe (power-of-2 scales) is accepted on every arch."""
+    with te.autocast(enabled=True, recipe=transformer_engine.common.recipe.Float8BlockScaling()):
+        pass

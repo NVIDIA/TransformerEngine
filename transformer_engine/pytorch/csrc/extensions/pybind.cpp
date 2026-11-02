@@ -149,7 +149,7 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
         py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
-        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
+        py::arg("bin_bounds"), py::arg("histogram_mode"),
         "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
@@ -164,13 +164,16 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_score_for_moe_aux_loss_bwd", &fused_score_for_moe_aux_loss_bwd,
         py::arg("intermediate_output"), py::arg("grad_scores"), py::arg("grad_logits"),
         py::arg("topk"), py::arg("score_function"), "Fused aux loss with score function bwd");
+  m.def("get_moe_aux_loss_workspace_config", &get_moe_aux_loss_workspace_config);
   m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        py::arg("deterministic") = false, py::arg("workspace") = py::none(),
         "Fused aux loss fwd (host-int total_num_tokens, host-folded C_coeff)");
   m.def("fused_moe_aux_loss_fwd_graph_safe", &fused_moe_aux_loss_fwd_graph_safe, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        py::arg("deterministic") = false, py::arg("workspace") = py::none(),
         "Fused aux loss fwd (device-tensor total_num_tokens, CUDA-graph-safe)");
   m.def("fused_moe_aux_loss_bwd", &fused_moe_aux_loss_bwd, py::arg("Const_buf"),
         py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
@@ -210,6 +213,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+  m.def("nvfp4_gemm_swizzled_scales_alignment",
+        &transformer_engine::pytorch::NVFP4Quantizer::gemm_swizzled_scales_alignment,
+        py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
+        py::arg("row_scaled_nvfp4"), py::arg("nvfp4_use_4over6"), py::arg("sm_arch"),
+        py::arg("disable_rht_cast_fusion"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
@@ -437,21 +445,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::arg("input"), py::arg("output"), py::arg("M_tiles"), py::arg("K_tiles"),
       py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_expand_scale_to_fp8", &transformer_engine::pytorch::nvfp4_expand_scale_to_fp8,
-        "Expand tile-level scales to row-level scales and convert to FP8 E4M3", py::arg("input"),
+        "Expand tile-level scales to row-level scales and convert to FP8", py::arg("input"),
         py::arg("output"), py::arg("tile_rows"), py::arg("tile_cols"), py::arg("rows_padded"),
-        py::arg("block_len"), py::call_guard<py::gil_scoped_release>());
+        py::arg("block_len"), py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3);
   m.def("nvfp4_compute_per_block_scale",
         &transformer_engine::pytorch::nvfp4_compute_per_block_scale,
         "Compute per-block decode scale from block amax and global amax", py::arg("block_amax"),
-        py::arg("scale"), py::arg("global_amax"), py::call_guard<py::gil_scoped_release>());
+        py::arg("scale"), py::arg("global_amax"),
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
+        py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_compute_global_scale", &transformer_engine::pytorch::nvfp4_compute_global_scale,
         "Compute global encode scale from global amax", py::arg("global_amax"),
-        py::arg("global_scale"), py::call_guard<py::gil_scoped_release>());
+        py::arg("global_scale"), py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
+        py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_fused_scale", &transformer_engine::pytorch::nvfp4_fused_scale,
         "Fused kernel: compute per-block decode scale, copy global amax, expand to row-level FP8",
         py::arg("block_amax"), py::arg("global_amax"), py::arg("per_block_scale"),
         py::arg("target_scale"), py::arg("target_amax"), py::arg("tile_rows"), py::arg("tile_cols"),
-        py::arg("rows_padded"), py::arg("block_len"), py::call_guard<py::gil_scoped_release>());
+        py::arg("rows_padded"), py::arg("block_len"),
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
+        py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_multi_tensor_fused_scale",
         &transformer_engine::pytorch::nvfp4_multi_tensor_fused_scale,
         "Batched fused scale: compute per-block decode scale, copy global amax, expand to FP8 for "
@@ -459,6 +472,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("block_amax_list"), py::arg("global_amax_list"), py::arg("per_block_scale_list"),
         py::arg("target_scale_list"), py::arg("target_amax_list"), py::arg("tile_rows_list"),
         py::arg("tile_cols_list"), py::arg("rows_padded_list"), py::arg("block_len"),
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
         py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_2d_multi_tensor_transpose",
         &transformer_engine::pytorch::nvfp4_2d_multi_tensor_transpose,
@@ -505,12 +519,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Partial cast from master weights for NVFP4 2D", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("global_scale"), py::arg("h"), py::arg("w"),
         py::arg("start_offset"), py::arg("block_len") = 16,
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
         py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_multi_tensor_2d_partial_cast",
         &transformer_engine::pytorch::nvfp4_multi_tensor_2d_partial_cast,
         "Batched partial cast from master weights for NVFP4 2D", py::arg("inp_list"),
         py::arg("out_list"), py::arg("scale_list"), py::arg("global_scale_list"), py::arg("h_list"),
         py::arg("w_list"), py::arg("start_offset_list"), py::arg("block_len") = 16,
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
         py::call_guard<py::gil_scoped_release>());
   m.def("mxfp8_scaling_compute_partial_amax",
         &transformer_engine::pytorch::mxfp8_scaling_compute_partial_amax,
@@ -581,6 +597,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply QKV RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
         "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_mla_kv_rope_mxfp8", &transformer_engine::pytorch::fused_mla_kv_rope_mxfp8,
+        "Split MLA key/value, apply RoPE to the key and quantize both to MXFP8", py::arg("kv"),
+        py::arg("k_rope"), py::arg("cos"), py::arg("sin"), py::arg("v_head_dim"),
+        py::arg("key_quantizer"), py::arg("value_quantizer"));
 
   // fused router
   transformer_engine::pytorch::init_router_bindings(m);
@@ -595,6 +615,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Misc
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
+  m.def("get_cublasLt_build_version", &nvte_get_cublaslt_build_version,
+        "Get the cublasLt version that Transformer Engine was built against",
+        py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
@@ -605,7 +628,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("splits_to_offsets_multi", &transformer_engine::pytorch::splits_to_offsets_multi,
         "Compute multiple scaled inclusive-scan offsets from a split-sizes vector",
         py::arg("split_sizes"), py::arg("device"), py::kw_only(), py::arg("strides"),
-        py::arg("include_leading_zero"), py::arg("dtypes"), py::arg("bulk_allocate") = false);
+        py::arg("include_leading_zero"), py::arg("dtypes"), py::arg("bulk_allocate") = false,
+        py::arg("split_alignment") = 1);
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
 
