@@ -424,6 +424,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     // Quantize the output
     std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
     my_quantizer->quantize(unquantized_D_tensor, D_tensor);
+    my_quantizer->optimize_tensor_for_gemm(D_tensor, D);
   }
   // Pack outputs
   std::vector<py::object> out;

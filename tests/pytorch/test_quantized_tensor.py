@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Tuple, Union, Optional
 
 import pytest
 import torch
+import transformer_engine_torch as tex
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
@@ -1233,3 +1234,104 @@ def test_restore_real_quantized_storage(monkeypatch, compiled_metadata):
     assert restored[0] is x and restored[2] is None
     assert isinstance(tail, tuple) and tail[0] is x
     torch.testing.assert_close(restored[1].dequantize(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "quantization,shape",
+    [
+        pytest.param(
+            "mxfp8",
+            (128, 128),
+            marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+        ),
+        *[
+            pytest.param(
+                name,
+                shape,
+                marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+            )
+            for name, shape in [
+                ("nvfp4", (32, 128)),
+                ("nvfp4-rht", (32, 128)),
+                ("nvfp4-rht", (128, 128)),
+                ("nvfp4-2d", (128, 128)),
+                ("nvfp4_row_scaled", (128, 128)),
+                ("nvfp4_4over6", (32, 128)),
+            ]
+        ],
+    ],
+)
+@pytest.mark.parametrize("optimize_for_gemm", [False, True])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "quantize",
+        "multi_tensor_quantize",
+        "split_quantize",
+        "gelu",
+        "dgelu",
+        "scaled_srelu",
+        "dbias_dgelu",
+        "bgrad",
+        "layernorm",
+        "rmsnorm",
+    ],
+)
+def test_native_quantization_scale_layout(
+    quantization, shape, optimize_for_gemm, operation, monkeypatch
+):
+    """Every producer honors the quantizer's requested scale layout."""
+    monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", "1")
+    if quantization in ("nvfp4-rht", "nvfp4-2d"):
+        quantizer = NVFP4Quantizer(
+            with_rht=quantization == "nvfp4-rht",
+            with_post_rht_amax=quantization == "nvfp4-rht",
+            with_2d_quantization=quantization == "nvfp4-2d",
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )
+    else:
+        quantizer = make_quantizer(quantization)
+    inp = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    grad = torch.randn_like(inp)
+    weight = torch.randn(shape[-1], dtype=inp.dtype, device=inp.device)
+    bias = torch.randn_like(weight)
+    scales = torch.rand(shape[0], dtype=torch.float32, device=inp.device)
+
+    def run(out=None):
+        if operation == "quantize":
+            return quantizer(inp)
+        if operation == "multi_tensor_quantize":
+            return tex.multi_tensor_quantize([inp], [quantizer])[0]
+        if operation == "split_quantize":
+            return tex.split_quantize(inp, [shape[0]], [quantizer])[0]
+        if operation == "gelu":
+            return tex.gelu(inp, quantizer)
+        if operation == "dgelu":
+            return tex.dgelu(grad, inp, quantizer)
+        if operation == "scaled_srelu":
+            return tex.scaled_srelu(inp, scales, quantizer)
+        if operation == "dbias_dgelu":
+            return tex.dbias_dgelu(grad, inp, quantizer)[1]
+        if operation == "bgrad":
+            return tex.bgrad_quantize(inp, quantizer)[1]
+        if operation == "layernorm":
+            return tex.layernorm_fwd(
+                inp, weight, bias, 1e-5, out, quantizer, te.DType.kBFloat16, 0, False
+            )[0]
+        if operation == "rmsnorm":
+            return tex.rmsnorm_fwd(inp, weight, 1e-5, out, quantizer, te.DType.kBFloat16, 0, False)[
+                0
+            ]
+        raise AssertionError(operation)
+
+    quantizer.optimize_for_gemm = False
+    expected = run().dequantize()
+    quantizer.optimize_for_gemm = optimize_for_gemm
+    actual = run()
+    assert actual._with_gemm_swizzled_scales == optimize_for_gemm
+    torch.testing.assert_close(actual.dequantize(), expected, atol=0, rtol=0)
+    if operation in ("layernorm", "rmsnorm"):
+        assert run(actual) is actual
+        assert actual._with_gemm_swizzled_scales == optimize_for_gemm
+        torch.testing.assert_close(actual.dequantize(), expected, atol=0, rtol=0)

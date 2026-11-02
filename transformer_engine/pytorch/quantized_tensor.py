@@ -450,6 +450,9 @@ class Quantizer(abc.ABC):
 
     """Whether to solely optimize for matrix multiplication
 
+    MXFP8 and NVFP4 outputs use GEMM-swizzled scales even when a separate
+    swizzle is needed after quantization.
+
     The resulting quantized tensors are not guaranteed to support any
     operation other than matrix multiplication. Use with care since
     this is likely to break communication, checkpointing, and many
