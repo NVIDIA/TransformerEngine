@@ -25,6 +25,7 @@ from transformer_engine.pytorch import (
     QuantizedTensor,
 )
 
+from transformer_engine.pytorch.quantized_tensor import prepare_for_saving, restore_from_saved
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
@@ -1187,3 +1188,48 @@ def test_skip_quantization_with_noop_flag(
         assert torch.equal(
             buf_without_noop, buf_with_noop
         ), f"{quantization}/{usage}: noop flag fails to take effect because {attr} changed."
+
+
+def test_saved_storage_protocol(monkeypatch):
+    """Preserve custom metadata, pass the full suffix, and use the returned remainder."""
+    value, tail, replacement = (torch.tensor(i) for i in range(3))
+    remainder = [replacement, tail]
+
+    class Storage:
+        __slots__ = ()
+
+        def prepare_for_saving(self):
+            return [value], self
+
+        def restore_from_saved(self, tensors):
+            assert isinstance(tensors, list)
+            assert len(tensors) == 2 and tensors[0] is value and tensors[1] is tail
+            return remainder
+
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
+    storage = Storage()
+    saved, objects = prepare_for_saving(value, storage)
+    restored, remaining = restore_from_saved(
+        objects + [None], saved + [tail], return_saved_tensors=True
+    )
+    assert restored[0] is value and restored[1] is storage and restored[2] is replacement
+    assert isinstance(remaining, list) and len(remaining) == 1 and remaining[0] is tail
+
+
+@pytest.mark.parametrize("compiled_metadata", [False, True])
+def test_restore_real_quantized_storage(monkeypatch, compiled_metadata):
+    """Restore actual MXFP8 buffers and None/plain tensor slots with either metadata form."""
+    if not te.is_mxfp8_available():
+        pytest.skip("MXFP8 is unavailable.")
+    q = MXFP8Quantizer(te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    q.internal = True
+    x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    quantized = q(x)
+    expected = quantized.dequantize().clone()
+    with monkeypatch.context() as context:
+        context.setattr(torch.compiler, "is_compiling", lambda: compiled_metadata)
+        saved, objects = prepare_for_saving(x, quantized, None)
+    restored, tail = restore_from_saved(objects, tuple(saved) + (x,), return_saved_tensors=True)
+    assert restored[0] is x and restored[2] is None
+    assert isinstance(tail, tuple) and tail[0] is x
+    torch.testing.assert_close(restored[1].dequantize(), expected, rtol=0, atol=0)
