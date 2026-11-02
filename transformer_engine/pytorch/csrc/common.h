@@ -135,6 +135,9 @@ class Quantizer {
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
                         const std::optional<TensorWrapper>& noop_flag = std::nullopt) = 0;
 
+  /*! @brief Apply the requested GEMM scale layout to a computed tensor. */
+  void optimize_tensor_for_gemm(TensorWrapper& tensor, py::handle tensor_py) const;
+
   virtual ~Quantizer() = default;
 
   DType dtype = DType::kNumTypes;

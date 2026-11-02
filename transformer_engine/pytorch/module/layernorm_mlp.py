@@ -2277,13 +2277,6 @@ def _layernorm_mlp_forward_fake(
         args.fc2_input_quantizer if fp8_or_debug else None,
         gated=args.activation in _GATED_ACTIVATIONS,
         dtype=args.activation_dtype,
-        fused_quantization=(
-            args.fp8
-            and not args.debug
-            and not gemm_gelu_fusion
-            and not args.recipe_float8_block_scaling
-            and not args.recipe_custom
-        ),
     )
     if args.fc2_output_quantizer is not None:
         args.fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)

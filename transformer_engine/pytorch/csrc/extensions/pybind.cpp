@@ -213,11 +213,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
-  m.def("nvfp4_gemm_swizzled_scales_alignment",
-        &transformer_engine::pytorch::NVFP4Quantizer::gemm_swizzled_scales_alignment,
-        py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
-        py::arg("row_scaled_nvfp4"), py::arg("nvfp4_use_4over6"), py::arg("sm_arch"),
-        py::arg("disable_rht_cast_fusion"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
@@ -405,8 +400,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
-  m.def("normalization_scale_layout", &transformer_engine::pytorch::normalization_scale_layout,
-        py::arg("normalization"), py::arg("quantizer"), py::arg("use_cudnn"));
   m.def("layernorm_fwd", &transformer_engine::pytorch::layernorm_fwd, "LayerNorm", py::arg("input"),
         py::arg("weight"), py::arg("bias"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));

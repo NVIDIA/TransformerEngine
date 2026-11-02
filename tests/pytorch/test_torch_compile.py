@@ -66,7 +66,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
 )
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
-from transformer_engine.pytorch.dynamo.fake import fake_bgrad, fake_norm
+from transformer_engine.pytorch.dynamo.fake import fake_bgrad
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -2061,34 +2061,6 @@ def test_to_tensor_spec_quantized(factory, shape, swizzled):
         assert spec.quantizer.optimize_for_gemm == q.optimize_for_gemm == (not swizzled)
 
 
-@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
-@pytest.mark.parametrize("with_2d_quantization", [False, True])
-@pytest.mark.parametrize("optimize_for_gemm", [False, True])
-@pytest.mark.parametrize(
-    "use_cudnn,shape,compact",
-    [
-        (True, (128, 128), True),
-        (True, (2, 64, 128), True),
-        (True, (64, 128), False),
-        (False, (128, 128), False),
-    ],
-)
-def test_fake_norm_mxfp8_scale_layout(
-    monkeypatch, normalization, with_2d_quantization, optimize_for_gemm, use_cudnn, shape, compact
-):
-    """2D MXFP8 fallback preserves the quantizer's scale layout."""
-    monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", str(int(use_cudnn)))
-    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3, with_2d_quantization=with_2d_quantization)
-    quantizer.optimize_for_gemm = optimize_for_gemm
-    inp = TensorSpec(shape=shape, dtype=torch.bfloat16, device=torch.device("cpu"))
-    out, _, _ = fake_norm(inp, quantizer, normalization=normalization)
-    compact = compact and not with_2d_quantization
-    expected = optimize_for_gemm and not compact
-    assert out.create_metadata()["nontensor_kwargs"]["with_gemm_swizzled_scales"] == expected
-    assert out.create_tensor()._with_gemm_swizzled_scales == expected
-    assert quantizer.optimize_for_gemm == optimize_for_gemm
-
-
 # ---------------------------------------------------------------------------
 # te.Linear / te.LayerNormLinear / te.LayerNormMLP
 # ---------------------------------------------------------------------------
@@ -3461,7 +3433,8 @@ def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
         previous_graph_count = len(graphs)
         dx, db = compiled(inp)
         expected_db, expected_dx = tex.bgrad_quantize(inp, quantizer)
-        assert dx._with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+        assert dx._with_gemm_swizzled_scales == optimize_for_gemm
+        assert expected_dx._with_gemm_swizzled_scales == optimize_for_gemm
         torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
         torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
         torch.testing.assert_close(
@@ -3474,7 +3447,11 @@ def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
     inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
     _, expected_dx = tex.bgrad_quantize(inp, quantizer)
     _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
-    assert dx_spec.with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+    metadata = dx_spec.create_metadata()
+    assert (
+        metadata["nontensor_kwargs"]["with_gemm_swizzled_scales"]
+        == expected_dx._with_gemm_swizzled_scales
+    )
     for name, (inner_shape, inner_dtype) in dx_spec.quantizer.inner_tensor_specs(shape).items():
         inner = getattr(expected_dx, name)
         assert inner.shape == inner_shape

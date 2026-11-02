@@ -81,11 +81,7 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   // Perform quantization
   quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
 
-  // Post-quantize swizzle for quantizers whose kernel does not bake
-  // the GEMM-swizzled scale layout in directly
-  if (quantizer_cpp->optimize_for_gemm && !output_cpp.get_with_gemm_swizzled_scales()) {
-    inplace_swizzle_scale_for_gemm(output_py);
-  }
+  quantizer_cpp->optimize_tensor_for_gemm(output_cpp, output_py);
 
   return output_py;
 }
@@ -128,9 +124,7 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
   }
 
   nvfp4_quantizer_cpp->quantize_impl(input_cpp, output_cpp, std::nullopt, false);
-  if (quantizer_cpp->optimize_for_gemm && !output_cpp.get_with_gemm_swizzled_scales()) {
-    inplace_swizzle_scale_for_gemm(output_py);
-  }
+  quantizer_cpp->optimize_tensor_for_gemm(output_cpp, output_py);
 
   return output_py;
 }
@@ -1165,6 +1159,9 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
   // Perform multi-tensor quantization
   multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
 
+  for (size_t i = 0; i < output_cpp_list.size(); ++i) {
+    quantizer_cpp_list[i]->optimize_tensor_for_gemm(output_cpp_list[i], output_py_list[i]);
+  }
   return output_py_list;
 }
 
@@ -2265,6 +2262,9 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
   }
 
+  for (size_t i = 0; i < output_cpp_list.size(); ++i) {
+    quantizer_cpp_list[i]->optimize_tensor_for_gemm(output_cpp_list[i], output_py_list[i]);
+  }
   return output_py_list;
 }
 

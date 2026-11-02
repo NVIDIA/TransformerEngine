@@ -67,6 +67,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
   // Trivial impl if tensors are empty
   if (product(shape) == 0) {
     grad_bias_torch.zero_();
+    quantizer_cpp->optimize_tensor_for_gemm(grad_input_nvte, grad_input_py);
     return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
   }
 
@@ -91,6 +92,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
   if (!with_fused_kernel) {
     sum_bias_grad(grad_bias_torch, grad_output_torch);
     quantizer_cpp->quantize(grad_output_nvte, grad_input_nvte);
+    quantizer_cpp->optimize_tensor_for_gemm(grad_input_nvte, grad_input_py);
     return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
   }
 
@@ -116,6 +118,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
                         workspace_nvte.data(), stream);
   });
 
+  quantizer_cpp->optimize_tensor_for_gemm(grad_input_nvte, grad_input_py);
   return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
 }
 
@@ -149,6 +152,7 @@ std::vector<py::object> dact_dbias(
   // Return immediately if tensors are empty
   if (product(output_shape) == 0) {
     grad_bias_torch.zero_();
+    quantizer_cpp->optimize_tensor_for_gemm(grad_input_nvte, grad_input_py);
     return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
   }
 
@@ -259,6 +263,7 @@ std::vector<py::object> dact_dbias(
       NVTE_ERROR("Invalid implementation");
   }
 
+  quantizer_cpp->optimize_tensor_for_gemm(grad_input_nvte, grad_input_py);
   return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
 }
 
