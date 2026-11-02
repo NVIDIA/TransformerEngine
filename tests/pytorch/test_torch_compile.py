@@ -2984,7 +2984,11 @@ def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
     inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
     _, expected_dx = tex.bgrad_quantize(inp, quantizer)
     _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
-    assert dx_spec.with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+    metadata = dx_spec.create_metadata()
+    assert (
+        metadata["nontensor_kwargs"]["with_gemm_swizzled_scales"]
+        == expected_dx._with_gemm_swizzled_scales
+    )
     for name, (inner_shape, inner_dtype) in dx_spec.quantizer.inner_tensor_specs(shape).items():
         inner = getattr(expected_dx, name)
         assert inner.shape == inner_shape

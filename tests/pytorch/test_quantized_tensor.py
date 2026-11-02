@@ -8,10 +8,10 @@ from typing import Any, Dict, List, Tuple, Union, Optional
 
 import pytest
 import torch
-import transformer_engine_torch as tex
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -1304,7 +1304,12 @@ def test_native_quantization_scale_layout(
         if operation == "multi_tensor_quantize":
             return tex.multi_tensor_quantize([inp], [quantizer])[0]
         if operation == "split_quantize":
-            return tex.split_quantize(inp, [shape[0]], [quantizer])[0]
+            return tex.split_quantize(
+                inp,
+                [shape[0]],
+                [quantizer],
+                disable_bulk_allocation=shape[0] % 64 != 0 or quantization == "nvfp4-2d",
+            )[0]
         if operation == "gelu":
             return tex.gelu(inp, quantizer)
         if operation == "dgelu":
