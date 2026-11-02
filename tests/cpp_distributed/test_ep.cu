@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -1012,6 +1013,8 @@ TYPED_TEST(EPZeroCopyTest, IdentityAllSymm) {
 // -- main ----------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
+  // The non-v2 ops under test require the handle cache.
+  setenv("NVTE_EP_HANDLE_CACHE_SIZE", "4096", 0);
   if (!ep_bootstrap(argc, argv)) return 0;
   int ret = RUN_ALL_TESTS();
   ep_teardown();
