@@ -32,7 +32,6 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
-#include <memory>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -283,8 +282,6 @@ struct SimpleTensor {
   }
 };
 
-class Workspace;
-
 struct Tensor {
  public:
   SimpleTensor data;
@@ -297,8 +294,6 @@ struct Tensor {
 
   NVTEScalingMode scaling_mode;
   NVTETensor nvte_tensor;
-  // Lazily created for tensors used with the workspace planning API.
-  std::shared_ptr<Workspace> workspace;
   /*! \brief Whether scaling factors are in format expected by GEMM
    *
    *  Only meaningful for MXFP8 and NVFP4.
@@ -337,7 +332,6 @@ struct Tensor {
 
   /*! Reset tensor data. */
   void clear() {
-    workspace.reset();
     data.clear();
     columnwise_data.clear();
     amax.clear();

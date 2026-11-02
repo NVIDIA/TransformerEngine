@@ -14,13 +14,13 @@ for both forward and backward. Use the query/allocate/execute protocol described
 in :doc:`cast`; descriptors, activation-input descriptors, and mapper metadata
 occupy a single region in the caller-owned workspace. Use separate allocations
 for independently executing streams. These calls share
-the catalog, alignment, host-submission, and CUDA Graph lifetime rules in
+the buffer alignment, host-submission, and CUDA Graph lifetime rules in
 :doc:`workspace`.
 
 The original workspace-less functions reject MXFP8 layouts with varying last
 dimensions. Constant last dimensions use launch-local tensor maps and continue
 to work through both APIs. Grouped DBias plus activation backward already accepts
-workspace, requires constant last dimensions, and resolves its scratch through
-the same region catalog.
+a dedicated scratch workspace and requires constant last dimensions. It retains
+the existing scratch protocol and does not use the TMA workspace layout.
 
 .. doxygenfile:: activation.h

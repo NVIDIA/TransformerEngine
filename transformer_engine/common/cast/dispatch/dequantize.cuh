@@ -14,7 +14,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
-#include "../core/workspace.h"
+#include "../core/grouped_tma_workspace.h"
 #include "../fp8/dequantize_fp8.cuh"
 #include "../fp8_blockwise/group_dequantize_fp8_blockwise.cuh"
 #include "../mxfp8/dequantize_mxfp8.cuh"
@@ -65,7 +65,7 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
   switch (input.scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
       if (is_supported_by_CC_100()) {
-        common::dispatch_grouped_workspace(
+        common::dispatch_grouped_tma_workspace(
             workspace, common::grouped_tma_workspace_bytes(input),
             [&](Tensor *scratch) { mxfp8::group_dequantize(&input, output, stream, scratch); });
       } else {
@@ -75,7 +75,7 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
     }
     case NVTE_BLOCK_SCALING_1D:
     case NVTE_BLOCK_SCALING_2D: {
-      common::dispatch_grouped_workspace(workspace, 0, [&](Tensor *scratch) {
+      common::dispatch_grouped_tma_workspace(workspace, 0, [&](Tensor *scratch) {
         if (scratch != nullptr && scratch->data.dptr == nullptr) return;
         fp8_blockwise::group_dequantize(&input, output, stream);
       });

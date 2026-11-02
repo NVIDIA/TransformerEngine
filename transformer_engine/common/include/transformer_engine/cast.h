@@ -110,9 +110,8 @@ void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output
  *  Supports the same scaling modes as nvte_group_quantize. Calling with an empty workspace
  *  tensor (a tensor with a NULL data pointer) sets its required shape and dtype without
  *  performing quantization. Allocate that workspace and call again to execute the operation.
- *  The query prepares the internal region layout and includes any persistent reservations.
- *  Reusing the tensor handle preserves that catalog; execution uses its reserved scratch
- *  regions without overwriting persistent contents.
+ *  Query and execution reconstruct the same TMA-specific layout from the group count.
+ *  They may use different tensor handles; no persistent host metadata is attached to either.
  *  The workspace is a one-dimensional byte tensor and requires at least one byte even when
  *  the selected kernel does not need temporary storage.
  *  Execution validates the tensor's declared byte capacity and base alignment.
@@ -123,7 +122,7 @@ void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output
  *  Contents are rebuilt on every invocation; no initialization is required. Keep the memory
  *  alive until submitted work completes, and for the lifetime of captured graphs that use it.
  *  Each workspace is used by one CUDA stream. The caller supplies separate allocations
- *  for independently executing streams and serializes host access to each catalog.
+ *  for independently executing streams and serializes complete host submissions using the same buffer.
  *  Independent graphs require separate mutable storage, even if captured on the same stream.
  *  Query and allocate the workspace before CUDA graph capture.
  *

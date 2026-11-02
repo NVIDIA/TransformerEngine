@@ -26,73 +26,13 @@
 
 #include "../../common.h"
 #include "../../util/ptx.cuh"
-#include "../../util/workspace.h"
 #include "../../utils.cuh"
 #include "grouped_layout.cuh"
+#include "grouped_tma_workspace.h"
 
 namespace transformer_engine {
 namespace dispatch {
 namespace common {
-
-// Non-owning workspace view passed by value to the updater and consumer kernels.
-// Variable last dimensions require a complete view; direct paths never dereference it.
-struct GroupedTmaStorageView {
-  CUtensorMap *input = nullptr;
-  CUtensorMap *act_input = nullptr;
-  CUtensorMap *output_rowwise = nullptr;
-  CUtensorMap *output_colwise = nullptr;
-  size_t *rows = nullptr;
-  size_t *cols = nullptr;
-  size_t *offsets = nullptr;
-};
-
-// Each region, including metadata arrays with odd element counts, starts on
-// its own 128-byte boundary. Query and execution share this layout definition.
-struct GroupedTmaWorkspaceLayout {
-  explicit GroupedTmaWorkspaceLayout(size_t num_tensors) {
-    input = layout.add<CUtensorMap>(num_tensors);
-    act_input = layout.add<CUtensorMap>(num_tensors);
-    output_rowwise = layout.add<CUtensorMap>(num_tensors);
-    output_colwise = layout.add<CUtensorMap>(num_tensors);
-    rows = layout.add<size_t>(num_tensors);
-    cols = layout.add<size_t>(num_tensors);
-    offsets = layout.add<size_t>(num_tensors);
-  }
-
-  WorkspaceLayout layout;
-  WorkspaceBlock input, act_input, output_rowwise, output_colwise;
-  WorkspaceBlock rows, cols, offsets;
-};
-
-inline size_t get_grouped_tma_workspace_size(size_t num_tensors) {
-  const GroupedTmaWorkspaceLayout workspace_layout(num_tensors);
-  // A nonempty allocation distinguishes execution from a workspace size query,
-  // including layouts that do not use descriptors.
-  return std::max(size_t{1}, workspace_layout.layout.size());
-}
-
-// Constant last dimensions use launch-local descriptors passed by value.
-inline size_t grouped_tma_workspace_bytes(const GroupedTensor &tensor) {
-  return tensor.all_same_shape() || tensor.all_same_last_dim()
-             ? 0
-             : get_grouped_tma_workspace_size(tensor.num_tensors);
-}
-
-inline GroupedTmaStorageView get_grouped_tma_storage(Tensor *workspace, size_t num_tensors) {
-  if (num_tensors == 0) {
-    return {};
-  }
-  // The caller is responsible for the allocation size and alignment returned by the query.
-  const GroupedTmaWorkspaceLayout workspace_layout(num_tensors);
-  const WorkspaceView view(workspace->data.dptr, workspace_layout.layout);
-  return {view.get<CUtensorMap>(workspace_layout.input),
-          view.get<CUtensorMap>(workspace_layout.act_input),
-          view.get<CUtensorMap>(workspace_layout.output_rowwise),
-          view.get<CUtensorMap>(workspace_layout.output_colwise),
-          view.get<size_t>(workspace_layout.rows),
-          view.get<size_t>(workspace_layout.cols),
-          view.get<size_t>(workspace_layout.offsets)};
-}
 
 inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   const size_t cols = t->flat_last_dim();

@@ -14,7 +14,6 @@
 #include <vector>
 
 #include "../common.h"
-#include "core/workspace.h"
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
 #include "fp8/group_amax_fp8.cuh"
