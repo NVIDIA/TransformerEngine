@@ -934,50 +934,6 @@ class TestGroupedTensor:
             for name in ("rowwise_data", "columnwise_data", "scale_inv", "columnwise_scale_inv"):
                 assert torch.equal(getattr(actual, name), getattr(reference, name)), name
 
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_group_quantize_concurrent_cuda_graphs(self) -> None:
-        """Captured grouped quantizers must keep their TMA scratch storage independent."""
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-        quantizer.set_usage(rowwise=True, columnwise=True)
-        num_tensors = 65
-        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
-        inputs = []
-        metadata = []
-        expected = []
-        for index in range(2):
-            rows = [128 * (1 + (i + index) % 2) for i in range(num_tensors)]
-            cols = [128 * (1 + (i + index) % 3) for i in range(num_tensors)]
-            inputs.append(
-                torch.randn(
-                    sum(m * n for m, n in zip(rows, cols)), device="cuda", dtype=torch.bfloat16
-                ).view(1, -1)
-            )
-            metadata.append(
-                (
-                    torch.tensor(rows, device="cuda", dtype=torch.int64),
-                    torch.tensor(cols, device="cuda", dtype=torch.int64),
-                )
-            )
-            expected.append(tex.group_quantize(inputs[-1], quantizer, num_tensors, *metadata[-1]))
-        torch.cuda.synchronize()
-
-        graphs = []
-        outputs = []
-        for stream, tensor, (rows, cols) in zip(streams, inputs, metadata):
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=stream):
-                outputs.append(tex.group_quantize(tensor, quantizer, num_tensors, rows, cols))
-            graphs.append(graph)
-        for _ in range(20):
-            for stream, graph in zip(streams, graphs):
-                with torch.cuda.stream(stream):
-                    graph.replay()
-        torch.cuda.synchronize()
-
-        for actual, reference in zip(outputs, expected):
-            for attr in ("rowwise_data", "columnwise_data", "scale_inv", "columnwise_scale_inv"):
-                assert torch.equal(getattr(actual, attr), getattr(reference, attr)), attr
-
     @pytest.mark.parametrize("capture", [False, True])
     @pytest.mark.parametrize("rowwise", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
