@@ -436,7 +436,7 @@ class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
         return cute.compile(
             MXFP8GatedQuantizeG2SKernel(self),
             _fake_gmem_tensor(self.DTYPE, (sym_M, sym_2N), 16),  # mGatedInput
-            _fake_gmem_tensor(self.DTYPE, (sym_M, sym_N), 16) if self.IS_BWD else None,  # mGrad
+            _fake_gmem_tensor(self.DTYPE, (sym_M, sym_N), 16) if self.IS_BWD else None,  # mYGrad
             # mO_row, mS_row
             _fake_gmem_tensor(self.FP8_DTYPE, (sym_M, out_cols), 16) if self.ROWWISE else None,
             (
