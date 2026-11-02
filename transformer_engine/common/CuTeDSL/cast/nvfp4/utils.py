@@ -4,7 +4,6 @@
 
 """Constants, scaling math, and E2M1 conversion helpers for NVFP4 kernels."""
 
-import os
 from typing import Optional
 
 import cutlass
@@ -13,9 +12,6 @@ from cutlass import BFloat16, Boolean, Float32, Float8E4M3FN, Int64, Uint32
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
-
-
-CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
 
 FLOAT32_MAX = 3.4028234663852886e38
 BFLOAT16_MAX = 3.3895313892515355e38
@@ -38,21 +34,6 @@ def validate_tensor(tensor: Optional[cute.Tensor], expected_layout: cute.Layout,
         return
     cute.testing.assert_(tensor.layout == expected_layout, "Tensor layout does not match")
     cute.testing.assert_(tensor.element_type == expected_dtype, "Tensor dtype does not match")
-
-
-@cute.jit
-def noop_flag_is_set(mNoop: cute.Pointer) -> Boolean:
-    """Whether the cast_noop flag says this quantization is a no-op and must be skipped.
-
-    mNoop is a pointer rather than a tensor so that one compiled kernel serves both a present and
-    an absent flag, hence the address is checked before it is dereferenced, exactly like the CUDA
-    C++ kernel's `noop != nullptr && noop[0] == 1.0f`. The two checks cannot be joined with `and`,
-    which the DSL lowers to a non-short-circuiting op that would load from the null pointer.
-    """
-    flag_is_set = Boolean(False)
-    if mNoop.toint() != Int64(0):
-        flag_is_set = cute.make_tensor(mNoop, cute.make_layout((1,)))[0] == Float32(1.0)
-    return flag_is_set
 
 
 @dsl_user_op

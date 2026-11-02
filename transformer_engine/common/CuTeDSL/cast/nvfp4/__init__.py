@@ -4,4 +4,4 @@
 
 """CuTeDSL NVFP4 quantization kernels."""
 
-from . import quantize_transpose
+from . import quantize_nvfp4_common

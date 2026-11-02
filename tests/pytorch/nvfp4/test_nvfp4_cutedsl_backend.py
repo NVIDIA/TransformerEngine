@@ -204,7 +204,7 @@ def _install_call_counters():
     that is never seen. Compiling the kernels here rather than letting the dispatcher trigger it
     is what makes that possible, and costs one compilation per supported config at import.
     """
-    from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose import (
+    from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_nvfp4_common import (
         get_nvfp4_quantization_function,
     )
 
@@ -442,7 +442,7 @@ def test_kernel_coverage(flags):
     registration check pass by proxy.
     """
     # Imports cleanly only with the CuTeDSL stack present, which the module-level skip guarantees.
-    from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose import (
+    from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_nvfp4_common import (
         get_nvfp4_quantization_function,
     )
 
