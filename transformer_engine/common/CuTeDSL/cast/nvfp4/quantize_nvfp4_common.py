@@ -5,10 +5,12 @@
 """Shared definitions, kernel dispatch and TVM-FFI registration for CuTeDSL NVFP4."""
 
 import abc
+import functools
 import logging
 import os
 from typing import Optional
 
+import cutlass
 from cutlass import cute
 from cutlass import BFloat16, Boolean, Float4E2M1FN, Float8E4M3FN, Float32, Int64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
@@ -24,6 +26,14 @@ from transformer_engine.common.CuTeDSL.utils import device_compute_capability
 CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
 
 logger = logging.getLogger("transformer_engine.cutedsl.nvfp4")
+
+
+@functools.lru_cache(maxsize=None)
+def device_sm_count() -> int:
+    """SM count of the current device, which kernels size their grids against. Read when a
+    kernel is compiled, so a compiled kernel assumes the SM count of the device it was compiled
+    on; the C++ side keys kernels by SM architecture."""
+    return cutlass.utils.HardwareInfo().get_device_multiprocessor_count()
 
 
 @cute.jit
@@ -120,6 +130,8 @@ class NVFP4QuantizeEntry(NVFP4QuantizeKernelBase):
         # Kernels import shared definitions from this module. Resolve their
         # implementations only when constructing the compile-time entry object.
         # pylint: disable=import-outside-toplevel
+        from .quantize_nvfp4_g2r_bidim import NVFP4QuantizeBidimensionalG2RKernel
+        from .quantize_nvfp4_g2r_rowwise import NVFP4QuantizeRowwiseG2RKernel
         from .quantize_nvfp4_g2s_general import NVFP4QuantizeGeneralG2SKernel
 
         # pylint: enable=import-outside-toplevel
@@ -129,7 +141,9 @@ class NVFP4QuantizeEntry(NVFP4QuantizeKernelBase):
         # order, take the calls they are eligible for.
         self.general_kernel = NVFP4QuantizeGeneralG2SKernel(cfg)
         self.specialized_kernels = [
-            kernel_cls(cfg) for kernel_cls in () if kernel_cls.supports(cfg)
+            kernel_cls(cfg)
+            for kernel_cls in (NVFP4QuantizeRowwiseG2RKernel, NVFP4QuantizeBidimensionalG2RKernel)
+            if kernel_cls.supports(cfg)
         ]
 
     @cute.jit

@@ -2,13 +2,14 @@
 #
 # See LICENSE for license information.
 
-"""Cross-backend bit-exactness tests for the CuTeDSL NVFP4 quantize-transpose kernel.
+"""Cross-backend bit-exactness tests for the CuTeDSL NVFP4 quantize-transpose kernels.
 
 Every case quantizes the same input twice, once with the CuTeDSL backend disabled and once with
 it enabled, and requires the two results to agree byte for byte. The CUDA C++ kernels are the
-reference: `quantize_transpose_nvfp4_tuned_1D.cuh` is what the CuTeDSL kernel reimplements, and
-its numerics are in turn pinned against a pure-PyTorch reference by test_nvfp4_quantize_exact.py,
-so matching it bit for bit is the whole contract.
+reference: `quantize_transpose_nvfp4_tuned_1D.cuh` is what the CuTeDSL kernels reproduce (the
+general TMA-staged kernel, and for the configs they serve the register-resident rowwise and
+rowwise + columnwise kernels), and its numerics are in turn pinned against a pure-PyTorch
+reference by test_nvfp4_quantize_exact.py, so matching it bit for bit is the whole contract.
 
 Configurations the CuTeDSL kernel does not own are kept in the matrix, but it is worth being
 precise about how little they check: both runs execute the same CUDA kernel, so the comparison
@@ -27,14 +28,15 @@ rejects the config, and a backend switch that does not take effect all produce e
 Counting catches all three, including the last, since the run that is meant to be the CUDA
 reference asserts that no CuTeDSL kernel ran either.
 
-Stochastic rounding is deliberately not compared byte for byte, even though the CuTeDSL kernel
-implements it (and, as it happens, currently matches the CUDA kernel bit for bit, having
-replicated its Philox seeding, thread arrangement and draw order): which random bits an element
-gets follows from the work decomposition, and the CUDA kernel seeds Philox from the chunk
-coordinate a CTA starts on without reseeding when it steals a chunk through cluster launch
-control, so two implementations, or even two launches, may legitimately disagree without either
-being wrong. test_stochastic_rounding checks the property that defines the rounding instead,
-and test_nvfp4_sr_quantize.py checks the rounding itself on the CUDA side.
+Stochastic rounding is deliberately not compared byte for byte, even though the CuTeDSL kernels
+implement it: which random bits an element gets follows from the work decomposition. The general
+kernel replicates the CUDA kernel's Philox seeding, thread arrangement and draw order, but the
+CUDA kernel does not reseed when it steals a chunk through cluster launch control, so two
+launches may legitimately disagree; the register kernels draw once per output block, keyed by the
+block's coordinates, so their stream differs from the CUDA kernel's by design.
+test_stochastic_rounding checks the property that defines the rounding instead,
+test_block_philox_matches_philox4x32 checks the register kernels' generator against plain
+Philox4x32, and test_nvfp4_sr_quantize.py checks the rounding itself on the CUDA side.
 
 RHT is out of scope: it is a pre-transform with kernels and tests of its own, and it splits the
 quantization into per-direction calls, so "which backend ran" stops being one fact per case.
@@ -738,3 +740,79 @@ def test_dequantized_output_tracks_input(use_fast_math):
     # expected; an order of magnitude more than that means the output is not a quantization of x.
     error = relative_dequantize_error(out, x)
     assert error < 0.2, f"relative error {error:.4f} is too large for an NVFP4 round trip"
+
+
+@pytest.mark.parametrize("columnwise", [False, True], ids=["rowwise", "rowwise-columnwise"])
+def test_unaligned_input(columnwise):
+    """An input that is only 16-byte aligned is not eligible for the register kernels' 32-byte
+    loads, so the backend has to serve it with the general kernel, still bit for bit."""
+    case = replace(ROWWISE, id="unaligned", columnwise=columnwise)
+    rows, cols = flat_dims(case.shape)
+    buffer = torch.empty(rows * cols + 8, dtype=case.dtype, device="cuda")
+    x = buffer[8:].view(case.shape)  # 16 bytes past a 256-byte-aligned allocation
+    x.copy_(make_input(case))
+    assert x.data_ptr() % 32 == 16
+    run_case(case, x)
+
+
+def _philox4x32(key, counter, rounds):
+    """Plain Philox4x32 (curanddx's philox4x32_native_state): `rounds` rounds of the counter."""
+    mask = 0xFFFFFFFF
+    k0, k1 = key
+    c = list(counter)
+    for r in range(rounds):
+        if r > 0:
+            k0, k1 = (k0 + 0x9E3779B9) & mask, (k1 + 0xBB67AE85) & mask
+        p0, p1 = 0xD2511F53 * c[0], 0xCD9E8D57 * c[2]
+        c = [(p1 >> 32) ^ c[1] ^ k0, p1 & mask, (p0 >> 32) ^ c[3] ^ k1, p0 & mask]
+    return c
+
+
+def test_block_philox_matches_philox4x32():
+    """The register kernels' folded block draw is plain Philox4x32 of the counter
+    {offset_lo, offset_hi, subsequence_lo, subsequence_hi} for key = seed, with
+    subsequence_hi = logical_hi ^ hi(offset_lo * M0) ^ seed_hi (philox_rng.py)."""
+    # pylint: disable=import-outside-toplevel
+    import cutlass
+    from cutlass import cute, Int32, Uint32, Uint64
+    from cutlass.cute.runtime import from_dlpack
+    from transformer_engine.common.CuTeDSL import philox_rng
+
+    if not philox_rng.BLOCK_PHILOX_FOLD_SUPPORTED:
+        pytest.skip("the folded block draw needs at least 3 Philox rounds")
+
+    @cute.kernel
+    def draw_kernel(mIn: cute.Tensor, mOut: cute.Tensor):
+        t, _, _ = cute.arch.thread_idx()
+        word = []
+        for i in cutlass.range_constexpr(6):
+            word.append(Uint32(mIn[t, i]))
+        seed = Uint64(word[0]) | (Uint64(word[1]) << Uint64(32))
+        offset = Uint64(word[2]) | (Uint64(word[3]) << Uint64(32))
+        fold = philox_rng.make_block_philox_fold(
+            philox_rng.make_block_philox(seed, offset), word[4]
+        )
+        draw = philox_rng.block_philox_draws([word[5]], fold)[0]
+        for i in cutlass.range_constexpr(4):
+            mOut[t, i] = Int32(draw[i])
+
+    @cute.jit
+    def draw(mIn: cute.Tensor, mOut: cute.Tensor):
+        draw_kernel(mIn, mOut).launch(grid=[1, 1, 1], block=[mIn.shape[0], 1, 1])
+
+    generator = torch.Generator().manual_seed(SEED)
+    words = torch.randint(0, 2**32, (128, 6), dtype=torch.int64, generator=generator)
+    words[0] = 0
+    words[1] = 2**32 - 1
+    draws = torch.zeros((128, 4), dtype=torch.int32, device="cuda")
+    draw(from_dlpack(words.to(torch.int32).cuda()), from_dlpack(draws))
+
+    for row, out in zip(words.tolist(), draws.cpu().tolist()):
+        seed_lo, seed_hi, offset_lo, offset_hi, sub_lo, logical_hi = row
+        sub_hi = logical_hi ^ ((offset_lo * 0xD2511F53) >> 32) ^ seed_hi
+        expected = _philox4x32(
+            (seed_lo, seed_hi),
+            (offset_lo, offset_hi, sub_lo, sub_hi),
+            philox_rng.NUM_PHILOX_ROUNDS,
+        )
+        assert [w & 0xFFFFFFFF for w in out] == expected, f"draw for {row}"
