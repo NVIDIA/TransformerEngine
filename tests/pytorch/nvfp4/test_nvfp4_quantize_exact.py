@@ -14,12 +14,332 @@ from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
+from transformer_engine.pytorch.module import _split_quantization
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
 NVFP4_E4M3_AMAX_FOR_UNIT_GLOBAL_SCALE = 448.0 * 6.0
 NVFP4_SUPPORTED_SCALE_MAX_VALUES = (0, 256, 448, 114688)
+
+
+def _batch_rowwise_quantizers(count, *, scale_dtype=tex.DType.kFloat8E4M3, optimize=True):
+    quantizers = []
+    for _ in range(count):
+        quantizer = NVFP4Quantizer(
+            rowwise=True, columnwise=False, row_scaled_nvfp4=True, scale_dtype=scale_dtype
+        )
+        quantizer.internal = True
+        quantizer.optimize_for_gemm = optimize
+        quantizers.append(quantizer)
+    return quantizers
+
+
+def _assert_batch_rowwise_equal(actual, expected, rows, columns):
+    assert type(actual) is type(expected)
+    assert actual.get_metadata()["fake_dtype"] == expected.get_metadata()["fake_dtype"]
+    assert actual._row_scaled_nvfp4 == expected._row_scaled_nvfp4
+    assert actual._with_gemm_swizzled_scales == expected._with_gemm_swizzled_scales
+    assert actual._rowwise_scale_inv.shape == expected._rowwise_scale_inv.shape
+    assert actual._columnwise_data is expected._columnwise_data is None
+    torch.testing.assert_close(actual._rowwise_data, expected._rowwise_data, atol=0, rtol=0)
+    torch.testing.assert_close(actual._amax_rowwise, expected._amax_rowwise, atol=0, rtol=0)
+    # Only live scale bytes are defined by the quantization kernel.
+    torch.testing.assert_close(
+        actual._rowwise_scale_inv[:rows, : columns // 16],
+        expected._rowwise_scale_inv[:rows, : columns // 16],
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        actual.dequantize(dtype=torch.bfloat16),
+        expected.dequantize(dtype=torch.bfloat16),
+        atol=0,
+        rtol=0,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("splits", [(128, 256), (32, 0, 96, 160), (0, 128, 0), (32, 32)])
+@pytest.mark.parametrize("columns", [64, 192, 512])
+@pytest.mark.parametrize("optimize", [False, True])
+@pytest.mark.parametrize("scale_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8UE5M3])
+def test_batch_rowwise_matches_per_expert(splits, columns, optimize, scale_dtype):
+    """Batching must preserve payload, live scales, amax, and dequantized values."""
+    if scale_dtype == tex.DType.kFloat8UE5M3 and not ue5m3_available:
+        pytest.skip(reason_for_no_ue5m3)
+    torch.manual_seed(307)
+    quantizers = _batch_rowwise_quantizers(len(splits), scale_dtype=scale_dtype, optimize=optimize)
+    x = torch.randn(sum(splits), columns, device="cuda", dtype=torch.bfloat16)
+    x[0].zero_()
+    x[1].fill_(2.0**-20)
+    x[-1].mul_(1024)
+    assert _split_quantization._can_batch_nvfp4_rowwise(x, splits, quantizers)
+    for factor in (1.0, 0.25, 8.0):
+        x.mul_(factor)
+        actual, _ = _split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+        assert all(quantizer.optimize_for_gemm == optimize for quantizer in quantizers)
+        expected = tex.split_quantize(x, splits, quantizers)
+        for rows, output, reference in zip(splits, actual, expected):
+            _assert_batch_rowwise_equal(output, reference, rows, columns)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "case",
+    [
+        "noncontiguous",
+        "fp32",
+        "unaligned_rows",
+        "unaligned_columns",
+        "single",
+        "all_empty",
+        "offload",
+        "external",
+        "columnwise",
+        "rht",
+        "post_rht",
+        "stochastic",
+        "two_dimensional",
+        "amax_reduction",
+        "4over6",
+        "mixed_scale",
+        "tensor_scaled",
+        "zero_columns",
+        "disabled_second_level_scale",
+        "mixed_scale_bound",
+    ],
+)
+def test_batch_rowwise_preserves_native_fallback(monkeypatch, case):
+    """Unsupported settings and offload must continue through native split quantization."""
+    x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    splits = (64, 64)
+    quantizers = _batch_rowwise_quantizers(2)
+    if case == "noncontiguous":
+        x = x.t()
+    elif case == "fp32":
+        x = x.float()
+    elif case == "unaligned_rows":
+        splits = (16, 112)
+    elif case == "unaligned_columns":
+        x = x[:, :96].contiguous()
+    elif case == "single":
+        splits, quantizers = (128,), quantizers[:1]
+    elif case == "all_empty":
+        x, splits = x[:0], (0, 0)
+    elif case == "external":
+        quantizers[0].internal = False
+    elif case == "columnwise":
+        quantizers[0].columnwise_usage = True
+    elif case == "mixed_scale":
+        quantizers[1].scale_dtype = tex.DType.kFloat8UE5M3
+    elif case == "tensor_scaled":
+        quantizers[0].row_scaled_nvfp4 = False
+    elif case == "zero_columns":
+        x = x[:, :0]
+    elif case == "disabled_second_level_scale":
+        quantizers[0].disable_second_level_scale = True
+    elif case == "mixed_scale_bound":
+        quantizers[1].nvfp4_e4m3_max = 256
+    elif case != "offload":
+        field = {
+            "rht": "with_rht",
+            "post_rht": "with_post_rht_amax",
+            "stochastic": "stochastic_rounding",
+            "two_dimensional": "with_2d_quantization",
+            "amax_reduction": "with_amax_reduction",
+            "4over6": "nvfp4_use_4over6",
+        }[case]
+        setattr(quantizers[0], field, True)
+    sentinel = object()
+    calls = []
+
+    def native(*args, **kwargs):
+        calls.append((args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(tex, "split_quantize", native)
+    outputs, _ = _split_quantization._split_quantize(
+        x, splits, quantizers, x.dtype, disable_bulk_allocation=case == "offload"
+    )
+    assert outputs is sentinel
+    assert len(calls) == 1
+    assert calls[0][0][0] is x
+    assert calls[0][1]["disable_bulk_allocation"] == (case == "offload")
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_batch_rowwise_preserves_custom_quantizer():
+    """A subclass's Python implementation must not be replaced by native batching."""
+    calls = []
+
+    class CustomNVFP4(NVFP4Quantizer):
+        def quantize_impl(self, tensor):
+            calls.append(tensor.shape)
+            return tensor + 1
+
+    x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    quantizers = [CustomNVFP4(row_scaled_nvfp4=True) for _ in range(2)]
+    for quantizer in quantizers:
+        quantizer.internal = True
+        quantizer.set_usage(rowwise=True, columnwise=False)
+    outputs, _ = _split_quantization._split_quantize(x, (64, 64), quantizers, x.dtype)
+    assert len(calls) == 2
+    torch.testing.assert_close(torch.cat(outputs), x + 1, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("columnwise", [False, True])
+def test_batch_rowwise_mxfp8_unchanged(columnwise):
+    """MXFP8 must retain the native path and identical payloads and scales."""
+    splits = (128, 256)
+    x = torch.randn(sum(splits), 128, device="cuda", dtype=torch.bfloat16)
+    quantizers = [
+        te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=columnwise)
+        for _ in splits
+    ]
+    for quantizer in quantizers:
+        quantizer.internal = True
+    assert not _split_quantization._can_batch_nvfp4_rowwise(x, splits, quantizers)
+    actual, _ = _split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+    expected = tex.split_quantize(x, splits, quantizers)
+    for output, reference in zip(actual, expected):
+        for name in (
+            "_rowwise_data",
+            "_rowwise_scale_inv",
+            "_columnwise_data",
+            "_columnwise_scale_inv",
+        ):
+            got, ref = getattr(output, name), getattr(reference, name)
+            if ref is None:
+                assert got is None
+            else:
+                torch.testing.assert_close(got, ref, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_batch_rowwise_padding_is_disjoint():
+    """Writing an expert's padded scale extent must not corrupt a neighboring expert."""
+    splits = (32, 32, 96)
+    quantizers = _batch_rowwise_quantizers(len(splits))
+    x = torch.randn(sum(splits), 128, device="cuda", dtype=torch.bfloat16)
+    outputs, _ = _split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+    snapshots = [
+        (
+            result._rowwise_data.clone(),
+            result._rowwise_scale_inv.clone(),
+            result._amax_rowwise.clone(),
+        )
+        for result in outputs[1:]
+    ]
+    outputs[0]._rowwise_data.zero_()
+    outputs[0]._rowwise_scale_inv.zero_()
+    outputs[0]._amax_rowwise.zero_()
+    for result, (data, scales, amax) in zip(outputs[1:], snapshots):
+        torch.testing.assert_close(result._rowwise_data, data, atol=0, rtol=0)
+        torch.testing.assert_close(result._rowwise_scale_inv, scales, atol=0, rtol=0)
+        torch.testing.assert_close(result._amax_rowwise, amax, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("splits", [(128, 256), (32, 0, 96, 160)])
+@pytest.mark.parametrize("scale_max", [0, 448])
+def test_batch_rowwise_requantize_expert(splits, scale_max):
+    """Requantizing one expert must preserve its layout and every neighbor's data."""
+    torch.manual_seed(319)
+    quantizers = _batch_rowwise_quantizers(len(splits), optimize=False)
+    for quantizer in quantizers:
+        quantizer.nvfp4_e4m3_max = scale_max
+    x = torch.randn(sum(splits), 192, device="cuda", dtype=torch.bfloat16)
+    actual, _ = _split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+    expected = tex.split_quantize(x, splits, quantizers)
+    for index, rows in enumerate(splits):
+        if not rows:
+            continue
+        replacement = 8 * torch.randn(rows, x.shape[1], device=x.device, dtype=x.dtype)
+        snapshots = [
+            (
+                result._rowwise_data.clone(),
+                result._rowwise_scale_inv.clone(),
+                result._amax_rowwise.clone(),
+            )
+            for result in actual
+        ]
+        tex.quantize(replacement, quantizers[index], actual[index])
+        tex.quantize(replacement, quantizers[index], expected[index])
+        for other, (output, reference) in enumerate(zip(actual, expected)):
+            _assert_batch_rowwise_equal(output, reference, splits[other], x.shape[1])
+            if other != index:
+                for tensor, snapshot in zip(
+                    (output._rowwise_data, output._rowwise_scale_inv, output._amax_rowwise),
+                    snapshots[other],
+                ):
+                    torch.testing.assert_close(tensor, snapshot, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_batch_rowwise_preserves_invalid_scale_bound():
+    """A nondefault scale bound without 4over6 must retain the native validation error."""
+    quantizers = _batch_rowwise_quantizers(2)
+    for quantizer in quantizers:
+        quantizer.nvfp4_e4m3_max = 256
+    x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
+    message = "non-default scale max is only supported with 4over6"
+    with pytest.raises(RuntimeError, match=message):
+        _split_quantization._split_quantize(x, (128, 128), quantizers, x.dtype)
+    with pytest.raises(RuntimeError, match=message):
+        tex.split_quantize(x, (128, 128), quantizers)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("splits", [(128, 256), (32, 0, 96)])
+def test_batch_rowwise_graph_replay(splits):
+    """Captured quantization must consume fresh inputs and refresh every expert's scales."""
+    quantizers = _batch_rowwise_quantizers(len(splits))
+    x = torch.randn(sum(splits), 128, device="cuda", dtype=torch.bfloat16)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            tex.split_quantize(x, splits, quantizers)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        actual, _ = _split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+    for factor in (1.0, 0.25, 8.0):
+        with torch.cuda.stream(stream):
+            x.copy_(factor * torch.randn_like(x))
+            graph.replay()
+            expected = tex.split_quantize(x, splits, quantizers)
+        stream.synchronize()
+        for rows, output, reference in zip(splits, actual, expected):
+            _assert_batch_rowwise_equal(output, reference, rows, x.shape[1])
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires two CUDA devices")
+def test_batch_rowwise_independent_devices_and_streams():
+    """All allocations and launches must follow the input device and active stream."""
+    for device in (0, 1):
+        with torch.cuda.device(device):
+            splits = (32, 96)
+            quantizers = _batch_rowwise_quantizers(len(splits))
+            x = torch.randn(sum(splits), 128, device="cuda", dtype=torch.bfloat16)
+            streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+            results = []
+            for stream in streams:
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    torch.cuda._sleep(100_000)
+                    results.append(
+                        _split_quantization._split_quantize(x, splits, quantizers, x.dtype)[0]
+                    )
+            expected = tex.split_quantize(x, splits, quantizers)
+            for stream, outputs in zip(streams, results):
+                stream.synchronize()
+                for rows, output, reference in zip(splits, outputs, expected):
+                    assert output.device == x.device
+                    _assert_batch_rowwise_equal(output, reference, rows, x.shape[1])
 
 
 @dataclass(frozen=True)
