@@ -106,9 +106,12 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   if (quantizer.is_none() || IsFloat8Quantizers(quantizer.ptr())) {
     impl = Impl::FULLY_FUSED;
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
-    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
+    auto mxfp8_quantizer_cpp = dynamic_cast<MXFP8Quantizer *>(quantizer_cpp.get());
+    NVTE_CHECK(mxfp8_quantizer_cpp != nullptr, "Could not cast to MXFP8 quantizer");
+    // cuDNN quantizes 1D blocks and requires full 128x128 tiles.
+    if (!mxfp8_quantizer_cpp->with_2d_quantization &&
+        transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
         inner_size % 128 == 0) {
-      // cuDNN MXFP8 kernel requires full 128x128 tiles
       impl = Impl::FULLY_FUSED;
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
