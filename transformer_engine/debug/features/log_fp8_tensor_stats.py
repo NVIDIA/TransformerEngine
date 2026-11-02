@@ -18,7 +18,7 @@ from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,

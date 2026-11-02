@@ -19,7 +19,7 @@ from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
@@ -295,6 +295,11 @@ else:
         _flash_attn_bwd_v4 = no_torch_dynamo()(_fa4_with_none_window_sentinel(_flash_attn_bwd_v4))
 
         fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
+        fa_utils.cutlass_dsl_version = cutlass_dsl_version
+        try:
+            fa_utils.quack_version = PkgVersion(get_pkg_version("quack-kernels"))
+        except PackageNotFoundError:
+            fa_utils.quack_version = None
         fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16

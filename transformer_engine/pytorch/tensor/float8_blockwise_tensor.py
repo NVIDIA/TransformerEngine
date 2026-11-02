@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import transformer_engine_torch as tex
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import (
     Float8BlockwiseQTensorStorage,

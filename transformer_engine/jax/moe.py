@@ -2177,10 +2177,6 @@ def moe(
         FSDP shards the gated dimension, layout conversion permutes gathered
         FP8 data and inverse scales, preserving global gate/up pairing without
         gathering or requantizing full-precision weights.
-    Per-expert dispatch-slot alignment defaults to 128 tokens (``_ALIGN_SIZE``).
-    Requesting cuDNN fusion reserves 256 tokens, also when falling back, to
-    preserve compatibility with EP bootstrap buffer sizing.
-
     use_cudnn_fusion : bool
         Defaults to ``True``: try cuDNN's shared JAX grouped MXFP8 GLU/dGLU APIs
         on SM100+ GPUs; cuDNN selects the architecture-specific kernels. ``False`` uses unfused TE grouped GEMM.
@@ -2189,13 +2185,19 @@ def moe(
         weights fall back to unfused TE grouped GEMM.
         Ineligible calls warn and fall back to TE's regular grouped-GEMM
         implementation. API signatures and GPU capability determine support.
-
     cudnn_native_weight_layout : Optional[bool]
         ``False`` selects standard contiguous gate/up [E,K,2N] storage;
         ``True`` selects native [E,2N,K] storage with alternating 32-column
         gate/up blocks. Defaults to ``None``, inferring storage from the global
         shape. Ambiguous square shapes require an explicit flag. This option
         describes parameter storage independently of the selected execution path.
+
+    Notes
+    -----
+    Per-expert dispatch-slot alignment is 128 tokens (``_ALIGN_SIZE``) with
+    ``use_cudnn_fusion=False``. Requesting cuDNN fusion (the default) reserves
+    256 tokens, also when falling back, to preserve compatibility with EP
+    bootstrap buffer sizing.
 
     MeshResource fields name physical mesh axes, not Flax logical axes.
     ``input_axes``, ``wi_kernel_axes``, ``wo_kernel_axes`` and
