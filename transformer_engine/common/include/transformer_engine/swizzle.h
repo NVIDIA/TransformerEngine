@@ -26,6 +26,7 @@ extern "C" {
  *  Requirements:
  *  - scale_inv is stored in row-major.
  *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - Input and output scale_inv buffer pointers used by this operation must be 16-byte aligned.
  *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */
 void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream);
@@ -73,6 +74,7 @@ void nvte_pack_mxfp8_columnwise_scales_for_batched_gemm(const NVTETensor input, 
  *  Requirements:
  *  - scale_inv is stored in row-major.
  *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - Input and output scale_inv buffer pointers used by this operation must be 16-byte aligned.
  *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */
 void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
@@ -83,6 +85,7 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
  *
  *  Use this variant when the data and scale_inv tensors intentionally have
  *  different shapes, e.g. when scale_invs have been transposed for attention.
+ *  The 16-byte alignment requirement for scale_inv buffer pointers used by this operation still applies.
  */
 void nvte_multi_tensor_swizzle_scaling_factors_unchecked(const NVTETensor* inputs,
                                                          NVTETensor* outputs,
