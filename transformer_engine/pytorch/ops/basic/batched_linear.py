@@ -399,9 +399,14 @@ class BatchedLinear(BasicOperation):
         return (rows, self.batch_size, features)
 
     def _validate_mxfp8_dimensions(self, rows: int, *, with_columnwise_input: bool) -> None:
-        # Row count only matters for column-wise scaling, which is
-        # needed for the weight gradient
-        dims = [("in_features", self.in_features), ("out_features", self.out_features)]
+        # MXFP8 quantization requires the flattened row count to be
+        # divisible by 32. Column-wise scaling, which is needed for the
+        # weight gradient, also requires this for each batch entry.
+        dims = [
+            ("in_features", self.in_features),
+            ("out_features", self.out_features),
+            ("batch_size * rows per GEMM", self.batch_size * rows),
+        ]
         if with_columnwise_input:
             dims.append(("rows per GEMM", rows))
         for name, size in dims:
