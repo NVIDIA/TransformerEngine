@@ -187,3 +187,83 @@ def test_batched_csa_kernels_compound_fsdp_ep_batch_sharding():
     )
     assert got_compressor.sharding.spec[0] == ("fsdp", "expert")
     assert got_indexer.sharding.spec[0] == ("fsdp", "expert")
+
+
+@pytest.mark.L0
+@pytest.mark.parametrize("lengths", [(21, 33), (3, 33)])
+def test_indexer_thd_vjp_and_segment_isolation(lengths):
+    _require_sm100()
+    from transformer_engine.jax.attention import SequenceDescriptor
+
+    counts = [n // 4 for n in lengths]
+    descriptor = SequenceDescriptor.from_seqlens_and_offsets(
+        (jnp.array([[*lengths, -1]], jnp.int32), jnp.array([[*counts, -1]], jnp.int32)),
+        (
+            jnp.array([[0, lengths[0], sum(lengths), -1]], jnp.int32),
+            jnp.array([[0, counts[0], sum(counts), -1]], jnp.int32),
+        ),
+    )
+    key = jax.random.key(19)
+    q = jax.random.normal(key, (sum(lengths) + 1, 64, 128), jnp.bfloat16).at[-1].set(jnp.nan)
+    k = (
+        jax.random.normal(jax.random.fold_in(key, 1), (sum(counts) + 1, 1, 128), jnp.bfloat16)
+        .at[-1]
+        .set(jnp.nan)
+    )
+    w = jax.random.normal(jax.random.fold_in(key, 2), q.shape[:2], jnp.bfloat16).at[-1].set(jnp.nan)
+    bound = (max(lengths) + 3) // 4
+
+    def packed(x, y, z):
+        return dsa_indexer(
+            x,
+            y,
+            z,
+            sm_scale=128**-0.5,
+            sequence_descriptor=descriptor,
+            max_seqlen_q=max(lengths),
+            max_seqlen_k=bound,
+        )
+
+    def reference(x, y, z):
+        rows = []
+        qs = ks = 0
+        for nq, nk in zip(lengths, counts):
+            dots = jnp.einsum(
+                "thd,kd->thk",
+                x[qs : qs + nq].astype(jnp.float32),
+                y[ks : ks + nk, 0].astype(jnp.float32),
+            )
+            score = jnp.einsum(
+                "thk,th->tk", jax.nn.relu(dots) * 128**-0.5, z[qs : qs + nq].astype(jnp.float32)
+            )
+            visible = 4 * (jnp.arange(nk)[None] + 1) <= jnp.arange(nq)[:, None] + 1
+            rows.append(
+                jnp.pad(
+                    jnp.where(visible, score, -jnp.inf),
+                    ((0, 0), (0, (bound + 3) // 4 * 4 - nk)),
+                    constant_values=-jnp.inf,
+                )
+            )
+            qs, ks = qs + nq, ks + nk
+        return jnp.pad(jnp.concatenate(rows), ((0, 1), (0, 0)), constant_values=-jnp.inf)
+
+    def loss(fn, x, y, z):
+        scores = fn(x, y, z)
+        return jnp.where(jnp.isfinite(scores), scores, 0).sum()
+
+    got, expected = jax.jit(packed)(q, k, w), reference(q, k, w)
+    np.testing.assert_array_equal(np.isfinite(got), np.isfinite(expected))
+    valid = np.isfinite(expected)
+    np.testing.assert_allclose(
+        np.asarray(got)[valid], np.asarray(expected)[valid], atol=2e-5, rtol=2e-5
+    )
+    actual_grads = jax.jit(jax.grad(lambda x, y, z: loss(packed, x, y, z), argnums=(0, 1, 2)))(
+        q, k, w
+    )
+    expected_grads = jax.grad(lambda x, y, z: loss(reference, x, y, z), argnums=(0, 1, 2))(q, k, w)
+    for actual, expected in zip(actual_grads, expected_grads):
+        np.testing.assert_allclose(actual, expected, atol=2e-5, rtol=2e-5)
+        np.testing.assert_array_equal(actual[-1], 0)
+    # Alter only the second segment: first-segment scores must remain unchanged.
+    altered = packed(q.at[lengths[0] : sum(lengths)].multiply(2), k, w)
+    np.testing.assert_array_equal(got[: lengths[0]], altered[: lengths[0]])

@@ -18,6 +18,8 @@ import jax.numpy as jnp
 from jax.experimental.shard_map import shard_map
 from jax.sharding import PartitionSpec as P
 
+from .attention import AttnMaskType, QKVLayout, SequenceDescriptor
+from .cpp_extensions.attention import generate_cu_seqlen
 from .sharding import _get_mesh
 
 
@@ -218,10 +220,31 @@ def hca_compressor_batched(
     return csa_compressor_batched(kv, score, ape, batch_axes=batch_axes, ratio=ratio, coff=1)
 
 
-def _cudnn_indexer_forward(q, k, weights, *, ratio, sm_scale):
+def _cudnn_indexer_forward(
+    q,
+    k,
+    weights,
+    *,
+    ratio,
+    sm_scale,
+    cu_seqlens_q=None,
+    cu_seqlens_k=None,
+    max_seqlen_q=None,
+    max_seqlen_k=None,
+):
     from cudnn import indexer_forward_jax_sm100
 
-    return indexer_forward_jax_sm100(q, k, weights, ratio=ratio, sm_scale=sm_scale)
+    return indexer_forward_jax_sm100(
+        q,
+        k,
+        weights,
+        ratio=ratio,
+        sm_scale=sm_scale,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+    )
 
 
 def _indexer_reference(q, k, weights, ratio, sm_scale):
@@ -236,25 +259,65 @@ def _indexer_reference(q, k, weights, ratio, sm_scale):
     return jnp.where(block_ends <= q_positions + 1, scores, -jnp.inf)
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4))
-def _dsa_indexer(q, k, weights, ratio, sm_scale):
-    return _cudnn_indexer_forward(q, k, weights, ratio=ratio, sm_scale=sm_scale)
+def _indexer_packed_reference(q, k, w, cu_q, cu_k, ratio, scale, max_q, max_k):
+    width = (max_k + 3) // 4 * 4
+    qp = jnp.pad(q, ((0, max_q), (0, 0), (0, 0)))
+    kp = jnp.pad(k, ((0, width), (0, 0), (0, 0)))
+    wp = jnp.pad(w, ((0, max_q), (0, 0)))
+
+    def segment(i, scores):
+        qs = jax.lax.dynamic_slice_in_dim(qp, cu_q[i], max_q)
+        ks = jax.lax.dynamic_slice_in_dim(kp, cu_k[i], width)
+        ws = jax.lax.dynamic_slice_in_dim(wp, cu_q[i], max_q)
+        # Clear invalid slices before arithmetic: output masking alone can leave
+        # 0 * NaN in reverse AD when adjacent segments/capacity contain NaNs.
+        q_valid = jnp.arange(max_q) < cu_q[i + 1] - cu_q[i]
+        k_valid = jnp.arange(width) < cu_k[i + 1] - cu_k[i]
+        qs = jnp.where(q_valid[:, None, None], qs, 0)
+        ks = jnp.where(k_valid[:, None, None], ks, 0)
+        ws = jnp.where(q_valid[:, None], ws, 0)
+        # Reuse existing dense math + ratio-causal mask on one segment only.
+        values = _indexer_reference(qs[None], ks[None], ws[None], ratio, scale)[0]
+        values = jnp.where(jnp.arange(width) < cu_k[i + 1] - cu_k[i], values, -jnp.inf)
+        rows = cu_q[i] + jnp.arange(max_q)
+        rows = jnp.where(jnp.arange(max_q) < cu_q[i + 1] - cu_q[i], rows, q.shape[0])
+        return scores.at[rows].set(values, mode="drop")
+
+    initial = jnp.full((q.shape[0], width), -jnp.inf, jnp.float32)
+    return jax.lax.fori_loop(0, cu_q.shape[0] - 1, segment, initial)
 
 
-def _dsa_indexer_fwd(q, k, weights, ratio, sm_scale):
-    out = _cudnn_indexer_forward(q, k, weights, ratio=ratio, sm_scale=sm_scale)
-    return out, (q, k, weights)
+@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8))
+def _dsa_indexer(q, k, weights, cu_q, cu_k, ratio, sm_scale, max_q, max_k):
+    return _dsa_indexer_fwd(q, k, weights, cu_q, cu_k, ratio, sm_scale, max_q, max_k)[0]
 
 
-def _dsa_indexer_bwd(ratio, sm_scale, residual, grad_out):
-    q, k, weights = residual
-    _, pullback = jax.vjp(
-        lambda q_, k_, weights_: _indexer_reference(q_, k_, weights_, ratio, sm_scale),
+def _dsa_indexer_fwd(q, k, weights, cu_q, cu_k, ratio, sm_scale, max_q, max_k):
+    out = _cudnn_indexer_forward(
         q,
         k,
         weights,
+        ratio=ratio,
+        sm_scale=sm_scale,
+        cu_seqlens_q=cu_q,
+        cu_seqlens_k=cu_k,
+        max_seqlen_q=max_q,
+        max_seqlen_k=max_k,
     )
-    return pullback(grad_out)
+    return out, (q, k, weights, cu_q, cu_k)
+
+
+def _dsa_indexer_bwd(ratio, sm_scale, max_q, max_k, residual, grad_out):
+    q, k, weights, cu_q, cu_k = residual
+
+    def reference(q_, k_, w_):
+        if cu_q is None:
+            return _indexer_reference(q_, k_, w_, ratio, sm_scale)
+        return _indexer_packed_reference(q_, k_, w_, cu_q, cu_k, ratio, sm_scale, max_q, max_k)
+
+    _, pullback = jax.vjp(reference, q, k, weights)
+    grad_q, grad_k, grad_weights = pullback(grad_out)
+    return grad_q, grad_k, grad_weights, None, None
 
 
 _dsa_indexer.defvjp(_dsa_indexer_fwd, _dsa_indexer_bwd)
@@ -267,14 +330,57 @@ def dsa_indexer(
     *,
     ratio: int = 4,
     sm_scale: float = 1.0,
+    sequence_descriptor: SequenceDescriptor | None = None,
+    max_seqlen_q: int | None = None,
+    max_seqlen_k: int | None = None,
 ) -> Any:
-    """Differentiable SM100 DSv4 indexer score kernel.
+    """Differentiable SM100 indexer, using cuDNN forward and a JAX reference VJP.
 
-    The CuTeDSL kernel implements the forward pass. Until cuDNN exposes an
-    equivalent compact JAX backward call, TE computes its exact mathematical
-    VJP with JAX operations.
+    Dense inputs use BSHD/BSHD/BSH. Packed inputs use Q [Tq,64,128],
+    K [Tk,1,128], weights [Tq,64], and a caller-created SequenceDescriptor
+    with explicit INT32 lengths [1,M] and offsets [1,M+1]. Only one contiguous
+    pack is supported: valid offsets must equal cumulative lengths, segments
+    start at position zero, and unused slots are trailing -1 entries. Callers
+    own these values and valid endpoints within storage capacity; holes and
+    segment-ID descriptors are not supported. This is not context parallelism.
+
+    Packed calls require positive static maximum Q/K lengths, with maxK at
+    least ceil(maxQ/ratio). Returns FP32 [Tq,ceil4(maxK)], with segment-local
+    key columns and -inf for invalid entries. Metadata is not differentiated.
     """
-    return _dsa_indexer(q, k, weights, ratio, sm_scale)
+    cu_q = cu_k = None
+    if q.ndim == 3:
+        if not isinstance(sequence_descriptor, SequenceDescriptor):
+            raise ValueError("THD requires a SequenceDescriptor with explicit lengths and offsets")
+        sd = sequence_descriptor
+        if any(x.size for x in (*sd.segment_ids, *sd.segment_pos)):
+            raise ValueError("THD indexer requires explicit lengths/offsets, not segment IDs")
+        q_len, k_len = sd.seqlens
+        q_off, k_off = sd.seq_offsets
+        if (
+            q_len.ndim != 2
+            or q_len.shape[0] != 1
+            or q_len.shape[1] < 1
+            or k_len.shape != q_len.shape
+            or q_off.shape != (1, q_len.shape[1] + 1)
+            or k_off.shape != q_off.shape
+            or any(x.dtype != jnp.int32 for x in (q_len, k_len, q_off, k_off))
+        ):
+            raise ValueError("THD descriptor requires INT32 lengths [1,M] and offsets [1,M+1]")
+        (q_len, k_len), _ = sd.get_seqlens_and_offsets(
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            QKVLayout.THD_THD_THD,
+            (-1, -1),
+            q_len.shape[1],
+        )
+        # For contiguous packs, lengths give native prefixes directly. The
+        # existing utility maps unused -1 slots to repeated terminal offsets.
+        cu_q, cu_k = generate_cu_seqlen(q_len.flatten()), generate_cu_seqlen(k_len.flatten())
+    elif q.ndim != 4 or any(
+        x is not None for x in (sequence_descriptor, max_seqlen_q, max_seqlen_k)
+    ):
+        raise ValueError("dense indexer requires BSHD inputs without packed metadata")
+    return _dsa_indexer(q, k, weights, cu_q, cu_k, ratio, sm_scale, max_seqlen_q, max_seqlen_k)
 
 
 def dsa_indexer_batched(
