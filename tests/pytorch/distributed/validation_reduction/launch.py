@@ -58,4 +58,5 @@ status["gpu_after"] = subprocess.check_output(
     ["nvidia-smi", "--query-gpu=" + fields, "--format=csv,noheader"], text=True
 )
 status_path.write_text(json.dumps(status, indent=2))
-raise SystemExit(max(row["exit_code"] for row in rows))
+# A rank killed by a signal exits negative, so max() alone could report success.
+raise SystemExit(int(any(row["exit_code"] != 0 for row in rows)))
