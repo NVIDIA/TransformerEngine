@@ -52,10 +52,10 @@ TMA descriptor arrays or implicit device allocations.
 
 ``nvte_group_dequantize_v2`` uses the same query/allocate/execute protocol and
 TMA layout. Its descriptor updater and consumer use the same caller-owned
-buffer; it supports more than 64 groups. PyTorch grouped quantize and dequantize
-allocate workspace through the framework, including during graph capture. The
-JAX grouped MXFP8 FFI uses v2 with its XLA-owned workspace; its constant last
-dimension uses launch-local descriptors and does not reserve a descriptor region.
+buffer; it supports more than 64 groups. PyTorch grouped MXFP8 quantize and
+dequantize allocate workspace through the framework, including during graph
+capture. The JAX grouped MXFP8 FFI retains the original API: its constant last
+dimension uses launch-local descriptors and needs no descriptor arrays.
 
 Only MXFP8 layouts with varying last dimensions need mutable descriptor arrays.
 Constant last dimensions (uniform shapes or varying first dimensions) pass tensor

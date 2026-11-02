@@ -71,10 +71,11 @@ storage, or retire those graphs and recapture.
 Frameworks and other operations
 --------------------------------
 
-PyTorch grouped quantize/dequantize allocate temporary TMA workspace through the
-framework, including graph-pool allocations during capture. JAX grouped MXFP8 FFI
-uses the same v2 API with XLA-owned memory; its constant last dimension uses
-launch-local descriptors and needs no descriptor arrays.
+PyTorch grouped MXFP8 quantize/dequantize allocate temporary TMA workspace through
+the framework, including graph-pool allocations during capture. Other formats
+retain their existing API calls. The JAX grouped MXFP8 FFI also retains the
+original API: its constant last dimension uses launch-local descriptors and
+needs no descriptor arrays.
 
 Cast+DBias and fused activation backward with DBias retain their existing
 backend-specific scratch protocol. They do not use this TMA workspace layout.

@@ -445,7 +445,6 @@ void nvte_group_quantize_dbias_dsrelu(const NVTEGroupedTensor input,
 /*! \brief Casts input tensor from reduced to higher precision.
  *         In case of the MXFP8 dequantization, the dequantized values are stored to the rowwise
  *         data of the output tensor, regardless of whether the row- or columnwise scaling is used.
- *         MXFP8 groups with varying last dimensions require nvte_group_dequantize_v2.
  *
  *  \param[in]     input     Input FP8/MXFP8 tensor to be cast.
  *  \param[in,out] output    Output tensor.
@@ -456,6 +455,7 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
 /*! \brief Casts input grouped tensor from reduced to higher precision.
  *         In case of the MXFP8 dequantization, the dequantized values are stored to the rowwise
  *         data of the output tensor, regardless of whether the row- or columnwise scaling is used.
+ *         MXFP8 groups with varying last dimensions require nvte_group_dequantize_v2.
  *
  *  \param[in]     input     Input grouped FP8/MXFP8 tensor to be cast.
  *  \param[in,out] output    Output grouped tensor.
