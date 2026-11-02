@@ -238,7 +238,6 @@ class LayerNormLinearBwdArgs:
     requires_dgrad: bool = False
     requires_wgrad: bool = False
     ln_out_needs_gather: bool = False
-    inp_shape: Optional[torch.Size] = None
 
     # --- Normalization ---
     normalization: str = "LayerNorm"
@@ -784,7 +783,6 @@ def _layernorm_linear_setup_ctx(
     bwd_args.requires_dgrad = fwd_args.input_requires_grad
     bwd_args.requires_wgrad = fwd_args.weight_requires_grad
     bwd_args.ln_out_needs_gather = ctx_attrs["ln_out_needs_gather"]
-    bwd_args.inp_shape = inp.shape
 
     # Normalization
     bwd_args.normalization = fwd_args.normalization
@@ -974,7 +972,7 @@ def _layernorm_linear_backward_impl(
         ub_obj_wgrad = None
         ub_type_dgrad = None
         ub_type_wgrad = None
-        dgrad_shape = args.inp_shape
+        dgrad_shape = inputmat.shape
         if args.ub_overlap_ag:
             # Overlap grad_output all-gather with dgrad compute
             args.ub_obj_gradout = get_ub(args.ub_name + "_dgrad", args.fp8)
@@ -1781,7 +1779,7 @@ def _layernorm_linear_backward_fake(
     dgrad = None
     if args.requires_dgrad:
         dgrad = TensorSpec(
-            shape=args.inp_shape,
+            shape=args.inputmat.shape,
             dtype=out_dtype,
             device=device,
         )

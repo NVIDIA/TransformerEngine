@@ -364,7 +364,6 @@ class LayerNormMLPBwdArgs:
     fc1_weight_requires_grad: bool = False
     fc1_bias_requires_grad: bool = False
     fc2_weight_requires_grad: bool = False
-    inp_shape: Optional[torch.Size] = None
 
     # --- Normalization ---
     normalization: str = "LayerNorm"
@@ -1173,7 +1172,6 @@ def _layernorm_mlp_setup_ctx(
     bwd_args.fc1_weight_requires_grad = fc1_weight_requires_grad
     bwd_args.fc1_bias_requires_grad = fwd_args.fc1_bias_requires_grad
     bwd_args.fc2_weight_requires_grad = fc2_weight_requires_grad
-    bwd_args.inp_shape = inp.shape
 
     # Normalization
     bwd_args.normalization = fwd_args.normalization
@@ -2432,15 +2430,8 @@ def _layernorm_mlp_backward_fake(
 
     dgrad = None
     if args.requires_dgrad:
-        inp_leading = args.grad_output.shape[0]
-        if args.sequence_parallel and not args.set_parallel_mode:
-            inp_leading = inp_leading // args.tp_size
         dgrad = TensorSpec(
-            shape=(
-                (in_features,)
-                if len(args.grad_output.shape) == 1
-                else (inp_leading, *args.grad_output.shape[1:-1], in_features)
-            ),
+            shape=args.inputmat.shape,
             dtype=out_dtype,
             device=device,
         )
