@@ -9,6 +9,8 @@
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <type_traits>
+
 #include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
 
@@ -26,6 +28,23 @@ typedef enum {
 
 using MATH_T = float;
 using fp8e4m3 = __nv_fp8_e4m3;
+
+// TE has no FP64 DType, so an FP64 second moment reaches the kernels as an Int64 tensor over the
+// same storage (FusedAdam passes `exp_avg_sq.view(torch.int64)`). VAR_T is the second moment's
+// storage type: MOMENT_T, or double for those Int64 tensors.
+template <typename VAR_T>
+using VarMath = std::conditional_t<std::is_same_v<VAR_T, double>, double, MATH_T>;
+
+// Keep sqrt(v_hat) + eps in the second moment's math type until the update is rounded.
+template <typename V_MATH_T>
+__device__ __forceinline__ V_MATH_T adam_denominator(const V_MATH_T next_v_unbiased,
+                                                     const float epsilon) {
+  if constexpr (std::is_same_v<V_MATH_T, double>) {
+    return sqrt(next_v_unbiased) + static_cast<double>(epsilon);
+  } else {
+    return sqrtf(next_v_unbiased) + epsilon;
+  }
+}
 using fp8e5m2 = __nv_fp8_e5m2;
 
 template <typename T>
@@ -49,7 +68,8 @@ struct FP8Data {
 template <>
 struct FP8Data<false> {};
 
-template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename MOMENT_T, typename index_t>
+template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename MOMENT_T, typename index_t,
+          typename VAR_T = MOMENT_T>
 struct AdamFunctorMaster {
   static constexpr bool is_fp8_type = is_fp8<PARAM_T>::value;
 
@@ -82,7 +102,7 @@ struct AdamFunctorMaster {
     MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_loc]);
     m += chunk_idx * chunk_size;
 
-    MOMENT_T *v = reinterpret_cast<MOMENT_T *>(tl.addresses[3][tensor_loc]);
+    VAR_T *v = reinterpret_cast<VAR_T *>(tl.addresses[3][tensor_loc]);
     v += chunk_idx * chunk_size;
 
     FULL_T *p_master = reinterpret_cast<FULL_T *>(tl.addresses[4][tensor_loc]);
@@ -104,7 +124,7 @@ struct AdamFunctorMaster {
       MATH_T r_g[ILP];
       MATH_T r_p[ILP];
       MATH_T r_m[ILP];
-      MATH_T r_v[ILP];
+      VarMath<VAR_T> r_v[ILP];
 #pragma unroll
       for (int ii = 0; ii < ILP; ii++) {
         int i = i_start + threadIdx.x + ii * blockDim.x;
@@ -112,12 +132,12 @@ struct AdamFunctorMaster {
           r_g[ii] = static_cast<MATH_T>(g[i]);
           r_p[ii] = static_cast<MATH_T>(p_master[i]);
           r_m[ii] = static_cast<MATH_T>(m[i]);
-          r_v[ii] = static_cast<MATH_T>(v[i]);
+          r_v[ii] = static_cast<VarMath<VAR_T>>(v[i]);
         } else {
           r_g[ii] = MATH_T(0);
           r_p[ii] = MATH_T(0);
           r_m[ii] = MATH_T(0);
-          r_v[ii] = MATH_T(0);
+          r_v[ii] = VarMath<VAR_T>(0);
         }
       }
 #pragma unroll
@@ -125,18 +145,22 @@ struct AdamFunctorMaster {
         if (mode == ADAM_MODE_0) {  // L2
           r_g[ii] = r_g[ii] + (decay * r_p[ii]);
           r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
-          r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
+          r_v[ii] = static_cast<VarMath<VAR_T>>(beta2) * r_v[ii] +
+                    static_cast<VarMath<VAR_T>>(1 - beta2) * static_cast<VarMath<VAR_T>>(r_g[ii]) *
+                        static_cast<VarMath<VAR_T>>(r_g[ii]);
           MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
-          MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
+          VarMath<VAR_T> next_v_unbiased = r_v[ii] / beta2_correction;
+          VarMath<VAR_T> denom = adam_denominator(next_v_unbiased, epsilon);
           MATH_T update = next_m_unbiased / denom;
           r_p[ii] = r_p[ii] - (lr * update);
         } else {  // weight decay
           r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
-          r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
+          r_v[ii] = static_cast<VarMath<VAR_T>>(beta2) * r_v[ii] +
+                    static_cast<VarMath<VAR_T>>(1 - beta2) * static_cast<VarMath<VAR_T>>(r_g[ii]) *
+                        static_cast<VarMath<VAR_T>>(r_g[ii]);
           MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
-          MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
+          VarMath<VAR_T> next_v_unbiased = r_v[ii] / beta2_correction;
+          VarMath<VAR_T> denom = adam_denominator(next_v_unbiased, epsilon);
           MATH_T update = (next_m_unbiased / denom) + (decay * r_p[ii]);
           r_p[ii] = r_p[ii] - (lr * update);
         }
@@ -148,7 +172,7 @@ struct AdamFunctorMaster {
         if (i < n && i < chunk_size) {
           p_master[i] = static_cast<FULL_T>(r_p[ii]);
           m[i] = static_cast<MOMENT_T>(r_m[ii]);
-          v[i] = static_cast<MOMENT_T>(r_v[ii]);
+          v[i] = static_cast<VAR_T>(r_v[ii]);
           if constexpr (is_fp8_type) {
             __builtin_assume(fp8_data.max >= 0);
             fp8_data.max = fmaxf(fabsf(r_p[ii]), fp8_data.max);
@@ -291,7 +315,8 @@ struct AdamFunctorMasterParamRemainder {
   }
 };
 
-template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename MOMENT_T, typename index_t>
+template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename MOMENT_T, typename index_t,
+          typename VAR_T = MOMENT_T>
 struct AdamFunctor {
   __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<4> &tl,  // NOLINT(*)
@@ -320,7 +345,7 @@ struct AdamFunctor {
     MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_loc]);
     m += chunk_idx * chunk_size;
 
-    MOMENT_T *v = reinterpret_cast<MOMENT_T *>(tl.addresses[3][tensor_loc]);
+    VAR_T *v = reinterpret_cast<VAR_T *>(tl.addresses[3][tensor_loc]);
     v += chunk_idx * chunk_size;
 
     n -= chunk_idx * chunk_size;
@@ -330,7 +355,7 @@ struct AdamFunctor {
       MATH_T r_g[ILP];
       MATH_T r_p[ILP];
       MATH_T r_m[ILP];
-      MATH_T r_v[ILP];
+      VarMath<VAR_T> r_v[ILP];
 #pragma unroll
       for (int ii = 0; ii < ILP; ii++) {
         int i = i_start + threadIdx.x + ii * blockDim.x;
@@ -338,12 +363,12 @@ struct AdamFunctor {
           r_g[ii] = static_cast<MATH_T>(g[i]);
           r_p[ii] = static_cast<MATH_T>(p[i]);
           r_m[ii] = static_cast<MATH_T>(m[i]);
-          r_v[ii] = static_cast<MATH_T>(v[i]);
+          r_v[ii] = static_cast<VarMath<VAR_T>>(v[i]);
         } else {
           r_g[ii] = MATH_T(0);
           r_p[ii] = MATH_T(0);
           r_m[ii] = MATH_T(0);
-          r_v[ii] = MATH_T(0);
+          r_v[ii] = VarMath<VAR_T>(0);
         }
       }
 #pragma unroll
@@ -351,18 +376,22 @@ struct AdamFunctor {
         if (mode == ADAM_MODE_0) {  // L2
           r_g[ii] = r_g[ii] + (decay * r_p[ii]);
           r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
-          r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
+          r_v[ii] = static_cast<VarMath<VAR_T>>(beta2) * r_v[ii] +
+                    static_cast<VarMath<VAR_T>>(1 - beta2) * static_cast<VarMath<VAR_T>>(r_g[ii]) *
+                        static_cast<VarMath<VAR_T>>(r_g[ii]);
           MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
-          MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
+          VarMath<VAR_T> next_v_unbiased = r_v[ii] / beta2_correction;
+          VarMath<VAR_T> denom = adam_denominator(next_v_unbiased, epsilon);
           MATH_T update = next_m_unbiased / denom;
           r_p[ii] = r_p[ii] - (lr * update);
         } else {  // weight decay
           r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
-          r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
+          r_v[ii] = static_cast<VarMath<VAR_T>>(beta2) * r_v[ii] +
+                    static_cast<VarMath<VAR_T>>(1 - beta2) * static_cast<VarMath<VAR_T>>(r_g[ii]) *
+                        static_cast<VarMath<VAR_T>>(r_g[ii]);
           MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
-          MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
+          VarMath<VAR_T> next_v_unbiased = r_v[ii] / beta2_correction;
+          VarMath<VAR_T> denom = adam_denominator(next_v_unbiased, epsilon);
           MATH_T update = (next_m_unbiased / denom) + (decay * r_p[ii]);
           r_p[ii] = r_p[ii] - (lr * update);
         }
@@ -373,7 +402,7 @@ struct AdamFunctor {
         if (i < n && i < chunk_size) {
           p[i] = static_cast<PARAM_T>(r_p[ii]);
           m[i] = static_cast<MOMENT_T>(r_m[ii]);
-          v[i] = static_cast<MOMENT_T>(r_v[ii]);
+          v[i] = static_cast<VAR_T>(r_v[ii]);
         }
       }
     }
@@ -611,9 +640,11 @@ void multi_tensor_adam_cuda(int chunk_size, Tensor noop_flag,
       const bool m_is_bf16 = tensor_lists[2][j]->dtype() == DType::kBFloat16;
       const bool v_is_fp32 = tensor_lists[3][j]->dtype() == DType::kFloat32;
       const bool v_is_bf16 = tensor_lists[3][j]->dtype() == DType::kBFloat16;
-      NVTE_CHECK((m_is_fp32 && v_is_fp32) || (m_is_bf16 && v_is_bf16),
-                 "First and second moment tensors must both be Float32 or both be BFloat16, but "
-                 "tensor ",
+      // Int64 carries an FP64 second moment (see VarMath).
+      const bool v_is_fp64 = tensor_lists[3][j]->dtype() == DType::kInt64;
+      NVTE_CHECK((m_is_fp32 && (v_is_fp32 || v_is_fp64)) || (m_is_bf16 && v_is_bf16),
+                 "First and second moment tensors must both be Float32 or both be BFloat16, or "
+                 "Float32 with an FP64 second moment passed as Int64, but tensor ",
                  j, " has first moment dtype=", to_string(tensor_lists[2][j]->dtype()),
                  " and second moment dtype=", to_string(tensor_lists[3][j]->dtype()));
     }
@@ -638,67 +669,51 @@ void multi_tensor_adam_cuda(int chunk_size, Tensor noop_flag,
     }
   }
 
-  // Get moment dtype (m and v have the same dtype, already validated above)
+  // Get moment dtype (m and v have the same dtype, or v is FP64 with an FP32 m, validated above)
   const auto moment_type_te = tensor_lists[2][0]->dtype();
+  const bool fp64_second_moment = tensor_lists[3][0]->dtype() == DType::kInt64;
+  for (size_t j = 0; j < num_tensors_per_list; j++) {
+    NVTE_CHECK((tensor_lists[3][j]->dtype() == DType::kInt64) == fp64_second_moment,
+               "Second moment tensors must all be FP64 (passed as Int64) or none");
+  }
 
-  // Launch kernel
+  // Launch kernel. The second moment is stored as moment_type, or as double for FP64.
+#define NVTE_ADAM_LAUNCH(NUM_LISTS, FUNCTOR, INDEX_T, MOMENT_T, VAR_T)                             \
+  multi_tensor_apply<NUM_LISTS>((INDEX_T)BLOCK_SIZE, (INDEX_T)chunk_size, noop_flag, tensor_lists, \
+                                FUNCTOR<p_in_type, g_in_type, float, MOMENT_T, INDEX_T, VAR_T>(),  \
+                                stream, beta1, beta2, bias_correction1, bias_correction2, epsilon, \
+                                lr, (adamMode_t)mode, weight_decay)
+#define NVTE_ADAM_DISPATCH(NUM_LISTS, FUNCTOR, INDEX_T)                                    \
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(                                              \
+      p_in_type_te, p_in_type,                                                             \
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(                                          \
+          g_in_type_te, g_in_type,                                                         \
+          if (fp64_second_moment) {                                                        \
+            NVTE_ADAM_LAUNCH(NUM_LISTS, FUNCTOR, INDEX_T, float, double);                  \
+          } else {                                                                         \
+            TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(                                      \
+                moment_type_te, moment_type,                                               \
+                NVTE_ADAM_LAUNCH(NUM_LISTS, FUNCTOR, INDEX_T, moment_type, moment_type);); \
+          }))
   if (requires_64bit_indexing) {
     if (num_tensor_lists == 4) {
       // g, p, m, v
-      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          p_in_type_te, p_in_type,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-              g_in_type_te, g_in_type,
-              TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
-                  moment_type_te, moment_type,
-                  multi_tensor_apply<4>(
-                      (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
-                      AdamFunctor<p_in_type, g_in_type, float, moment_type, int64_t>(), stream,
-                      beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                      (adamMode_t)mode, weight_decay);)));
+      NVTE_ADAM_DISPATCH(4, AdamFunctor, int64_t);
     } else {
       // g, p, m, v, p_master
-      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          p_in_type_te, p_in_type,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-              g_in_type_te, g_in_type,
-              TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
-                  moment_type_te, moment_type,
-                  multi_tensor_apply<5>(
-                      (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
-                      AdamFunctorMaster<p_in_type, g_in_type, float, moment_type, int64_t>(),
-                      stream, beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                      (adamMode_t)mode, weight_decay);)));
+      NVTE_ADAM_DISPATCH(5, AdamFunctorMaster, int64_t);
     }
   } else {
     if (num_tensor_lists == 4) {
       // g, p, m, v
-      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          p_in_type_te, p_in_type,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-              g_in_type_te, g_in_type,
-              TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
-                  moment_type_te, moment_type,
-                  multi_tensor_apply<4>(
-                      BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                      AdamFunctor<p_in_type, g_in_type, float, moment_type, int32_t>(), stream,
-                      beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                      (adamMode_t)mode, weight_decay);)));
+      NVTE_ADAM_DISPATCH(4, AdamFunctor, int32_t);
     } else {
       // g, p, m, v, p_master
-      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          p_in_type_te, p_in_type,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-              g_in_type_te, g_in_type,
-              TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
-                  moment_type_te, moment_type,
-                  multi_tensor_apply<5>(
-                      BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                      AdamFunctorMaster<p_in_type, g_in_type, float, moment_type, int32_t>(),
-                      stream, beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                      (adamMode_t)mode, weight_decay);)));
+      NVTE_ADAM_DISPATCH(5, AdamFunctorMaster, int32_t);
     }
   }
+#undef NVTE_ADAM_DISPATCH
+#undef NVTE_ADAM_LAUNCH
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
