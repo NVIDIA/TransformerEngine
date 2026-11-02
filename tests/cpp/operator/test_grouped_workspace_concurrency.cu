@@ -8,7 +8,6 @@
 #include <gtest/gtest.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
-#include <transformer_engine/workspace.h>
 
 #include <array>
 #include <memory>

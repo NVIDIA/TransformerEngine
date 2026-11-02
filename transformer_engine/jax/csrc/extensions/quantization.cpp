@@ -615,7 +615,7 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_
 
   QuantizationConfigWrapper quant_config{};
   // This FFI only varies the first dimension, so descriptors are launch-local.
-  // The v2 query requests one byte and its empty catalog writes no device data;
+  // The v2 query requests one byte and no descriptor storage;
   // reuse the existing XLA-owned metadata allocation for that nonempty binding.
   // Query first so any future descriptor reservation fails before overlapping the
   // group sizes/offsets instead of silently corrupting their storage.

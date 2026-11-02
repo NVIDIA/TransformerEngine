@@ -8,7 +8,6 @@
 #include <transformer_engine/cast.h>
 
 #include "../common.h"
-#include "core/workspace.h"
 #include "dispatch/quantize.cuh"
 
 void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor dbias,
@@ -20,8 +19,6 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
   constexpr bool IS_DACT = false;
   constexpr const NVTETensor activation_input = nullptr;
 
-  dispatch::common::dispatch_dbias_workspace(workspace, [&](NVTETensor scratch) {
-    dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
-        input, activation_input, output, dbias, scratch, nullptr, stream);
-  });
+  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
 }

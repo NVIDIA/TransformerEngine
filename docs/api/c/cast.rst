@@ -12,9 +12,8 @@ Grouped quantization workspace
 ``nvte_group_quantize_v2`` accepts the existing ``NVTETensor`` workspace argument.
 Call it with an empty tensor to query the required shape and dtype, allocate
 storage through the framework, then call the same function again to quantize.
-The query prepares the region layout internally, including any persistent
-reservations already attached to that tensor. No separate requirements or
-operation-planning call is needed.
+The query computes a TMA-specific layout from the group count. Query and execution
+may use different tensor handles; no resource catalog or planning API is needed.
 
 .. code-block:: cpp
 
@@ -36,15 +35,15 @@ stream. Execution validates the tensor's declared byte capacity and base alignme
 the caller is responsible for the actual allocation behind the pointer.
 
 Each descriptor and metadata array starts on a 128-byte boundary. Workspace size
-and offsets are calculated with the common layout utility; callers should query
+and offsets are calculated with the grouped TMA layout; callers should query
 requirements rather than hard-code sizes. See :doc:`workspace` for layout,
-persistent table, growth, and CUDA Graph lifetime contracts.
+buffer ownership and CUDA Graph lifetime contracts.
 
 Allocate before CUDA graph capture. Keep the workspace alive until all uses
 complete, including captured graph executions. Use one workspace per CUDA stream;
 the framework or application allocates separate memory for independently executing
 streams. TE does not track streams or partition the allocation into stream slots.
-Serialize host access to each catalog and order all GPU uses of its mutable
+Serialize complete host submissions and order all GPU uses of the same mutable
 storage. Independently executing graphs also require separate workspaces.
 The original ``nvte_group_quantize`` and ``nvte_group_dequantize`` reject MXFP8
 layouts with varying last dimensions. Use their ``_v2`` variants with caller-owned
@@ -52,8 +51,8 @@ workspace for those layouts, including serialized use. There are no shared mutab
 TMA descriptor arrays or implicit device allocations.
 
 ``nvte_group_dequantize_v2`` uses the same query/allocate/execute protocol and
-region catalog. Its descriptor updater and consumer use the same caller-owned
-region; it supports more than 64 groups. PyTorch grouped quantize and dequantize
+TMA layout. Its descriptor updater and consumer use the same caller-owned
+buffer; it supports more than 64 groups. PyTorch grouped quantize and dequantize
 allocate workspace through the framework, including during graph capture. The
 JAX grouped MXFP8 FFI uses v2 with its XLA-owned workspace; its constant last
 dimension uses launch-local descriptors and does not reserve a descriptor region.
@@ -61,7 +60,8 @@ dimension uses launch-local descriptors and does not reserve a descriptor region
 Only MXFP8 layouts with varying last dimensions need mutable descriptor arrays.
 Constant last dimensions (uniform shapes or varying first dimensions) pass tensor
 maps by value as kernel parameters. Grouped DBias, including fused activation
-backward, requires a constant last dimension and uses the supplied workspace scratch.
+backward, requires a constant last dimension and retains its existing scratch
+protocol. Its scratch tensor uses the existing backend-specific protocol.
 Other grouped formats do not use these mutable MXFP8 descriptor arrays.
 
 .. doxygenfile:: cast.h

@@ -8,7 +8,6 @@
 #include <transformer_engine/cast.h>
 
 #include "../common.h"
-#include "core/workspace.h"
 #include "dispatch/quantize.cuh"
 
 void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
