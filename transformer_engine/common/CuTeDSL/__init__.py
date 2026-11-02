@@ -20,7 +20,7 @@ from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8_common import (
 from transformer_engine.common.CuTeDSL.cast.mxfp8.requantize_mxfp8 import (
     get_mxfp8_requantization_function,
 )
-from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose import (
+from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_nvfp4_common import (
     get_nvfp4_quantization_function,
 )
 

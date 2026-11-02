@@ -2,7 +2,11 @@
 #
 # See LICENSE for license information.
 
-"""Device and host-launch logic for the tuned NVFP4 quantize-transpose kernel."""
+"""General NVFP4 quantize-transpose kernel: TMA-staged tiles, the CuTeDSL counterpart of
+quantize_transpose_nvfp4_tuned_1D.cuh.
+
+It handles every config. NVFP4QuantizeEntry in quantize_nvfp4_common.py dispatches the calls a
+specialized kernel is eligible for to that kernel and falls back to this one otherwise."""
 
 from typing import Optional
 
@@ -22,7 +26,6 @@ from cutlass import (
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.cast.nvfp4.utils import (
-    CUTEDSL_DEBUG_LOGGING,
     NVFP4_BLOCK_SCALING_SIZE,
     NVFP4_SCALE_PAD_INNER,
     NVFP4_SCALE_PAD_OUTER,
@@ -34,11 +37,11 @@ from transformer_engine.common.CuTeDSL.cast.nvfp4.utils import (
     make_prmt_u32,
     mul_cvt_bf16x8_to_fp4x8,
     mul_cvt_bf16x8_to_fp4x8_sr,
-    noop_flag_is_set,
     pack_u32x2,
     validate_tensor,
 )
 from transformer_engine.common.CuTeDSL.philox_rng import PhiloxRng
+from .quantize_nvfp4_common import CUTEDSL_DEBUG_LOGGING, NVFP4QuantizeKernelBase, noop_flag_is_set
 from transformer_engine.common.CuTeDSL.utils import (
     abs_max_x2_bf16,
     fabs_f32,
@@ -59,7 +62,7 @@ prmt_lo_u32 = make_prmt_u32(0x5410)
 prmt_hi_u32 = make_prmt_u32(0x7632)
 
 
-class NVFP4QuantizeTransposeTuned1DKernel:
+class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
     """Tuned kernel to cast to NVFP4 and transpose.
 
     Each thread block processes a CHUNK_DIM_Y x CHUNK_DIM_X _chunk_ of the input tensor as a grid
@@ -97,6 +100,10 @@ class NVFP4QuantizeTransposeTuned1DKernel:
     THREADS_PER_BANK = (32 * 4 * 8) // 4 // NVFP4_BLOCK_SCALING_SIZE  # 16
     assert NUM_BUFFERS <= STAGES  # otherwise, prefetch loop would read OOB
 
+    @staticmethod
+    def supports(cfg) -> bool:
+        return True
+
     def __init__(self, cfg):
         self.cfg = cfg
 
@@ -127,8 +134,7 @@ class NVFP4QuantizeTransposeTuned1DKernel:
         """
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(
-                "[CuTeDSL] NVFP4QuantizeTransposeTuned1DKernel.__call__() with config:"
-                f" {self.cfg}\n"
+                f"[CuTeDSL] NVFP4QuantizeGeneralG2SKernel.__call__() with config: {self.cfg}\n"
             )
 
         ## Validation
