@@ -100,7 +100,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         scale_inv_dtype: Optional[DType] = None,
     ):
         if (
-            shapes is not None
+            shapes is not None  # pylint: disable=chained-comparison
             and len(shapes) == num_tensors
             and num_tensors > 0
             and all(shapes[0] == s for s in shapes)

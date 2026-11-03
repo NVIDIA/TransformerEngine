@@ -351,7 +351,7 @@ def get_no_load_balance_thd_causal_metadata(
     remains the logical document boundary, so each global chunk is represented
     as its intersection with every document.
     """
-    assert cp_size > 0 and 0 <= cp_rank < cp_size
+    assert 0 <= cp_rank < cp_size
     assert cu_seqlens.shape == cu_seqlens_padded.shape
     assert total_tokens % cp_size == 0
 

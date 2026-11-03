@@ -20,7 +20,7 @@ FAILED_CASES=""
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"
 
-pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+pip3 install pytest==8.4.2 || error_exit "Failed to install pytest"
 
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_torch_fsdp2_hybrid.xml $TE_PATH/tests/pytorch/distributed/test_torch_fsdp2.py -k "hybrid" || test_fail "hybrid test_torch_fsdp2.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_hybrid_tp_sp.xml $TE_PATH/tests/pytorch/distributed/test_hybrid_tp_sp.py || test_fail "test_hybrid_tp_sp.py"
