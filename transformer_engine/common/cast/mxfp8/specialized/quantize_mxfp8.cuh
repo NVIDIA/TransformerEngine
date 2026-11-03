@@ -887,6 +887,11 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   using OType2 = typename ptx::FPx2<OType>;
   constexpr int32_t numItersIType2 = sizeof(inputUnitType) / sizeof(IType2);
 
+  // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+  // so per-block amax will be NaN if all values in the block are NaN.
+  const float nan_float = __int_as_float(0x7FC00000);
+  const IType nan_itype = static_cast<IType>(nan_float);
+
   int32_t warpId = threadIdx.y;
   int32_t leader = ptx::elect_one_sync();
   int2 block_coords;
@@ -1355,6 +1360,11 @@ __global__ void quantize_mxfp8_kernel_cast_only(
 
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
+
+  // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+  // so per-block amax will be NaN if all values in the block are NaN.
+  const float nan_float = __int_as_float(0x7FC00000);
+  const IType nan_itype = static_cast<IType>(nan_float);
 
   int32_t warpId = threadIdx.y;
   int32_t leader = ptx::elect_one_sync();
