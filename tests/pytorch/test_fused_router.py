@@ -1788,10 +1788,11 @@ def test_logit_bias_preserves_tiny_scores_and_gradients(mode):
     torch.testing.assert_close(p[0, 0], expected, atol=0, rtol=5e-6)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("mode", ["fused_atomic", "two_kernel"])
-def test_logit_bias_cuda_graph_mutable_bias_and_bounds(mode):
+def test_logit_bias_cuda_graph_mutable_logits_bias_and_bounds(mode, dtype):
     torch.manual_seed(123)
-    logits = torch.randn(129, 512, device="cuda")
+    logits = torch.randn(129, 512, device="cuda", dtype=dtype)
     bias = torch.zeros(512, device="cuda")
     bounds = torch.tensor([-16.0, 16.0], device="cuda")
     hist = torch.zeros(512, 1000, device="cuda", dtype=torch.int32)
@@ -1805,13 +1806,16 @@ def test_logit_bias_cuda_graph_mutable_bias_and_bounds(mode):
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         probs, mask = _logit_bias_route(logits, bias, 10, **kwargs)
+    rtol = {torch.float32: 5e-6, torch.float16: 2e-3, torch.bfloat16: 2e-2}[dtype]
     for factor in (1.0, 2.0):
+        # Changing logits also exercises the captured FP32 copy in the two-kernel path.
+        logits.copy_(torch.randn_like(logits) * factor)
         bias.copy_(torch.linspace(-factor, factor, 512, device="cuda"))
         bounds.copy_(torch.tensor([-32.0 * factor, 32.0 * factor], device="cuda"))
         hist.zero_()
         graph.replay()
         expected, expected_mask = _logit_bias_reference(logits, bias, 10)
-        torch.testing.assert_close(probs, expected, atol=0, rtol=5e-6)
+        torch.testing.assert_close(probs, expected, atol=0, rtol=rtol)
         assert torch.equal(mask, expected_mask)
         assert torch.equal(hist, _logit_bias_histogram_reference(logits, bias, 10, bounds, 1000))
 
