@@ -16,6 +16,21 @@ THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
 
 
+def _softmax_bwd_in_place(*tensors: torch.Tensor) -> bool:
+    """Whether a softmax backward may overwrite the incoming gradient.
+
+    The tex backward kernels compute the input gradient in place into
+    ``output_grads``. In eager mode this avoids allocating another
+    [b, np, sq, sk] buffer while the gradient and the saved softmax output
+    (both of that size) are still alive. While tracing under torch.compile
+    (or when building a double-backward graph) the non-aliasing
+    ``te_softmax::*_bwd`` custom ops are used instead.
+    """
+    if torch.compiler.is_compiling() or torch.is_grad_enabled():
+        return False
+    return all(type(t) is torch.Tensor for t in tensors)  # pylint: disable=unidiomatic-typecheck
+
+
 # ----------------------------- ScaledSoftmax -------------------------------
 
 
@@ -36,6 +51,8 @@ def scaled_softmax_backward(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Backward pass for ScaledSoftmax."""
+    # The kernel writes in place; clone so the op does not mutate/alias its inputs.
+    output_grads = output_grads.clone(memory_format=torch.contiguous_format)
     return tex.scaled_softmax_backward(output_grads, softmax_results, scale)
 
 
@@ -55,7 +72,12 @@ def _scaled_softmax_setup_context(ctx, inputs, output):
 
 def _scaled_softmax_backward_wrapper(ctx, grad_output):
     (softmax_results,) = ctx.saved_tensors
-    grad_inputs = torch.ops.te_softmax.scaled_softmax_bwd(grad_output, softmax_results, ctx.scale)
+    if _softmax_bwd_in_place(grad_output, softmax_results):
+        grad_inputs = tex.scaled_softmax_backward(grad_output, softmax_results, ctx.scale)
+    else:
+        grad_inputs = torch.ops.te_softmax.scaled_softmax_bwd(
+            grad_output, softmax_results, ctx.scale
+        )
     return grad_inputs, None
 
 
@@ -89,6 +111,8 @@ def scaled_masked_softmax_backward(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Backward pass for ScaledMaskedSoftmax."""
+    # The kernel writes in place; clone so the op does not mutate/alias its inputs.
+    output_grads = output_grads.clone(memory_format=torch.contiguous_format)
     return tex.scaled_masked_softmax_backward(output_grads, softmax_results, scale)
 
 
@@ -108,9 +132,12 @@ def _scaled_masked_softmax_setup_context(ctx, inputs, output):
 
 def _scaled_masked_softmax_backward_wrapper(ctx, grad_output):
     (softmax_results,) = ctx.saved_tensors
-    grad_inputs = torch.ops.te_softmax.scaled_masked_softmax_bwd(
-        grad_output, softmax_results, ctx.scale
-    )
+    if _softmax_bwd_in_place(grad_output, softmax_results):
+        grad_inputs = tex.scaled_masked_softmax_backward(grad_output, softmax_results, ctx.scale)
+    else:
+        grad_inputs = torch.ops.te_softmax.scaled_masked_softmax_bwd(
+            grad_output, softmax_results, ctx.scale
+        )
     return grad_inputs, None, None
 
 
@@ -142,6 +169,8 @@ def scaled_upper_triang_masked_softmax_backward(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Backward pass for ScaledUpperTriangMaskedSoftmax."""
+    # The kernel writes in place; clone so the op does not mutate/alias its inputs.
+    output_grads = output_grads.clone(memory_format=torch.contiguous_format)
     return tex.scaled_upper_triang_masked_softmax_backward(output_grads, softmax_results, scale)
 
 
@@ -161,9 +190,14 @@ def _scaled_upper_triang_masked_softmax_setup_context(ctx, inputs, output):
 
 def _scaled_upper_triang_masked_softmax_backward_wrapper(ctx, grad_output):
     (softmax_results,) = ctx.saved_tensors
-    grad_inputs = torch.ops.te_softmax.scaled_upper_triang_masked_softmax_bwd(
-        grad_output, softmax_results, ctx.scale
-    )
+    if _softmax_bwd_in_place(grad_output, softmax_results):
+        grad_inputs = tex.scaled_upper_triang_masked_softmax_backward(
+            grad_output, softmax_results, ctx.scale
+        )
+    else:
+        grad_inputs = torch.ops.te_softmax.scaled_upper_triang_masked_softmax_bwd(
+            grad_output, softmax_results, ctx.scale
+        )
     return grad_inputs, None
 
 
@@ -197,6 +231,8 @@ def scaled_aligned_causal_masked_softmax_backward(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """Backward pass for ScaledAlignedCausalMaskedSoftmax."""
+    # The kernel writes in place; clone so the op does not mutate/alias its inputs.
+    output_grads = output_grads.clone(memory_format=torch.contiguous_format)
     return tex.scaled_aligned_causal_masked_softmax_backward(output_grads, softmax_results, scale)
 
 
@@ -216,9 +252,14 @@ def _scaled_aligned_causal_masked_softmax_setup_context(ctx, inputs, output):
 
 def _scaled_aligned_causal_masked_softmax_backward_wrapper(ctx, grad_output):
     (softmax_results,) = ctx.saved_tensors
-    grad_inputs = torch.ops.te_softmax.scaled_aligned_causal_masked_softmax_bwd(
-        grad_output, softmax_results, ctx.scale
-    )
+    if _softmax_bwd_in_place(grad_output, softmax_results):
+        grad_inputs = tex.scaled_aligned_causal_masked_softmax_backward(
+            grad_output, softmax_results, ctx.scale
+        )
+    else:
+        grad_inputs = torch.ops.te_softmax.scaled_aligned_causal_masked_softmax_bwd(
+            grad_output, softmax_results, ctx.scale
+        )
     return grad_inputs, None
 
 

@@ -25,6 +25,11 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.DotProductAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward, set_context_parallel_group
 
+In eager training, the fused softmax used by the unfused attention backend reuses
+the incoming gradient buffer during backward to reduce peak memory. Under
+``torch.compile``, softmax backward uses a separate buffer to preserve the
+custom operator's non-aliasing contract.
+
 .. autoapiclass:: transformer_engine.pytorch.GatedDeltaNetAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward
 
