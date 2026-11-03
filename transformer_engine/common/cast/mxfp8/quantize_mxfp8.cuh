@@ -435,9 +435,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             if constexpr (std::is_same_v<IType, float>) {
               thread_amax = fmaxf(thread_amax, 0.0f);
             } else {
-              ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, {
-                static_cast<IType>(0.0f), static_cast<IType>(0.0f)
-              });
+              ptx::abs_max_2x(thread_amax_2x, thread_amax_2x,
+                              {static_cast<IType>(0.0f), static_cast<IType>(0.0f)});
             }
           }
         }
