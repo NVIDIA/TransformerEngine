@@ -83,6 +83,26 @@ __device__ __forceinline__ int GetGroupIdx(MultiAmaxHadamardCastFusionArgs *kern
   return group_idx;
 }
 
+// Offset range [begin, end) of the group most recently resolved by GetGroupIdxCached.
+struct GroupRangeCache {
+  int begin = 0;
+  int end = 0;
+};
+
+__device__ __forceinline__ int GetGroupIdxCached(MultiAmaxHadamardCastFusionArgs *kernel_args_ptr,
+                                                 int offset, int cached_idx,
+                                                 GroupRangeCache &cache) {
+  if (offset >= cache.begin && offset < cache.end) {
+    return cached_idx;
+  }
+  const int group_idx = GetGroupIdx(kernel_args_ptr, offset);
+  cache.begin = kernel_args_ptr->split_sections_range[group_idx];
+  cache.end = group_idx == kernel_args_ptr->num_tensors - 1
+                  ? cutlass::platform::numeric_limits<int>::max()
+                  : kernel_args_ptr->split_sections_range[group_idx + 1];
+  return group_idx;
+}
+
 CUTLASS_DEVICE
 cutlass::Array<cutlass::float_e2m1_t, 8> StochasticNumericConverterBase(
     cutlass::Array<float, 8> const &input, cutlass::Array<uint32_t, 2> const &rbits) {
@@ -705,7 +725,9 @@ __launch_bounds__(640, 1) __global__ static void group_row_col_rht_gemm_device(
           rng_seed = rng_state != nullptr ? __ldg(rng_state) : 0;
           rng_offset = rng_state != nullptr ? __ldg(rng_state + 1) : 0;
         }
-        int group_idx = GetGroupIdx(&args, scheduler.tile_n_base() * size<1>(epilogue_tiler));
+        GroupRangeCache group_range_cache;
+        int group_idx = GetGroupIdxCached(&args, scheduler.tile_n_base() * size<1>(epilogue_tiler),
+                                          0, group_range_cache);
 
         // Setup tile-level TMEM (t2r) and global memory (r2g) copy descriptors
         auto tiled_t2r = make_tmem_copy(TMEM_LOAD_NEW{}, bulk_tmem_epilogue(_, _, _, _0{}));
@@ -742,7 +764,8 @@ __launch_bounds__(640, 1) __global__ static void group_row_col_rht_gemm_device(
           for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n; ++k_tile) {
             int global_tile_n_offset = (tile_n_base + k_tile) * size<1>(epilogue_tiler);
 
-            int cur_group_idx = GetGroupIdx(&args, global_tile_n_offset);
+            int cur_group_idx =
+                GetGroupIdxCached(&args, global_tile_n_offset, group_idx, group_range_cache);
 
             if (cur_group_idx != group_idx) {
               group_idx = cur_group_idx;
@@ -968,7 +991,9 @@ __launch_bounds__(640, 1) __global__ static void group_row_col_rht_gemm_device(
         constexpr int row_quant_barrier_id = 2;
         cutlass::arch::NamedBarrier::sync(NumEpilogueRowQuantThreadCount, row_quant_barrier_id);
 
-        int group_idx = GetGroupIdx(&args, scheduler.tile_n_base() * size<1>(epilogue_tiler));
+        GroupRangeCache group_range_cache;
+        int group_idx = GetGroupIdxCached(&args, scheduler.tile_n_base() * size<1>(epilogue_tiler),
+                                          0, group_range_cache);
         float a_global_amax_val = shared_storage.global_a_amax[group_idx];
         // Aligning with TensorEngine's recipe to generate scale factors
         static constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
@@ -989,7 +1014,8 @@ __launch_bounds__(640, 1) __global__ static void group_row_col_rht_gemm_device(
           for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_n_base < tiles_n;) {
             int global_tile_n_offset = (tile_n_base + k_tile) * size<1>(epilogue_tiler);
 
-            int cur_group_idx = GetGroupIdx(&args, global_tile_n_offset);
+            int cur_group_idx =
+                GetGroupIdxCached(&args, global_tile_n_offset, group_idx, group_range_cache);
             if (cur_group_idx != group_idx) {
               group_idx = cur_group_idx;
               a_global_amax_val = shared_storage.global_a_amax[group_idx];
