@@ -11,6 +11,7 @@
 
 #include <array>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 #include "../test_common.h"
@@ -192,6 +193,201 @@ TEST_P(GroupedWorkspaceConcurrency, IndependentWorkspaces) {
     ASSERT_EQ(cudaStreamDestroy(streams[i]), cudaSuccess);
   }
 }
+
+// Small buffers shared by query tests across formats. Device data is deliberately
+// poisoned so a query that accidentally executes is observable.
+struct QueryData {
+  const std::vector<size_t> shape{256, 128};
+  Tensor values{"query_values", shape, DType::kFloat32};
+  Tensor result{"query_result", shape, DType::kByte};
+  Tensor scales{"query_scales", std::vector<size_t>{4096}, DType::kFloat32};
+  Tensor amax{"query_amax", std::vector<size_t>{256}, DType::kFloat32};
+  Tensor offsets{"query_offsets", std::vector<size_t>{3}, DType::kInt64};
+  Tensor rows{"query_rows", std::vector<size_t>{2}, DType::kInt64};
+  GroupedTensorWrapper input{2, shape};
+  GroupedTensorWrapper output;
+  GroupedTensorWrapper dequantized{2, shape};
+
+  explicit QueryData(NVTEScalingMode mode) : output(2, shape, mode) {
+    input.set_rowwise_data(values.rowwise_dptr(), DType::kBFloat16, std::vector<size_t>{256 * 128});
+    dequantized.set_rowwise_data(values.rowwise_dptr(), DType::kFloat32,
+                                 std::vector<size_t>{256 * 128});
+    output
+        .set_rowwise_data(result.rowwise_dptr(), DType::kFloat8E4M3, std::vector<size_t>{256 * 128})
+        .set_rowwise_scale_inv(scales.rowwise_dptr(), DType::kFloat32, std::vector<size_t>{4096})
+        .set_scale(scales.rowwise_dptr(), DType::kFloat32, std::vector<size_t>{2});
+    if (mode == NVTE_NVFP4_1D_SCALING) {
+      output.set_row_scaled_nvfp4(true);
+      output
+          .set_rowwise_data(result.rowwise_dptr(), DType::kFloat4E2M1,
+                            std::vector<size_t>{256 * 128})
+          .set_rowwise_scale_inv(scales.rowwise_dptr(), DType::kFloat8E4M3,
+                                 std::vector<size_t>{256, 8})
+          .set_amax(amax.rowwise_dptr(), DType::kFloat32, std::vector<size_t>{256})
+          .set_tensor_offsets(offsets.rowwise_dptr(), DType::kInt64, std::vector<size_t>{3})
+          .set_first_dims(rows.rowwise_dptr(), DType::kInt64, std::vector<size_t>{2});
+      const std::array<int64_t, 3> host_offsets{0, 128 * 128, 256 * 128};
+      const std::array<int64_t, 2> host_rows{128, 128};
+      NVTE_CHECK_CUDA(cudaMemcpy(offsets.rowwise_dptr(), host_offsets.data(), sizeof(host_offsets),
+                                 cudaMemcpyHostToDevice));
+      NVTE_CHECK_CUDA(cudaMemcpy(rows.rowwise_dptr(), host_rows.data(), sizeof(host_rows),
+                                 cudaMemcpyHostToDevice));
+    }
+    NVTE_CHECK_CUDA(cudaMemset(values.rowwise_dptr(), 0x5a, 256 * 128 * sizeof(float)));
+    NVTE_CHECK_CUDA(cudaMemset(result.rowwise_dptr(), 0x5a, 256 * 128));
+    NVTE_CHECK_CUDA(cudaMemset(scales.rowwise_dptr(), 0x5a, 4096 * sizeof(float)));
+    NVTE_CHECK_CUDA(cudaMemset(amax.rowwise_dptr(), 0x5a, 256 * sizeof(float)));
+  }
+};
+
+class GroupedWorkspaceQuery : public ::testing::TestWithParam<NVTEScalingMode> {
+ protected:
+  void SetUp() override {
+    const auto capability = test::getDeviceComputeCapability();
+    if (GetParam() == NVTE_NVFP4_1D_SCALING && capability < test::blackwellComputeCapability) {
+      GTEST_SKIP() << "Grouped NVFP4 requires Blackwell or newer.";
+    }
+    if ((GetParam() == NVTE_BLOCK_SCALING_1D || GetParam() == NVTE_BLOCK_SCALING_2D) &&
+        capability < test::hopperComputeCapability) {
+      GTEST_SKIP() << "Grouped FP8 block scaling requires Hopper or newer.";
+    }
+  }
+};
+
+TEST_P(GroupedWorkspaceQuery, RejectsUnsupportedActivation) {
+  if (GetParam() == NVTE_DELAYED_TENSOR_SCALING) {
+    GTEST_SKIP() << "Delayed tensor scaling supports grouped activation.";
+  }
+  QueryData data(GetParam());
+  Tensor storage("query_workspace", std::vector<size_t>{1}, DType::kByte);
+  TensorWrapper workspace;
+  const std::array<void (*)(NVTEGroupedTensor, NVTEGroupedTensor, NVTETensor, cudaStream_t), 5>
+      forward{nvte_group_gelu_v2, nvte_group_silu_v2, nvte_group_relu_v2, nvte_group_qgelu_v2,
+              nvte_group_srelu_v2};
+  for (size_t i = 0; i < forward.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto operation = forward[i];
+    EXPECT_THROW(operation(data.input.data(), data.output.data(), workspace.data(), 0),
+                 std::runtime_error);
+    TensorWrapper execution(storage.rowwise_dptr(), std::vector<size_t>{1}, DType::kByte);
+    EXPECT_THROW(operation(data.input.data(), data.output.data(), execution.data(), 0),
+                 std::runtime_error);
+  }
+}
+
+TEST_P(GroupedWorkspaceQuery, RejectsUnsupportedInputType) {
+  QueryData data(GetParam());
+  data.input.set_rowwise_data(data.values.rowwise_dptr(), DType::kInt32,
+                              std::vector<size_t>{256 * 128});
+  QuantizationConfigWrapper config;
+  config.set_force_pow_2_scales(true);
+  TensorWrapper workspace;
+  EXPECT_THROW(
+      nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(), config, 0),
+      std::runtime_error);
+}
+
+TEST_P(GroupedWorkspaceQuery, RejectsInvalidFormatConfiguration) {
+  QueryData data(GetParam());
+  QuantizationConfigWrapper config;
+  if (GetParam() == NVTE_DELAYED_TENSOR_SCALING) {
+    data.output.set_scale(data.scales.rowwise_dptr(), DType::kInt32, std::vector<size_t>{2});
+  } else if (GetParam() == NVTE_NVFP4_1D_SCALING) {
+    data.output.set_row_scaled_nvfp4(false);
+  } else {
+    if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
+      GTEST_SKIP() << "Non-power-of-two block scales are supported before Blackwell.";
+    }
+    config.set_force_pow_2_scales(false);
+  }
+  TensorWrapper workspace;
+  EXPECT_THROW(
+      nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(), config, 0),
+      std::runtime_error);
+  Tensor storage("query_workspace", std::vector<size_t>{1}, DType::kByte);
+  TensorWrapper execution(storage.rowwise_dptr(), std::vector<size_t>{1}, DType::kByte);
+  EXPECT_THROW(
+      nvte_group_quantize_v2(data.input.data(), data.output.data(), execution.data(), config, 0),
+      std::runtime_error);
+}
+
+TEST_P(GroupedWorkspaceQuery, SupportedQueriesDoNotLaunchOrWrite) {
+  QueryData data(GetParam());
+  QuantizationConfigWrapper config;
+  config.set_force_pow_2_scales(true);
+  const auto expected = read_bytes(data.result.rowwise_dptr(), 256 * 128);
+  const auto expected_scales = read_bytes(data.scales.rowwise_dptr(), 4096 * sizeof(float));
+  const auto expected_amax = read_bytes(data.amax.rowwise_dptr(), 256 * sizeof(float));
+  const auto expected_values = read_bytes(data.values.rowwise_dptr(), 256 * 128 * sizeof(float));
+  TensorWrapper workspace;
+  // Warm host-side CUDA state before capture; the second query must still be empty.
+  nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(), config, 0);
+  EXPECT_EQ(workspace.dtype(), DType::kByte);
+  ASSERT_EQ(workspace.shape().ndim, 1);
+  EXPECT_EQ(workspace.shape().data[0], 1);
+  if (GetParam() == NVTE_BLOCK_SCALING_1D || GetParam() == NVTE_BLOCK_SCALING_2D) {
+    nvte_group_dequantize_v2(data.output.data(), data.dequantized.data(), workspace.data(), 0);
+  }
+  cudaStream_t stream;
+  ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+  ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), cudaSuccess);
+  EXPECT_NO_THROW(nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(),
+                                         config, stream));
+  if (GetParam() == NVTE_BLOCK_SCALING_1D || GetParam() == NVTE_BLOCK_SCALING_2D) {
+    EXPECT_NO_THROW(nvte_group_dequantize_v2(data.output.data(), data.dequantized.data(),
+                                             workspace.data(), stream));
+  }
+  cudaGraph_t graph;
+  ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
+  size_t nodes = 0;
+  ASSERT_EQ(cudaGraphGetNodes(graph, nullptr, &nodes), cudaSuccess);
+  EXPECT_EQ(nodes, 0);
+  EXPECT_EQ(read_bytes(data.result.rowwise_dptr(), expected.size()), expected);
+  EXPECT_EQ(read_bytes(data.scales.rowwise_dptr(), expected_scales.size()), expected_scales);
+  EXPECT_EQ(read_bytes(data.amax.rowwise_dptr(), expected_amax.size()), expected_amax);
+  EXPECT_EQ(read_bytes(data.values.rowwise_dptr(), expected_values.size()), expected_values);
+  ASSERT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+  ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
+TEST_P(GroupedWorkspaceQuery, BlockDequantizeRejectsInvalidLayoutAndType) {
+  if (GetParam() != NVTE_BLOCK_SCALING_1D && GetParam() != NVTE_BLOCK_SCALING_2D) {
+    GTEST_SKIP() << "This regression targets block-scaled dequantization.";
+  }
+  QueryData data(GetParam());
+  TensorWrapper workspace;
+  data.output.set_with_gemm_swizzled_scales(true);
+  EXPECT_THROW(
+      nvte_group_dequantize_v2(data.output.data(), data.dequantized.data(), workspace.data(), 0),
+      std::runtime_error);
+  data.output.set_with_gemm_swizzled_scales(false);
+  data.dequantized.set_rowwise_data(data.values.rowwise_dptr(), DType::kInt32,
+                                    std::vector<size_t>{256 * 128});
+  EXPECT_THROW(
+      nvte_group_dequantize_v2(data.output.data(), data.dequantized.data(), workspace.data(), 0),
+      std::runtime_error);
+}
+
+TEST(GroupedWorkspaceQueryConfig, RejectsInvalidNvfp4Options) {
+  if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
+    GTEST_SKIP() << "Grouped NVFP4 requires Blackwell or newer.";
+  }
+  QueryData data(NVTE_NVFP4_1D_SCALING);
+  for (int option = 0; option < 3; ++option) {
+    QuantizationConfigWrapper config;
+    if (option == 0) config.set_stochastic_rounding(true);
+    if (option == 1) config.set_nvfp4_2d_quantization(true);
+    if (option == 2) config.set_nvfp4_4over6_mode(kNVTENVFP44Over6MinMAE);
+    TensorWrapper workspace;
+    EXPECT_THROW(
+        nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(), config, 0),
+        std::runtime_error);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(Formats, GroupedWorkspaceQuery,
+                         ::testing::Values(NVTE_DELAYED_TENSOR_SCALING, NVTE_BLOCK_SCALING_1D,
+                                           NVTE_BLOCK_SCALING_2D, NVTE_NVFP4_1D_SCALING));
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest, GroupedWorkspaceConcurrency,
                          ::testing::Combine(::testing::Range(0, 11), ::testing::Bool()));

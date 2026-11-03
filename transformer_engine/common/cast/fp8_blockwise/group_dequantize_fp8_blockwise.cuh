@@ -376,8 +376,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // ``group_quantize_fp8_blockwise``. The input GroupedTensor must have exactly
 // one of rowwise / columnwise data populated (the dequantize API rejects
 // both).
-inline void group_dequantize(const GroupedTensor* input, GroupedTensor* output,
-                             cudaStream_t stream) {
+inline void group_dequantize(const GroupedTensor* input, GroupedTensor* output, cudaStream_t stream,
+                             bool query_only = false) {
   using namespace group_dequantize_kernel;
 
   const int sm = transformer_engine::cuda::sm_arch();
@@ -450,60 +450,67 @@ inline void group_dequantize(const GroupedTensor* input, GroupedTensor* output,
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
       input->dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          output->dtype(), OType, using CType = float;
-          const IType* const input_dptr = reinterpret_cast<const IType*>(input_data.dptr);
-          OType* const output_dptr = reinterpret_cast<OType*>(output->data.dptr);
-          const CType* const scale_inv_dptr = reinterpret_cast<const CType*>(input_scale_inv.dptr);
+          output->dtype(), OType,
+          {
+            if (query_only) return;
+            using CType = float;
+            const IType* const input_dptr = reinterpret_cast<const IType*>(input_data.dptr);
+            OType* const output_dptr = reinterpret_cast<OType*>(output->data.dptr);
+            const CType* const scale_inv_dptr =
+                reinterpret_cast<const CType*>(input_scale_inv.dptr);
 
-          if (is_1d && use_rowwise) {
-            if (same_both_dims) {
-              group_dequantize_blockwise_1d_rw_kernel<true, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(
-                      input_dptr, output_dptr, scale_inv_dptr, tensor_offsets_ptr, num_tensors,
-                      common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
-            } else {
-              group_dequantize_blockwise_1d_rw_kernel<false, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(
-                      input_dptr, output_dptr, scale_inv_dptr, tensor_offsets_ptr, num_tensors,
-                      common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
-            }
-          } else if (is_1d && use_colwise) {
-            if (same_both_dims) {
-              group_dequantize_blockwise_1d_cw_kernel<true, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(input_dptr, output_dptr, scale_inv_dptr,
-                                               scale_t_stride_aligned_K, tensor_offsets_ptr,
-                                               num_tensors, common_first_dim_blocks, K,
-                                               total_row_blocks, first_logical_dim);
-            } else {
-              group_dequantize_blockwise_1d_cw_kernel<false, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(input_dptr, output_dptr, scale_inv_dptr,
-                                               scale_t_stride_aligned_K, tensor_offsets_ptr,
-                                               num_tensors, common_first_dim_blocks, K,
-                                               total_row_blocks, first_logical_dim);
-            }
-          } else if (!is_1d && use_rowwise) {
-            if (same_both_dims) {
-              group_dequantize_blockwise_2d_rw_kernel<true, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(
-                      input_dptr, output_dptr, scale_inv_dptr, scale_stride_y, tensor_offsets_ptr,
-                      num_tensors, common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
-            } else {
-              group_dequantize_blockwise_2d_rw_kernel<false, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(
-                      input_dptr, output_dptr, scale_inv_dptr, scale_stride_y, tensor_offsets_ptr,
-                      num_tensors, common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
-            }
-          } else {  // 2D columnwise
-            if (same_both_dims) {
-              group_dequantize_blockwise_2d_cw_kernel<true, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(
-                      input_dptr, output_dptr, scale_inv_dptr, tensor_offsets_ptr, num_tensors,
-                      common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
-            } else {
-              group_dequantize_blockwise_2d_cw_kernel<false, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(
-                      input_dptr, output_dptr, scale_inv_dptr, tensor_offsets_ptr, num_tensors,
-                      common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
+            if (is_1d && use_rowwise) {
+              if (same_both_dims) {
+                group_dequantize_blockwise_1d_rw_kernel<true, IType, OType, CType>
+                    <<<grid, block, 0, stream>>>(
+                        input_dptr, output_dptr, scale_inv_dptr, tensor_offsets_ptr, num_tensors,
+                        common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
+              } else {
+                group_dequantize_blockwise_1d_rw_kernel<false, IType, OType, CType>
+                    <<<grid, block, 0, stream>>>(
+                        input_dptr, output_dptr, scale_inv_dptr, tensor_offsets_ptr, num_tensors,
+                        common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
+              }
+            } else if (is_1d && use_colwise) {
+              if (same_both_dims) {
+                group_dequantize_blockwise_1d_cw_kernel<true, IType, OType, CType>
+                    <<<grid, block, 0, stream>>>(input_dptr, output_dptr, scale_inv_dptr,
+                                                 scale_t_stride_aligned_K, tensor_offsets_ptr,
+                                                 num_tensors, common_first_dim_blocks, K,
+                                                 total_row_blocks, first_logical_dim);
+              } else {
+                group_dequantize_blockwise_1d_cw_kernel<false, IType, OType, CType>
+                    <<<grid, block, 0, stream>>>(input_dptr, output_dptr, scale_inv_dptr,
+                                                 scale_t_stride_aligned_K, tensor_offsets_ptr,
+                                                 num_tensors, common_first_dim_blocks, K,
+                                                 total_row_blocks, first_logical_dim);
+              }
+            } else if (!is_1d && use_rowwise) {
+              if (same_both_dims) {
+                group_dequantize_blockwise_2d_rw_kernel<true, IType, OType, CType>
+                    <<<grid, block, 0, stream>>>(input_dptr, output_dptr, scale_inv_dptr,
+                                                 scale_stride_y, tensor_offsets_ptr, num_tensors,
+                                                 common_first_dim_blocks, K, total_row_blocks,
+                                                 first_logical_dim);
+              } else {
+                group_dequantize_blockwise_2d_rw_kernel<false, IType, OType, CType>
+                    <<<grid, block, 0, stream>>>(input_dptr, output_dptr, scale_inv_dptr,
+                                                 scale_stride_y, tensor_offsets_ptr, num_tensors,
+                                                 common_first_dim_blocks, K, total_row_blocks,
+                                                 first_logical_dim);
+              }
+            } else {  // 2D columnwise
+              if (same_both_dims) {
+                group_dequantize_blockwise_2d_cw_kernel<true, IType, OType, CType>
+                    <<<grid, block, 0, stream>>>(
+                        input_dptr, output_dptr, scale_inv_dptr, tensor_offsets_ptr, num_tensors,
+                        common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
+              } else {
+                group_dequantize_blockwise_2d_cw_kernel<false, IType, OType, CType>
+                    <<<grid, block, 0, stream>>>(
+                        input_dptr, output_dptr, scale_inv_dptr, tensor_offsets_ptr, num_tensors,
+                        common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
+              }
             }
           });  // NOLINT(*)
   );           // NOLINT(*)

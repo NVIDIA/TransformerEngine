@@ -16,8 +16,10 @@ Query and execution
 ---------------------
 
 1. Call the operation with a workspace tensor whose rowwise data pointer is null.
-   The call validates inputs and returns the required shape and dtype without
-   launching GPU work or modifying outputs.
+   The call performs the same operation, format, and configuration checks as
+   execution, then returns the required shape and dtype without launching GPU
+   work or modifying outputs. This also applies to formats that need no TMA
+   descriptor storage.
 2. Allocate that storage through the framework or application. Descriptor storage
    requires a 128-byte aligned base pointer.
 3. Set the workspace's rowwise data pointer and call the operation to execute.

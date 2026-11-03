@@ -76,8 +76,8 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
     case NVTE_BLOCK_SCALING_1D:
     case NVTE_BLOCK_SCALING_2D: {
       common::dispatch_grouped_tma_workspace(workspace, 0, [&](Tensor *scratch) {
-        if (scratch != nullptr && scratch->data.dptr == nullptr) return;
-        fp8_blockwise::group_dequantize(&input, output, stream);
+        const bool query_only = scratch != nullptr && scratch->data.dptr == nullptr;
+        fp8_blockwise::group_dequantize(&input, output, stream, query_only);
       });
       break;
     }
