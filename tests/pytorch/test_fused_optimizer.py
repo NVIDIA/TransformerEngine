@@ -328,6 +328,52 @@ class TestFusedAdam(TestFusedOptimizer):
 
         torch.testing.assert_close(ref_param, tst_param)
 
+    @pytest.mark.parametrize("capturable", [False, True])
+    @pytest.mark.parametrize("master_weights", [False, True])
+    def test_empty_param_in_last_metadata_slot(self, master_weights, capturable):
+        """An empty param in the last slot of a kernel launch (issue #3202).
+
+        multi_tensor_apply packs at most 36 tensors per launch for depth-4 Adam
+        and 30 for depth-5 Adam with master weights. An empty tensor in the last
+        slot produces no chunks, so it must not keep the following tensors from
+        starting a new launch.
+
+        """
+        if master_weights and not is_bf16_available():
+            pytest.skip("BF16 is not supported")
+        max_tensors_per_launch = 30 if master_weights else 36
+        param_dtype = torch.bfloat16 if master_weights else torch.float32
+        numels = [64] * (max_tensors_per_launch - 1) + [0] + [64] * 20
+
+        # FP32 reference starts from the same (possibly BF16-rounded) values
+        tst_params = [
+            torch.nn.Parameter(torch.randn(n, device="cuda").to(param_dtype)) for n in numels
+        ]
+        ref_params = [torch.nn.Parameter(p.detach().float()) for p in tst_params]
+        ref_optim = torch.optim.Adam(ref_params, **self.options)
+        tst_optim = self.fused_optim(
+            tst_params, capturable=capturable, master_weights=master_weights, **self.options
+        )
+
+        for _ in range(self.iters):
+            for p_ref, p_tst in zip(ref_params, tst_params):
+                p_tst.grad = torch.randn_like(p_tst)
+                p_ref.grad = p_tst.grad.float()
+            ref_optim.step()
+            tst_optim.step()
+
+        if master_weights:
+            torch.testing.assert_close(
+                [tst_optim.get_unscaled_state(p, "master_param") for p in tst_params],
+                [p.detach() for p in ref_params],
+            )
+            torch.testing.assert_close(
+                [p.detach() for p in tst_params],
+                [p.detach().to(param_dtype) for p in ref_params],
+            )
+        else:
+            torch.testing.assert_close(tst_params, ref_params)
+
     def gen_precision_aware_test(
         self,
         use_fp8_params,
