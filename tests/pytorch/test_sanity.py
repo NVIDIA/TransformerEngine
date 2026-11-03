@@ -9,6 +9,9 @@ import pytest
 import os
 import copy
 import ctypes
+import subprocess
+import sys
+import textwrap
 
 import transformer_engine
 import transformer_engine.common as te_common
@@ -1704,3 +1707,26 @@ def test_cuda_library_search_order(monkeypatch, tmp_path, available, expected):
         assert loaded == [f"lib{lib_name}.so"]
     else:
         assert loaded == [str(locations[expected] / f"lib{lib_name}.so.1")]
+
+
+def test_import_does_not_require_curand_library():
+    """TE only uses cuRAND's device headers, and torch no longer always installs its library."""
+    probe = textwrap.dedent(
+        """
+        import ctypes
+
+        cdll = ctypes.CDLL
+
+
+        def cdll_without_curand(name, *args, **kwargs):
+            if name is not None and "curand" in str(name):
+                raise OSError(f"{name}: cannot open shared object file")
+            return cdll(name, *args, **kwargs)
+
+
+        ctypes.CDLL = cdll_without_curand
+
+        import transformer_engine.pytorch
+        """
+    )
+    subprocess.run([sys.executable, "-c", probe], check=True)
