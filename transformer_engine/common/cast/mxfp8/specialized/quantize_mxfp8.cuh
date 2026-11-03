@@ -201,6 +201,11 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
   constexpr int32_t numItersIType2 = sizeof(inputUnitType) / sizeof(IType2);
   using OType2 = typename ptx::FPx2<OType>;
 
+  // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+  // so per-block amax will be NaN if all values in the block are NaN.
+  const float nan_float = __int_as_float(0x7FC00000);
+  const IType nan_itype = static_cast<IType>(nan_float);
+
   e8m0_t *sRowwiseScale = nullptr;
   if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
     extern __shared__ char smem[];
@@ -328,7 +333,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
         output_units[j] = rOutput[j];
       }
     } else {
-      IType2 thread_amax2{0.f, 0.f};
+      IType2 thread_amax2 = {nan_itype, nan_itype};
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
       for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
@@ -449,7 +454,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
         output_units[j] = rOutput[j];
       }
     } else {
-      IType2 thread_amax2{0.f, 0.f};
+      IType2 thread_amax2 = {nan_itype, nan_itype};
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
       for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
@@ -1109,7 +1114,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
             float2 *sColwiseReduce_2x = reinterpret_cast<float2 *>(sColwiseReduce);
 
-            IType2 row_amax2{0.0f, 0.0f};
+            IType2 row_amax2 = {nan_itype, nan_itype};
 #pragma unroll
             for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
               ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
@@ -1586,7 +1591,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
           IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
           float2 *sColwiseReduce_2x = reinterpret_cast<float2 *>(sColwiseReduce);
 
-          IType2 row_amax2{0.0f, 0.0f};
+          IType2 row_amax2 = {nan_itype, nan_itype};
 #pragma unroll
           for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
             ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
