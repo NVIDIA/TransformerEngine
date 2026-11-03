@@ -14,11 +14,14 @@ Precision Notes:
   global memory. For example, the gradient is required to have the same dtype as the input.
 """
 
+import functools
 import warnings
 from typing import Optional, Union
 
 import torch
 import transformer_engine_torch as tex
+
+from .constants import TE_DType_To_Torch
 
 # Re-export the C++ enum NVTERoutingMapFormat under a friendlier Python name.
 # Members:
@@ -243,6 +246,7 @@ def fused_topk_with_score_function(
 ):
     """
     Fused topk with score function router.
+
     Parameters
     ----------
     logits : torch.Tensor in fp32/bf16/fp16
@@ -283,9 +287,10 @@ def fused_topk_with_score_function(
         Same shape as ``logits``.
     routing_map : torch.Tensor
         Same leading dims as ``logits``; trailing dim and dtype depend on
-        routing_map_format, or dense top-k indices when topk_indices is provided:
-        - BYTEMAP:   bool[*logits.shape[:-1], num_experts]
-        - BITMAP_U8: uint8[*logits.shape[:-1], ceil(num_experts/8)]
+        ``routing_map_format``, or dense top-k indices when ``topk_indices`` is provided:
+
+        - BYTEMAP: ``bool[*logits.shape[:-1], num_experts]``
+        - BITMAP_U8: ``uint8[*logits.shape[:-1], ceil(num_experts/8)]``,
           LSB-first bit-packed.
     """
     if logits.dtype == torch.float64:
@@ -412,6 +417,33 @@ def fused_compute_score_for_moe_aux_loss(
     return FusedComputeScoresForMoEAuxLoss.apply(logits, topk, score_function, routing_map_format)
 
 
+@functools.lru_cache(maxsize=None)
+def _get_moe_aux_loss_workspace_config() -> tuple[tuple[int, ...], torch.dtype]:
+    """Scratch metadata, queried once through the common forward operation."""
+    shape, dtype = tex.get_moe_aux_loss_workspace_config()
+    return tuple(shape), TE_DType_To_Torch[dtype]
+
+
+@functools.lru_cache(maxsize=None)
+def _get_cached_moe_aux_loss_workspace(device_index: int, _stream_handle: int) -> torch.Tensor:
+    """Persistent scratch for eager calls, with independent storage for each stream."""
+    # _stream_handle is part of the cache key: concurrent streams must not share scratch.
+    shape, dtype = _get_moe_aux_loss_workspace_config()
+    return torch.empty(shape, dtype=dtype, device=device_index)
+
+
+def _get_moe_aux_loss_workspace(device: torch.device) -> torch.Tensor:
+    """Reuse eager scratch; give captured operations private graph-pool storage."""
+    with torch.cuda.device(device):
+        if torch.cuda.is_current_stream_capturing():
+            # Allocate only during capture, never on replay. Do not cache graph-pool
+            # storage: a graph may replay concurrently with eager work or another graph.
+            shape, dtype = _get_moe_aux_loss_workspace_config()
+            return torch.empty(shape, dtype=dtype, device=device)
+        stream = torch.cuda.current_stream(device)
+        return _get_cached_moe_aux_loss_workspace(stream.device.index, stream.cuda_stream)
+
+
 class FusedAuxLoss(torch.autograd.Function):
     """
     Fused MoE aux loss. ``total_num_tokens`` may be either a Python int
@@ -428,10 +460,12 @@ class FusedAuxLoss(torch.autograd.Function):
         num_experts: int,
         topk: int,
         coeff: float,
+        deterministic: bool,
     ):
         # pylint: disable=missing-function-docstring
         num_rows = probs.size(0)
         num_cols = probs.size(1)
+        workspace = _get_moe_aux_loss_workspace(probs.device) if deterministic else None
         if isinstance(total_num_tokens, torch.Tensor):
             aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd_graph_safe(
                 probs=probs,
@@ -442,6 +476,8 @@ class FusedAuxLoss(torch.autograd.Function):
                 num_cols=num_cols,
                 topk=topk,
                 coeff=coeff,
+                deterministic=deterministic,
+                workspace=workspace,
             )
         else:
             aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd(
@@ -453,6 +489,8 @@ class FusedAuxLoss(torch.autograd.Function):
                 num_cols=num_cols,
                 topk=topk,
                 coeff=coeff,
+                deterministic=deterministic,
+                workspace=workspace,
             )
         ctx.save_for_backward(Const_buf, tokens_per_expert)
         ctx.num_rows = num_rows
@@ -470,7 +508,7 @@ class FusedAuxLoss(torch.autograd.Function):
             num_cols=ctx.num_cols,
             grad_aux_loss=grad_aux_loss,
         )
-        return grad_probs, None, None, None, None, None
+        return grad_probs, None, None, None, None, None, None
 
 
 def fused_moe_aux_loss(
@@ -480,9 +518,11 @@ def fused_moe_aux_loss(
     num_experts: int,
     topk: int,
     coeff: float,
+    deterministic: bool = False,
 ) -> torch.Tensor:
     """
     Fused MoE aux loss.
+
     Parameters
     ----------
     probs : torch.Tensor in fp32/bf16/fp16
@@ -498,10 +538,18 @@ def fused_moe_aux_loss(
     topk : int
     coeff : float
         the coefficient of the aux loss.
+    deterministic : bool, default = False
+        Use a fixed-order two-stage FP32 reduction instead of atomic accumulation.
+        Repeated calls with identical inputs on the same hardware and software
+        are bitwise reproducible. Results may differ from other reduction orders.
+        Eager calls reuse scratch per device and stream; CUDA Graph capture uses
+        private scratch that is reused on replay.
 
     Returns
     -------
     aux_loss : torch.Tensor.
         A scalar tensor in the same dtype as the "probs".
     """
-    return FusedAuxLoss.apply(probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff)
+    return FusedAuxLoss.apply(
+        probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff, deterministic
+    )

@@ -9,6 +9,7 @@
 import functools
 
 import torch
+import transformer_engine
 
 from transformer_engine.common import load_framework_extension
 from transformer_engine.pytorch.torch_version import torch_version
@@ -16,6 +17,13 @@ from transformer_engine.pytorch.torch_version import torch_version
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 load_framework_extension("torch")
+
+# Defined in a standalone module so that internal modules can import them without
+# going through this package's __init__.
+from transformer_engine.pytorch.device import te_device_type, te_platform
+
+transformer_engine.te_device_type = te_device_type
+transformer_engine.te_platform = te_platform
 from transformer_engine.pytorch import constants
 from transformer_engine.pytorch.constants import CPLoadBalancingStrategy, DType
 from transformer_engine.pytorch.module import LayerNormLinear

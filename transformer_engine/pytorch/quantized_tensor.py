@@ -18,6 +18,8 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.constants import dist_group_type
+
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
@@ -359,28 +361,34 @@ def restore_from_saved(
     Note: please use `restore_from_func_ctx` instead if you are restoring tensors from a function context to make sure tensor_objects is detached and its memory can be freed
     """
     tensor_objects = []
+    offset = 0
     for tensor in tensors:
         if tensor is None or isinstance(tensor, torch.Tensor):
-            tensor_objects.append(saved_tensors[0])
-            saved_tensors = saved_tensors[1:]
+            tensor_objects.append(saved_tensors[offset])
+            offset += 1
         elif isinstance(tensor, _SavedTensorRef):
             # The saved tensor was unpacked (running autograd's version check), but
             # may have lost its subclass under hooks; use the original object.
             tensor_objects.append(tensor.weight)
-            saved_tensors = saved_tensors[1:]
+            offset += 1
         elif isinstance(tensor, _SavedQuantizedTensor):
             count = len(tensor.inner_names)
-            inner = dict(zip(tensor.inner_names, saved_tensors[:count]))
+            inner = dict(zip(tensor.inner_names, saved_tensors[offset : offset + count]))
             tensor_objects.append(
                 QuantizedTensorStorage.__tensor_unflatten__(inner, tensor.metadata, None, None)
             )
-            saved_tensors = saved_tensors[count:]
+            offset += count
         else:
+            # Storage restorers receive the full remaining list/tuple and own the
+            # returned remainder. Preserve that protocol for custom implementations.
+            if offset:
+                saved_tensors = saved_tensors[offset:]
             saved_tensors = tensor.restore_from_saved(saved_tensors)
+            offset = 0
             tensor_objects.append(tensor)
 
     if return_saved_tensors:
-        return tensor_objects, saved_tensors
+        return tensor_objects, saved_tensors[offset:] if offset else saved_tensors
     return tensor_objects
 
 
@@ -535,7 +543,7 @@ class Quantizer(abc.ABC):
             )
 
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         # Handle the device passed as string
         device = torch.device(device)
         result = tex.create_empty_quantized_tensor(
@@ -591,7 +599,7 @@ class Quantizer(abc.ABC):
         Returns ``{attr_name: torch.Tensor}`` suitable as the ``inner_tensors``
         argument of the storage's ``__tensor_unflatten__``.
         """
-        device = torch.device(device if device is not None else "cuda")
+        device = torch.device(device if device is not None else te_device_type())
         return {
             attr: torch.empty(buf_shape, dtype=buf_dtype, device=device)
             for attr, (buf_shape, buf_dtype) in self.inner_tensor_specs(tuple(shape)).items()
