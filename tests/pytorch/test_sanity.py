@@ -8,8 +8,10 @@ import torch
 import pytest
 import os
 import copy
+import ctypes
 
 import transformer_engine
+import transformer_engine.common as te_common
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
@@ -1651,3 +1653,54 @@ def test_inference_mode(
         with autocast(enabled=with_quantization, recipe=quantization_recipe):
             y = module(x, **kwargs)
     check_weights()
+
+
+@pytest.mark.parametrize(
+    "available, expected",
+    [
+        (("linker",), "linker"),
+        (("linker", "python"), "python"),
+        (("linker", "python", "ld_library_path"), "ld_library_path"),
+        (("linker", "python", "ld_library_path", "lib_path"), "lib_path"),
+    ],
+)
+def test_cuda_library_search_order(monkeypatch, tmp_path, available, expected):
+    """Selected locations outrank the Python environment, which outranks a host-wide library."""
+    lib_name = "tesearchordertest"
+    locations = {
+        "python": tmp_path / "python" / "nvidia" / lib_name / "lib",
+        "ld_library_path": tmp_path / "ld_library_path",
+        "lib_path": tmp_path / "lib_path" / "lib",
+    }
+    for name, location in locations.items():
+        if name in available:
+            location.mkdir(parents=True)
+            (location / f"lib{lib_name}.so.1").touch()
+
+    loaded = []
+
+    def fake_cdll(name, mode=0):
+        if name == f"lib{lib_name}.so" and "linker" not in available:
+            raise OSError(f"{name}: cannot open shared object file")
+        loaded.append(name)
+        return object()
+
+    monkeypatch.setattr(ctypes, "CDLL", fake_cdll)
+    monkeypatch.setattr(te_common.sysconfig, "get_path", lambda _: str(tmp_path / "python"))
+    for variable in ("CUDA_HOME", "CUDA_PATH", f"{lib_name.upper()}_HOME"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(locations["ld_library_path"]))
+    monkeypatch.setenv(f"{lib_name.upper()}_PATH", str(tmp_path / "lib_path"))
+
+    te_common._load_cuda_library_from_system.cache_clear()
+    te_common._load_cuda_library_from_python.cache_clear()
+    te_common._load_cuda_library_from_linker_default.cache_clear()
+    te_common._load_cuda_library.cache_clear()
+
+    found_in_system, _ = te_common._load_cuda_library(lib_name)
+
+    assert found_in_system == (expected != "python")
+    if expected == "linker":
+        assert loaded == [f"lib{lib_name}.so"]
+    else:
+        assert loaded == [str(locations[expected] / f"lib{lib_name}.so.1")]

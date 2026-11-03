@@ -391,10 +391,12 @@ def _load_cuda_library_from_python(lib_name: str, strict: bool = False):
 @functools.lru_cache(maxsize=None)
 def _load_cuda_library_from_system(lib_name: str):
     """
-    Attempts to load shared object file installed via system/cuda-toolkit.
+    Attempts to load shared object file from a location selected by the environment or toolkit.
 
     `lib_name`: Name of library to load without extension or `lib` prefix.
     """
+
+    ext = _get_sys_extension()
 
     # Where to look for the shared lib in decreasing order of preference.
     paths = (
@@ -404,20 +406,30 @@ def _load_cuda_library_from_system(lib_name: str):
         os.environ.get("CUDA_PATH"),
         "/usr/local/cuda",
     )
+    patterns = [f"{path}/**/lib{lib_name}{ext}*" for path in paths if path is not None]
+    ld_library_path = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+    patterns += [f"{path}/lib{lib_name}{ext}*" for path in ld_library_path if path]
 
-    for path in paths:
-        if path is None:
-            continue
-        libs = glob.glob(f"{path}/**/lib{lib_name}{_get_sys_extension()}*", recursive=True)
+    for pattern in patterns:
+        libs = glob.glob(pattern, recursive=True)
         libs = [lib for lib in libs if "stub" not in lib]
         libs.sort(reverse=True, key=os.path.basename)
         if libs:
             return True, ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
 
-    # Search in LD_LIBRARY_PATH.
+    return False, None
+
+
+@functools.lru_cache(maxsize=None)
+def _load_cuda_library_from_linker_default(lib_name: str):
+    """
+    Attempts to load shared object file through the dynamic linker's default search.
+
+    `lib_name`: Name of library to load without extension or `lib` prefix.
+    """
+
     try:
-        _lib_handle = ctypes.CDLL(f"lib{lib_name}{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
-        return True, _lib_handle
+        return True, ctypes.CDLL(f"lib{lib_name}{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
     except OSError:
         return False, None
 
@@ -426,11 +438,11 @@ def _load_cuda_library_from_system(lib_name: str):
 def _load_cuda_library(lib_name: str):
     """
     Load given shared library.
-    Prioritize loading from system/toolkit
-    before checking python packages.
+    Prioritize locations selected by the environment or toolkit, then python packages,
+    then the dynamic linker's default search.
     """
 
-    # Attempt to locate library in system.
+    # Attempt to locate library in a selected location.
     found, handle = _load_cuda_library_from_system(lib_name)
     if found:
         return True, handle
@@ -439,6 +451,12 @@ def _load_cuda_library(lib_name: str):
     found, handle = _load_cuda_library_from_python(lib_name)
     if found:
         return False, handle
+
+    # A host-wide library comes last: pip-installed frameworks depend on the version in their own
+    # Python environment, and loading another copy globally would replace it in this process.
+    found, handle = _load_cuda_library_from_linker_default(lib_name)
+    if found:
+        return True, handle
 
     raise RuntimeError(f"{lib_name} shared object not found.")
 

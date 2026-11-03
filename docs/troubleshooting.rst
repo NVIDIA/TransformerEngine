@@ -69,6 +69,10 @@ UV and virtual environments
        export CUDNN_HOME=$CUDNN_PATH
        export LD_LIBRARY_PATH=$CUDNN_PATH/lib:$LD_LIBRARY_PATH
 
+   At runtime, Transformer Engine searches for each CUDA library in ``<LIBRARY>_HOME``,
+   ``<LIBRARY>_PATH``, ``CUDA_HOME``, ``CUDA_PATH``, ``/usr/local/cuda``, and ``LD_LIBRARY_PATH``.
+   It then searches the Python environment, and finally the dynamic linker's default locations.
+
 3. **Building wheels**
 
    Use ``uv build --wheel --no-build-isolation -v`` when building the wheel and
