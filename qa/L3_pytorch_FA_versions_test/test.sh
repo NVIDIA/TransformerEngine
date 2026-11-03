@@ -20,7 +20,7 @@ FAILED_CASES=""
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"
 
-pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+pip3 install pytest==8.4.2 || error_exit "Failed to install pytest"
 
 # Limit parallel build jobs to avoid overwhelming system resources
 export MAX_JOBS=32

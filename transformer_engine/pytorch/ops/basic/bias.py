@@ -139,7 +139,7 @@ class Bias(BasicOperation):
         *,
         prev_op_grad_output_quantizer,
         basic_op_kwargs,
-        **unused,  # pylint: disable=unused-argument
+        **_unused,
     ) -> BiasFwdArgs:
         if basic_op_kwargs[0]:
             raise ValueError("Bias forward does not expect keyword arguments")

@@ -1081,7 +1081,7 @@ class NVFP4QuantizerRef(Quantizer):
     def quantize(
         self,
         tensor: torch.Tensor,
-        **kwargs,  # pylint: disable=unused-argument
+        **_kwargs,
     ) -> NVFP4TensorRef:
         # sanity checks
         if tensor.dtype not in reference_utils.HIGH_PRECISION_FLOAT_DTYPES:
