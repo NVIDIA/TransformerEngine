@@ -17,7 +17,7 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
-#include <transformer_engine/cast.h>
+#include <transformer_engine/multi_tensor.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -80,12 +80,12 @@ void performGroupedFusedAmaxTest(const GroupedAmaxConfig& cfg) {
   auto outs = make_row_scaled_outputs("gout_", Ms, K);
   std::vector<NVTETensor> out_handles;
   for (auto& t : outs) out_handles.push_back(t->data());
-  nvte_group_nvfp4_compute_amax(packed.data(), out_handles.data(), splits.data(), num_tensors, 0);
+  nvte_group_amax(packed.data(), out_handles.data(), splits.data(), num_tensors, 0);
 
   auto outs2 = make_row_scaled_outputs("gout2_", Ms, K);
   std::vector<NVTETensor> out_handles2;
   for (auto& t : outs2) out_handles2.push_back(t->data());
-  nvte_group_nvfp4_compute_amax(packed.data(), out_handles2.data(), splits.data(), num_tensors, 0);
+  nvte_group_amax(packed.data(), out_handles2.data(), splits.data(), num_tensors, 0);
 
   cudaDeviceSynchronize();
   ASSERT_EQ(cudaGetLastError(), cudaSuccess) << cudaGetErrorString(cudaGetLastError());
@@ -187,7 +187,7 @@ TEST(NVFP4GroupedRowScaledAmaxTestSuite, HeterogeneousColumnwise) {
   std::vector<NVTETensor> handles;
   for (auto& t : outs) handles.push_back(t->data());
   const std::vector<size_t> splits(Ms);
-  nvte_group_nvfp4_compute_amax(packed.data(), handles.data(), splits.data(), num_tensors, 0);
+  nvte_group_amax(packed.data(), handles.data(), splits.data(), num_tensors, 0);
   cudaDeviceSynchronize();
   ASSERT_EQ(cudaGetLastError(), cudaSuccess) << cudaGetErrorString(cudaGetLastError());
 
@@ -265,7 +265,7 @@ void runLoopVsGroupedBench(size_t num_tensors, size_t M, size_t K, int iters) {
 
   double grouped = median_ms(
       [&]() {
-        nvte_group_nvfp4_compute_amax(packed.data(), h_g.data(), splits.data(), num_tensors, 0);
+        nvte_group_amax(packed.data(), h_g.data(), splits.data(), num_tensors, 0);
       },
       iters);
 
@@ -274,7 +274,7 @@ void runLoopVsGroupedBench(size_t num_tensors, size_t M, size_t K, int iters) {
         for (size_t i = 0; i < num_tensors; ++i) {
           NVTETensor one = outs_l[i]->data();
           size_t s1 = M;
-          nvte_group_nvfp4_compute_amax(ins[i]->data(), &one, &s1, 1, 0);
+          nvte_group_amax(ins[i]->data(), &one, &s1, 1, 0);
         }
       },
       iters);

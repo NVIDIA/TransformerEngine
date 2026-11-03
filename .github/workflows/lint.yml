@@ -33,11 +33,15 @@ jobs:
     steps:
       - name: 'Checkout'
         uses: actions/checkout@v3
+      - name: 'Set up Python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: 'Lint'
         run: |
           sudo apt-get update
           sudo apt-get install pip -y
-          pip install torch numpy
+          pip install torch numpy wheel
           export PYTHON_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_pytorch_lint/test.sh

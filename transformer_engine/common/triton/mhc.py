@@ -339,6 +339,28 @@ def projection_config_bwd_dphi():
     return configs
 
 
+def _max_shared_mem():
+    """Opt-in shared memory per block of the current device."""
+    try:
+        driver = triton.runtime.driver.active
+        return driver.utils.get_device_properties(driver.get_current_device())["max_shared_mem"]
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Triton < 3.8 imports torch to create the CUDA driver, but CudaUtils doesn't. Without
+        # torch the current device is unknown, so use device 0 like triton_call_lowering.
+        pass
+    try:
+        from triton.backends.nvidia.driver import (
+            CudaUtils,
+        )  # pylint: disable=import-outside-toplevel
+
+        return CudaUtils().get_device_properties(0)["max_shared_mem"]
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        raise RuntimeError(
+            "Failed to query the device's max_shared_mem through Triton. Triton >= 3.2 is"
+            f" required for mHC, got {triton.__version__}."
+        ) from e
+
+
 def projection_prune_bwd_dphi(configs, named_args, **kwargs):
     USE_SPLIT_M = named_args.get("USE_SPLIT_M", kwargs.get("USE_SPLIT_M", None))
     M = named_args.get("M", kwargs.get("M", None))
@@ -369,9 +391,7 @@ def projection_prune_bwd_dphi(configs, named_args, **kwargs):
     # Drop configs that exceed the grid Y limit or the device's shared memory
     x = named_args.get("x_ptr", kwargs.get("x_ptr", None))
     x_element_size = x.element_size() if x is not None else 4
-    max_shared_mem = triton.runtime.driver.active.utils.get_device_properties(
-        triton.runtime.driver.active.get_current_device()
-    )["max_shared_mem"]
+    max_shared_mem = _max_shared_mem()
 
     def smem_bytes(config):
         step_m = config.kwargs["STEP_SIZE_M"]
@@ -934,6 +954,10 @@ def _mhc_sinkhorn_bwd_fused_recompute(
             hist_g_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
         )
         tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
+
+    # The history is read back below by threads other than those that stored it, so the stores
+    # must be visible to the whole block first.
+    tl.debug_barrier()
 
     # Backward pass
     grad_log_P = grad_out * P  # (BATCH_SIZE, n, n)
