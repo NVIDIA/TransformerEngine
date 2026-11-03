@@ -19,6 +19,10 @@
 #include "../fp8/gated_fp8.cuh"
 #include "../mxfp8/gated_mxfp8.cuh"
 
+#ifdef NVTE_WITH_CUTEDSL
+#include "../mxfp8/gated_mxfp8_cutedsl.cuh"
+#endif
+
 namespace transformer_engine {
 namespace dispatch {
 
@@ -86,8 +90,16 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
       NVTE_CHECK(is_supported_by_CC_100(),
                  "Gated FWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
       Tensor dummy_grad_tensor;
-      mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
-                                                                       output, p, stream);
+      bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+      quantized_with_cutedsl =
+          cutedsl_backend::mxfp8_quantize_gated_cutedsl</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(
+              input, dummy_grad_tensor, output, p, stream);
+#endif
+      if (!quantized_with_cutedsl) {
+        mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
+                                                                         output, p, stream);
+      }
       break;
     }
     default:
@@ -176,8 +188,16 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
       NVTE_CHECK(is_supported_by_CC_100(),
                  "Gated BWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
 
-      mxfp8::quantize_gated</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
-                                                                     stream);
+      bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+      quantized_with_cutedsl =
+          cutedsl_backend::mxfp8_quantize_gated_cutedsl</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(
+              gated_input, grad, output, p, stream);
+#endif
+      if (!quantized_with_cutedsl) {
+        mxfp8::quantize_gated</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
+                                                                       stream);
+      }
       break;
     }
     default:

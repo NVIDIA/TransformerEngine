@@ -85,6 +85,60 @@ def dact_dgelu(x: Float32) -> Float32:
     ) + Float32(0.5) * (Float32(1.0) + t)
 
 
+# ---- Gated activations (gated_mxfp8.cuh) ----
+# The parameterized ones take their ClampedSwiGLUParam / SiTUGLUParam fields as
+# trailing runtime arguments.
+
+LOG2E = 1.4426950408889634  # log2(e), what __expf scales its argument by
+
+
+def act_sigmoid(x: Float32) -> Float32:
+    return sigmoid(x)
+
+
+def dact_dsigmoid(x: Float32) -> Float32:
+    return dsigmoid(x)
+
+
+def act_clamped_silu(x: Float32, limit: Float32, alpha: Float32) -> Float32:
+    c = cute.arch.fmin(limit, x)
+    return c * sigmoid(alpha * c)
+
+
+def act_situ_gate(x: Float32, beta1: Float32) -> Float32:
+    return beta1 * tanh(x / beta1) * sigmoid(x)
+
+
+def dact_dsitu_gate(x: Float32, beta1: Float32) -> Float32:
+    t = tanh(x / beta1)
+    s = sigmoid(x)
+    return (Float32(1.0) - t * t) * s + beta1 * t * s * (Float32(1.0) - s)
+
+
+def situ_up(x: Float32, beta2: Float32) -> Float32:
+    return beta2 * tanh(x / beta2)
+
+
+def dsitu_up(x: Float32, beta2: Float32) -> Float32:
+    t = tanh(x / beta2)
+    return Float32(1.0) - t * t
+
+
+@cute.jit
+def sigmoidf(x: Float32) -> Float32:
+    """math.h's sigmoidf: __frcp_rn(1.0f + __expf(-x))."""
+    e = cute.arch.inline_ptx(
+        "ex2.approx.f32 {$w0}, {$r0};",
+        write_only_types=[Float32],
+        read_only_args=[-x * Float32(LOG2E)],
+    )
+    return cute.arch.inline_ptx(
+        "rcp.rn.f32 {$w0}, {$r0};",
+        write_only_types=[Float32],
+        read_only_args=[Float32(1.0) + e],
+    )
+
+
 # BF16 activation tables (see common/util/activation_table.cuh, which builds them; the layouts
 # below must match it). With a table, BF16 activations follow the table specification: GeLU and
 # SiLU of -inf give -0, and the derivatives below the table window are the linear term

@@ -12,6 +12,7 @@ import tvm_ffi
 
 from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8_common import (
     get_mxfp8_quantization_function,
+    get_mxfp8_gated_quantization_function,
 )
 
 
@@ -19,6 +20,8 @@ def register_cutedsl_backends():
     """Register all available CuTeDSL backends for on-demand compilation via TVM-FFI.
     The C++ dispatcher retrieves them by the names defined here.
     """
-    tvm_ffi.register_global_func(
-        "get_mxfp8_quantization_function", get_mxfp8_quantization_function, override=True
-    )
+    for entrypoint in (
+        get_mxfp8_quantization_function,
+        get_mxfp8_gated_quantization_function,
+    ):
+        tvm_ffi.register_global_func(entrypoint.__name__, entrypoint, override=True)
