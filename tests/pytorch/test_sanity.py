@@ -1666,7 +1666,8 @@ def _run_cuda_library_search(monkeypatch, tmp_path, ld_library_path, linker_find
     loaded = []
 
     def fake_cdll(name, mode=0):
-        if name == f"lib{_SEARCH_LIB}.so" and not linker_finds_library:
+        missing = not os.path.exists(name) if "/" in name else not linker_finds_library
+        if missing:
             raise OSError(f"{name}: cannot open shared object file")
         loaded.append(name)
         return object()
@@ -1741,14 +1742,30 @@ def test_cuda_library_ld_library_path_name_choice(monkeypatch, tmp_path, suffixe
     assert loaded == [str(directory / f"lib{_SEARCH_LIB}.so{expected_suffix}")]
 
 
-def test_cuda_library_ld_library_path_token_uses_linker(monkeypatch, tmp_path):
-    """Only the linker can expand $ORIGIN, so that entry must outrank the Python environment."""
+@pytest.mark.parametrize("entry", ["$ORIGIN/lib", "${ORIGIN}/lib"])
+def test_cuda_library_ld_library_path_expands_origin(monkeypatch, tmp_path, entry):
+    """A $ORIGIN entry that has the library outranks the Python environment."""
     _create_libraries(tmp_path / "python" / "nvidia" / _SEARCH_LIB / "lib", ".1")
+    _create_libraries(tmp_path / "bin" / "lib", "")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
 
-    found_in_system, loaded = _run_cuda_library_search(monkeypatch, tmp_path, "$ORIGIN/lib")
+    found_in_system, loaded = _run_cuda_library_search(monkeypatch, tmp_path, entry)
 
     assert found_in_system
-    assert loaded == [f"lib{_SEARCH_LIB}.so"]
+    assert loaded == [str(tmp_path / "bin" / "lib" / f"lib{_SEARCH_LIB}.so")]
+
+
+def test_cuda_library_token_entry_without_library_keeps_python_priority(monkeypatch, tmp_path):
+    """A token entry that lacks the library must not let a host-wide library win."""
+    location = tmp_path / "python" / "nvidia" / _SEARCH_LIB / "lib"
+    _create_libraries(location, ".1")
+
+    found_in_system, loaded = _run_cuda_library_search(
+        monkeypatch, tmp_path, "$ORIGIN/missing:$LIB/missing"
+    )
+
+    assert not found_in_system
+    assert loaded == [str(location / f"lib{_SEARCH_LIB}.so.1")]
 
 
 def test_import_does_not_require_curand_library():

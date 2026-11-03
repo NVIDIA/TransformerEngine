@@ -416,17 +416,20 @@ def _load_cuda_library_from_system(lib_name: str):
         if lib:
             return True, ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
 
+    origin = os.path.dirname(os.path.realpath(sys.executable))
     for path in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep):
         if not path:
             continue
-        # Only the dynamic linker can expand tokens such as $ORIGIN.
-        if "$" in path:
-            found, handle = _load_cuda_library_from_linker_default(lib_name)
-            if found:
-                return True, handle
-            continue
-        # Follow the unversioned name as the linker does. Python packages only have versioned names.
+        # In this variable, $ORIGIN is the executable's directory. dlopen would use the caller's.
+        path = path.replace("${ORIGIN}", origin).replace("$ORIGIN", origin)
         exact = os.path.join(path, file_name)
+        # dlopen expands the other tokens, such as $LIB, but a file search cannot.
+        if "$" in path:
+            try:
+                return True, ctypes.CDLL(exact, mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                continue
+        # Follow the unversioned name as the linker does. Python packages only have versioned names.
         lib = exact if os.path.exists(exact) else _newest_cuda_library(f"{exact}*")
         if lib:
             return True, ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
