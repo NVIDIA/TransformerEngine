@@ -25,6 +25,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.attention.native_cp_transport import get_native_cp_transport
 from transformer_engine.pytorch.constants import (
     dist_group_type,
     TE_DType,
@@ -33,6 +34,7 @@ from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     get_distributed_rank,
     gather_along_first_dim,
+    is_logical_process_group,
     reduce_scatter_along_first_dim,
 )
 
@@ -60,10 +62,24 @@ _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
 
 
 def flash_attn_p2p_communicate(
-    rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
+    rank,
+    send_tensor,
+    send_dst,
+    recv_tensor,
+    recv_src,
+    cp_group,
+    batch_p2p_comm,
+    native_channel=0,
 ):
     """Point-to-point communications of KV and dKV in Attention with context parallelism"""
     send_recv_ops = []
+    native_transport = get_native_cp_transport(cp_group)
+    if native_transport is not None:
+        return [
+            native_transport.send_recv(
+                send_tensor, send_dst, recv_tensor, recv_src, channel=native_channel
+            )
+        ]
 
     if batch_p2p_comm:
         if rank % 2 == 0:
@@ -1557,11 +1573,22 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # synchronize fwd results correction across steps
         fwd_results_correction_done = torch.cuda.Event()
 
-        p2p_comm_buffers = [None for _ in range(cp_size)]
         k_shape = k.shape
         k_numel = k.numel()
         v_shape = v.shape
-        p2p_comm_buffers[0] = torch.cat((k.view(-1), v.view(-1)), dim=-1)
+        p2p_shape = (k_numel + v.numel(),)
+        native_transport = get_native_cp_transport(cp_group)
+        if native_transport is not None and fp8:
+            raise RuntimeError("Native CP transport does not support FP8 attention yet")
+        if native_transport is None:
+            p2p_comm_buffers = [None for _ in range(cp_size)]
+            p2p_comm_buffers[0] = torch.cat((k.view(-1), v.view(-1)), dim=-1)
+        else:
+            native_pair = native_transport.attention_buffer_pair(p2p_shape, k.dtype)
+            arena_buffers = (native_pair[0][0], native_pair[0][1], native_pair[1][0])
+            p2p_comm_buffers = [arena_buffers[i % 3] for i in range(cp_size)]
+            p2p_comm_buffers[0][:k_numel].copy_(k.view(-1))
+            p2p_comm_buffers[0][k_numel:].copy_(v.view(-1))
         send_recv_reqs = [[], []]
 
         # P2P communication and compute: each rank has cp_size steps
@@ -1576,7 +1603,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         req.wait()
 
                     if i < (cp_size - 1):
-                        p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
+                        if native_transport is None:
+                            p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
                         send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
                             rank,
                             p2p_comm_buffers[i],
@@ -1585,6 +1613,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             recv_src,
                             cp_group,
                             batch_p2p_comm,
+                            native_channel=0,
                         )
 
                     kv_inputs[i % 2] = p2p_comm_buffers[i]
@@ -1953,6 +1982,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         kv_fp8 = None
         kv = p2p_comm_buffers[-1]
+        if native_transport is not None:
+            kv = kv.clone()
         if fp8:
             q_fp8, kv_fp8 = [
                 Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
@@ -2003,6 +2034,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.cp_size_a2a = cp_size_a2a
         ctx.rank_a2a = rank_a2a
         ctx.cp_group = cp_group
+        ctx.native_cp_transport = native_transport
         ctx.cp_global_ranks = cp_global_ranks
         ctx.cp_stream = cp_stream
         ctx.dropout_p = dropout_p
@@ -2238,10 +2270,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if isinstance(dout, QuantizedTensorStorage):
                 dout = dout.dequantize(dtype=bwd_nominal_dtype)
             dq_buffer = torch.empty_like(q)
-            p2p_comm_buffers = [
-                torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
-                torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
-            ]
+            if ctx.native_cp_transport is None:
+                p2p_comm_buffers = [
+                    torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
+                    torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
+                ]
+            else:
+                p2p_comm_buffers = list(
+                    ctx.native_cp_transport.attention_buffer_pair(kv.shape, kv.dtype)
+                )
             p2p_comm_buffers[0][0].copy_(kv)
             if ctx.use_fused_attention:
                 bwd_output_te_dtype = TE_DType[bwd_nominal_dtype]
@@ -2341,7 +2378,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     send_tensor = send_tensor[1]
                     recv_tensor = recv_tensor[1]
                 send_recv_reqs = flash_attn_p2p_communicate(
-                    rank, send_tensor, send_dst, recv_tensor, recv_src, ctx.cp_group, batch_p2p_comm
+                    rank,
+                    send_tensor,
+                    send_dst,
+                    recv_tensor,
+                    recv_src,
+                    ctx.cp_group,
+                    batch_p2p_comm,
+                    native_channel=1,
                 )
 
             kv = p2p_comm_buffers[i % 2][0]
@@ -2729,6 +2773,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # [b, h, sq, 2*cp, sk//(2*cp)] -> [b, h, sq, sk]
             attn_dbias = attn_dbias.view(*attn_dbias.shape[:-2], -1)
 
+        if ctx.native_cp_transport is not None and not ctx.fp8:
+            dkv_out = torch.empty((dk.numel() + dv.numel(),), dtype=dk.dtype, device=dk.device)
+            dkv_out[: dk.numel()].copy_(dk.reshape(-1))
+            dkv_out[dk.numel() :].copy_(dv.reshape(-1))
+            dk = dkv_out[: dk.numel()].view_as(dk)
+            dv = dkv_out[dk.numel() :].view_as(dv)
+
         nvtx_range_pop(f"{nvtx_label}")
 
         return (
@@ -3081,7 +3132,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         rank = get_distributed_rank(ctx.cp_group)
 
         (*saved_tensors,) = ctx.saved_tensors
-        (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = saved_tensors[:5]
+        q, k, v, cu_seqlens_q, cu_seqlens_q_padded = saved_tensors[:5]
         cu_seqlens_kv_per_step = saved_tensors[5:7]
         out_per_step = saved_tensors[7:9]
         softmax_lse_per_step = saved_tensors[9:11]
@@ -4041,9 +4092,19 @@ def attn_forward_func_with_cp(
             cp_group = cp_group[0]
             cp_comm_type = "a2a"
     else:
-        assert isinstance(
-            cp_group, dist_group_type
-        ), f"cp_group must be {dist_group_type} type for {cp_comm_type=}!"
+        assert isinstance(cp_group, dist_group_type) or is_logical_process_group(
+            cp_group
+        ), f"cp_group must be a ProcessGroup or logical CP descriptor for {cp_comm_type=}!"
+
+    if is_logical_process_group(cp_group):
+        if cp_comm_type != "p2p":
+            raise RuntimeError("Logical CP groups only support cp_comm_type='p2p'.")
+        if fp8:
+            raise RuntimeError("Native CP transport does not support FP8 attention yet.")
+        if softmax_type != "vanilla" or return_max_logit:
+            raise RuntimeError(
+                "Native CP transport currently supports vanilla softmax without max-logit output."
+            )
 
     assert qkv_format in [
         "bshd",
@@ -4286,9 +4347,9 @@ def get_batch_on_this_cp_rank(
         raise ValueError(f"Unsupported qvk_format: {qvk_format}!")
     if qvk_format == "thd":
         # Get context parallel size and rank
-        cp_size = torch.distributed.get_world_size(group=cp_group)
+        cp_size = get_distributed_world_size(cp_group)
         if cp_size > 1:
-            cp_rank = torch.distributed.get_rank(group=cp_group)
+            cp_rank = get_distributed_rank(cp_group)
 
             # Calculate the chunk sizes for each sequence
             total_slices_of_any_sequence = 2 * cp_size
