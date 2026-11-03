@@ -519,16 +519,6 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
   GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
   const GroupedTensor *activations_tensor = convertNVTEGroupedTensor(activation);
   GroupedTensor *dbias_tensor = convertNVTEGroupedTensor(dbias);
-  Tensor *workspace_tensor = convertNVTETensor(workspace);
-
-  // Only grouped MXFP8 needs TMA descriptor storage
-  if (workspace_tensor != nullptr && scaling_mode != NVTE_MXFP8_1D_SCALING) {
-    common::dispatch_grouped_tma_workspace(workspace, 0, [&](Tensor *scratch) {
-      if (scratch->data.dptr == nullptr) return;
-      group_quantize_fwd_helper<IS_ACT, ParamOP, OP>(input, output, quant_config, stream);
-    });
-    return;
-  }
 
   // Quantization config
   QuantizationConfig quant_config_cpp;
@@ -543,62 +533,65 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     noop_tensor = convertNVTETensorCheck(quant_config_cpp.noop_tensor);
   }
 
-  // Dispatch to quantization kernel depending on data format
-  switch (scaling_mode) {
-    case NVTE_DELAYED_TENSOR_SCALING: {
-      fp8::group_quantize<IS_ACT, ParamOP, OP>(input_tensor, noop_tensor, output_tensor,
-                                               &quant_config_cpp, stream);
-      break;
-    }
-    case NVTE_MXFP8_1D_SCALING: {
-      common::dispatch_grouped_tma_workspace(
-          workspace, common::grouped_tma_workspace_bytes(*output_tensor), [&](Tensor *scratch) {
-            mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
-                input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor, scratch,
-                &quant_config_cpp, stream);
-          });
-      break;
-    }
-    case NVTE_BLOCK_SCALING_1D: {
-      NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_1D.");
-      fp8_blockwise::group_quantize_blockwise_1d(input_tensor, output_tensor, noop_tensor,
-                                                 quant_config_cpp.amax_epsilon,
-                                                 quant_config_cpp.force_pow_2_scales, stream);
-      break;
-    }
-    case NVTE_BLOCK_SCALING_2D: {
-      NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_2D.");
-      fp8_blockwise::group_quantize_blockwise_2d(input_tensor, output_tensor, noop_tensor,
-                                                 quant_config_cpp.amax_epsilon,
-                                                 quant_config_cpp.force_pow_2_scales, stream);
-      break;
-    }
-    case NVTE_NVFP4_1D_SCALING: {
-      NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_NVFP4_1D_SCALING.");
-      NVTE_CHECK(output_tensor->row_scaled_nvfp4,
-                 "Grouped NVFP4 quantization is only implemented for row-scaled NVFP4.");
-      NVTE_CHECK(!quant_config_cpp.stochastic_rounding,
-                 "Grouped row-scaled NVFP4 quantization does not support stochastic rounding.");
-      NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
-                 "Grouped row-scaled NVFP4 quantization does not support 2D quantization.");
-      NVTE_CHECK(quant_config_cpp.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
-                 "Grouped row-scaled NVFP4 quantization does not support 4over6.");
-      if (input_tensor->num_tensors == 0) {
+  // Query and execution use the same backend checks. Query-only backends
+  // return before launching GPU work, including formats without TMA storage.
+  const size_t bytes = scaling_mode == NVTE_MXFP8_1D_SCALING
+                           ? common::grouped_tma_workspace_bytes(*output_tensor)
+                           : 0;
+  common::dispatch_grouped_tma_workspace(workspace, bytes, [&](Tensor *scratch) {
+    const bool query_only = scratch != nullptr && scratch->data.dptr == nullptr;
+    switch (scaling_mode) {
+      case NVTE_DELAYED_TENSOR_SCALING: {
+        fp8::group_quantize<IS_ACT, ParamOP, OP>(input_tensor, noop_tensor, output_tensor,
+                                                 &quant_config_cpp, stream, query_only);
         break;
       }
-      nvfp4::group_row_amax_graph_safe(input_tensor, noop_tensor, output_tensor, stream);
-      const DType scale_dtype = output_tensor->scale_inv.has_data()
-                                    ? output_tensor->scale_inv.dtype
-                                    : output_tensor->columnwise_scale_inv.dtype;
-      TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
-          scale_dtype, ScaleType,
-          nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(
-              input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream););
-      break;
+      case NVTE_MXFP8_1D_SCALING: {
+        mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+            input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor, scratch,
+            &quant_config_cpp, stream);
+        break;
+      }
+      case NVTE_BLOCK_SCALING_1D: {
+        NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_1D.");
+        fp8_blockwise::group_quantize_blockwise_1d(
+            input_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
+            quant_config_cpp.force_pow_2_scales, stream, nullptr, nullptr, query_only);
+        break;
+      }
+      case NVTE_BLOCK_SCALING_2D: {
+        NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_2D.");
+        fp8_blockwise::group_quantize_blockwise_2d(
+            input_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
+            quant_config_cpp.force_pow_2_scales, stream, nullptr, nullptr, query_only);
+        break;
+      }
+      case NVTE_NVFP4_1D_SCALING: {
+        NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_NVFP4_1D_SCALING.");
+        NVTE_CHECK(output_tensor->row_scaled_nvfp4,
+                   "Grouped NVFP4 quantization is only implemented for row-scaled NVFP4.");
+        NVTE_CHECK(!quant_config_cpp.stochastic_rounding,
+                   "Grouped row-scaled NVFP4 quantization does not support stochastic rounding.");
+        NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                   "Grouped row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(quant_config_cpp.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
+                   "Grouped row-scaled NVFP4 quantization does not support 4over6.");
+        if (input_tensor->num_tensors == 0) break;
+        nvfp4::group_row_amax_graph_safe(input_tensor, noop_tensor, output_tensor, stream,
+                                         query_only);
+        const DType scale_dtype = output_tensor->scale_inv.has_data()
+                                      ? output_tensor->scale_inv.dtype
+                                      : output_tensor->columnwise_scale_inv.dtype;
+        TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+            scale_dtype, ScaleType,
+            nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(
+                input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream, query_only););
+        break;
+      }
+      default:
+        NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
     }
-    default:
-      NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
-  }
+  });
 }
 
 // Grouped scaled SwiGLU recompute: input [N, 2H] ([act|gate]) + prob [N]

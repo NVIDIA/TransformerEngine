@@ -420,7 +420,8 @@ inline void group_row_amax(const Tensor &input, const Tensor *noop,
 // output->tensor_offsets, amax goes to the contiguous rowwise [sum_M] / columnwise
 // [num_tensors * K] buffers. BF16-only, VARYING_FIRST_DIM.
 inline void group_row_amax_graph_safe(const GroupedTensor *input, const Tensor *noop,
-                                      GroupedTensor *output, cudaStream_t stream) {
+                                      GroupedTensor *output, cudaStream_t stream,
+                                      bool query_only = false) {
 #if FP4_TYPE_SUPPORTED
   using namespace group_row_scaled_amax_kernel;
 
@@ -454,6 +455,12 @@ inline void group_row_amax_graph_safe(const GroupedTensor *input, const Tensor *
                               ? reinterpret_cast<const float *>(noop->data.dptr)
                               : nullptr;
 
+  alignas(64) CUtensorMap tensor_map_input{};
+  create_2D_tensor_map(tensor_map_input, input->data, capacity_rows, cols, FA_TILE_DIM_Y,
+                       FA_TILE_DIM_X, cols, 0, sizeof(__nv_bfloat16) * 8);
+
+  if (query_only) return;
+
   // Zero the capacity-sized amax buffers before atomicMax.
   {
     const size_t row_count = do_row ? capacity_rows : 0;
@@ -464,10 +471,6 @@ inline void group_row_amax_graph_safe(const GroupedTensor *input, const Tensor *
         row_amax_all, col_amax_all, row_count, col_count, noop_ptr);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
-
-  alignas(64) CUtensorMap tensor_map_input{};
-  create_2D_tensor_map(tensor_map_input, input->data, capacity_rows, cols, FA_TILE_DIM_Y,
-                       FA_TILE_DIM_X, cols, 0, sizeof(__nv_bfloat16) * 8);
 
   constexpr size_t buff_elems_total = FA_BUFFS_NUM * FA_BUFF_IN_SIZE;
   constexpr size_t buff_size_aligned_in =
@@ -1656,7 +1659,7 @@ template <typename ScaleType>
 inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const Tensor *noop,
                                              GroupedTensor *output,
                                              const QuantizationConfig *quant_config,
-                                             cudaStream_t stream) {
+                                             cudaStream_t stream, bool query_only = false) {
 #if FP4_TYPE_SUPPORTED
   using namespace group_row_scaled_cast_kernel;
   using namespace quantize_transpose_tuned_kernel;
@@ -1724,6 +1727,7 @@ inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const T
   alignas(64) CUtensorMap tensor_map_input{};
   create_2D_tensor_map(tensor_map_input, input->data, capacity_rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
                        cols, 0, sizeof(IType) * 8);
+  if (query_only) return;
 
   constexpr int buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr int buff_elems_total_in = BUFFS_NUM_IN * buff_elems;
