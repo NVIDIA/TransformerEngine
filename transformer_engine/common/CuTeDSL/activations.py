@@ -8,6 +8,7 @@ A CuTeDSL port of the CUDA C++ implementation in common/util/math.h."""
 # Each function is a 1:1 port of its math.h counterpart (see module docstring).
 # pylint: disable=missing-function-docstring
 import os
+from typing import Optional
 
 from cutlass import cute
 from cutlass import Float32
@@ -21,8 +22,9 @@ def tanh(x: Float32) -> Float32:
     return cute.math.tanh(x, fastmath=USE_FAST_MATH)
 
 
-def exp(x: Float32) -> Float32:
-    return cute.math.exp(x, fastmath=USE_FAST_MATH)
+def exp(x: Float32, fast_math: bool = False) -> Float32:
+    """exp(x); fast_math, or NVTE_USE_FAST_MATH, selects the fast approximate exp."""
+    return cute.math.exp(x, fastmath=fast_math or USE_FAST_MATH)
 
 
 def act_relu(x: Float32) -> Float32:
@@ -35,8 +37,11 @@ def act_gelu(x: Float32) -> Float32:
     return x * (Float32(0.5) + Float32(0.5) * tanh(x * (A + B * x * x)))
 
 
-def act_silu(x: Float32) -> Float32:
-    return x / (Float32(1.0) + exp(-x))
+def act_silu(x: Float32, sig: Optional[Float32] = None, fast_math: bool = False) -> Float32:
+    # Recompute the sigmoid if not provided one
+    if sig is None:
+        sig = sigmoid(x, fast_math)
+    return x * sig
 
 
 def act_qgelu(x: Float32) -> Float32:
@@ -57,17 +62,20 @@ def dact_dsrelu(x: Float32) -> Float32:
     return cute.arch.fmax(Float32(2.0) * x, Float32(0.0))
 
 
-def sigmoid(x: Float32) -> Float32:
-    return Float32(1.0) / (Float32(1.0) + exp(-x))
+def sigmoid(x: Float32, fast_math: bool = False) -> Float32:
+    return Float32(1.0) / (Float32(1.0) + exp(-x, fast_math))
 
 
-def dsigmoid(x: Float32) -> Float32:
-    s = sigmoid(x)
+def dsigmoid(x: Float32, fast_math: bool = False) -> Float32:
+    s = sigmoid(x, fast_math)
     return s * (Float32(1.0) - s)
 
 
-def dact_dsilu(x: Float32) -> Float32:
-    return fma_f32(x, dsigmoid(x), sigmoid(x))
+def dact_dsilu(x: Float32, sig: Optional[Float32] = None, fast_math: bool = False) -> Float32:
+    # Recompute the sigmoid if not provided one
+    if sig is None:
+        return fma_f32(x, dsigmoid(x, fast_math), sigmoid(x, fast_math))
+    return x * sig * (Float32(1.0) - sig) + sig
 
 
 def dact_dqgelu(x: Float32) -> Float32:
@@ -86,8 +94,6 @@ def dact_dgelu(x: Float32) -> Float32:
 # The parameterized ones take their ClampedSwiGLUParam / SiTUGLUParam fields as
 # trailing runtime arguments.
 
-LOG2E = 1.4426950408889634  # log2(e), what __expf scales its argument by
-
 
 def act_sigmoid(x: Float32) -> Float32:
     return sigmoid(x)
@@ -103,34 +109,33 @@ def act_clamped_silu(x: Float32, limit: Float32, alpha: Float32) -> Float32:
 
 
 def act_situ_gate(x: Float32, beta1: Float32) -> Float32:
+    """SiTU-GLU's activation, applied to the act half."""
     return beta1 * tanh(x / beta1) * sigmoid(x)
 
 
 def dact_dsitu_gate(x: Float32, beta1: Float32) -> Float32:
+    """Derivative of act_situ_gate."""
     t = tanh(x / beta1)
     s = sigmoid(x)
     return (Float32(1.0) - t * t) * s + beta1 * t * s * (Float32(1.0) - s)
 
 
+def identity(x: Float32) -> Float32:
+    """The default gate: gating is ideally the identity."""
+    return x
+
+
+def didentity(x: Float32) -> Float32:  # pylint: disable=unused-argument
+    """Derivative of identity."""
+    return Float32(1.0)
+
+
 def situ_up(x: Float32, beta2: Float32) -> Float32:
+    """SiTU-GLU's gate transform, applied to the gate half."""
     return beta2 * tanh(x / beta2)
 
 
 def dsitu_up(x: Float32, beta2: Float32) -> Float32:
+    """Derivative of situ_up."""
     t = tanh(x / beta2)
     return Float32(1.0) - t * t
-
-
-@cute.jit
-def sigmoidf(x: Float32) -> Float32:
-    """math.h's sigmoidf: __frcp_rn(1.0f + __expf(-x))."""
-    e = cute.arch.inline_ptx(
-        "ex2.approx.f32 {$w0}, {$r0};",
-        write_only_types=[Float32],
-        read_only_args=[-x * Float32(LOG2E)],
-    )
-    return cute.arch.inline_ptx(
-        "rcp.rn.f32 {$w0}, {$r0};",
-        write_only_types=[Float32],
-        read_only_args=[Float32(1.0) + e],
-    )

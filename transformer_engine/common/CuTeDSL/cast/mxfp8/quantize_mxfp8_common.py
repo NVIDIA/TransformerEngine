@@ -69,17 +69,13 @@ SUPPORTED_DACTIVATIONS = {
     "dsrelu": dact_dsrelu,
 }
 
-
-# Gated activations of gated_mxfp8.cuh, as (ActOP, DActOP) ports of the math.h functions the
-# CUDA dispatcher instantiates them with. swiglu and clamped_swiglu backward, and situglu in
-# both directions, do not go through this table: like the CUDA kernel they take a special path.
 GATED_ACTIVATIONS = {
     "geglu": (act_gelu, dact_dgelu),
     "qgeglu": (act_qgelu, dact_dqgelu),
     "reglu": (act_relu, dact_drelu),
     "sreglu": (act_srelu, dact_dsrelu),
     "glu": (act_sigmoid, dact_dsigmoid),
-    "swiglu": (act_silu, None),
+    "swiglu": (act_silu, dact_dsilu),
     "clamped_swiglu": (None, None),
     "situglu": (None, None),
 }

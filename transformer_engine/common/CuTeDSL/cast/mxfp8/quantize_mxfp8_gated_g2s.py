@@ -23,12 +23,13 @@ from typing import Optional
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Boolean, Float32, Int32
+from cutlass import Float32, Int32
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
     fabs_f32,
     is_packed16,
+    select_f32,
     truncate_f32_bf16,
     truncate_f32_f16,
 )
@@ -36,9 +37,13 @@ from transformer_engine.common.CuTeDSL.activations import (
     act_clamped_silu,
     act_situ_gate,
     dact_dsitu_gate,
+    identity,
+    didentity,
     situ_up,
     dsitu_up,
-    sigmoidf,
+    act_silu,
+    dact_dsilu,
+    sigmoid,
 )
 from .quantize_mxfp8_common import (
     CUTEDSL_DEBUG_LOGGING,
@@ -54,23 +59,15 @@ from .quantize_mxfp8_g2s_general import (
 
 
 @cute.jit
-def _select_f32(pred: Boolean, if_true: Float32, if_false: Float32) -> Float32:
-    result = if_false
-    if pred:
-        result = if_true
-    return result
-
-
-@cute.jit
-def _gated_element(
+def gated_elementwise_op(
     act_element: Float32,
     gate_element: Float32,
     y_grad_element: Optional[Float32],
-    limit: Optional[Float32],
-    alpha: Optional[Float32],
-    glu_linear_offset: Optional[Float32],
-    beta1: Optional[Float32],
-    beta2: Optional[Float32],
+    limit: Optional[Float32], # Clamped SwiGLU only
+    alpha: Optional[Float32], # Clamped SwiGLU only
+    glu_linear_offset: Optional[Float32], # Clamped SwiGLU only
+    beta1: Optional[Float32], # SiTU-GLU only
+    beta2: Optional[Float32], # SiTU-GLU only
     ACTIVATION: cutlass.Constexpr[str],
     IS_BWD: cutlass.Constexpr[bool],
 ):
@@ -79,16 +76,23 @@ def _gated_element(
     BWD: (act_grad, gate_grad)    act_grad = y_grad * gate(g) * dact(a),
                                   gate_grad = y_grad * act(a) * dgate(g)
     """
-    # Transform the gate. Gating is ideally the identity, with derivative 1.
-    gate = gate_element
-    dgate = None
+
     if cutlass.const_expr(ACTIVATION == "clamped_swiglu"):
-        # |g| > limit is gated_mxfp8.cuh's (g > limit || g < -limit), NaN included
-        dgate = _select_f32(fabs_f32(gate_element) > limit, Float32(0.0), Float32(1.0))
+        # FWD gate function for clamped_swiglu: 
+        # gate(g) = clamp(g, -limit, limit) + glu_linear_offset
         gate = cute.arch.fmin(cute.arch.fmax(-limit, gate_element), limit) + glu_linear_offset
+        # BWD dgate function for clamped_swiglu:
+        # dgate(g) = 0   if g < -limit or g > limit
+        #          = 1   if -limit <= g <= limit
+        dgate = select_f32(fabs_f32(gate_element) > limit, Float32(0.0), Float32(1.0))
     elif cutlass.const_expr(ACTIVATION == "situglu"):
-        dgate = dsitu_up(gate_element, beta2)
         gate = situ_up(gate_element, beta2)
+        dgate = dsitu_up(gate_element, beta2)
+    else:
+        gate = identity(gate_element)
+        dgate = didentity(gate_element)
+
+    act_fn, dact_fn = GATED_ACTIVATIONS[ACTIVATION]
 
     if cutlass.const_expr(not IS_BWD):
         if cutlass.const_expr(ACTIVATION == "clamped_swiglu"):
@@ -96,33 +100,31 @@ def _gated_element(
         elif cutlass.const_expr(ACTIVATION == "situglu"):
             act = act_situ_gate(act_element, beta1)
         else:
-            act = GATED_ACTIVATIONS[ACTIVATION][0](act_element)
+            act = act_fn(act_element)
         y = act * gate
         outputs = (y, None)
     else:
         if cutlass.const_expr(ACTIVATION == "clamped_swiglu"):
             x = cute.arch.fmin(act_element, limit)
-            s = sigmoidf(alpha * x)
+            # Somehow CUDA always uses fast math for this and we should too to match its output
+            s = sigmoid(alpha * x, fast_math=True)
             act = x * s
-            dact = _select_f32(
+            dact = select_f32(
                 act_element <= limit, s + s * (Float32(1.0) - s) * alpha * x, Float32(0.0)
             )
         elif cutlass.const_expr(ACTIVATION == "situglu"):
             act = act_situ_gate(act_element, beta1)
             dact = dact_dsitu_gate(act_element, beta1)
         elif cutlass.const_expr(ACTIVATION == "swiglu"):
-            s = sigmoidf(act_element)
-            act = act_element * s
-            dact = act_element * s * (Float32(1.0) - s) + s
+            # Match CUDA implementation's behavior too
+            s = sigmoid(act_element, fast_math=True)
+            act = act_silu(act_element, s)
+            dact = dact_dsilu(act_element, s)
         else:
-            act_fn, dact_fn = GATED_ACTIVATIONS[ACTIVATION]
             act = act_fn(act_element)
             dact = dact_fn(act_element)
         act_grad = dact * y_grad_element * gate
-        if cutlass.const_expr(dgate is None):
-            gate_grad = act * y_grad_element
-        else:
-            gate_grad = dgate * act * y_grad_element
+        gate_grad = dgate * act * y_grad_element
         outputs = (act_grad, gate_grad)
     return outputs
 
@@ -131,12 +133,12 @@ def _gated_element(
 def gated_elementwise_smem_tile(
     sAct_tile: cute.Tensor, # also the y tile in FWD / the act_grad tile in BWD
     sGate_tile: cute.Tensor, # also the gate_grad tile in BWD
-    sYGrad_tile: Optional[cute.Tensor],
-    limit: Optional[Float32],
-    alpha: Optional[Float32],
-    glu_linear_offset: Optional[Float32],
-    beta1: Optional[Float32],
-    beta2: Optional[Float32],
+    sYGrad_tile: Optional[cute.Tensor], # BWD only
+    limit: Optional[Float32], # Clamped SwiGLU only
+    alpha: Optional[Float32], # Clamped SwiGLU only
+    glu_linear_offset: Optional[Float32], # Clamped SwiGLU only
+    beta1: Optional[Float32], # SiTU-GLU only
+    beta2: Optional[Float32], # SiTU-GLU only
     ACTIVATION: cutlass.Constexpr[str],
     IS_BWD: cutlass.Constexpr[bool],
     ROWWISE: cutlass.Constexpr[bool],
@@ -166,7 +168,7 @@ def gated_elementwise_smem_tile(
         # DTYPE below is then exact.
         if cutlass.const_expr(IS_BWD):
             y_grad_element = Float32(sYGrad_tile[i])
-            act_grad_element, gate_grad_element = _gated_element(
+            act_grad_element, gate_grad_element = gated_elementwise_op(
                 act_element,
                 gate_element,
                 y_grad_element,
@@ -184,7 +186,7 @@ def gated_elementwise_smem_tile(
             sAct_tile[i] = DTYPE(act_grad_element)
             sGate_tile[i] = DTYPE(gate_grad_element)
         else:
-            y_element, _ = _gated_element(
+            y_element, _ = gated_elementwise_op(
                 act_element,
                 gate_element,
                 None,

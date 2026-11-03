@@ -9,7 +9,7 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Float32, Int64, Int32, Uint16, Uint32
+from cutlass import Boolean, Float32, Int64, Int32, Uint16, Uint32
 
 # This must match `inline std::string to_string(const DType type)`` in transformer_engine/common/common.h exactly
 # which is how we encode types to strings in C++
@@ -67,6 +67,15 @@ FP32_MANTISSA_BITS = 23
 def fabs_f32(val: Float32) -> Float32:
     """Compute the absolute value of a float32."""
     return (val.bitcast(Int32) & Int32(0x7FFFFFFF)).bitcast(Float32)
+
+
+@cute.jit
+def select_f32(pred: Boolean, if_true: Float32, if_false: Float32) -> Float32:
+    """Return if_true if the runtime predicate pred holds, else if_false."""
+    result = if_false
+    if pred:
+        result = if_true
+    return result
 
 
 @cute.jit
