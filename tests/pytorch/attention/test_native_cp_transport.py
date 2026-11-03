@@ -2,12 +2,13 @@
 #
 # See LICENSE for license information.
 
-"""CPU-only checks for native CP initialization policy."""
+"""CPU-only checks for native CP initialization, staging and ring collectives."""
 
 import importlib.util
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -213,3 +214,213 @@ def test_native_cp_halo_rejects_incompatible_buffers(native_module):
         transport.exchange(torch.zeros(512), 7, torch.zeros(512), 7)
     transport.exchange(torch.empty(0), 7, torch.empty(0), 7)
     extension.cp_native_transport_send_recv.assert_not_called()
+
+
+def _collective_transport(module, arena_bytes):
+    transport = module.NativeCPTransport.__new__(module.NativeCPTransport)
+    transport.handle = 123
+    transport.arena = torch.empty(arena_bytes, dtype=torch.uint8)
+    transport._parent_rank = {rank: index for index, rank in enumerate((11, 3, 17, 5, 13, 7, 2))}
+    return transport
+
+
+def _logical_group(size, rank):
+    # The descriptor's order, not sorted global ranks, owns the rank-major shards.
+    return SimpleNamespace(
+        ranks=(11, 3, 17, 5, 13, 7, 2)[:size], size=lambda: size, rank=lambda: rank
+    )
+
+
+def _check_collective_ring(monkeypatch, transport, operation, size, rank, dtype, noncontiguous):
+    """Simulate foreign shards/partial sums and validate every transmitted chunk."""
+    group = _logical_group(size, rank)
+    rows = 17 * size if operation == "reduce_scatter" else 17
+    inputs = []
+    for owner in range(size):
+        values = torch.arange(rows * 9, dtype=dtype) + owner * 1000
+        inputs.append(values.reshape(9, rows).t() if noncontiguous else values.reshape(rows, 9))
+    source = inputs[rank]
+    before = source.clone()
+    assert source.is_contiguous() == (not noncontiguous)
+    channel = {"all_gather": 0, "reduce_scatter": 1, "all_reduce": 2}[operation]
+    capacity = (transport.payload_bytes // 512 * 256) // source.element_size()
+    chunk_elements = source.numel() // size if operation == "reduce_scatter" else source.numel()
+    rank_inputs = [
+        value.reshape(size, -1) if operation == "reduce_scatter" else value.reshape(-1)
+        for value in inputs
+    ]
+    works = []
+
+    def partial(owners, shard, start, stop):
+        return torch.stack([rank_inputs[owner][shard, start:stop] for owner in owners]).sum(0)
+
+    def exchange(send, dst, recv, src, used_channel):
+        call = len(works)
+        chunk, phase = divmod(call, size - 1)
+        step = phase + 1
+        start, stop = chunk * capacity, min((chunk + 1) * capacity, chunk_elements)
+        assert dst == group.ranks[(rank + 1) % size]
+        assert src == group.ranks[(rank - 1) % size]
+        assert used_channel == channel
+        for staged in (send, recv):
+            assert staged.shape == (stop - start,) and staged.dtype == dtype
+            assert staged.is_contiguous()
+            assert staged.untyped_storage().data_ptr() == transport.arena.data_ptr()
+        assert send.data_ptr() != recv.data_ptr()
+        if operation == "reduce_scatter":
+            sent_owners = [(rank - offset) % size for offset in range(step)]
+            recv_owners = [(rank - offset) % size for offset in range(1, step + 1)]
+            expected_send = partial(sent_owners, (rank - step) % size, start, stop)
+            incoming = partial(recv_owners, (rank - step - 1) % size, start, stop)
+        else:
+            expected_send = rank_inputs[(rank - step + 1) % size][start:stop]
+            incoming = rank_inputs[(rank - step) % size][start:stop]
+        torch.testing.assert_close(send, expected_send, rtol=0, atol=0)
+        # Data becomes available only when the caller waits on this particular work.
+        work = SimpleNamespace(wait=Mock(side_effect=lambda: recv.copy_(incoming)))
+        works.append(work)
+        return work
+
+    exchange_mock = Mock(side_effect=exchange)
+    monkeypatch.setattr(transport, "send_recv", exchange_mock)
+    monkeypatch.setattr(
+        torch.distributed,
+        "get_process_group_ranks",
+        Mock(side_effect=AssertionError("logical collectives must use descriptor.ranks")),
+    )
+    arena_pointer = transport.arena.data_ptr()
+    result = getattr(transport, operation)(source, group)
+    if operation == "all_gather":
+        expected = torch.cat(inputs, dim=0)
+    else:
+        expected = torch.stack(inputs).sum(0)
+        if operation == "reduce_scatter":
+            expected = expected.chunk(size, dim=0)[rank]
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+    torch.testing.assert_close(source, before, rtol=0, atol=0)
+    assert result.dtype == dtype
+    assert result.untyped_storage().data_ptr() != arena_pointer
+    assert transport.arena.data_ptr() == arena_pointer
+    expected_calls = 0 if size == 1 else (chunk_elements + capacity - 1) // capacity * (size - 1)
+    assert exchange_mock.call_count == expected_calls
+    for work in works:
+        work.wait.assert_called_once_with()
+    if size > 1:
+        assert chunk_elements > capacity  # Both fixed arenas must exercise multiple chunks.
+
+
+@pytest.mark.parametrize("operation", ["all_gather", "reduce_scatter", "all_reduce"])
+@pytest.mark.parametrize("size", [1, 2, 3, 5, 7])
+@pytest.mark.parametrize("arena_bytes", [512, 1024])
+@pytest.mark.parametrize("noncontiguous", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
+def test_native_cp_collectives_follow_logical_ring(
+    monkeypatch, native_module, operation, size, arena_bytes, noncontiguous, dtype
+):
+    """Every rank receives foreign data, including odd rings and non-natural rank order."""
+    module, extension = native_module
+    transport = _collective_transport(module, arena_bytes)
+    for rank in range(size):
+        _check_collective_ring(monkeypatch, transport, operation, size, rank, dtype, noncontiguous)
+    extension.cp_native_transport_create.assert_not_called()
+
+
+@pytest.mark.parametrize("arena_bytes", [512, 1024])
+def test_native_cp_collectives_reuse_one_arena(monkeypatch, native_module, arena_bytes):
+    module, extension = native_module
+    transport = _collective_transport(module, arena_bytes)
+    arena = transport.arena
+    for size in (3, 5, 3):
+        for operation in ("all_gather", "reduce_scatter", "all_reduce"):
+            _check_collective_ring(monkeypatch, transport, operation, size, 1, torch.float32, True)
+            assert transport.arena is arena
+            assert transport.payload_bytes == arena_bytes
+    extension.cp_native_transport_create.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["all_gather", "reduce_scatter", "all_reduce"])
+@pytest.mark.parametrize("size", [1, 2, 3, 5, 7])
+def test_native_cp_collectives_accept_empty_tensors(monkeypatch, native_module, operation, size):
+    module, _ = native_module
+    transport = _collective_transport(module, 512)
+    exchange = Mock(side_effect=AssertionError("empty tensors must not communicate"))
+    monkeypatch.setattr(transport, "send_recv", exchange)
+    source = torch.empty((0, 9))
+    result = getattr(transport, operation)(source, _logical_group(size, 0))
+    assert result.shape == source.shape and result.dtype == source.dtype
+    exchange.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["all_gather", "reduce_scatter", "all_reduce"])
+@pytest.mark.parametrize("arena_bytes", [0, 256])
+def test_native_cp_collectives_reject_small_arena(
+    monkeypatch, native_module, operation, arena_bytes
+):
+    module, _ = native_module
+    transport = _collective_transport(module, arena_bytes)
+    exchange = Mock()
+    monkeypatch.setattr(transport, "send_recv", exchange)
+    source = torch.zeros((51 if operation == "reduce_scatter" else 17, 9))
+    with pytest.raises(RuntimeError, match="arena needs at least 512 bytes"):
+        getattr(transport, operation)(source, _logical_group(3, 0))
+    exchange.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["all_gather", "reduce_scatter", "all_reduce"])
+def test_native_cp_collectives_reject_wrong_device(monkeypatch, native_module, operation):
+    module, _ = native_module
+    transport = _collective_transport(module, 512)
+    exchange = Mock()
+    monkeypatch.setattr(transport, "send_recv", exchange)
+    source = torch.empty((51 if operation == "reduce_scatter" else 17, 9), device="meta")
+    with pytest.raises(ValueError, match="must be on the arena device"):
+        getattr(transport, operation)(source, _logical_group(3, 0))
+    exchange.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["all_gather", "reduce_scatter"])
+def test_native_cp_collectives_reject_scalar_shards(monkeypatch, native_module, operation):
+    module, _ = native_module
+    transport = _collective_transport(module, 512)
+    exchange = Mock()
+    monkeypatch.setattr(transport, "send_recv", exchange)
+    with pytest.raises(ValueError, match="dimension|shards"):
+        getattr(transport, operation)(torch.tensor(3.0), _logical_group(3, 0))
+    exchange.assert_not_called()
+
+
+@pytest.mark.parametrize("size", [2, 3, 5, 7])
+def test_native_cp_reduce_scatter_rejects_unequal_shards(monkeypatch, native_module, size):
+    module, _ = native_module
+    transport = _collective_transport(module, 512)
+    exchange = Mock()
+    monkeypatch.setattr(transport, "send_recv", exchange)
+    with pytest.raises(ValueError, match="equal first-dimension shards"):
+        transport.reduce_scatter(torch.zeros((size + 1, 9)), _logical_group(size, 0))
+    exchange.assert_not_called()
+
+
+@pytest.mark.parametrize("size", [1, 3, 5])
+def test_native_cp_all_reduce_accepts_scalar(monkeypatch, native_module, size):
+    module, _ = native_module
+    transport = _collective_transport(module, 512)
+    source = torch.tensor(3.0)
+    group = _logical_group(size, 0)
+    calls = []
+
+    def exchange(send, dst, recv, src, channel):
+        step = len(calls) + 1
+        assert dst == group.ranks[1] and src == group.ranks[-1] and channel == 2
+        torch.testing.assert_close(send, torch.tensor([float((1 - step) % size + 3)]))
+        work = SimpleNamespace(wait=Mock(side_effect=lambda: recv.fill_(float((-step) % size + 3))))
+        calls.append(work)
+        return work
+
+    monkeypatch.setattr(transport, "send_recv", exchange)
+    result = transport.all_reduce(source, group)
+    torch.testing.assert_close(result, torch.tensor(float(sum(range(3, size + 3)))))
+    torch.testing.assert_close(source, torch.tensor(3.0))
+    assert result.shape == () and result.data_ptr() != source.data_ptr()
+    assert len(calls) == size - 1
+    for work in calls:
+        work.wait.assert_called_once_with()

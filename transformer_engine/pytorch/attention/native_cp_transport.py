@@ -14,7 +14,6 @@ import weakref
 from typing import Iterable, Optional
 
 import torch
-
 import transformer_engine_torch as tex
 
 _group_transports = weakref.WeakKeyDictionary()
@@ -156,27 +155,91 @@ class NativeCPTransport:
         if recv_global_rank is not None:
             recv_tensor.copy_(recv)
 
-    def all_reduce(self, tensor: torch.Tensor, group, channel: int = 2) -> torch.Tensor:
-        """Ring sum over a dynamic-CP subgroup."""
+    def _ring_peers(self, group):
+        """Resolve logical rank order without constructing a ProcessGroup."""
         ranks = (
             group.ranks
             if hasattr(group, "ranks")
             else torch.distributed.get_process_group_ranks(group)
         )
-        result = tensor.contiguous().clone()
-        if len(ranks) == 1:
-            return result
-
-        size = tensor.nbytes
-        send = self._view(0, tensor.shape, tensor.dtype)
-        recv = self._view((size + 255) // 256 * 256, tensor.shape, tensor.dtype)
-        send.copy_(tensor)
         rank = group.rank()
-        dst, src = ranks[(rank + 1) % len(ranks)], ranks[(rank - 1) % len(ranks)]
-        for _ in range(len(ranks) - 1):
-            self.send_recv(send, dst, recv, src, channel).wait()
-            result.add_(recv)
-            send, recv = recv, send
+        return rank, ranks[(rank + 1) % len(ranks)], ranks[(rank - 1) % len(ranks)]
+
+    def _collective_chunks(self, tensor):
+        """Stage bounded chunks; application inputs/outputs never alias the arena."""
+        if tensor.device != self.arena.device:
+            raise ValueError("Native CP tensors must be on the arena device")
+        capacity = (self.payload_bytes // 512 * 256) // tensor.element_size()
+        if capacity < 1:
+            raise RuntimeError("Native CP collective arena needs at least 512 bytes")
+        for start in range(0, tensor.numel(), capacity):
+            stop = min(start + capacity, tensor.numel())
+            size = (stop - start) * tensor.element_size()
+            yield (
+                start,
+                stop,
+                self._view(0, (stop - start,), tensor.dtype),
+                self._view((size + 255) // 256 * 256, (stop - start,), tensor.dtype),
+            )
+
+    def all_gather(self, tensor: torch.Tensor, group, channel: int = 0) -> torch.Tensor:
+        """Gather equal first-dimension shards in the logical group's rank order.
+
+        Operations are ordered on the caller stream, including the copy from
+        each received chunk. Like the other arena users, calls are serialized;
+        the returned tensor is ordinary PyTorch storage, not registered memory.
+        """
+        if tensor.ndim == 0:
+            raise ValueError("Native CP all-gather requires at least one dimension")
+        size = group.size()
+        if size == 1:
+            return tensor
+        rank, dst, src = self._ring_peers(group)
+        flat = tensor.contiguous().view(-1)
+        output = tensor.new_empty((size * tensor.shape[0], *tensor.shape[1:]))
+        shards = output.view(size, -1)
+        shards[rank].copy_(flat)
+        for start, stop, send, recv in self._collective_chunks(flat):
+            send.copy_(flat[start:stop])
+            for step in range(1, size):
+                self.send_recv(send, dst, recv, src, channel).wait()
+                shards[(rank - step) % size, start:stop].copy_(recv)
+                send, recv = recv, send
+        return output
+
+    def reduce_scatter(self, tensor: torch.Tensor, group, channel: int = 1) -> torch.Tensor:
+        """Sum and scatter equal first-dimension shards through bounded staging."""
+        size = group.size()
+        if tensor.ndim == 0 or tensor.shape[0] % size:
+            raise ValueError("Native CP reduce-scatter requires equal first-dimension shards")
+        if size == 1:
+            return tensor
+        rank, dst, src = self._ring_peers(group)
+        shards = tensor.contiguous().view(size, -1)
+        output = tensor.new_empty((tensor.shape[0] // size, *tensor.shape[1:]))
+        flat = output.view(-1)
+        for start, stop, send, recv in self._collective_chunks(flat):
+            send.copy_(shards[(rank - 1) % size, start:stop])
+            for step in range(1, size):
+                self.send_recv(send, dst, recv, src, channel).wait()
+                recv.add_(shards[(rank - step - 1) % size, start:stop])
+                send, recv = recv, send
+            flat[start:stop].copy_(send)
+        return output
+
+    def all_reduce(self, tensor: torch.Tensor, group, channel: int = 2) -> torch.Tensor:
+        """Ring sum over a dynamic-CP subgroup, bounded by the existing arena."""
+        result = tensor.contiguous().clone()
+        if group.size() == 1:
+            return result
+        _, dst, src = self._ring_peers(group)
+        flat, reduced = tensor.contiguous().view(-1), result.view(-1)
+        for start, stop, send, recv in self._collective_chunks(flat):
+            send.copy_(flat[start:stop])
+            for _ in range(group.size() - 1):
+                self.send_recv(send, dst, recv, src, channel).wait()
+                reduced[start:stop].add_(recv)
+                send, recv = recv, send
         return result
 
     def destroy(self) -> None:
