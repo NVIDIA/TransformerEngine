@@ -72,15 +72,17 @@ __device__ inline CompType extract_qb_cutoff_and_compact(int *topk_indices, Comp
   }
 }
 
-template <QBMode Mode>
-__device__ inline void accumulate_qb_histogram_epilogue(const CompType *raw_scores, CompType cutoff,
-                                                        int num_experts, int lane_id,
-                                                        const CompType *bin_bounds, int num_bins,
-                                                        int32_t *histogram) {
+template <QBMode Mode, typename ScoreType>
+__device__ inline void accumulate_qb_histogram_epilogue(const ScoreType *raw_scores,
+                                                        CompType cutoff, int num_experts,
+                                                        int lane_id, const CompType *bin_bounds,
+                                                        int num_bins, int32_t *histogram) {
   if constexpr (Mode == QBMode::FusedAtomic) {
     const QBBinParams bin_params = load_qb_bin_params(bin_bounds, num_bins);
     for (int expert = lane_id; expert < num_experts; expert += kThreadsPerWarp) {
-      int bin = __float2int_rd((cutoff - raw_scores[expert] - bin_params.lower) * bin_params.scale);
+      int bin =
+          __float2int_rd((cutoff - static_cast<CompType>(raw_scores[expert]) - bin_params.lower) *
+                         bin_params.scale);
       bin = max(0, min(bin, num_bins - 1));
       atomicAdd(histogram + static_cast<size_t>(expert) * num_bins + bin, 1);
     }
@@ -95,7 +97,7 @@ __device__ inline void accumulate_qb_histogram_epilogue(const CompType *raw_scor
 
 template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat,
           TopkFuncType TopkFunc = TopkFuncType::Naive, typename IndexType = int32_t,
-          QBMode QbMode = QBMode::Disabled>
+          QBMode QbMode = QBMode::Disabled, bool BiasInLogitSpace = false>
 __global__ void fused_topk_forward_simple_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
@@ -174,7 +176,12 @@ __global__ void fused_topk_forward_simple_kernel(
     __syncwarp();
 
     // Preprocess: apply score function in-place on shmem
-    if (use_pre_softmax && score_function == 1) {
+    if constexpr (BiasInLogitSpace) {
+      // Keep raw logits for selection; save unbiased sigmoid scores for weights/backward.
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        intermediate_output[pos_offset + i] = sigmoid_scalar(scores[i]);
+      }
+    } else if (use_pre_softmax && score_function == 1) {
       apply_softmax_on_float(scores, num_experts, lane_id);
       __syncwarp();
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
@@ -248,9 +255,14 @@ __global__ void fused_topk_forward_simple_kernel(
       }
     }
     if constexpr (QbMode == QBMode::FusedAtomic) {
-      accumulate_qb_histogram_epilogue<QbMode>(intermediate_output + pos_offset, cutoff,
-                                               num_experts, lane_id, qb_bin_bounds, qb_num_bins,
-                                               qb_histogram);
+      if constexpr (BiasInLogitSpace) {
+        accumulate_qb_histogram_epilogue<QbMode>(logits + pos_offset, cutoff, num_experts, lane_id,
+                                                 qb_bin_bounds, qb_num_bins, qb_histogram);
+      } else {
+        accumulate_qb_histogram_epilogue<QbMode>(intermediate_output + pos_offset, cutoff,
+                                                 num_experts, lane_id, qb_bin_bounds, qb_num_bins,
+                                                 qb_histogram);
+      }
     }
     __syncwarp();
 
@@ -1219,6 +1231,116 @@ void fused_topk_with_score_function_forward_qb_with_indices(
 #undef QB_ROUTER_FORWARD_WITH_INDICES_LAUNCH
 }
 
+// Logit-space bias deliberately uses the simple kernel for all K. The optimized
+// score-space path and its environment-controlled dispatch are unchanged.
+template <typename DataType, typename IndexType, NVTERoutingMapFormat Format, QBMode Mode>
+void launch_logit_bias(const Tensor logits, int num_tokens, int num_experts, int topk,
+                       float scaling_factor, const Tensor expert_bias, Tensor probs,
+                       Tensor routing_output, bool use_dense_indices, Tensor intermediate_output,
+                       Tensor cutoff, Tensor histogram, Tensor bin_bounds, cudaStream_t stream) {
+  const int tokens_per_block = kThreadsPerBlock / kThreadsPerWarp;
+  const int selection_topk = topk + (Mode != QBMode::Disabled ? 1 : 0);
+  size_t shared_memory_size =
+      static_cast<size_t>(tokens_per_block) *
+      (num_experts * sizeof(CompType) + selection_topk * (sizeof(CompType) + sizeof(int)));
+  if constexpr (Format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
+    shared_memory_size +=
+        static_cast<size_t>(tokens_per_block) * ((num_experts + 31) / 32) * sizeof(uint32_t);
+  }
+  check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
+  auto kernel = fused_topk_forward_simple_kernel<DataType, float, Format, TopkFuncType::Naive,
+                                                 IndexType, Mode, true>;
+  NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                       static_cast<int>(shared_memory_size)));
+  kernel<<<(num_tokens + tokens_per_block - 1) / tokens_per_block, kThreadsPerBlock,
+           shared_memory_size, stream>>>(
+      reinterpret_cast<const DataType *>(logits.data.dptr), num_tokens, num_experts, topk, false,
+      -1, -1, scaling_factor, 0, reinterpret_cast<const float *>(expert_bias.data.dptr),
+      reinterpret_cast<DataType *>(probs.data.dptr),
+      use_dense_indices ? nullptr : reinterpret_cast<uint8_t *>(routing_output.data.dptr),
+      reinterpret_cast<CompType *>(intermediate_output.data.dptr),
+      use_dense_indices ? reinterpret_cast<IndexType *>(routing_output.data.dptr) : nullptr,
+      reinterpret_cast<CompType *>(cutoff.data.dptr),
+      reinterpret_cast<int32_t *>(histogram.data.dptr),
+      reinterpret_cast<const CompType *>(bin_bounds.data.dptr),
+      histogram.has_data() ? static_cast<int>(histogram.data.shape[1]) : 0);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void fused_topk_with_logit_bias_forward(const Tensor logits, int num_tokens, int num_experts,
+                                        int topk, float scaling_factor, const Tensor expert_bias,
+                                        Tensor probs, Tensor routing_output,
+                                        NVTERoutingMapFormat routing_map_format,
+                                        bool use_dense_indices, Tensor intermediate_output,
+                                        Tensor cutoff, Tensor histogram, Tensor bin_bounds,
+                                        NVTEQBHistogramMode histogram_mode, cudaStream_t stream) {
+  check_routing_map_format(routing_map_format);
+  NVTE_CHECK(num_tokens > 0 && num_experts > 0, "Logit router dimensions must be positive");
+  NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
+             "Logit router num_tokens * num_experts exceeds INT_MAX");
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "Invalid logit router topk");
+  const std::vector<size_t> shape{static_cast<size_t>(num_tokens),
+                                  static_cast<size_t>(num_experts)};
+  NVTE_CHECK(logits.data.shape == shape && probs.data.shape == shape &&
+                 intermediate_output.data.shape == shape,
+             "Logit router tensor shape mismatch");
+  NVTE_CHECK(
+      probs.data.dtype == logits.data.dtype && intermediate_output.data.dtype == DType::kFloat32,
+      "Logit router dtype mismatch");
+  NVTE_CHECK(expert_bias.has_data() && expert_bias.data.dtype == DType::kFloat32 &&
+                 expert_bias.data.shape == std::vector<size_t>{static_cast<size_t>(num_experts)},
+             "Logit router bias must be FP32 [num_experts]");
+  NVTE_CHECK(
+      histogram.has_data() == bin_bounds.has_data() && histogram.has_data() == cutoff.has_data(),
+      "Incomplete logit QB tensors");
+  if (histogram.has_data()) {
+    check_qb_forward_tensors(logits, num_tokens, num_experts, topk, expert_bias, probs,
+                             intermediate_output, cutoff, histogram, bin_bounds);
+    NVTE_CHECK(histogram_mode == NVTE_QB_HISTOGRAM_TWO_KERNEL ||
+                   histogram_mode == NVTE_QB_HISTOGRAM_FUSED_ATOMIC,
+               "Invalid histogram mode");
+  }
+  const auto expected_output_shape =
+      use_dense_indices
+          ? std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(topk)}
+          : expected_routing_map_shape(num_tokens, num_experts, routing_map_format);
+  NVTE_CHECK(routing_output.data.shape == expected_output_shape,
+             "Logit router output shape mismatch");
+  if (use_dense_indices) {
+    NVTE_CHECK(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+               "Dense indices cannot be combined with a bitmap output");
+    if (routing_output.data.dtype == DType::kInt16) {
+      NVTE_CHECK(num_experts <= INT16_MAX, "Too many experts for int16 indices");
+    }
+  }
+#define LOGIT_LAUNCH(DataType, IndexType, Format, Mode)                                          \
+  launch_logit_bias<DataType, IndexType, Format, Mode>(                                          \
+      logits, num_tokens, num_experts, topk, scaling_factor, expert_bias, probs, routing_output, \
+      use_dense_indices, intermediate_output, cutoff, histogram, bin_bounds, stream)
+#define LOGIT_MODE(DataType, IndexType, Format)                     \
+  if (!histogram.has_data()) {                                      \
+    LOGIT_LAUNCH(DataType, IndexType, Format, QBMode::Disabled);    \
+  } else if (histogram_mode == NVTE_QB_HISTOGRAM_TWO_KERNEL) {      \
+    LOGIT_LAUNCH(DataType, IndexType, Format, QBMode::TwoKernel);   \
+  } else {                                                          \
+    LOGIT_LAUNCH(DataType, IndexType, Format, QBMode::FusedAtomic); \
+  }
+#define LOGIT_OUTPUT(DataType)                                              \
+  if (use_dense_indices) {                                                  \
+    TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(                                  \
+        routing_output.data.dtype, IndexType,                               \
+        LOGIT_MODE(DataType, IndexType, NVTE_ROUTING_MAP_FORMAT_BYTEMAP);); \
+  } else if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {     \
+    LOGIT_MODE(DataType, int32_t, NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);       \
+  } else {                                                                  \
+    LOGIT_MODE(DataType, int32_t, NVTE_ROUTING_MAP_FORMAT_BYTEMAP);         \
+  }
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(logits.data.dtype, DataType, LOGIT_OUTPUT(DataType););
+#undef LOGIT_OUTPUT
+#undef LOGIT_MODE
+#undef LOGIT_LAUNCH
+}
+
 // Backward: grad_probs + intermediate_output + routing_map → grad_logits.
 //
 // Double-buffered cp.async loads all 3 inputs in original types.  Two-pass
@@ -1801,6 +1923,23 @@ void nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked(
   nvte_fused_topk_with_score_function_forward_qb_with_indices(
       logits, num_tokens, num_experts, topk, scaling_factor, expert_bias, probs, topk_indices,
       intermediate_output, cutoff, histogram, bin_bounds, histogram_mode, stream);
+}
+
+void nvte_fused_topk_with_logit_bias_forward(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_output,
+    NVTERoutingMapFormat routing_map_format, int use_dense_indices, NVTETensor intermediate_output,
+    NVTETensor cutoff, NVTETensor histogram, NVTETensor bin_bounds,
+    NVTEQBHistogramMode histogram_mode, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_logit_bias_forward);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_logit_bias_forward(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, scaling_factor,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(routing_output), routing_map_format, use_dense_indices != 0,
+      *convertNVTETensorCheck(intermediate_output), *convertNVTETensorCheck(cutoff),
+      *convertNVTETensorCheck(histogram), *convertNVTETensorCheck(bin_bounds), histogram_mode,
+      stream);
 }
 
 void nvte_qb_histogram_accumulate(const NVTETensor raw_scores, const NVTETensor cutoff,
