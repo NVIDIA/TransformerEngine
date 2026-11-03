@@ -61,7 +61,7 @@ def _scaled_softmax_backward_fake(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     del softmax_results, scale
-    return torch.empty_like(output_grads)
+    return torch.empty_like(output_grads, memory_format=torch.contiguous_format)
 
 
 def _scaled_softmax_setup_context(ctx, inputs, output):
@@ -121,7 +121,7 @@ def _scaled_masked_softmax_backward_fake(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     del softmax_results, scale
-    return torch.empty_like(output_grads)
+    return torch.empty_like(output_grads, memory_format=torch.contiguous_format)
 
 
 def _scaled_masked_softmax_setup_context(ctx, inputs, output):
@@ -179,7 +179,7 @@ def _scaled_upper_triang_masked_softmax_backward_fake(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     del softmax_results, scale
-    return torch.empty_like(output_grads)
+    return torch.empty_like(output_grads, memory_format=torch.contiguous_format)
 
 
 def _scaled_upper_triang_masked_softmax_setup_context(ctx, inputs, output):
@@ -241,7 +241,7 @@ def _scaled_aligned_causal_masked_softmax_backward_fake(
     output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
 ) -> torch.Tensor:
     del softmax_results, scale
-    return torch.empty_like(output_grads)
+    return torch.empty_like(output_grads, memory_format=torch.contiguous_format)
 
 
 def _scaled_aligned_causal_masked_softmax_setup_context(ctx, inputs, output):
