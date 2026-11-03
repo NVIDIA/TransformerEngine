@@ -261,16 +261,14 @@ def quantize_rowwise_mxfp8(
                 x2_lo_to_f32(amax_2x),
                 x2_hi_to_f32(amax_2x),
             )
+            # For relu the max is at least 0
+            amax_r = cute.arch.fmax(amax_r, Float32(0.0))
         else:
             # Compare the 2 packed abs max
             amax_r = cute.arch.fmax(
                 fabs_f32(x2_lo_to_f32(amax_2x)),
                 fabs_f32(x2_hi_to_f32(amax_2x)),
             )
-        # For relu, the amax is always at least 0
-        # For non-relu fused cases, if all values are NaN, amax will be 0.0 instead of NaN
-        # which is to match the CUDA implementation and keep the scale result bit-exact
-        amax_r = cute.arch.fmax(amax_r, Float32(0.0))
     else:
         # Since we need to do computation on individual f16 / bf16 elements, we can't read in pack
         sX_thread_rw = cute.make_tensor(
@@ -472,7 +470,7 @@ def quantize_colwise_mxfp8(
         if cutlass.const_expr(FUSE_RELU):
             amax_c = cute.arch.fmax(to_f32(amax_value), Float32(0.0))
         else:
-            amax_c = cute.arch.fmax(fabs_f32(to_f32(amax_value)), Float32(0.0))
+            amax_c = fabs_f32(to_f32(amax_value))
     else:
         # Otherwise we need to case input values to fp32. Allocate the register tensor and load from SMEM input tiles.
         rX_thread_f32 = cute.make_rmem_tensor(
@@ -707,18 +705,17 @@ def quantize_bidimensional_mxfp8_swizzled(
             with cute.arch.elect_one():
                 sColReduce_2x[i] = pack_f32x2(col_lo, col_hi)
 
+        # Compute the rowwise scale factor
         row_amax = cute.arch.fmax(
             fabs_f32(x2_lo_to_f32(row_amax2)), fabs_f32(x2_hi_to_f32(row_amax2))
         )
-        row_amax = cute.arch.fmax(row_amax, Float32(0.0))
         row_exp = cvt_f32_to_fp8e8m0fnu(row_amax * MAX_NORM_RCP)
         row_inv = exp2f_rcp(row_exp)
         tSsS_row_tile[0] = row_exp
         cute.arch.sync_warp()
 
         # Compute the colwise scale factor (only handle the one that belongs to this thread / lane)
-        col_amax = cute.arch.fmax(sColReduce_warp[lane], Float32(0.0))
-        col_exp = cvt_f32_to_fp8e8m0fnu(col_amax * MAX_NORM_RCP)
+        col_exp = cvt_f32_to_fp8e8m0fnu(sColReduce_warp[lane] * MAX_NORM_RCP)
         tSsS_col_tile[0] = col_exp
         sColReduce_warp[lane] = exp2f_rcp(col_exp)
         cute.arch.sync_warp()
@@ -1934,8 +1931,6 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
             for i in cutlass.range_constexpr(1, MXFP8_BLOCK_SCALING_SIZE // 2):
                 amax_2x = abs_max_x2(amax_2x, rX_i32[i])
             amax = cute.arch.fmax(fabs_f32(x2_lo_to_f32(amax_2x)), fabs_f32(x2_hi_to_f32(amax_2x)))
-            # Floor at 0 so an all-NaN block drops NaN like CUDA's fmaxf
-            amax = cute.arch.fmax(amax, Float32(0.0))
 
             biased_exp = cvt_f32_to_fp8e8m0fnu(amax * self.cfg.MAX_NORM_RCP)
             if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
