@@ -29,13 +29,6 @@ namespace cutedsl_backend {
 
 using namespace tvm_ffi_bridge;
 
-namespace detail {
-
-// TMA needs 16-byte aligned global addresses.
-inline bool is_16B_aligned(const void *ptr) { return reinterpret_cast<uintptr_t>(ptr) % 16 == 0; }
-
-}  // namespace detail
-
 struct MXFP8GatedQuantConfig {
   static constexpr const char *kEntrypointName = "get_mxfp8_gated_quantization_function";
 
@@ -133,11 +126,13 @@ bool mxfp8_quantize_gated_cutedsl(const Tensor &gated_input, const Tensor &grad,
           "output halves to be divisible by 128.");
       return false;
     }
-    bool aligned = detail::is_16B_aligned(gated_input.data.dptr) &&
-                   (!config.rowwise || detail::is_16B_aligned(output->data.dptr)) &&
-                   (!config.colwise || detail::is_16B_aligned(output->columnwise_data.dptr));
+    // TMA needs aligned global addresses
+    bool aligned =
+        is_aligned_ptr(gated_input.data.dptr, TMA_GMEM_ALIGNMENT) &&
+        (!config.rowwise || is_aligned_ptr(output->data.dptr, TMA_GMEM_ALIGNMENT)) &&
+        (!config.colwise || is_aligned_ptr(output->columnwise_data.dptr, TMA_GMEM_ALIGNMENT));
     if constexpr (IS_BWD) {
-      aligned = aligned && detail::is_16B_aligned(grad.data.dptr);
+      aligned = aligned && is_aligned_ptr(grad.data.dptr, TMA_GMEM_ALIGNMENT);
     }
     if (!aligned) {
       maybe_warn_cutedsl_not_chosen("an input or output is not 16-byte aligned.");
@@ -150,13 +145,15 @@ bool mxfp8_quantize_gated_cutedsl(const Tensor &gated_input, const Tensor &grad,
     }
     checkCuDriverContext(stream);
 
-    // Sanity checks and swizzled-scale padding, mirroring mxfp8::quantize_gated
+    // Sanity checks, mirroring mxfp8::quantize_gated
     if (config.rowwise) {
       NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
     }
     if (config.colwise) {
       NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
     }
+
+    // Zero out swizzled scales if padding is needed.
     if (config.swizzled && (cols % 128 != 0 || rows % 128 != 0)) {
       if (config.rowwise) {
         NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr, 0,
