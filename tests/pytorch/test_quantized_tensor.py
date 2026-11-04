@@ -1340,3 +1340,114 @@ def test_native_quantization_scale_layout(
         assert run(actual) is actual
         assert actual._with_gemm_swizzled_scales == optimize_for_gemm
         torch.testing.assert_close(actual.dequantize(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("operation", ["multi_tensor_quantize", "split_quantize"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "all",
+        "compact",
+        "rowwise",
+        "mixed_usage",
+        "mixed_optimize",
+        "no_optimize",
+        "mixed_formats",
+        "already_swizzled",
+        "all_swizzled",
+        "empty",
+    ],
+)
+def test_multi_tensor_quantization_scale_layout(operation, case):
+    """Batched output finalization preserves each tensor's data, usage and layout."""
+    shapes = [(64, 128)] * 3
+    if case == "all_swizzled":
+        shapes = [(128, 128)] * 3
+    if case == "empty":
+        shapes[1] = (0, 128)
+    quantizers = []
+    for i in range(3):
+        if case == "mixed_formats" and i == 1:
+            quantizer = MXFP8Quantizer(te.DType.kFloat8E4M3)
+        else:
+            with_rht = case in ("all", "no_optimize", "all_swizzled")
+            with_rht |= case == "already_swizzled" and i != 1
+            quantizer = NVFP4Quantizer(
+                with_rht=with_rht,
+                with_post_rht_amax=with_rht,
+                stochastic_rounding=False,
+                with_random_sign_mask=False,
+            )
+        quantizer.optimize_for_gemm = case != "no_optimize" and not (
+            case == "mixed_optimize" and i == 1
+        )
+        if case == "rowwise":
+            quantizer.set_usage(rowwise=True, columnwise=False)
+        elif case == "mixed_usage":
+            quantizer.set_usage(rowwise=i != 2, columnwise=i != 0)
+        quantizers.append(quantizer)
+    inputs = [torch.randn(shape, dtype=torch.bfloat16, device="cuda") for shape in shapes]
+    references = [quantizer(inp) for quantizer, inp in zip(quantizers, inputs)]
+    if operation == "multi_tensor_quantize":
+        outputs = tex.multi_tensor_quantize(inputs, quantizers)
+    else:
+        outputs = tex.split_quantize(
+            torch.cat(inputs),
+            [shape[0] for shape in shapes],
+            quantizers,
+            disable_bulk_allocation=case
+            in (
+                "compact",
+                "rowwise",
+                "mixed_usage",
+                "mixed_optimize",
+                "mixed_formats",
+                "already_swizzled",
+                "empty",
+            ),
+        )
+    for actual, expected, quantizer in zip(outputs, references, quantizers):
+        assert actual._with_gemm_swizzled_scales == quantizer.optimize_for_gemm
+        assert actual.shape == expected.shape
+        for usage in ("rowwise", "columnwise"):
+            actual_data = getattr(actual, f"_{usage}_data")
+            expected_data = getattr(expected, f"_{usage}_data")
+            actual_scales = getattr(actual, f"_{usage}_scale_inv")
+            expected_scales = getattr(expected, f"_{usage}_scale_inv")
+            assert (actual_data is None) == (expected_data is None)
+            assert (actual_scales is None) == (expected_scales is None)
+            if actual_data is not None:
+                torch.testing.assert_close(actual_data, expected_data, atol=0, rtol=0)
+                assert actual_scales.shape == expected_scales.shape
+        if actual._rowwise_data is not None:
+            torch.testing.assert_close(
+                actual.dequantize(dtype=torch.float32),
+                expected.dequantize(dtype=torch.float32),
+                atol=0,
+                rtol=0,
+            )
+        if actual._columnwise_data is not None:
+
+            def columnwise_view(tensor):
+                return NVFP4Tensor(
+                    shape=(tensor.shape[-1], tensor.shape[0]),
+                    dtype=torch.float32,
+                    rowwise_data=tensor._columnwise_data,
+                    rowwise_scale_inv=tensor._columnwise_scale_inv,
+                    columnwise_data=None,
+                    columnwise_scale_inv=None,
+                    amax_rowwise=tensor._amax_columnwise,
+                    amax_columnwise=None,
+                    fp4_dtype=quantizer.dtype,
+                    quantizer=quantizer,
+                    with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                )
+
+            if not isinstance(quantizer, MXFP8Quantizer):
+                torch.testing.assert_close(
+                    columnwise_view(actual).dequantize(dtype=torch.float32),
+                    columnwise_view(expected).dequantize(dtype=torch.float32),
+                    atol=0,
+                    rtol=0,
+                )
