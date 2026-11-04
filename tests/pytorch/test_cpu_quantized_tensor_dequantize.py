@@ -11,21 +11,31 @@ a RecursionError from __torch_dispatch__ re-entering dequantize().
 import pytest
 import torch
 
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch.constants import DType
+
 # Skip the entire module when CUDA is not available.
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 
 @pytest.fixture(params=["nvfp4", "mxfp8"])
 def quantizer(request):
     """Yield an NVFP4 or MXFP8 quantizer."""
     if request.param == "nvfp4":
+        if not nvfp4_available:
+            pytest.skip(reason_for_no_nvfp4)
         from transformer_engine.pytorch import NVFP4Quantizer
 
         return NVFP4Quantizer()
     else:
+        if not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         from transformer_engine.pytorch import MXFP8Quantizer
 
-        return MXFP8Quantizer()
+        return MXFP8Quantizer(fp8_dtype=DType.kFloat8E4M3)
 
 
 def _quantize_cpu(quantizer, shape=(128, 128)):
