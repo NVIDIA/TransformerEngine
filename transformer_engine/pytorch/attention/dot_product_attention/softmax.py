@@ -300,6 +300,12 @@ class FusedScaleMaskSoftmax(nn.Module):
     """
     fused operation: scaling + mask + softmax
 
+    Softmax backward produces a separate gradient buffer by default. The unfused
+    attention backend explicitly enables reuse of its private intermediate gradient
+    in eager training to reduce peak memory. Softmax or dropout module hooks,
+    ``torch.compile``, tensor subclasses, and backward with grad mode enabled retain
+    the functional path without overwriting the incoming gradient.
+
     Arguments:
         mask_func: mask function to be applied.
         softmax_in_fp32: if true, softmax in performed at fp32 precision.
