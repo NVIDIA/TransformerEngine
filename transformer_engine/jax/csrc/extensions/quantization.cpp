@@ -635,5 +635,73 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeV2Handler, GroupedQuantizeV2FFI,
                                   .Attr<int64_t>("flatten_axis"),
                               FFI_CudaGraph_Traits);
 
+// Rebuild the GEMM operands of a rowwise-prequantized MXFP8 grouped tensor: swizzled rowwise
+// scales and the columnwise copy. The rowwise data itself is consumed in place.
+Error_Type GroupedRequantizeFFI(cudaStream_t stream, Buffer_Type rowwise_data,
+                                Buffer_Type rowwise_sinv, Buffer_Type group_sizes,
+                                Result_Type colwise_out, Result_Type colwise_sinv,
+                                Result_Type swizzled_rowwise_sinv, Result_Type int64_workspace) {
+  auto data_dtype = convert_ffi_datatype_to_te_dtype(rowwise_data.element_type());
+  NVTE_CHECK(data_dtype == DType::kFloat8E4M3, "GroupedRequantize requires E4M3 data.");
+  NVTE_CHECK(convert_ffi_datatype_to_te_dtype(rowwise_sinv.element_type()) == DType::kFloat8E8M0,
+             "scale_inv must be E8M0 for MXFP8 grouped requantize.");
+
+  auto data_dims = rowwise_data.dimensions();
+  NVTE_CHECK(data_dims.size() == 2, "GroupedRequantize expects 2D data [rows, hidden].");
+  const size_t m = data_dims[0];
+  const size_t n = data_dims[1];
+  NVTE_CHECK(m % 128 == 0 && n % 128 == 0,
+             "GroupedRequantize requires rows and hidden to be multiples of 128; got (", m, ", ", n,
+             ").");
+  NVTE_CHECK(rowwise_sinv.element_count() == m * n / 32, "rowwise scale_inv must hold rows * ",
+             "hidden / 32 elements.");
+  const size_t n_groups = group_sizes.dimensions()[0];
+
+  // Workspace: [n_groups int64 row counts | n_groups + 1 int64 element offsets].
+  auto *int64_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
+  auto *offsets_ptr = int64_ptr + n_groups;
+  nvte_convert_int32_to_int64_with_multiplier(
+      reinterpret_cast<const int32_t *>(group_sizes.untyped_data()), int64_ptr, n_groups, 1,
+      stream);
+  nvte_compute_grouped_tensor_offsets(int64_ptr, offsets_ptr, n_groups, static_cast<int64_t>(n),
+                                      stream);
+
+  const std::vector<size_t> data_shape{m, n};
+  TensorWrapper input(NVTE_MXFP8_1D_SCALING);
+  input.set_rowwise_data(rowwise_data.untyped_data(), data_dtype, data_shape);
+  input.set_rowwise_scale_inv(rowwise_sinv.untyped_data(), DType::kFloat8E8M0,
+                              std::vector<size_t>{m, n / 32});
+
+  TensorWrapper output(NVTE_MXFP8_1D_SCALING);
+  output.set_rowwise_data(rowwise_data.untyped_data(), data_dtype, data_shape);
+  output.set_rowwise_scale_inv(swizzled_rowwise_sinv->untyped_data(), DType::kFloat8E8M0,
+                               std::vector<size_t>{m * n / 32});
+  output.set_columnwise_data(colwise_out->untyped_data(), data_dtype, data_shape);
+  output.set_columnwise_scale_inv(colwise_sinv->untyped_data(), DType::kFloat8E8M0,
+                                  std::vector<size_t>{m / 32 * n});
+
+  TensorWrapper offsets;
+  offsets.set_rowwise_data(offsets_ptr, DType::kInt64, std::vector<size_t>{n_groups + 1});
+
+  // BF16 intermediate, matching the dequantize -> quantize chain.
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_use_fast_math(true);
+  nvte_group_requantize(input.data(), output.data(), offsets.data(), nullptr, quant_config, stream);
+
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedRequantizeHandler, GroupedRequantizeFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // rowwise_data
+                                  .Arg<Buffer_Type>()      // rowwise_sinv (compact)
+                                  .Arg<Buffer_Type>()      // group_sizes (int32)
+                                  .Ret<Buffer_Type>()      // colwise_out
+                                  .Ret<Buffer_Type>()      // colwise_sinv
+                                  .Ret<Buffer_Type>()      // swizzled_rowwise_sinv
+                                  .Ret<Buffer_Type>(),     // int64_workspace
+                              FFI_CudaGraph_Traits);
+
 }  // namespace jax
 }  // namespace transformer_engine
