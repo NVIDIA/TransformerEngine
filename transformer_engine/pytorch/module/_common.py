@@ -64,6 +64,25 @@ def set_quantizer_usage_for_wgrad_all_gather(quantizer) -> None:
     quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
 
 
+def overwrite_main_grad_wgrad_gemm(
+    weight_ref: Optional[Callable[[], Any]], gemm: Callable[[bool], Any]
+) -> Any:
+    """Run a fused wgrad GEMM into the main_grad of a weight with ``overwrite_main_grad`` set.
+
+    Megatron-FSDP sets ``overwrite_main_grad`` and clears ``_fsdp_wgrad_written`` once it has
+    consumed ``main_grad``. Only the first wgrad since then may overwrite: a weight used more
+    than once in one backward (e.g. an LM head shared with an MTP head) accumulates the rest.
+    Deciding when the GEMM runs keeps this correct for delayed wgrads, whatever their order.
+    A weight without the attribute has an owner that never clears it, so it always overwrites.
+    """
+    weight = weight_ref() if weight_ref is not None else None
+    written = getattr(weight, "_fsdp_wgrad_written", None)
+    out = gemm(bool(written))
+    if written is not None:
+        weight._fsdp_wgrad_written = True
+    return out
+
+
 def can_reconstruct_wgrad_input_from_original(quantizer) -> bool:
     """Whether wgrad input can be reconstructed from a saved original tensor."""
     target = getattr(quantizer, "parent_quantizer", quantizer)
