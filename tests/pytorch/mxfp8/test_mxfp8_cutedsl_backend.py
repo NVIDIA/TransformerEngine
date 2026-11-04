@@ -59,11 +59,12 @@ MATRIX_SIZES = [
     (96, 128),
 ]
 # (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
-BLOCK_SIZES = [(1, 32), (32, 1), (32, 32)]
+ROW, COL, BOTH = (1, 32), (32, 1), (32, 32)
+BLOCK_SIZES = [ROW, COL, BOTH]
 
 # Every activation the CuTeDSL backend implements; "desc" is the name it goes by in the
-# config key (Activation in common/util/cutedsl_utils.h). Gated variants are absent because
-# they go to a separate TE/common kernel that the backend does not cover.
+# config key (Activation in common/util/cutedsl_utils.h). Gated variants go to a separate kernel
+# and are covered by GATED_ACTIVATIONS below.
 IDENTITY = {"name": "Identity", "act": None, "dact": None, "dbias_dact": None, "desc": "none"}
 ACTIVATIONS = [
     {
@@ -250,31 +251,39 @@ def extract_quantized_output(out, rowwise, columnwise, swizzled):
     compared. Swizzled layout: the meaningful scales are scattered by the swizzle, so the
     top-left slice is meaningless; both backends zero the padding (see zero_scales_kernel),
     so compare the whole buffer instead -- which also covers the padding-zeroing itself.
+    FP8 -0.0 (0x80) is folded into +0.0: both backends round to zero there and may differ only
+    in its sign, which training does not depend on.
     """
     parts = {}
     if rowwise:
         d = out._rowwise_data.view(torch.uint8)
         M, N = d.shape
-        parts["rowwise data"] = d.clone()
+        parts["rowwise data"] = d.masked_fill(d == 0x80, 0)
         s = out._rowwise_scale_inv
         parts["rowwise scales"] = (s if swizzled else s[:M, : (N + 31) // 32]).clone()
     if columnwise:
         d = out._columnwise_data.view(torch.uint8)
         M, N = d.shape
-        parts["colwise data"] = d.clone()
+        parts["colwise data"] = d.masked_fill(d == 0x80, 0)
         s = out._columnwise_scale_inv
         parts["colwise scales"] = (s if swizzled else s[: (M + 31) // 32, :N]).clone()
     return parts
 
 
-def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False):
+def run_test_case(
+    method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False, input_offset=0
+):
     """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the
-    same input and config.
+    same input and config. input_offset (in elements) shifts x's data pointer past the
+    start of its allocation, to test misaligned inputs.
     """
     M, N = shape
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
     x, act_input = generate_inputs(M, N, in_dtype)
+    if input_offset:
+        buf = torch.empty(input_offset + M * N, dtype=in_dtype, device="cuda")
+        x = buf[input_offset:].view(M, N).copy_(x)
 
     set_cutedsl_backend(False)
     out_cuda, dbias_cuda = run_quantize(
@@ -370,3 +379,178 @@ def test_sizes(swizzled, method, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
     run_test_case(method, act, (256, 384), (32, 32), in_dtype, fp8_dtype, swizzled)
+
+
+# Cover the specialized kernels' shapes
+
+SPECIALIZED_PATH_CASES = [
+    # G2RRowwise2Lane: the four launch tiers (by output size) on the flat packed-scale view.
+    ("g2r_rowwise2lane_tier0", (1024, 4096), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier1", (4064, 4480), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier2", (8192, 8192), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier3", (16384, 8192), ROW, torch.bfloat16, False, 0),
+    # Swizzled scales use the 2-D grid instead of the flat view.
+    ("g2r_rowwise2lane_swizzled", (4096, 4096), ROW, torch.bfloat16, True, 0),
+    # Partial row and column tiles, and scale padding.
+    ("g2r_rowwise2lane_swizzled_partial", (160, 384), ROW, torch.bfloat16, True, 0),
+    # Row tiles past grid.y's limit spill into grid.z.
+    ("g2r_rowwise2lane_swizzled_grid_z", (524352, 128), ROW, torch.bfloat16, True, 0),
+    # G2RRowwise1Lane: input only 16-byte aligned, or fp16.
+    ("g2r_rowwise1lane_misaligned_bf16", (1024, 4096), ROW, torch.bfloat16, False, 8),
+    ("g2r_rowwise1lane_fp16", (1024, 4096), ROW, torch.float16, False, 0),
+    # G2RBidim: static N == 2048 / 4096, the wide tile with and without the
+    # deep cluster, and the narrow tile (N % 512 != 0).
+    ("g2r_bidim_n2048", (256, 2048), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_n2048_swizzled", (256, 2048), BOTH, torch.bfloat16, True, 0),
+    ("g2r_bidim_n4096_swizzled", (256, 4096), BOTH, torch.bfloat16, True, 0),
+    ("g2r_bidim_wide", (256, 6144), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_wide_cluster", (4096, 16384), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_narrow", (160, 2304), BOTH, torch.bfloat16, False, 0),
+    ("g2r_bidim_narrow_swizzled", (160, 2304), BOTH, torch.bfloat16, True, 0),
+    # M % 128 != 0: swizzled scale padding.
+    ("g2r_bidim_wide_swizzled_pad", (4128, 6144), BOTH, torch.bfloat16, True, 0),
+    # G2SBidim: fp16, or bf16 with N % 256 != 0.
+    ("g2s_bidim_fp16", (256, 1024), BOTH, torch.float16, False, 0),
+    ("g2s_bidim_bf16_n384", (256, 384), BOTH, torch.bfloat16, False, 0),
+]
+
+
+@pytest.mark.parametrize(
+    "shape,block_size,in_dtype,swizzled,input_offset",
+    [case[1:] for case in SPECIALIZED_PATH_CASES],
+    ids=[case[0] for case in SPECIALIZED_PATH_CASES],
+)
+def test_specialized_kernels(shape, block_size, in_dtype, swizzled, input_offset):
+    run_test_case(
+        "CAST_ONLY",
+        IDENTITY,
+        shape,
+        block_size,
+        in_dtype,
+        tex.DType.kFloat8E4M3,
+        swizzled,
+        input_offset,
+    )
+
+
+# Gated activations (gated_mxfp8.cuh). Input is [M, 2N] = [act | gate]; the forward writes
+# [M, N] and the backward, given grad [M, N], writes [M, 2N]. "desc" is the name the activation
+# goes by in the config key (GatedActivation in common/util/cutedsl_utils.h). The parameters of
+# the parameterized ones are chosen so that their clamps and tanh terms are active on the
+# [-2, 2] inputs generate_inputs draws.
+GATED_ACTIVATIONS = [
+    {"name": "GeGLU", "act": tex.geglu, "dact": tex.dgeglu, "desc": "geglu", "kwargs": {}},
+    {"name": "QGeGLU", "act": tex.qgeglu, "dact": tex.dqgeglu, "desc": "qgeglu", "kwargs": {}},
+    {"name": "ReGLU", "act": tex.reglu, "dact": tex.dreglu, "desc": "reglu", "kwargs": {}},
+    {"name": "SReGLU", "act": tex.sreglu, "dact": tex.dsreglu, "desc": "sreglu", "kwargs": {}},
+    {"name": "SwiGLU", "act": tex.swiglu, "dact": tex.dswiglu, "desc": "swiglu", "kwargs": {}},
+    {"name": "GLU", "act": tex.glu, "dact": tex.dglu, "desc": "glu", "kwargs": {}},
+    {
+        "name": "ClampedSwiGLU",
+        "act": tex.clamped_swiglu,
+        "dact": tex.clamped_dswiglu,
+        "desc": "clamped_swiglu",
+        "kwargs": {"limit": 1.0, "alpha": 1.702, "glu_linear_offset": 0.5},
+    },
+    {
+        "name": "SiTUGLU",
+        "act": tex.situglu,
+        "dact": tex.dsituglu,
+        "desc": "situglu",
+        "kwargs": {"beta1": 1.0, "beta2": 2.0},
+    },
+]
+get_gated_id = lambda a: a["name"]
+GATED_DIRECTIONS = [False, True]
+get_direction_id = lambda is_bwd: "bwd" if is_bwd else "fwd"
+
+
+def run_on_both_backends(run):
+    """Return (CUDA result, CuTeDSL result) of run(), with run() responsible for materializing
+    whatever it returns before the backend is switched."""
+    set_cutedsl_backend(False)
+    cuda_result = run()
+    set_cutedsl_backend(True)
+    try:
+        cutedsl_result = run()
+    finally:
+        set_cutedsl_backend(False)
+    return cuda_result, cutedsl_result
+
+
+def assert_cutedsl_kernel_registered(key):
+    """Guard against a silent CUDA fallback, which would make a cross-backend comparison compare
+    CUDA against itself."""
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
+        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+        "to CUDA and this case compared CUDA against itself"
+    )
+
+
+def get_gated_cfg_key(act, in_dtype, fp8_dtype, rowwise, colwise, swizzled, is_bwd):
+    """Mirror of MXFP8GatedQuantConfig::to_key (gated_mxfp8_cutedsl.cuh)."""
+    major, minor = device_compute_capability()
+    flags = (rowwise, colwise, swizzled, is_bwd)
+    return (
+        f"cutedsl_mxfp8_gated_sm{major * 10 + minor}_{DTYPE_TO_STR[in_dtype]}_"
+        f"{FP8_TO_KEY[fp8_dtype]}_"
+        + "_".join("1" if f else "0" for f in flags)
+        + f"_{act['desc']}"
+    )
+
+
+def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swizzled=False):
+    """Assert the CuTeDSL and CUDA backends produce bit-identical gated activation outputs.
+    shape is (M, N): the gated input is [M, 2N].
+    """
+    M, N = shape
+    if is_bwd and swizzled:
+        pytest.skip("CuTeDSL hands backward gated activations with GEMM-swizzled scales to CUDA")
+    rowwise = block_size[1] != 1
+    columnwise = block_size[0] != 1
+    x, _ = generate_inputs(M, 2 * N, in_dtype)
+    grad, _ = generate_inputs(M, N, in_dtype, seed=1)
+
+    def run():
+        q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+        q.optimize_for_gemm = swizzled
+        if is_bwd:
+            out = act["dact"](grad, x, q, **act["kwargs"])
+        else:
+            out = act["act"](x, q, **act["kwargs"])
+        return extract_quantized_output(out, rowwise, columnwise, swizzled)
+
+    cuda_output, cutedsl_output = run_on_both_backends(run)
+    assert_cutedsl_kernel_registered(
+        get_gated_cfg_key(act, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, is_bwd)
+    )
+
+    layout = "swizzled" if swizzled else "linear"
+    tag = (
+        f"{act['name']}/{get_direction_id(is_bwd)}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/"
+        f"{FP8_TO_STR[fp8_dtype]}/{layout}"
+    )
+    for name, cuda_bytes in cuda_output.items():
+        assert torch.equal(
+            cutedsl_output[name], cuda_bytes
+        ), f"{tag}: {name} differ between backends"
+
+
+@pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("act", GATED_ACTIVATIONS, ids=get_gated_id)
+@pytest.mark.parametrize("is_bwd", GATED_DIRECTIONS, ids=get_direction_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_gated_sizes(swizzled, is_bwd, act, block_size, shape):
+    run_gated_test_case(
+        act, is_bwd, shape, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled
+    )
+
+
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+@pytest.mark.parametrize("act", GATED_ACTIVATIONS, ids=get_gated_id)
+@pytest.mark.parametrize("is_bwd", GATED_DIRECTIONS, ids=get_direction_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_gated_dtypes(swizzled, is_bwd, act, fp8_dtype, in_dtype):
+    run_gated_test_case(act, is_bwd, (256, 384), BOTH, in_dtype, fp8_dtype, swizzled)

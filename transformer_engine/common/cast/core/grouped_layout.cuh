@@ -36,39 +36,66 @@ inline bool full_tile_1D_tensor(const Tensor *const t, const size_t elems_per_bl
 namespace kernel {
 
 constexpr size_t THREADS_PER_BLOCK = 256;
-template <int nvec, typename OType>
-__global__ void __launch_bounds__(THREADS_PER_BLOCK)
+
+//! Threads per CTA of reduce_dbias_kernel, one column each.
+constexpr int REDUCE_DBIAS_THREADS = 64;
+//! Rows of a column copied into shared memory per pipeline stage.
+constexpr int REDUCE_DBIAS_STAGE_ROWS = 32;
+//! Pipeline stages: while one stage is added up, the others are in flight.
+constexpr int REDUCE_DBIAS_STAGES = 4;
+
+/*! \brief dbias[c] = sum over rows r of partial[r][c], added in row order from 0.
+ *
+ *  The adds of a column form one sequential chain, so the result does not depend on how the
+ *  work is split; what the split decides is how many loads are in flight. One thread per
+ *  column copies its column into shared memory with cp.async, REDUCE_DBIAS_STAGE_ROWS rows per
+ *  stage and REDUCE_DBIAS_STAGES stages deep, and adds each stage in row order once it has
+ *  landed. A thread reads back only the rows it copied itself, so no barrier is needed.
+ */
+template <typename OType>
+__global__ void __launch_bounds__(REDUCE_DBIAS_THREADS)
     reduce_dbias_kernel(OType *const dbias_output, const float *const dbias_partial,
                         const size_t rows, const size_t cols) {
-  using ComputeVec = Vec<float, nvec>;
-  using OutputVec = Vec<OType, nvec>;
-
-  const size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-
-  if (thread_id * nvec >= cols) {
+  __shared__ float stages[REDUCE_DBIAS_STAGES][REDUCE_DBIAS_STAGE_ROWS][REDUCE_DBIAS_THREADS];
+  const size_t col = static_cast<size_t>(blockIdx.x) * REDUCE_DBIAS_THREADS + threadIdx.x;
+  if (col >= cols) {
     return;
   }
+  const float *in = dbias_partial + col;
+  const size_t num_stages = (rows + REDUCE_DBIAS_STAGE_ROWS - 1) / REDUCE_DBIAS_STAGE_ROWS;
 
-  const float *const thread_in_base = dbias_partial + thread_id * nvec;
-  OType *const thread_out_base = dbias_output + thread_id * nvec;
-
-  ComputeVec ldg_vec;
-  ComputeVec acc_vec;
-  acc_vec.clear();
-  for (int i = 0; i < rows; ++i) {
-    ldg_vec.load_from(thread_in_base + i * cols);
-#pragma unroll
-    for (int e = 0; e < nvec; ++e) {
-      acc_vec.data.elt[e] += ldg_vec.data.elt[e];
+  // Copies stage k of this thread's column into its slot of stages[k % REDUCE_DBIAS_STAGES], and
+  // commits it as one cp.async group; past the last stage it commits an empty group, so that
+  // every iteration below can wait for the same number of groups.
+  const auto issue = [&](const size_t k) {
+    if (k < num_stages) {
+      const size_t r0 = k * REDUCE_DBIAS_STAGE_ROWS;
+      const int n = static_cast<int>(min(static_cast<size_t>(REDUCE_DBIAS_STAGE_ROWS), rows - r0));
+      float(*dst)[REDUCE_DBIAS_THREADS] = stages[k % REDUCE_DBIAS_STAGES];
+      for (int i = 0; i < n; ++i) {
+        const uint32_t dst_addr =
+            static_cast<uint32_t>(__cvta_generic_to_shared(&dst[i][threadIdx.x]));
+        asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(dst_addr),
+                     "l"(in + (r0 + i) * cols)
+                     : "memory");
+      }
     }
-  }
+    asm volatile("cp.async.commit_group;\n" ::: "memory");
+  };
 
-  OutputVec stg_vec;
 #pragma unroll
-  for (int e = 0; e < nvec; ++e) {
-    stg_vec.data.elt[e] = static_cast<OType>(acc_vec.data.elt[e]);
+  for (int k = 0; k < REDUCE_DBIAS_STAGES - 1; ++k) issue(k);
+  float acc = 0.0f;
+  for (size_t k = 0; k < num_stages; ++k) {
+    issue(k + REDUCE_DBIAS_STAGES - 1);
+    // All but the REDUCE_DBIAS_STAGES - 1 most recent groups are complete: stage k has landed.
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(REDUCE_DBIAS_STAGES - 1) : "memory");
+    const size_t r0 = k * REDUCE_DBIAS_STAGE_ROWS;
+    const int n = static_cast<int>(min(static_cast<size_t>(REDUCE_DBIAS_STAGE_ROWS), rows - r0));
+    const float(*src)[REDUCE_DBIAS_THREADS] = stages[k % REDUCE_DBIAS_STAGES];
+    for (int i = 0; i < n; ++i) acc += src[i][threadIdx.x];
   }
-  stg_vec.store_to(thread_out_base);
+  dbias_output[col] = static_cast<OType>(acc);
 }
 
 template <int nvec, typename OType>
@@ -131,11 +158,10 @@ void reduce_dbias(const float *workspace_ptr, Tensor *dbias, const size_t rows, 
   constexpr size_t reduce_dbias_nvec = reduce_dbias_store_bytes / sizeof(IType);
 
   NVTE_CHECK(cols % reduce_dbias_nvec == 0, "Unsupported shape.");
-  const size_t reduce_dbias_num_blocks = DIVUP(cols, THREADS_PER_BLOCK * reduce_dbias_nvec);
+  const size_t num_blocks = DIVUP(cols, static_cast<size_t>(REDUCE_DBIAS_THREADS));
 
-  reduce_dbias_kernel<reduce_dbias_nvec, IType>
-      <<<reduce_dbias_num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-          reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, rows, cols);
+  reduce_dbias_kernel<IType><<<num_blocks, REDUCE_DBIAS_THREADS, 0, stream>>>(
+      reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, rows, cols);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

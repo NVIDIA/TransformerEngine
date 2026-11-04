@@ -17,6 +17,7 @@
 
 #include "../../common.h"
 #include "../../tvm_ffi_bridge.h"
+#include "../../util/activation_table.cuh"
 #include "../../util/cutedsl_utils.h"
 #include "../core/common.cuh"  // dispatch::common::reduce_dbias
 #include "quantize_mxfp8.cuh"  // dispatch::mxfp8::quantize_kernel::zero_scales_kernel
@@ -41,16 +42,21 @@ struct MXFP8QuantConfig {
   bool with_act = false;             // If an activation operation is fused
   bool use_2d_quantization = false;  // If use 2D quantization
   Activation activation = Activation::kNone;
+  // The activation table layout the kernel reads (see util/activation_table.cuh): kNoTable,
+  // kDefaultTable or kExactDsiluTable.
+  activation_table::TableUse activation_table = activation_table::kNoTable;
   uint32_t sm_arch = static_cast<uint32_t>(cuda::sm_arch());
 
   // Bit layout: dtype [3:0] (4 used/reserved), fp8_dtype [7:4] (4 used/reserved),
-  // flags [15:8] (8 used/reserved), activation [21:16] (6 used/reserved), and
-  // SM architecture [30:22] (9 used/reserved). Bit 31 is unused.
+  // flags [15:8] (8 used/reserved), activation [19:16] (4 used/reserved), activation table
+  // [21:20] (2 used/reserved) and SM architecture [30:22] (9 used/reserved). Bit 31 is unused.
   uint32_t to_id() const {
     static_assert(static_cast<uint32_t>(DType::kNumTypes) <= 16,
                   "DType no longer fits in the 4 bits to_id() gives it.");
-    static_assert(static_cast<uint32_t>(Activation::kNumTypes) <= 64,
-                  "Activation no longer fits in the 6 bits to_id() gives it.");
+    static_assert(static_cast<uint32_t>(Activation::kNumTypes) <= 16,
+                  "Activation no longer fits in the 4 bits to_id() gives it.");
+    NVTE_CHECK(static_cast<uint32_t>(activation_table) < 4,
+               "Activation table use no longer fits in the 2 bits to_id() gives it.");
     NVTE_CHECK(sm_arch < 512, "SM architecture no longer fits in the 9 bits to_id() gives it.");
     return static_cast<uint32_t>(dtype) | (static_cast<uint32_t>(fp8_dtype) << 4) |
            (static_cast<uint32_t>(rowwise) << 8) | (static_cast<uint32_t>(colwise) << 9) |
@@ -58,7 +64,20 @@ struct MXFP8QuantConfig {
            (static_cast<uint32_t>(with_dbias) << 12) | (static_cast<uint32_t>(with_dact) << 13) |
            (static_cast<uint32_t>(with_act) << 14) |
            (static_cast<uint32_t>(use_2d_quantization) << 15) |
-           (static_cast<uint32_t>(activation) << 16) | (sm_arch << 22);
+           (static_cast<uint32_t>(activation) << 16) |
+           (static_cast<uint32_t>(activation_table) << 20) | (sm_arch << 22);
+  }
+
+  //! The activation table layout as the CuTeDSL config names it.
+  const char *activation_table_str() const {
+    switch (activation_table) {
+      case activation_table::kDefaultTable:
+        return "default";
+      case activation_table::kExactDsiluTable:
+        return "exact";
+      default:
+        return "none";
+    }
   }
 
   std::optional<tvm::ffi::Function> get_kernel() const {
@@ -95,6 +114,10 @@ struct MXFP8QuantConfig {
         .append(use_2d_quantization ? "1" : "0")
         .append("_")
         .append(activation_to_str(activation));
+    // Kernels that read a table carry its layout in the name; the rest keep their names.
+    if (activation_table != activation_table::kNoTable) {
+      key.append("_table_").append(activation_table_str());
+    }
     return key;
   }
 
@@ -106,17 +129,19 @@ struct MXFP8QuantConfig {
     tvm::ffi::Any result = (*entrypoint)(
         tvm::ffi::String(fn_name), tvm::ffi::String(to_string(dtype)),
         tvm::ffi::String(to_string(fp8_dtype)), rowwise, colwise, swizzled, with_amax, with_dbias,
-        with_dact, with_act, use_2d_quantization, tvm::ffi::String(activation_to_str(activation)));
+        with_dact, with_act, use_2d_quantization, tvm::ffi::String(activation_to_str(activation)),
+        tvm::ffi::String(activation_table_str()));
     return result.try_cast<bool>().value_or(false);
   }
 };
 
 // Signature mirrors mxfp8::quantize (input, act_input, noop, output, dbias,
-// workspace, stream). Returns false to fall back to the CUDA kernel.
+// workspace, activation table, stream). Returns false to fall back to the CUDA kernel.
 inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor *input_tensor,
                                    const Tensor *act_input_tensor, const Tensor *noop_tensor,
                                    Tensor *output_tensor, Tensor *dbias_tensor,
-                                   Tensor *workspace_tensor, cudaStream_t stream) {
+                                   Tensor *workspace_tensor, const void *activation_table_ptr,
+                                   cudaStream_t stream) {
   const size_t flat_m = input_tensor->flat_first_dim();
   const size_t flat_n = input_tensor->flat_last_dim();
   if (flat_n % 16 != 0) {
@@ -206,9 +231,10 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     mActInput = tvm_ffi_bridge::DLTensorWrapper(act_input_tensor->data, true, device_index);
   if (workspace_tensor != nullptr && workspace_tensor->data.dptr != nullptr)
     mWorkspace = tvm_ffi_bridge::DLTensorWrapper(workspace_tensor->data, true, device_index);
-  // noop and stream are tvm-ffi opaque "handles"; pass them as void*.
+  // noop, the activation table and stream are tvm-ffi opaque "handles"; pass them as void*.
   (*mxfp8_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmax, noop_ptr, &mActInput,
-                          &mWorkspace, static_cast<void *>(stream));
+                          &mWorkspace, const_cast<void *>(activation_table_ptr),
+                          static_cast<void *>(stream));
 
   // If WITH_DBIAS, reduce the workspace partial dbias in CUDA C++ for now.
   // This will not be affected by the noop flag, which is aligned with the CUDA C++ implementation
@@ -227,7 +253,7 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_tensor,
                             const Tensor *noop_tensor, Tensor *output_tensor, Tensor *dbias_tensor,
                             Tensor *workspace_tensor, const bool use_2d_quantization,
-                            cudaStream_t stream) {
+                            const activation_table::TableRef &activation_lut, cudaStream_t stream) {
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
     maybe_warn_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
     return false;
@@ -248,7 +274,8 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
                                 /*with_dact=*/IS_DACT,
                                 /*with_act=*/IS_ACT,
                                 /*use_2d_quantization=*/use_2d_quantization,
-                                /*activation=*/activation_func_to_enum<ParamOP, OP>()};
+                                /*activation=*/activation_func_to_enum<ParamOP, OP>(),
+                                /*activation_table=*/activation_lut.use};
   // Sanity checks, mirroring mxfp8::quantize in quantize_mxfp8.cuh
   if (config.rowwise) {
     NVTE_CHECK(output_tensor->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
@@ -269,7 +296,7 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
     NVTE_CHECK(workspace_tensor != nullptr, "Workspace must be a tensor.");
   }
   return mxfp8_quantize_cutedsl(config, input_tensor, act_input_tensor, noop_tensor, output_tensor,
-                                dbias_tensor, workspace_tensor, stream);
+                                dbias_tensor, workspace_tensor, activation_lut.ptr, stream);
 }
 
 }  // namespace cutedsl_backend
