@@ -727,9 +727,7 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::obje
                                                     /*check_scale_inv_shapes=*/false);
 }
 
-namespace {
-
-void inplace_swizzle_scale_for_gemm_impl(TensorWrapper &tensor_nvte, py::handle tensor) {
+void inplace_swizzle_scale_for_gemm(TensorWrapper &tensor_nvte, py::handle tensor) {
   // Return early if scale swizzling is not required
   const auto scaling_mode = tensor_nvte.scaling_mode();
   switch (scaling_mode) {
@@ -785,17 +783,9 @@ void inplace_swizzle_scale_for_gemm_impl(TensorWrapper &tensor_nvte, py::handle 
   }
 }
 
-}  // namespace
-
-void Quantizer::optimize_tensor_for_gemm(TensorWrapper &tensor, py::handle tensor_py) const {
-  if (optimize_for_gemm && !tensor.get_with_gemm_swizzled_scales()) {
-    inplace_swizzle_scale_for_gemm_impl(tensor, tensor_py);
-  }
-}
-
 void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   auto tensor_nvte = makeTransformerEngineTensor(tensor, py::none());
-  inplace_swizzle_scale_for_gemm_impl(tensor_nvte, tensor);
+  inplace_swizzle_scale_for_gemm(tensor_nvte, tensor);
 }
 
 }  // namespace pytorch

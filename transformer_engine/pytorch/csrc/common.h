@@ -131,12 +131,10 @@ class Quantizer {
   virtual std::pair<TensorWrapper, py::object> convert_and_update_tensor(
       py::object tensor) const = 0;
 
-  /*! @brief Convert to a quantized data format */
+  /*! @brief Quantize, optionally deferring standalone swizzle to batch finalization. */
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
-                        const std::optional<TensorWrapper>& noop_flag = std::nullopt) = 0;
-
-  /*! @brief Apply the requested GEMM scale layout to a computed tensor. */
-  void optimize_tensor_for_gemm(TensorWrapper& tensor, py::handle tensor_py) const;
+                        py::handle out_py, const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                        bool defer_swizzle = false) = 0;
 
   virtual ~Quantizer() = default;
 
@@ -177,7 +175,8 @@ class NoneQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                py::handle out_py, const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                bool defer_swizzle = false) override;
 };
 
 class Float8Quantizer : public Quantizer {
@@ -212,7 +211,8 @@ class Float8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                py::handle out_py, const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                bool defer_swizzle = false) override;
 };
 
 class Float8CurrentScalingQuantizer : public Quantizer {
@@ -252,7 +252,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                py::handle out_py, const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                bool defer_swizzle = false) override;
 
   /*! @brief Quantize to FP8, skipping local amax computation
    *
@@ -308,7 +309,8 @@ class Float8BlockQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                py::handle out_py, const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                bool defer_swizzle = false) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
@@ -337,7 +339,8 @@ class MXFP8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+                py::handle out_py, const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                bool defer_swizzle = false) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
@@ -397,9 +400,11 @@ class NVFP4Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
-  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
+                py::handle out_py, const std::optional<TensorWrapper>& noop_flag = std::nullopt,
+                bool defer_swizzle = false) override;
+  void quantize_impl(const TensorWrapper& input, TensorWrapper& out, py::handle out_py,
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax,
+                     bool defer_swizzle = false);
 
   /*! @brief Quantize to NVFP4, skipping local amax computation
    *
@@ -407,7 +412,7 @@ class NVFP4Quantizer : public Quantizer {
    * local amax. The amax may still be reduced across the amax
    * reduction group.
    */
-  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out);
+  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out, py::handle out_py);
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 

@@ -59,7 +59,9 @@ void optimize_tensors_for_gemm(const std::vector<std::unique_ptr<Quantizer>> &qu
       });
   if (!use_batch) {
     for (size_t i = 0; i < tensors.size(); ++i) {
-      quantizers[i]->optimize_tensor_for_gemm(tensors[i], tensors_py[i]);
+      if (quantizers[i]->optimize_for_gemm) {
+        inplace_swizzle_scale_for_gemm(tensors[i], tensors_py[i]);
+      }
     }
     return;
   }
@@ -138,9 +140,8 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   }
 
   // Perform quantization
-  quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
+  quantizer_cpp->quantize(input_cpp, output_cpp, output_py, noop_flag_cpp);
 
-  quantizer_cpp->optimize_tensor_for_gemm(output_cpp, output_py);
 
   return output_py;
 }
@@ -182,8 +183,7 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
     output_py.attr("_amax_columnwise") = py::cast(columnwise_amax);
   }
 
-  nvfp4_quantizer_cpp->quantize_impl(input_cpp, output_cpp, std::nullopt, false);
-  quantizer_cpp->optimize_tensor_for_gemm(output_cpp, output_py);
+  nvfp4_quantizer_cpp->quantize_impl(input_cpp, output_cpp, output_py, std::nullopt, false);
 
   return output_py;
 }
@@ -1134,7 +1134,8 @@ namespace {
 void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
                                 std::vector<py::handle> &quantizer_py_list,
                                 std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
-                                std::vector<TensorWrapper> &output_list) {
+                                std::vector<TensorWrapper> &output_list,
+                                const std::vector<py::object> &output_py_list) {
   // Check number of tensors
   const size_t num_tensors = input_list.size();
   NVTE_CHECK(quantizer_py_list.size() == num_tensors, "Expected ", num_tensors,
@@ -1175,7 +1176,8 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
   } else {
     // Quantize kernels individually
     for (size_t i = 0; i < num_tensors; ++i) {
-      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i]);
+      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i], output_py_list[i],
+                                      std::nullopt, /*defer_swizzle=*/true);
     }
   }
 }
@@ -1216,7 +1218,8 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
   }
 
   // Perform multi-tensor quantization
-  multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+  multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list,
+                             output_py_list);
 
   optimize_tensors_for_gemm(quantizer_cpp_list, output_cpp_list, output_py_list);
   return output_py_list;
@@ -2089,6 +2092,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
 void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                const std::vector<TensorWrapper> &input_list,
                                std::vector<TensorWrapper> &output_list,
+                               const std::vector<py::object> &output_py_list,
                                const std::vector<size_t> &split_sections,
                                const std::vector<NVFP4Quantizer *> &quantizers) {
   // Check tensor lists
@@ -2160,7 +2164,8 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
           if (input_list[i].numel() == 0) {
             continue;
           }
-          quantizers[i]->quantize(input_list[i], output_list[i], std::nullopt);
+          quantizers[i]->quantize(input_list[i], output_list[i], output_py_list[i], std::nullopt,
+                                   /*defer_swizzle=*/true);
         }
       }
     } else {  // NVFP4 quantize
@@ -2328,13 +2333,14 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (auto &quantizer : quantizer_cpp_list) {
         nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
       }
-      split_quantize_nvfp4_impl(input_nvte, input_list, output_cpp_list, split_sections,
-                                nvfp4_quantizers);
+      split_quantize_nvfp4_impl(input_nvte, input_list, output_cpp_list, output_py_list,
+                                split_sections, nvfp4_quantizers);
       break;
     }
     default:
       // General multi-tensor quantization
-      multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+      multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list,
+                                 output_py_list);
   }
 
   optimize_tensors_for_gemm(quantizer_cpp_list, output_cpp_list, output_py_list);

@@ -69,7 +69,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
             act_func(input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        quantizer_cpp->quantize(temp_nvte, out_nvte);
+        quantizer_cpp->quantize(temp_nvte, out_nvte, out_py);
       }
       break;
     case Impl::FULLY_FUSED:
@@ -118,14 +118,13 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
             act_func(input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
+        nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte, out_py);
       }
       break;
     default:
       NVTE_ERROR("Invalid activation implementation (", static_cast<int>(impl), ")");
   }
 
-  quantizer_cpp->optimize_tensor_for_gemm(out_nvte, out_py);
   return out_py;
 }
 
@@ -186,7 +185,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
             dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        quantizer_cpp->quantize(temp_nvte, grad_input_nvte);
+        quantizer_cpp->quantize(temp_nvte, grad_input_nvte, grad_input_py);
       }
       break;
     case Impl::FULLY_FUSED:
@@ -235,14 +234,13 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
             dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
+        nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte, grad_input_py);
       }
       break;
     default:
       NVTE_ERROR("Invalid activation implementation (", static_cast<int>(impl), ")");
   }
 
-  quantizer_cpp->optimize_tensor_for_gemm(grad_input_nvte, grad_input_py);
   return grad_input_py;
 }
 }  // namespace
@@ -439,8 +437,7 @@ py::object maybe_quantize(const at::Tensor& tensor, py::handle quantizer) {
   const std::vector<size_t> shape(shape_te.data, shape_te.data + shape_te.ndim);
   auto fake_dtype = GetTransformerEngineDType(tensor.scalar_type());
   auto [out_nvte, out_py] = quantizer_cpp->create_tensor(shape, fake_dtype);
-  quantizer_cpp->quantize(tensor_nvte, out_nvte);
-  quantizer_cpp->optimize_tensor_for_gemm(out_nvte, out_py);
+  quantizer_cpp->quantize(tensor_nvte, out_nvte, out_py);
   return out_py;
 }
 
