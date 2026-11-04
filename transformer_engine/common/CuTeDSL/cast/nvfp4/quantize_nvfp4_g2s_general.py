@@ -14,7 +14,6 @@ import cutlass
 from cutlass import cute
 from cutlass import (
     BFloat16,
-    Float4E2M1FN,
     Float8E4M3FN,
     Float32,
     Int32,
@@ -25,28 +24,29 @@ from cutlass import (
 )
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
-from transformer_engine.common.CuTeDSL.cast.nvfp4.utils import (
-    NVFP4_BLOCK_SCALING_SIZE,
-    NVFP4_SCALE_PAD_INNER,
-    NVFP4_SCALE_PAD_OUTER,
+from transformer_engine.common.CuTeDSL.utils import (
+    abs_max_x2_bf16,
+    fabs_f32,
+    make_prmt_u32,
+    pack_u32x2,
+    x2_hi_to_f32_bf16,
+    x2_lo_to_f32_bf16,
+)
+from transformer_engine.common.CuTeDSL.utils_nvfp4 import (
     compute_block_decode_sf,
     compute_block_encode_sf,
     compute_global_encode_sf,
     cvt_f32x8_to_fp4x8,
     cvt_f32x8_to_fp4x8_sr,
-    make_prmt_u32,
     mul_cvt_bf16x8_to_fp4x8,
     mul_cvt_bf16x8_to_fp4x8_sr,
-    pack_u32x2,
-    validate_tensor,
 )
 from transformer_engine.common.CuTeDSL.philox_rng import PhiloxRng
-from .quantize_nvfp4_common import CUTEDSL_DEBUG_LOGGING, NVFP4QuantizeKernelBase, noop_flag_is_set
-from transformer_engine.common.CuTeDSL.utils import (
-    abs_max_x2_bf16,
-    fabs_f32,
-    x2_hi_to_f32_bf16,
-    x2_lo_to_f32_bf16,
+from .quantize_nvfp4_common import (
+    CUTEDSL_DEBUG_LOGGING,
+    NVFP4_BLOCK_SCALING_SIZE,
+    noop_flag_is_set,
+    NVFP4QuantizeKernelBase,
 )
 
 
@@ -137,48 +137,7 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
                 f"[CuTeDSL] NVFP4QuantizeGeneralG2SKernel.__call__() with config: {self.cfg}\n"
             )
 
-        ## Validation
-
-        # Validate input and output tensor layouts
         M, N = mX.shape
-        mX_layout = cute.make_ordered_layout((M, N), order=(1, 0))
-        mO_row_layout = mX_layout
-        mO_col_layout = cute.make_ordered_layout((N, M), order=(1, 0))
-        validate_tensor(mX, mX_layout, BFloat16)
-        validate_tensor(mO_row, mO_row_layout, Float4E2M1FN)
-        validate_tensor(mO_col, mO_col_layout, Float4E2M1FN)
-
-        # Validate scaling factor tensor layouts
-        mS_row_layout = cute.make_ordered_layout(
-            (
-                cute.round_up(M, NVFP4_SCALE_PAD_OUTER),
-                cute.round_up(cute.ceil_div(N, NVFP4_BLOCK_SCALING_SIZE), NVFP4_SCALE_PAD_INNER),
-            ),
-            order=(1, 0),
-        )
-        mS_col_layout = cute.make_ordered_layout(
-            (
-                cute.round_up(N, NVFP4_SCALE_PAD_OUTER),
-                cute.round_up(cute.ceil_div(M, NVFP4_BLOCK_SCALING_SIZE), NVFP4_SCALE_PAD_INNER),
-            ),
-            order=(1, 0),
-        )
-        validate_tensor(mS_row, mS_row_layout, Float8E4M3FN)
-        validate_tensor(mS_col, mS_col_layout, Float8E4M3FN)
-
-        # Validate amax tensor layouts
-        if cutlass.const_expr(self.cfg.ROW_SCALED_NVFP4):
-            mAmaxRow_layout = cute.make_layout((M,))
-            validate_tensor(mAmaxRow, mAmaxRow_layout, Float32)
-        else:
-            mAmaxRow_layout = cute.make_layout((1,))
-            validate_tensor(mAmaxRow, mAmaxRow_layout, Float32)
-        mAmaxCol_layout = cute.make_layout((1,))
-        validate_tensor(mAmaxCol, mAmaxCol_layout, Float32)
-
-        # Validate RNG state tensor layout
-        mRngState_layout = cute.make_layout((2,))
-        validate_tensor(mRngState, mRngState_layout, Int64)
 
         ## TMA descriptors
         # The FP4 outputs are moved as bytes: two elements to a byte, so the byte view of the
@@ -300,7 +259,7 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
         if cutlass.const_expr(cfg.RETURN_TRANSPOSE):
 
             @cute.struct
-            class SharedStorage:
+            class SharedStorage:  # pylint: disable=missing-class-docstring
                 mbar_storage: cute.struct.MemRange[cute.Int64, self.NUM_BUFFERS]
                 sX: cute.struct.Align[
                     cute.struct.MemRange[BFloat16, TILE * TILE * self.NUM_BUFFERS], 128
@@ -323,7 +282,7 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
         else:
 
             @cute.struct
-            class SharedStorage:
+            class SharedStorage:  # pylint: disable=missing-class-docstring
                 mbar_storage: cute.struct.MemRange[cute.Int64, self.NUM_BUFFERS]
                 sX: cute.struct.Align[
                     cute.struct.MemRange[BFloat16, TILE * TILE * self.NUM_BUFFERS], 128
@@ -341,10 +300,12 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
         storage = smem.allocate(SharedStorage)
 
         # Create views into the shared memory
-        buffered_tile = lambda inner_cols: cute.make_layout(
-            ((TILE, inner_cols), self.NUM_BUFFERS),
-            stride=((inner_cols, 1), TILE * inner_cols),
-        )
+        def buffered_tile(inner_cols):
+            return cute.make_layout(
+                ((TILE, inner_cols), self.NUM_BUFFERS),
+                stride=((inner_cols, 1), TILE * inner_cols),
+            )
+
         sX = storage.sX.get_tensor(buffered_tile(TILE))
         sO_row = storage.sO_row.get_tensor(buffered_tile(TILE // 2))
         sS_row = storage.sS_row.get_tensor(
@@ -676,9 +637,10 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
                     if cutlass.const_expr(cfg.USE_STOCHASTIC_ROUNDING):
                         rbits03 = rng.get_rbits()
                         rbits47 = rng.get_rbits()
+                        # pylint: disable-next=no-value-for-parameter
                         out = cvt_f32x8_to_fp4x8_sr(*scaled, rbits03, rbits47)
                     else:
-                        out = cvt_f32x8_to_fp4x8(*scaled)
+                        out = cvt_f32x8_to_fp4x8(*scaled)  # pylint: disable=no-value-for-parameter
                 sO_u32[row * u32_per_row + group] = out
 
     @cute.jit
@@ -795,10 +757,14 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
                         rbits03 = rng.get_rbits()
                         rbits47 = rng.get_rbits()
                         outs.append(
-                            cvt_f32x8_to_fp4x8_sr(*scaled[8 * e : 8 * e + 8], rbits03, rbits47)
+                            cvt_f32x8_to_fp4x8_sr(
+                                *scaled[8 * e : 8 * e + 8], rbits03, rbits47
+                            )  # pylint: disable=no-value-for-parameter
                         )
                     else:
-                        outs.append(cvt_f32x8_to_fp4x8(*scaled[8 * e : 8 * e + 8]))
+                        outs.append(
+                            cvt_f32x8_to_fp4x8(*scaled[8 * e : 8 * e + 8])
+                        )  # pylint: disable=no-value-for-parameter
 
             sO_u64[(2 * lane + w) * u64_per_row + tid_y] = pack_u32x2(outs[0], outs[1])
 
@@ -833,7 +799,7 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
             cute.make_layout((self.SCALES_PER_CHUNK_X // 4,), stride=(1,)),
         )
         # A u32 view of the scale tensor: its padded inner extent (= the row stride) is a
-        # multiple of NVFP4_SCALE_PAD_INNER = 4, so rows stay u32-aligned, and a chunk's first
+        # multiple of NVFP4_SCALE_PAD_COLS = 4, so rows stay u32-aligned, and a chunk's first
         # scale column is a multiple of SCALES_PER_CHUNK_X.
         scale_stride = cute.size(mS.shape[1])
         mS_u32 = cute.make_tensor(

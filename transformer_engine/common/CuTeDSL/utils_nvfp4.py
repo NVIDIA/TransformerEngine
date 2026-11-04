@@ -2,81 +2,30 @@
 #
 # See LICENSE for license information.
 
-"""Constants, scaling math, and E2M1 conversion helpers for NVFP4 kernels."""
-
-from typing import Optional
+"""NVFP4 scaling math and E2M1 conversion helpers for the CuTeDSL kernels."""
 
 import cutlass
 from cutlass import cute
-from cutlass import BFloat16, Boolean, Float32, Float8E4M3FN, Int32, Int64, Uint32, Uint64
-from cutlass._mlir.dialects import arith as mlir_arith
+from cutlass import BFloat16, Float32, Float8E4M3FN, Int64, Uint32
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 
-FLOAT32_MAX = 3.4028234663852886e38
-BFLOAT16_MAX = 3.3895313892515355e38
-FLOAT8E4M3_MAX = 448.0
-FLOAT4E2M1_MAX = 6.0
+from transformer_engine.common.CuTeDSL.utils import (
+    BFLOAT16_MAX,
+    FLOAT32_MAX,
+    abs_max_tree_bf16x2,
+    rcp_rn_f32,
+    select_f32,
+    swap_halves_b32,
+)
+from transformer_engine.common.CuTeDSL.utils_fp8 import (
+    FP8E4M3_MAX_NORM,
+    cvt_f32_to_fp8e4m3_code,
+    cvt_fp8e4m3_code_to_f32,
+)
 
-# Number of elements per NVFP4 scale block (they share one E4M3 scale factor).
-NVFP4_BLOCK_SCALING_SIZE = 16
-# Input row/col divisibility the CUDA tuned-1D kernel requires (16B TMA alignment).
-NVFP4_SHAPE_ALIGNMENT = 32
-# Padding TE applies to the scale tensors' outer / inner dim (NVFP4Quantizer::get_scale_shape).
-NVFP4_SCALE_PAD_OUTER = 128
-NVFP4_SCALE_PAD_INNER = 4
-
-
-# Runs if CUTE_DSL_ENABLE_ASSERTIONS=1 or --enable-assertions present in cute.compile
-def validate_tensor(tensor: Optional[cute.Tensor], expected_layout: cute.Layout, expected_dtype):
-    """Assert at trace time that an optional tensor has the expected layout and dtype."""
-    if tensor is None:
-        return
-    cute.testing.assert_(tensor.layout == expected_layout, "Tensor layout does not match")
-    cute.testing.assert_(tensor.element_type == expected_dtype, "Tensor dtype does not match")
-
-
-@dsl_user_op
-def select_f32(cond: Boolean, if_true: Float32, if_false: Float32, *, loc=None, ip=None) -> Float32:
-    """`cond ? if_true : if_false` as one select, never a branch."""
-    return Float32(
-        mlir_arith.select(
-            cond.ir_value(loc=loc, ip=ip),
-            if_true.ir_value(loc=loc, ip=ip),
-            if_false.ir_value(loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-@cute.jit
-def pack_u32x2(lo: Uint32, hi: Uint32) -> Int64:
-    """Pack two u32 into one 64-bit register (register-pair move, no real instruction)."""
-    return cute.arch.inline_ptx(
-        "mov.b64 {$w0}, {{$r0}, {$r1}};",
-        write_only_types=[Int64],
-        read_only_args=[lo, hi],
-    )
-
-
-def make_prmt_u32(selector: int):
-    """A byte-permute op with the 16-bit selector baked in as an immediate.
-
-    prmt.b32 indexes the eight source bytes {a0..a3, b0..b7} and each selector nibble picks the
-    byte for one destination position, low nibble first. 0x5410 interleaves the low halves of a
-    and b (a0 a1 b0 b1), 0x7632 the high halves.
-    """
-
-    @cute.jit
-    def prmt_u32(a: Uint32, b: Uint32) -> Uint32:
-        return cute.arch.inline_ptx(
-            f"prmt.b32 {{$w0}}, {{$r0}}, {{$r1}}, {selector:#x};",
-            write_only_types=[Uint32],
-            read_only_args=[a, b],
-        )
-
-    return prmt_u32
+# Largest finite E2M1 value.
+FP4E2M1_MAX_NORM = 6.0
 
 
 @cute.jit
@@ -87,7 +36,7 @@ def compute_global_encode_sf(global_amax: Float32) -> Float32:
     row-scaled configuration evaluates this per scaling block and the DSL lowers a dynamic `if`
     to real divergent branches where the CUDA kernel's ternary gets predicated selects.
     """
-    global_encode_scale = FLOAT8E4M3_MAX * FLOAT4E2M1_MAX / global_amax
+    global_encode_scale = FP8E4M3_MAX_NORM * FP4E2M1_MAX_NORM / global_amax
     global_encode_scale = cute.arch.fmin(global_encode_scale, FLOAT32_MAX)
     degenerate = (global_amax == 0.0) | (global_encode_scale == 0.0)
     return select_f32(degenerate, Float32(1.0), global_encode_scale)
@@ -96,7 +45,7 @@ def compute_global_encode_sf(global_amax: Float32) -> Float32:
 @cute.jit
 def compute_block_decode_sf(block_amax: Float32, global_encode_sf: Float32) -> Float8E4M3FN:
     "like quantization_and_transposition_SF::compute_decoding_scaling_factor in core_nvfp4.cuh"
-    block_decode_sf = block_amax * (global_encode_sf * (1.0 / FLOAT4E2M1_MAX))
+    block_decode_sf = block_amax * (global_encode_sf * (1.0 / FP4E2M1_MAX_NORM))
     block_decode_sf = cute.arch.fmin(block_decode_sf, FLOAT32_MAX)
     return block_decode_sf.to(Float8E4M3FN)
 
@@ -113,12 +62,11 @@ def compute_block_encode_sf(
         block_encode_sf = 1.0 / (block_decode_sf.to(Float32) * global_decode_sf)
         block_encode_sf = cute.arch.fmin(block_encode_sf, FLOAT32_MAX)
         return block_encode_sf
-    elif cutlass.const_expr(sf_type == BFloat16):
+    if cutlass.const_expr(sf_type == BFloat16):
         block_encode_sf = global_encode_sf / block_decode_sf.to(Float32)
         block_encode_sf = cute.arch.fmin(block_encode_sf, BFLOAT16_MAX)
         return block_encode_sf.to(BFloat16)
-    else:
-        raise ValueError("Unsupported scaling-factor type. Only FP32 and BF16 are supported.")
+    raise ValueError("Unsupported scaling-factor type. Only FP32 and BF16 are supported.")
 
 
 @dsl_user_op
@@ -365,120 +313,7 @@ def mul_cvt_bf16x8_to_fp4x8_sr(
     )
 
 
-# --- Register-resident kernels: global memory access by address ---
-#
-# The register kernels address global memory with 64-bit byte addresses rather than through
-# layouts: every access is one row offset from a thread-constant base, and the cache hints and
-# vector widths below are part of what makes them fast.
-
-
-def _vec(prefix: str, count: int) -> str:
-    return "{" + ", ".join(f"{{${prefix}{i}}}" for i in range(count)) + "}"
-
-
-@cute.jit
-def row_offset(row: Int32, pitch: Int32) -> Int64:
-    """row * pitch for non-negative 32-bit operands. A product of two zero-extended words lowers
-    to one IMAD.WIDE.U32; plain arithmetic rather than inline PTX, so ptxas can recompute an
-    address instead of keeping it live."""
-    return Int64(Uint64(Uint32(row)) * Uint64(Uint32(pitch)))
-
-
-@cute.jit
-def prefetch_l2(addr: Int64):
-    """Bring one global cache line into L2. Names no destination register, so it can be issued
-    ahead of a chain the thread is already stalled on."""
-    cute.arch.inline_ptx("prefetch.global.L2 [{$r0}];", read_only_args=[addr])
-
-
-@cute.jit
-def ld_global_nc_evict_first_v8(addr: Int64):
-    """32 bytes of input read once: read-only path, evicted first from L2. 32-byte aligned."""
-    return list(
-        cute.arch.inline_ptx(
-            "ld.global.nc.L2::evict_first.v8.b32 " + _vec("w", 8) + ", [{$r0}];",
-            write_only_types=[Uint32] * 8,
-            read_only_args=[addr],
-        )
-    )
-
-
-@cute.jit
-def ld_global_evict_last_v8(addr: Int64):
-    """32 bytes of input that is read again soon: coherent path (the read-only path would not
-    keep the line for the re-read) and kept in L2 until then. 32-byte aligned."""
-    return list(
-        cute.arch.inline_ptx(
-            "ld.global.L2::evict_last.v8.b32 " + _vec("w", 8) + ", [{$r0}];",
-            write_only_types=[Uint32] * 8,
-            read_only_args=[addr],
-        )
-    )
-
-
-@cute.jit
-def ld_global_v2(addr: Int64):
-    """8 bytes, 8-byte aligned."""
-    return list(
-        cute.arch.inline_ptx(
-            "ld.global.v2.b32 " + _vec("w", 2) + ", [{$r0}];",
-            write_only_types=[Uint32] * 2,
-            read_only_args=[addr],
-        )
-    )
-
-
-@cute.jit
-def unpack_u64(v: Int64):
-    """The (low, high) words of a 64-bit value."""
-    return cute.arch.inline_ptx(
-        "mov.b64 {{$w0}, {$w1}}, {$r0};", write_only_types=[Uint32, Uint32], read_only_args=[v]
-    )
-
-
-@cute.jit
-def st_global_u8(addr: Int64, value: Uint32):
-    """Store the low byte of value."""
-    cute.arch.inline_ptx("st.global.u8 [{$r0}], {$r1};", read_only_args=[addr, value])
-
-
-@cute.jit
-def st_global_u16(addr: Int64, value: Uint32):
-    """Store the low two bytes of value, 2-byte aligned."""
-    cute.arch.inline_ptx("st.global.u16 [{$r0}], {$r1};", read_only_args=[addr, value])
-
-
-@cute.jit
-def st_global_u32(addr: Int64, value: Uint32):
-    """4-byte aligned."""
-    cute.arch.inline_ptx("st.global.b32 [{$r0}], {$r1};", read_only_args=[addr, value])
-
-
-@cute.jit
-def st_global_v2(addr: Int64, w0: Uint32, w1: Uint32):
-    """8 bytes, 8-byte aligned."""
-    cute.arch.inline_ptx("st.global.v2.b32 [{$r0}], {{$r1}, {$r2}};", read_only_args=[addr, w0, w1])
-
-
-@cute.jit
-def st_global_v4(addr: Int64, words):
-    """16 bytes, 16-byte aligned."""
-    cute.arch.inline_ptx(
-        "st.global.v4.b32 [{$r0}], {{$r1}, {$r2}, {$r3}, {$r4}};",
-        read_only_args=[addr] + list(words),
-    )
-
-
-@cute.jit
-def st_global_v8(addr: Int64, words):
-    """32 bytes (one sector), 32-byte aligned."""
-    cute.arch.inline_ptx(
-        "st.global.v8.b32 [{$r0}], {" + ", ".join(f"{{$r{i}}}" for i in range(1, 9)) + "};",
-        read_only_args=[addr] + list(words),
-    )
-
-
-# --- Register-resident kernels: the numeric core ---
+# --- Register-resident (g2r) kernels: the numeric core ---
 #
 # A 16-element block is eight packed bf16 words; word h holds element 2h in its low half and
 # 2h+1 in its high half. Block scale -> coefficient -> E2M1 follows TE's formulas
@@ -487,58 +322,10 @@ def st_global_v8(addr: Int64, words):
 
 
 @cute.jit
-def swap_halves_b32(v: Uint32) -> Uint32:
-    """Exchange the two 16-bit halves of a word."""
-    return cute.arch.inline_ptx(
-        "prmt.b32 {$w0}, {$r0}, {$r0}, 0x1032;", write_only_types=[Uint32], read_only_args=[v]
-    )
-
-
-@cute.jit
-def rcp_rn_f32(x: Float32) -> Float32:
-    """Correctly rounded reciprocal, bit for bit the IEEE quotient 1 / x."""
-    return cute.arch.inline_ptx(
-        "rcp.rn.f32 {$w0}, {$r0};", write_only_types=[Float32], read_only_args=[x]
-    )
-
-
-@cute.jit
-def e4m3_code(x: Float32) -> Uint32:
-    """The E4M3 byte of x (round to nearest, saturating to 448), as static_cast<fp8e4m3> does.
-    Its clamp to FLT_MAX in compute_decoding_scaling_factor cannot change the byte: the only
-    value it alters, +inf, saturates to the same 448."""
-    return cute.arch.inline_ptx(
-        "{ .reg .b16 h; cvt.rn.satfinite.e4m3x2.f32 h, {$r0}, {$r0}; "
-        "cvt.u32.u16 {$w0}, h; and.b32 {$w0}, {$w0}, 255; }",
-        write_only_types=[Uint32],
-        read_only_args=[x],
-    )
-
-
-@cute.jit
-def e4m3_value(code: Uint32) -> Float32:
-    """The value of the E4M3 byte `code`, exactly."""
-    return cute.arch.inline_ptx(
-        "{ .reg .b16 c, lo, hi; .reg .b32 h; cvt.u16.u32 c, {$r0}; "
-        "cvt.rn.f16x2.e4m3x2 h, c; mov.b32 {lo, hi}, h; cvt.f32.f16 {$w0}, lo; }",
-        write_only_types=[Float32],
-        read_only_args=[code],
-    )
-
-
-@cute.jit
 def coefficient_of(code: Uint32, S_dec: Float32) -> Float32:
     """compute_nvfp4_scaling_coefficient<float> for scale byte `code`:
     min(1 / (scale * S_dec), FLT_MAX) with S_dec = 1 / S_enc computed once by the caller."""
-    return cute.arch.fmin(rcp_rn_f32(e4m3_value(code) * S_dec), Float32(FLOAT32_MAX))
-
-
-@cute.jit
-def splat_f32x2(x: Float32) -> Int64:
-    """x in both halves of a packed f32 pair, as mul.f32x2 consumes it."""
-    return cute.arch.inline_ptx(
-        "mov.b64 {$w0}, {{$r0}, {$r0}};", write_only_types=[Int64], read_only_args=[x]
-    )
+    return cute.arch.fmin(rcp_rn_f32(cvt_fp8e4m3_code_to_f32(code) * S_dec), Float32(FLOAT32_MAX))
 
 
 @cute.jit
@@ -570,24 +357,6 @@ def scale_column_bf16(a: Uint32, b: Uint32, coeff2: Int64, LOW: cutlass.Constexp
     )
 
 
-def abs_max_tree_bf16x2(words):
-    """Packed abs-max over a power-of-two count of words, as a balanced tree: the magnitudes of
-    both halves are the abs-maxes of the even and odd elements (signs are unreliable,
-    max.xorsign.abs leaves the XOR of the operands' signs)."""
-    # Imported here: utils.py of the package root is imported by every CuTeDSL module.
-    from transformer_engine.common.CuTeDSL.utils import (  # pylint: disable=import-outside-toplevel
-        abs_max_x2_bf16,
-    )
-
-    level = list(words)
-    while len(level) > 1:
-        level = [
-            Uint32(abs_max_x2_bf16(Int32(level[2 * i]), Int32(level[2 * i + 1])))
-            for i in range(len(level) // 2)
-        ]
-    return level[0]
-
-
 @cute.jit
 def block_scale_code(words, S_enc_div6: Float32) -> Uint32:
     """E4M3 scale byte of one rowwise block (eight packed words) for the encode scale
@@ -595,7 +364,7 @@ def block_scale_code(words, S_enc_div6: Float32) -> Uint32:
     m = abs_max_tree_bf16x2(words)
     # Fold the two halves with the same unit: swap them and take one more abs-max.
     folded = abs_max_tree_bf16x2([m, swap_halves_b32(m)]) & Uint32(0x7FFF0000)
-    return e4m3_code(folded.bitcast(Float32) * S_enc_div6)
+    return cvt_f32_to_fp8e4m3_code(folded.bitcast(Float32) * S_enc_div6)
 
 
 @cute.jit

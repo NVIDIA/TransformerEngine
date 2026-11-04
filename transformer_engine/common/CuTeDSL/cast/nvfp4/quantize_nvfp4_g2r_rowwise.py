@@ -12,19 +12,20 @@ from cutlass import cute
 from cutlass import Boolean, Float32, Int32, Int64, Uint32, Uint64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
-from transformer_engine.common.CuTeDSL.cast.nvfp4.utils import (
-    NVFP4_BLOCK_SCALING_SIZE,
-    block_scale_code,
-    coefficient_of,
-    compute_global_encode_sf,
+from transformer_engine.common.CuTeDSL.utils import (
     ld_global_nc_evict_first_v8,
-    pack_row_block,
+    pack_f32x2,
     prefetch_l2,
     rcp_rn_f32,
     row_offset,
-    splat_f32x2,
     st_global_u8,
     st_global_v2,
+)
+from transformer_engine.common.CuTeDSL.utils_nvfp4 import (
+    block_scale_code,
+    coefficient_of,
+    compute_global_encode_sf,
+    pack_row_block,
 )
 from transformer_engine.common.CuTeDSL.philox_rng import (
     BLOCK_PHILOX_FOLD_SUPPORTED,
@@ -35,10 +36,11 @@ from transformer_engine.common.CuTeDSL.philox_rng import (
 )
 from .quantize_nvfp4_common import (
     CUTEDSL_DEBUG_LOGGING,
-    NVFP4QuantizeConfig,
-    NVFP4QuantizeKernelBase,
+    NVFP4_BLOCK_SCALING_SIZE,
     device_sm_count,
     noop_flag_is_set,
+    NVFP4QuantizeConfig,
+    NVFP4QuantizeKernelBase,
 )
 
 
@@ -221,7 +223,7 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
             if cutlass.const_expr(STOCHASTIC):
                 table[tidx] = coeff
             else:
-                table[tidx] = splat_f32x2(coeff)
+                table[tidx] = pack_f32x2(coeff, coeff)
 
             active = j0 < blocks_per_row
             for w in cutlass.range_constexpr(0, ROWS, WAVE):
@@ -256,7 +258,8 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
                             )
                     for i in cutlass.range_constexpr(g, g + 2):
                         if cutlass.const_expr(STOCHASTIC):
-                            coeff2 = splat_f32x2(table[Int32(codes[i])])
+                            coeff = table[Int32(codes[i])]
+                            coeff2 = pack_f32x2(coeff, coeff)
                         else:
                             coeff2 = table[Int32(codes[i])]
                         w0, w1 = pack_row_block(v[i], coeff2, rnd[i - g], STOCHASTIC)

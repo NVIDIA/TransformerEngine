@@ -16,14 +16,19 @@ from cutlass import BFloat16, Boolean, Float4E2M1FN, Float8E4M3FN, Float32, Int6
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
-from transformer_engine.common.CuTeDSL.cast.nvfp4.utils import (
-    NVFP4_SCALE_PAD_INNER,
-    NVFP4_SCALE_PAD_OUTER,
-    NVFP4_SHAPE_ALIGNMENT,
-)
 from transformer_engine.common.CuTeDSL.utils import device_compute_capability
 
 CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
+
+# Elements sharing one E4M3 block scale.
+NVFP4_BLOCK_SCALING_SIZE = 16
+# The C++ dispatcher only offers flattened dims that are multiples of 32.
+NVFP4_SHAPE_ALIGNMENT = 32
+# The scale tensors are allocated padded to (round_up(rows, 128), round_up(cols / 16, 4)), the
+# 128x4 tile of the GEMM-swizzled layout (NVFP4Quantizer::get_scale_shape). Declaring that
+# divisibility at compile time tells the kernels each scale row starts 4-byte aligned.
+NVFP4_SCALE_PAD_ROWS = 128
+NVFP4_SCALE_PAD_COLS = 4
 
 logger = logging.getLogger("transformer_engine.cutedsl.nvfp4")
 
@@ -202,12 +207,12 @@ def compile_cutedsl_function_from_cfg(cfg):
     # Neither is expressible in sym_M / sym_N (SymInt has no `//` or `+`), so the scales get
     # fresh syms carrying only the divisibility the padding guarantees.
     scale_row_shape = (
-        cute.sym_int32(divisibility=NVFP4_SCALE_PAD_OUTER),
-        cute.sym_int32(divisibility=NVFP4_SCALE_PAD_INNER),
+        cute.sym_int32(divisibility=NVFP4_SCALE_PAD_ROWS),
+        cute.sym_int32(divisibility=NVFP4_SCALE_PAD_COLS),
     )
     scale_col_shape = (
-        cute.sym_int32(divisibility=NVFP4_SCALE_PAD_OUTER),
-        cute.sym_int32(divisibility=NVFP4_SCALE_PAD_INNER),
+        cute.sym_int32(divisibility=NVFP4_SCALE_PAD_ROWS),
+        cute.sym_int32(divisibility=NVFP4_SCALE_PAD_COLS),
     )
 
     # mX / mO_row / mS_row: (M, N) input, (M, N) rowwise fp4 output and its scales. The fp4

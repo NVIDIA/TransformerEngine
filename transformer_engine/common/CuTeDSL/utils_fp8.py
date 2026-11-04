@@ -17,6 +17,10 @@ from cutlass.cutlass_dsl import BaseDSL
 
 logger = logging.getLogger("transformer_engine.cutedsl.utils_fp8")
 
+# Largest finite FP8 values.
+FP8E4M3_MAX_NORM = 448.0
+FP8E5M2_MAX_NORM = 57344.0
+
 
 @cute.jit
 def cvt_f32_to_fp8e8m0fnu(val: Float32) -> Float8E8M0FNU:
@@ -291,3 +295,20 @@ def get_cvt_f32x2_to_fp8x2_func(fp8_dtype, relu: bool = False) -> Callable[..., 
     if relu:
         return functools.partial(fn, relu=True)
     return fn
+
+
+@cute.jit
+def cvt_f32_to_fp8e4m3_code(val: Float32) -> Uint32:
+    """The E4M3 byte of val (round to nearest, saturating to 448), as static_cast<fp8e4m3> does."""
+    return Uint32(cvt_f32x2_to_fp8e4m3x2(val, val)) & Uint32(0xFF)
+
+
+@cute.jit
+def cvt_fp8e4m3_code_to_f32(code: Uint32) -> Float32:
+    """The value of the E4M3 byte held in the low bits of `code`, exactly."""
+    return cute.arch.inline_ptx(
+        "{ .reg .b16 c, lo, hi; .reg .b32 h; cvt.u16.u32 c, {$r0}; "
+        "cvt.rn.f16x2.e4m3x2 h, c; mov.b32 {lo, hi}, h; cvt.f32.f16 {$w0}, lo; }",
+        write_only_types=[Float32],
+        read_only_args=[code],
+    )
