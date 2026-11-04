@@ -227,6 +227,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   DType output_dtype = out_dtype ? *out_dtype : A_tensor.dtype();
   // Output tensor
+  const bool reuse_output = !D.is_none();
   TensorWrapper D_tensor;
   if (D.is_none()) {
     std::tie(D_tensor, D) = createOutputTensor(D_shape, output_dtype, quantizer);
@@ -423,6 +424,9 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   if (unfused_quantization_needed) {
     // Quantize the output
     std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
+    if (reuse_output) {
+      std::tie(D_tensor, D) = my_quantizer->convert_and_update_tensor(D);
+    }
     my_quantizer->quantize(unquantized_D_tensor, D_tensor);
     my_quantizer->optimize_tensor_for_gemm(D_tensor, D);
   }
