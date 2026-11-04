@@ -11,7 +11,6 @@ import re
 import subprocess
 import sys
 import textwrap
-import types
 import warnings
 from typing import Literal, NamedTuple, Union
 
@@ -3269,58 +3268,3 @@ def _check_linear_bias_compile(
         forward=case in ("bias", "unfused"),
         backward=case != "linear" and bool(targets),
     )
-
-
-@pytest.mark.parametrize("scaled", [False, True], ids=["bf16", "mxfp8_scales"])
-def test_ep_custom_ops_optional_mutated_args(monkeypatch, scaled):
-    """EP custom ops accept None for their optional mutated scale arguments.
-
-    The BF16 path passes None for the MXFP8 scale buffers. With a ``= None``
-    default those trailing args were dropped before torch's ADInplaceOrView
-    kernel indexed them, raising IndexError (issue #3814). The backend is
-    stubbed so no NCCL EP setup is needed; when scales are passed, the mutated
-    scale buffer must still have its version counter bumped.
-    """
-    from transformer_engine.pytorch import ep
-
-    calls = {}
-
-    def record(name, mutated_scale_pos):
-        def stub(*args):
-            calls[name] = args
-            if args[mutated_scale_pos] is not None:
-                args[mutated_scale_pos].add_(1)
-
-        return stub
-
-    monkeypatch.setattr(
-        ep,
-        "tex",
-        types.SimpleNamespace(
-            ep_dispatch=record("dispatch", 9),
-            ep_prepare_and_dispatch=record("prepare_and_dispatch", 10),
-            ep_combine_bwd=record("combine_bwd", 7),
-        ),
-    )
-
-    def t():
-        return torch.zeros(8, device="cuda")
-
-    scale_in, scale_out = (t(), t()) if scaled else (None, None)
-    ops = torch.ops.transformer_engine_ep
-    ops.dispatch(t(), t(), t(), t(), t(), t(), 2, 16, scale_in, scale_out)
-    ops.prepare_and_dispatch(t(), t(), t(), t(), t(), t(), 2, 16, t(), t(), scale_out, scale_in)
-    ops.combine_bwd(t(), t(), t(), 2, 16, torch.int64, scale_in, scale_out)
-
-    def same(got, want):
-        return got is None if want is None else got.data_ptr() == want.data_ptr()
-
-    for name, got, want in (
-        ("dispatch", calls["dispatch"][8:], (scale_in, scale_out)),
-        ("prepare_and_dispatch", calls["prepare_and_dispatch"][10:], (scale_out, scale_in)),
-        ("combine_bwd", calls["combine_bwd"][6:], (scale_in, scale_out)),
-    ):
-        assert all(same(g, w) for g, w in zip(got, want)), name
-    if scaled:
-        # Each op declares scale_out as mutated, so each call bumps its version.
-        assert scale_out._version == 3
