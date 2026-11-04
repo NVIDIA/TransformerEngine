@@ -57,9 +57,12 @@ from .cpp_extensions.misc import jax_dtype_to_te_dtype
 from .quantize import (
     GroupedScaledTensor1x,
     GroupedQuantizer,
+    Quantizer,
     QuantizerSet,
     ScaledTensorFactory,
     ScalingMode,
+    QuantizeLayout,
+    QuantizerFactory,
     ScaledTensor2x,
     TensorUsage,
     noop_quantizer_set,
@@ -643,6 +646,27 @@ def _validate_moe_quantizer_sets(
                 )
 
 
+def _validate_dispatch_quantizer(dispatch_quantizer, fc1_x_quantizer, hidden):
+    """Check that tokens can be dispatched with ``dispatch_quantizer`` and requantized for FC1."""
+    if dispatch_quantizer.scaling_mode != ScalingMode.MXFP8_1D_SCALING:
+        raise NotImplementedError(
+            "dispatch_quantizer supports only MXFP8_1D_SCALING, got"
+            f" {dispatch_quantizer.scaling_mode}."
+        )
+    if dispatch_quantizer.q_dtype != jnp.float8_e4m3fn:
+        raise ValueError(
+            f"dispatch_quantizer supports only E4M3 payloads, got {dispatch_quantizer.q_dtype}."
+        )
+    if not isinstance(fc1_x_quantizer, GroupedQuantizer):
+        raise ValueError(
+            "dispatch_quantizer requires an MXFP8 grouped quantizer for the FC1 input."
+        )
+    if hidden % 512 != 0:
+        raise ValueError(
+            f"dispatch_quantizer requires the hidden size to be a multiple of 512, got {hidden}."
+        )
+
+
 def _with_grouped_weight_buffers(tensor, data, scale_inv, original_shape):
     """Rebuild a dense grouped weight while preserving its quantization metadata."""
     return GroupedScaledTensor1x(
@@ -884,11 +908,13 @@ def _ffn_fwd_per_shard(
     token_counts_local: jnp.ndarray,
     wi: jnp.ndarray,
     wo: jnp.ndarray,
+    recv_scale_inv_local: Optional[jnp.ndarray],
     wi_0_bias: Optional[jnp.ndarray],
     wi_1_bias: Optional[jnp.ndarray],
     wo_bias: Optional[jnp.ndarray],
     quantizer_sets: Tuple[QuantizerSet, QuantizerSet],
     *,
+    compute_dtype,
     num_local_experts: int,
     activation_type: str,
     apply_topk_weights_early: bool,
@@ -903,26 +929,40 @@ def _ffn_fwd_per_shard(
     wi_fsdp_axis: Optional[int],
     wo_fsdp_axis: Optional[int],
 ):
-    """Run the grouped FFN on one shard's EP receive buffer."""
+    """Run the grouped FFN on one shard's EP receive buffer.
+
+    ``recv_scale_inv_local`` is set when ``recv_tokens_local`` holds dispatched MXFP8 data. The
+    dispatched data is consumed by the forward FC1 GEMM directly, and only the FC1 operands for
+    the backward pass are requantized from it.
+    """
     hidden = recv_tokens_local.shape[-1]
     sorted_x = recv_tokens_local.reshape(-1, hidden)
     recv_w_flat = recv_topk_weights_local.reshape(-1)
     group_sizes = token_counts_local.reshape(-1).astype(jnp.int32)
 
-    wi = wi.astype(sorted_x.dtype)
-    wo = wo.astype(sorted_x.dtype)
+    wi = wi.astype(compute_dtype)
+    wo = wo.astype(compute_dtype)
 
     wi_combined_bias = (
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
 
     fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
-    casted_sorted_x = tex.grouped_quantize(
-        sorted_x,
-        fc1_quantizer_set.x,
-        group_sizes,
-        flatten_axis=-1,
-    )
+    if recv_scale_inv_local is None:
+        casted_sorted_x = tex.grouped_quantize(
+            sorted_x,
+            fc1_quantizer_set.x,
+            group_sizes,
+            flatten_axis=-1,
+        )
+    else:
+        casted_sorted_x = tex.grouped_requantize(
+            sorted_x,
+            recv_scale_inv_local.reshape(sorted_x.shape[0], -1),
+            group_sizes,
+            fc1_quantizer_set.x,
+            compute_dtype,
+        )
     casted_wi = _prepare_fc1_weight(
         wi,
         fc1_quantizer_set.kernel,
@@ -966,7 +1006,7 @@ def _ffn_fwd_per_shard(
             casted_wi_rhs.scale_inv,
             padded_offsets,
             prob,
-            compute_dtype=sorted_x.dtype,
+            compute_dtype=compute_dtype,
             output_dtype=fc2_quantizer_set.x.q_dtype,
         )
         combined_out = combined_out_3d.reshape(sorted_x.shape[0], combined)
@@ -1014,7 +1054,7 @@ def _ffn_fwd_per_shard(
             colwise_data=intermediate_col.reshape(-1),
             colwise_scale_inv=intermediate_scale_col,
             scaling_mode=scaling_mode,
-            dq_dtype=sorted_x.dtype,
+            dq_dtype=compute_dtype,
             data_layout=fc2_quantizer_set.x.data_layout,
             q_layout=fc2_quantizer_set.x.q_layout,
             flatten_axis=1,
@@ -1293,6 +1333,7 @@ def _moe_fwd_rule(
     wi_1_bias,
     wo_bias,
     quantizer_sets,
+    dispatch_quantizer,
     num_experts,
     activation_type,
     mesh_resource,
@@ -1347,6 +1388,8 @@ def _moe_fwd_rule(
         )
         B, S, H = x.shape
         K = _num_experts_per_tok(router_info)
+        if dispatch_quantizer is not None:
+            _validate_dispatch_quantizer(dispatch_quantizer, quantizer_sets[0].x, H)
         cudnn_native_weight_layout = _resolve_cudnn_native_weight_layout(
             wi, H, cudnn_native_weight_layout
         )
@@ -1554,14 +1597,37 @@ def _moe_fwd_rule(
             dispatch_output_per_expert_alignment=dispatch_alignment,
             topk_idx_dtype=int(jax_dtype_to_te_dtype(topk_idx_3d.dtype)),
         )
-        recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
-            tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx_3d, x, topk_w_3d, recv_pr)
-        )
+        dispatch_x = x
+        if dispatch_quantizer is not None:
+            dispatch_x = tex.quantize(
+                x,
+                QuantizerFactory.create(
+                    scaling_mode=dispatch_quantizer.scaling_mode,
+                    q_dtype=dispatch_quantizer.q_dtype,
+                    q_layout=QuantizeLayout.ROWWISE,
+                ),
+            )
+        (
+            recv_tokens,
+            recv_topk_weights,
+            token_counts,
+            total_recv_tokens,
+            handle_mem,
+        ) = tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx_3d, dispatch_x, topk_w_3d, recv_pr)
+        recv_scale_inv = None
+        if dispatch_quantizer is not None:
+            recv_tokens, recv_scale_inv = recv_tokens.data, recv_tokens.scale_inv
         token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
         if dispatch_checkpoint_name is not None:
             recv_tokens = checkpoint_name(recv_tokens, dispatch_checkpoint_name)
             recv_topk_weights = checkpoint_name(recv_topk_weights, dispatch_checkpoint_name)
+            if dispatch_quantizer is not None:
+                recv_scale_inv = checkpoint_name(recv_scale_inv, dispatch_checkpoint_name)
         recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))
+        if dispatch_quantizer is not None:
+            recv_scale_inv = jax.lax.with_sharding_constraint(
+                recv_scale_inv, NamedSharding(mesh, ep3_spec)
+            )
         recv_topk_weights = jax.lax.with_sharding_constraint(
             recv_topk_weights, NamedSharding(mesh, ep2_spec)
         )
@@ -1571,6 +1637,9 @@ def _moe_fwd_rule(
         bias_spec = P(ep_axis, None)
         ffn_in_specs = (ep3_spec, ep2_spec, ep2_spec, wi_input_spec, wo_input_spec)
         ffn_in_args = [recv_tokens, recv_topk_weights, token_counts, wi, wo]
+        if dispatch_quantizer is not None:
+            ffn_in_specs += (ep3_spec,)
+            ffn_in_args.append(recv_scale_inv)
         if has_bias:
             ffn_in_specs += (bias_spec, bias_spec, bias_spec)
             ffn_in_args.extend([wi_0_bias, wi_1_bias, wo_bias])
@@ -1594,21 +1663,21 @@ def _moe_fwd_rule(
         )
 
         def _ffn_fwd_body(*args):
-            if has_bias:
-                r_tok, r_w, tc, local_wi, local_wo, w0b, w1b, wob = args
-            else:
-                r_tok, r_w, tc, local_wi, local_wo = args
-                w0b = w1b = wob = None
+            r_tok, r_w, tc, local_wi, local_wo, *rest = args
+            r_scale_inv = rest.pop(0) if dispatch_quantizer is not None else None
+            w0b, w1b, wob = rest if has_bias else (None, None, None)
             return _ffn_fwd_per_shard(
                 r_tok,
                 r_w,
                 tc,
                 local_wi,
                 local_wo,
+                r_scale_inv,
                 w0b,
                 w1b,
                 wob,
                 quantizer_sets,
+                compute_dtype=x.dtype,
                 num_local_experts=num_local_experts,
                 activation_type=activation_type,
                 apply_topk_weights_early=apply_topk_weights_early,
@@ -1984,6 +2053,7 @@ def _moe_bwd_rule(
             d_wi_1_bias if has_bias else None,
             d_wo_bias if has_bias else None,
             ctx.quantizer_sets,
+            None,
         )
 
 
@@ -2021,7 +2091,7 @@ def _moe_aux_loss_bwd(ctx, d_aux_loss, K):
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(8, 26)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 27)))
 def _moe(
     x,
     router_info,
@@ -2031,6 +2101,7 @@ def _moe(
     wi_1_bias,
     wo_bias,
     quantizer_sets,
+    dispatch_quantizer,
     num_experts,
     activation_type,
     mesh_resource,
@@ -2059,6 +2130,7 @@ def _moe(
         wi_1_bias,
         wo_bias,
         quantizer_sets,
+        dispatch_quantizer,
         num_experts,
         activation_type,
         mesh_resource,
@@ -2114,6 +2186,7 @@ def moe(
     dispatch_checkpoint_name: Optional[str] = None,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
+    dispatch_quantizer: Optional[Quantizer] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray, jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -2185,6 +2258,12 @@ def moe(
         weights fall back to unfused TE grouped GEMM.
         Ineligible calls warn and fall back to TE's regular grouped-GEMM
         implementation. API signatures and GPU capability determine support.
+    dispatch_quantizer : Optional[Quantizer]
+        Quantizer used to quantize tokens before EP dispatch so that the dispatch moves
+        quantized data and compact scales instead of high-precision activations. Only MXFP8
+        E4M3 quantizers are supported, and the hidden size must be a multiple of 512. The
+        quantizer's layout is ignored; tokens are always quantized rowwise. Defaults to
+        ``None`` (no dispatch quantization).
     cudnn_native_weight_layout : Optional[bool]
         ``False`` selects standard contiguous gate/up [E,K,2N] storage;
         ``True`` selects native [E,2N,K] storage with alternating 32-column
@@ -2210,6 +2289,8 @@ def moe(
     """
     if not isinstance(use_cudnn_fusion, bool):
         raise TypeError("use_cudnn_fusion must be a bool")
+    if dispatch_quantizer is not None and not isinstance(dispatch_quantizer, Quantizer):
+        raise TypeError("dispatch_quantizer must be a Quantizer or None")
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
         mesh_resource, quant_before_fsdp_ag
     )
@@ -2278,6 +2359,7 @@ def moe(
             wi_1_bias,
             wo_bias,
             quantizer_sets,
+            dispatch_quantizer,
             num_experts,
             activation_type,
             mesh_resource,
