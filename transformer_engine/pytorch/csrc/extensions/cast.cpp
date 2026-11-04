@@ -1441,8 +1441,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   return retval;
 }
 
-// allocate fp4 data, fp8 scalings, and amax values
-// layout: [fp4_data0, ..., fp4_dataN, fp8_scaling0, ..., fp8_scalingN, amax0, ..., amaxN]
+// Bulk-allocate FP4 data, scales, and amax values.
 // amax buffer will be zeroed out by later amax kernels, so we can use empty to allocate
 std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_allocate_nvfp4_tensors(
     std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
@@ -1510,6 +1509,25 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const bool with_gemm_swizzled_scales =
       group_optimize_for_gemm && group_with_rht && all_tensors_rht_cast_fusion_eligible;
 
+  auto allocate_buffers = [&](auto &shapes, auto &dtypes, auto &alignments) {
+    if (!group_optimize_for_gemm || with_gemm_swizzled_scales) {
+      return bulk_allocate(shapes, dtypes, std::nullopt, alignments);
+    }
+
+    // Compact scales must be releasable after swizzling, independently of data and amax.
+    const std::vector<std::vector<size_t>> scale_shapes(shapes.begin() + num_tensors,
+                                                        shapes.begin() + 2 * num_tensors);
+    shapes.erase(shapes.begin() + num_tensors, shapes.begin() + 2 * num_tensors);
+    dtypes.erase(dtypes.begin() + num_tensors, dtypes.begin() + 2 * num_tensors);
+    alignments.erase(alignments.begin() + num_tensors, alignments.begin() + 2 * num_tensors);
+    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
+    auto scales =
+        bulk_allocate(scale_shapes, std::vector<at::ScalarType>(num_tensors, torch::kUInt8),
+                      std::nullopt, std::vector<size_t>(num_tensors, 16));
+    tensors.insert(tensors.begin() + num_tensors, scales.begin(), scales.end());
+    return tensors;
+  };
+
   // Helper function to get size of byte buffer holding FP4 data (last dim divided by 2)
   auto fp4_byte_shape = [](const std::vector<size_t> &shape) -> std::vector<size_t> {
     NVTE_CHECK(!shape.empty());
@@ -1568,7 +1586,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
       alignments.insert(alignments.end(), num_tensors, 16);
     }
-    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
+    auto tensors = allocate_buffers(shapes, dtypes, alignments);
 
     // Split data, scale, and amax tensors
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -1626,7 +1644,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
       alignments.insert(alignments.end(), num_tensors, 16);
     }
-    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
+    auto tensors = allocate_buffers(shapes, dtypes, alignments);
 
     // Split data, scale, and amax tensors
     for (size_t i = 0; i < num_tensors; ++i) {
