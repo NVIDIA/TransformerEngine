@@ -108,22 +108,22 @@ std::string gemm_test_name(const testing::TestParamInfo<GemmTestParams> &info) {
          std::to_string(k);
 }
 
-}  // namespace
-
-class GemmTestSuite : public ::testing::TestWithParam<GemmTestParams> {};
-
-/* GEMM with C and D in different buffers */
-TEST_P(GemmTestSuite, OutOfPlaceAccumulation) {
-  const auto [input_dtype, output_dtype] = std::get<0>(GetParam());
-  const auto [transa, transb] = std::get<1>(GetParam());
-  const auto [m, n, k] = std::get<2>(GetParam());
+/* Check D = alpha * op(A) * op(B) + beta * C
+ *
+ * If with_C is true, C and D are in different buffers. Otherwise, C
+ * is NULL and beta is zero.
+ */
+void run_gemm_test(const GemmTestParams &params, bool with_C) {
+  const auto [input_dtype, output_dtype] = std::get<0>(params);
+  const auto [transa, transb] = std::get<1>(params);
+  const auto [m, n, k] = std::get<2>(params);
   const bool fp8_input = isFp8Type(input_dtype);
   const bool fp8_output = isFp8Type(output_dtype);
   if (fp8_input && getDeviceComputeCapability() < 89) {
     GTEST_SKIP() << "FP8 GEMM requires compute capability 8.9+";
   }
 
-  // FP8 output requires a high-precision C
+  // FP8 output requires FP16 or BF16 C
   const DType C_dtype = fp8_output ? DType::kBFloat16 : output_dtype;
 
   // Tensors
@@ -148,7 +148,7 @@ TEST_P(GemmTestSuite, OutOfPlaceAccumulation) {
 
   // Scaling factors are powers of two so the result is exact
   const float alpha = 2.f;
-  const float beta = 0.5f;
+  const float beta = with_C ? 0.5f : 0.f;
   float A_scale_inv = 1.f, B_scale_inv = 1.f, D_scale = 1.f;
   if (fp8_input) {
     A_scale_inv = 2.f;
@@ -164,8 +164,8 @@ TEST_P(GemmTestSuite, OutOfPlaceAccumulation) {
   // Launch GEMM
   MatmulConfigWrapper config;
   config.set_use_split_accumulator(true);
-  nvte_cublas_gemm_v2(transa, transb, &alpha, A.data(), B.data(), &beta, C.data(), D.data(),
-                      workspace.data(), config, 0);
+  nvte_cublas_gemm_v2(transa, transb, &alpha, A.data(), B.data(), &beta,
+                      with_C ? C.data() : nullptr, D.data(), workspace.data(), config, 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
   // Check output
@@ -187,6 +187,16 @@ TEST_P(GemmTestSuite, OutOfPlaceAccumulation) {
   const auto C_ref = cast_values(C_values, C_dtype);
   compareResults("C", C, C_ref.data(), true, 0, 0);
 }
+
+}  // namespace
+
+class GemmTestSuite : public ::testing::TestWithParam<GemmTestParams> {};
+
+/* GEMM with C and D in different buffers */
+TEST_P(GemmTestSuite, OutOfPlaceAccumulation) { run_gemm_test(GetParam(), true); }
+
+/* GEMM without accumulation input */
+TEST_P(GemmTestSuite, NoAccumulationInput) { run_gemm_test(GetParam(), false); }
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest, GemmTestSuite,
@@ -224,5 +234,35 @@ TEST(GemmTest, InvalidAccumulationInput) {
                std::runtime_error);
   EXPECT_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &beta,
                                    C_wrong_shape.data(), D.data(), workspace.data(), nullptr, 0),
+               std::runtime_error);
+
+  // C is required if beta is non-zero
+  EXPECT_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &beta, nullptr,
+                                   D.data(), workspace.data(), nullptr, 0),
+               std::runtime_error);
+}
+
+/* GEMM with FP8 output and C that is incompatible with D */
+TEST(GemmTest, InvalidAccumulationInputWithFP8Output) {
+  if (getDeviceComputeCapability() < 89) {
+    GTEST_SKIP() << "FP8 GEMM requires compute capability 8.9+";
+  }
+  const size_t m = 32, n = 64, k = 16;
+  Tensor A("A", std::vector<size_t>{m, k}, DType::kFloat8E4M3);
+  Tensor B("B", std::vector<size_t>{n, k}, DType::kFloat8E4M3);
+  Tensor D("D", std::vector<size_t>{n, m}, DType::kFloat8E4M3);
+  Tensor C_fp32("C_fp32", std::vector<size_t>{n, m}, DType::kFloat32);
+  Tensor workspace("workspace", std::vector<size_t>{kWorkspaceBytes}, DType::kByte);
+  const float alpha = 1.f;
+  const float beta = 1.f;
+
+  // FP8 output cannot be read as an accumulation input
+  EXPECT_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &beta, D.data(),
+                                   D.data(), workspace.data(), nullptr, 0),
+               std::runtime_error);
+
+  // FP8 output requires FP16 or BF16 C
+  EXPECT_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &beta,
+                                   C_fp32.data(), D.data(), workspace.data(), nullptr, 0),
                std::runtime_error);
 }
