@@ -18,6 +18,8 @@ from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
+
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
@@ -293,6 +295,11 @@ else:
         _flash_attn_bwd_v4 = no_torch_dynamo()(_fa4_with_none_window_sentinel(_flash_attn_bwd_v4))
 
         fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
+        fa_utils.cutlass_dsl_version = cutlass_dsl_version
+        try:
+            fa_utils.quack_version = PkgVersion(get_pkg_version("quack-kernels"))
+        except PackageNotFoundError:
+            fa_utils.quack_version = None
         fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
@@ -663,10 +670,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             if fp8_recipe.float8_current_scaling():
                 S_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=S_quantizer.dtype, device="cuda"
+                    fp8_dtype=S_quantizer.dtype, device=te_device_type()
                 )
                 dP_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=dP_quantizer.dtype, device="cuda"
+                    fp8_dtype=dP_quantizer.dtype, device=te_device_type()
                 )
             # disable swizzle for MXFP8Quantizer
             for quantizer in [
@@ -1038,9 +1045,9 @@ class FlashAttention(torch.nn.Module):
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor)
             for x in [query_layer, key_layer, value_layer]
         ), "FlashAttention only supports FP16 and BF16 data types, or Float8Tensors."
-        assert (
-            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-        ), "FlashAttention currently only supports CUDA tensors."
+        assert all(
+            x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+        ), f"FlashAttention currently only supports {te_device_type()} tensors."
         assert (
             qkv_layout in QKVLayouts
         ), f"FlashAttention does not support qkv_layout = {qkv_layout}!"
@@ -2718,9 +2725,9 @@ class FusedAttention(torch.nn.Module):
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, QuantizedTensorStorage)
             for x in [query_layer, key_layer, value_layer]
         ), "FusedAttention only supports FP16 and BF16 data types, or QuantizedTensors."
-        assert (
-            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-        ), "FusedAttention only supports CUDA tensors."
+        assert all(
+            x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+        ), f"FusedAttention only supports {te_device_type()} tensors."
         assert (
             qkv_layout in QKVLayouts
         ), f"FusedAttention does not support qkv_layout = {qkv_layout}!"

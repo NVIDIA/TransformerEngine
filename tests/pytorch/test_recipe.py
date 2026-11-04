@@ -820,3 +820,31 @@ def test_fp8_recipe_unpickle_rebuilds_missing_quant_params(recipe):
     assert restored.fp8_quant_fwd_inp.power_2_scale == recipe.fp8_quant_fwd_inp.power_2_scale
     assert restored.fp8_quant_fwd_weight.power_2_scale == recipe.fp8_quant_fwd_weight.power_2_scale
     assert restored.fp8_quant_bwd_grad.power_2_scale == recipe.fp8_quant_bwd_grad.power_2_scale
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+@pytest.mark.parametrize(
+    "role", ["fp8_quant_fwd_inp", "fp8_quant_fwd_weight", "fp8_quant_bwd_grad"]
+)
+def test_float8_block_scaling_non_pow2_scales_arch_support(role):
+    """Non-power-of-2 FP8 block scales are rejected on Blackwell and newer, accepted on Hopper."""
+    fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling()
+    setattr(
+        fp8_recipe,
+        role,
+        transformer_engine.common.recipe.QParams(power_2_scale=False, amax_epsilon=0.0),
+    )
+    if torch.cuda.get_device_capability() >= (10, 0):
+        with pytest.raises(RuntimeError, match="power-of-2"):
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                pass
+    else:
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            pass
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+def test_float8_block_scaling_default_recipe_supported():
+    """The default FP8 block-scaling recipe (power-of-2 scales) is accepted on every arch."""
+    with te.autocast(enabled=True, recipe=transformer_engine.common.recipe.Float8BlockScaling()):
+        pass

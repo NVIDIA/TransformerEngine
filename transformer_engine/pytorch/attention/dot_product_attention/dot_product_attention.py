@@ -10,11 +10,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 
+from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 from torch.fx.experimental.symbolic_shapes import guard_scalar
 from torch.nn.parameter import Parameter
 
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import (
     Format,
     Recipe,
@@ -32,6 +34,7 @@ from transformer_engine.pytorch.quantization import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
 )
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
@@ -51,6 +54,7 @@ from transformer_engine.pytorch.distributed import (
     graph_safe_rng_available,
 )
 from transformer_engine.pytorch.jit import no_torch_dynamo
+from transformer_engine.pytorch.utils import SplitAlongDim
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.attention.inference import InferenceParams
 
@@ -528,6 +532,18 @@ def _unpack_packed_qkv(
             f" dimension, got strides {tuple(packed.stride())}."
         )
 
+    def _unpack(packed: torch.Tensor, num: int) -> Tuple[torch.Tensor, ...]:
+        # With select, autograd would build each view's gradient as a zero-filled tensor of
+        # the packed shape and sum them. SplitAlongDim instead returns the backend's packed
+        # gradient buffer when the view gradients alias it, or concatenates them otherwise.
+        # Its backward inspects data pointers, which dynamo cannot trace.
+        if torch.compiler.is_compiling() or isinstance(packed, QuantizedTensorStorage):
+            return tuple(packed.select(qkv_interleave_dim, i) for i in range(num))
+        return tuple(
+            x.squeeze(qkv_interleave_dim)
+            for x in SplitAlongDim.apply(packed, qkv_interleave_dim, [1] * num)
+        )
+
     def _packed_layout(fmt: str, num: int) -> str:
         # bshd + 3 @ -3 -> bs3hd; bshd + 3 @ -2 -> bsh3d; thd + 2 @ -2 -> th2d
         pos = len(fmt) + qkv_interleave_dim + 1
@@ -550,9 +566,7 @@ def _unpack_packed_qkv(
                 f"qkv_layer must have size 3 at dim {qkv_interleave_dim}"
                 f" (qkv_interleave_dim), got shape {tuple(qkv_layer.shape)}."
             )
-        query_layer, key_layer, value_layer = (
-            qkv_layer.select(qkv_interleave_dim, i) for i in range(3)
-        )
+        query_layer, key_layer, value_layer = _unpack(qkv_layer, 3)
         return query_layer, key_layer, value_layer, _packed_layout(qkv_format, 3)
 
     if query_layer is None:
@@ -574,7 +588,7 @@ def _unpack_packed_qkv(
             f"kv_layer must have size 2 at dim {qkv_interleave_dim}"
             f" (qkv_interleave_dim), got shape {tuple(kv_layer.shape)}."
         )
-    key_layer, value_layer = (kv_layer.select(qkv_interleave_dim, i) for i in range(2))
+    key_layer, value_layer = _unpack(kv_layer, 2)
     return (
         query_layer,
         key_layer,
@@ -954,12 +968,14 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.softmax_offset = None
         if self.softmax_type == "off-by-one":
             self.softmax_offset = torch.zeros(
-                self.num_attention_heads // self.tp_size, device="cuda"
+                self.num_attention_heads // self.tp_size, device=te_device_type()
             )
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
-                Parameter(torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")),
+                Parameter(
+                    torch.zeros(self.num_attention_heads // self.tp_size, device=te_device_type())
+                ),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
 
@@ -2345,9 +2361,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_output = False
 
             # checks for q/k/v shapes
-            assert (
-                query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-            ), "DotProductAttention only supports CUDA tensors."
+            assert all(
+                x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+            ), f"DotProductAttention only supports {te_device_type()} tensors."
             assert (
                 query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
             ), "Queries, keys and values must have the same data type!"
@@ -2508,7 +2524,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                             "Mixed THD policy sequence_ids must be one-dimensional int32 or "
                             "int64 tensors."
                         )
-                    if not sequence_ids.is_cuda or sequence_ids.device != query_layer.device:
+                    if sequence_ids.device != query_layer.device:
                         raise ValueError(
                             "Mixed THD policy sequence_ids must be on the Q/K/V device."
                         )
@@ -2931,6 +2947,29 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
 
             if use_flash_attention:
+                # DSL 4.6.2 reverted bulk-copy lane election; Quack PR #181 restores it.
+                quack_version = FlashAttentionUtils.quack_version
+                cutlass_version = FlashAttentionUtils.cutlass_dsl_version
+                affected_dependencies = (
+                    quack_version is not None
+                    and PkgVersion("0.6.0") <= quack_version < PkgVersion("0.6.4")
+                    and cutlass_version is not None
+                    and cutlass_version >= PkgVersion("4.6.2")
+                )
+                if (
+                    flash_attention_backend is not None
+                    and flash_attention_backend.major == 4
+                    and attention_params.requires_backward
+                    and affected_dependencies
+                    and dpa_utils.get_device_compute_capability(query_layer.device) == (9, 0)
+                ):
+                    raise RuntimeError(
+                        f"FA4 {flash_attention_backend} backward on Hopper (SM90) can hang with "
+                        f"quack-kernels {quack_version} and CUTLASS DSL "
+                        f"{cutlass_version}. Upgrade to a compatible "
+                        "Quack release containing the fix in 0.6.4: "
+                        "https://github.com/Dao-AILab/quack/pull/181"
+                    )
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
                         _alibi_cache,
