@@ -43,11 +43,19 @@ class _FromMXFP8Func(torch.autograd.Function):
         if tensor._rowwise_data is None and tensor._columnwise_data is None:
             raise ValueError("Cannot dequantize MXFP8 tensor with no data")
         te_dtype = torch_to_transformer_engine_dtype[dtype]
-        # ``tex.dequantize`` requires CUDA-resident buffers.
+        # ``tex.dequantize`` requires CUDA-resident buffers.  Move
+        # the raw inner tensors individually so that we never call
+        # ``.to()`` on the full QuantizedTensor, which would re-enter
+        # ``__torch_dispatch__`` → ``dequantize()`` → infinite recursion.
         src_device = tensor.device
         if src_device.type != te_device_type():
-            cuda_tensor = tensor.to(device=torch.device(te_device_type()))
-            result = tex.dequantize(cuda_tensor, te_dtype)
+            target_device = torch.device(te_device_type())
+            metadata = tensor.get_metadata()
+            for key, value in metadata.items():
+                if isinstance(value, torch.Tensor):
+                    metadata[key] = value.to(device=target_device)
+            cuda_storage = MXFP8TensorStorage(**metadata)
+            result = tex.dequantize(cuda_storage, te_dtype)
             return result.to(device=src_device)
         return tex.dequantize(tensor, te_dtype)
 
