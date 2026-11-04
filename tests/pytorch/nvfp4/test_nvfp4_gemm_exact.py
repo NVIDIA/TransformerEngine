@@ -1225,3 +1225,85 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_output_capacity(
 
     for got, ref in zip(actual, expected):
         torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
+
+
+def _row_grouped_operands(splits, n=96, k=128):
+    """Make row-scaled inputs and per-tensor weights for each expert."""
+    wq = NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False)
+    xq = NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False, row_scaled_nvfp4=True)
+    weights = [wq(torch.randn(n, k, device="cuda", dtype=torch.bfloat16)) for _ in splits]
+    inputs = [xq(torch.randn(m, k, device="cuda", dtype=torch.bfloat16)) for m in splits]
+    return weights, inputs
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_nvfp4_row_grouped_graph_replay(out_dtype):
+    """Repeated graph replay consumes current payloads and current amax values."""
+    splits = [64, 0, 128]
+    weights, inputs = _row_grouped_operands(splits)
+    out = torch.empty(sum(splits), 96, device="cuda", dtype=out_dtype)
+
+    def run():
+        return general_grouped_gemm(
+            weights,
+            inputs,
+            [out],
+            [None] * len(splits),
+            out_dtype,
+            m_splits=splits,
+            single_output=True,
+        )[0]
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            run()
+    torch.cuda.current_stream().wait_stream(stream)
+    for step in range(3):
+        for operand in weights + inputs:
+            if operand.numel():
+                # Both quantized payload and its global scales change each step.
+                q = operand._quantizer
+                q.update_quantized(
+                    torch.randn(operand.shape, device="cuda", dtype=torch.bfloat16) * (step + 1),
+                    operand,
+                )
+        reference = torch.cat(
+            [general_gemm(w, x, out_dtype=out_dtype)[0] for w, x in zip(weights, inputs)]
+        )
+        graph.replay()
+        torch.testing.assert_close(out, reference, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_nvfp4_row_grouped_streams():
+    """Grouped GEMMs synchronize correctly with non-default caller streams."""
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    results = []
+    for stream in streams:
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            splits = [32, 160]
+            weights, inputs = _row_grouped_operands(splits)
+            out = torch.empty(sum(splits), 96, device="cuda", dtype=torch.bfloat16)
+            y = general_grouped_gemm(
+                weights,
+                inputs,
+                [out],
+                [None] * 2,
+                torch.bfloat16,
+                m_splits=splits,
+                single_output=True,
+            )[0]
+            ref = torch.cat(
+                [general_gemm(w, x, out_dtype=torch.bfloat16)[0] for w, x in zip(weights, inputs)]
+            )
+            results.append((y, ref))
+        torch.cuda.current_stream().wait_stream(stream)
+    for y, ref in results:
+        torch.testing.assert_close(y, ref, rtol=0, atol=0)
