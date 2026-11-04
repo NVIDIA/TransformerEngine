@@ -465,8 +465,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *input
     }
   } else {
     const auto [C0, C1] = inputC->flat_2d_dims();
-    NVTE_CHECK(C0 == n && C1 == m, "GEMM input C has incompatible dimensions (expected ", n, "x",
-               m, ", got ", C0, "x", C1, ")");
+    NVTE_CHECK(C0 == n && C1 == m, "GEMM input C has incompatible dimensions (expected ", n, "x", m,
+               ", got ", C0, "x", C1, ")");
     const DType C_dtype = inputC->data.dtype;
     if (is_fp8_dtype(outputD->data.dtype)) {
       NVTE_CHECK(C_dtype == DType::kFloat16 || C_dtype == DType::kBFloat16,
@@ -475,8 +475,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *input
                  "GEMM with FP8 output requires C and bias to have the same dtype (C=",
                  to_string(C_dtype), ", bias=", to_string(inputBias->data.dtype), ").");
     } else {
-      NVTE_CHECK(C_dtype == outputD->data.dtype, "GEMM requires C and D to have the same dtype (C=",
-                 to_string(C_dtype), ", D=", to_string(outputD->data.dtype), ").");
+      NVTE_CHECK(C_dtype == outputD->data.dtype,
+                 "GEMM requires C and D to have the same dtype (C=", to_string(C_dtype),
+                 ", D=", to_string(outputD->data.dtype), ").");
     }
     C_type = get_cuda_dtype(C_dtype);
   }
