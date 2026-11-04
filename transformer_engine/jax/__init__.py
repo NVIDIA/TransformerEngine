@@ -22,12 +22,22 @@ model and support automatic differentiation.
 
 # pylint: disable=wrong-import-position
 
+import os
+import warnings
+
 # This unused import is needed because the top level `transformer_engine/__init__.py`
 # file catches an `ImportError` as a guard for cases where the given framework's
 # extensions are not available.
 import jax
 
 from transformer_engine.common import load_framework_extension
+
+if os.getenv("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0":
+    warnings.warn(
+        "TE/JAX is not yet compatible with CuTeDSL due to XLA, TE/JAX, and Python GC conflicts. "
+        "We are working on a fix; in the meantime NVTE_ENABLE_CUTEDSL_BACKEND is forced off."
+    )
+os.environ["NVTE_ENABLE_CUTEDSL_BACKEND"] = "0"
 
 load_framework_extension("jax")
 
