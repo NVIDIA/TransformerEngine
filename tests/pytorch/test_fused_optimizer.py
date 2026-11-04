@@ -349,7 +349,7 @@ class TestFusedAdam(TestFusedOptimizer):
         tst_params = [
             torch.nn.Parameter(torch.randn(n, device="cuda").to(param_dtype)) for n in numels
         ]
-        ref_params = [torch.nn.Parameter(p.detach().float()) for p in tst_params]
+        ref_params = [torch.nn.Parameter(p.detach().clone().float()) for p in tst_params]
         ref_optim = torch.optim.Adam(ref_params, **self.options)
         tst_optim = self.fused_optim(
             tst_params, capturable=capturable, master_weights=master_weights, **self.options
@@ -358,7 +358,7 @@ class TestFusedAdam(TestFusedOptimizer):
         for _ in range(self.iters):
             for p_ref, p_tst in zip(ref_params, tst_params):
                 p_tst.grad = torch.randn_like(p_tst)
-                p_ref.grad = p_tst.grad.float()
+                p_ref.grad = p_tst.grad.clone().float()
             ref_optim.step()
             tst_optim.step()
 
