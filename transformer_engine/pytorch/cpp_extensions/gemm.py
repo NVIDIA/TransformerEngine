@@ -1040,6 +1040,49 @@ def strided_batched_gemm(
     )
 
 
+def _can_group_nvfp4_row_scaled_gemm(A, B) -> bool:
+    """Whether operands support the row-scaled forward grouped backend."""
+    # Other layouts, bilateral scales, and UE5M3 keep the general-GEMM path.
+    return all(
+        isinstance(a, NVFP4TensorStorage)
+        and isinstance(b, NVFP4TensorStorage)
+        and not (is_custom(a) or is_custom(b))
+        and len(a.shape) == len(b.shape) == 2
+        and not a._row_scaled_nvfp4
+        and b._row_scaled_nvfp4
+        and a._scale_dtype == b._scale_dtype == DType.kFloat8E4M3
+        and a._amax_rowwise is not None
+        and a._amax_rowwise.numel() == 1
+        for a, b in zip(A, B)
+    )
+
+
+def _nvfp4_row_scaled_grouped_gemm(A, B, out, m_splits, single_output, use_split_accumulator):
+    """Group FP32 forward GEMMs while retaining per-expert output scaling."""
+    out_views = list(out[0].split(m_splits, dim=0)) if single_output else out
+    active = [i for i, dest in enumerate(out_views) if dest.numel()]
+    if active:
+        aliases = [
+            _nvfp4_row_scaled_gemm_inputs(A[i], B[i], transa=True, transb=False) for i in active
+        ]
+        intermediates = [torch.empty_like(out_views[i], dtype=torch.float32) for i in active]
+        general_grouped_gemm(
+            [alias[0] for alias in aliases],
+            [alias[1] for alias in aliases],
+            intermediates,
+            [None] * len(active),
+            torch.float32,
+            m_splits=[out_views[i].shape[0] for i in active],
+            use_split_accumulator=use_split_accumulator,
+        )
+        for i, intermediate, alias in zip(active, intermediates, aliases):
+            row_scales, col_scales = alias[2:]
+            # Match general_gemm's FP32 arithmetic and final cast/copy exactly.
+            intermediate.mul_(row_scales * col_scales)
+            out_views[i].copy_(intermediate.to(dtype=out_views[i].dtype))
+    return out[0] if single_output else out
+
+
 def general_grouped_gemm(
     A: List[torch.Tensor],
     B: List[torch.Tensor],
@@ -1090,6 +1133,23 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
+
+    # Only the ordinary forward epilogue is eligible. Preserve debug/custom
+    # output handling, backward, accumulation, bias, and fused-GELU fallbacks.
+    if layout == "TN" and _can_group_nvfp4_row_scaled_gemm(A, B):
+        simple_epilogue = not (grad or accumulate or gelu or use_bias)
+        unquantized_output = D_dtype is None and all(q is None for q in quantization_params)
+        native_output = all(
+            isinstance(o, torch.Tensor)
+            and not isinstance(o, QuantizedTensorStorage)
+            and o.is_contiguous()
+            for o in out
+        )
+        if simple_epilogue and unquantized_output and native_output:
+            result = _nvfp4_row_scaled_grouped_gemm(
+                A, B, out, m_splits, single_output, use_split_accumulator
+            )
+            return result, bias, gelu_input
 
     # Determine whether to repeatedly call general_gemm
     use_general_gemm_impl = False

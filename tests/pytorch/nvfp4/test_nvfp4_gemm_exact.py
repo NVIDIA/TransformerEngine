@@ -838,3 +838,304 @@ def test_nvfp4_ue5m3_gemm_leaves_operands_unswizzled(M: int, K: int, N: int):
     ref = x_q.dequantize(dtype=torch.float32) @ w_q.dequantize(dtype=torch.float32).t()
     rel_err = (y1.float() - ref).norm() / ref.norm()
     assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"
+
+
+def _row_grouped_operands(splits, n=96, k=128, hybrid=False):
+    """Deterministic operands with different expert-wise dynamic ranges."""
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    weights, inputs = [], []
+    for i, m in enumerate(splits):
+        wq = NVFP4Quantizer(rowwise=True, columnwise=True, with_rht=False)
+        xq = NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False, row_scaled_nvfp4=True)
+        if hybrid:
+            wq = HybridQuantizer(rowwise_quantizer=wq, columnwise_quantizer=IdentityQuantizer())
+            xq = HybridQuantizer(rowwise_quantizer=xq, columnwise_quantizer=IdentityQuantizer())
+        weights.append(wq(torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * (i + 1)))
+        inputs.append(xq(torch.randn(m, k, device="cuda", dtype=torch.bfloat16) / (i + 1)))
+    return weights, inputs
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("splits", [(128, 128, 128), (32, 0, 160), (0, 64, 0), (0, 0, 0)])
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("single_output", [False, True])
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_nvfp4_row_grouped_exact(monkeypatch, splits, out_dtype, single_output, hybrid):
+    """The grouped backend preserves per-expert results and operand metadata exactly."""
+    import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
+
+    torch.manual_seed(73)
+    weights, inputs = _row_grouped_operands(splits, hybrid=hybrid)
+    reference = [general_gemm(w, x, out_dtype=out_dtype)[0] for w, x in zip(weights, inputs)]
+    snapshots = []
+    for w, x in zip(weights, inputs):
+        for operand in (w, x):
+            native = gemm_module._unwrap_tensor(operand, "rowwise")
+            snapshots.append(
+                (
+                    native,
+                    native._row_scaled_nvfp4,
+                    native._amax_rowwise.clone(),
+                    native._rowwise_scale_inv.clone(),
+                )
+            )
+    native_grouped = gemm_module.tex.te_general_grouped_gemm
+    calls = []
+
+    def recorded(*args, **kwargs):
+        calls.append(args)
+        return native_grouped(*args, **kwargs)
+
+    monkeypatch.setattr(gemm_module.tex, "te_general_grouped_gemm", recorded)
+    outputs = (
+        [torch.empty(sum(splits), 96, dtype=out_dtype, device="cuda")]
+        if single_output
+        else [torch.empty(m, 96, dtype=out_dtype, device="cuda") for m in splits]
+    )
+    result, _, _ = general_grouped_gemm(
+        weights,
+        inputs,
+        outputs,
+        [None] * len(splits),
+        out_dtype,
+        m_splits=list(splits) if single_output else None,
+        single_output=single_output,
+    )
+    actual = result.split(splits) if single_output else result
+    for y, expected, dest in zip(
+        actual, reference, outputs[0].split(splits) if single_output else outputs
+    ):
+        assert y.data_ptr() == dest.data_ptr()
+        torch.testing.assert_close(y, expected, rtol=0, atol=0)
+    assert len(calls) == int(any(splits))
+    if calls:
+        assert len(calls[0][0]) == sum(m > 0 for m in splits)
+        assert calls[0][5] == TE_DType[torch.float32]
+    for operand, row_scaled, amax, scales in snapshots:
+        assert operand._row_scaled_nvfp4 == row_scaled
+        torch.testing.assert_close(operand._amax_rowwise, amax, rtol=0, atol=0)
+        assert torch.equal(operand._rowwise_scale_inv, scales)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("option", ["bias", "accumulate", "grad", "D_dtype", "bilateral", "mixed"])
+def test_nvfp4_row_grouped_fallback(monkeypatch, option):
+    """Unsupported epilogues and operand configurations keep the original dispatch."""
+    import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
+
+    torch.manual_seed(73)
+    splits = [64, 128]
+    weights, inputs = _row_grouped_operands(splits)
+    kwargs = dict(m_splits=splits)
+    biases = [torch.randn(96, device="cuda", dtype=torch.bfloat16) for _ in splits]
+    if option == "bias":
+        kwargs.update(bias=biases, use_bias=True)
+    elif option == "accumulate":
+        kwargs["accumulate"] = True
+    elif option == "grad":
+        kwargs["grad"] = True
+    elif option == "D_dtype":
+        kwargs["D_dtype"] = TE_DType[torch.bfloat16]
+    elif option == "bilateral":
+        weights = [
+            NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False, row_scaled_nvfp4=True)(
+                torch.randn(96, 128, device="cuda", dtype=torch.bfloat16)
+            )
+            for _ in splits
+        ]
+    elif option == "mixed":
+        inputs[1] = NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False)(
+            torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+        )
+    outputs = [torch.randn(m, 96, device="cuda", dtype=torch.bfloat16) for m in splits]
+    expected = [o.clone() for o in outputs]
+    for i in range(len(splits)):
+        general_gemm(
+            weights[i],
+            inputs[i],
+            out=expected[i],
+            out_dtype=torch.bfloat16,
+            accumulate=option == "accumulate",
+            grad=option == "grad",
+            bias=biases[i] if option == "bias" else None,
+        )
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Unsupported operation entered grouped row-scaled fast path")
+
+    monkeypatch.setattr(gemm_module, "_nvfp4_row_scaled_grouped_gemm", forbidden)
+    result, _, _ = general_grouped_gemm(
+        weights, inputs, outputs, [None] * len(splits), torch.bfloat16, **kwargs
+    )
+    for y, ref in zip(result, expected):
+        torch.testing.assert_close(y, ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
+def test_nvfp4_row_grouped_graph_replay(out_dtype):
+    """Repeated graph replay consumes current payloads and current amax values."""
+    splits = [64, 0, 128]
+    weights, inputs = _row_grouped_operands(splits)
+    out = torch.empty(sum(splits), 96, device="cuda", dtype=out_dtype)
+
+    def run():
+        return general_grouped_gemm(
+            weights,
+            inputs,
+            [out],
+            [None] * len(splits),
+            out_dtype,
+            m_splits=splits,
+            single_output=True,
+        )[0]
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            run()
+    torch.cuda.current_stream().wait_stream(stream)
+    for step in range(3):
+        for operand in weights + inputs:
+            if operand.numel():
+                # Both quantized payload and its global scales change each step.
+                q = operand._quantizer
+                q.update_quantized(
+                    torch.randn(operand.shape, device="cuda", dtype=torch.bfloat16) * (step + 1),
+                    operand,
+                )
+        reference = torch.cat(
+            [general_gemm(w, x, out_dtype=out_dtype)[0] for w, x in zip(weights, inputs)]
+        )
+        graph.replay()
+        torch.testing.assert_close(out, reference, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("device_index", [0, 1])
+def test_nvfp4_row_grouped_streams(device_index):
+    """Grouped backend dependencies remain correct on non-default streams/devices."""
+    if torch.cuda.device_count() <= device_index:
+        pytest.skip("Requires a second CUDA device")
+    with torch.cuda.device(device_index):
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        results = []
+        for stream in streams:
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                splits = [32, 160]
+                weights, inputs = _row_grouped_operands(splits)
+                out = torch.empty(sum(splits), 96, device="cuda", dtype=torch.bfloat16)
+                y = general_grouped_gemm(
+                    weights,
+                    inputs,
+                    [out],
+                    [None] * 2,
+                    torch.bfloat16,
+                    m_splits=splits,
+                    single_output=True,
+                )[0]
+                ref = torch.cat(
+                    [
+                        general_gemm(w, x, out_dtype=torch.bfloat16)[0]
+                        for w, x in zip(weights, inputs)
+                    ]
+                )
+                results.append((y, ref))
+            torch.cuda.current_stream().wait_stream(stream)
+        for y, ref in results:
+            torch.testing.assert_close(y, ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("layout", ["NN", "NT"])
+def test_nvfp4_row_grouped_backward_layouts(monkeypatch, layout):
+    """Backward layouts retain generalized row/column scaling through dense GEMMs."""
+    import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
+
+    torch.manual_seed(91)
+    weights, inputs = [], []
+    for _ in range(2):
+        shape_a, shape_b = ((128, 96), (64, 128)) if layout == "NN" else ((64, 96), (64, 128))
+        weights.append(
+            NVFP4Quantizer(rowwise=True, columnwise=True, with_rht=False)(
+                torch.randn(shape_a, device="cuda", dtype=torch.bfloat16)
+            )
+        )
+        inputs.append(
+            NVFP4Quantizer(rowwise=True, columnwise=True, with_rht=False, row_scaled_nvfp4=True)(
+                torch.randn(shape_b, device="cuda", dtype=torch.bfloat16)
+            )
+        )
+    expected = [
+        general_gemm(w, x, out_dtype=torch.bfloat16, layout=layout, grad=True)[0]
+        for w, x in zip(weights, inputs)
+    ]
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Backward layout entered the forward-only grouped fast path")
+
+    monkeypatch.setattr(gemm_module, "_nvfp4_row_scaled_grouped_gemm", forbidden)
+    outputs = [torch.empty_like(y) for y in expected]
+    result, _, _ = general_grouped_gemm(
+        weights, inputs, outputs, [None] * 2, torch.bfloat16, layout=layout, grad=True
+    )
+    for y, ref in zip(result, expected):
+        torch.testing.assert_close(y, ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("option", ["gelu", "output_quantization", "noncontiguous_output"])
+def test_nvfp4_row_grouped_preserves_validation(monkeypatch, option):
+    """The optimization preserves existing errors for unsupported operations."""
+    import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
+
+    weights, inputs = _row_grouped_operands([64])
+    output = torch.empty(64, 96, dtype=torch.bfloat16, device="cuda")
+    quantizers, kwargs = [None], {}
+    if option == "gelu":
+        kwargs["gelu"] = True
+    elif option == "output_quantization":
+        quantizers = [NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False)]
+    else:
+        output = torch.empty(96, 64, dtype=torch.bfloat16, device="cuda").t()
+    eligibility = gemm_module._can_group_nvfp4_row_scaled_gemm
+    failures = []
+    for enable in (False, True):
+        monkeypatch.setattr(
+            gemm_module,
+            "_can_group_nvfp4_row_scaled_gemm",
+            eligibility if enable else lambda *_: False,
+        )
+        with pytest.raises((AssertionError, ValueError, NotImplementedError)) as error:
+            general_grouped_gemm(weights, inputs, [output], quantizers, torch.bfloat16, **kwargs)
+        failures.append((type(error.value), str(error.value)))
+    assert failures[0] == failures[1]
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_nvfp4_row_grouped_higher_rank_fallback(monkeypatch):
+    """Higher-rank operands preserve the existing dense-GEMM behavior."""
+    import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
+
+    weight = NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False)(
+        torch.randn(96, 128, device="cuda", dtype=torch.bfloat16)
+    )
+    inp = NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False, row_scaled_nvfp4=True)(
+        torch.randn(2, 32, 128, device="cuda", dtype=torch.bfloat16)
+    )
+    expected = general_gemm(weight, inp, out_dtype=torch.bfloat16)[0]
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Higher-rank operands entered the matrix-only grouped fast path")
+
+    monkeypatch.setattr(gemm_module, "_nvfp4_row_scaled_grouped_gemm", forbidden)
+    out = torch.empty_like(expected)
+    result, _, _ = general_grouped_gemm([weight], [inp], [out], [None], torch.bfloat16)
+    torch.testing.assert_close(result[0], expected, rtol=0, atol=0)

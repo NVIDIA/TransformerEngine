@@ -5,6 +5,7 @@
 add_executable(test_util
                test_nvrtc.cpp
                test_string.cpp
+               test_multi_stream.cpp
                ../test_common.cu)
 
 
