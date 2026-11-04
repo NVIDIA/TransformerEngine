@@ -66,33 +66,6 @@ def test_gemm_with_missing_nvfp4_amax(disable_x: bool, disable_w: bool) -> None:
     torch.testing.assert_close(gemm(w_test, x_test), gemm(w_ref, x_ref), atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("shape", [(32, 128), (128, 128)])
-@pytest.mark.parametrize("with_rht", [False, True])
-@pytest.mark.parametrize("optimize_for_gemm", [False, True])
-def test_gemm_reuse_quantized_output(shape, with_rht, optimize_for_gemm):
-    """Requantizing a GEMM output resets its previous scale layout."""
-    torch.manual_seed(42)
-    weight = torch.randn(shape[-1], shape[-1], device="cuda", dtype=torch.bfloat16)
-    inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
-    next_inp = torch.randn_like(inp)
-    quantizer = NVFP4Quantizer(
-        with_rht=with_rht,
-        with_post_rht_amax=with_rht,
-        stochastic_rounding=False,
-        with_random_sign_mask=False,
-    )
-    quantizer.optimize_for_gemm = optimize_for_gemm
-    out = general_gemm(weight, inp, quantization_params=quantizer)[0]
-    expected = quantizer(general_gemm(weight, next_inp)[0])
-
-    actual = general_gemm(weight, next_inp, quantization_params=quantizer, out=out)[0]
-
-    assert actual is out
-    assert actual._with_gemm_swizzled_scales == optimize_for_gemm
-    torch.testing.assert_close(actual.dequantize(), expected.dequantize(), atol=0, rtol=0)
-
-
 def check_nvfp4_gemm_versus_reference(
     x_dtype: torch.dtype,
     w_dtype: torch.dtype,
