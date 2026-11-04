@@ -624,7 +624,7 @@ def test_nvfp4_row_scaled_quantizer_roles(
             QuantizerRole(module_type="linear", tensor_type="grad_input"),
         ],
     ).make_quantizers()
-    assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
+    assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [True, False]
     assert [q.nvfp4_use_4over6 for q in backward_quantizers] == [False, False]
     assert [q.nvfp4_e4m3_max for q in backward_quantizers] == [0, 0]
     assert [q.nvfp4_4over6_err_mode for q in backward_quantizers] == [nvfp4_4over6_err_mode] * 2
@@ -656,6 +656,34 @@ def test_nvfp4_row_scaled_quantizer_roles(
         True,
         True,
     ]
+
+
+@pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
+@pytest.mark.parametrize("row_scaled_activation", [False, True], ids=["act", "row_scaled_act"])
+@pytest.mark.parametrize("row_scaled_weight", [False, True], ids=["w", "row_scaled_w"])
+@pytest.mark.parametrize("disable_2d_quantization", [False, True], ids=["2d", "1d"])
+def test_nvfp4_row_scaled_weight_quantizer_roles(
+    row_scaled_activation, row_scaled_weight, disable_2d_quantization
+):
+    recipe = NVFP4BlockScaling(
+        row_scaled_activation=row_scaled_activation,
+        row_scaled_weight=row_scaled_weight,
+        disable_2d_quantization=disable_2d_quantization,
+    )
+    weight_quantizer, input_quantizer = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="forward",
+        num_quantizers=2,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="weight"),
+            QuantizerRole(module_type="linear", tensor_type="input"),
+        ],
+    ).make_quantizers()
+    assert weight_quantizer.row_scaled_nvfp4 == row_scaled_weight
+    assert weight_quantizer.with_2d_quantization == (
+        not row_scaled_weight and not disable_2d_quantization
+    )
+    assert input_quantizer.row_scaled_nvfp4 == row_scaled_activation
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)

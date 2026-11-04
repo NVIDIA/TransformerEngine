@@ -1963,6 +1963,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
                 if quantizer is None:
                     raise RuntimeError("Weight quantizer has not been initialized")
+                if getattr(quantizer, "row_scaled_nvfp4", False):
+                    raise NotImplementedError(
+                        "Row-scaled NVFP4 weights (row_scaled_weight=True) do not support "
+                        "quantized primary weights."
+                    )
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
                 # HybridQuantizer is included so its current-scaling / NVFP4

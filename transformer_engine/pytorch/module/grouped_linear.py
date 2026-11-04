@@ -136,6 +136,7 @@ def is_module_grouped_tensor_path_supported(
         getattr(recipe, "backward_override", None),
         getattr(recipe, "disable_rht", None),
         getattr(recipe, "row_scaled_activation", None),
+        getattr(recipe, "row_scaled_weight", None),
         getattr(recipe, "fp8_format", None),
         getattr(recipe, "nvfp4_4over6", None),
         dtype,
@@ -149,6 +150,7 @@ def _is_module_grouped_tensor_path_supported(
     backward_override: Optional[str],
     disable_rht: Optional[bool],
     row_scaled_activation: Optional[bool],
+    row_scaled_weight: Optional[bool],
     fp8_format: Optional[RecipeFormat],
     nvfp4_4over6: Optional[str],
     dtype: torch.dtype,
@@ -193,7 +195,12 @@ def _is_module_grouped_tensor_path_supported(
                 and fp8_format == RecipeFormat.E4M3
                 and nvfp4_4over6 == "none"
             )
-        return device_capability >= (10, 0) and not disable_rht and fp8_format == RecipeFormat.E4M3
+        return (
+            device_capability >= (10, 0)
+            and not disable_rht
+            and fp8_format == RecipeFormat.E4M3
+            and (not row_scaled_weight or cublaslt_version >= 130400)
+        )
     return False
 
 

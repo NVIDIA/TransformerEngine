@@ -85,6 +85,18 @@ def _is_nvfp4_row_scaled_tensor(tensor: torch.Tensor) -> bool:
     return isinstance(tensor, NVFP4TensorStorage) and tensor._row_scaled_nvfp4
 
 
+def _nvfp4_unit_amax_alias(
+    tensor: NVFP4TensorStorage, amax_key: str
+) -> Tuple[NVFP4TensorStorage, torch.Tensor]:
+    """Return a per-tensor alias with unit ``amax_key`` and the replaced FP32 amax."""
+    metadata = tensor.get_metadata()
+    amax = metadata[amax_key]
+    assert amax is not None and amax.dtype == torch.float32
+    metadata[amax_key] = amax.new_ones(1)
+    metadata["row_scaled_nvfp4"] = False
+    return NVFP4TensorStorage(**metadata), amax
+
+
 def _nvfp4_row_scaled_gemm_inputs(
     A: NVFP4TensorStorage,
     B: NVFP4TensorStorage,
@@ -93,27 +105,13 @@ def _nvfp4_row_scaled_gemm_inputs(
     transb: bool,
 ) -> Tuple[NVFP4TensorStorage, NVFP4TensorStorage, torch.Tensor, torch.Tensor]:
     """Return per-tensor GEMM aliases and row/column FP32 output scales."""
-    A_metadata = A.get_metadata()
-    a_amax_key = "amax_rowwise" if transa else "amax_columnwise"
-    output_col_scales = A_metadata[a_amax_key]
-    assert output_col_scales is not None
-    A_metadata[a_amax_key] = output_col_scales.new_ones(1)
-    A_metadata["row_scaled_nvfp4"] = False
-
-    B_metadata = B.get_metadata()
-    b_amax_key = "amax_columnwise" if transb else "amax_rowwise"
-    output_row_scales = B_metadata[b_amax_key]
-    assert output_row_scales is not None
-    B_metadata[b_amax_key] = output_row_scales.new_ones(1)
-    B_metadata["row_scaled_nvfp4"] = False
-
-    assert output_row_scales.dtype == torch.float32 and output_col_scales.dtype == torch.float32
-    return (
-        NVFP4TensorStorage(**A_metadata),
-        NVFP4TensorStorage(**B_metadata),
-        output_row_scales.view(-1, 1),
-        output_col_scales.view(1, -1),
+    gemm_A, output_col_scales = _nvfp4_unit_amax_alias(
+        A, "amax_rowwise" if transa else "amax_columnwise"
     )
+    gemm_B, output_row_scales = _nvfp4_unit_amax_alias(
+        B, "amax_columnwise" if transb else "amax_rowwise"
+    )
+    return gemm_A, gemm_B, output_row_scales.view(-1, 1), output_col_scales.view(1, -1)
 
 
 def _nvfp4_row_scaled_grouped_gemm(
@@ -158,9 +156,13 @@ def _nvfp4_row_scaled_grouped_gemm(
     if single_output:
         if m_splits is None or len(m_splits) != num_gemms:
             return False
-        if any(s.numel() != 1 for s in col_scales):
+        col_numel = col_scales[0].numel()
+        if col_numel not in (1, out[0].shape[-1]):
             return False
-        if any(s.numel() != m for s, m in zip(row_scales, m_splits)):
+        if any(s.numel() != col_numel for s in col_scales):
+            return False
+        per_row_scales = all(s.numel() == m for s, m in zip(row_scales, m_splits))
+        if not per_row_scales and (col_numel == 1 or any(s.numel() != 1 for s in row_scales)):
             return False
         fp32_out = torch.empty_like(out[0], dtype=torch.float32)
         gemm_out = [fp32_out]
@@ -220,8 +222,18 @@ def _nvfp4_row_scaled_grouped_gemm(
         repeats = torch.tensor(m_splits, dtype=torch.int64, pin_memory=True).to(
             fp32_out.device, non_blocking=True
         )
-        col_factor = torch.cat(col_scales).repeat_interleave(repeats, output_size=total_rows)
-        fp32_2d.mul_((torch.cat(row_scales) * col_factor).view(-1, 1))
+        if col_numel == 1:
+            col_factor = torch.cat(col_scales).repeat_interleave(repeats, output_size=total_rows)
+            fp32_2d.mul_((torch.cat(row_scales) * col_factor).view(-1, 1))
+        elif per_row_scales:
+            col_factor = torch.stack(col_scales).repeat_interleave(
+                repeats, dim=0, output_size=total_rows
+            )
+            fp32_2d.mul_(torch.cat(row_scales).view(-1, 1))
+            fp32_2d.mul_(col_factor)
+        else:
+            factor = torch.stack(col_scales) * torch.cat(row_scales).view(-1, 1)
+            fp32_2d.mul_(factor.repeat_interleave(repeats, dim=0, output_size=total_rows))
         if bias is not None:
             fp32_2d.add_(
                 torch.stack(bias).repeat_interleave(repeats, dim=0, output_size=total_rows)
@@ -1314,12 +1326,15 @@ def general_grouped_gemm_for_grouped_tensor(
             getattr(t, "_row_scaled_nvfp4", False) for t in operand
         )
 
-    if _list_has_row_scaled(A) or _list_has_row_scaled(B):
+    if _list_has_row_scaled(B):
         raise NotImplementedError(
-            "Row-scaled NVFP4 operands passed as a list are not supported; pass a GroupedTensor."
+            "Row-scaled NVFP4 B operands passed as a list are not supported; pass a GroupedTensor."
         )
+    row_scaled_A_list = _list_has_row_scaled(A)
+    if row_scaled_A_list and not all(_is_nvfp4_row_scaled_tensor(a) for a in A):
+        raise NotImplementedError("Row-scaled NVFP4 A operands must all be row-scaled.")
 
-    row_scaled = _is_row_scaled(A) or _is_row_scaled(B)
+    row_scaled = row_scaled_A_list or _is_row_scaled(A) or _is_row_scaled(B)
     row_scaled_accumulate = accumulate
     post_scale_rows = None  # per-row outer scale -> output rows (from B)
     post_scale_cols = None  # per-group per-col outer scale -> output cols (from A)
@@ -1328,7 +1343,12 @@ def general_grouped_gemm_for_grouped_tensor(
             raise NotImplementedError(
                 "Row-scaled NVFP4 grouped GEMM does not support explicit beta; use accumulate."
             )
-        if _is_row_scaled(A):
+        if row_scaled_A_list:
+            amax_key = "amax_rowwise" if transa else "amax_columnwise"
+            A, col_scales = zip(*(_nvfp4_unit_amax_alias(a, amax_key) for a in A))
+            A = list(A)
+            post_scale_cols = torch.cat([s.view(-1) for s in col_scales])
+        elif _is_row_scaled(A):
             A = A.copy()
             if transa:
                 post_scale_cols = A.amax

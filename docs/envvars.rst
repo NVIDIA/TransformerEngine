@@ -367,7 +367,13 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable row-scaled NVFP4 tensors for the activation and gradient-output quantizers in the ``NVFP4BlockScaling`` recipe; weights keep per-tensor scaling. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row and columnwise ``amax`` metadata as one FP32 value per tensor column instead of a single scalar. Random Hadamard transforms and stochastic rounding follow the recipe settings as for per-tensor NVFP4. Sequence parallelism, Userbuffers communication overlap, and ``transformer_engine.pytorch.ops.GroupedLinear`` are not supported.
+   :Description: Enable row-scaled NVFP4 tensors for the activation and gradient-output quantizers in the ``NVFP4BlockScaling`` recipe; weights are controlled by :envvar:`NVTE_NVFP4_ROW_SCALED_WEIGHT`. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row and columnwise ``amax`` metadata as one FP32 value per tensor column instead of a single scalar. Random Hadamard transforms and stochastic rounding follow the recipe settings as for per-tensor NVFP4. Sequence parallelism, Userbuffers communication overlap, and ``transformer_engine.pytorch.ops.GroupedLinear`` are not supported.
+
+.. envvar:: NVTE_NVFP4_ROW_SCALED_WEIGHT
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable row-scaled NVFP4 tensors for the weight quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_weight=True)`` is used), weights store one FP32 global ``amax`` per row and per column with 1x16 (1D) block scales, and weight 2D quantization is disabled. When unset, weights use a single per-tensor global ``amax`` with 16x16 (2D) block scales, or 1x16 block scales with ``NVTE_NVFP4_DISABLE_2D_QUANTIZATION=1``. Row-scaled weights require BF16 weight tensors with both dimensions divisible by 32. The restrictions of :envvar:`NVTE_NVFP4_ROW_SCALED_ACTIVATION` apply, and 4over6 on weights and quantized primary weights are not supported.
 
 .. envvar:: NVTE_NVFP4_4OVER6
 
