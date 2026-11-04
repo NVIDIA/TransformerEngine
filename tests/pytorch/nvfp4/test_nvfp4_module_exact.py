@@ -53,7 +53,11 @@ class GetRecipes:
         return nvfp4_recipe
 
     @staticmethod
-    def nvfp4_row_scaled(with_rht: bool = False, with_2d_quantization: bool = False):
+    def nvfp4_row_scaled(
+        with_rht: bool = False,
+        with_2d_quantization: bool = False,
+        row_scaled_weight: bool = False,
+    ):
         nvfp4_recipe = recipe.NVFP4BlockScaling()
         nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(random_hadamard_transform=with_rht)
         nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=with_2d_quantization)
@@ -62,14 +66,18 @@ class GetRecipes:
         # training Linear this also drives the row-scaled columnwise (transpose)
         # of the activation that the wgrad GEMM consumes in the backward pass.
         nvfp4_recipe.row_scaled_activation = True
+        nvfp4_recipe.row_scaled_weight = row_scaled_weight
         return nvfp4_recipe
 
     @staticmethod
     def nvfp4_recipe_to_test(
-        with_rht: bool = False, with_2d_quantization: bool = False, row_scaled: bool = False
+        with_rht: bool = False,
+        with_2d_quantization: bool = False,
+        row_scaled: bool = False,
+        row_scaled_weight: bool = False,
     ):
         if row_scaled:
-            return GetRecipes.nvfp4_row_scaled(with_rht, with_2d_quantization)
+            return GetRecipes.nvfp4_row_scaled(with_rht, with_2d_quantization, row_scaled_weight)
         if with_rht and with_2d_quantization:
             return GetRecipes.nvfp4_rht_and_2d_quantization()
         elif with_rht:
@@ -81,7 +89,10 @@ class GetRecipes:
 
 
 def get_nvfp4_quantizer_factory(
-    with_rht: bool = False, with_2d_quantization: bool = False, row_scaled: bool = False
+    with_rht: bool = False,
+    with_2d_quantization: bool = False,
+    row_scaled: bool = False,
+    row_scaled_weight: bool = False,
 ):
     """
     Create a quantizer factory for NVFP4 reference implementation.
@@ -127,6 +138,7 @@ def get_nvfp4_quantizer_factory(
                 quant_tile_shape=(16, 16) if with_2d_quantization else (1, 16),
                 pow_2_scales=False,
                 with_rht=False,
+                row_scaled_nvfp4=row_scaled_weight,
             )
         if role.tensor_type == "grad_output":
             return reference_nvfp4.NVFP4QuantizerRef(
@@ -174,6 +186,7 @@ def check_nvfp4_module_versus_reference(
     with_rht: bool = False,
     with_2d_quantization: bool = False,
     row_scaled: bool = False,
+    row_scaled_weight: bool = False,
     rel_tol: float = None,
 ):
     """
@@ -188,6 +201,7 @@ def check_nvfp4_module_versus_reference(
         num_steps: Number of forward/backward steps to test
         row_scaled: Enable row-scaled (per-token) NVFP4 activation quantization,
             exercising the row-scaled columnwise (transpose) path consumed by wgrad.
+        row_scaled_weight: Enable row-scaled NVFP4 weight quantization (requires row_scaled).
         rel_tol: If set, compare tensors by relative Frobenius-norm error instead of
             the default bitwise-tight ``assert_close`` (used for the row-scaled path).
     """
@@ -256,8 +270,12 @@ def check_nvfp4_module_versus_reference(
             ref_module.layer_norm_bias.copy_(native_module.layer_norm_bias)
 
     # Create recipes for native and reference implementations
-    nvfp4_recipe = GetRecipes.nvfp4_recipe_to_test(with_rht, with_2d_quantization, row_scaled)
-    nvfp4_ref_factory = get_nvfp4_quantizer_factory(with_rht, with_2d_quantization, row_scaled)
+    nvfp4_recipe = GetRecipes.nvfp4_recipe_to_test(
+        with_rht, with_2d_quantization, row_scaled, row_scaled_weight
+    )
+    nvfp4_ref_factory = get_nvfp4_quantizer_factory(
+        with_rht, with_2d_quantization, row_scaled, row_scaled_weight
+    )
     nvfp4_ref_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_factory)
 
     # Training loop comparison
@@ -449,7 +467,7 @@ def test_nvfp4_linear_versus_reference(
 @pytest.mark.parametrize("num_steps", [1, 3], ids=["single_step", "multi_step"])
 @pytest.mark.parametrize("with_rht", [False, True], ids=["no_rht", "with_rht"])
 @pytest.mark.parametrize(
-    "with_2d_quantization", [False, True], ids=["no_2d_quantization", "with_2d_quantization"]
+    "weight_scaling", ["per_tensor_1d", "per_tensor_2d", "row_scaled_1d"], ids=lambda s: f"w_{s}"
 )
 @pytest.mark.parametrize(
     "module_class", [te.Linear, te.LayerNormLinear], ids=["Linear", "LayerNormLinear"]
@@ -459,7 +477,7 @@ def test_nvfp4_linear_row_scaled_versus_reference(
     out_features: int,
     num_steps: int,
     with_rht: bool,
-    with_2d_quantization: bool,
+    weight_scaling: str,
     module_class,
 ):
     """End-to-end row-scaled (per-token) NVFP4 Linear forward + backward.
@@ -478,8 +496,9 @@ def test_nvfp4_linear_row_scaled_versus_reference(
         x_dtype=torch.bfloat16,
         num_steps=num_steps,
         with_rht=with_rht,
-        with_2d_quantization=with_2d_quantization,
+        with_2d_quantization=weight_scaling == "per_tensor_2d",
         row_scaled=True,
+        row_scaled_weight=weight_scaling == "row_scaled_1d",
         rel_tol=2e-2,
     )
 
@@ -538,7 +557,14 @@ def _relative_error(native: torch.Tensor, ref: torch.Tensor) -> float:
         "GroupedLinear_grouped_tensor",
     ],
 )
-def test_nvfp4_row_scaled_default_recipe_error_versus_per_tensor(name: str):
+@pytest.mark.parametrize(
+    "row_scaled_activation, row_scaled_weight",
+    [(True, False), (False, True), (True, True)],
+    ids=["row_scaled_act", "row_scaled_w", "row_scaled_act_w"],
+)
+def test_nvfp4_row_scaled_default_recipe_error_versus_per_tensor(
+    name: str, row_scaled_activation: bool, row_scaled_weight: bool
+):
     """Row-scaled NVFP4 with default recipe settings is no less accurate than per-tensor."""
     reset_rng_states()
     state = _make_default_recipe_module(name).state_dict()
@@ -550,7 +576,13 @@ def test_nvfp4_row_scaled_default_recipe_error_versus_per_tensor(name: str):
     reference = _run_default_recipe_module(name, state, None, x, dy)
     per_tensor = _run_default_recipe_module(name, state, recipe.NVFP4BlockScaling(), x, dy)
     row_scaled = _run_default_recipe_module(
-        name, state, recipe.NVFP4BlockScaling(row_scaled_activation=True), x, dy
+        name,
+        state,
+        recipe.NVFP4BlockScaling(
+            row_scaled_activation=row_scaled_activation, row_scaled_weight=row_scaled_weight
+        ),
+        x,
+        dy,
     )
 
     for key, ref in reference.items():
@@ -561,6 +593,14 @@ def test_nvfp4_row_scaled_default_recipe_error_versus_per_tensor(name: str):
         assert (
             err_row_scaled <= 1.25 * err_per_tensor + 1e-6
         ), f"{key} relative error {err_row_scaled:.4f} exceeds per-tensor {err_per_tensor:.4f}"
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_nvfp4_row_scaled_weight_rejects_quantized_primary_weights():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(row_scaled_weight=True)
+    with pytest.raises(NotImplementedError, match="row_scaled_weight"):
+        with te.quantized_model_init(enabled=True, recipe=nvfp4_recipe):
+            te.Linear(128, 128, params_dtype=torch.bfloat16, device="cuda")
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
