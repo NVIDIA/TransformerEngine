@@ -13,29 +13,32 @@ from cutlass import cute
 from cutlass import Boolean, Float32, Int32, Int64, Uint32, Uint64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
-from transformer_engine.common.CuTeDSL.cast.nvfp4.utils import (
-    NVFP4_BLOCK_SCALING_SIZE,
+from transformer_engine.common.CuTeDSL.utils import (
     abs_max_tree_bf16x2,
-    block_scale_code,
-    coefficient_of,
-    compute_global_encode_sf,
-    e4m3_code,
     ld_global_evict_last_v8,
     ld_global_v2,
-    pack_column_block,
-    pack_row_block,
+    pack_f32x2,
     pack_u32x2,
     prefetch_l2,
     rcp_rn_f32,
     row_offset,
-    splat_f32x2,
     st_global_u16,
     st_global_u32,
     st_global_u8,
     st_global_v2,
     st_global_v4,
     st_global_v8,
-    unpack_u64,
+    unpack_i64_to_i32x2,
+)
+from transformer_engine.common.CuTeDSL.utils_fp8 import (
+    cvt_f32_to_fp8e4m3_code,
+)
+from transformer_engine.common.CuTeDSL.utils_nvfp4 import (
+    block_scale_code,
+    coefficient_of,
+    compute_global_encode_sf,
+    pack_column_block,
+    pack_row_block,
 )
 from transformer_engine.common.CuTeDSL.philox_rng import (
     BLOCK_PHILOX_FOLD_SUPPORTED,
@@ -48,10 +51,11 @@ from transformer_engine.common.CuTeDSL.philox_rng import (
 )
 from .quantize_nvfp4_common import (
     CUTEDSL_DEBUG_LOGGING,
-    NVFP4QuantizeConfig,
-    NVFP4QuantizeKernelBase,
+    NVFP4_BLOCK_SCALING_SIZE,
     device_sm_count,
     noop_flag_is_set,
+    NVFP4QuantizeConfig,
+    NVFP4QuantizeKernelBase,
 )
 
 
@@ -379,9 +383,11 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
                 if cbase + q < K and nblk > 0:
                     d = []
                     for t in cutlass.range_constexpr(4):
-                        lo, hi = unpack_u64(staging[slot * (self._STAGING_WORDS // 2) + 4 * ll + t])
-                        d.append(lo)
-                        d.append(hi)
+                        lo, hi = unpack_i64_to_i32x2(
+                            staging[slot * (self._STAGING_WORDS // 2) + 4 * ll + t]
+                        )
+                        d.append(Uint32(lo))
+                        d.append(Uint32(hi))
                     if nblk >= 4:
                         if wide:
                             st_global_v8(q_ptr, d)  # one 32-byte sector
@@ -469,7 +475,8 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
                 rnd_row[g] = draws[0]
                 rnd_row[g + 1] = draws[1]
         codes_a = [block_scale_code(v[i], S_enc_row_div6) for i in range(4)]
-        coeff2_a = [splat_f32x2(table[Int32(codes_a[i])]) for i in range(4)]
+        coeffs_a = [table[Int32(codes_a[i])] for i in range(4)]
+        coeff2_a = [pack_f32x2(c, c) for c in coeffs_a]
         for i in cutlass.range_constexpr(4):
             w0, w1 = pack_row_block(v[i], coeff2_a[i], rnd_row[i], STOCHASTIC)
             if afull or (rows[i] < M and arow):
@@ -515,11 +522,14 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
         codes_b = [None] * 4
         for p in cutlass.range_constexpr(2):  # one packed word holds a pair of adjacent columns
             pair_amax = abs_max_tree_bf16x2(raw[p]) & Uint32(0x7FFF7FFF)
-            codes_b[2 * p] = e4m3_code((pair_amax << Uint32(16)).bitcast(Float32) * S_enc_col_div6)
-            codes_b[2 * p + 1] = e4m3_code(
+            codes_b[2 * p] = cvt_f32_to_fp8e4m3_code(
+                (pair_amax << Uint32(16)).bitcast(Float32) * S_enc_col_div6
+            )
+            codes_b[2 * p + 1] = cvt_f32_to_fp8e4m3_code(
                 (pair_amax & Uint32(0xFFFF0000)).bitcast(Float32) * S_enc_col_div6
             )
-        coeff2_b = [splat_f32x2(table[THREADS + Int32(codes_b[k])]) for k in range(4)]
+        coeffs_b = [table[THREADS + Int32(codes_b[k])] for k in range(4)]
+        coeff2_b = [pack_f32x2(c, c) for c in coeffs_b]
         for p in cutlass.range_constexpr(2):
             for q in cutlass.range_constexpr(2):
                 cs = 2 * p + q
