@@ -388,26 +388,32 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scaled_softmax_forward", &transformer_engine::pytorch::scaled_softmax_forward,
         "Scaled Softmax FWD", py::call_guard<py::gil_scoped_release>());
   m.def("scaled_softmax_backward", &transformer_engine::pytorch::scaled_softmax_backward,
-        "Scaled Softmax BWD", py::call_guard<py::gil_scoped_release>());
+        "Scaled Softmax BWD", py::arg("output_grads"), py::arg("softmax_results"),
+        py::arg("scale_factor"), py::arg("overwrite") = false,
+        py::call_guard<py::gil_scoped_release>());
   m.def("scaled_masked_softmax_forward",
         &transformer_engine::pytorch::scaled_masked_softmax_forward, "Scaled Masked Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
   m.def("scaled_masked_softmax_backward",
         &transformer_engine::pytorch::scaled_masked_softmax_backward, "Scaled Masked Softmax BWD",
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("output_grads"), py::arg("softmax_results"), py::arg("scale_factor"),
+        py::arg("overwrite") = false, py::call_guard<py::gil_scoped_release>());
   m.def("scaled_upper_triang_masked_softmax_forward",
         &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_forward,
         "Scaled Upper-Triangular Masked Softmax FWD", py::call_guard<py::gil_scoped_release>());
   m.def("scaled_upper_triang_masked_softmax_backward",
         &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_backward,
-        "Scaled Upper-Triangular Masked Softmax BWD", py::call_guard<py::gil_scoped_release>());
+        "Scaled Upper-Triangular Masked Softmax BWD", py::arg("output_grads"),
+        py::arg("softmax_results"), py::arg("scale_factor"), py::arg("overwrite") = false,
+        py::call_guard<py::gil_scoped_release>());
   m.def("scaled_aligned_causal_masked_softmax_forward",
         &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_forward,
         "Scaled Bottom-Right Corner Aligned Masked Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
   m.def("scaled_aligned_causal_masked_softmax_backward",
         &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_backward,
-        "Scaled Bottom-Right Corner Aligned Masked Softmax BWD",
+        "Scaled Bottom-Right Corner Aligned Masked Softmax BWD", py::arg("output_grads"),
+        py::arg("softmax_results"), py::arg("scale_factor"), py::arg("overwrite") = false,
         py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
