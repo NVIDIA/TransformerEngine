@@ -262,7 +262,7 @@ class TVMFFICentral {
     int device;
     NVTE_CHECK_CUDA(cudaGetDevice(&device));
     const std::string key = cfg.to_key() + "_device_" + std::to_string(device) + "_generation_" +
-                            std::to_string(nvte_get_cuda_context_generation(device));
+                            std::to_string(nvte_get_cuda_state_version());
     std::optional<tvm::ffi::Function> fn =
         cfg.retrieve_func_from_python(key) ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
     if (!fn) {

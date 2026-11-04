@@ -195,11 +195,8 @@ void bind_quantize_with_amax_extensions(py::module_ &m) {
 #include "common/util/pybind_helper.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("reset_cuda_state", &nvte_reset_cuda_state, py::arg("device"),
-        py::call_guard<py::gil_scoped_release>());
-  m.def("release_cuda_state", &nvte_release_cuda_state, py::arg("device"),
-        py::call_guard<py::gil_scoped_release>());
-  m.def("get_cuda_context_generation", &nvte_get_cuda_context_generation, py::arg("device"));
+  m.def("reset_cuda_state", &nvte_reset_cuda_state, py::call_guard<py::gil_scoped_release>());
+  m.def("release_cuda_state", &nvte_release_cuda_state, py::call_guard<py::gil_scoped_release>());
   m.def("get_cuda_state_version", &nvte_get_cuda_state_version);
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
 

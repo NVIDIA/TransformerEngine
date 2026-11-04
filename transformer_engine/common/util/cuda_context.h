@@ -13,8 +13,6 @@
 
 namespace transformer_engine::cuda_context {
 
-struct DeviceState;
-
 // Registered objects keep stable addresses. Reset and destruction must be
 // externally serialized with all TE calls. Registration is lazy and host-only.
 class Resource {
@@ -23,11 +21,12 @@ class Resource {
   Resource(const Resource &) = delete;
   Resource &operator=(const Resource &) = delete;
   virtual ~Resource();
+  // Device affinity selects a live cleanup context; -1 is host-only or multi-device.
   void bind_context(int device);
 
  private:
-  friend void reset(int device);
-  friend void release(int device);
+  friend void reset();
+  friend void release();
   // Preflight runs before any resource or generation changes. An owner can
   // reject a lifecycle operation that its dependency cannot safely perform.
   virtual void check_context_loss() const {}
@@ -35,7 +34,7 @@ class Resource {
   virtual int release_order() const { return 0; }
   virtual void release_context() = 0;
   virtual void invalidate_context() noexcept = 0;
-  DeviceState *context_ = nullptr;
+  bool registered_ = false;
   int device_ = -1;
 };
 
@@ -79,10 +78,10 @@ class InitializationFlag final : public Resource {
 };
 
 // Process-wide notification for host TLS that needs to recheck CUDA following
-// ANY device reset. Device resource ownership remains scoped to the device.
+// a global lifecycle operation. Device affinity is only used for live cleanup.
 uint64_t generation();
-void reset(int device);
-void release(int device);
+void reset();
+void release();
 
 }  // namespace transformer_engine::cuda_context
 

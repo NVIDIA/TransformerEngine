@@ -12,29 +12,22 @@
 #include <atomic>
 #include <exception>
 #include <limits>
-#include <map>
 #include <mutex>
-#include <set>
 #include <vector>
 
-#include "cuda_runtime.h"
+#include "cuda_driver.h"
 #include "logging.h"
 
 namespace transformer_engine::cuda_context {
-
-struct DeviceState {
-  std::atomic<uint64_t> generation{1};
-  std::set<Resource *> resources;
-};
 
 namespace {
 struct Registry {
   // Lifecycle callbacks may destroy other registered objects. Membership uses
   // its own mutex, so their destructors can unregister without re-entering the
-  // lifecycle lock. Public generation queries wait for a complete operation.
+  // lifecycle lock. The global version is published after the full operation.
   std::mutex lifecycle_mutex;
   std::mutex mutex;
-  std::map<int, DeviceState> devices;
+  std::vector<Resource *> resources;
   std::atomic<uint64_t> generation{1};
 };
 
@@ -43,13 +36,52 @@ Registry &registry() {
   static auto &instance = *new Registry;
   return instance;
 }
+// Only attach primary contexts that already exist. Cached RTC device entries
+// may be registered for devices that have never had a context in this process.
+template <typename Function>
+void with_primary_context(int ordinal, Function &&function) {
+  if (ordinal < 0) {
+    function();
+    return;
+  }
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuInit, 0);
+  CUdevice device;
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, ordinal);
+  unsigned flags;
+  int active;
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxGetState, device, &flags, &active);
+  if (!active) {
+    function();
+    return;
+  }
+  CUcontext context;
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
+  const auto push_status = cuda_driver::call("cuCtxPushCurrent", context);
+  if (push_status != CUDA_SUCCESS) {
+    cuda_driver::call("cuDevicePrimaryCtxRelease", device);
+    NVTE_CHECK_CUDA_DRIVER(push_status);
+  }
+  CUcontext popped;
+  try {
+    function();
+  } catch (...) {
+    cuda_driver::call("cuCtxPopCurrent", &popped);
+    cuda_driver::call("cuDevicePrimaryCtxRelease", device);
+    throw;
+  }
+  const auto pop_status = cuda_driver::call("cuCtxPopCurrent", &popped);
+  const auto release_status = cuda_driver::call("cuDevicePrimaryCtxRelease", device);
+  NVTE_CHECK_CUDA_DRIVER(pop_status);
+  NVTE_CHECK_CUDA_DRIVER(release_status);
+}
 }  // namespace
 
 Resource::~Resource() {
-  if (context_ != nullptr) {
+  if (registered_) {
     auto &state = registry();
     std::lock_guard<std::mutex> lock(state.mutex);
-    context_->resources.erase(this);
+    auto &resources = state.resources;
+    resources.erase(std::remove(resources.begin(), resources.end(), this), resources.end());
   }
 }
 
@@ -71,88 +103,66 @@ void ExternalResource::release_context() {
 }
 
 void Resource::bind_context(int device) {
-  NVTE_CHECK(device >= 0, "Invalid CUDA device ordinal.");
-  if (device_ == device) return;
+  NVTE_CHECK(device >= -1, "Invalid CUDA cleanup device ordinal.");
   auto &state = registry();
   std::lock_guard<std::mutex> lock(state.mutex);
-  auto &context = state.devices[device];
-  if (context_ == &context) return;
-  // Allocate the new registration before removing the old one.
-  context.resources.insert(this);
-  if (context_ != nullptr) context_->resources.erase(this);
-  context_ = &context;
+  if (!registered_) {
+    state.resources.push_back(this);
+    registered_ = true;
+  }
   device_ = device;
 }
 
 uint64_t generation() { return registry().generation.load(std::memory_order_acquire); }
 
-void reset(int device) {
-  NVTE_CHECK(device >= 0, "Invalid CUDA device ordinal.");
+void reset() {
   auto &state = registry();
   std::lock_guard<std::mutex> lifecycle_lock(state.lifecycle_mutex);
   std::unique_lock<std::mutex> lock(state.mutex);
-  auto &context = state.devices[device];
-  const auto next = context.generation.load(std::memory_order_relaxed) + 1;
-  NVTE_CHECK(next != 0 && state.generation.load(std::memory_order_relaxed) !=
-                              std::numeric_limits<uint64_t>::max(),
-             "CUDA context generation overflow.");
-  for (auto *resource : context.resources) resource->check_context_loss();
-  const auto resources = context.resources;
-  // Callbacks must not destroy old CUDA handles or register new resources. The
-  // caller has stopped all users, including other threads' TLS destructors.
-  // Public device-generation queries take this mutex and cannot observe a
-  // partially invalidated registry.
+  NVTE_CHECK(
+      state.generation.load(std::memory_order_relaxed) != std::numeric_limits<uint64_t>::max(),
+      "CUDA state generation overflow.");
+  for (auto *resource : state.resources) resource->check_context_loss();
+  const auto resources = state.resources;
+  // All users are stopped and all contexts backing registered resources have
+  // been lost. No CUDA calls or new registrations are allowed during reset.
   for (auto *resource : resources) {
-    if (context.resources.count(resource) == 0) continue;
+    if (std::find(state.resources.begin(), state.resources.end(), resource) ==
+        state.resources.end())
+      continue;
     lock.unlock();
     resource->invalidate_context();
     lock.lock();
   }
-  context.generation.store(next, std::memory_order_release);
   state.generation.fetch_add(1, std::memory_order_release);
 }
 
-void release(int device) {
-  NVTE_CHECK(device >= 0, "Invalid CUDA device ordinal.");
+void release() {
   auto &state = registry();
   std::lock_guard<std::mutex> lifecycle_lock(state.lifecycle_mutex);
   std::unique_lock<std::mutex> lock(state.mutex);
-  auto &context = state.devices[device];
-  const auto next = context.generation.load(std::memory_order_relaxed) + 1;
-  NVTE_CHECK(next != 0 && state.generation.load(std::memory_order_relaxed) !=
-                              std::numeric_limits<uint64_t>::max(),
-             "CUDA context generation overflow.");
-  for (auto *resource : context.resources) resource->check_release();
-  std::vector<Resource *> resources(context.resources.begin(), context.resources.end());
+  NVTE_CHECK(
+      state.generation.load(std::memory_order_relaxed) != std::numeric_limits<uint64_t>::max(),
+      "CUDA state generation overflow.");
+  for (auto *resource : state.resources) resource->check_release();
+  auto resources = state.resources;
   std::stable_sort(resources.begin(), resources.end(),
                    [](auto *a, auto *b) { return a->release_order() < b->release_order(); });
-  int previous;
-  NVTE_CHECK_CUDA(cudaGetDevice(&previous));
-  NVTE_CHECK_CUDA(cudaSetDevice(device));
   std::exception_ptr error;
   for (auto *resource : resources) {
-    if (context.resources.count(resource) == 0) continue;
+    if (std::find(state.resources.begin(), state.resources.end(), resource) ==
+        state.resources.end())
+      continue;
     lock.unlock();
     try {
-      resource->release_context();
+      with_primary_context(resource->device_, [&] { resource->release_context(); });
     } catch (...) {
       if (!error) error = std::current_exception();
     }
     lock.lock();
   }
-  context.generation.store(next, std::memory_order_release);
   state.generation.fetch_add(1, std::memory_order_release);
-  const auto restore_status = cudaSetDevice(previous);
   if (error) std::rethrow_exception(error);
-  NVTE_CHECK_CUDA(restore_status);
-}
-
-uint64_t device_generation(int device) {
-  NVTE_CHECK(device >= 0, "Invalid CUDA device ordinal.");
-  auto &state = registry();
-  std::lock_guard<std::mutex> lifecycle_lock(state.lifecycle_mutex);
-  std::lock_guard<std::mutex> lock(state.mutex);
-  return state.devices[device].generation.load(std::memory_order_acquire);
 }
 
 }  // namespace transformer_engine::cuda_context
@@ -184,12 +194,8 @@ NVTECudaStateRegistration nvte_register_cuda_state(int device, NVTECudaStateCall
 
 void nvte_unregister_cuda_state(NVTECudaStateRegistration registration) { delete registration; }
 
-void nvte_reset_cuda_state(int device) { transformer_engine::cuda_context::reset(device); }
+void nvte_reset_cuda_state() { transformer_engine::cuda_context::reset(); }
 
-void nvte_release_cuda_state(int device) { transformer_engine::cuda_context::release(device); }
+void nvte_release_cuda_state() { transformer_engine::cuda_context::release(); }
 
 uint64_t nvte_get_cuda_state_version() { return transformer_engine::cuda_context::generation(); }
-
-uint64_t nvte_get_cuda_context_generation(int device) {
-  return transformer_engine::cuda_context::device_generation(device);
-}

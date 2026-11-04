@@ -133,7 +133,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK_CUDA(cudaMalloc(&handler._device_barrier, sizeof(int)));
 
   handler._initialize = true;
-  handler.bind_context(handler.local_device_ids_within_process.front());
+  // Cleanup starts in the barrier allocation's context; the registry is global.
+  handler.bind_context(handler.local_device_ids_within_process.back());
 
   // Bootstrap UB/cuBlasMp via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
@@ -282,16 +283,27 @@ void CommunicatorHandler::check_context_loss() const {
 
 void CommunicatorHandler::release_context() {
   if (!_initialize) return;
-  for (auto &comm : tp_comms) {
-    if (comm != nullptr) {
-      NVTE_CHECK_NCCL(ncclCommDestroy(comm));
-      comm = nullptr;
+  int previous;
+  NVTE_CHECK_CUDA(cudaGetDevice(&previous));
+  try {
+    for (size_t i = 0; i < tp_comms.size(); ++i) {
+      if (tp_comms[i] != nullptr) {
+        NVTE_CHECK_CUDA(cudaSetDevice(local_device_ids_within_process[i]));
+        NVTE_CHECK_NCCL(ncclCommDestroy(tp_comms[i]));
+        tp_comms[i] = nullptr;
+      }
     }
+    if (_device_barrier != nullptr) {
+      // init allocates the barrier after selecting the last local device.
+      NVTE_CHECK_CUDA(cudaSetDevice(local_device_ids_within_process.back()));
+      NVTE_CHECK_CUDA(cudaFree(_device_barrier));
+      _device_barrier = nullptr;
+    }
+  } catch (...) {
+    cudaSetDevice(previous);
+    throw;
   }
-  if (_device_barrier != nullptr) {
-    NVTE_CHECK_CUDA(cudaFree(_device_barrier));
-    _device_barrier = nullptr;
-  }
+  NVTE_CHECK_CUDA(cudaSetDevice(previous));
   for (const auto &path : _nccl_id_file_name) std::remove(path.c_str());
   _nccl_id_file_name.clear();
   tp_comms.clear();

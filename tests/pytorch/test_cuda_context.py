@@ -20,22 +20,13 @@ from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch.cpp_extensions.gemm import general_grouped_gemm_for_grouped_tensor
 
 
-@pytest.mark.parametrize("bad_device", [-1, True, "cuda:0"])
-def test_invalid_device_does_not_mutate_state(bad_device):
-    with pytest.raises(ValueError, match="nonnegative"):
-        te.release_cuda_state(bad_device)
-    with pytest.raises(ValueError, match="nonnegative"):
-        te.reset_cuda_state(bad_device)
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_context_loss_rejects_initialized_framework_without_mutation():
     x = torch.ones(32, device="cuda")
-    device = x.device.index
-    generation = tex.get_cuda_context_generation(device)
+    generation = tex.get_cuda_state_version()
     with pytest.raises(RuntimeError, match="initialized PyTorch CUDA runtime"):
-        te.reset_cuda_state(device)
-    assert tex.get_cuda_context_generation(device) == generation
+        te.reset_cuda_state()
+    assert tex.get_cuda_state_version() == generation
     torch.testing.assert_close(x, torch.ones_like(x))
 
 
@@ -49,11 +40,11 @@ def test_live_cleanup_rebuilds_gemm_caches_and_preserves_model():
     old_ones = get_cached_ones_tensor(32, torch.float32, x.device)
     old_scratch = get_cublas_workspace(device, False, False)
     cpu_ones = get_cached_ones_tensor(16, torch.float32, torch.device("cpu"))
-    initial = tex.get_cuda_context_generation(device)
+    initial = tex.get_cuda_state_version()
     for _ in range(3):
-        te.release_cuda_state(device)
-        assert tex.get_cuda_context_generation(device) > initial
-        initial = tex.get_cuda_context_generation(device)
+        te.release_cuda_state()
+        assert tex.get_cuda_state_version() > initial
+        initial = tex.get_cuda_state_version()
         torch.testing.assert_close(model(x), reference)
         torch.testing.assert_close(before, reference)
         torch.testing.assert_close(old_ones, torch.ones_like(old_ones))
@@ -64,7 +55,6 @@ def test_live_cleanup_rebuilds_gemm_caches_and_preserves_model():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_live_cleanup_rebuilds_strided_batched_gemm_handle():
-    device = torch.cuda.current_device()
     a = torch.ones((2, 16, 16), dtype=torch.bfloat16, device="cuda")
     b = a * 2
     b[1] *= 2
@@ -73,19 +63,25 @@ def test_live_cleanup_rebuilds_strided_batched_gemm_handle():
     for _ in range(3):
         strided_batched_gemm(a, b, output, layout="TN")
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
-        te.release_cuda_state(device)
+        te.release_cuda_state()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Two CUDA devices required")
-def test_live_cleanup_preserves_other_device_cache():
+def test_global_cleanup_rebuilds_all_device_caches_and_preserves_current_device():
     a = get_cached_ones_tensor(32, torch.float32, torch.device("cuda:0"))
     b = get_cached_ones_tensor(32, torch.float32, torch.device("cuda:1"))
-    other_generation = tex.get_cuda_context_generation(1)
-    te.release_cuda_state(0)
-    assert tex.get_cuda_context_generation(1) == other_generation
-    assert get_cached_ones_tensor(32, torch.float32, torch.device("cuda:0")) is not a
-    assert get_cached_ones_tensor(32, torch.float32, torch.device("cuda:1")) is b
-    torch.testing.assert_close(b, torch.ones_like(b))
+    cpu = get_cached_ones_tensor(32, torch.float32, torch.device("cpu"))
+    scratch = [get_cublas_workspace(device, False, False) for device in (0, 1)]
+    version = tex.get_cuda_state_version()
+    with torch.cuda.device(1):
+        te.release_cuda_state()
+        assert torch.cuda.current_device() == 1
+    assert tex.get_cuda_state_version() == version + 1
+    for device, old in enumerate((a, b)):
+        assert get_cached_ones_tensor(32, torch.float32, torch.device("cuda", device)) is not old
+        assert get_cublas_workspace(device, False, False) is not scratch[device]
+        torch.testing.assert_close(old, torch.ones_like(old))
+    assert get_cached_ones_tensor(32, torch.float32, torch.device("cpu")) is cpu
 
 
 @pytest.mark.skipif(
@@ -93,7 +89,6 @@ def test_live_cleanup_preserves_other_device_cache():
     reason="Blackwell required for grouped MXFP8",
 )
 def test_grouped_tma_storage_is_rebuilt_after_release():
-    device = torch.cuda.current_device()
     quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
     quantizer.set_usage(rowwise=True, columnwise=True)
     for groups in (2, 65):
@@ -107,7 +102,7 @@ def test_grouped_tma_storage_is_rebuilt_after_release():
         cols = torch.tensor(last, device="cuda", dtype=torch.int64)
         expected = tex.group_quantize(x, quantizer, groups, rows, cols)
         for _ in range(3):
-            te.release_cuda_state(device)
+            te.release_cuda_state()
             actual = tex.group_quantize(x, quantizer, groups, rows, cols)
             assert torch.equal(actual.rowwise_data, expected.rowwise_data)
             assert torch.equal(actual.columnwise_data, expected.columnwise_data)
@@ -122,7 +117,7 @@ def test_release_is_rejected_during_graph_capture():
     with torch.cuda.graph(graph, stream=stream):
         torch.ones(1, device="cuda").add_(1)
         with pytest.raises(RuntimeError, match="outside graph capture"):
-            te.release_cuda_state(torch.cuda.current_device())
+            te.release_cuda_state()
 
 
 @pytest.mark.skipif(not te.is_fp8_available(), reason="FP8 required")
@@ -137,7 +132,7 @@ def test_release_preserves_fp8_history_and_rebuilds_registrations():
     assert index_key in model.fp8_meta
     history = model.fp8_meta["scaling_fwd"].amax_history.clone()
     scale = model.fp8_meta["scaling_fwd"].scale.clone()
-    te.release_cuda_state(x.device.index)
+    te.release_cuda_state()
     assert index_key not in model.fp8_meta
     torch.testing.assert_close(model.fp8_meta["scaling_fwd"].amax_history, history)
     torch.testing.assert_close(model.fp8_meta["scaling_fwd"].scale, scale)
@@ -154,12 +149,11 @@ def test_release_preserves_fp8_history_and_rebuilds_registrations():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_release_rejects_active_fp8_autocast():
-    device = torch.cuda.current_device()
-    generation = tex.get_cuda_context_generation(device)
+    generation = tex.get_cuda_state_version()
     with te.autocast():
         with pytest.raises(RuntimeError, match="outside FP8 autocast"):
-            te.release_cuda_state(device)
-    assert tex.get_cuda_context_generation(device) == generation
+            te.release_cuda_state()
+    assert tex.get_cuda_state_version() == generation
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -178,7 +172,7 @@ def test_release_recreates_sequence_and_nvfp4_tensor_caches():
         get_rht_matrix(False, device.index),
         _fp4_e2m1_vals(device, torch.float32),
     )
-    te.release_cuda_state(device.index)
+    te.release_cuda_state()
     recreated = (
         get_full_cu_seqlens(4, 128, device),
         get_seq_chunk_ids_for_reordering_before_attn(2, device),
@@ -220,4 +214,63 @@ def test_live_cleanup_recreates_grouped_gemm_handle():
     for _ in range(3):
         general_grouped_gemm_for_grouped_tensor(weight, value, output, layout="TN")
         torch.testing.assert_close(output.rowwise_data.view_as(reference), reference)
-        te.release_cuda_state(device.index)
+        te.release_cuda_state()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Two CUDA devices required")
+def test_global_release_rejects_capture_on_another_device_before_mutation():
+    cached = [get_cached_ones_tensor(32, torch.float32, torch.device("cuda", d)) for d in (0, 1)]
+    version = tex.get_cuda_state_version()
+    with torch.cuda.device(1):
+        stream = torch.cuda.Stream()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            torch.ones(1, device="cuda:1").add_(1)
+            with torch.cuda.device(0):
+                with pytest.raises(RuntimeError, match="outside graph capture"):
+                    te.release_cuda_state()
+    assert tex.get_cuda_state_version() == version
+    for device, old in enumerate(cached):
+        assert get_cached_ones_tensor(32, torch.float32, torch.device("cuda", device)) is old
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2 or not te.is_fp8_available(),
+    reason="Two FP8 CUDA devices required",
+)
+def test_global_release_preserves_fp8_history_on_two_devices(monkeypatch):
+    # The existing fused recipe updater uses the calling device's stream even
+    # when processing another device's reduction bucket. Exercise the supported
+    # unfused path here; the single-device regression above covers fused update.
+    monkeypatch.setenv("NVTE_UNFUSED_FP8_UPDATE", "1")
+    states = []
+    key = FP8GlobalStateManager.get_buffer_info()
+    for device in (0, 1):
+        with torch.cuda.device(device):
+            # Delayed-scaling buffers are keyed by recipe/group, not by device.
+            # Keep the two models in independent reduction buckets.
+            recipe = DelayedScaling(amax_history_len=4 + device)
+            model = te.Linear(128, 128, params_dtype=torch.bfloat16)
+            x = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+            with te.autocast(recipe=recipe):
+                model(x).float().square().mean().backward()
+            assert key in model.fp8_meta
+            states.append((model, x, recipe))
+    # A later model's autocast also updates earlier reduction buckets. Snapshot
+    # both histories at the actual restart boundary, after both warmup passes.
+    histories = [model.fp8_meta["scaling_fwd"].amax_history.clone() for model, _, _ in states]
+    te.release_cuda_state()
+    for (model, _, _), history in zip(states, histories):
+        assert key not in model.fp8_meta
+        torch.testing.assert_close(model.fp8_meta["scaling_fwd"].amax_history, history)
+    for device, (model, x, recipe) in enumerate(states):
+        with torch.cuda.device(device):
+            model.zero_grad(set_to_none=True)
+            x.grad = None
+            with te.autocast(recipe=recipe):
+                output = model(x)
+            output.float().square().mean().backward()
+            assert key in model.fp8_meta
+            assert torch.isfinite(x.grad).all()
+            assert torch.isfinite(model.weight.grad).all()
+    te.release_cuda_state()

@@ -160,11 +160,11 @@ pybind11::dict Registrations() {
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
-  m.def("release_cuda_state", &nvte_release_cuda_state, pybind11::arg("device"),
+  m.def("get_cuda_state_version", &nvte_get_cuda_state_version);
+  m.def("release_cuda_state", &nvte_release_cuda_state,
         pybind11::call_guard<pybind11::gil_scoped_release>());
-  m.def("reset_cuda_state", &nvte_reset_cuda_state, pybind11::arg("device"),
+  m.def("reset_cuda_state", &nvte_reset_cuda_state,
         pybind11::call_guard<pybind11::gil_scoped_release>());
-  m.def("get_cuda_context_generation", &nvte_get_cuda_context_generation, pybind11::arg("device"));
   m.def(
       "synchronize_cuda_device",
       [](int device) {

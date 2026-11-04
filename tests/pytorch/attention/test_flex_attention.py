@@ -714,7 +714,7 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     ):
         device = q.device.index
         assert flex_attention._cudnn_score_mod_graph_cache
-        release_cuda_state(device)
+        release_cuda_state()
         assert torch.device("cuda", device) not in flex_attention._cudnn_score_mod_handles
         assert not flex_attention._cudnn_score_mod_graph_cache
         for tensor in (q, k, v):

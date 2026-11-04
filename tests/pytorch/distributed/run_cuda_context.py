@@ -30,26 +30,26 @@ def main():
                 bootstrap_backend="gloo",
             )
             owner = get_ub("qkv_fprop", False)
-            generation = tex.get_cuda_context_generation(device)
+            generation = tex.get_cuda_state_version()
             try:
-                tex.reset_cuda_state(device)
+                tex.reset_cuda_state()
             except RuntimeError as error:
                 assert "communication" in str(error)
             else:
                 raise AssertionError("Active communication must reject post-loss reset")
-            assert tex.get_cuda_context_generation(device) == generation
+            assert tex.get_cuda_state_version() == generation
             # A retained public owner must fail explicitly even after the global
             # manager has been cleared. Destruction must happen while NCCL is live.
             dist.barrier()
             try:
-                te.release_cuda_state(device)
+                te.release_cuda_state()
             except RuntimeError as error:
                 assert "Release all owners" in str(error)
             else:
                 raise AssertionError("A retained communication owner must reject release")
             del owner
             dist.barrier()
-            te.release_cuda_state(device)
+            te.release_cuda_state()
             value = torch.tensor(float(dist.get_rank() + 1), device="cuda")
             dist.all_reduce(value)
             torch.testing.assert_close(value, value.new_tensor(world_size * (world_size + 1) / 2))

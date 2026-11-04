@@ -17,39 +17,37 @@
 extern "C" {
 #endif
 
-/*! Invalidate registered TE resources after the primary context of device has
- *  been destroyed externally. The caller must serialize this call with ALL TE
- *  calls, including destruction, in every host thread. The caller also owns
- *  context teardown and recovery of framework allocators and device tensors.
+/*! Invalidate all registered TE CUDA-dependent state after external context loss.
+ *  Every primary context backing a registered resource must already be destroyed.
+ *  This is a process-wide boundary, not selective recovery of one device.
+ *  Calling reset with any such context still alive abandons live resources and
+ *  is unsupported. Use release while contexts are usable instead.
  *
- *  This call does not destroy the context, synchronize the GPU, or
- *  create GPU resources. Host plan descriptors are released via dependency APIs.
- *  Registered resources abandon handles already destroyed
- *  with the context, and are recreated lazily. Calling this while the old
- *  context is alive leaks those resources and is not supported.
- *
- *  Only registered resources participate. See the recovery documentation for
- *  the supported subsystems; this is not a reset of the complete training stack.
- *  Device must be a nonnegative CUDA ordinal, supplied by the caller because
- *  CUDA may be unavailable during recovery. Repeated resets are safe.
+ *  Stop ALL TE calls and object construction/destruction in every host thread.
+ *  The caller owns context teardown/recreation, framework allocator recovery,
+ *  and replacement of device tensors and captured graphs. Reset is host-only:
+ *  it does not query CUDA, synchronize, or destroy dead stream/event/module
+ *  handles. Supported resources are recreated lazily after recovery.
+ *  Opaque vendor host-state cleanup may require dependency support.
  */
-void nvte_reset_cuda_state(int device);
+void nvte_reset_cuda_state(void);
 
-/*! Release TE resources while the device's primary CUDA context is still
- *  usable. This supports in-process restarts which preserve the CUDA context,
- *  and optional cleanup before externally destroying a context. Stop all TE
- *  calls, finish GPU work, retire captured graphs, and release framework-owned
- *  TE resources before calling. Communicators must remain alive through cleanup.
- *  This call does not reset CUDA, framework allocators, model tensors, or RNG.
- *  Operations recreate released resources lazily. Cleanup errors propagate;
- *  after such an error the caller must finish cleanup before resuming work.
+/*! Release all registered TE CUDA-dependent state while its contexts and
+ *  borrowed communicators remain usable. Stop all TE calls, finish GPU work,
+ *  retire captured graphs, and release frontend-owned TE state first. This is
+ *  process-wide and does not destroy CUDA contexts, model tensors, or RNG state.
+ *  Device-affine callbacks run with their existing primary context current;
+ *  unused devices are not initialized. The calling thread's context is restored.
+ *  A callback registered with device=-1 manages its own device selection.
+ *  Cleanup errors propagate after remaining callbacks run. Finish cleanup before
+ *  resuming work after an error. Resources are recreated lazily on next use.
  */
-void nvte_release_cuda_state(int device);
+void nvte_release_cuda_state(void);
 
-/*! Process-wide release/acquire notification, advanced after release or reset
- *  mutates state on any device, including a release reporting partial failure.
- *  Comparing this is a cheap way to decide
- *  whether a per-device generation query is needed. It is not a resource pin.
+/*! Single process-wide generation, initially one. A completed release/reset
+ *  publishes an increment with release/acquire semantics. Rejected preflight
+ *  does not advance it; a partially failed release does. This host-only query
+ *  is a cheap notification, not a resource pin or permission to race cleanup.
  */
 uint64_t nvte_get_cuda_state_version(void);
 
@@ -69,20 +67,15 @@ typedef struct {
 } NVTECudaStateCallbacks;
 typedef struct NVTECudaStateRegistrationImpl *NVTECudaStateRegistration;
 
-/*! Register stable user_data without querying CUDA. Keep it alive until
- *  unregister returns. Registration/destruction is serialized with TE calls.
- *  Callbacks may unregister other resources they destroy during cleanup.
+/*! Register stable user_data in the process-wide registry without querying CUDA.
+ *  Device is a live-cleanup affinity, not a reset scope. Use -1 for host-only or
+ *  multi-device owners; those callbacks select their own devices when needed.
+ *  Keep user_data alive until unregister returns. Registration/destruction is
+ *  serialized with lifecycle calls. Cleanup may unregister destroyed children.
  */
 NVTECudaStateRegistration nvte_register_cuda_state(int device, NVTECudaStateCallbacks callbacks,
                                                    void *user_data);
 void nvte_unregister_cuda_state(NVTECudaStateRegistration registration);
-
-/*! Host-only resource generation for a device, initially one. Release/reset
- *  publishes its new generation after cleanup. A generation change
- *  invalidates externally cached TE stream/event handles too. Reading a
- *  generation does not pin resources or permit racing reset with TE operations.
- */
-uint64_t nvte_get_cuda_context_generation(int device);
 
 #ifdef __cplusplus
 }  // extern "C"

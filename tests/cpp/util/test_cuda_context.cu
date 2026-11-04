@@ -33,12 +33,25 @@ class ContextResetTest : public ::testing::Test {
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) GTEST_SKIP();
     ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
   }
-  void reset(int device = 0) {
-    ASSERT_EQ(cudaSetDevice(device), cudaSuccess);
-    ASSERT_EQ(cudaDeviceReset(), cudaSuccess);
-    const auto before = nvte_get_cuda_context_generation(device);
-    ASSERT_NO_THROW(nvte_reset_cuda_state(device));
-    EXPECT_EQ(nvte_get_cuda_context_generation(device), before + 1);
+  void reset() {
+    int count;
+    ASSERT_EQ(cudaGetDeviceCount(&count), cudaSuccess);
+    for (int ordinal = 0; ordinal < count; ++ordinal) {
+      CUdevice device;
+      unsigned flags;
+      int active;
+      ASSERT_EQ(cuDeviceGet(&device, ordinal), CUDA_SUCCESS);
+      ASSERT_EQ(cuDevicePrimaryCtxGetState(device, &flags, &active), CUDA_SUCCESS);
+      if (active) {
+        ASSERT_EQ(cudaSetDevice(ordinal), cudaSuccess);
+        ASSERT_EQ(cudaDeviceReset(), cudaSuccess);
+      }
+    }
+    const auto before = nvte_get_cuda_state_version();
+    ASSERT_NO_THROW(nvte_reset_cuda_state());
+    EXPECT_EQ(nvte_get_cuda_state_version(), before + 1);
+    // The external caller recreates a usable context after the host-only reset.
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
   }
 };
 
@@ -46,15 +59,65 @@ TEST(CudaContextHostTest, GenerationDoesNotInitializeCuda) {
   ASSERT_EQ(cuInit(0), CUDA_SUCCESS);
   CUcontext before = nullptr, after = nullptr;
   ASSERT_EQ(cuCtxGetCurrent(&before), CUDA_SUCCESS);
-  const auto initial = nvte_get_cuda_context_generation(0);
-  nvte_reset_cuda_state(0);
-  EXPECT_EQ(nvte_get_cuda_context_generation(0), initial + 1);
-  nvte_reset_cuda_state(0);
-  EXPECT_EQ(nvte_get_cuda_context_generation(0), initial + 2);
+  const auto initial = nvte_get_cuda_state_version();
+  nvte_reset_cuda_state();
+  EXPECT_EQ(nvte_get_cuda_state_version(), initial + 1);
+  nvte_reset_cuda_state();
+  EXPECT_EQ(nvte_get_cuda_state_version(), initial + 2);
   ASSERT_EQ(cuCtxGetCurrent(&after), CUDA_SUCCESS);
   EXPECT_EQ(before, after);
-  EXPECT_THROW(nvte_reset_cuda_state(-1), std::runtime_error);
-  EXPECT_THROW(nvte_get_cuda_context_generation(-1), std::runtime_error);
+}
+
+TEST(CudaContextHostTest, LiveReleaseDoesNotCreateUnusedContexts) {
+  ASSERT_EQ(cuInit(0), CUDA_SUCCESS);
+  int count;
+  ASSERT_EQ(cuDeviceGetCount(&count), CUDA_SUCCESS);
+  std::vector<int> before(count);
+  for (int device = 0; device < count; ++device) {
+    unsigned flags;
+    ASSERT_EQ(cuDevicePrimaryCtxGetState(device, &flags, &before[device]), CUDA_SUCCESS);
+  }
+  CUcontext previous, current;
+  ASSERT_EQ(cuCtxGetCurrent(&previous), CUDA_SUCCESS);
+  int calls = 0;
+  auto callback = [](void *data) { ++*static_cast<int *>(data); };
+  const NVTECudaStateCallbacks callbacks{nullptr, nullptr, callback, callback, 0};
+  const auto registration = nvte_register_cuda_state(0, callbacks, &calls);
+  const auto global = nvte_register_cuda_state(-1, callbacks, &calls);
+  const auto version = nvte_get_cuda_state_version();
+  EXPECT_NO_THROW(nvte_release_cuda_state());
+  EXPECT_EQ(nvte_get_cuda_state_version(), version + 1);
+  EXPECT_EQ(calls, 2);
+  EXPECT_EQ(cuCtxGetCurrent(&current), CUDA_SUCCESS);
+  EXPECT_EQ(previous, current);
+  for (int device = 0; device < count; ++device) {
+    unsigned flags;
+    int active;
+    EXPECT_EQ(cuDevicePrimaryCtxGetState(device, &flags, &active), CUDA_SUCCESS);
+    EXPECT_EQ(active, before[device]);
+  }
+  nvte_unregister_cuda_state(registration);
+  nvte_unregister_cuda_state(global);
+}
+
+TEST(CudaContextHostTest, PartialReleaseContinuesAndPublishesOneVersion) {
+  int failed = 0, released = 0;
+  auto release = [](void *data) { ++*static_cast<int *>(data); };
+  auto fail = [](void *data) {
+    ++*static_cast<int *>(data);
+    throw std::runtime_error("release failure");
+  };
+  const NVTECudaStateCallbacks bad{nullptr, nullptr, fail, release, 0};
+  const NVTECudaStateCallbacks good{nullptr, nullptr, release, release, 0};
+  const auto first = nvte_register_cuda_state(-1, bad, &failed);
+  const auto second = nvte_register_cuda_state(-1, good, &released);
+  const auto version = nvte_get_cuda_state_version();
+  EXPECT_THROW(nvte_release_cuda_state(), std::runtime_error);
+  EXPECT_EQ(failed, 1);
+  EXPECT_EQ(released, 1);
+  EXPECT_EQ(nvte_get_cuda_state_version(), version + 1);
+  nvte_unregister_cuda_state(first);
+  nvte_unregister_cuda_state(second);
 }
 
 TEST_F(ContextResetTest, StreamsAndRtcRecoverRepeatedly) {
@@ -78,23 +141,113 @@ TEST_F(ContextResetTest, StreamsAndRtcRecoverRepeatedly) {
   }
 }
 
-TEST_F(ContextResetTest, ResetPreservesOtherDevice) {
-  int count = 0;
+TEST_F(ContextResetTest, GlobalResetRecoversBothDevicesAndKeepsRtcCode) {
+  int count;
+  ASSERT_EQ(cudaGetDeviceCount(&count), cudaSuccess);
+  if (count < 2) GTEST_SKIP() << "Requires two CUDA devices";
+  auto &manager = rtc::KernelManager::instance();
+  constexpr auto code = R"(__global__ void recovered(int *p, int value) { *p = value; })";
+  for (int device = 0; device < 2; ++device) {
+    ASSERT_EQ(cudaSetDevice(device), cudaSuccess);
+    manager.compile("global recovery test", "recovered", code, "recovered.cu");
+  }
+  for (int cycle = 0; cycle < 3; ++cycle) {
+    for (int device = 0; device < 2; ++device) {
+      ASSERT_EQ(cudaSetDevice(device), cudaSuccess);
+      EXPECT_TRUE(manager.is_compiled("global recovery test", device));
+      int *data;
+      ASSERT_EQ(cudaMalloc(&data, sizeof(int)), cudaSuccess);
+      auto stream = nvte_get_compute_stream(0);
+      const int expected = 10 * cycle + device;
+      manager.launch("global recovery test", 1, 1, 0, stream, data, expected);
+      ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+      int value = -1;
+      ASSERT_EQ(cudaMemcpy(&value, data, sizeof(int), cudaMemcpyDeviceToHost), cudaSuccess);
+      EXPECT_EQ(value, expected);
+    }
+    reset();
+  }
+}
+
+TEST_F(ContextResetTest, GlobalReleaseRecreatesBothDevicesAndRestoresContext) {
+  int count;
+  ASSERT_EQ(cudaGetDeviceCount(&count), cudaSuccess);
+  if (count < 2) GTEST_SKIP() << "Requires two CUDA devices";
+  auto &manager = rtc::KernelManager::instance();
+  constexpr auto code = R"(__global__ void recovered(int *p, int value) { *p = value; })";
+  std::vector<int *> storage(2);
+  for (int device = 0; device < 2; ++device) {
+    ASSERT_EQ(cudaSetDevice(device), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&storage[device], sizeof(int)), cudaSuccess);
+    manager.compile("global release test", "recovered", code, "recovered.cu");
+  }
+  for (int cycle = 0; cycle < 3; ++cycle) {
+    for (int device = 0; device < 2; ++device) {
+      ASSERT_EQ(cudaSetDevice(device), cudaSuccess);
+      auto stream = nvte_get_compute_stream(0);
+      auto event = nvte_get_compute_stream_event(0);
+      auto handle = nvte_get_cudnn_handle();
+      ASSERT_EQ(cudnnSetStream(handle, stream), CUDNN_STATUS_SUCCESS);
+      const int expected = cycle + device;
+      manager.launch("global release test", 1, 1, 0, stream, storage[device], expected);
+      ASSERT_EQ(cudaEventRecord(event, stream), cudaSuccess);
+      ASSERT_EQ(cudaEventSynchronize(event), cudaSuccess);
+      int value = -1;
+      ASSERT_EQ(cudaMemcpy(&value, storage[device], sizeof(int), cudaMemcpyDeviceToHost), cudaSuccess);
+      EXPECT_EQ(value, expected);
+    }
+    CUcontext before, after;
+    ASSERT_EQ(cuCtxGetCurrent(&before), CUDA_SUCCESS);
+    const auto version = nvte_get_cuda_state_version();
+    nvte_release_cuda_state();
+    EXPECT_EQ(nvte_get_cuda_state_version(), version + 1);
+    ASSERT_EQ(cuCtxGetCurrent(&after), CUDA_SUCCESS);
+    EXPECT_EQ(before, after);
+    int current;
+    ASSERT_EQ(cudaGetDevice(&current), cudaSuccess);
+    EXPECT_EQ(current, 1);
+  }
+  for (int device = 0; device < 2; ++device) {
+    ASSERT_EQ(cudaSetDevice(device), cudaSuccess);
+    ASSERT_EQ(cudaFree(storage[device]), cudaSuccess);
+  }
+  reset();
+}
+
+TEST_F(ContextResetTest, GlobalReleaseErrorRestoresContextAndVisitsOtherDevices) {
+  int count;
   ASSERT_EQ(cudaGetDeviceCount(&count), cudaSuccess);
   if (count < 2) GTEST_SKIP() << "Requires two CUDA devices";
   ASSERT_EQ(cudaSetDevice(1), cudaSuccess);
-  auto stream = nvte_get_compute_stream(0);
-  auto event = nvte_get_compute_stream_event(0);
-  const auto other_generation = nvte_get_cuda_context_generation(1);
-  reset(0);
-  EXPECT_EQ(nvte_get_cuda_context_generation(1), other_generation);
-  ASSERT_EQ(cudaSetDevice(1), cudaSuccess);
-  EXPECT_EQ(nvte_get_compute_stream(0), stream);
-  EXPECT_EQ(nvte_get_compute_stream_event(0), event);
-  EXPECT_EQ(cudaEventRecord(event, stream), cudaSuccess);
-  EXPECT_EQ(cudaEventSynchronize(event), cudaSuccess);
-  reset(1);
   ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+  struct Owner {
+    int device;
+    bool fail;
+    int calls = 0;
+  } first{0, true}, second{1, false};
+  auto cleanup = [](void *data) {
+    auto &owner = *static_cast<Owner *>(data);
+    int current;
+    EXPECT_EQ(cudaGetDevice(&current), cudaSuccess);
+    EXPECT_EQ(current, owner.device);
+    ++owner.calls;
+    if (owner.fail) throw std::runtime_error("affine release failure");
+  };
+  const NVTECudaStateCallbacks callbacks{nullptr, nullptr, cleanup, [](void *) {}, 0};
+  auto a = nvte_register_cuda_state(0, callbacks, &first);
+  auto b = nvte_register_cuda_state(1, callbacks, &second);
+  CUcontext before, after;
+  ASSERT_EQ(cuCtxGetCurrent(&before), CUDA_SUCCESS);
+  const auto version = nvte_get_cuda_state_version();
+  EXPECT_THROW(nvte_release_cuda_state(), std::runtime_error);
+  EXPECT_EQ(first.calls, 1);
+  EXPECT_EQ(second.calls, 1);
+  EXPECT_EQ(nvte_get_cuda_state_version(), version + 1);
+  ASSERT_EQ(cuCtxGetCurrent(&after), CUDA_SUCCESS);
+  EXPECT_EQ(before, after);
+  nvte_unregister_cuda_state(a);
+  nvte_unregister_cuda_state(b);
+  reset();
 }
 
 TEST_F(ContextResetTest, OtherThreadsCudnnHandleRecovers) {
@@ -140,13 +293,13 @@ TEST_F(ContextResetTest, FinishedThreadsReturnHandlesForReleaseAndReuse) {
   ASSERT_NE(first, nullptr);
   // Deliberate handoff of the same live cached handle to a subsequent thread.
   EXPECT_EQ(first, second);
-  nvte_release_cuda_state(0);
+  nvte_release_cuda_state();
   std::thread([&]() {
     ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
     auto handle = nvte_get_cudnn_handle();
     EXPECT_EQ(cudnnSetStream(handle, nvte_get_compute_stream(0)), CUDNN_STATUS_SUCCESS);
   }).join();
-  nvte_release_cuda_state(0);
+  nvte_release_cuda_state();
 }
 
 TEST_F(ContextResetTest, CudnnNormalizationPlanRecoversNumerically) {
@@ -249,19 +402,19 @@ TEST(CudaContextHostTest, CallbackPreflightAndNestedUnregister) {
   const NVTECudaStateCallbacks normal{nullptr, nullptr, CallbackOwner::invalidate,
                                       CallbackOwner::invalidate, 0};
   parent.child = nvte_register_cuda_state(0, normal, &child);
-  auto registration = nvte_register_cuda_state(0, normal, &parent);
+  auto registration = nvte_register_cuda_state(1, normal, &parent);
   const NVTECudaStateCallbacks rejecting{CallbackOwner::reject, nullptr, CallbackOwner::invalidate,
                                          CallbackOwner::invalidate, 0};
-  auto rejected = nvte_register_cuda_state(0, rejecting, &child);
-  const auto initial = nvte_get_cuda_context_generation(0);
-  EXPECT_THROW(nvte_reset_cuda_state(0), std::runtime_error);
-  EXPECT_EQ(nvte_get_cuda_context_generation(0), initial);
+  auto rejected = nvte_register_cuda_state(-1, rejecting, &child);
+  const auto initial = nvte_get_cuda_state_version();
+  EXPECT_THROW(nvte_reset_cuda_state(), std::runtime_error);
+  EXPECT_EQ(nvte_get_cuda_state_version(), initial);
   EXPECT_EQ(parent.calls, 0);
   EXPECT_EQ(child.calls, 0);
   nvte_unregister_cuda_state(rejected);
-  nvte_reset_cuda_state(0);
+  nvte_reset_cuda_state();
   EXPECT_EQ(parent.calls, 1);
-  EXPECT_EQ(nvte_get_cuda_context_generation(0), initial + 1);
+  EXPECT_EQ(nvte_get_cuda_state_version(), initial + 1);
   nvte_unregister_cuda_state(registration);
 }
 
@@ -282,9 +435,9 @@ TEST_F(ContextResetTest, LiveReleaseRecreatesStreamsAndLibraryHandles) {
     int value = -1;
     ASSERT_EQ(cudaMemcpy(&value, storage, sizeof(int), cudaMemcpyDeviceToHost), cudaSuccess);
     EXPECT_EQ(value, cycle);
-    const auto previous = nvte_get_cuda_context_generation(0);
-    nvte_release_cuda_state(0);
-    EXPECT_EQ(nvte_get_cuda_context_generation(0), previous + 1);
+    const auto previous = nvte_get_cuda_state_version();
+    nvte_release_cuda_state();
+    EXPECT_EQ(nvte_get_cuda_state_version(), previous + 1);
     EXPECT_EQ(cudaGetLastError(), cudaSuccess);
   }
   ASSERT_EQ(cudaFree(storage), cudaSuccess);
