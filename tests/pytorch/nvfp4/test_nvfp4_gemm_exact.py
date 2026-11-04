@@ -883,12 +883,19 @@ def test_nvfp4_row_grouped_exact(monkeypatch, splits, out_dtype, single_output, 
             )
     native_grouped = gemm_module.tex.te_general_grouped_gemm
     calls = []
+    scale_copy = gemm_module._batched_row_scale_copy
+    scale_calls = []
 
     def recorded(*args, **kwargs):
         calls.append(args)
         return native_grouped(*args, **kwargs)
 
+    def recorded_scale_copy(*args):
+        scale_calls.append(args)
+        return scale_copy(*args)
+
     monkeypatch.setattr(gemm_module.tex, "te_general_grouped_gemm", recorded)
+    monkeypatch.setattr(gemm_module, "_batched_row_scale_copy", recorded_scale_copy)
     outputs = (
         [torch.empty(sum(splits), 96, dtype=out_dtype, device="cuda")]
         if single_output
@@ -910,6 +917,11 @@ def test_nvfp4_row_grouped_exact(monkeypatch, splits, out_dtype, single_output, 
         assert y.data_ptr() == dest.data_ptr()
         torch.testing.assert_close(y, expected, rtol=0, atol=0)
     assert len(calls) == int(any(splits))
+    assert len(scale_calls) == int(single_output and any(splits))
+    if scale_calls:
+        assert scale_calls[0][0] is outputs[0]
+        assert scale_calls[0][1].dtype == scale_calls[0][2].dtype == torch.float32
+        assert scale_calls[0][2].shape == (sum(splits), 1)
     if calls:
         assert len(calls[0][0]) == sum(m > 0 for m in splits)
         assert calls[0][5] == TE_DType[torch.float32]
@@ -974,7 +986,7 @@ def test_nvfp4_row_grouped_fallback(monkeypatch, option):
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
 def test_nvfp4_row_grouped_graph_replay(out_dtype):
     """Repeated graph replay consumes current payloads and current amax values."""
     splits = [64, 0, 128]
@@ -1139,3 +1151,98 @@ def test_nvfp4_row_grouped_higher_rank_fallback(monkeypatch):
     out = torch.empty_like(expected)
     result, _, _ = general_grouped_gemm([weight], [inp], [out], [None], torch.bfloat16)
     torch.testing.assert_close(result[0], expected, rtol=0, atol=0)
+
+
+@pytest.fixture
+def isolated_batched_scale_compile():
+    """Keep dtype/shape compile tests independent of the process-wide frame cache."""
+    torch._dynamo.reset()
+    yield
+    torch._dynamo.reset()
+
+
+@pytest.mark.usefixtures("isolated_batched_scale_compile")
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("outer_compile", [False, True])
+def test_batched_row_scale_copy_rounding(out_dtype, outer_compile):
+    """Fusion preserves FP32 multiplication and destination rounding across shapes."""
+    import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
+
+    operation = gemm_module._batched_row_scale_copy
+    if outer_compile:
+        operation = torch.compile(operation, fullgraph=True, dynamic=True)
+    values = torch.tensor(
+        [0.0, -0.0, 1.00390625, -1.00390625, 65504.0, -65504.0, 1e-20, -1e-20],
+        device="cuda",
+        dtype=torch.float32,
+    )
+    for rows, cols in [(1, 1), (1, 97), (33, 96), (129, 127), (33, 96)]:
+        intermediate = values.repeat((rows * cols + 7) // 8)[: rows * cols].reshape(rows, cols)
+        scales = torch.linspace(0.125, 3.14159, rows, device="cuda").reshape(rows, 1)
+        if rows > 1:
+            scales[0] = 0
+        # Separate eager operations define both rounding boundaries independently.
+        reference = intermediate.clone()
+        reference.mul_(scales)
+        reference = reference.to(out_dtype)
+        destination = torch.full_like(reference, 42)
+        pointer = destination.data_ptr()
+        saved_input, saved_scales = intermediate.clone(), scales.clone()
+        operation(destination, intermediate, scales)
+        assert destination.data_ptr() == pointer
+        assert torch.equal(destination.view(torch.uint8), reference.view(torch.uint8))
+        assert torch.equal(intermediate, saved_input)
+        assert torch.equal(scales, saved_scales)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("scalar_rows", [False, True])
+def test_nvfp4_row_grouped_scale_shapes(out_dtype, scalar_rows):
+    """Scalar and per-row scales preserve each expert's FP32 scale-product rounding."""
+    splits = [32, 0, 96]
+    weights, inputs = _row_grouped_operands(splits)
+    if scalar_rows:
+        # The generalized GEMM contract also permits one scalar scale per operand.
+        inputs[0]._amax_rowwise = inputs[0]._amax_rowwise[:1].clone()
+    # An active expert with zero global scale must write zeros to its destination.
+    weights[2]._amax_rowwise.zero_()
+    reference = torch.cat(
+        [general_gemm(w, x, out_dtype=out_dtype)[0] for w, x in zip(weights, inputs)]
+    )
+    output = torch.full_like(reference, 42)
+    result, _, _ = general_grouped_gemm(
+        weights,
+        inputs,
+        [output],
+        [None] * len(splits),
+        out_dtype,
+        m_splits=splits,
+        single_output=True,
+    )
+    assert result.data_ptr() == output.data_ptr()
+    assert torch.equal(result.view(torch.uint8), reference.view(torch.uint8))
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_nvfp4_row_grouped_separate_output_dtypes(monkeypatch):
+    """Independent output buffers retain their individual dtypes and scaling path."""
+    import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
+
+    splits = [32, 64, 128]
+    weights, inputs = _row_grouped_operands(splits)
+    dtypes = [torch.float16, torch.bfloat16, torch.float32]
+    reference = [
+        general_gemm(w, x, out_dtype=dtype)[0] for w, x, dtype in zip(weights, inputs, dtypes)
+    ]
+    outputs = [torch.empty_like(y) for y in reference]
+
+    def forbidden(*_args):
+        pytest.fail("Separate outputs entered the combined-output scaling path")
+
+    monkeypatch.setattr(gemm_module, "_batched_row_scale_copy", forbidden)
+    result, _, _ = general_grouped_gemm(weights, inputs, outputs, [None] * len(splits), dtypes[0])
+    for actual, expected, destination in zip(result, reference, outputs):
+        assert actual.data_ptr() == destination.data_ptr()
+        assert actual.dtype == expected.dtype
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))

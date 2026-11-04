@@ -3862,12 +3862,19 @@ def test_row_grouped_dispatch_integration(monkeypatch, precision, backward_overr
     enabled = gemm_module._can_group_nvfp4_row_scaled_gemm
     native = gemm_module._nvfp4_row_scaled_grouped_gemm
     calls = []
+    scale_copy = gemm_module._batched_row_scale_copy
+    scale_calls = []
 
     def recorded(*args, **kwargs):
         calls.append(True)
         return native(*args, **kwargs)
 
+    def recorded_scale_copy(*args):
+        scale_calls.append(True)
+        return scale_copy(*args)
+
     monkeypatch.setattr(gemm_module, "_nvfp4_row_scaled_grouped_gemm", recorded)
+    monkeypatch.setattr(gemm_module, "_batched_row_scale_copy", recorded_scale_copy)
 
     def run(grouped):
         monkeypatch.setattr(
@@ -3890,6 +3897,7 @@ def test_row_grouped_dispatch_integration(monkeypatch, precision, backward_overr
         reference, ref_grads = run(False)
         actual, grads = run(True)
         assert bool(calls) == (precision == "nvfp4")
+        assert bool(scale_calls) == (precision == "nvfp4")
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
         for grad, ref in zip(grads, ref_grads):
             if ref is None:
