@@ -10,28 +10,20 @@ import jax
 import transformer_engine_jax as tex
 
 
-def release_cuda_state(device: int) -> None:
-    """Release device-scoped TE state at a coordinated restart boundary.
+def release_cuda_state() -> None:
+    """Release all TE-owned CUDA state at a process-wide restart boundary.
 
-    Stop TE submissions on all host threads/ranks, complete asynchronous work and
-    retire captured graphs first. This clears JAX's process-wide compilation
-    cache so executables cannot retain communication owners. NCCL communicators
-    must remain usable through cleanup; collective users call on every rank.
-    Model arrays and the XLA runtime are not destroyed.
+    Stop TE submissions on all host threads/ranks and retire captured graphs
+    first. This waits for local GPU work, clears JAX compilation caches, and
+    finalizes TE EP across all local devices. Borrowed NCCL communicators remain
+    usable through cleanup; every collective rank participates in the same order.
+    Model arrays and the XLA runtime survive.
     """
-    if not isinstance(device, int) or isinstance(device, bool) or device < 0:
-        raise ValueError("device must be a nonnegative CUDA device ordinal")
     from .cpp_extensions import ep as ep_extension  # pylint: disable=import-outside-toplevel
 
-    if ep_extension._ep_config is not None:  # pylint: disable=protected-access
-        local_devices = jax.local_devices(backend="gpu")
-        if len(local_devices) != 1 or local_devices[0].local_hardware_id != device:
-            raise RuntimeError(
-                "JAX EP spans process-local devices. Call ep_finalize on every rank "
-                "before releasing individual devices."
-            )
     jax.effects_barrier()
-    tex.synchronize_cuda_device(device)
+    for device in jax.local_devices(backend="gpu"):
+        tex.synchronize_cuda_device(device.local_hardware_id)
     jax.clear_caches()
     if ep_extension._ep_config is not None:  # pylint: disable=protected-access
         from . import ep  # pylint: disable=import-outside-toplevel
@@ -40,13 +32,11 @@ def release_cuda_state(device: int) -> None:
     triton = sys.modules.get("transformer_engine.jax.triton_extensions.utils")
     if triton is not None:
         triton.release_cuda_state()
-    tex.release_cuda_state(device)
+    tex.release_cuda_state()
 
 
-def reset_cuda_state(device: int) -> None:
+def reset_cuda_state() -> None:
     """Reject a false-success reset of a lost JAX/XLA-owned CUDA runtime."""
-    if not isinstance(device, int) or isinstance(device, bool) or device < 0:
-        raise ValueError("device must be a nonnegative CUDA device ordinal")
     raise RuntimeError(
         "TE cannot recreate a lost JAX/XLA CUDA runtime. Restart the worker after "
         "context loss; use release_cuda_state while CUDA is usable for a "

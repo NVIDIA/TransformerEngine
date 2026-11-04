@@ -242,7 +242,7 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
         + "_"
         + desc
         + f"_device_{torch.cuda.current_device()}_generation_"
-        + str(tex.get_cuda_context_generation(torch.cuda.current_device()))
+        + str(tex.get_cuda_state_version())
     )
 
 
@@ -338,7 +338,6 @@ def test_cast_only(swizzled, fp8_dtype, in_dtype, block_size, shape):
 
 def test_release_retires_and_recompiles_cutedsl_executors():
     """Do not retain a context-bound executor through a live-context release."""
-    device = torch.cuda.current_device()
     x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
     quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
     set_cutedsl_backend(False)
@@ -355,11 +354,11 @@ def test_release_retires_and_recompiles_cutedsl_executors():
             assert tvm_ffi.get_global_func(key, allow_missing=True) is not None
             # Even a mistaken post-loss call must reject active opaque executors
             # before advancing the generation or mutating registered state.
-            generation = tex.get_cuda_context_generation(device)
+            generation = tex.get_cuda_state_version()
             with pytest.raises(RuntimeError, match="CuTeDSL"):
-                tex.reset_cuda_state(device)
-            assert tex.get_cuda_context_generation(device) == generation
-            te.release_cuda_state(device)
+                tex.reset_cuda_state()
+            assert tex.get_cuda_state_version() == generation
+            te.release_cuda_state()
             assert tvm_ffi.get_global_func(key, allow_missing=True) is None
     finally:
         set_cutedsl_backend(False)

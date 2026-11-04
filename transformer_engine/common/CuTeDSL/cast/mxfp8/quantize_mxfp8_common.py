@@ -530,11 +530,11 @@ def compile_cutedsl_function_from_cfg(cfg):
 _registered_kernels = {}
 
 
-def release_cuda_state(device: int) -> None:
-    """Remove this device's TE-owned compiled registry entries with a live context."""
+def release_cuda_state(device=None) -> None:
+    """Remove TE-owned compiled entries globally or for one live cleanup callback."""
     for name in tuple(_registered_kernels):
         marker = f"_device_{device}_generation_"
-        if marker not in name:
+        if device is not None and marker not in name:
             continue
         tvm_ffi.remove_global_func(name)
         del _registered_kernels[name]

@@ -292,7 +292,7 @@ class TVMFFICentral {
     int device;
     NVTE_CHECK_CUDA(cudaGetDevice(&device));
     const std::string key = cfg.to_key() + "_device_" + std::to_string(device) + "_generation_" +
-                            std::to_string(nvte_get_cuda_context_generation(device));
+                            std::to_string(nvte_get_cuda_state_version());
     bool success = false;
     {
       PythonGCPause gc_pause;

@@ -15,20 +15,11 @@ from transformer_engine.jax import cpp_extensions as extensions
 from transformer_engine.jax.quantize.tensor import GroupedNoScaleTensor
 
 
-@pytest.mark.parametrize("bad_device", [-1, True, "cuda:0"])
-def test_invalid_device_does_not_mutate_state(bad_device):
-    with pytest.raises(ValueError, match="nonnegative"):
-        te.release_cuda_state(bad_device)
-    with pytest.raises(ValueError, match="nonnegative"):
-        te.reset_cuda_state(bad_device)
-
-
 def test_context_loss_rejects_framework_without_mutation():
-    device = jax.devices("gpu")[0].local_hardware_id
-    generation = tex.get_cuda_context_generation(device)
+    generation = tex.get_cuda_state_version()
     with pytest.raises(RuntimeError, match="JAX/XLA CUDA runtime"):
-        te.reset_cuda_state(device)
-    assert tex.get_cuda_context_generation(device) == generation
+        te.reset_cuda_state()
+    assert tex.get_cuda_state_version() == generation
 
 
 def test_live_cleanup_preserves_arrays_and_recreates_normalization():
@@ -46,17 +37,16 @@ def test_live_cleanup_preserves_arrays_and_recreates_normalization():
     reference = (x - mean) * jax.lax.rsqrt(
         jnp.mean((x - mean) ** 2, axis=-1, keepdims=True) + epsilon
     ) * gamma + beta
-    generation = tex.get_cuda_context_generation(device.local_hardware_id)
+    generation = tex.get_cuda_state_version()
     for _ in range(3):
         np.testing.assert_allclose(compute(x), reference, rtol=1e-4, atol=1e-4)
-        te.release_cuda_state(device.local_hardware_id)
-        assert tex.get_cuda_context_generation(device.local_hardware_id) > generation
-        generation = tex.get_cuda_context_generation(device.local_hardware_id)
+        te.release_cuda_state()
+        assert tex.get_cuda_state_version() > generation
+        generation = tex.get_cuda_state_version()
     np.testing.assert_allclose(compute(x), reference, rtol=1e-4, atol=1e-4)
 
 
 def test_live_cleanup_rebuilds_grouped_gemm_pinned_transfers():
-    device = jax.devices("gpu")[0].local_hardware_id
     sizes = jnp.array([32, 64], dtype=jnp.int32)
     lhs = jnp.arange(96 * 64, dtype=jnp.float16).reshape(96, 64) / 8192
     rhs = jnp.ones((2, 64, 32), dtype=jnp.float16) / 64
@@ -75,4 +65,27 @@ def test_live_cleanup_rebuilds_grouped_gemm_pinned_transfers():
         copy(sizes, num_gemms=2).block_until_ready()
         output = compute(left, right, contracting_dims=((1,), (1,)), use_async_d2h_group_sizes=True)
         np.testing.assert_allclose(output, reference, rtol=2e-3, atol=2e-3)
-        te.release_cuda_state(device)
+        te.release_cuda_state()
+
+
+@pytest.mark.skipif(len(jax.local_devices(backend="gpu")) < 2, reason="Two CUDA devices required")
+def test_global_release_preserves_arrays_and_rebuilds_plans_on_two_devices():
+    compute = jax.jit(lambda x, gamma, beta: layernorm(x, gamma, beta, "layernorm", False, 1e-5))
+    states = []
+    for device in jax.local_devices(backend="gpu")[:2]:
+        with jax.default_device(device):
+            x = jax.device_put(
+                jnp.arange(8 * 128, dtype=jnp.float32).reshape(8, 128) / 1000, device
+            )
+            gamma = jax.device_put(jnp.ones(128), device)
+            beta = jax.device_put(jnp.zeros(128), device)
+            values = np.asarray(x)
+            centered = values - values.mean(axis=-1, keepdims=True)
+            reference = centered / np.sqrt((centered**2).mean(axis=-1, keepdims=True) + 1e-5)
+            states.append((x, gamma, beta, reference))
+    for _ in range(3):
+        for x, gamma, beta, reference in states:
+            np.testing.assert_allclose(compute(x, gamma, beta), reference, rtol=1e-4, atol=1e-4)
+        version = tex.get_cuda_state_version()
+        te.release_cuda_state()
+        assert tex.get_cuda_state_version() == version + 1
