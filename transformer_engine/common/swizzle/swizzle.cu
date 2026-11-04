@@ -1117,7 +1117,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
              "Expected output tensor with scales in GEMM swizzled format.");
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
-      NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP8, got ",
+      NVTE_CHECK(is_fp8_dtype(input->dtype()) || is_fp4_dtype(input->dtype()),
+                 "Input tensor has invalid dtype (expected FP8 or FP4, got ",
                  to_string(input->dtype()), ").");
       break;
     case NVTE_NVFP4_1D_SCALING:
@@ -1532,9 +1533,9 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
     auto scaling_mode = input[i]->scaling_mode;
     auto is_fp8 = is_fp8_dtype(input[i]->dtype());
     auto is_fp4 = is_fp4_dtype(input[i]->dtype());
-    NVTE_CHECK(
-        (is_fp8 && is_mxfp8_scaling(scaling_mode)) || (is_fp4 && is_nvfp4_scaling(scaling_mode)),
-        "Not implemented scaling mode " + to_string(scaling_mode) + ".");
+    NVTE_CHECK(((is_fp8 || is_fp4) && is_mxfp_scaling(scaling_mode)) ||
+                   (is_fp4 && is_nvfp4_scaling(scaling_mode)),
+               "Not implemented scaling mode " + to_string(scaling_mode) + ".");
     NVTE_CHECK(!input[i]->with_gemm_swizzled_scales,
                "Expected input tensors with scales in compact format.");
     NVTE_CHECK(output[i]->with_gemm_swizzled_scales,
@@ -1706,7 +1707,8 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
 
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
-      NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP8, got ",
+      NVTE_CHECK(is_fp8_dtype(input->dtype()) || is_fp4_dtype(input->dtype()),
+                 "Input tensor has invalid dtype (expected FP8 or FP4, got ",
                  to_string(input->dtype()), ").");
       if (has_rowwise_scale_inv) {
         NVTE_CHECK(output->scale_inv.shape.size() == 2,
@@ -1846,9 +1848,9 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
 
     NVTE_CHECK(scaling_mode == first_scaling_mode,
                "All tensors should have the same scaling mode in multi-tensor unswizzle.");
-    NVTE_CHECK(
-        (is_fp8 && is_mxfp8_scaling(scaling_mode)) || (is_fp4 && is_nvfp4_scaling(scaling_mode)),
-        "Not implemented scaling mode " + to_string(scaling_mode) + ".");
+    NVTE_CHECK(((is_fp8 || is_fp4) && is_mxfp_scaling(scaling_mode)) ||
+                   (is_fp4 && is_nvfp4_scaling(scaling_mode)),
+               "Not implemented scaling mode " + to_string(scaling_mode) + ".");
     NVTE_CHECK(input[i]->with_gemm_swizzled_scales,
                "Expected input tensors with scales in GEMM swizzled format.");
     NVTE_CHECK(!output[i]->with_gemm_swizzled_scales,

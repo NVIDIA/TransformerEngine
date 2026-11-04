@@ -24,6 +24,7 @@
 #include "../util/multi_stream.h"
 #include "./config.h"
 #include "./cutlass_grouped_gemm.cuh"
+#include "./cutlass_mxfp4_mxfp8_gemm.h"
 
 namespace {
 
@@ -334,6 +335,21 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  bool gemm_producer, const Tensor *inputCounter, cudaStream_t stream) {
   NVTE_CHECK(!inputA->row_scaled_nvfp4 && !inputB->row_scaled_nvfp4,
              "cuBLAS GEMM does not support row-scaled NVFP4 inputs.");
+
+  if (is_mxfp4_mxfp8_gemm(*inputA, *inputB)) {
+    NVTE_CHECK(!alpha_beta_on_device, "MXFP4 x MXFP8 GEMM requires alpha and beta on host.");
+    NVTE_CHECK(outputPreGelu->data.dptr == nullptr,
+               "MXFP4 x MXFP8 GEMM does not support the GELU epilogue.");
+    NVTE_CHECK(!grad || inputBias->data.dptr == nullptr,
+               "MXFP4 x MXFP8 GEMM does not support the bias-gradient epilogue.");
+    NVTE_CHECK(inputCounter == nullptr || inputCounter->data.dptr == nullptr,
+               "MXFP4 x MXFP8 GEMM does not support atomic GEMM.");
+    cutlass_mxfp4_mxfp8_gemm(inputA, inputB, outputD, inputBias, transa == CUBLAS_OP_T,
+                             transb == CUBLAS_OP_T, *reinterpret_cast<const float *>(alpha),
+                             *reinterpret_cast<const float *>(beta), workspace, workspaceSize,
+                             stream);
+    return;
+  }
 
   // Tensor dims in row-major order
   const auto [A0, A1] = inputA->flat_2d_dims();
