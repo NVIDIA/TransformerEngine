@@ -12,6 +12,7 @@ import warnings
 import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.device import te_device_type
+from ..jit import jit_fuser
 from ..constants import TE_DType, DType
 from ..utils import (
     get_device_compute_capability,
@@ -516,17 +517,30 @@ def _can_group_nvfp4_row_scaled_gemm(A, B) -> bool:
     )
 
 
+@jit_fuser
+def _batched_row_scale_copy(
+    destination: torch.Tensor, intermediate: torch.Tensor, scales: torch.Tensor
+) -> None:
+    """Scale FP32 GEMM output and convert directly into the destination."""
+    destination.copy_(intermediate * scales)
+
+
 def _nvfp4_row_scaled_grouped_gemm(
     A, B, out, m_splits, single_output, use_split_accumulator, workspaces, sm_count
 ):
-    """Group FP32 forward GEMMs and preserve per-expert output scaling."""
+    """Group FP32 forward GEMMs and batch scaling of a combined output."""
     out_views = list(out[0].split(m_splits, dim=0)) if single_output else out
     active = [i for i, dest in enumerate(out_views) if dest.numel()]
     if active:
         aliases = [
             _nvfp4_row_scaled_gemm_inputs(A[i], B[i], transa=True, transb=False) for i in active
         ]
-        intermediates = [torch.empty_like(out_views[i], dtype=torch.float32) for i in active]
+        if single_output:
+            combined_intermediate = torch.empty_like(out[0], dtype=torch.float32)
+            intermediate_views = combined_intermediate.split(m_splits, dim=0)
+            intermediates = [intermediate_views[i] for i in active]
+        else:
+            intermediates = [torch.empty_like(out_views[i], dtype=torch.float32) for i in active]
         empty_tensors = [_empty_tensor()] * len(active)
         tex.te_general_grouped_gemm(
             [alias[0] for alias in aliases],
@@ -547,11 +561,24 @@ def _nvfp4_row_scaled_grouped_gemm(
             use_split_accumulator,
             sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
         )
-        for i, intermediate, alias in zip(active, intermediates, aliases):
-            row_scales, col_scales = alias[2:]
-            # Match general_gemm's FP32 arithmetic and final cast/copy exactly.
-            intermediate.mul_(row_scales * col_scales)
-            out_views[i].copy_(intermediate.to(dtype=out_views[i].dtype))
+        if single_output:
+            # Materialize the FP32 scale products before fusion to retain
+            # general_gemm's rounding boundary. A scalar row scale expands to
+            # all rows of its expert; empty experts contribute no rows.
+            scales = torch.cat(
+                [
+                    (alias[2] * alias[3]).expand(out_views[i].shape[0], 1)
+                    for i, alias in zip(active, aliases)
+                ],
+                dim=0,
+            )
+            _batched_row_scale_copy(out[0], combined_intermediate, scales)
+        else:
+            for i, intermediate, alias in zip(active, intermediates, aliases):
+                row_scales, col_scales = alias[2:]
+                # Match general_gemm's FP32 arithmetic and final cast/copy exactly.
+                intermediate.mul_(row_scales * col_scales)
+                out_views[i].copy_(intermediate.to(dtype=out_views[i].dtype))
     return out[0] if single_output else out
 
 
