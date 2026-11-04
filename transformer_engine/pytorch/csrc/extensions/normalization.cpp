@@ -135,8 +135,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     }
   }
 
-  const bool cudnn_mxfp8_output =
-      impl == Impl::FULLY_FUSED && IsMXFP8Quantizers(quantizer.ptr());
+  const bool cudnn_mxfp8_output = impl == Impl::FULLY_FUSED && IsMXFP8Quantizers(quantizer.ptr());
 
   // Output tensor
   TensorWrapper out_nvte;

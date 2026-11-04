@@ -8,9 +8,9 @@
 #include <pybind.h>
 
 #include "common.h"
-#include "extensions.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
+#include "extensions.h"
 #include "pybind.h"
 #include "torch/torch.h"
 
@@ -329,8 +329,8 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::convert_and_update_tensor(
   return {std::move(out_cpp), std::move(tensor)};
 }
 
-void NoneQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                             py::handle /*out_py*/, const std::optional<TensorWrapper>& noop_flag,
+void NoneQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out, py::handle /*out_py*/,
+                             const std::optional<TensorWrapper>& noop_flag,
                              bool /*defer_swizzle*/) {
   NVTE_ERROR("NoneQuantizer does not support quantization");
 }
@@ -1036,7 +1036,8 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 }
 
 void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                                             py::handle /*out_py*/, const std::optional<TensorWrapper>& noop_flag,
+                                             py::handle /*out_py*/,
+                                             const std::optional<TensorWrapper>& noop_flag,
                                              bool /*defer_swizzle*/) {
   const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
   at::Tensor amax_and_scale = at::empty({2}, opts);
@@ -1427,7 +1428,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
 }
 
 void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                                    py::handle /*out_py*/, const std::optional<TensorWrapper>& noop_flag,
+                                    py::handle /*out_py*/,
+                                    const std::optional<TensorWrapper>& noop_flag,
                                     bool /*defer_swizzle*/) {
   if (input.numel() == 0) {
     return;
@@ -1838,8 +1840,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
   return {std::move(out_cpp), std::move(tensor)};
 }
 
-void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                              py::handle /*out_py*/, const std::optional<TensorWrapper>& noop_flag,
+void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out, py::handle /*out_py*/,
+                              const std::optional<TensorWrapper>& noop_flag,
                               bool /*defer_swizzle*/) {
   if (input.numel() == 0) {
     return;
@@ -2584,8 +2586,7 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
 }
 
 void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                                   py::handle out_py,
-                                   const std::optional<TensorWrapper>& noop_flag,
+                                   py::handle out_py, const std::optional<TensorWrapper>& noop_flag,
                                    bool compute_amax, bool defer_swizzle) {
   auto swizzle_if_needed = [&]() {
     if (!defer_swizzle && optimize_for_gemm && !out.get_with_gemm_swizzled_scales()) {
@@ -2822,13 +2823,13 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   swizzle_if_needed();
 }
 
-void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                              py::handle out_py, const std::optional<TensorWrapper>& noop_flag,
-                              bool defer_swizzle) {
+void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out, py::handle out_py,
+                              const std::optional<TensorWrapper>& noop_flag, bool defer_swizzle) {
   this->quantize_impl(input, out, out_py, noop_flag, true, defer_swizzle);
 }
 
-void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out, py::handle out_py) {
+void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
+                                        py::handle out_py) {
   NVTE_CHECK(!out.get_row_scaled_nvfp4(),
              "quantize_with_amax is not supported for row-scaled NVFP4 quantization.");
   // Update output tensor amaxes with input tensor amax

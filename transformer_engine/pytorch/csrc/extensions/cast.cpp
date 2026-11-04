@@ -142,7 +142,6 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   // Perform quantization
   quantizer_cpp->quantize(input_cpp, output_cpp, output_py, noop_flag_cpp);
 
-
   return output_py;
 }
 
@@ -2165,7 +2164,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
             continue;
           }
           quantizers[i]->quantize(input_list[i], output_list[i], output_py_list[i], std::nullopt,
-                                   /*defer_swizzle=*/true);
+                                  /*defer_swizzle=*/true);
         }
       }
     } else {  // NVFP4 quantize
