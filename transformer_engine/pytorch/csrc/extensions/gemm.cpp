@@ -427,7 +427,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     if (reuse_output) {
       std::tie(D_tensor, D) = my_quantizer->convert_and_update_tensor(D);
     }
-    my_quantizer->quantize(unquantized_D_tensor, D_tensor, D);
+    my_quantizer->quantize(unquantized_D_tensor, D_tensor);
   }
   // Pack outputs
   std::vector<py::object> out;

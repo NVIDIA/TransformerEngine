@@ -8,7 +8,6 @@
 #include <pybind.h>
 
 #include "common.h"
-#include "extensions.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "pybind.h"
@@ -330,8 +329,8 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::convert_and_update_tensor(
 }
 
 void NoneQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                             py::handle /*out_py*/, const std::optional<TensorWrapper>& noop_flag,
-                             bool /*defer_swizzle*/) {
+                             const std::optional<TensorWrapper>& noop_flag,
+                             QuantizationWorkspace* /*workspace*/) {
   NVTE_ERROR("NoneQuantizer does not support quantization");
 }
 
@@ -632,8 +631,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::convert_and_update_tensor(
 }
 
 void Float8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                               py::handle /*out_py*/, const std::optional<TensorWrapper>& noop_flag,
-                               bool /*defer_swizzle*/) {
+                               const std::optional<TensorWrapper>& noop_flag,
+                               QuantizationWorkspace* /*workspace*/) {
   if (input.numel() == 0) {
     return;
   }
@@ -1036,8 +1035,8 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 }
 
 void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                                             py::handle /*out_py*/, const std::optional<TensorWrapper>& noop_flag,
-                                             bool /*defer_swizzle*/) {
+                                             const std::optional<TensorWrapper>& noop_flag,
+                                             QuantizationWorkspace* /*workspace*/) {
   const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
   at::Tensor amax_and_scale = at::empty({2}, opts);
   this->quantize_impl(input, out, noop_flag, true, amax_and_scale[0], amax_and_scale[1]);
@@ -1427,8 +1426,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
 }
 
 void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                                    py::handle /*out_py*/, const std::optional<TensorWrapper>& noop_flag,
-                                    bool /*defer_swizzle*/) {
+                                    const std::optional<TensorWrapper>& noop_flag,
+                                    QuantizationWorkspace* /*workspace*/) {
   if (input.numel() == 0) {
     return;
   }
@@ -1839,8 +1838,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
 }
 
 void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                              py::handle /*out_py*/, const std::optional<TensorWrapper>& noop_flag,
-                              bool /*defer_swizzle*/) {
+                              const std::optional<TensorWrapper>& noop_flag,
+                              QuantizationWorkspace* /*workspace*/) {
   if (input.numel() == 0) {
     return;
   }
@@ -2017,10 +2016,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
-  // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
-  // through the standalone post-quantize swizzle pass instead.
-  const bool with_gemm_swizzled_scales = emits_gemm_swizzled_scales(shape);
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
   NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
@@ -2370,10 +2366,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
-  // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
-  // through the standalone post-quantize swizzle pass instead.
-  const bool with_gemm_swizzled_scales = emits_gemm_swizzled_scales(shape);
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool disable_second_level_scale = this->disable_second_level_scale;
@@ -2584,13 +2577,12 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
 }
 
 void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                                   py::handle out_py,
-                                   const std::optional<TensorWrapper>& noop_flag,
-                                   bool compute_amax, bool defer_swizzle) {
-  auto swizzle_if_needed = [&]() {
-    if (!defer_swizzle && optimize_for_gemm && !out.get_with_gemm_swizzled_scales()) {
-      inplace_swizzle_scale_for_gemm(out, out_py);
-    }
+                                   const std::optional<TensorWrapper>& noop_flag, bool compute_amax,
+                                   QuantizationWorkspace* workspace) {
+  QuantizationWorkspace local_workspace;
+  auto& scale_workspace = workspace ? *workspace : local_workspace;
+  auto finish = [&]() {
+    if (!scale_workspace.defer_swizzle) scale_workspace.finish(out);
   };
   auto reduce_amaxes = [&]() {
     if (!this->with_amax_reduction || this->disable_second_level_scale) {
@@ -2626,8 +2618,14 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     if (!compute_amax) {
       reduce_amaxes();
     }
-    swizzle_if_needed();
+    finish();
     return;
+  }
+
+  const bool kernel_swizzles = emits_gemm_swizzled_scales(convertShape(input.shape())) &&
+                               (!with_rht || input.dtype() == DType::kBFloat16);
+  if (out.get_with_gemm_swizzled_scales() && !kernel_swizzles) {
+    scale_workspace.prepare(out, noop_flag.has_value());
   }
 
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -2819,16 +2817,16 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
   }
-  swizzle_if_needed();
+  finish();
 }
 
 void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                              py::handle out_py, const std::optional<TensorWrapper>& noop_flag,
-                              bool defer_swizzle) {
-  this->quantize_impl(input, out, out_py, noop_flag, true, defer_swizzle);
+                              const std::optional<TensorWrapper>& noop_flag,
+                              QuantizationWorkspace* workspace) {
+  this->quantize_impl(input, out, noop_flag, true, workspace);
 }
 
-void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out, py::handle out_py) {
+void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out) {
   NVTE_CHECK(!out.get_row_scaled_nvfp4(),
              "quantize_with_amax is not supported for row-scaled NVFP4 quantization.");
   // Update output tensor amaxes with input tensor amax
@@ -2851,7 +2849,7 @@ void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out
   input.set_amax(nullptr, DType::kFloat32, input.defaultShape);
 
   // Perform quantization
-  this->quantize_impl(input, out, out_py, std::nullopt, false);
+  this->quantize_impl(input, out, std::nullopt, false);
 }
 
 std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& shape,
