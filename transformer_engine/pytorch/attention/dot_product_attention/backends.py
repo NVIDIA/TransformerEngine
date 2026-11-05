@@ -256,17 +256,12 @@ except PackageNotFoundError:
     _flash_attn_bwd_v4 = None
 else:
     try:
-        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
-
-        # FA4 4.0.0b24 requires CUTLASS DSL 4.6.2 or newer.
-        if fa_utils.fa4_version == PkgVersion("4.0.0b24") and cutlass_dsl_version < PkgVersion(
-            "4.6.2"
-        ):
+        if fa_utils.fa4_version < fa_utils.v4_version_required:
             raise ImportError(
-                "flash-attn-4 4.0.0b24 requires nvidia-cutlass-dsl>=4.6.2; "
-                f"found {cutlass_dsl_version}"
+                f"flash-attn-4>={fa_utils.v4_version_required} is required; "
+                f"found {fa_utils.fa4_version}"
             )
-
+        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
         from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
             flash_attn_func as _flash_attn_func_v4,
             flash_attn_varlen_func as _flash_attn_varlen_func_v4,
