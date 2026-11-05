@@ -4,6 +4,8 @@
 
 """Fused scaled masked softmax functions"""
 
+# pylint: disable=unidiomatic-typecheck
+
 import os
 from typing import Callable, Optional
 import torch
@@ -17,13 +19,6 @@ THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
 
 
-def _softmax_bwd_in_place(allow_inplace_backward: bool, *tensors: torch.Tensor) -> bool:
-    """Whether an explicitly donated eager gradient may be overwritten."""
-    if not allow_inplace_backward or torch.compiler.is_compiling() or torch.is_grad_enabled():
-        return False
-    return all(type(t) is torch.Tensor for t in tensors)  # pylint: disable=unidiomatic-typecheck
-
-
 # ----------------------------- ScaledSoftmax -------------------------------
 
 
@@ -32,7 +27,6 @@ def scaled_softmax_forward(
     inputs: torch.Tensor, scale: float, allow_inplace_backward: bool = False
 ) -> torch.Tensor:
     """Forward pass for ScaledSoftmax."""
-    # setup_context consumes allow_inplace_backward; the forward kernel does not.
     del allow_inplace_backward
     return tex.scaled_softmax_forward(inputs, scale)
 
@@ -70,7 +64,13 @@ def _scaled_softmax_setup_context(ctx, inputs, output):
 
 def _scaled_softmax_backward_wrapper(ctx, grad_output):
     (softmax_results,) = ctx.saved_tensors
-    if _softmax_bwd_in_place(ctx.allow_inplace_backward, grad_output, softmax_results):
+    if (
+        ctx.allow_inplace_backward
+        and not torch.compiler.is_compiling()
+        and not torch.is_grad_enabled()
+        and type(grad_output) is torch.Tensor
+        and type(softmax_results) is torch.Tensor
+    ):
         grad_inputs = tex.scaled_softmax_backward(
             grad_output, softmax_results, ctx.scale, overwrite=True
         )
@@ -132,7 +132,13 @@ def _scaled_masked_softmax_setup_context(ctx, inputs, output):
 
 def _scaled_masked_softmax_backward_wrapper(ctx, grad_output):
     (softmax_results,) = ctx.saved_tensors
-    if _softmax_bwd_in_place(ctx.allow_inplace_backward, grad_output, softmax_results):
+    if (
+        ctx.allow_inplace_backward
+        and not torch.compiler.is_compiling()
+        and not torch.is_grad_enabled()
+        and type(grad_output) is torch.Tensor
+        and type(softmax_results) is torch.Tensor
+    ):
         grad_inputs = tex.scaled_masked_softmax_backward(
             grad_output, softmax_results, ctx.scale, overwrite=True
         )
@@ -196,7 +202,13 @@ def _scaled_upper_triang_masked_softmax_setup_context(ctx, inputs, output):
 
 def _scaled_upper_triang_masked_softmax_backward_wrapper(ctx, grad_output):
     (softmax_results,) = ctx.saved_tensors
-    if _softmax_bwd_in_place(ctx.allow_inplace_backward, grad_output, softmax_results):
+    if (
+        ctx.allow_inplace_backward
+        and not torch.compiler.is_compiling()
+        and not torch.is_grad_enabled()
+        and type(grad_output) is torch.Tensor
+        and type(softmax_results) is torch.Tensor
+    ):
         grad_inputs = tex.scaled_upper_triang_masked_softmax_backward(
             grad_output, softmax_results, ctx.scale, overwrite=True
         )
@@ -260,7 +272,13 @@ def _scaled_aligned_causal_masked_softmax_setup_context(ctx, inputs, output):
 
 def _scaled_aligned_causal_masked_softmax_backward_wrapper(ctx, grad_output):
     (softmax_results,) = ctx.saved_tensors
-    if _softmax_bwd_in_place(ctx.allow_inplace_backward, grad_output, softmax_results):
+    if (
+        ctx.allow_inplace_backward
+        and not torch.compiler.is_compiling()
+        and not torch.is_grad_enabled()
+        and type(grad_output) is torch.Tensor
+        and type(softmax_results) is torch.Tensor
+    ):
         grad_inputs = tex.scaled_aligned_causal_masked_softmax_backward(
             grad_output, softmax_results, ctx.scale, overwrite=True
         )
