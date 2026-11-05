@@ -94,6 +94,18 @@ def exp2f_rcp(scale_e8m0) -> Float32:
 
 
 @cute.jit
+def exp2f(scale_e8m0) -> Float32:
+    """2^(biased_exp - 127) for an e8m0 scale, matching ptx::exp2f in util/ptx.cuh."""
+    biased_exp = Int32(scale_e8m0.bitcast(cutlass.Uint8))
+    result = (biased_exp << Int32(FP32_MANTISSA_BITS)).bitcast(Float32)
+    # 2^-127 is subnormal, so it cannot be built by shifting into the exponent field.
+    for cmp_val, repl_bits in [(255, 0x7FFFFFFF), (0, 0x00400000)]:
+        if biased_exp == Int32(cmp_val):
+            result = Int32(repl_bits).bitcast(Float32)
+    return result
+
+
+@cute.jit
 def exp2_bf16x2_rcp(scale_e8m0) -> Uint32:
     """Pack two BF16 copies of the E8M0 reciprocal computed by exp2f_rcp."""
     # These reciprocal powers of two are exact in BF16. Taking the upper bits
