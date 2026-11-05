@@ -554,7 +554,7 @@ class TestMHC:
                 tols = get_tols(dtype)
                 tolerance = tols["atol"] + tols["rtol"] * jnp.abs(truth)
                 assert jnp.all(
-                    te_err <= 2 * ref_err + tolerance
+                    te_err <= ref_err + tolerance
                 ), f"{name}: TE error {te_err}, reference {ref_err}"
                 continue
             te_err, ref_err = rel_err(grad, truth), rel_err(ref_grad, truth)
