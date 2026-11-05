@@ -136,9 +136,9 @@ std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWra
   std::vector<TensorWrapper> views;
   views.reserve(outputs.size());
   for (size_t i = 0; i < outputs.size(); ++i) {
-    views.emplace_back(compact_scales[i] ? make_compact_output_view(outputs[i], scratch[2 * i],
-                                                                    scratch[2 * i + 1])
-                                         : copy_tensor_view(outputs[i]));
+    views.emplace_back(
+        compact_scales[i] ? make_compact_output_view(outputs[i], scratch[2 * i], scratch[2 * i + 1])
+                          : copy_tensor_view(outputs[i]));
   }
   return views;
 }
