@@ -97,6 +97,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     UNFUSED,
     // Compute norm directly
     FULLY_FUSED,
+    // Compute norm directly with compact scales, then swizzle them for GEMM
+    FUSED_NORM_QUANT_UNSWIZZLED,
     // Compute norm and amax in high precision, then quantize to FP8
     FUSED_NORM_AMAX_FP8,
     // Compute norm and amax in high precision, then quantize to NVFP4
@@ -112,7 +114,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     if (!mxfp8_quantizer_cpp->with_2d_quantization &&
         transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
         inner_size % 128 == 0) {
-      impl = Impl::FULLY_FUSED;
+      impl = quantizer_cpp->optimize_for_gemm ? Impl::FUSED_NORM_QUANT_UNSWIZZLED
+                                              : Impl::FULLY_FUSED;
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
              !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
@@ -142,23 +145,23 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   } else {
     std::tie(out_nvte, out) = quantizer_cpp->convert_and_update_tensor(out);
   }
-  at::Tensor rowwise_scales, columnwise_scales;
-  std::optional<TensorWrapper> compact_out_nvte;
-  if (impl == Impl::FULLY_FUSED && IsMXFP8Quantizers(quantizer.ptr()) &&
-      quantizer_cpp->optimize_for_gemm) {
-    compact_out_nvte.emplace(make_compact_output_view(out_nvte, rowwise_scales, columnwise_scales));
-  }
 
   // Construct unquantized output tensor if needed
   TensorWrapper unquantized_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  TensorWrapper *kernel_out_nvte = compact_out_nvte ? &*compact_out_nvte : &out_nvte;
+  TensorWrapper compact_out_nvte;
+  at::Tensor rowwise_scales, columnwise_scales;
+  TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
       NoneQuantizer q{none};
       std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
+    } break;
+    case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
+      compact_out_nvte = make_compact_output_view(out_nvte, rowwise_scales, columnwise_scales);
+      kernel_out_nvte = &compact_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
@@ -205,6 +208,9 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     case Impl::UNFUSED: {
       quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
     } break;
+    case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
+      swizzle_scales_into(compact_out_nvte, out_nvte);
+    } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte, amax_buf);
@@ -216,8 +222,6 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     default: {
     }
   }
-
-  if (compact_out_nvte) swizzle_scales_into(*compact_out_nvte, out_nvte);
   return {out, py::cast(mu_py), py::cast(rsigma_py)};
 }
 
@@ -342,7 +346,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     UNFUSED,
     // Compute norm directly
     FULLY_FUSED,
-    // Compute norm directly, with quantization scales in compact format
+    // Compute norm directly with compact scales, then swizzle them for GEMM
     FUSED_NORM_QUANT_UNSWIZZLED,
     // Compute norm and amax in high precision, then quantize to FP8
     FUSED_NORM_AMAX_FP8,
@@ -358,12 +362,10 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     // The fused MXFP8 kernels quantize 1D blocks and require full 128x128 tiles
     if (!mxfp8_quantizer_cpp->with_2d_quantization && outer_size % 128 == 0 &&
         inner_size % 128 == 0) {
-      if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
-        impl = Impl::FUSED_NORM_QUANT_UNSWIZZLED;
-      } else {
-        // Transformer Engine's fused RMSNorm + MXFP8 kernel
-        impl = Impl::FULLY_FUSED;
-      }
+      // cuDNN emits compact scales
+      const bool use_cudnn = transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN");
+      impl = use_cudnn && quantizer_cpp->optimize_for_gemm ? Impl::FUSED_NORM_QUANT_UNSWIZZLED
+                                                           : Impl::FULLY_FUSED;
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
              !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
@@ -393,22 +395,23 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   } else {
     std::tie(out_nvte, out) = quantizer_cpp->convert_and_update_tensor(out);
   }
-  at::Tensor rowwise_scales, columnwise_scales;
-  std::optional<TensorWrapper> compact_out_nvte;
-  if (impl == Impl::FUSED_NORM_QUANT_UNSWIZZLED && quantizer_cpp->optimize_for_gemm) {
-    compact_out_nvte.emplace(make_compact_output_view(out_nvte, rowwise_scales, columnwise_scales));
-  }
 
   // Construct unquantized output tensor if needed
   TensorWrapper unquantized_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  TensorWrapper *kernel_out_nvte = compact_out_nvte ? &*compact_out_nvte : &out_nvte;
+  TensorWrapper compact_out_nvte;
+  at::Tensor rowwise_scales, columnwise_scales;
+  TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
       NoneQuantizer q{none};
       std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
+    } break;
+    case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
+      compact_out_nvte = make_compact_output_view(out_nvte, rowwise_scales, columnwise_scales);
+      kernel_out_nvte = &compact_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
@@ -453,6 +456,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     case Impl::UNFUSED: {
       quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
     } break;
+    case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
+      swizzle_scales_into(compact_out_nvte, out_nvte);
+    } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte, amax_buf);
@@ -464,8 +470,6 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     default: {
     }
   }
-
-  if (compact_out_nvte) swizzle_scales_into(*compact_out_nvte, out_nvte);
   return {out, py::none(), py::cast(rsigma_py)};
 }
 
