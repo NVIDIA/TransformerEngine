@@ -2494,6 +2494,13 @@ class TestBasicOps:
         var_ref = x_ref.square().mean(dim=-1, keepdim=True)
         gamma_ref = 1 + w_ref if zero_centered_gamma else w_ref
         n_ref = x_ref * torch.rsqrt(eps + var_ref) * gamma_ref
+        # RMSNorm returns the normalized output and SiLUGate passes its
+        # gradient back in the input dtype. Round both in the reference:
+        # with signed gates, positive and negative contributions can nearly
+        # cancel, so comparing against an unrounded BF16 reference fails
+        # near zero even for a correct implementation.
+        n_ref = n_ref + (n_ref.to(dtype).to(n_ref.dtype) - n_ref).detach()
+        n_ref.register_hook(lambda grad: grad.to(dtype).to(grad.dtype))
         y_ref = n_ref * torch.nn.functional.silu(g_ref)
         y_ref.backward(dy_ref)
 
