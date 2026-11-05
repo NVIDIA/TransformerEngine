@@ -78,7 +78,7 @@ def gated_elementwise_op(
     """
 
     if cutlass.const_expr(ACTIVATION == "clamped_swiglu"):
-        # FWD gate function for clamped_swiglu: 
+        # FWD gate function for clamped_swiglu:
         # gate(g) = clamp(g, -limit, limit) + glu_linear_offset
         gate = cute.arch.fmin(cute.arch.fmax(-limit, gate_element), limit) + glu_linear_offset
         # BWD dgate function for clamped_swiglu:
@@ -272,43 +272,38 @@ def _split_gated_scales(
     COLWISE: cutlass.Constexpr[bool],
     SWIZZLED: cutlass.Constexpr[bool],
 ):
-    """Views of the backward output's scales split into its act_grad and gate_grad halves; returns
-    (mS_row_act, mS_row_gate, mS_col_act, mS_col_gate).
-
-    The [M, 2N] output is [act_grad | gate_grad] and its scales are laid out for the whole
-    output. Each view has the shape of an [M, N] tensor's scales and the strides of the whole
-    output's, and starts where the whole output's layout places that half's first scale. For
-    swizzled scales this needs the halves to be whole 128x4 tiles (N % 128 == 0, required by the
-    C++ dispatcher).
-    """
+    """Split the scales of a gated input with logical shape [M, 2N] into the act and gate halves, each with logical shape [M, N].""" 
     mS_row_act = mS_row_gate = mS_col_act = mS_col_gate = None
     if cutlass.const_expr(SWIZZLED):
         mS_row, mS_col = derive_swizzled_scale_layout(
             M, 2 * N, ROWWISE, COLWISE, mS_row, mS_col
         )
-        half_tiles = N // 128
+        # To slice the left half (act) and right half (gate) of the swizzled scales, we need to tile using the tiler
+        # with the same mode pattern as the swizzled layout's shape:
+        # mS_row: ((32, 4, ceil(M/128)), (4, ceil(N/64))) : ((16, 4, 512·ceil(N/64)), (1, 512))
+        # mS_col: ((4, ceil(M/128)), (32, 4, ceil(N/64))) : ((1, 512), (16, 4, 512·ceil(M/128)))
         if cutlass.const_expr(ROWWISE):
             row_tiler = (
-                cute.make_layout((32, 4, cute.ceil_div(M, 128))),  # all rows
-                cute.make_layout((4, half_tiles)),  # one half's scale columns
+                cute.make_layout((32, 4, cute.ceil_div(M, 128))), # slice all rows
+                cute.make_layout((4, cute.ceil_div(N, 128))), # slice half columns so cdiv uses 128 instead of 64
             )
             mS_row_act = cute.local_tile(mS_row, row_tiler, (0, 0))
             mS_row_gate = cute.local_tile(mS_row, row_tiler, (0, 1))
         if cutlass.const_expr(COLWISE):
             col_tiler = (
-                cute.make_layout((4, cute.ceil_div(cute.ceil_div(M, 32), 4))),  # all scale rows
-                cute.make_layout((32, 4, half_tiles)),  # one half's columns
+                cute.make_layout((4, cute.ceil_div(M, 128))), # slice all rows
+                cute.make_layout((32, 4, cute.ceil_div(N, 128))), # slice half columns so cdiv uses 128 instead of 64
             )
             mS_col_act = cute.local_tile(mS_col, col_tiler, (0, 0))
             mS_col_gate = cute.local_tile(mS_col, col_tiler, (0, 1))
     else:
         # Compact scales are row-major, so each half is a block of scale columns
         if cutlass.const_expr(ROWWISE):
-            row_tiler = (mS_row.shape[0], N // MXFP8_BLOCK_SCALING_SIZE)
+            row_tiler = (M, cute.ceil_div(N, MXFP8_BLOCK_SCALING_SIZE))
             mS_row_act = cute.local_tile(mS_row, row_tiler, (0, 0))
             mS_row_gate = cute.local_tile(mS_row, row_tiler, (0, 1))
         if cutlass.const_expr(COLWISE):
-            col_tiler = (mS_col.shape[0], N)
+            col_tiler = (cute.ceil_div(M, MXFP8_BLOCK_SCALING_SIZE), N)
             mS_col_act = cute.local_tile(mS_col, col_tiler, (0, 0))
             mS_col_gate = cute.local_tile(mS_col, col_tiler, (0, 1))
     return mS_row_act, mS_row_gate, mS_col_act, mS_col_gate
@@ -375,7 +370,6 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         mS_row_act_grad = mS_row_gate_grad = mS_col_act_grad = mS_col_gate_grad = None  # BWD only
         if cutlass.const_expr(self.cfg.IS_BWD):
             # The [M, 2N] output is [act_grad | gate_grad]; the kernel takes its two halves
-            # TODO(kainingz): how to implement this in a more elegant way
             mS_row_act_grad, mS_row_gate_grad, mS_col_act_grad, mS_col_gate_grad = (
                 _split_gated_scales(
                     mS_row,
