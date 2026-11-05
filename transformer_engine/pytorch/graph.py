@@ -90,6 +90,18 @@ def _none_grad_context_wrapper(inputs):
         input_tensor.grad = original_grad
 
 
+def _reset_wgrad_written(params):
+    """Make the next fused wgrad of each ``overwrite_main_grad`` weight overwrite ``main_grad``.
+
+    The overwrite-or-accumulate choice is baked into each captured GEMM, so every captured
+    backward starts from a cleared flag, like an eager backward after the caller consumed
+    ``main_grad`` (see ``overwrite_main_grad_wgrad_gemm``).
+    """
+    for param in params:
+        if getattr(param, "_fsdp_wgrad_written", None) is not None:
+            param._fsdp_wgrad_written = False
+
+
 @contextlib.contextmanager
 def _graph_context_wrapper(*args, **kwargs):
     """Wrapper around `torch.cuda.graph`.
@@ -709,13 +721,6 @@ def _make_graphed_callables(
             post_warmup_hook()
     torch.cuda.synchronize()
 
-    # Warmup backwards leave _fsdp_wgrad_written set. Clear it so the captured backward overwrites
-    # main_grad on its first fused wgrad (see overwrite_main_grad_wgrad_gemm).
-    for module_params in per_callable_module_params:
-        for param in module_params:
-            if getattr(param, "_fsdp_wgrad_written", None) is not None:
-                param._fsdp_wgrad_written = False
-
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
     # the safest approach is to capture all passes in the same order they'll run:
     # fwd 1, fwd 2, ... fwd N, then bwd N, bwd N-1, ... bwd 1.
@@ -868,6 +873,7 @@ def _make_graphed_callables(
                             callables[callable_idx],
                         )
 
+                        _reset_wgrad_written(per_callable_module_params[per_callable_bwd_idx])
                         inputs = tuple(i for i in static_input_surface if i.requires_grad)
                         with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
                             bwd_graph, pool=mempool
@@ -1005,6 +1011,7 @@ def _make_graphed_callables(
                     callables[bwd_idx],
                 )
 
+                _reset_wgrad_written(per_callable_module_params[bwd_idx])
                 inputs = tuple(i for i in static_input_surface if i.requires_grad)
                 with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
                     bwd_graph, pool=mempool
@@ -1055,6 +1062,8 @@ def _make_graphed_callables(
         per_callable_returned_param_grad_clone_slots = list(
             reversed(per_callable_returned_param_grad_clone_slots)
         )
+    for module_params in per_callable_module_params:
+        _reset_wgrad_written(module_params)
     # Now for every per_callable list, per_callable_*[i] holds the stuff for the ith callable.
 
     def make_graphed_autograd_function(

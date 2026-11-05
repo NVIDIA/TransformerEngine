@@ -95,6 +95,65 @@ def test_reused_weight_graph_replay_overwrites_stale_main_grad(module_cls):
         torch.testing.assert_close(weight.main_grad, expected, rtol=1e-2, atol=atol)
 
 
+class _Uses(torch.nn.Module):
+    def __init__(self, module, uses):
+        super().__init__()
+        self.module = module
+        self.uses = uses
+
+    def forward(self, x):
+        return sum(self.module(x * (i + 1)) for i in range(self.uses))
+
+
+@pytest.mark.parametrize("module_cls", [te.Linear, te.LayerNormLinear])
+@pytest.mark.parametrize("uses", [1, 2])
+@pytest.mark.parametrize("with_order", [False, True])
+def test_weight_shared_by_graphed_microbatches_overwrites_stale_main_grad(
+    module_cls, uses, with_order
+):
+    """Each captured backward overwrites first, even when another capture already set the flag."""
+    torch.manual_seed(1234)
+    fused = _build(module_cls, True, False)
+    reference = _build(module_cls, False, False)
+    reference.load_state_dict(fused.state_dict())
+    weight = fused.weight
+    weight.main_grad = torch.empty(OUT, HIDDEN, device="cuda", dtype=torch.float32)
+    _reset_main_grad(weight)
+    microbatches = 2
+    samples = tuple(
+        (torch.randn(TOKENS, HIDDEN, device="cuda", dtype=torch.bfloat16),)
+        for _ in range(microbatches)
+    )
+    if with_order:
+        # One layer, both microbatches forward, then both backward, as pipelined schedules capture.
+        graphed = te.make_graphed_callables(
+            (_Uses(fused, uses),),
+            samples,
+            _order=[1] * microbatches + [-1] * microbatches,
+            _num_layers_per_chunk=[1],
+        )
+        bwd_order = list(range(microbatches))
+    else:
+        graphed = te.make_graphed_callables(
+            tuple(_Uses(fused, uses) for _ in range(microbatches)), samples
+        )
+        bwd_order = list(reversed(range(microbatches)))
+    assert len(graphed) == microbatches
+    for _ in range(2):
+        xs = [torch.randn(TOKENS, HIDDEN, device="cuda", dtype=torch.bfloat16) for _ in graphed]
+        dys = [torch.randn(TOKENS, OUT, device="cuda", dtype=torch.bfloat16) for _ in graphed]
+        outs = [g(x) for g, x in zip(graphed, xs)]
+        # Backward in capture order, the caller consuming main_grad after each one.
+        for i in bwd_order:
+            _reset_main_grad(weight)
+            reference.weight.grad = None
+            (outs[i].float() * dys[i].float()).sum().backward()
+            (_Uses(reference, uses)(xs[i]).float() * dys[i].float()).sum().backward()
+            expected = reference.weight.grad.float()
+            atol = 8 * uses * torch.finfo(torch.bfloat16).eps * expected.abs().max().item()
+            torch.testing.assert_close(weight.main_grad, expected, rtol=1e-2, atol=atol)
+
+
 @pytest.mark.parametrize("module_cls", [te.Linear, te.LayerNormLinear])
 def test_weight_without_flag_keeps_overwriting(module_cls):
     """A caller that never clears ``_fsdp_wgrad_written`` keeps getting overwrites across backwards."""

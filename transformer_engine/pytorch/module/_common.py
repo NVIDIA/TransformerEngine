@@ -74,6 +74,8 @@ def overwrite_main_grad_wgrad_gemm(
     than once in one backward (e.g. an LM head shared with an MTP head) accumulates the rest.
     Deciding when the GEMM runs keeps this correct for delayed wgrads, whatever their order.
     A weight without the attribute has an owner that never clears it, so it always overwrites.
+    Under CUDA graph capture the choice is baked into the graph; ``make_graphed_callables``
+    clears the flag before capturing each backward.
     """
     weight = weight_ref() if weight_ref is not None else None
     written = getattr(weight, "_fsdp_wgrad_written", None)
