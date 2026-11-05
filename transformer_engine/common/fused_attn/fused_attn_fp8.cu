@@ -465,16 +465,17 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
     // Pad the user's cumulative buffers to the bucketed batch size so cuDNN never reads past them.
     if (pad_direct_tails) {
       const size_t stride = alignTo<16>((b + 1) * sizeof(int32_t));
-      int8_t *pad_ws = static_cast<int8_t *>(workspace) + plan_workspace_size +
+      int8_t* pad_ws = static_cast<int8_t*>(workspace) + plan_workspace_size +
                        actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
-      void **ptrs[4] = {&devPtrcuSeqlensQ, &devPtrcuSeqlensKV, &devPtrSeqOffsetsQ, &devPtrSeqOffsetsKV};
+      void** ptrs[4] = {&devPtrcuSeqlensQ, &devPtrcuSeqlensKV, &devPtrSeqOffsetsQ,
+                        &devPtrSeqOffsetsKV};
       const bool needed[4] = {is_padding, is_padding, is_ragged_q,
                               is_ragged_kv && !offset_mults.kv_from_q};
       PaddedCuSeqlensArgs pad_args;
       for (int i = 0; i < 4; ++i) {
         if (!needed[i]) continue;
-        pad_args.src[i] = static_cast<const int32_t *>(*ptrs[i]);
-        pad_args.dst[i] = reinterpret_cast<int32_t *>(pad_ws + i * stride);
+        pad_args.src[i] = static_cast<const int32_t*>(*ptrs[i]);
+        pad_args.dst[i] = reinterpret_cast<int32_t*>(pad_ws + i * stride);
         *ptrs[i] = pad_args.dst[i];
       }
       constexpr size_t nthreads_per_block = 128;
