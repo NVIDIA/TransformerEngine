@@ -168,9 +168,6 @@ class MXFP8Quantizer(Quantizer):
         Swizzle kernel will be performed before GEMM to suit the need of CuBLAS.
         CuBLAS doc: https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
         """
-        # Use ceil-division (mirroring C++ DIVUP in quantizer.cpp) so partial
-        # trailing blocks from the relaxed last_dim % 16 constraint get one
-        # scale each instead of collapsing to zero.
         if columnwise:
             # Columnwise: scale_inv shape is [ceildiv(prod(shape[:-1]), BLOCK_SIZE), shape[-1]]
             # with padding to multiples of [4, 128]
