@@ -3,7 +3,9 @@
 # See LICENSE for license information.
 
 from collections.abc import Iterable
+import ctypes
 import io
+import os
 from typing import Any, Dict, List, Tuple, Union, Optional
 
 import pytest
@@ -11,6 +13,7 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+from transformer_engine.common import _get_shared_object_file
 from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -1012,6 +1015,67 @@ class TestQuantizedTensor:
         assert (
             x.grad is not None and x.grad.norm().item() > 0
         ), "Gradient did not flow back to the input through quantize -> dequantize"
+
+
+@pytest.fixture
+def cuda_quantization_backend():
+    """Keep the scale-stride regression on CUDA regardless of the backend default."""
+    core = ctypes.CDLL(str(_get_shared_object_file("core")))
+    flag = os.getenv("NVTE_ENABLE_CUTEDSL_BACKEND")
+    core.nvte_set_cutedsl_backend(0)
+    yield
+    core.nvte_set_cutedsl_backend(flag is not None and not flag.startswith("0"))
+
+
+@pytest.mark.usefixtures("cuda_quantization_backend")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10,
+    reason="Register-resident MXFP8 quantization requires Blackwell or newer",
+)
+@pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
+@pytest.mark.parametrize("cols", [1024, 2048, 4096])
+@pytest.mark.parametrize("extra", [(0, 0), (4, 0), (0, 16), (4, 16)])
+def test_mxfp8_quantize_with_pitched_scales(
+    fp8_dtype: te.DType, cols: int, extra: Tuple[int, int]
+) -> None:
+    """Quantization honors the scale strides supplied by the output tensor."""
+    torch.manual_seed(1234)
+    rows = 64
+    x = torch.randn((rows, cols), dtype=torch.bfloat16, device="cuda")
+    quantizer = MXFP8Quantizer(fp8_dtype=fp8_dtype)
+    quantizer.optimize_for_gemm = False
+    ref = quantizer(x)
+    out = MXFP8Tensor(
+        shape=x.shape,
+        dtype=x.dtype,
+        device=x.device,
+        rowwise_data=torch.empty_like(ref._rowwise_data),
+        columnwise_data=torch.empty_like(ref._columnwise_data),
+        rowwise_scale_inv=torch.full(
+            (rows, cols // 32 + extra[0]), 0xAA, dtype=torch.uint8, device=x.device
+        ),
+        columnwise_scale_inv=torch.full(
+            (rows // 32, cols + extra[1]), 0xAA, dtype=torch.uint8, device=x.device
+        ),
+        fp8_dtype=fp8_dtype,
+        quantizer=quantizer,
+        with_gemm_swizzled_scales=False,
+    )
+    out.quantize_(x)
+    torch.testing.assert_close(out._rowwise_data, ref._rowwise_data, rtol=0, atol=0)
+    torch.testing.assert_close(out._columnwise_data, ref._columnwise_data, rtol=0, atol=0)
+    torch.testing.assert_close(
+        out._rowwise_scale_inv[:, : cols // 32],
+        ref._rowwise_scale_inv[:rows, : cols // 32],
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        out._columnwise_scale_inv[:, :cols],
+        ref._columnwise_scale_inv[: rows // 32, :cols],
+        rtol=0,
+        atol=0,
+    )
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
