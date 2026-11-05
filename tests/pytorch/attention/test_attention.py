@@ -3893,12 +3893,13 @@ def test_mha_fp8_vs_f16(
     RoPE,
     is_training,
     scaling_mode,
+    monkeypatch,
 ):
     """Test MultiHeadAttention module in FP8"""
     if not is_training and fp8_dpa_bwd:
         pytest.skip("fp8_dpa_bwd=True not applicable for inference")
 
-    os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_dpa_bwd else "0")
     config = _get_fp8_vs_f16_config(model, qkv_format)
 
     # Test backend availability
@@ -4136,7 +4137,9 @@ def _run_mha_fp8_vs_f16(
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current", "mxfp8"])
-def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
+def test_dpa_fp8_vs_f16(
+    dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode, monkeypatch
+):
     """Test DotProductAttention module in FP8"""
     config = _get_fp8_vs_f16_config(model, qkv_layout)
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
@@ -4154,8 +4157,8 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     #    if get_device_compute_capability() >= (10, 0):
     #        config.dropout_p = 0.1
 
-    os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "1"
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_dpa_bwd else "0")
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
 
     # Test backend availability
     if scaling_mode == "delayed":
@@ -4469,7 +4472,7 @@ param_types_fp8 = [torch.float16, torch.bfloat16]
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("model", model_configs_fp8)
-def test_custom_mha_fp8_vs_f16(dtype, model):
+def test_custom_mha_fp8_vs_f16(dtype, model, monkeypatch):
     """Test FP8 dot product attention implementations based on cuDNN frontend
     v0.9 and v1.0+. Each test compares results from a custom implementation of
     an FP8 MHA module, i.e. Custom_MHA_FP8(), to results from an F16 MHA
@@ -4477,6 +4480,9 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     Both paths take F16 input and output. QKV layout is bs3hd"""
 
     config = model_configs_fp8[model]
+
+    # The custom implementation always executes FP8 backward.
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1")
 
     # Test backend availability
     is_training = True
