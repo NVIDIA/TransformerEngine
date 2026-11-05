@@ -201,6 +201,14 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
         return super().quantize_(tensor, noop_flag=noop_flag)
 
+    def view(self, *shape: Tuple[int]) -> MXFP4Tensor:
+        # pylint: disable=missing-function-docstring
+        return _ViewFunc.apply(self, shape)
+
+    def reshape(self, *shape: Tuple[int]) -> MXFP4Tensor:
+        # pylint: disable=missing-function-docstring
+        return _ViewFunc.apply(self, shape)
+
     def contiguous(
         self,
         memory_format: torch.memory_format = torch.contiguous_format,
@@ -230,6 +238,23 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
                 requires_grad=False,
                 **metadata,
             )
+
+        if func == aten.view.default:
+            tensor, shape = args[0], args[1]
+            if list(shape) == list(tensor.size()):
+                return tensor.detach()
+            return tensor.view(shape)
+
+        if func == aten.copy_.default:
+            dst, src = args[0], args[1]
+            if (
+                isinstance(dst, MXFP4Tensor)
+                and isinstance(src, MXFP4Tensor)
+                and dst._with_gemm_swizzled_scales != src._with_gemm_swizzled_scales
+            ):
+                dst.quantize_(src)
+                return None
+
         return super().__torch_dispatch__(func, types, args, kwargs)
 
     @property
@@ -245,3 +270,41 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
     def is_cuda(self):
         """Return whether the tensor is on a CUDA device."""
         return self.device.type == "cuda"
+
+
+class _ViewFunc(torch.autograd.Function):
+    """View function
+
+    View the MXFP4Tensor using the provided shape. The inner
+    dimension must be unchanged.
+
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        tensor: MXFP4Tensor,
+        shape: Tuple[Any, ...],
+    ) -> MXFP4Tensor:
+        # pylint: disable=missing-function-docstring
+        ctx.shape = tensor.shape
+        if len(shape) == 1 and isinstance(shape[0], Iterable):
+            shape = shape[0]
+        storage = MXFP4TensorStorage.view(tensor, shape if shape else None)
+        if storage is tensor:
+            return tensor
+        return MXFP4Tensor(
+            shape=storage.size(),
+            dtype=tensor.dtype,
+            device=tensor.device,
+            requires_grad=tensor.requires_grad,
+            **storage.get_metadata(),
+        )
+
+    @staticmethod
+    def backward(
+        ctx,
+        grad: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], ...]:
+        # pylint: disable=missing-function-docstring
+        return grad.reshape(ctx.shape), None
