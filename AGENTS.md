@@ -280,6 +280,15 @@ particular container, GPU architecture, GPU count, or external repository.
 Use the higher-level launcher for distributed, Megatron Core, FSDP, ONNX, and
 attention-backend coverage rather than reconstructing its environment.
 
+Adding a test file does not automatically add QA coverage: for example,
+`qa/L0_pytorch_unittest/test.sh` explicitly enumerates attention test files.
+Connect new specialized suites to a checked-in qualified target. The SM100
+FROST target is `qa/L1_pytorch_frost_unittest/test.sh`; a provisioned L0 lane
+can enable its hook with `NVTE_FROST_TEST_REQUIRED=1`. A required target must
+fail for missing capabilities or skipped tests and verify that isolated
+negative-test children actually execute, rather than accepting an all-skipped
+pytest result.
+
 ### Validation by changed area
 
 - Shared Python: focused behavior through each affected frontend.
