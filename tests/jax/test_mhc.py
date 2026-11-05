@@ -554,6 +554,15 @@ class TestMHC:
             te_err, ref_err = rel_err(grad, truth), rel_err(ref_grad, truth)
             assert te_err <= 2 * ref_err + 1e-3, f"{name}: TE error {te_err}, reference {ref_err}"
 
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_autotuning(self, dtype):
+        """Exercise every mHC Triton kernel with autotuning enabled."""
+        assert os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "0"
+        # Check the forward output explicitly: AD can eliminate expand's forward kernel.
+        self.test_forward(8, 128, 1024, dtype, 20)
+        TestMHCOps().test_mhc_sinkhorn(8, 128, 1024, dtype, recompute=False, iters=20)
+        self.test_backward(8, 128, 1024, dtype, 20)
+
     @pytest_parametrize_wrapper("b,s,C", [(8, 32, 32)])
     def test_has_aux(self, b, s, C):
         """has_aux=True returns the branch's auxiliary output unchanged."""
