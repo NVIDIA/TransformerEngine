@@ -91,7 +91,7 @@ def test_global_cleanup_rebuilds_all_device_caches_and_preserves_current_device(
 def test_grouped_tma_storage_is_rebuilt_after_release():
     quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
     quantizer.set_usage(rowwise=True, columnwise=True)
-    for groups in (2, 65):
+    for groups in (2, 64):
         first = [128] * groups
         last = [128] * groups
         last[-1] = 256

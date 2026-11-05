@@ -9,6 +9,7 @@
 #include <cudnn.h>
 #include <gtest/gtest.h>
 #include <nvrtc.h>
+#include <transformer_engine/cast.h>
 #include <transformer_engine/cuda_context.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/multi_stream.h>
@@ -564,6 +565,70 @@ TEST_F(ContextResetTest, CublasGemmRecoversNumerically) {
                          cudaMemcpyDeviceToHost),
               cudaSuccess);
     for (auto value : actual) EXPECT_EQ(value, 2.0f * dim * (cycle + 1));
+    reset();
+  }
+}
+
+TEST_F(ContextResetTest, GroupedMxfp8RecoversNumerically) {
+  cudaDeviceProp properties;
+  ASSERT_EQ(cudaGetDeviceProperties(&properties, 0), cudaSuccess);
+  if (properties.major < 10) GTEST_SKIP() << "Grouped MXFP8 requires Blackwell";
+  constexpr size_t groups = 3;
+  for (int cycle = 0; cycle < 3; ++cycle) {
+    const std::vector<int64_t> rows{128, 256, 128};
+    const std::vector<int64_t> cols{128, 256, 128 * (cycle + 2)};
+    std::vector<int64_t> offsets(groups + 1, 0);
+    for (size_t i = 0; i < groups; ++i) offsets[i + 1] = offsets[i] + rows[i] * cols[i];
+    const size_t elements = offsets.back();
+    std::vector<float> expected(elements), actual(elements);
+    for (size_t i = 0; i < elements; ++i) {
+      expected[i] = (static_cast<int>(i % 15) - 7) * static_cast<float>(1 << cycle);
+    }
+    std::vector<void *> allocations;
+    const auto allocate = [&](size_t bytes) {
+      void *ptr = nullptr;
+      const auto status = cudaMalloc(&ptr, bytes);
+      if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
+      allocations.push_back(ptr);
+      return ptr;
+    };
+    const auto upload = [&](const auto &values) {
+      const size_t bytes = values.size() * sizeof(values[0]);
+      void *ptr = allocate(bytes);
+      const auto status = cudaMemcpy(ptr, values.data(), bytes, cudaMemcpyHostToDevice);
+      if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
+      return ptr;
+    };
+    // Exactly representable values give an independent reference for both kernels.
+    void *input_data = upload(expected);
+    void *rows_data = upload(rows);
+    void *cols_data = upload(cols);
+    void *offsets_data = upload(offsets);
+    void *quantized = allocate(elements);
+    void *scales = allocate(elements / 32);
+    void *dequantized = allocate(elements * sizeof(float));
+    {
+      const std::vector<size_t> shape{1, elements}, metadata_shape{groups};
+      GroupedTensorWrapper input(groups, shape);
+      GroupedTensorWrapper output(groups, shape, NVTE_MXFP8_1D_SCALING);
+      GroupedTensorWrapper recovered(groups, shape);
+      for (auto *tensor : {&input, &output, &recovered}) {
+        tensor->set_first_dims(rows_data, DType::kInt64, metadata_shape)
+            .set_last_dims(cols_data, DType::kInt64, metadata_shape)
+            .set_tensor_offsets(offsets_data, DType::kInt64, std::vector<size_t>{groups + 1});
+      }
+      input.set_rowwise_data(input_data, DType::kFloat32, std::vector<size_t>{elements});
+      output.set_rowwise_data(quantized, DType::kFloat8E4M3, std::vector<size_t>{elements})
+          .set_rowwise_scale_inv(scales, DType::kFloat8E8M0, std::vector<size_t>{elements / 32});
+      recovered.set_rowwise_data(dequantized, DType::kFloat32, std::vector<size_t>{elements});
+      nvte_group_quantize(input.data(), output.data(), nullptr, nullptr);
+      nvte_group_dequantize(output.data(), recovered.data(), nullptr);
+      ASSERT_EQ(
+          cudaMemcpy(actual.data(), dequantized, elements * sizeof(float), cudaMemcpyDeviceToHost),
+          cudaSuccess);
+      EXPECT_EQ(actual, expected) << "cycle " << cycle;
+    }
+    for (auto ptr : allocations) ASSERT_EQ(cudaFree(ptr), cudaSuccess);
     reset();
   }
 }
