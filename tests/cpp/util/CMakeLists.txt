@@ -5,7 +5,7 @@
 add_executable(test_util
                test_nvrtc.cpp
                test_string.cpp
-               test_grouped_tma_workspace.cpp
+               test_grouped_tma_workspace_layout.cpp
                ../test_common.cu)
 
 
