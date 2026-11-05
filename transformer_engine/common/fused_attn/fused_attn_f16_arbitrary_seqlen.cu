@@ -434,7 +434,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       const size_t stride = alignTo<16>((b + 1) * sizeof(int32_t));
       int8_t *pad_ws = static_cast<int8_t *>(workspace) + plan_workspace_size +
                        actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
-      void **ptrs[4] = {&devPtrCuSeqlensQ, &devPtrCuSeqlensKV, &devPtrSeqOffsetsQ, &devPtrSeqOffsetsKV};
+      void **ptrs[4] = {&devPtrCuSeqlensQ, &devPtrCuSeqlensKV, &devPtrSeqOffsetsQ,
+                        &devPtrSeqOffsetsKV};
       const bool needed[4] = {is_padding, is_padding, is_ragged_q,
                               is_ragged_kv && !offset_mults.kv_from_q};
       PaddedCuSeqlensArgs pad_args;
