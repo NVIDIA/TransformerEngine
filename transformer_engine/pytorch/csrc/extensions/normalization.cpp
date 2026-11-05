@@ -144,16 +144,17 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   } else {
     std::tie(out_nvte, out) = quantizer_cpp->convert_and_update_tensor(out);
   }
-  QuantizationWorkspace scale_workspace;
+  at::Tensor rowwise_scales, columnwise_scales;
+  std::optional<TensorWrapper> compact_out_nvte;
   if (cudnn_mxfp8_output && quantizer_cpp->optimize_for_gemm) {
-    scale_workspace.prepare(out_nvte);
+    compact_out_nvte.emplace(make_compact_output_view(out_nvte, rowwise_scales, columnwise_scales));
   }
 
   // Construct unquantized output tensor if needed
   TensorWrapper unquantized_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  TensorWrapper *kernel_out_nvte = &out_nvte;
+  TensorWrapper *kernel_out_nvte = compact_out_nvte ? &*compact_out_nvte : &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
       NoneQuantizer q{none};
@@ -217,7 +218,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     }
   }
 
-  scale_workspace.finish(out_nvte);
+  if (compact_out_nvte) swizzle_scales_into(*compact_out_nvte, out_nvte);
   return {out, py::cast(mu_py), py::cast(rsigma_py)};
 }
 
@@ -393,16 +394,17 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   } else {
     std::tie(out_nvte, out) = quantizer_cpp->convert_and_update_tensor(out);
   }
-  QuantizationWorkspace scale_workspace;
+  at::Tensor rowwise_scales, columnwise_scales;
+  std::optional<TensorWrapper> compact_out_nvte;
   if (impl == Impl::FUSED_NORM_QUANT_UNSWIZZLED && quantizer_cpp->optimize_for_gemm) {
-    scale_workspace.prepare(out_nvte);
+    compact_out_nvte.emplace(make_compact_output_view(out_nvte, rowwise_scales, columnwise_scales));
   }
 
   // Construct unquantized output tensor if needed
   TensorWrapper unquantized_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  TensorWrapper *kernel_out_nvte = &out_nvte;
+  TensorWrapper *kernel_out_nvte = compact_out_nvte ? &*compact_out_nvte : &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
       NoneQuantizer q{none};
@@ -464,7 +466,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     }
   }
 
-  scale_workspace.finish(out_nvte);
+  if (compact_out_nvte) swizzle_scales_into(*compact_out_nvte, out_nvte);
   return {out, py::none(), py::cast(rsigma_py)};
 }
 

@@ -10,6 +10,7 @@
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
+#include "extensions.h"
 #include "pybind.h"
 #include "torch/torch.h"
 
@@ -329,8 +330,7 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::convert_and_update_tensor(
 }
 
 void NoneQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                             const std::optional<TensorWrapper>& noop_flag,
-                             QuantizationWorkspace* /*workspace*/) {
+                             const std::optional<TensorWrapper>& noop_flag) {
   NVTE_ERROR("NoneQuantizer does not support quantization");
 }
 
@@ -631,8 +631,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::convert_and_update_tensor(
 }
 
 void Float8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                               const std::optional<TensorWrapper>& noop_flag,
-                               QuantizationWorkspace* /*workspace*/) {
+                               const std::optional<TensorWrapper>& noop_flag) {
   if (input.numel() == 0) {
     return;
   }
@@ -1035,8 +1034,7 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 }
 
 void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                                             const std::optional<TensorWrapper>& noop_flag,
-                                             QuantizationWorkspace* /*workspace*/) {
+                                             const std::optional<TensorWrapper>& noop_flag) {
   const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
   at::Tensor amax_and_scale = at::empty({2}, opts);
   this->quantize_impl(input, out, noop_flag, true, amax_and_scale[0], amax_and_scale[1]);
@@ -1426,8 +1424,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
 }
 
 void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                                    const std::optional<TensorWrapper>& noop_flag,
-                                    QuantizationWorkspace* /*workspace*/) {
+                                    const std::optional<TensorWrapper>& noop_flag) {
   if (input.numel() == 0) {
     return;
   }
@@ -1838,8 +1835,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(
 }
 
 void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                              const std::optional<TensorWrapper>& noop_flag,
-                              QuantizationWorkspace* /*workspace*/) {
+                              const std::optional<TensorWrapper>& noop_flag) {
   if (input.numel() == 0) {
     return;
   }
@@ -2577,13 +2573,24 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
 }
 
 void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                                   const std::optional<TensorWrapper>& noop_flag, bool compute_amax,
-                                   QuantizationWorkspace* workspace) {
-  QuantizationWorkspace local_workspace;
-  auto& scale_workspace = workspace ? *workspace : local_workspace;
-  auto finish = [&]() {
-    if (!scale_workspace.defer_swizzle) scale_workspace.finish(out);
-  };
+                                   const std::optional<TensorWrapper>& noop_flag,
+                                   bool compute_amax) {
+  const bool needs_swizzle = input.numel() != 0 && out.get_with_gemm_swizzled_scales() &&
+                             !emits_gemm_swizzled_scales(convertShape(input.shape()));
+  if (!needs_swizzle) {
+    quantize_kernel(input, out, noop_flag, compute_amax);
+    return;
+  }
+  at::Tensor rowwise_scales, columnwise_scales;
+  auto kernel_out =
+      make_compact_output_view(out, rowwise_scales, columnwise_scales, noop_flag.has_value());
+  quantize_kernel(input, kernel_out, noop_flag, compute_amax);
+  swizzle_scales_into(kernel_out, out);
+}
+
+void NVFP4Quantizer::quantize_kernel(const TensorWrapper& input, TensorWrapper& out,
+                                     const std::optional<TensorWrapper>& noop_flag,
+                                     bool compute_amax) {
   auto reduce_amaxes = [&]() {
     if (!this->with_amax_reduction || this->disable_second_level_scale) {
       return;
@@ -2618,14 +2625,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     if (!compute_amax) {
       reduce_amaxes();
     }
-    finish();
     return;
-  }
-
-  const bool kernel_swizzles = emits_gemm_swizzled_scales(convertShape(input.shape())) &&
-                               (!with_rht || input.dtype() == DType::kBFloat16);
-  if (out.get_with_gemm_swizzled_scales() && !kernel_swizzles) {
-    scale_workspace.prepare(out, noop_flag.has_value());
   }
 
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -2817,13 +2817,11 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
   }
-  finish();
 }
 
 void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
-                              const std::optional<TensorWrapper>& noop_flag,
-                              QuantizationWorkspace* workspace) {
-  this->quantize_impl(input, out, noop_flag, true, workspace);
+                              const std::optional<TensorWrapper>& noop_flag) {
+  this->quantize_impl(input, out, noop_flag, true);
 }
 
 void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out) {

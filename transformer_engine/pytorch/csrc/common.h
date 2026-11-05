@@ -96,16 +96,6 @@ enum FP8BwdTensors {
   GRAD_INPUT3 = 5
 };
 
-struct QuantizationWorkspace {
-  bool defer_swizzle = false;
-  std::optional<TensorWrapper> final_output;
-  std::optional<at::Tensor> rowwise_scales;
-  std::optional<at::Tensor> columnwise_scales;
-
-  void prepare(TensorWrapper& output, bool preserve_scales = false);
-  void finish(TensorWrapper& output);
-};
-
 class Quantizer {
  public:
   virtual NVTEScalingMode get_scaling_mode() const = 0;
@@ -141,10 +131,9 @@ class Quantizer {
   virtual std::pair<TensorWrapper, py::object> convert_and_update_tensor(
       py::object tensor) const = 0;
 
-  /*! @brief Quantize, optionally deferring standalone swizzle to batch finalization. */
+  /*! @brief Quantize into the layout requested by the output tensor. */
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
-                        const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                        QuantizationWorkspace* workspace = nullptr) = 0;
+                        const std::optional<TensorWrapper>& noop_flag = std::nullopt) = 0;
 
   virtual ~Quantizer() = default;
 
@@ -185,8 +174,7 @@ class NoneQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                QuantizationWorkspace* workspace = nullptr) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 };
 
 class Float8Quantizer : public Quantizer {
@@ -221,8 +209,7 @@ class Float8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                QuantizationWorkspace* workspace = nullptr) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 };
 
 class Float8CurrentScalingQuantizer : public Quantizer {
@@ -262,8 +249,7 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                QuantizationWorkspace* workspace = nullptr) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   /*! @brief Quantize to FP8, skipping local amax computation
    *
@@ -319,8 +305,7 @@ class Float8BlockQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                QuantizationWorkspace* workspace = nullptr) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
@@ -349,8 +334,7 @@ class MXFP8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                QuantizationWorkspace* workspace = nullptr) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
@@ -410,11 +394,11 @@ class NVFP4Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
-                const std::optional<TensorWrapper>& noop_flag = std::nullopt,
-                QuantizationWorkspace* workspace = nullptr) override;
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax,
-                     QuantizationWorkspace* workspace = nullptr);
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
+  void quantize_kernel(const TensorWrapper& input, TensorWrapper& out,
+                       const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 
   /*! @brief Quantize to NVFP4, skipping local amax computation
    *

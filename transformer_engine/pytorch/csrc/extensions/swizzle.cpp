@@ -69,8 +69,8 @@ TensorWrapper scale_view(const TensorWrapper &tensor, bool rowwise) {
 
 }  // namespace
 
-void QuantizationWorkspace::prepare(TensorWrapper &output, bool preserve_scales) {
-  NVTE_CHECK(!final_output.has_value(), "Quantization workspace is already in use");
+TensorWrapper make_compact_output_view(const TensorWrapper &output, at::Tensor &rowwise_scales,
+                                       at::Tensor &columnwise_scales, bool preserve_scales) {
   NVTE_CHECK(output.get_with_gemm_swizzled_scales(), "Expected a GEMM-ready output");
   auto compact_output = copy_tensor_view(output);
   compact_output.set_with_gemm_swizzled_scales(false);
@@ -79,11 +79,9 @@ void QuantizationWorkspace::prepare(TensorWrapper &output, bool preserve_scales)
         rowwise ? output.get_rowwise_scale_inv() : output.get_columnwise_scale_inv();
     if (scales.data_ptr == nullptr) continue;
     auto &scratch = rowwise ? rowwise_scales : columnwise_scales;
-    if (!scratch.has_value()) {
-      scratch = allocateSpace(scales.shape, DType::kByte, false);
-    }
+    if (!scratch.defined()) scratch = allocateSpace(scales.shape, DType::kByte, false);
     compact_output.set_parameter(rowwise ? kNVTERowwiseScaleInv : kNVTEColumnwiseScaleInv,
-                                 scratch->data_ptr(), static_cast<DType>(scales.dtype),
+                                 scratch.data_ptr(), static_cast<DType>(scales.dtype),
                                  scales.shape);
     if (preserve_scales) {
       // A GPU no-op must preserve the previous scales through finalization.
@@ -95,90 +93,83 @@ void QuantizationWorkspace::prepare(TensorWrapper &output, bool preserve_scales)
       });
     }
   }
-  final_output.emplace(std::move(output));
-  output = std::move(compact_output);
+  return compact_output;
 }
 
-void QuantizationWorkspace::finish(TensorWrapper &output) {
-  if (!final_output.has_value()) return;
+void swizzle_scales_into(const TensorWrapper &input, const TensorWrapper &output) {
+  if (input.get_with_gemm_swizzled_scales() || input.numel() == 0) return;
   for (bool rowwise : {true, false}) {
-    const auto scales =
-        rowwise ? output.get_rowwise_scale_inv() : output.get_columnwise_scale_inv();
+    const auto scales = rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
     if (scales.data_ptr == nullptr) continue;
-    auto input_scales = scale_view(output, rowwise);
-    auto output_scales = scale_view(*final_output, rowwise);
+    auto input_scales = scale_view(input, rowwise);
+    auto output_scales = scale_view(output, rowwise);
     NVTE_SCOPED_GIL_RELEASE({
       nvte_swizzle_scaling_factors(input_scales.data(), output_scales.data(),
                                    at::cuda::getCurrentCUDAStream());
     });
   }
-  output = std::move(*final_output);
-  final_output.reset();
-  rowwise_scales.reset();
-  columnwise_scales.reset();
 }
 
-void prepare_quantization_workspaces(std::vector<TensorWrapper> &outputs,
-                                     std::vector<QuantizationWorkspace> &workspaces) {
-  NVTE_CHECK(outputs.size() == workspaces.size(), "Mismatched quantization workspaces");
+std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWrapper> &outputs,
+                                                     const std::vector<bool> &needs_swizzle,
+                                                     std::vector<at::Tensor> &scratch) {
+  NVTE_CHECK(outputs.size() == needs_swizzle.size(), "Mismatched output layouts");
+  scratch.resize(2 * outputs.size());
   for (bool rowwise : {true, false}) {
     std::vector<std::vector<size_t>> shapes;
     std::vector<size_t> indices;
     for (size_t i = 0; i < outputs.size(); ++i) {
       const auto scales =
           rowwise ? outputs[i].get_rowwise_scale_inv() : outputs[i].get_columnwise_scale_inv();
-      if (outputs[i].numel() != 0 && scales.data_ptr != nullptr) {
+      if (needs_swizzle[i] && scales.data_ptr != nullptr) {
         shapes.emplace_back(scales.shape.data, scales.shape.data + scales.shape.ndim);
         indices.push_back(i);
       }
     }
     if (indices.empty()) continue;
-    auto scratch = bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), at::kByte),
+    auto buffers = bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), at::kByte),
                                  std::nullopt, std::vector<size_t>(shapes.size(), 16));
     for (size_t i = 0; i < indices.size(); ++i) {
-      auto &workspace = workspaces[indices[i]];
-      (rowwise ? workspace.rowwise_scales : workspace.columnwise_scales) = std::move(scratch[i]);
+      scratch[2 * indices[i] + !rowwise] = std::move(buffers[i]);
     }
   }
+  std::vector<TensorWrapper> views;
+  views.reserve(outputs.size());
   for (size_t i = 0; i < outputs.size(); ++i) {
-    workspaces[i].defer_swizzle = true;
-    if (outputs[i].numel() != 0) workspaces[i].prepare(outputs[i]);
+    views.emplace_back(
+        needs_swizzle[i] ? make_compact_output_view(outputs[i], scratch[2 * i], scratch[2 * i + 1])
+                         : copy_tensor_view(outputs[i]));
   }
+  return views;
 }
 
-void finish_quantization_workspaces(std::vector<TensorWrapper> &outputs,
-                                    std::vector<QuantizationWorkspace> &workspaces, bool batched) {
-  NVTE_CHECK(outputs.size() == workspaces.size(), "Mismatched quantization workspaces");
-  if (!batched) {
-    for (size_t i = 0; i < outputs.size(); ++i) workspaces[i].finish(outputs[i]);
+void multi_tensor_swizzle_scales_into(const std::vector<TensorWrapper> &inputs,
+                                      const std::vector<TensorWrapper> &outputs) {
+  NVTE_CHECK(inputs.size() == outputs.size(), "Mismatched quantization outputs");
+  if (inputs.size() == 1) {
+    swizzle_scales_into(inputs.front(), outputs.front());
     return;
   }
   for (bool rowwise : {true, false}) {
     std::vector<TensorWrapper> input_views, output_views;
-    std::vector<NVTETensor> inputs, destinations;
-    for (size_t i = 0; i < outputs.size(); ++i) {
+    std::vector<NVTETensor> sources, destinations;
+    for (size_t i = 0; i < inputs.size(); ++i) {
       const auto scales =
-          rowwise ? outputs[i].get_rowwise_scale_inv() : outputs[i].get_columnwise_scale_inv();
-      if (!workspaces[i].final_output.has_value() || scales.data_ptr == nullptr) continue;
-      input_views.emplace_back(scale_view(outputs[i], rowwise));
-      output_views.emplace_back(scale_view(*workspaces[i].final_output, rowwise));
-      inputs.push_back(input_views.back().data());
+          rowwise ? inputs[i].get_rowwise_scale_inv() : inputs[i].get_columnwise_scale_inv();
+      if (inputs[i].get_with_gemm_swizzled_scales() || inputs[i].numel() == 0 ||
+          scales.data_ptr == nullptr)
+        continue;
+      input_views.emplace_back(scale_view(inputs[i], rowwise));
+      output_views.emplace_back(scale_view(outputs[i], rowwise));
+      sources.push_back(input_views.back().data());
       destinations.push_back(output_views.back().data());
     }
-    if (!inputs.empty()) {
+    if (!sources.empty()) {
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_multi_tensor_swizzle_scaling_factors(inputs.data(), destinations.data(), inputs.size(),
-                                                  at::cuda::getCurrentCUDAStream());
+        nvte_multi_tensor_swizzle_scaling_factors(sources.data(), destinations.data(),
+                                                  sources.size(), at::cuda::getCurrentCUDAStream());
       });
     }
-  }
-  for (size_t i = 0; i < outputs.size(); ++i) {
-    auto &workspace = workspaces[i];
-    if (!workspace.final_output.has_value()) continue;
-    outputs[i] = std::move(*workspace.final_output);
-    workspace.final_output.reset();
-    workspace.rowwise_scales.reset();
-    workspace.columnwise_scales.reset();
   }
 }
 
