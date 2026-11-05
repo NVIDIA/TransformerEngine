@@ -17,7 +17,7 @@ namespace {
 using transformer_engine::dispatch::common::GroupedTmaWorkspaceLayout;
 using transformer_engine::dispatch::common::kGroupedTmaWorkspaceAlignment;
 
-TEST(GroupedTmaWorkspaceTest, EmptyLayoutHasNoArrays) {
+TEST(GroupedTmaWorkspaceLayoutTest, EmptyLayoutHasNoArrays) {
   const GroupedTmaWorkspaceLayout layout(0);
   EXPECT_EQ(layout.size(), 0);
   const auto view = layout.view(nullptr);
@@ -30,7 +30,7 @@ TEST(GroupedTmaWorkspaceTest, EmptyLayoutHasNoArrays) {
   EXPECT_EQ(view.offsets, nullptr);
 }
 
-TEST(GroupedTmaWorkspaceTest, DescriptorAndMetadataArraysHaveIndependentAlignedStorage) {
+TEST(GroupedTmaWorkspaceLayoutTest, ArraysAreAlignedAndDisjoint) {
   constexpr size_t kGroups = 65;
   constexpr size_t kAlignment = kGroupedTmaWorkspaceAlignment;
   constexpr size_t kMapBytes = kGroups * sizeof(CUtensorMap);
@@ -52,14 +52,14 @@ TEST(GroupedTmaWorkspaceTest, DescriptorAndMetadataArraysHaveIndependentAlignedS
             buffer.data() + 4 * kMapStride + 2 * kMetadataStride);
 }
 
-TEST(GroupedTmaWorkspaceTest, RejectsNullAndMisalignedStorage) {
+TEST(GroupedTmaWorkspaceLayoutTest, RejectsNullAndMisalignedStorage) {
   const GroupedTmaWorkspaceLayout layout(1);
   alignas(kGroupedTmaWorkspaceAlignment) std::array<char, kGroupedTmaWorkspaceAlignment> buffer{};
   EXPECT_THROW(layout.view(nullptr), std::runtime_error);
   EXPECT_THROW(layout.view(buffer.data() + 1), std::runtime_error);
 }
 
-TEST(GroupedTmaWorkspaceTest, RejectsArrayAndTotalSizeOverflow) {
+TEST(GroupedTmaWorkspaceLayoutTest, RejectsArrayAndTotalSizeOverflow) {
   constexpr size_t kMax = std::numeric_limits<size_t>::max();
   EXPECT_THROW((void)GroupedTmaWorkspaceLayout(kMax), std::runtime_error);
   EXPECT_THROW((void)GroupedTmaWorkspaceLayout(kMax / sizeof(CUtensorMap)), std::runtime_error);

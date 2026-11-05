@@ -12,6 +12,8 @@
 #include <array>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <tuple>
 #include <vector>
 
 #include "../test_common.h"
@@ -19,6 +21,12 @@
 namespace {
 using namespace transformer_engine;
 using test::Tensor;
+
+std::vector<unsigned char> read_bytes(void *data, size_t bytes) {
+  std::vector<unsigned char> result(bytes);
+  NVTE_CHECK_CUDA(cudaMemcpy(result.data(), data, bytes, cudaMemcpyDeviceToHost));
+  return result;
+}
 
 // Above the former device-symbol limit; each stream uses different dimensions,
 // pointers, and data so accidentally sharing descriptors corrupts the results.
@@ -87,17 +95,11 @@ struct GroupData {
   }
 };
 
-std::vector<unsigned char> read_bytes(void *data, size_t bytes) {
-  std::vector<unsigned char> result(bytes);
-  NVTE_CHECK_CUDA(cudaMemcpy(result.data(), data, bytes, cudaMemcpyDeviceToHost));
-  return result;
-}
-
 // 0..4: activation, 5..9: backward, 10: dequantization. Every path used to
 // reference shared mutable device symbols when the last dimension varied.
 class GroupedWorkspaceConcurrency : public ::testing::TestWithParam<std::tuple<int, bool>> {};
 
-TEST_P(GroupedWorkspaceConcurrency, IndependentWorkspaces) {
+TEST_P(GroupedWorkspaceConcurrency, ConcurrentStreamsMatchSerialResults) {
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) GTEST_SKIP();
   const int operation = std::get<0>(GetParam());
   const bool capture = std::get<1>(GetParam());
@@ -193,6 +195,19 @@ TEST_P(GroupedWorkspaceConcurrency, IndependentWorkspaces) {
     ASSERT_EQ(cudaStreamDestroy(streams[i]), cudaSuccess);
   }
 }
+
+std::string workspace_concurrency_test_name(
+    const ::testing::TestParamInfo<GroupedWorkspaceConcurrency::ParamType> &info) {
+  const std::array<const char *, 11> operations{"Gelu",   "Silu",   "Relu",      "Qgelu",
+                                                "Srelu",  "Dgelu",  "Dsilu",     "Drelu",
+                                                "Dqgelu", "Dsrelu", "Dequantize"};
+  return std::string(operations[std::get<0>(info.param)]) +
+         (std::get<1>(info.param) ? "Graph" : "Eager");
+}
+
+INSTANTIATE_TEST_SUITE_P(OperatorTest, GroupedWorkspaceConcurrency,
+                         ::testing::Combine(::testing::Range(0, 11), ::testing::Bool()),
+                         workspace_concurrency_test_name);
 
 // Small buffers shared by query tests across formats. Device data is deliberately
 // poisoned so a query that accidentally executes is observable.
@@ -385,10 +400,23 @@ TEST(GroupedWorkspaceQueryConfig, RejectsInvalidNvfp4Options) {
   }
 }
 
+std::string workspace_query_test_name(const ::testing::TestParamInfo<NVTEScalingMode> &info) {
+  switch (info.param) {
+    case NVTE_DELAYED_TENSOR_SCALING:
+      return "DelayedFp8";
+    case NVTE_BLOCK_SCALING_1D:
+      return "BlockFp8_1D";
+    case NVTE_BLOCK_SCALING_2D:
+      return "BlockFp8_2D";
+    case NVTE_NVFP4_1D_SCALING:
+      return "RowScaledNvfp4";
+    default:
+      return "Unknown";
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(Formats, GroupedWorkspaceQuery,
                          ::testing::Values(NVTE_DELAYED_TENSOR_SCALING, NVTE_BLOCK_SCALING_1D,
-                                           NVTE_BLOCK_SCALING_2D, NVTE_NVFP4_1D_SCALING));
-
-INSTANTIATE_TEST_SUITE_P(OperatorTest, GroupedWorkspaceConcurrency,
-                         ::testing::Combine(::testing::Range(0, 11), ::testing::Bool()));
+                                           NVTE_BLOCK_SCALING_2D, NVTE_NVFP4_1D_SCALING),
+                         workspace_query_test_name);
 }  // namespace
