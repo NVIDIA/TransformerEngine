@@ -98,14 +98,14 @@ lifecycle operation invalidates successful initialization after the owner finish
 cleanup. Users must still stop all calls before teardown; ``ensure_valid`` does
 not make concurrent reset or destruction safe.
 
-TMA workspace recovery
-----------------------
+Grouped operation recovery
+--------------------------
 
-Grouped operations use stateless caller-owned TMA storage. After context loss,
-replace the caller's device allocations and repeat query/allocate/execute. Each
-execution rebuilds descriptors from the current tensor pointers. No workspace
-catalog, plans, or persistent-region registration is involved. Retire old CUDA
-graphs and recapture with valid allocations.
+After context loss, replace the caller's device allocations and construct grouped
+tensors with current data and metadata pointers. Grouped MXFP8 operations rebuild
+their context-local tensor maps from these pointers on execution. Retire old CUDA
+graphs and recapture with valid allocations. This lifecycle API does not change
+the grouped operations' descriptor-storage or stream-concurrency contract.
 
 Framework cleanup
 -----------------
@@ -115,8 +115,7 @@ all active devices before mutating state, synchronizes those devices, clears
 PyTorch's process-wide compilation cache, finalizes TE EP/Userbuffers, detaches
 FP8 reduction registrations, and clears TE-owned tensor caches across devices.
 CPU tensor cache entries and FP8 numerical history survive. Model and optimizer
-tensors, RNG state and the framework runtime are retained. TMA scratch follows
-the framework allocator lifetime.
+tensors, RNG state and the framework runtime are retained.
 
 Call outside FP8 autocast and graph capture, after backward completes. Release
 independently retained communication owners first. Borrowed process groups must
