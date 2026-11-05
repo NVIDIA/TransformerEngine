@@ -254,9 +254,15 @@ TEST(GemmTest, InvalidAccumulationInputWithFP8Output) {
   Tensor C_fp32("C_fp32", std::vector<size_t>{n, m}, DType::kFloat32);
   Tensor workspace("workspace", std::vector<size_t>{kWorkspaceBytes}, DType::kByte);
   const float alpha = 1.f;
+  const float zero = 0.f;
   const float beta = 1.f;
 
-  // FP8 output cannot be read as an accumulation input
+  // FP8 output passed as C is not read if beta is zero
+  EXPECT_NO_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &zero, D.data(),
+                                      D.data(), workspace.data(), nullptr, 0));
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+
+  // FP8 output cannot be accumulated in-place
   EXPECT_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &beta, D.data(),
                                    D.data(), workspace.data(), nullptr, 0),
                std::runtime_error);

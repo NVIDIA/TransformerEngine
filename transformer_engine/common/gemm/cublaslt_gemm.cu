@@ -923,6 +923,12 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
     config_ = *reinterpret_cast<MatmulConfig *>(config);
   }
 
+  // FP8 output cannot be accumulated in-place, so passing D as C means there is
+  // no accumulation input. This keeps calls written for the C == D API working.
+  if (C_tensor == D_tensor && is_fp8_dtype(D_tensor->data.dtype)) {
+    C_tensor = nullptr;
+  }
+
   // Accumulation input is only optional if it is not read
   NVTE_CHECK(C_tensor != nullptr || config_.alpha_beta_on_device || *beta == 0,
              "GEMM requires accumulation input C if beta is non-zero (beta=", *beta, ").");

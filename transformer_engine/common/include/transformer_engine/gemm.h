@@ -199,7 +199,9 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
  * C must have the same shape and dtype as D, except that FP8 output
  * requires FP16 or BF16 C (with the same dtype as the bias, if
  * any). C may be the same tensor as D, in which case the result is
- * accumulated in-place. C may be NULL if beta is zero.
+ * accumulated in-place. C may be NULL if beta is zero. FP8 output
+ * cannot be accumulated in-place, so if D is FP8 and C is the same
+ * tensor as D, then C is treated as NULL.
  *
  *  \param[in]  transa    Whether to transpose A matrix.
  *  \param[in]  transb    Whether to transpose B matrix.
