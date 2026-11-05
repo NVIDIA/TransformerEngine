@@ -464,11 +464,11 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
 
     // Pad the user's cumulative buffers to the bucketed batch size so cuDNN never reads past them.
     if (pad_direct_tails) {
-      void *ptrs[4] = {devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV};
+      void* ptrs[4] = {devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV};
       const bool needed[4] = {is_padding, is_padding, is_ragged_q,
                               is_ragged_kv && !offset_mults.kv_from_q};
       pad_direct_cu_seqlens(ptrs, needed, actual_b, b,
-                            static_cast<int8_t *>(workspace) + plan_workspace_size +
+                            static_cast<int8_t*>(workspace) + plan_workspace_size +
                                 actual_seqlen_workspace_size + seqlen_offsets_workspace_size,
                             stream);
       devPtrcuSeqlensQ = ptrs[0];
