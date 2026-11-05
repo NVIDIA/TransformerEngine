@@ -62,6 +62,7 @@ from transformer_engine.pytorch.attention.inference import InferenceParams
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
+    FlashAttentionUtils,
 )
 
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
