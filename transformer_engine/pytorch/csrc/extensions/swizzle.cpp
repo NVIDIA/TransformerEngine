@@ -144,10 +144,12 @@ std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWra
 }
 
 void multi_tensor_swizzle_scales_into(const std::vector<TensorWrapper> &inputs,
-                                      const std::vector<TensorWrapper> &outputs) {
-  NVTE_CHECK(inputs.size() == outputs.size(), "Mismatched quantization outputs");
+                                      const std::vector<TensorWrapper> &outputs,
+                                      const std::vector<bool> &compact_scales) {
+  NVTE_CHECK(inputs.size() == outputs.size() && inputs.size() == compact_scales.size(),
+             "Mismatched quantization outputs");
   if (inputs.size() == 1) {
-    swizzle_scales_into(inputs.front(), outputs.front());
+    if (compact_scales.front()) swizzle_scales_into(inputs.front(), outputs.front());
     return;
   }
   for (bool rowwise : {true, false}) {
@@ -156,9 +158,7 @@ void multi_tensor_swizzle_scales_into(const std::vector<TensorWrapper> &inputs,
     for (size_t i = 0; i < inputs.size(); ++i) {
       const auto scales =
           rowwise ? inputs[i].get_rowwise_scale_inv() : inputs[i].get_columnwise_scale_inv();
-      if (inputs[i].get_with_gemm_swizzled_scales() || inputs[i].numel() == 0 ||
-          scales.data_ptr == nullptr)
-        continue;
+      if (!compact_scales[i] || inputs[i].numel() == 0 || scales.data_ptr == nullptr) continue;
       input_views.emplace_back(scale_view(inputs[i], rowwise));
       output_views.emplace_back(scale_view(outputs[i], rowwise));
       sources.push_back(input_views.back().data());

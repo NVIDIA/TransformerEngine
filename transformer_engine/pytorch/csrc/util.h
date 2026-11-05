@@ -49,7 +49,8 @@ std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWra
 void swizzle_scales_into(const TensorWrapper& input, const TensorWrapper& output);
 
 void multi_tensor_swizzle_scales_into(const std::vector<TensorWrapper>& inputs,
-                                      const std::vector<TensorWrapper>& outputs);
+                                      const std::vector<TensorWrapper>& outputs,
+                                      const std::vector<bool>& compact_scales);
 
 using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>;
 

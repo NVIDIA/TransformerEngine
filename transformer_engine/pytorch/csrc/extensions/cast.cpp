@@ -59,7 +59,7 @@ void quantize_with_batched_swizzle(std::vector<TensorWrapper> &outputs,
   std::vector<at::Tensor> scratch;
   auto kernel_outputs = make_compact_output_views(outputs, compact_scales, scratch);
   quantize(kernel_outputs);
-  multi_tensor_swizzle_scales_into(kernel_outputs, outputs);
+  multi_tensor_swizzle_scales_into(kernel_outputs, outputs, compact_scales);
 }
 
 void allreduce_nvfp4_amax_tensors(NVFP4Quantizer *nvfp4_quantizer_cpp,
