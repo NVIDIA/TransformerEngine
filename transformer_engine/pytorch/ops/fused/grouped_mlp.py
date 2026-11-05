@@ -779,12 +779,11 @@ def _cudnn_compute_wgrad(
             grouped_dy.columnwise_data.view(dtype=data_dtype).view(total_tokens, out_features).T
         )
         b_tensor = grouped_x.columnwise_data.view(dtype=data_dtype).view(total_tokens, in_features)
-        sfa_tensor = grouped_dy.columnwise_scale_inv.view(sfa_leading_dim, -1).view(
-            dtype=scale_view_dtype
-        )
-        sfb_tensor = grouped_x.columnwise_scale_inv.view(sfb_leading_dim, -1).view(
-            dtype=scale_view_dtype
-        )
+        sfa_tensor = grouped_dy.columnwise_scale_inv.view(dtype=scale_view_dtype)
+        sfb_tensor = grouped_x.columnwise_scale_inv.view(dtype=scale_view_dtype)
+        if not getattr(wgrad_kernel_fn, "supports_canonical_layouts", False):
+            sfa_tensor = sfa_tensor.view(sfa_leading_dim, -1)
+            sfb_tensor = sfb_tensor.view(sfb_leading_dim, -1)
 
     common_wgrad_kwargs = {
         "a_tensor": a_tensor,
@@ -875,9 +874,15 @@ def _compute_grad_params(
     offsets,
     use_dense_single_group,
     cudnn_wgrad_workspace=None,
+    wgrad_gemm_fn_factory=None,
 ):
     """Compute weight gradients and build grad_params for a GroupedLinear layer.
     Returns the grad_params list in parameter registration order.
+
+    ``wgrad_gemm_fn_factory``, if given, replaces the wgrad GEMM chosen below. It is
+    called as ``factory(accumulate)`` with the flag decided here and returns
+    ``fn(grouped_x, grouped_dy, wgrad_output)``. The BF16 fused grouped MLP uses it
+    for its unquantized cuDNN wgrad.
     """
 
     # Allocate grad buffers, determine accumulate flag.
@@ -907,12 +912,14 @@ def _compute_grad_params(
                 )
                 accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
             else:
-                grouped_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
+                wgrad_dtype = weight_grad_dtype(weights, dtype)
+                grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
                     num_tensors=num_groups,
-                    shapes=[weight_shape] * num_groups,
-                    quantizer=None,
-                    device=device,
-                    dtype=weight_grad_dtype(weights, dtype),
+                    tensor_shape=weight_shape,
+                    rowwise_data=torch.empty(
+                        (num_groups, *weight_shape), dtype=wgrad_dtype, device=device
+                    ),
+                    dtype=wgrad_dtype,
                 )
             wgrad_output = grouped_wgrad
             w_list = [grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)]
@@ -941,7 +948,9 @@ def _compute_grad_params(
             raise RuntimeError(
                 "distributed-weight fused grouped-MLP requires delay_wgrad_compute=False."
             )
-        if (
+        if wgrad_gemm_fn_factory is not None:
+            gemm_fn = wgrad_gemm_fn_factory(accumulate_into_main_grad)
+        elif (
             use_dense_single_group
             and isinstance(grouped_x, (GroupedTensor, GroupedTensorStorage))
             and isinstance(grouped_dy, (GroupedTensor, GroupedTensorStorage))
@@ -1142,16 +1151,17 @@ def fuse_grouped_mlp_ops(
             except (TypeError, ValueError):
                 matches_pattern = False
 
-        if matches_pattern and (
-            window[0].split_alignment % 256 != 0 or window[2].split_alignment % 256 != 0
-        ):
-            warnings.warn(
-                "Grouped MLP fusion was skipped because both GroupedLinear operations "
-                "require split_alignment to be divisible by 256 "
-                f"(got {window[0].split_alignment} and {window[2].split_alignment}).",
-                stacklevel=2,
-            )
-            matches_pattern = False
+        if matches_pattern:
+            fc1_alignment = window[0]._resolve_split_alignment(recipe)
+            fc2_alignment = window[2]._resolve_split_alignment(recipe)
+            if fc1_alignment % 256 != 0 or fc2_alignment % 256 != 0:
+                warnings.warn(
+                    "Grouped MLP fusion was skipped because both GroupedLinear operations "
+                    "require split_alignment to be divisible by 256 "
+                    f"(got {fc1_alignment} and {fc2_alignment}).",
+                    stacklevel=2,
+                )
+                matches_pattern = False
 
         if matches_pattern:
             op = fused_op_cls(
@@ -1179,7 +1189,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
     MXFP8 uses CuTe DSL grouped-GEMM kernels via the cuDNN front-end. When
     caller output/grad_input buffers are provided, the GEMMs write into them
-    directly.
+    directly. When the front-end wrappers advertise ``supports_canonical_layouts``,
+    MXFP8 operands are passed in their natural layouts instead of kernel-facing
+    views, in the forward and, with a supporting dGLU wrapper, the backward.
 
     """
 
@@ -1489,6 +1501,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     torch.int64,
                 ],
                 bulk_allocate=True,
+                split_alignment=256,
             )
 
         # Prepare FC1 grouped weight tensor for fused kernels.
@@ -1617,86 +1630,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc1_weight_k = fc1_weight_shape[1] // 2 if use_nvfp4 else fc1_weight_shape[1]
         k_sf_divisor = 2 * sf_vec_size if use_nvfp4 else 4 * sf_vec_size
 
-        # Pack data tensors
-        # Note: Fused kernel expects tensor with non-contiguous
-        # logical dims.
-        # Data actual shape: (1, sum(m), k)
-        # Scale actual shape: (1, sum(m)/128, k/128, 32 (block row),
-        #  4 (block row), 4 (block col))
-        # Data logical shape: (sum(m), k, 1)
-        # Scale logical shape: (32 (block row), 4 (block row),
-        #   sum(m)/128, 4 (block col), k/128, 1)
-        fc1_x_data = grouped_fc1_x.rowwise_data.view(dtype=data_dtype)
-        fc1_x_data = fc1_x_data.view(in_shape[0], data_in_k)
-        fc1_x_data = fc1_x_data.unsqueeze(0).permute(1, 2, 0)
-        fc1_x_scales = grouped_fc1_x.scale_inv
-        fc1_x_scales = fc1_x_scales.view(dtype=scale_view_dtype)
-        with_gemm_swizzled_scales = grouped_fc1_x._with_gemm_swizzled_scales
-        if use_nvfp4 and with_gemm_swizzled_scales:
-            fc1_x_scales = fc1_x_scales.view(
-                1,
-                ceil_div(in_shape[0], 128),
-                ceil_div(data_in_k, k_sf_divisor),
-                32,
-                4,
-                4,
-            )
-            fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
-        elif use_nvfp4:
-            fc1_x_scales = fc1_x_scales.view(
-                1,
-                ceil_div(in_shape[0], 128),
-                4,
-                32,
-                ceil_div(data_in_k, k_sf_divisor),
-                4,
-            )
-            fc1_x_scales = fc1_x_scales.permute(3, 2, 1, 5, 4, 0)
-        else:
-            fc1_x_scales = fc1_x_scales.view(
-                1,
-                ceil_div(in_shape[0], 128),
-                ceil_div(in_shape[1], k_sf_divisor),
-                32,
-                4,
-                4,
-            )
-            fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
-
-        alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
-        norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
-        current_stream = torch.cuda.current_stream(device.index).cuda_stream
-
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
-
-        fc1_prob_tensor = None
-        if not unit_activation_scale:
-            fc1_prob_tensor = (
-                scales.detach().to(dtype=torch.float32 if use_nvfp4 else dtype).reshape(-1, 1, 1)
-            )
-        if use_nvfp4:
-            # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
-            # global scale factors, so alpha supplies the product of the two
-            # operand global scales.
-            fc1_alpha_tensor = (
-                _nvfp4_global_scale(
-                    grouped_fc1_x,
-                    fc1_input_quantizer,
-                    columnwise=False,
-                    num_groups=num_groups,
-                    device=device,
-                )
-                * _nvfp4_global_scale(
-                    grouped_fc1_weight,
-                    fc1_weight_quantizer,
-                    columnwise=False,
-                    num_groups=num_groups,
-                    device=device,
-                )
-            ).to(torch.float32)
-        else:
-            fc1_alpha_tensor = alpha_tensor
 
         # Choose kernel implementation for FC1 + act
         kernel_impl = "gemm_act"
@@ -1727,6 +1662,95 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     kernel_impl = "gemm_act_rht_amax"
                 elif activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
                     kernel_impl = "gemm_act_rht_amax"
+
+        # Pack data tensors
+        # Note: Fused kernel expects tensor with non-contiguous
+        # logical dims.
+        # Data actual shape: (1, sum(m), k)
+        # Scale actual shape: (1, sum(m)/128, k/128, 32 (block row),
+        #  4 (block row), 4 (block col))
+        # Data logical shape: (sum(m), k, 1)
+        # Scale logical shape: (32 (block row), 4 (block row),
+        #   sum(m)/128, 4 (block col), k/128, 1)
+        # With canonical layouts, cuDNN takes A as (sum(m), k), B as
+        # (num_groups, n, k), and scales as the packed buffers as-is.
+        canonical = (
+            kernel_impl == "gemm_act"
+            and not use_nvfp4
+            and getattr(self.grouped_gemm_activation_kernel(), "supports_canonical_layouts", False)
+            and getattr(self.grouped_gemm_quant_kernel(), "supports_canonical_layouts", False)
+        )
+        fc1_x_data = grouped_fc1_x.rowwise_data.view(dtype=data_dtype)
+        fc1_x_data = fc1_x_data.view(in_shape[0], data_in_k)
+        if not canonical:
+            fc1_x_data = fc1_x_data.unsqueeze(0).permute(1, 2, 0)
+        fc1_x_scales = grouped_fc1_x.scale_inv
+        fc1_x_scales = fc1_x_scales.view(dtype=scale_view_dtype)
+        with_gemm_swizzled_scales = grouped_fc1_x._with_gemm_swizzled_scales
+        if use_nvfp4 and with_gemm_swizzled_scales:
+            fc1_x_scales = fc1_x_scales.view(
+                1,
+                ceil_div(in_shape[0], 128),
+                ceil_div(data_in_k, k_sf_divisor),
+                32,
+                4,
+                4,
+            )
+            fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
+        elif use_nvfp4:
+            fc1_x_scales = fc1_x_scales.view(
+                1,
+                ceil_div(in_shape[0], 128),
+                4,
+                32,
+                ceil_div(data_in_k, k_sf_divisor),
+                4,
+            )
+            fc1_x_scales = fc1_x_scales.permute(3, 2, 1, 5, 4, 0)
+        elif not canonical:
+            fc1_x_scales = fc1_x_scales.view(
+                1,
+                ceil_div(in_shape[0], 128),
+                ceil_div(in_shape[1], k_sf_divisor),
+                32,
+                4,
+                4,
+            )
+            fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
+
+        alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
+        norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
+        current_stream = torch.cuda.current_stream(device.index).cuda_stream
+
+        fc1_prob_tensor = None
+        if not unit_activation_scale:
+            fc1_prob_tensor = (
+                scales.detach()
+                .to(dtype=torch.float32 if use_nvfp4 else dtype)
+                .reshape((-1,) if canonical else (-1, 1, 1))
+            )
+        if use_nvfp4:
+            # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
+            # global scale factors, so alpha supplies the product of the two
+            # operand global scales.
+            fc1_alpha_tensor = (
+                _nvfp4_global_scale(
+                    grouped_fc1_x,
+                    fc1_input_quantizer,
+                    columnwise=False,
+                    num_groups=num_groups,
+                    device=device,
+                )
+                * _nvfp4_global_scale(
+                    grouped_fc1_weight,
+                    fc1_weight_quantizer,
+                    columnwise=False,
+                    num_groups=num_groups,
+                    device=device,
+                )
+            ).to(torch.float32)
+        else:
+            fc1_alpha_tensor = alpha_tensor
 
         # Common kernel arguments
         fc1_activation_kwargs = {
@@ -1815,17 +1839,18 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             # Data logical shape: (n, k, num_groups)
             fc1_w_data = fc1_w_data.view(dtype=data_dtype)
             fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_k)
-            fc1_w_data = fc1_w_data.permute(1, 2, 0)
             fc1_w_scales = fc1_w_scales.view(dtype=scale_view_dtype)
-            fc1_w_scales = fc1_w_scales.view(
-                num_groups,
-                ceil_div(fc1_weight_shape[0], 128),
-                ceil_div(fc1_weight_shape[1], k_sf_divisor),
-                32,
-                4,
-                4,
-            )
-            fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
+            if not canonical:
+                fc1_w_data = fc1_w_data.permute(1, 2, 0)
+                fc1_w_scales = fc1_w_scales.view(
+                    num_groups,
+                    ceil_div(fc1_weight_shape[0], 128),
+                    ceil_div(fc1_weight_shape[1], k_sf_divisor),
+                    32,
+                    4,
+                    4,
+                )
+                fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
             fc1_activation_kwargs["b_tensor"] = fc1_w_data
             fc1_activation_kwargs["sfb_tensor"] = fc1_w_scales
@@ -1852,17 +1877,18 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_weight_shape[0],
                     fc1_weight_k,
                 )
-                fc1_w_data = fc1_w_data.permute(1, 2, 0)
                 fc1_w_scales = swizzled_rowwise_scale.view(dtype=scale_view_dtype)
-                fc1_w_scales = fc1_w_scales.view(
-                    1,
-                    ceil_div(fc1_weight_shape[0], 128),
-                    ceil_div(fc1_weight_k, k_sf_divisor),
-                    32,
-                    4,
-                    4,
-                )
-                fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
+                if not canonical:
+                    fc1_w_data = fc1_w_data.permute(1, 2, 0)
+                    fc1_w_scales = fc1_w_scales.view(
+                        1,
+                        ceil_div(fc1_weight_shape[0], 128),
+                        ceil_div(fc1_weight_k, k_sf_divisor),
+                        32,
+                        4,
+                        4,
+                    )
+                    fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
                 fc1_activation_kwargs["b_tensor"] = fc1_w_data
                 fc1_activation_kwargs["sfb_tensor"] = fc1_w_scales
             else:
@@ -1894,7 +1920,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             raise RuntimeError(f"Unrecognized kernel variant ({kernel_impl})")
 
         activation_in = fc1_kernel_out["c_tensor"]
-        activation_in = activation_in.view(in_shape[0], fc1_weight_shape[0])
+        if not canonical:
+            activation_in = activation_in.view(in_shape[0], fc1_weight_shape[0])
 
         if fc2_is_dist:
             fc2_weight_quantizers = _weight_quantizers(fc2_op, num_groups)
@@ -1965,13 +1992,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         else:
             # Unpack MXFP8 output
             fc2_in_row_data = fc1_kernel_out["d_tensor"]
-            fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1])
             fc2_in_row_scale = fc1_kernel_out["sfd_row_tensor"]
-            fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 4, 0, 1, 3)
             fc2_in_col_data = fc1_kernel_out["d_col_tensor"]
-            fc2_in_col_data = fc2_in_col_data.view(in_shape[0], fc2_weight_shape[1])
             fc2_in_col_scale = fc1_kernel_out["sfd_col_tensor"]
-            fc2_in_col_scale = fc2_in_col_scale.permute(5, 2, 4, 0, 1, 3)
+            if not canonical:
+                fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1])
+                fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 4, 0, 1, 3)
+                fc2_in_col_data = fc2_in_col_data.view(in_shape[0], fc2_weight_shape[1])
+                fc2_in_col_scale = fc2_in_col_scale.permute(5, 2, 4, 0, 1, 3)
             grouped_fc2_x = GroupedTensorStorage(
                 shape=(in_shape[0], fc2_weight_shape[1]),
                 dtype=dtype,
@@ -2152,7 +2180,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 )
                 if fc2_scales is not None:
                     fc2_scales_tensor = (
-                        fc2_scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
+                        fc2_scales.detach()
+                        .to(dtype=torch.float32)
+                        .reshape((-1,) if canonical else (-1, 1, 1))
                     )
                 fc2_quant_kwargs = {
                     "a_tensor": fc1_kernel_out["d_tensor"],
@@ -2170,6 +2200,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     "use_dynamic_sched": True,
                 }
                 fc2_quant_kernel = self.grouped_gemm_quant_kernel()
+                if getattr(fc2_quant_kernel, "supports_optional_amax", False):
+                    # The FC2 output amax is not used.
+                    fc2_quant_kwargs["generate_amax"] = False
                 if supports_single_group_runtime_offsets:
                     fc2_quant_kwargs["use_single_group_runtime_offsets"] = use_dense_single_group
 
@@ -2190,18 +2223,18 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc2_weight_shape[0],
                         fc2_weight_shape[1],
                     )
-                    fc2_w_data = fc2_w_data.permute(1, 2, 0)
-
                     fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
-                    fc2_w_scales = fc2_w_scales.view(
-                        num_groups,
-                        ceil_div(fc2_weight_shape[0], 128),
-                        ceil_div(fc2_weight_shape[1], 128),
-                        MXFP8_BLOCK_SCALING_SIZE,
-                        4,
-                        4,
-                    )
-                    fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
+                    if not canonical:
+                        fc2_w_data = fc2_w_data.permute(1, 2, 0)
+                        fc2_w_scales = fc2_w_scales.view(
+                            num_groups,
+                            ceil_div(fc2_weight_shape[0], 128),
+                            ceil_div(fc2_weight_shape[1], 128),
+                            MXFP8_BLOCK_SCALING_SIZE,
+                            4,
+                            4,
+                        )
+                        fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
                     fc2_quant_kwargs["b_tensor"] = fc2_w_data
                     fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
                 else:
@@ -2219,9 +2252,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_quant_kwargs["b_dtype"] = torch.float8_e4m3fn
                     fc2_quant_kwargs["b_major"] = "k"
 
-                fc2_quant_kwargs["d_tensor"] = fc2_out_buf.as_strided(
-                    (in_shape[0], fc2_weight_shape[0], 1),
-                    (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
+                fc2_quant_kwargs["d_tensor"] = (
+                    fc2_out_buf
+                    if canonical
+                    else fc2_out_buf.as_strided(
+                        (in_shape[0], fc2_weight_shape[0], 1),
+                        (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
+                    )
                 )
                 fc2_quant_kernel(**fc2_quant_kwargs)
                 fc2_out = fc2_out_buf
@@ -2484,9 +2521,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Data logical shape: (sum(m), k, 1)
         # Scale logical shape: (32 (block row), 4 (block row),
         #   sum(m)/128, 4 (block col), k/128, 1)
+        dactivation_kernel = self.grouped_gemm_dactivation_kernel()
+        canonical = (
+            not use_nvfp4
+            and getattr(dactivation_kernel, "supports_canonical_layouts", False)
+            and getattr(self.grouped_gemm_quant_kernel(), "supports_canonical_layouts", False)
+        )
         fc2_dy_data = grouped_fc2_dy.rowwise_data.view(dtype=data_dtype)
         fc2_dy_data = fc2_dy_data.view(out_shape[0], data_k)
-        fc2_dy_data = fc2_dy_data.unsqueeze(0).permute(1, 2, 0)
+        if not canonical:
+            fc2_dy_data = fc2_dy_data.unsqueeze(0).permute(1, 2, 0)
         fc2_dy_scales = grouped_fc2_dy.scale_inv
         fc2_dy_scales = fc2_dy_scales.view(dtype=scale_view_dtype)
         with_gemm_swizzled_scales = grouped_fc2_dy._with_gemm_swizzled_scales
@@ -2510,7 +2554,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 4,
             )
             fc2_dy_scales = fc2_dy_scales.permute(3, 2, 1, 5, 4, 0)
-        else:
+        elif not canonical:
             fc2_dy_scales = fc2_dy_scales.view(
                 1,
                 ceil_div(out_shape[0], 128),
@@ -2552,7 +2596,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         dscales_tensor = None
         if not unit_activation_scale:
             scales_f32 = scales.detach().to(dtype=torch.float32)
-            scales_tensor = scales_f32.reshape(-1, 1, 1)
+            scales_tensor = scales_f32.reshape((-1,) if canonical else (-1, 1, 1))
             dscales_tensor = torch.zeros_like(scales_tensor)
 
         # Distributed weight (e.g. GTP): re-gather before any use (the NVFP4 global scale below
@@ -2606,7 +2650,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         fc2_dactivation_kwargs = {
             "a_tensor": fc2_dy_data,
-            "c_tensor": activation_in.unsqueeze(0).permute(1, 2, 0),
+            "c_tensor": activation_in if canonical else activation_in.unsqueeze(0).permute(1, 2, 0),
             "sfa_tensor": fc2_dy_scales,
             "padded_offsets": split_points,
             "alpha_tensor": fc2_alpha_tensor,
@@ -2621,7 +2665,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "discrete_col_sfd": not use_nvfp4,
             "use_dynamic_sched": True,
         }
-        dactivation_kernel = self.grouped_gemm_dactivation_kernel()
         if deterministic_dactivation:
             # Never passed to a wrapper that would reject it -- the check above raises first.
             fc2_dactivation_kwargs["deterministic"] = True
@@ -2660,21 +2703,27 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_w_data = fc2_weight_for_gemm.columnwise_data
             fc2_w_data = fc2_w_data.view(dtype=data_dtype)
             fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_k)
-            fc2_w_data = fc2_w_data.permute(1, 2, 0) if use_nvfp4 else fc2_w_data.permute(2, 1, 0)
             fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=scale_view_dtype)
-            fc2_w_scales = fc2_w_scales.view(
-                num_groups,
-                ceil_div(fc2_weight_shape[1], k_sf_divisor),
-                ceil_div(fc2_weight_shape[0], 128),
-                32,
-                4,
-                4,
-            )
-            fc2_w_scales = (
-                fc2_w_scales.permute(3, 4, 2, 5, 1, 0)
-                if use_nvfp4
-                else fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
-            )
+            if canonical:
+                # The column-wise weight is (num_groups, k, n): an n-major B for this GEMM.
+                fc2_dactivation_kwargs["b_major"] = "n"
+            else:
+                fc2_w_data = (
+                    fc2_w_data.permute(1, 2, 0) if use_nvfp4 else fc2_w_data.permute(2, 1, 0)
+                )
+                fc2_w_scales = fc2_w_scales.view(
+                    num_groups,
+                    ceil_div(fc2_weight_shape[1], k_sf_divisor),
+                    ceil_div(fc2_weight_shape[0], 128),
+                    32,
+                    4,
+                    4,
+                )
+                fc2_w_scales = (
+                    fc2_w_scales.permute(3, 4, 2, 5, 1, 0)
+                    if use_nvfp4
+                    else fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
+                )
 
             fc2_dactivation_kwargs["b_tensor"] = fc2_w_data
             fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
@@ -2754,17 +2803,18 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         else:
             fc1_dy_bf16 = None
             fc1_dy_row_data = fc2_dgrad_kernel_out["d_row_tensor"]
-            fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0])
-            # View scale in their actual swizzled shape
-            fc1_dy_row_scale = (
-                fc2_dgrad_kernel_out["sfd_row_tensor"].permute(5, 2, 4, 0, 1, 3).view(-1)
-            )
+            fc1_dy_row_scale = fc2_dgrad_kernel_out["sfd_row_tensor"]
             fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
-            fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0])
-            # View scale in their actual swizzled shape
-            fc1_dy_col_scale = (
-                fc2_dgrad_kernel_out["sfd_col_tensor"].permute(5, 2, 4, 0, 1, 3).view(-1)
-            )
+            fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"]
+            if not canonical:
+                fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0])
+                # View scale in their actual swizzled shape
+                fc1_dy_row_scale = fc1_dy_row_scale.permute(5, 2, 4, 0, 1, 3)
+                fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0])
+                # View scale in their actual swizzled shape
+                fc1_dy_col_scale = fc1_dy_col_scale.permute(5, 2, 4, 0, 1, 3)
+            fc1_dy_row_scale = fc1_dy_row_scale.view(-1)
+            fc1_dy_col_scale = fc1_dy_col_scale.view(-1)
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
         if grad_scales is not None:
             grad_scales = grad_scales.view(-1)
@@ -3115,19 +3165,23 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_w_data = fc1_w_data.view(
                         num_groups, fc1_weight_shape[0], fc1_weight_shape[1]
                     )
-                    fc1_w_data = fc1_w_data.permute(2, 1, 0)
                     fc1_w_scales = fc1_weight_for_gemm.columnwise_scale_inv.view(
                         dtype=torch.float8_e8m0fnu
                     )
-                    fc1_w_scales = fc1_w_scales.view(
-                        num_groups,
-                        ceil_div(fc1_weight_shape[1], 128),
-                        ceil_div(fc1_weight_shape[0], 128),
-                        MXFP8_BLOCK_SCALING_SIZE,
-                        4,
-                        4,
-                    )
-                    fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
+                    if canonical:
+                        # The column-wise weight is (num_groups, k, n): an n-major B for this GEMM.
+                        fc1_dgrad_kwargs["b_major"] = "n"
+                    else:
+                        fc1_w_data = fc1_w_data.permute(2, 1, 0)
+                        fc1_w_scales = fc1_w_scales.view(
+                            num_groups,
+                            ceil_div(fc1_weight_shape[1], 128),
+                            ceil_div(fc1_weight_shape[0], 128),
+                            MXFP8_BLOCK_SCALING_SIZE,
+                            4,
+                            4,
+                        )
+                        fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
                     fc1_dgrad_kwargs["b_tensor"] = fc1_w_data
                     fc1_dgrad_kwargs["sfb_tensor"] = fc1_w_scales
@@ -3152,9 +3206,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 grad_input_buffer = validate_or_alloc_output(
                     grad_input_buffer, in_shape, dtype, device
                 )
-                fc1_dgrad_kwargs["d_tensor"] = grad_input_buffer.as_strided(
-                    (out_shape[0], fc1_weight_shape[1], 1),
-                    (fc1_weight_shape[1], 1, out_shape[0] * fc1_weight_shape[1]),
+                fc1_dgrad_kwargs["d_tensor"] = (
+                    grad_input_buffer
+                    if canonical
+                    else grad_input_buffer.as_strided(
+                        (out_shape[0], fc1_weight_shape[1], 1),
+                        (fc1_weight_shape[1], 1, out_shape[0] * fc1_weight_shape[1]),
+                    )
                 )
                 fc1_dgrad_kernel(**fc1_dgrad_kwargs)
                 grad_input = grad_input_buffer
@@ -3362,5 +3420,978 @@ def fuse_unary_activation_ops(
     )
 
 
+# --------------------------------------------------------------------------- #
+#  BF16 backend
+# --------------------------------------------------------------------------- #
+#
+# Unquantized sibling of the block-scaled ops above: the same cuDNN CuTe DSL
+# grouped-GEMM wrappers, called with ``sfa_tensor=None`` to select their BF16
+# backend. It shares no base class with ``_GroupedMLP_CuTeGEMMBase``, which is
+# built around block-scaled operands.
+#
+#     FC1 + SwiGLU/GeGLU   grouped_gemm_glu_wrapper_sm100
+#     FC2, FC1 dgrad       grouped_gemm_wrapper_sm100
+#     FC2 dgrad + dGLU     grouped_gemm_dglu_wrapper_sm100
+#     FC1/FC2 wgrad        grouped_gemm_wgrad_wrapper_sm100
+#
+# Operands use cuDNN's canonical layouts (cuDNN frontend PR #1602), which keep
+# offsets and pointer tables on the device, so this path never syncs the stream.
+#
+# Differences from the block-scaled contract:
+# 1. The GLU wrapper returns the pre-activation only with ``generate_c=True``.
+# 2. ``prob_tensor`` is mandatory and float32.
+# 3. The GLU clamp (+/-7.0) and GeGLU alpha (1.702) are fixed in the kernel.
+# 4. ``dprob`` is reduced with atomics, so determinism requests are refused.
+
+# Fixed in the BF16 GLU/dGLU kernels; activations asking for other values decline.
+_BF16_GEGLU_ALPHA: float = 1.702
+_BF16_GLU_CLAMP_LIMIT: float = 7.0
+
+# MoEGroupedGemmGluBiasBf16Kernel.FIX_PAD_SIZE: the total token count and every
+# group must be a multiple of this.
+_BF16_M_ALIGNMENT: int = 256
+
+# Tolerance for matching activation constants, as in fuse_grouped_mlp_ops.
+_BF16_FLOAT_MATCH_TOL: float = 1e-3
+
+# First cuDNN frontend with canonical BF16 layouts (PR #1602). Develop builds reported
+# 1.32.0 before it merged, so is_supported also checks supports_bf16_canonical_layouts.
+_BF16_MIN_CUDNN_FRONTEND_VERSION: str = "1.32.0"
+
+
+def _bf16_glu_act_funcs(activation_op) -> Optional[tuple[str, str, float]]:
+    """Map an activation to BF16 cuDNN ``(act_func, dact_func, linear_offset)``, or ``None``.
+
+    SwiGLU always maps. GeGLU maps when its limit and alpha match the kernel's fixed
+    values; its linear offset is a runtime argument. Other activations have no BF16
+    kernel. cuDNN frontend 1.30/1.31 have a wrong BF16 dGeGLU, but its fix (PR #1187)
+    predates PR #1602, which ``is_supported`` requires.
+    """
+    if isinstance(activation_op, ScaledClampedQGeGLU):
+        clamped = activation_op._clamped
+        if abs(clamped.limit - _BF16_GLU_CLAMP_LIMIT) > _BF16_FLOAT_MATCH_TOL:
+            return None
+        if abs(clamped.alpha - _BF16_GEGLU_ALPHA) > _BF16_FLOAT_MATCH_TOL:
+            return None
+        return ("geglu", "dgeglu", float(clamped.glu_linear_offset))
+    if isinstance(activation_op, ScaledSwiGLU):
+        return ("swiglu", "dswiglu", 0.0)
+    return None
+
+
+def _bf16_ones_prob(total_tokens: int, device: torch.device) -> torch.Tensor:
+    """Unit float32 ``prob``, cached so its pointer is stable across CUDA graph replays."""
+    return get_cached_ones_tensor(total_tokens, torch.float32, device)
+
+
+@functools.lru_cache(maxsize=None)
+def _bf16_weight_names(num_groups: int) -> tuple[str, ...]:
+    return tuple(f"weight{idx}" for idx in range(num_groups))
+
+
+def _bf16_per_expert_weights(fc_op: GroupedLinear, num_groups: int) -> list[torch.Tensor]:
+    """Per-expert weights, read from ``_parameters`` to skip ``nn.Module.__getattr__``."""
+    params = fc_op._parameters
+    return [params[name] for name in _bf16_weight_names(num_groups)]
+
+
+def _bf16_packed_weight(fc_op: GroupedLinear, num_groups: int) -> torch.Tensor:
+    """Expert-major ``(num_groups, out_features, in_features)`` view of a packed weight."""
+    weight = fc_op.weight
+    if not isinstance(weight, GroupedTensor):
+        raise RuntimeError(
+            f"{fc_op.__class__.__name__} expected a GroupedTensor weight with "
+            "single_grouped_weight=True."
+        )
+    data = weight.rowwise_data
+    if data is None:
+        raise RuntimeError("Grouped weight has no rowwise_data.")
+    return data.view(num_groups, fc_op.out_features, fc_op.in_features)
+
+
+def _bf16_materialize_distributed(
+    fc_op: GroupedLinear, *, for_backward: bool
+) -> Optional[list[torch.Tensor]]:
+    """Gathered full weights of a distributed weight group, or ``None`` for plain weights.
+
+    As in the block-scaled op, the leader ``weight0`` gathers the group for each GEMM,
+    ``_compute_grad_params`` handles the wgrad side, and packed weights are rejected.
+    """
+    if fc_op.single_grouped_weight:
+        if is_distributed_weight(fc_op.weight):
+            raise RuntimeError(
+                "The BF16 fused grouped MLP supports distributed weights only with "
+                "single_grouped_weight=False."
+            )
+        return None
+    leader = fc_op._parameters["weight0"]
+    if not is_distributed_weight(leader):
+        return None
+    materialize = (
+        materialize_weight_for_backward if for_backward else materialize_weight_for_forward
+    )
+    weights = materialize(leader)
+    expected = (fc_op.out_features, fc_op.in_features)
+    if len(weights) != fc_op.num_groups or any(
+        tuple(w.shape) != expected or w.dtype != torch.bfloat16 for w in weights
+    ):
+        raise RuntimeError(
+            f"Distributed weight group materialized {len(weights)} weights of shapes/dtypes "
+            f"{[(tuple(w.shape), w.dtype) for w in weights]}, but the BF16 fused grouped MLP "
+            f"needs {fc_op.num_groups} BF16 weights of shape {expected}."
+        )
+    return weights
+
+
+def _bf16_weight_ptrs(
+    fc_op: GroupedLinear,
+    num_groups: int,
+    device: torch.device,
+    materialized: Optional[list[torch.Tensor]] = None,
+) -> torch.Tensor:
+    """Device table of per-expert weight pointers, cached until a weight is reallocated.
+
+    The cache avoids a per-call upload and keeps the table's address stable for CUDA
+    graphs. Gathered distributed weights (``materialized``) are new each call, so their
+    table is not cached.
+    """
+    if materialized is not None:
+        return tex.copy_data_ptrs_to_device(materialized, device)
+    weights = _bf16_per_expert_weights(fc_op, num_groups)
+    key = (device, tuple(w.data_ptr() for w in weights))
+    cached = fc_op.__dict__.get("_bf16_weight_ptrs_cache")
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    ptrs = tex.copy_data_ptrs_to_device(weights, device)
+    fc_op.__dict__["_bf16_weight_ptrs_cache"] = (key, ptrs)
+    return ptrs
+
+
+def _bf16_fprop_weight_kwargs(
+    fc_op: GroupedLinear,
+    num_groups: int,
+    device: torch.device,
+    materialized: Optional[list[torch.Tensor]] = None,
+) -> dict[str, Any]:
+    """Forward-GEMM B operand: the packed ``(experts, out, in)`` weight, or K-major pointers."""
+    if fc_op.single_grouped_weight:
+        return {"b_tensor": _bf16_packed_weight(fc_op, num_groups)}
+    return {
+        "b_ptrs": _bf16_weight_ptrs(fc_op, num_groups, device, materialized),
+        "n": fc_op.out_features,
+        "b_dtype": torch.bfloat16,
+        "b_major": "k",
+    }
+
+
+def _bf16_dgrad_weight_kwargs(
+    fc_op: GroupedLinear,
+    num_groups: int,
+    device: torch.device,
+    materialized: Optional[list[torch.Tensor]] = None,
+) -> dict[str, Any]:
+    """Dgrad-GEMM B operand, read N-major so the weights need no transpose.
+
+    A packed weight is cuDNN's canonical N-major ``(experts, K, N)`` (K = out, N = in)
+    and goes as one dense tensor; per-expert weights use the pointer table.
+    """
+    if fc_op.single_grouped_weight:
+        return {"b_tensor": _bf16_packed_weight(fc_op, num_groups), "b_major": "n"}
+    return {
+        "b_ptrs": _bf16_weight_ptrs(fc_op, num_groups, device, materialized),
+        "n": fc_op.in_features,
+        "b_dtype": torch.bfloat16,
+        "b_major": "n",
+    }
+
+
+def _bf16_wgrad_fn_factory(
+    *,
+    weight_shape: tuple[int, int],
+    offsets: torch.Tensor,
+    wgrad_kernel_fn: Callable,
+    single_grouped_weight: bool,
+    num_groups: int,
+    current_stream=None,
+) -> Callable[[bool], Callable]:
+    """Build the ``factory(accumulate) -> gemm_fn`` that ``_compute_grad_params`` expects.
+
+    ``accumulate`` is decided by the shared main_grad logic, so it is not bound here.
+    Leaving ``current_stream`` unset resolves the stream when the GEMM runs, as in
+    ``_cudnn_compute_wgrad``, so a delayed wgrad runs on the ``backward_dw()`` stream.
+    """
+
+    def factory(accumulate: bool) -> Callable:
+        return functools.partial(
+            _bf16_cudnn_wgrad,
+            weight_shape=weight_shape,
+            offsets=offsets,
+            accumulate=accumulate,
+            wgrad_kernel_fn=wgrad_kernel_fn,
+            single_grouped_weight=single_grouped_weight,
+            num_groups=num_groups,
+            current_stream=current_stream,
+        )
+
+    return factory
+
+
+def _bf16_packed_wgrad_buffer(
+    wgrad_output: list[torch.Tensor], num_groups: int, weight_shape: tuple[int, int]
+) -> Optional[torch.Tensor]:
+    """The contiguous ``(num_groups, out, in)`` buffer behind a per-expert wgrad list, if any.
+
+    Writing it in dense mode needs no pointer table. Main_grad buffers are separate
+    tensors and use discrete mode.
+    """
+    base = wgrad_output[0]._base
+    if base is None or base.shape != (num_groups, *weight_shape) or not base.is_contiguous():
+        return None
+    base_ptr = base.data_ptr()
+    stride_bytes = weight_shape[0] * weight_shape[1] * base.element_size()
+    for idx, w in enumerate(wgrad_output):
+        if w._base is not base or w.data_ptr() != base_ptr + idx * stride_bytes:
+            return None
+    return base
+
+
+def _bf16_cudnn_wgrad(
+    x_2d: Optional[torch.Tensor],
+    dy_2d: Optional[torch.Tensor],
+    wgrad_output,
+    *,
+    weight_shape: tuple[int, int],
+    offsets: torch.Tensor,
+    accumulate: bool,
+    wgrad_kernel_fn: Callable,
+    single_grouped_weight: bool,
+    num_groups: int,
+    current_stream=None,
+) -> None:
+    """BF16 wgrad ``wgrad[e] = dY[e]^T @ X[e]``, as called by ``_compute_grad_params``."""
+    if x_2d is None or dy_2d is None:
+        raise RuntimeError("BF16 grouped MLP wgrad requires both the input and grad output.")
+    out_features, in_features = weight_shape
+    total_tokens = x_2d.shape[0]
+    if total_tokens == 0:
+        # The wgrad is zero: overwrite fresh outputs, leave accumulating ones unchanged.
+        if not accumulate:
+            if single_grouped_weight:
+                wgrad_output.rowwise_data.zero_()
+            else:
+                for wgrad in wgrad_output:
+                    wgrad.zero_()
+        return
+
+    if current_stream is None:
+        current_stream = torch.cuda.current_stream(x_2d.device.index).cuda_stream
+
+    common_kwargs = {
+        "a_tensor": dy_2d.view(total_tokens, out_features).T,
+        "b_tensor": x_2d.view(total_tokens, in_features),
+        "sfa_tensor": None,
+        "sfb_tensor": None,
+        "offsets_tensor": offsets,
+        "acc_dtype": torch.float32,
+        "accumulate_on_output": accumulate,
+        "current_stream": current_stream,
+    }
+    # No ``descriptor_workspace``: cuDNN accepts it only for block-scaled wgrad.
+
+    if single_grouped_weight:
+        wgrad_tensor = wgrad_output.rowwise_data.view(num_groups, out_features, in_features)
+    else:
+        wgrad_tensor = _bf16_packed_wgrad_buffer(wgrad_output, num_groups, weight_shape)
+    if wgrad_tensor is not None:
+        wgrad_kernel_fn(
+            **common_kwargs,
+            output_mode="dense",
+            wgrad_tensor=wgrad_tensor,
+            wgrad_dtype=wgrad_tensor.dtype,
+        )
+    else:
+        wgrad_ptrs = tex.copy_data_ptrs_to_device(wgrad_output, wgrad_output[0].device)
+        wgrad_kernel_fn(
+            **common_kwargs,
+            output_mode="discrete",
+            wgrad_ptrs=wgrad_ptrs,
+            wgrad_dtype=wgrad_output[0].dtype,
+        )
+
+
+def fuse_bf16_grouped_mlp_ops(ops, *, recipe, fused_op_cls=None):
+    """Fuse unquantized GroupedLinear + GLU + GroupedLinear windows (``recipe is None`` only).
+
+    Under a recipe the BF16 kernels would drop the quantization, and a custom recipe
+    may enable the block-scaled fusion, so the two matchers never claim the same recipe.
+    """
+    if fused_op_cls is None:
+        fused_op_cls = GroupedMLP_CuTeGEMMGLUBf16
+    if recipe is not None:
+        return ops
+    if not fused_op_cls.is_supported():
+        return ops
+
+    out = []
+    window, ops = ops[:3], ops[3:]
+    while len(window) == 3:
+        matches_pattern = _bf16_window_matches(window)
+        if matches_pattern and (
+            window[0].split_alignment % _BF16_M_ALIGNMENT != 0
+            or window[2].split_alignment % _BF16_M_ALIGNMENT != 0
+        ):
+            warnings.warn(
+                "BF16 grouped MLP fusion was skipped because both GroupedLinear operations "
+                f"require split_alignment to be divisible by {_BF16_M_ALIGNMENT} "
+                f"(got {window[0].split_alignment} and {window[2].split_alignment}).",
+                stacklevel=2,
+            )
+            matches_pattern = False
+        if matches_pattern:
+            out.append(fused_op_cls(fc1=window[0], activation=window[1], fc2=window[2]))
+            window = ops[:3]
+            ops = ops[3:]
+            continue
+        out.append(window[0])
+        window = window[1:] + ops[:1]
+        ops = ops[1:]
+    out.extend(window)
+    return out
+
+
+def _bf16_window_matches(window) -> bool:
+    """Whether a three-op window can be served by the BF16 fused kernels."""
+    fc1, activation, fc2 = window
+    if not (isinstance(fc1, GroupedLinear) and isinstance(fc2, GroupedLinear)):
+        return False
+    if _bf16_glu_act_funcs(activation) is None:
+        return False
+    # Same check as the constructor, so an accepted window always builds.
+    try:
+        validate_grouped_mlp_dims(fc1, activation, fc2)
+    except (TypeError, ValueError):
+        return False
+    # BF16 weights only.
+    is_dist = []
+    for fc in (fc1, fc2):
+        weight = fc.weight if fc.single_grouped_weight else fc.weight0
+        if weight.dtype != torch.bfloat16:
+            return False
+        is_dist.append(is_distributed_weight(weight))
+    # Compute follows autocast. The fusion cache ignores autocast, so this only governs
+    # the first selection; fuser_forward raises if the autocast dtype changes later.
+    if torch.is_autocast_enabled() and torch.get_autocast_dtype("cuda") != torch.bfloat16:
+        return False
+    # FC1 and FC2 are both distributed or neither, as the block-scaled op asserts.
+    if any(is_dist) and not all(is_dist):
+        return False
+    # The fused FC1 kernel applies its per-token scale after GLU; it cannot
+    # implement GroupedLinear(scale_bias=True), which scales bias before GLU.
+    if fc1._scale_bias:
+        return False
+    return True
+
+
+class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
+    """BF16 GroupedLinear + GLU activation + GroupedLinear as one fused op."""
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_kernel(cls) -> Callable:
+        """Plain BF16 grouped GEMM (FC2 forward, FC1 dgrad)."""
+        from cudnn import grouped_gemm_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_activation_kernel(cls) -> Callable:
+        """Fused BF16 grouped GEMM + GLU activation (FC1 forward)."""
+        from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_glu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_dactivation_kernel(cls) -> Callable:
+        """Fused BF16 grouped GEMM + GLU backward (FC2 dgrad)."""
+        from cudnn import grouped_gemm_dglu_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_dglu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_wgrad_kernel(cls) -> Callable:
+        """BF16 grouped GEMM wgrad."""
+        from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_wgrad_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def is_supported(cls) -> bool:
+        """Whether this fused operation is supported on the current system."""
+        # Blackwell only: the BF16 kernels have no Rubin (SM 10.7) variant.
+        device_arch = get_device_compute_capability()
+        if not (device_arch[0] == 10 and device_arch[1] < 7):
+            return False
+        # Canonical layouts and device-only offsets need cuDNN frontend PR #1602.
+        if not _cudnn_frontend_version_at_least(_BF16_MIN_CUDNN_FRONTEND_VERSION):
+            return False
+        try:
+            kernels = (
+                cls.grouped_gemm_kernel(),
+                cls.grouped_gemm_activation_kernel(),
+                cls.grouped_gemm_dactivation_kernel(),
+                cls.grouped_gemm_wgrad_kernel(),
+            )
+        except ImportError:
+            return False
+        return all(getattr(k, "supports_bf16_canonical_layouts", False) for k in kernels)
+
+    @classmethod
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """Never: the BF16 dGLU reduces ``dprob`` with atomics and rejects ``deterministic``."""
+        return False
+
+    def __init__(
+        self,
+        *,
+        fc1: GroupedLinear,
+        activation: Optional[FusibleOperation],
+        fc2: GroupedLinear,
+    ) -> None:
+        if activation is None:
+            raise TypeError("Expected a grouped MLP activation op.")
+        super().__init__((fc1, activation, fc2))
+        if not self.is_supported():
+            self.grouped_gemm_activation_kernel()  # Try triggering the import error
+            self.grouped_gemm_dactivation_kernel()
+            raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
+        validate_grouped_mlp_dims(fc1, activation, fc2)
+        act_funcs = _bf16_glu_act_funcs(activation)
+        if act_funcs is None:
+            raise RuntimeError(
+                f"{type(activation).__name__} cannot be served by the BF16 grouped MLP "
+                "kernels. The BF16 GLU kernel hardwires clamp=+/-"
+                f"{_BF16_GLU_CLAMP_LIMIT} and alpha={_BF16_GEGLU_ALPHA}, and has no "
+                "SiTU-GLU or SReLU variant."
+            )
+        self._cudnn_act_func, self._cudnn_dact_func, self._cudnn_linear_offset = act_funcs
+
+    def _check_token_alignment(self, num_tokens: int) -> None:
+        """The total token count must be 256-aligned; cuDNN checks each group's offsets."""
+        if num_tokens % _BF16_M_ALIGNMENT != 0:
+            raise ValueError(
+                f"{self.__class__.__name__} requires the total token count to be a multiple "
+                f"of {_BF16_M_ALIGNMENT}, but got {num_tokens}. Pad the routed tokens "
+                "(e.g. with te.ops.FP8Padding) so every split honors the GroupedLinear "
+                "split_alignment."
+            )
+
+    def fuser_forward(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        *,
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer,
+        next_op_input_quantizer,
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
+        fc1_op, activation_op, fc2_op = self.basic_ops
+        fc1_ctx, _activation_ctx, fc2_ctx = basic_op_ctxs
+
+        # Caller-provided buffers: FC2 forward output and FC1 backward grad-input.
+        if OUTPUT_BUFFER_KEY in basic_op_kwargs[0]:
+            raise ValueError(
+                f"'{OUTPUT_BUFFER_KEY}' buffer can only be provided to FC2 (the last op) of "
+                "the fused grouped MLP, not FC1."
+            )
+        if GRAD_INPUT_BUFFER_KEY in basic_op_kwargs[-1]:
+            raise ValueError(
+                f"'{GRAD_INPUT_BUFFER_KEY}' buffer can only be provided to FC1 (the first op) of "
+                "the fused grouped MLP, not FC2."
+            )
+        output_buffer = basic_op_kwargs[-1].get(OUTPUT_BUFFER_KEY)
+        fc1_ctx.dgrad_out = basic_op_kwargs[0].get(GRAD_INPUT_BUFFER_KEY)
+
+        fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
+        fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
+        if isinstance(input_, GroupedTensor):
+            raise RuntimeError(
+                "The BF16 fused grouped MLP does not accept a pre-quantized GroupedTensor "
+                "input; that layout only arises on the block-scaled path."
+            )
+        # The kernels take 2-D (tokens, features) operands and 1-D per-token scales.
+        if input_.dim() != 2 or input_.size(1) != fc1_weight_shape[1]:
+            raise ValueError(
+                f"{self.__class__.__name__} expects a 2-D (tokens, {fc1_weight_shape[1]}) input,"
+                f" but got shape {tuple(input_.size())}. Flatten the leading dimensions."
+            )
+        scale_inputs = [("activation scales", basic_op_extra_inputs[1][0])]
+        if fc2_op._scale_bias:
+            scale_inputs.append(("FC2 bias scales", basic_op_extra_inputs[2][1]))
+        for name, scale_input in scale_inputs:
+            if scale_input.dim() != 1:
+                raise ValueError(
+                    f"{self.__class__.__name__} expects 1-D (tokens,) {name}, but got shape"
+                    f" {tuple(scale_input.size())}. Flatten them."
+                )
+        in_shape = list(input_.size())
+        total_tokens = in_shape[0]
+
+        num_groups = fc1_op.num_groups
+        fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
+        device = fc1_weight_param.device
+        if torch.is_autocast_enabled():
+            dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = fc1_weight_param.dtype
+        if dtype != torch.bfloat16:
+            if torch.is_autocast_enabled():
+                raise RuntimeError(
+                    f"{self.__class__.__name__} computes in BF16, but this forward runs under"
+                    f" a {dtype} autocast. The fused op was selected under BF16 autocast or"
+                    " with autocast disabled, and fusion is not re-selected when the autocast"
+                    " dtype changes;"
+                    " keep the autocast dtype of this module consistent across steps."
+                )
+            raise RuntimeError(f"{self.__class__.__name__} requires BF16 compute, but got {dtype}.")
+        self._check_token_alignment(total_tokens)
+
+        requires_grad = any(ctx.requires_grad for ctx in basic_op_ctxs)
+        input_requires_grad = requires_grad
+        fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
+        fc1_weight_requires_grad = requires_grad and fc1_weight_param.requires_grad
+        fc2_weight_requires_grad = requires_grad and fc2_weight_param.requires_grad
+
+        # cuDNN padded offsets (int32) and dbias offsets (int64, leading zero).
+        fc1_split_sizes = basic_op_extra_inputs[0][0]
+        fc2_split_sizes = basic_op_extra_inputs[2][0]
+        if (
+            fc1_split_sizes.size() != fc2_split_sizes.size()
+            or fc1_split_sizes.data_ptr() != fc2_split_sizes.data_ptr()
+        ):
+            raise RuntimeError(
+                f"{self.__class__.__name__} got different split points for FC1 and FC2."
+            )
+        split_sizes = fc1_split_sizes
+        if int(split_sizes.numel()) != num_groups:
+            raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
+        split_sizes, (split_points, base_split_offsets) = tex.splits_to_offsets_multi(
+            split_sizes,
+            device,
+            strides=[1, 1],
+            include_leading_zero=[False, True],
+            dtypes=[torch.int32, torch.int64],
+            bulk_allocate=True,
+            split_alignment=_BF16_M_ALIGNMENT,
+        )
+
+        # Routing probability as float32 (M,), saved for the dGLU.
+        scales = basic_op_extra_inputs[1][0]
+        unit_activation_scale = bool(
+            getattr(activation_op, "_grouped_mlp_unit_activation_scale", False)
+        )
+        if unit_activation_scale and num_groups != 1:
+            unit_activation_scale = False
+        if unit_activation_scale:
+            prob_tensor = _bf16_ones_prob(total_tokens, device)
+        else:
+            # cuDNN needs a contiguous canonical prob; FP32 inputs are not copied by .to().
+            prob_tensor = scales.detach().reshape(total_tokens).to(dtype=torch.float32).contiguous()
+
+        alpha_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
+        current_stream = torch.cuda.current_stream(device.index).cuda_stream
+        fc1_x = maybe_dequantize(input_, dtype).contiguous()
+        fc1_weights = _bf16_materialize_distributed(fc1_op, for_backward=False)
+
+        # An empty batch (e.g. an expert-parallel rank that received no tokens) skips the
+        # kernels, whose canonical layouts reject M = 0. Distributed weights are still
+        # gathered, so the collectives stay in step with the other ranks.
+        empty_batch = total_tokens == 0
+
+        # FC1 GEMM + GLU. FC1's pre-activation (M, 2F) is saved for the dGLU.
+        if empty_batch:
+            activation_in = fc1_x.new_empty((0, fc1_weight_shape[0])) if requires_grad else None
+            fc2_in = fc1_x.new_empty((0, fc2_weight_shape[1]))
+        else:
+            fc1_kernel_out = self.grouped_gemm_activation_kernel()(
+                a_tensor=fc1_x,
+                sfa_tensor=None,
+                padded_offsets=split_points,
+                alpha_tensor=alpha_tensor,
+                bias_tensor=_pack_grouped_linear_bias_for_cudnn(fc1_op),
+                prob_tensor=prob_tensor,
+                acc_dtype=torch.float32,
+                c_dtype=dtype,
+                d_dtype=dtype,
+                cd_major="n",
+                act_func=self._cudnn_act_func,
+                linear_offset=self._cudnn_linear_offset,
+                generate_c=requires_grad,  # pre-activation for the dGLU
+                use_dynamic_sched=True,
+                current_stream=current_stream,
+                **_bf16_fprop_weight_kwargs(fc1_op, num_groups, device, fc1_weights),
+            )
+            activation_in = fc1_kernel_out["c_tensor"] if requires_grad else None
+            if requires_grad and activation_in is None:
+                raise RuntimeError(
+                    "The BF16 GLU kernel did not return the pre-activation tensor; "
+                    "generate_c was not honoured."
+                )
+            fc2_in = fc1_kernel_out["d_tensor"]
+
+        # FC2 GEMM. A distributed FC2 is gathered after the FC1 launch, as in the
+        # block-scaled op.
+        fc2_weights = _bf16_materialize_distributed(fc2_op, for_backward=False)
+        fc2_out = validate_or_alloc_output(
+            output_buffer, in_shape[:-1] + [fc2_weight_shape[0]], dtype, device
+        )
+        # The kernel adds prob * bias, so FC2's scales as prob implement scale_bias.
+        if fc2_op._scale_bias:
+            fc2_prob = (
+                basic_op_extra_inputs[2][1].detach().reshape(total_tokens).float().contiguous()
+            )
+        else:
+            fc2_prob = _bf16_ones_prob(total_tokens, device)
+        if not empty_batch:
+            self.grouped_gemm_kernel()(
+                a_tensor=fc2_in,
+                padded_offsets=split_points,
+                alpha_tensor=alpha_tensor,
+                bias_tensor=_pack_grouped_linear_bias_for_cudnn(fc2_op),
+                prob_tensor=fc2_prob,
+                acc_dtype=torch.float32,
+                c_dtype=dtype,
+                d_dtype=dtype,
+                d_tensor=fc2_out,
+                cd_major="n",
+                generate_c=False,
+                use_dynamic_sched=True,
+                current_stream=current_stream,
+                **_bf16_fprop_weight_kwargs(fc2_op, num_groups, device, fc2_weights),
+            )
+
+        if requires_grad:
+            saved_fc1_x = fc1_x if fc1_weight_requires_grad else None
+            saved_fc2_x = fc2_in if fc2_weight_requires_grad else None
+            if is_cpu_offload_enabled():
+                offload_tensors = [
+                    t for t in (saved_fc1_x, activation_in, saved_fc2_x) if t is not None
+                ]
+                start_offload(*offload_tensors)
+                mark_activation_offload(*offload_tensors)
+
+            fc1_ctx.save_for_backward(
+                split_sizes,
+                split_points,
+                base_split_offsets,
+                saved_fc1_x,
+                activation_in,
+                None if unit_activation_scale else prob_tensor,
+                saved_fc2_x,
+                fc2_prob if fc2_op._scale_bias else None,
+            )
+            fc1_ctx.dtype = dtype
+            fc1_ctx.input_requires_grad = input_requires_grad
+            fc1_ctx.weight_requires_grad = fc1_weight_requires_grad
+            fc1_ctx.scales_dtype = scales.dtype
+            fc1_ctx.unit_activation_scale = unit_activation_scale
+            fc2_ctx.dtype = dtype
+            fc2_ctx.input_requires_grad = input_requires_grad
+            fc2_ctx.weight_requires_grad = fc2_weight_requires_grad
+
+        return fc2_out, [(), (), ()]
+
+    def fuser_backward(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        grad_output: torch.Tensor,
+        **unused,  # pylint: disable=unused-argument
+    ) -> tuple[
+        torch.Tensor,
+        list[tuple[Optional[torch.Tensor], ...]],
+        list[tuple[()]],
+    ]:
+        fc1_op, _activation_op, fc2_op = self.basic_ops
+        fc1_ctx, _activation_ctx, fc2_ctx = basic_op_ctxs
+
+        fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
+        fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
+        if isinstance(grad_output, GroupedTensor):
+            raise RuntimeError(
+                "The BF16 fused grouped MLP does not accept a pre-quantized GroupedTensor "
+                "grad output."
+            )
+        grad_output = grad_output.reshape(-1, fc2_weight_shape[0])
+        out_shape = list(grad_output.size())
+        total_tokens = out_shape[0]
+        num_groups = fc1_op.num_groups
+        fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
+        device = fc1_weight_param.device
+        dtype = fc1_ctx.dtype
+
+        (
+            split_sizes,
+            split_points,
+            base_split_offsets,
+            saved_fc1_x,
+            activation_in,
+            saved_prob,
+            saved_fc2_x,
+            saved_fc2_scales,
+        ) = fc1_ctx.saved_tensors
+
+        if int(split_sizes.numel()) != num_groups:
+            raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
+
+        current_stream = torch.cuda.current_stream(device.index).cuda_stream
+        alpha_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
+        fc2_dy = maybe_dequantize(grad_output, dtype).contiguous()
+
+        # An empty batch skips the kernels but still gathers distributed weights and runs
+        # the shared wgrad code, so collectives and gradient finalization stay in step.
+        empty_batch = total_tokens == 0
+
+        # dprob (dGLU) and FC2 scale_bias dscales are both reduced with atomics; an empty
+        # batch launches neither.
+        unit_activation_scale = bool(getattr(fc1_ctx, "unit_activation_scale", False))
+        if (
+            not empty_batch
+            and (not unit_activation_scale or fc2_op._scale_bias)
+            and _deterministic_algorithms_required()
+            and not self.grouped_gemm_dactivation_is_deterministic()
+        ):
+            raise RuntimeError(
+                f"{_DETERMINISM_REQUESTED}, but the BF16 fused grouped MLP accumulates the"
+                " scale gradients (dprob, and dscales with FC2 scale_bias) with"
+                " nondeterministic atomics."
+            )
+
+        # FC2 dbias. With scale_bias it is scale-weighted, and the scales get
+        # dscales[t] = dY[t] . bias[group(t)].
+        fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
+        fc2_bias_grad_packed: Optional[torch.Tensor] = None
+        fc2_grad_scales: Optional[torch.Tensor] = None
+        if fc2_op.has_bias:
+            if empty_batch:
+                fc2_dbias_packed = fc2_dy.new_zeros((num_groups, fc2_weight_shape[0]))
+                if fc2_op._scale_bias:
+                    fc2_grad_scales = fc2_dy.new_zeros((0,), dtype=torch.float32)
+            elif fc2_op._scale_bias:
+                fc2_dbias_packed, fc2_grad_scales = compute_grouped_dbias_dscales(
+                    fc2_dy,
+                    saved_fc2_scales,
+                    fc2_op._get_packed_bias_tensor(dtype),
+                    offsets=base_split_offsets,
+                )
+            else:
+                fc2_dbias_packed = compute_grouped_dbias(fc2_dy, base_split_offsets, num_groups)
+            fc2_dbias_packed = fc2_dbias_packed.to(dtype=dtype)
+            if fc2_op.single_grouped_bias:
+                fc2_bias_grad_packed = fc2_dbias_packed
+            else:
+                fc2_bias_grads = [fc2_dbias_packed[idx] for idx in range(num_groups)]
+
+        # FC2 dgrad + dGLU: FC1 grad output, dprob, and optional FC1 dbias.
+        fc2_weights = _bf16_materialize_distributed(fc2_op, for_backward=True)
+        if empty_batch:
+            fc1_dy = fc2_dy.new_empty((0, fc1_weight_shape[0]))
+            grad_scales = None
+            if not unit_activation_scale:
+                grad_scales = fc2_dy.new_empty((0,), dtype=fc1_ctx.scales_dtype)
+            fc1_dbias = (
+                fc2_dy.new_zeros((num_groups, fc1_weight_shape[0])) if fc1_op.has_bias else None
+            )
+        else:
+            if unit_activation_scale:
+                prob_tensor = _bf16_ones_prob(total_tokens, device)
+            else:
+                prob_tensor = saved_prob
+            # Required by the BF16 dGLU API even when the grad is discarded below.
+            dprob_tensor = torch.zeros(total_tokens, dtype=torch.float32, device=device)
+            fc2_dgrad_kernel_out = self.grouped_gemm_dactivation_kernel()(
+                a_tensor=fc2_dy,
+                c_tensor=activation_in,
+                sfa_tensor=None,
+                padded_offsets=split_points,
+                alpha_tensor=alpha_tensor,
+                beta_tensor=alpha_tensor,
+                prob_tensor=prob_tensor,
+                dprob_tensor=dprob_tensor,
+                generate_dbias=fc1_op.has_bias,
+                acc_dtype=torch.float32,
+                d_dtype=dtype,
+                cd_major="n",
+                act_func=self._cudnn_dact_func,
+                linear_offset=self._cudnn_linear_offset,
+                use_dynamic_sched=True,
+                current_stream=current_stream,
+                **_bf16_dgrad_weight_kwargs(fc2_op, num_groups, device, fc2_weights),
+            )
+            fc1_dy = fc2_dgrad_kernel_out["d_row_tensor"]
+            grad_scales = None
+            if not unit_activation_scale:
+                grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
+                if grad_scales is not None:
+                    grad_scales = grad_scales.to(dtype=fc1_ctx.scales_dtype)
+            fc1_dbias = None
+            if fc1_op.has_bias and fc2_dgrad_kernel_out["dbias_tensor"] is not None:
+                fc1_dbias = fc2_dgrad_kernel_out["dbias_tensor"].squeeze(-1).to(dtype=dtype)
+
+        fc1_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
+        fc1_bias_grad_packed: Optional[torch.Tensor] = None
+        if fc1_dbias is not None:
+            if fc1_op.single_grouped_bias:
+                fc1_bias_grad_packed = fc1_dbias
+            else:
+                fc1_bias_grads = [fc1_dbias[idx] for idx in range(num_groups)]
+
+        wgrad_kernel_fn = self.grouped_gemm_wgrad_kernel()
+        wgrad_offsets = (
+            split_points
+            if split_points.dtype == torch.int32
+            else split_points.to(dtype=torch.int32)
+        )
+
+        # FC2 wgrad.
+        fc2_grad_params = _compute_grad_params(
+            fc_op=fc2_op,
+            ctx=fc2_ctx,
+            num_groups=num_groups,
+            weight_shape=fc2_weight_shape,
+            grouped_x=saved_fc2_x,
+            grouped_dy=fc2_dy,
+            dtype=dtype,
+            device=device,
+            bias_grads=fc2_bias_grads,
+            bias_grad_packed=fc2_bias_grad_packed,
+            label="FC2",
+            cudnn_wgrad_kernel_fn=wgrad_kernel_fn,
+            use_nvfp4=False,
+            data_dtype=torch.bfloat16,
+            scale_view_dtype=None,
+            sf_vec_size=None,
+            offsets=wgrad_offsets,
+            use_dense_single_group=False,
+            wgrad_gemm_fn_factory=_bf16_wgrad_fn_factory(
+                weight_shape=fc2_weight_shape,
+                offsets=wgrad_offsets,
+                wgrad_kernel_fn=wgrad_kernel_fn,
+                single_grouped_weight=fc2_op.single_grouped_weight,
+                num_groups=num_groups,
+            ),
+        )
+
+        # FC1 dgrad.
+        grad_input = None
+        grad_input_buffer = getattr(fc1_ctx, "dgrad_out", None)
+        if fc1_ctx.input_requires_grad:
+            in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
+            grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
+            fc1_weights = _bf16_materialize_distributed(fc1_op, for_backward=True)
+            if not empty_batch:
+                self.grouped_gemm_kernel()(
+                    a_tensor=fc1_dy,
+                    padded_offsets=split_points,
+                    alpha_tensor=alpha_tensor,
+                    prob_tensor=_bf16_ones_prob(total_tokens, device),
+                    acc_dtype=torch.float32,
+                    c_dtype=dtype,
+                    d_dtype=dtype,
+                    d_tensor=grad_input,
+                    cd_major="n",
+                    generate_c=False,
+                    use_dynamic_sched=True,
+                    current_stream=current_stream,
+                    **_bf16_dgrad_weight_kwargs(fc1_op, num_groups, device, fc1_weights),
+                )
+
+        # FC1 wgrad.
+        fc1_grad_params = _compute_grad_params(
+            fc_op=fc1_op,
+            ctx=fc1_ctx,
+            num_groups=num_groups,
+            weight_shape=fc1_weight_shape,
+            grouped_x=saved_fc1_x,
+            grouped_dy=fc1_dy,
+            dtype=dtype,
+            device=device,
+            bias_grads=fc1_bias_grads,
+            bias_grad_packed=fc1_bias_grad_packed,
+            label="FC1",
+            cudnn_wgrad_kernel_fn=wgrad_kernel_fn,
+            use_nvfp4=False,
+            data_dtype=torch.bfloat16,
+            scale_view_dtype=None,
+            sf_vec_size=None,
+            offsets=wgrad_offsets,
+            use_dense_single_group=False,
+            wgrad_gemm_fn_factory=_bf16_wgrad_fn_factory(
+                weight_shape=fc1_weight_shape,
+                offsets=wgrad_offsets,
+                wgrad_kernel_fn=wgrad_kernel_fn,
+                single_grouped_weight=fc1_op.single_grouped_weight,
+                num_groups=num_groups,
+            ),
+        )
+
+        # Free saved activations unless a delayed wgrad still needs them.
+        for fc_op, ctx, saved in (
+            (fc1_op, fc1_ctx, saved_fc1_x),
+            (fc2_op, fc2_ctx, saved_fc2_x),
+        ):
+            if saved is None:
+                continue
+            if (
+                ctx.weight_requires_grad
+                and fc_op.wgrad_store is not None
+                and fc_op.wgrad_store.delay_wgrad_compute()
+            ):
+                continue
+            clear_tensor_data(saved)
+
+        if unit_activation_scale:
+            activation_grad_extra = (None,)
+        else:
+            activation_grad_extra = (grad_scales,) if grad_scales is not None else ()
+        # Autograd sums FC2's dscales with dprob when both use the same probs tensor.
+        fc2_grad_extra = (None, fc2_grad_scales) if fc2_op._scale_bias else (None,)
+        return (
+            grad_input,
+            [fc1_grad_params, (), fc2_grad_params],
+            [(None,), activation_grad_extra, fc2_grad_extra],
+        )
+
+
+def fuse_bf16_ops(
+    ops: list[FusibleOperation],
+    *,
+    recipe: Optional[Recipe] = None,
+    **unused,  # pylint: disable=unused-argument
+) -> list[FusibleOperation]:
+    """Apply joint BF16 GroupedLinear + scaled GLU + GroupedLinear fusion."""
+
+    # Keep capability probes out of tracing for unrelated operation sequences.
+    if recipe is not None:
+        return ops
+    if not any(
+        isinstance(fc1, GroupedLinear)
+        and is_glu_activation(activation)
+        and isinstance(fc2, GroupedLinear)
+        for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
+    ):
+        return ops
+
+    return fuse_bf16_grouped_mlp_ops(
+        ops,
+        recipe=recipe,
+        fused_op_cls=GroupedMLP_CuTeGEMMGLUBf16,
+    )
+
+
 register_forward_backward_fusion(fuse_glu_ops, prepend=True)
 register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)
+register_forward_backward_fusion(fuse_bf16_ops, prepend=True)
