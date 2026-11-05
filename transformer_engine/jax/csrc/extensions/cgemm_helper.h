@@ -49,9 +49,6 @@ class CgemmConfig : public cuda_context::FrontendResource {
     config.use_ce = _use_ce;
     config.aggregate_ag = _aggregate_ag;
     config.use_cublasmp = _use_cublasmp;
-    int device;
-    NVTE_CHECK_CUDA(cudaGetDevice(&device));
-    config.bind_context(device);
   }
 
   static CgemmConfig &get(bool is_initialized = true) {
@@ -68,8 +65,7 @@ class CgemmConfig : public cuda_context::FrontendResource {
  private:
   void release_context() override { _initialized = false; }
   void invalidate_context() noexcept override { _initialized = false; }
-  int release_order() const override { return 800; }
-  CgemmConfig() = default;
+  CgemmConfig() : FrontendResource(-1, NVTE_CUDA_STATE_RELEASE_COLLECTIVE_CONFIG) {}
   ~CgemmConfig() = default;
   bool _initialized = false;
 };
@@ -162,7 +158,6 @@ class CommunicatorHandler : public cuda_context::FrontendResource {
   void check_context_loss() const override;
   void release_context() override;
   void invalidate_context() noexcept override {}
-  int release_order() const override { return 900; }
 
   bool _initialize = false;
   int *_device_barrier = nullptr;
@@ -186,7 +181,7 @@ class CollectiveGemmPlanRegistry {
   CollectiveGemmPlanRegistry &operator=(const CollectiveGemmPlanRegistry &) = delete;
 
   struct DevicePlans : cuda_context::FrontendResource {
-    explicit DevicePlans(int device) { bind_context(device); }
+    explicit DevicePlans(int device) : FrontendResource(device) {}
     void release_context() override { plans.clear(); }
     void invalidate_context() noexcept override { plans.clear(); }
     std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plans;

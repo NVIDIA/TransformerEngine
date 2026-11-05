@@ -430,7 +430,7 @@ class TVMFFIConfigCache {
 
  private:
   struct DeviceFunctions : cuda_context::Resource {
-    explicit DeviceFunctions(int device) : device(device) { bind_context(device); }
+    explicit DeviceFunctions(int device) : cuda_context::Resource(device), device(device) {}
     void check_context_loss() const override {
       for (const auto &entry : functions) {
         NVTE_CHECK(!entry.second.has_value(),

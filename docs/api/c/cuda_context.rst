@@ -33,9 +33,11 @@ still be released.
 Live cleanup retains device affinity: callbacks for one GPU run with its existing
 primary context current, and the caller's context is restored afterward. Cleanup
 does not initialize primary contexts on unused devices. Owners spanning several
-GPUs select the appropriate devices themselves. Release runs plans before library
-handles, modules and streams. Callback errors propagate after remaining callbacks
-run; cleanup is not transactional. Finish it before resuming work after an error.
+GPUs select the appropriate devices themselves. Both operations use dependency
+phases: plans precede library handles, modules and streams. Within a phase,
+cleanup follows reverse registration order. Callback errors propagate after
+remaining callbacks run; cleanup is not transactional. Finish it before resuming
+work after an error.
 
 Reset performs a process-wide preflight before mutating resources or publishing a
 new generation. Active communication/IPC/VMM owners, CuTeDSL executors and JAX
@@ -57,13 +59,44 @@ or permit concurrent reset and TE work. Callers must discard cached TE stream an
 event handles after either operation. Pointer equality does not identify a
 resource lifetime.
 
-Bindings register through ``nvte_register_cuda_state`` and unregister through
-``nvte_unregister_cuda_state``. Registration is host-only. Its device ordinal is
+The native ``Resource`` base and the C-ABI ``FrontendResource`` adapter register
+objects automatically during base construction and unregister during destruction,
+including constructor unwinding. The caller must exclude construction and
+destruction while lifecycle callbacks run; they cannot observe partial objects.
+Cleanup affinity and priority are explicit constructor parameters, rather than
+virtual calls on an incompletely constructed derived object.
+
+Bindings use ``nvte_register_cuda_state`` and ``nvte_unregister_cuda_state``.
+Registration is host-only. Its device ordinal is
 an affinity for live cleanup, not a reset filter; ``-1`` identifies host-only or
 multi-device owners whose callbacks manage device selection. Registered addresses
 remain stable until unregistration. Check callbacks cannot mutate state;
 invalidation callbacks cannot throw. Callbacks must not register new resources
 or re-enter lifecycle APIs, but cleanup may destroy and unregister child owners.
+
+``nvte_set_cuda_state_device`` changes an existing registration's live-cleanup
+affinity without changing its original registration order. Standard dependency
+phases are named by ``NVTECudaStateReleaseOrder``; custom integer priorities remain
+supported. Reset and release both process ascending priority and reverse
+registration order within each priority. Unregistered children are skipped even
+if they were present in the lifecycle snapshot.
+
+Lazy initialization
+-------------------
+
+``LazyResource`` provides an optional ``ensure_valid(initializer)`` for library
+handles, RTC modules and context-local kernel attributes. ``InitializationState``
+serializes initialization with a mutex and a second validity check, and publishes
+success with release/acquire ordering. A throwing initializer remains invalid and
+can be retried. The fast path does not query CUDA or lock the resource registry.
+
+Initializers receive their parameters from their caller; a cache container need
+not implement a parameterless virtual initializer. Owners provide distinct live
+release and post-loss invalidation hooks. Cleanup visits partially initialized
+owners too, since an initializer may acquire resources before failing. Every
+lifecycle operation invalidates successful initialization after the owner finishes
+cleanup. Users must still stop all calls before teardown; ``ensure_valid`` does
+not make concurrent reset or destruction safe.
 
 TMA workspace recovery
 ----------------------

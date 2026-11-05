@@ -949,7 +949,7 @@ std::mutex &getScoreModGraphCacheMutex() {
 }
 
 struct ScoreModCacheLifetime : cuda_context::FrontendResource {
-  explicit ScoreModCacheLifetime(int device) : device(device) { bind_context(device); }
+  explicit ScoreModCacheLifetime(int device) : FrontendResource(device), device(device) {}
   void release_context() override {
     std::lock_guard<std::mutex> lock(getScoreModGraphCacheMutex());
     auto &cache = getScoreModeGraphCache();

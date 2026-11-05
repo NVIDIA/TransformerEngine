@@ -490,7 +490,7 @@ struct GroupSizesTransfer {
 };
 
 struct GroupSizesTransfers : cuda_context::FrontendResource {
-  explicit GroupSizesTransfers(int device) { bind_context(device); }
+  explicit GroupSizesTransfers(int device) : FrontendResource(device) {}
   std::mutex mutex;
   std::map<cudaStream_t, GroupSizesTransfer> streams;
 

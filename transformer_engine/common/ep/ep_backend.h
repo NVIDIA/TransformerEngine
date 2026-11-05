@@ -94,7 +94,7 @@ class EPBackend : public cuda_context::Resource {
   ~EPBackend();
 
  private:
-  EPBackend() = default;
+  explicit EPBackend(int device) : cuda_context::Resource(device) {}
   void check_context_loss() const override;
   void release_context() override;
   void invalidate_context() noexcept override {}
