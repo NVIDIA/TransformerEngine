@@ -64,7 +64,7 @@ def test_fa4_deterministic_backend_selection(
     monkeypatch.setattr(dpa_utils, "get_device_compute_capability", lambda device: capability)
     monkeypatch.setattr(dpa_utils, "get_cudnn_version", lambda: (9, 26, 0))
     monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "v4_is_installed", True)
-    monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "fa4_version", PkgVersion("4.0.0b24"))
+    monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "fa4_version", PkgVersion("4.0.0b33"))
     monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "v4_validate_head_dims", None)
     params = dpa_utils.AttentionParams(
         device=torch.device("cuda:0"),
