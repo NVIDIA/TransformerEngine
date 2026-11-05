@@ -62,6 +62,39 @@ def test_reused_weight_accumulates_after_first_wgrad(module_cls, uses, delay):
         assert weight._fsdp_wgrad_written
 
 
+class _TwoUses(torch.nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, x1, x2):
+        return self.module(x1) + self.module(x2)
+
+
+@pytest.mark.parametrize("module_cls", [te.Linear, te.LayerNormLinear])
+def test_reused_weight_graph_replay_overwrites_stale_main_grad(module_cls):
+    """Warmup must not leave the flag set: replay overwrites first, then accumulates."""
+    torch.manual_seed(1234)
+    fused = _build(module_cls, True, False)
+    reference = _build(module_cls, False, False)
+    reference.load_state_dict(fused.state_dict())
+    weight = fused.weight
+    weight.main_grad = torch.empty(OUT, HIDDEN, device="cuda", dtype=torch.float32)
+    _reset_main_grad(weight)
+    sample = [torch.randn(TOKENS, HIDDEN, device="cuda", dtype=torch.bfloat16) for _ in range(2)]
+    graphed = te.make_graphed_callables(_TwoUses(fused), tuple(sample))
+    for _ in range(2):
+        _reset_main_grad(weight)
+        reference.weight.grad = None
+        xs = [torch.randn(TOKENS, HIDDEN, device="cuda", dtype=torch.bfloat16) for _ in range(2)]
+        dy = torch.randn(TOKENS, OUT, device="cuda", dtype=torch.bfloat16)
+        (graphed(*xs).float() * dy.float()).sum().backward()
+        (_TwoUses(reference)(*xs).float() * dy.float()).sum().backward()
+        expected = reference.weight.grad.float()
+        atol = 8 * torch.finfo(torch.bfloat16).eps * expected.abs().max().item()
+        torch.testing.assert_close(weight.main_grad, expected, rtol=1e-2, atol=atol)
+
+
 @pytest.mark.parametrize("module_cls", [te.Linear, te.LayerNormLinear])
 def test_weight_without_flag_keeps_overwriting(module_cls):
     """A caller that never clears ``_fsdp_wgrad_written`` keeps getting overwrites across backwards."""

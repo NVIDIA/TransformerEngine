@@ -1625,6 +1625,13 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 "bulk_overlap": bwd_args.ub_bulk_wgrad,
             }
 
+            # Plain bool so a delayed wgrad closure does not keep the backward args alive.
+            overwrite_main_grad_gemm = bool(
+                origin_weight_overwrites_main_grad
+                and bwd_args.fuse_wgrad_accumulation
+                and not is_dist_weight
+            )
+
             def wgrad_gemm(
                 x: torch.Tensor,
                 dy: torch.Tensor,
@@ -1638,11 +1645,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
 
                 """
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                if (
-                    origin_weight_overwrites_main_grad
-                    and bwd_args.fuse_wgrad_accumulation
-                    and not is_dist_weight
-                ):
+                if overwrite_main_grad_gemm:
                     dw, db, *_ = overwrite_main_grad_wgrad_gemm(
                         origin_weight_ref,
                         lambda accumulate: general_gemm(
@@ -2002,9 +2005,12 @@ class Linear(TransformerEngineBaseModule):
                              regular ``grad``) which is a pre-allocated buffer of the correct
                              size to accumulate gradients in. This argument along with
                              weight tensor having attribute 'overwrite_main_grad' set to True
-                             will overwrite ``main_grad`` instead of accumulating, until the
-                             weight's ``_fsdp_wgrad_written`` attribute is set; TE sets it after
-                             each such GEMM and the caller clears it once it consumes ``main_grad``.
+                             will overwrite ``main_grad`` instead of accumulating. To let a
+                             weight used more than once per backward accumulate its later wgrads,
+                             the caller sets ``weight._fsdp_wgrad_written = False`` before the
+                             backward and again after consuming ``main_grad``; TE sets it to True
+                             after each wgrad GEMM and accumulates while it is True. Without the
+                             attribute every wgrad overwrites.
     return_bias : bool, default = False
                  when set to ``True``, this module will not apply the additive bias itself, but
                  instead return the bias value during the forward pass together with the

@@ -709,6 +709,13 @@ def _make_graphed_callables(
             post_warmup_hook()
     torch.cuda.synchronize()
 
+    # Warmup backwards leave _fsdp_wgrad_written set. Clear it so the captured backward overwrites
+    # main_grad on its first fused wgrad (see overwrite_main_grad_wgrad_gemm).
+    for module_params in per_callable_module_params:
+        for param in module_params:
+            if getattr(param, "_fsdp_wgrad_written", None) is not None:
+                param._fsdp_wgrad_written = False
+
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
     # the safest approach is to capture all passes in the same order they'll run:
     # fwd 1, fwd 2, ... fwd N, then bwd N, bwd N-1, ... bwd 1.
