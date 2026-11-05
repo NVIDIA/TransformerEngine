@@ -36,6 +36,21 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<Tenso
 std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_unchecked(
     std::vector<TensorWrapper>& tensors, bool rowwise_usage, bool columnwise_usage);
 
+/*! \brief View of a GEMM-swizzled output whose scales are written to compact scratch buffers. */
+TensorWrapper make_compact_output_view(const TensorWrapper& output, at::Tensor& rowwise_scales,
+                                       at::Tensor& columnwise_scales, bool preserve_scales = false);
+
+/*! \brief Output views with compact scratch scales where compact_scales is set. */
+std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWrapper>& outputs,
+                                                     const std::vector<bool>& compact_scales,
+                                                     std::vector<at::Tensor>& scratch);
+
+/*! \brief Swizzle compact scales into the scale buffers of a GEMM-swizzled output. */
+void swizzle_scales_into(const TensorWrapper& input, const TensorWrapper& output);
+
+void multi_tensor_swizzle_scales_into(const std::vector<TensorWrapper>& inputs,
+                                      const std::vector<TensorWrapper>& outputs);
+
 using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>;
 
 /*! \brief Swizzle grouped tensor scales for GEMM if needed.

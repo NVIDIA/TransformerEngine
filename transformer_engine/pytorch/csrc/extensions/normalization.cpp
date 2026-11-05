@@ -7,6 +7,7 @@
 #include "../extensions.h"
 #include "common/util/system.h"
 #include "pybind.h"
+#include "util.h"
 
 namespace transformer_engine::pytorch {
 

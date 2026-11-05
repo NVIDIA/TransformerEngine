@@ -10,9 +10,9 @@
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
-#include "extensions.h"
 #include "pybind.h"
 #include "torch/torch.h"
+#include "util.h"
 
 namespace transformer_engine::pytorch {
 

@@ -728,14 +728,6 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
-TensorWrapper make_compact_output_view(const TensorWrapper &output, at::Tensor &rowwise_scales,
-                                       at::Tensor &columnwise_scales, bool preserve_scales = false);
-std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWrapper> &outputs,
-                                                     std::vector<at::Tensor> &scratch);
-void swizzle_scales_into(const TensorWrapper &input, const TensorWrapper &output);
-void multi_tensor_swizzle_scales_into(const std::vector<TensorWrapper> &inputs,
-                                      const std::vector<TensorWrapper> &outputs);
-
 void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tensors,
                                                   bool rowwise_usage, bool columnwise_usage);
 

@@ -27,6 +27,7 @@
 #include "transformer_engine/multi_tensor.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
+#include "util.h"
 
 namespace transformer_engine {
 namespace pytorch {
@@ -36,6 +37,29 @@ namespace {
 std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   const auto &shape = tensor.shape();
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
+}
+
+bool needs_compact_scales(const Quantizer &quantizer, const TensorWrapper &input) {
+  if (!quantizer.optimize_for_gemm || input.numel() == 0 ||
+      quantizer.get_scaling_mode() != NVTE_NVFP4_1D_SCALING) {
+    return false;
+  }
+  return !static_cast<const NVFP4Quantizer &>(quantizer).emits_gemm_swizzled_scales(
+      get_tensor_shape(input));
+}
+
+// Compact-scale outputs are quantized into scratch and swizzled with one kernel
+template <typename QuantizeFn>
+void quantize_with_batched_swizzle(std::vector<TensorWrapper> &outputs,
+                                   const std::vector<bool> &compact_scales, QuantizeFn &&quantize) {
+  if (std::none_of(compact_scales.begin(), compact_scales.end(), [](bool b) { return b; })) {
+    quantize(outputs);
+    return;
+  }
+  std::vector<at::Tensor> scratch;
+  auto kernel_outputs = make_compact_output_views(outputs, compact_scales, scratch);
+  quantize(kernel_outputs);
+  multi_tensor_swizzle_scales_into(kernel_outputs, outputs);
 }
 
 void allreduce_nvfp4_amax_tensors(NVFP4Quantizer *nvfp4_quantizer_cpp,
@@ -1154,7 +1178,13 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
   }
 
   // Perform multi-tensor quantization
-  multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+  std::vector<bool> compact_scales(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    compact_scales[i] = needs_compact_scales(*quantizer_cpp_list[i], input_cpp_list[i]);
+  }
+  quantize_with_batched_swizzle(output_cpp_list, compact_scales, [&](auto &outputs) {
+    multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, outputs);
+  });
 
   return output_py_list;
 }
@@ -2236,21 +2266,27 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
             return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(get_tensor_shape(input),
                                                                    /*for_grouped_kernel=*/true);
           });
-      if (quantizer.optimize_for_gemm && !emits_gemm_swizzled_scales) {
-        std::vector<at::Tensor> scratch;
-        auto compact_outputs = make_compact_output_views(output_cpp_list, scratch);
-        split_quantize_nvfp4_impl(input_nvte, input_list, compact_outputs, split_sections,
-                                  nvfp4_quantizers);
-        multi_tensor_swizzle_scales_into(compact_outputs, output_cpp_list);
-      } else {
-        split_quantize_nvfp4_impl(input_nvte, input_list, output_cpp_list, split_sections,
-                                  nvfp4_quantizers);
+      std::vector<bool> compact_scales(num_splits);
+      for (size_t i = 0; i < num_splits; ++i) {
+        compact_scales[i] = quantizer.optimize_for_gemm && !emits_gemm_swizzled_scales &&
+                            input_list[i].numel() != 0;
       }
+      quantize_with_batched_swizzle(output_cpp_list, compact_scales, [&](auto &outputs) {
+        split_quantize_nvfp4_impl(input_nvte, input_list, outputs, split_sections,
+                                  nvfp4_quantizers);
+      });
       break;
     }
-    default:
+    default: {
       // General multi-tensor quantization
-      multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+      std::vector<bool> compact_scales(num_splits);
+      for (size_t i = 0; i < num_splits; ++i) {
+        compact_scales[i] = needs_compact_scales(*quantizer_cpp_list[i], input_list[i]);
+      }
+      quantize_with_batched_swizzle(output_cpp_list, compact_scales, [&](auto &outputs) {
+        multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, outputs);
+      });
+    }
   }
 
   return output_py_list;

@@ -111,7 +111,9 @@ void swizzle_scales_into(const TensorWrapper &input, const TensorWrapper &output
 }
 
 std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWrapper> &outputs,
+                                                     const std::vector<bool> &compact_scales,
                                                      std::vector<at::Tensor> &scratch) {
+  NVTE_CHECK(outputs.size() == compact_scales.size(), "Mismatched output layouts");
   scratch.resize(2 * outputs.size());
   for (bool rowwise : {true, false}) {
     std::vector<std::vector<size_t>> shapes;
@@ -119,7 +121,7 @@ std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWra
     for (size_t i = 0; i < outputs.size(); ++i) {
       const auto scales =
           rowwise ? outputs[i].get_rowwise_scale_inv() : outputs[i].get_columnwise_scale_inv();
-      if (scales.data_ptr != nullptr) {
+      if (compact_scales[i] && scales.data_ptr != nullptr) {
         shapes.emplace_back(scales.shape.data, scales.shape.data + scales.shape.ndim);
         indices.push_back(i);
       }
@@ -134,7 +136,9 @@ std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWra
   std::vector<TensorWrapper> views;
   views.reserve(outputs.size());
   for (size_t i = 0; i < outputs.size(); ++i) {
-    views.emplace_back(make_compact_output_view(outputs[i], scratch[2 * i], scratch[2 * i + 1]));
+    views.emplace_back(compact_scales[i] ? make_compact_output_view(outputs[i], scratch[2 * i],
+                                                                    scratch[2 * i + 1])
+                                         : copy_tensor_view(outputs[i]));
   }
   return views;
 }
