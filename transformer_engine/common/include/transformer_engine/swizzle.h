@@ -31,6 +31,22 @@ extern "C" {
  */
 void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Swizzling scaling factors into the required interleaved layout for GEMM,
+ *         unless the noop flag is set.
+ *
+ *  Same as nvte_swizzle_scaling_factors, but the kernels return without writing
+ *  ``output`` when ``noop`` holds 1.0. The flag is read on the device, so the
+ *  decision can change between CUDA graph replays.
+ *
+ *  \param[in]     input        Input tensor with non-swizzled scale_inv.
+ *  \param[in,out] output       Output tensor which hosts swizzled scale_inv.
+ *  \param[in]     noop         Single FP32 value; skip the swizzle if it equals 1.0.
+ *                              May be an empty tensor, in which case the swizzle always runs.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ */
+void nvte_swizzle_scaling_factors_noop(const NVTETensor input, NVTETensor output,
+                                       const NVTETensor noop, cudaStream_t stream);
+
 /*! \brief Swizzling scaling factors into the required interleaved layout for GEMM
  *
  *  \param[in]     inputs                  Input tensors with non-swizzled scale_inv.

@@ -458,10 +458,87 @@ void performTestGroupedSwizzleMXFP8(const int num_tensors, const size_t M, const
                  num_tensors * col_numel);
 }
 
+// nvte_swizzle_scaling_factors_noop leaves the output untouched when noop holds 1 and
+// matches the reference swizzle when it holds 0.
+void performTestSwizzle1DNoop(const int num_tiles_M, const int num_tiles_K, const bool rowwise) {
+  using namespace test;
+
+  const int SF_MODE_X = rowwise ? 1 : 32;
+  const int SF_MODE_Y = rowwise ? 32 : 1;
+  const size_t M = num_tiles_M * MAT_TILE_DIM_M;
+  const size_t K = num_tiles_K * MAT_TILE_DIM_K;
+  const auto data_shape = std::vector<size_t>{M, K};
+  const auto scale_shape =
+      std::vector<size_t>{data_shape[0] / SF_MODE_X, data_shape[1] / SF_MODE_Y};
+  const size_t num_scales = scale_shape[0] * scale_shape[1];
+
+  Tensor input("input", data_shape, DType::kFloat8E4M3, rowwise, !rowwise, NVTE_MXFP8_1D_SCALING);
+  Tensor output("output", data_shape, DType::kFloat8E4M3, rowwise, !rowwise, NVTE_MXFP8_1D_SCALING);
+  output.set_with_gemm_swizzled_scales(true);
+  fillUniform(&input);
+  fillUniform(&output);
+  output.to_cpu();
+  auto output_scales = [&]() {
+    return rowwise ? output.rowwise_cpu_scale_inv_ptr<uint8_t>()
+                   : output.columnwise_cpu_scale_inv_ptr<uint8_t>();
+  };
+  std::vector<uint8_t> before(output_scales(), output_scales() + num_scales);
+
+  Tensor noop("noop", std::vector<size_t>{1}, DType::kFloat32);
+  auto set_noop = [&](float value) {
+    ASSERT_EQ(cudaMemcpy(noop.rowwise_dptr(), &value, sizeof(float), cudaMemcpyHostToDevice),
+              cudaSuccess);
+  };
+
+  set_noop(1.0f);
+  nvte_swizzle_scaling_factors_noop(input.data(), output.data(), noop.data(), 0);
+  cudaDeviceSynchronize();
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+  output.to_cpu();
+  compareResults("output_noop", output_scales(), before.data(), num_scales);
+
+  set_noop(0.0f);
+  nvte_swizzle_scaling_factors_noop(input.data(), output.data(), noop.data(), 0);
+  cudaDeviceSynchronize();
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+  output.to_cpu();
+  std::unique_ptr<uint8_t[]> ref_output = std::make_unique<uint8_t[]>(num_scales);
+  if (rowwise) {
+    compute_ref_swizzle<128, 4, true>(input.rowwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(),
+                                      scale_shape[0], scale_shape[1]);
+  } else {
+    compute_ref_swizzle<128, 4, false>(input.columnwise_cpu_scale_inv_ptr<uint8_t>(),
+                                       ref_output.get(), scale_shape[1], scale_shape[0]);
+  }
+  compareResults("output_swizzle", output_scales(), ref_output.get(), num_scales);
+}
+
 class SwizzleTestSuite
     : public ::testing::TestWithParam<
           std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool>> {};
 
+class SwizzleNoopTestSuite
+    : public ::testing::TestWithParam<std::tuple<std::pair<int, int>, bool>> {};
+
+TEST_P(SwizzleNoopTestSuite, TestSwizzleNoop) {
+  const auto num_tiles = std::get<0>(GetParam());
+  performTestSwizzle1DNoop(num_tiles.first, num_tiles.second, std::get<1>(GetParam()));
+}
+
+// The shapes cover the narrow (full-width) and wide row-wise kernels, and grids large
+// enough to go through the multi-tensor launchers.
+INSTANTIATE_TEST_SUITE_P(OperatorTest, SwizzleNoopTestSuite,
+                         ::testing::Combine(::testing::Values(std::make_pair(1, 1),
+                                                              std::make_pair(4, 8),
+                                                              std::make_pair(16, 3),
+                                                              std::make_pair(2, 64),
+                                                              std::make_pair(256, 4)),
+                                            ::testing::Values(true, false)),
+                         [](const testing::TestParamInfo<SwizzleNoopTestSuite::ParamType>& info) {
+                           return "ntiles" + std::to_string(std::get<0>(info.param).first) + "X" +
+                                  std::to_string(std::get<0>(info.param).second) +
+                                  (std::get<1>(info.param) ? "Rowwise" : "Colwise");
+                         });
 
 TEST_P(SwizzleTestSuite, TestSwizzle) {
     using namespace transformer_engine;

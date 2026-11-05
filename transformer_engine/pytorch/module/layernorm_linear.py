@@ -2047,7 +2047,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                              When set, this parameter enables additional optimizations:
 
                              * during FP8 training, it allows caching of the FP8 versions of
-                               the weights
+                               the weights; for weights that are already quantized (e.g. from
+                               ``quantized_model_init``) with MXFP8 or NVFP4 scales, it allows
+                               caching of the GEMM-swizzled scales
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)

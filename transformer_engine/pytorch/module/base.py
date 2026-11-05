@@ -907,6 +907,93 @@ def _is_weight_workspace_valid(
     return True
 
 
+def _needs_gemm_view(tensor: QuantizedTensor) -> bool:
+    """Whether a primary quantized weight keeps compact scales that each GEMM would swizzle."""
+    return (
+        isinstance(tensor, (MXFP8TensorStorage, NVFP4TensorStorage))
+        and not tensor._with_gemm_swizzled_scales
+    )
+
+
+def _make_gemm_view(tensor: QuantizedTensor) -> QuantizedTensor:
+    """Build a view of ``tensor`` that shares its data and owns GEMM-swizzled scale buffers.
+
+    The parameter keeps its compact scales, which all-gather, dequantization and
+    checkpointing expect. The scale buffers are filled by ``tex.swizzle_scales_into_``.
+    """
+    kwargs = tensor.get_metadata()
+    for key in ("rowwise_scale_inv", "columnwise_scale_inv"):
+        if kwargs[key] is not None:
+            kwargs[key] = torch.empty_like(kwargs[key])
+    kwargs["with_gemm_swizzled_scales"] = True
+    return type(tensor)(
+        shape=tensor.shape,
+        dtype=tensor.dtype,
+        requires_grad=False,
+        device=tensor.device,
+        **kwargs,
+    )
+
+
+def _is_gemm_view_valid(view: Optional[QuantizedTensorStorage], tensor: QuantizedTensor) -> bool:
+    """Whether a cached GEMM view still describes ``tensor``'s current buffers."""
+    if type(view) is not type(tensor) or view.shape != tensor.shape:
+        return False
+    if not view._with_gemm_swizzled_scales:
+        return False
+    for data_attr, scale_attr in (
+        ("_rowwise_data", "_rowwise_scale_inv"),
+        ("_columnwise_data", "_columnwise_scale_inv"),
+    ):
+        data, view_data = getattr(tensor, data_attr), getattr(view, data_attr)
+        if (data is None) != (view_data is None):
+            return False
+        if data is not None and data.data_ptr() != view_data.data_ptr():
+            return False
+        scales, view_scales = getattr(tensor, scale_attr), getattr(view, scale_attr)
+        if data is not None and (view_scales is None or scales.numel() != view_scales.numel()):
+            return False
+    return True
+
+
+_warned_gemm_view_miss_in_capture = False
+
+
+def _get_gemm_view(
+    tensor: QuantizedTensor,
+    view: Optional[QuantizedTensorStorage],
+    update_view: bool,
+    skip_update_flag: Optional[torch.Tensor],
+) -> Tuple[QuantizedTensor, Optional[QuantizedTensor]]:
+    """Return the cached GEMM view of a primary quantized weight, refreshing it if needed.
+
+    The view is refreshed when the caller signals that the weight may have changed
+    (``update_view``, i.e. the first micro-batch). Under CUDA graphs the refresh is
+    recorded on every capture and skipped on the device when ``skip_update_flag``
+    holds 1. Refreshes write into the existing buffers, so captured graphs stay valid.
+    """
+    global _warned_gemm_view_miss_in_capture
+    if not _is_gemm_view_valid(view, tensor):
+        if torch.cuda.is_current_stream_capturing():
+            # Never keep an allocation made during capture; fall back to swizzling in the GEMM.
+            if not _warned_gemm_view_miss_in_capture:
+                warnings.warn(
+                    "Swizzled-scale cache for a quantized weight was not built before CUDA graph"
+                    " capture; the captured GEMMs swizzle the weight scales on every replay. Run a"
+                    " warmup iteration with is_first_microbatch set before capturing."
+                )
+                _warned_gemm_view_miss_in_capture = True
+            return tensor, None
+        view = _make_gemm_view(tensor)
+        tex.swizzle_scales_into_(tensor, view)
+        return view, view
+    if skip_update_flag is not None:
+        tex.swizzle_scales_into_(tensor, view, skip_update_flag)
+    elif update_view:
+        tex.swizzle_scales_into_(tensor, view)
+    return view, None
+
+
 def quantize_weight(
     *,
     tensor: Optional[torch.Tensor] = None,
@@ -939,7 +1026,10 @@ def quantize_weight(
         High-precision dtype for debug quantization workspaces.
     cache: bool, default = False
         If ``True`` and a new workspace is created, it will be returned
-        as the second element so the caller can store it.
+        as the second element so the caller can store it. For a primary
+        MXFP8/NVFP4 weight with compact scales, the workspace is a view
+        that shares the weight's data and holds GEMM-swizzled scales; it is
+        refreshed under the same rules as a quantized workspace.
 
     Returns
     -------
@@ -960,7 +1050,10 @@ def quantize_weight(
         )
         if isinstance(quantizer, DebugQuantizer):
             tensor = quantizer.wrap_quantized_tensor(tensor)
-        return tensor, None
+            return tensor, None
+        if not cache or fsdp_group is not None or not _needs_gemm_view(tensor):
+            return tensor, None
+        return _get_gemm_view(tensor, workspace, update_workspace, skip_update_flag)
 
     # Validate workspace
     if workspace is not None and quantizer is not None:

@@ -727,6 +727,66 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::obje
                                                     /*check_scale_inv_shapes=*/false);
 }
 
+void swizzle_scales_into(py::handle src, py::handle dst, std::optional<at::Tensor> noop) {
+  auto src_nvte = makeTransformerEngineTensor(src, py::none());
+  auto dst_nvte = makeTransformerEngineTensor(dst, py::none());
+  const auto scaling_mode = src_nvte.scaling_mode();
+  NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING,
+             "swizzle_scales_into only supports MXFP8 and NVFP4 tensors.");
+  NVTE_CHECK(dst_nvte.scaling_mode() == scaling_mode,
+             "Source and destination scaling modes differ.");
+  NVTE_CHECK(!src_nvte.get_with_gemm_swizzled_scales(),
+             "Expected source tensor with scales in compact format.");
+  NVTE_CHECK(dst_nvte.get_with_gemm_swizzled_scales(),
+             "Expected destination tensor with scales in GEMM swizzled format.");
+
+  auto is_empty = [](const NVTEBasicTensor &t) -> bool {
+    return t.shape.ndim == 1 && t.shape.data[0] == 0;
+  };
+  TensorWrapper noop_nvte;
+  if (noop.has_value()) {
+    noop_nvte = makeTransformerEngineTensor(*noop);
+  }
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  // Swizzle one orientation from src's compact buffer into dst's preallocated buffer
+  for (const bool rowwise : {true, false}) {
+    const auto in_scales =
+        rowwise ? src_nvte.get_rowwise_scale_inv() : src_nvte.get_columnwise_scale_inv();
+    if (is_empty(in_scales)) {
+      continue;
+    }
+    const auto out_scales =
+        rowwise ? dst_nvte.get_rowwise_scale_inv() : dst_nvte.get_columnwise_scale_inv();
+    NVTE_CHECK(!is_empty(out_scales), "Destination tensor is missing ",
+               rowwise ? "row-wise" : "column-wise", " scaling factors.");
+    NVTE_CHECK(product(in_scales.shape, 0, in_scales.shape.ndim) ==
+                   product(out_scales.shape, 0, out_scales.shape.ndim),
+               "Source and destination scaling factors have different sizes.");
+    const auto data = rowwise ? src_nvte.get_rowwise_data() : src_nvte.get_columnwise_data();
+    const auto data_dtype = static_cast<DType>(data.dtype);
+    const auto scales_dtype = static_cast<DType>(in_scales.dtype);
+    TensorWrapper input_nvte(scaling_mode);
+    TensorWrapper output_nvte(scaling_mode);
+    if (rowwise) {
+      input_nvte.set_rowwise_data(nullptr, data_dtype, data.shape);
+      input_nvte.set_rowwise_scale_inv(in_scales.data_ptr, scales_dtype, in_scales.shape);
+      output_nvte.set_rowwise_data(nullptr, data_dtype, data.shape);
+      output_nvte.set_rowwise_scale_inv(out_scales.data_ptr, scales_dtype, in_scales.shape);
+    } else {
+      input_nvte.set_columnwise_data(nullptr, data_dtype, data.shape);
+      input_nvte.set_columnwise_scale_inv(in_scales.data_ptr, scales_dtype, in_scales.shape);
+      output_nvte.set_columnwise_data(nullptr, data_dtype, data.shape);
+      output_nvte.set_columnwise_scale_inv(out_scales.data_ptr, scales_dtype, in_scales.shape);
+    }
+    output_nvte.set_with_gemm_swizzled_scales(true);
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_swizzle_scaling_factors_noop(input_nvte.data(), output_nvte.data(), noop_nvte.data(),
+                                        stream);
+    });
+  }
+}
+
 void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   // Convert Python tensor to C++ tensor
   auto tensor_nvte = makeTransformerEngineTensor(tensor, py::none());

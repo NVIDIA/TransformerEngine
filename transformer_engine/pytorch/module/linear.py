@@ -2383,7 +2383,9 @@ class Linear(TransformerEngineBaseModule):
                              When set, this parameter enables additional optimizations:
 
                              * during FP8 training, it allows caching of the FP8 versions of
-                               the weights
+                               the weights; for weights that are already quantized (e.g. from
+                               ``quantized_model_init``) with MXFP8 or NVFP4 scales, it allows
+                               caching of the GEMM-swizzled scales
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
@@ -2465,6 +2467,10 @@ class Linear(TransformerEngineBaseModule):
                         set_quantizer_amax_reduction_group(quantizer, None)
 
             cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
+            if use_compiled_op and isinstance(weight_tensor, QuantizedTensor):
+                # The compiled op reuses a primary quantized weight as-is; its GEMMs keep
+                # swizzling the compact scales instead of using the cached swizzled view.
+                cache_name = None
             # A compiled refresh must not pass the old cache into the functional op.
             weight_workspace = None
             if cache_name is not None and not (use_compiled_op and is_first_microbatch):
