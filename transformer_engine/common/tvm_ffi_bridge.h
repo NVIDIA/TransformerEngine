@@ -33,7 +33,15 @@
 namespace transformer_engine {
 namespace tvm_ffi_bridge {
 
-bool initialize_python_cutedsl_backend();
+// Path of libtvm_ffi.so in the Python environment that compiles CuTeDSL kernels, or "" if unknown.
+std::string find_tvm_ffi_library();
+
+// Compile a CuTeDSL kernel in a separate Python process by calling `entrypoint(*args)` from
+// transformer_engine.common.CuTeDSL, export it as a shared library under `name`, and load it.
+// Returns std::nullopt if the config is unsupported or compilation fails.
+std::optional<tvm::ffi::Function> compile_and_load_kernel(const std::string &entrypoint,
+                                                          const std::string &name,
+                                                          const std::vector<std::string> &args);
 
 inline DLDataType convert_to_dltype(NVTEDType type) {
   switch (type) {
@@ -184,13 +192,15 @@ namespace transformer_engine {
 namespace tvm_ffi_bridge {
 
 // Compile-time check that a config provides the lazy-loadable kernel API:
-//   - std::string to_key() const
-// Builds the globally unique TVM-FFI registry key used when Python compiles and
-// registers the CuTeDSL function. The cache itself may use a different key.
+//   - static constexpr const char *kEntrypointName
+// The kernel factory in transformer_engine.common.CuTeDSL that compiles this config.
 //
-//   - bool retrieve_func_from_python(const std::string& key) const
-// This compiles + globally registers the kernel under `key`; returns whether
-// a kernel is now registered / the config is supported
+//   - std::string to_key() const
+// The unique name the compiled kernel is exported and loaded under. The cache itself may use a
+// different key.
+//
+//   - std::vector<std::string> compile_args() const
+// The entrypoint's positional arguments, as strings; JSON literals (true, 12, ...) are decoded.
 //
 //   - std::optional<tvm::ffi::Function> get_kernel() const
 // Retrieves the possibly cached function. If the config provides a
@@ -219,8 +229,9 @@ template <typename T>
 struct is_lazyloadable_config<
     T, std::void_t<
            std::enable_if_t<std::is_same<decltype(&T::to_key), std::string (T::*)() const>::value>,
-           std::enable_if_t<std::is_same<decltype(&T::retrieve_func_from_python),
-                                         bool (T::*)(const std::string &) const>::value>,
+           std::enable_if_t<std::is_convertible<decltype(T::kEntrypointName), const char *>::value>,
+           std::enable_if_t<std::is_same<decltype(&T::compile_args),
+                                         std::vector<std::string> (T::*)() const>::value>,
            std::enable_if_t<std::is_same<decltype(&T::get_kernel),
                                          std::optional<tvm::ffi::Function> (T::*)() const>::value>>>
     : std::true_type {};
@@ -236,8 +247,8 @@ class TVMFFICentral {
   template <typename Config>
   std::optional<tvm::ffi::Function> load_tvm_ffi_function(const Config &cfg) {
     static_assert(detail::is_lazyloadable_config<Config>::value,
-                  "Config must define `std::string to_key() const`, "
-                  "`bool retrieve_func_from_python(const std::string&) const`, "
+                  "Config must define `kEntrypointName`, `std::string to_key() const`, "
+                  "`std::vector<std::string> compile_args() const`, "
                   "and `std::optional<tvm::ffi::Function> get_kernel() const`.");
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
       maybe_warn_not_chosen(
@@ -259,9 +270,9 @@ class TVMFFICentral {
     }
     const std::string key = cfg.to_key();
     std::optional<tvm::ffi::Function> fn =
-        cfg.retrieve_func_from_python(key) ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
+        compile_and_load_kernel(Config::kEntrypointName, key, cfg.compile_args());
     if (!fn) {
-      maybe_warn_not_chosen("no TVM-FFI kernel is registered for config `", key, "`.");
+      maybe_warn_not_chosen("no CuTeDSL kernel could be compiled for config `", key, "`.");
     }
     return fn;
   }
@@ -302,6 +313,10 @@ class TVMFFICentral {
 
   void move_error(TVMFFIObjectHandle *result) const noexcept { move_error_(result); }
 
+  const TVMFFITypeInfo *get_type_info(int32_t type_index) const noexcept {
+    return get_type_info_(type_index);
+  }
+
   // Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
   template <typename... Args>
   void maybe_warn_not_chosen(const Args &...reason) const {
@@ -320,12 +335,17 @@ class TVMFFICentral {
   }
 
   bool prepare_tvm_ffi() {
-    if (!get_cutedsl_backend_enabled() || !initialize_python_cutedsl_backend()) {
+    if (!get_cutedsl_backend_enabled()) {
       return false;
     }
+    // Keep the library open for the lifetime of cached tvm::ffi::Function objects. It is found by
+    // name if TE's Python package already loaded it, and otherwise located through Python.
     if (tvm_ffi_handle_ == nullptr) {
-      // Keep the library open for the lifetime of cached tvm::ffi::Function objects.
       tvm_ffi_handle_ = dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL);
+    }
+    if (tvm_ffi_handle_ == nullptr) {
+      const std::string path = find_tvm_ffi_library();
+      if (!path.empty()) tvm_ffi_handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
     }
     if (tvm_ffi_handle_ == nullptr) {
       NVTE_WARN(
@@ -338,7 +358,8 @@ class TVMFFICentral {
     get_global_ = reinterpret_cast<GetGlobalFn>(dlsym(tvm_ffi_handle_, "TVMFFIFunctionGetGlobal"));
     move_error_ =
         reinterpret_cast<MoveErrorFn>(dlsym(tvm_ffi_handle_, "TVMFFIErrorMoveFromRaised"));
-    if (get_global_ == nullptr || move_error_ == nullptr) {
+    get_type_info_ = reinterpret_cast<GetTypeInfoFn>(dlsym(tvm_ffi_handle_, "TVMFFIGetTypeInfo"));
+    if (get_global_ == nullptr || move_error_ == nullptr || get_type_info_ == nullptr) {
       NVTE_WARN(
           "The CuTeDSL kernel is not chosen because the TVM-FFI library could not be loaded.");
       return false;
@@ -369,9 +390,11 @@ class TVMFFICentral {
   // These are symbols dynamically loaded from TVM-FFI
   using GetGlobalFn = decltype(&::TVMFFIFunctionGetGlobal);
   using MoveErrorFn = decltype(&::TVMFFIErrorMoveFromRaised);
+  using GetTypeInfoFn = decltype(&::TVMFFIGetTypeInfo);
 
   GetGlobalFn get_global_ = nullptr;
   MoveErrorFn move_error_ = nullptr;
+  GetTypeInfoFn get_type_info_ = nullptr;
 };
 
 // A utility class that each Config struct can use to cache the registered TVM-FFI functions
@@ -394,7 +417,7 @@ class TVMFFIConfigCache {
     if (!central.get_cutedsl_backend_enabled()) {
       return central.load_tvm_ffi_function(cfg);
     }
-    // Otherwise try the cache first, and ask Python to compile/register the kernel if not found.
+    // Otherwise try the cache first, and compile and load the kernel if not found.
     const uint32_t id = cfg.to_id();
     {
       std::shared_lock<std::shared_mutex> read_lock(mutex_);
@@ -435,8 +458,9 @@ inline void maybe_warn_cutedsl_not_chosen(const Args &...reason) {
 }  // namespace tvm_ffi_bridge
 }  // namespace transformer_engine
 
-// In tvm/ffi/function.h, tvm::ffi::Function::GetGlobal references these two symbols,
-// which need to be dynamically loaded from libtvm_ffi.so and forwarded to TVMFFICentral.
+// TVM-FFI's C++ wrappers (Function::GetGlobal, error handling, and casts to object types) reference
+// these symbols, which need to be dynamically loaded from libtvm_ffi.so and forwarded to
+// TVMFFICentral.
 extern "C" inline int TVMFFIFunctionGetGlobal(const TVMFFIByteArray *name,
                                               TVMFFIObjectHandle *out) {
   return transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().get_global(name, out);
@@ -444,6 +468,10 @@ extern "C" inline int TVMFFIFunctionGetGlobal(const TVMFFIByteArray *name,
 
 extern "C" inline void TVMFFIErrorMoveFromRaised(TVMFFIObjectHandle *result) {
   transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().move_error(result);
+}
+
+extern "C" inline const TVMFFITypeInfo *TVMFFIGetTypeInfo(int32_t type_index) {
+  return transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().get_type_info(type_index);
 }
 
 #endif  // TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_

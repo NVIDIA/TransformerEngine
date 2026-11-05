@@ -16,7 +16,7 @@ import textwrap
 import pytest
 import torch
 
-tvm_ffi = pytest.importorskip("tvm_ffi")
+pytest.importorskip("tvm_ffi")
 pytest.importorskip("cutlass")
 
 import transformer_engine.pytorch as te
@@ -136,19 +136,32 @@ def set_cutedsl_backend(enabled):
     CORE_LIB.nvte_set_cutedsl_backend(1 if enabled else 0)
 
 
+def cutedsl_kernel_loaded(key):
+    """Whether the C++ dispatcher has loaded the CuTeDSL kernel library exported under `key`."""
+    with open("/proc/self/maps", encoding="utf-8") as maps:
+        return f"/{key}.so" in maps.read()
+
+
 def test_enable_cutedsl_backend_after_import():
     """Test if we can manually enable the CuTeDSL backend without enabling CuTeDSL backend in the beginning."""
-    script = textwrap.dedent(
-        """
+    script = textwrap.dedent("""
         import ctypes
 
+        import torch
         import transformer_engine.pytorch  # pylint: disable=unused-import
-        import tvm_ffi
+        from transformer_engine.pytorch import MXFP8Quantizer
+        import transformer_engine_torch as tex
 
         from transformer_engine.common import _get_shared_object_file
 
-        entrypoint = "get_mxfp8_quantization_function"
-        assert tvm_ffi.get_global_func(entrypoint, allow_missing=True) is None
+        def cutedsl_kernel_loaded():
+            with open("/proc/self/maps", encoding="utf-8") as maps:
+                return "/cutedsl_mxfp8_" in maps.read()
+
+        x = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer(x)
+        assert not cutedsl_kernel_loaded()
 
         core = ctypes.CDLL(str(_get_shared_object_file("core")))
         setter = core.nvte_set_cutedsl_backend
@@ -156,9 +169,9 @@ def test_enable_cutedsl_backend_after_import():
         setter.restype = None
         setter(1)
 
-        assert tvm_ffi.get_global_func(entrypoint, allow_missing=True) is not None
-        """
-    )
+        quantizer(x)
+        assert cutedsl_kernel_loaded()
+        """)
     env = os.environ.copy()
     env["NVTE_ENABLE_CUTEDSL_BACKEND"] = "0"
     result = subprocess.run(
@@ -216,8 +229,8 @@ def run_quantize(method, act, x, ain, rowwise, columnwise, fp8_dtype, swizzled):
 
 
 def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
-    """Mirror of MXFP8QuantConfig::to_key (quantize_mxfp8_cutedsl.cuh): the name the CuTeDSL backend registers its compiled kernel under for this config.
-    Used to check if the CuTeDSL implementation is registered
+    """Mirror of MXFP8QuantConfig::to_key (quantize_mxfp8_cutedsl.cuh): the name the CuTeDSL backend exports its compiled kernel under for this config.
+    Used to check if the CuTeDSL implementation is loaded
     """
     with_dbias = method in ("CAST_DBIAS", "CAST_DBIAS_DACT")
     with_dact = method in ("CAST_DACT", "CAST_DBIAS_DACT")
@@ -292,12 +305,12 @@ def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=
         set_cutedsl_backend(False)
 
     # Guard against a silent CUDA fallback: every config in the matrix is one the
-    # CuTeDSL backend supports, so its kernel must have been registered under the
+    # CuTeDSL backend supports, so its kernel must have been loaded under the
     # config key. If not, the backend rejected or missed the config and the
     # comparison above was CUDA vs CUDA.
     key = get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, columnwise, swizzled)
-    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
-        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+    assert cutedsl_kernel_loaded(key), (
+        f"CuTeDSL kernel not loaded for {key}; the CuTeDSL backend fell back "
         "to CUDA and this case compared CUDA against itself"
     )
 

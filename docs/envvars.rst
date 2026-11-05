@@ -98,9 +98,7 @@ Optional Dependencies
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: Enable CuTeDSL support when building ``libtransformer_engine.so``. When set to ``1``, requires
-                 CPython Stable ABIs from Python 3.10 and above, and ``apache-tvm-ffi`` installed.
-                 Note: when linking ``libtransformer_engine.so`` built with ``NVTE_WITH_CUTEDSL=1`` to a standalone C++ executable,
-                 you must provide the definition of these CPython symbols. See ``tests/cpp/CMakeLists.txt`` for an example.
+                 ``apache-tvm-ffi`` installed.
 
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
@@ -152,6 +150,13 @@ General
    :Description: Use CuTeDSL kernel implementations when available. This requires that Transformer Engine was built with ``NVTE_WITH_CUTEDSL=1``.
                  It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
                  If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
+
+.. envvar:: NVTE_CUTEDSL_PYTHON
+
+   :Type: ``str`` (path)
+   :Default: the interpreter that imported ``transformer_engine``, otherwise ``python3``
+   :Description: Python interpreter that Transformer Engine launches in a separate process to compile CuTeDSL kernels.
+                 Its environment must provide ``transformer_engine``, ``apache-tvm-ffi``, ``nvidia-cutlass-dsl``, and a C compiler (``$CC``, default ``cc``) to link the kernel library.
 
 .. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
 
