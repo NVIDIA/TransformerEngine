@@ -14,25 +14,24 @@ namespace transformer_engine::cuda_context {
 // Framework bindings use only the common C ABI, not common's hidden C++ RTTI.
 class FrontendResource {
  public:
-  FrontendResource() = default;
-  FrontendResource(const FrontendResource &) = delete;
-  FrontendResource &operator=(const FrontendResource &) = delete;
-  virtual ~FrontendResource() { nvte_unregister_cuda_state(registration_); }
-  void bind_context(int device) {
+  explicit FrontendResource(int device = -1, int release_order = NVTE_CUDA_STATE_RELEASE_PLANS) {
+    // Store the explicit priority; virtual dispatch is not available for the
+    // derived owner during base construction. Trampolines run after construction.
     const NVTECudaStateCallbacks callbacks{
         [](void *p) { static_cast<FrontendResource *>(p)->check_context_loss(); },
         [](void *p) { static_cast<FrontendResource *>(p)->check_release(); },
         [](void *p) { static_cast<FrontendResource *>(p)->release_context(); },
-        [](void *p) { static_cast<FrontendResource *>(p)->invalidate_context(); }, release_order()};
-    auto registration = nvte_register_cuda_state(device, callbacks, this);
-    nvte_unregister_cuda_state(registration_);
-    registration_ = registration;
+        [](void *p) { static_cast<FrontendResource *>(p)->invalidate_context(); }, release_order};
+    registration_ = nvte_register_cuda_state(device, callbacks, this);
   }
+  FrontendResource(const FrontendResource &) = delete;
+  FrontendResource &operator=(const FrontendResource &) = delete;
+  virtual ~FrontendResource() { nvte_unregister_cuda_state(registration_); }
+  void set_device(int device) { nvte_set_cuda_state_device(registration_, device); }
 
  private:
   virtual void check_context_loss() const {}
   virtual void check_release() const {}
-  virtual int release_order() const { return 0; }
   virtual void release_context() = 0;
   virtual void invalidate_context() noexcept = 0;
   NVTECudaStateRegistration registration_ = nullptr;

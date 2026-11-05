@@ -44,7 +44,7 @@ struct CacheEntry {
 // The graph cache; a process-wide map that maps a normalized FusedAttnConfig to a CacheEntry
 template <typename GraphAndTensors>
 struct GraphCache : cuda_context::Resource {
-  explicit GraphCache(int device) { bind_context(device); }
+  explicit GraphCache(int device) : cuda_context::Resource(device) {}
   void invalidate_context() noexcept override { entries.clear(); }
   void release_context() override { entries.clear(); }
   std::mutex mutex;

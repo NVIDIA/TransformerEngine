@@ -64,8 +64,9 @@ bool is_enabled() {
   return is_enabled_;
 }
 
-struct Kernel::DeviceKernel : cuda_context::Resource {
-  explicit DeviceKernel(int device) : device(device) { bind_context(device); }
+struct Kernel::DeviceKernel : cuda_context::LazyResource {
+  explicit DeviceKernel(int device)
+      : LazyResource(device, NVTE_CUDA_STATE_RELEASE_MODULES), device(device) {}
   ~DeviceKernel() override {
     if (module == null_module) return;
     CUdevice gpu;
@@ -80,19 +81,17 @@ struct Kernel::DeviceKernel : cuda_context::Resource {
     }
     cuda_driver::call("cuDevicePrimaryCtxRelease", gpu);
   }
-  void invalidate_context() noexcept override {
+  void invalidate_resources() noexcept override {
     module = null_module;
     function = null_function;
   }
-  int release_order() const override { return 200; }
-  void release_context() override {
+  void release_resources() override {
     if (module == null_module) return;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleUnload, module);
     module = null_module;
     function = null_function;
   }
   int device;
-  std::mutex mutex;
   CUmodule module = null_module;
   CUfunction function = null_function;
 };
@@ -123,28 +122,32 @@ void swap(Kernel& first, Kernel& second) noexcept {
 
 CUfunction Kernel::get_function(int device_id) {
   auto& kernel = *devices_.at(device_id);
-  std::lock_guard<std::mutex> lock(kernel.mutex);
-  if (kernel.function != null_function) return kernel.function;
-  CUdevice device;
-  CUcontext context, previous;
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, device_id);
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxGetCurrent, &previous);
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
-  try {
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
-    if (kernel.module == null_module) {
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx, &kernel.module, compiled_code_.c_str(), 0,
-                                  nullptr, nullptr);
+  // The callable obtains the current Kernel's strings, which move/swap with
+  // devices_. DeviceKernel must not retain references into a movable Kernel.
+  kernel.ensure_valid([&] {
+    CUdevice device;
+    CUcontext context, previous;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, device_id);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxGetCurrent, &previous);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
+    try {
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
+      if (kernel.module == null_module) {
+        NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleLoadDataEx, &kernel.module, compiled_code_.c_str(), 0,
+                                    nullptr, nullptr);
+      }
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleGetFunction, &kernel.function, kernel.module,
+                                  mangled_name_.c_str());
+    } catch (...) {
+      cuda_driver::call("cuCtxSetCurrent", previous);
+      cuda_driver::call("cuDevicePrimaryCtxRelease", device);
+      throw;
     }
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuModuleGetFunction, &kernel.function, kernel.module,
-                                mangled_name_.c_str());
-  } catch (...) {
-    cuda_driver::call("cuCtxSetCurrent", previous);
-    cuda_driver::call("cuDevicePrimaryCtxRelease", device);
-    throw;
-  }
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, previous);
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
+    const auto restore = cuda_driver::call("cuCtxSetCurrent", previous);
+    const auto release = cuda_driver::call("cuDevicePrimaryCtxRelease", device);
+    NVTE_CHECK_CUDA_DRIVER(restore);
+    NVTE_CHECK_CUDA_DRIVER(release);
+  });
   return kernel.function;
 }
 

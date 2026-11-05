@@ -76,18 +76,22 @@ void with_primary_context(int ordinal, Function &&function) {
 }
 }  // namespace
 
-Resource::~Resource() {
-  if (registered_) {
-    auto &state = registry();
-    std::lock_guard<std::mutex> lock(state.mutex);
-    auto &resources = state.resources;
-    resources.erase(std::remove(resources.begin(), resources.end(), this), resources.end());
-  }
+Resource::Resource(int device, int release_order) : device_(device), release_order_(release_order) {
+  NVTE_CHECK(device >= -1, "Invalid CUDA cleanup device ordinal.");
+  auto &state = registry();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.resources.push_back(this);
 }
 
-ExternalResource::ExternalResource(int device, const char *owner) : owner_(owner) {
-  bind_context(device);
+Resource::~Resource() {
+  auto &state = registry();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  auto &resources = state.resources;
+  resources.erase(std::remove(resources.begin(), resources.end(), this), resources.end());
 }
+
+ExternalResource::ExternalResource(int device, const char *owner)
+    : Resource(device, NVTE_CUDA_STATE_RELEASE_EXTERNAL_OWNERS), owner_(owner) {}
 
 void ExternalResource::check_context_loss() const {
   NVTE_ERROR("Cannot recover active ", owner_,
@@ -102,14 +106,10 @@ void ExternalResource::release_context() {
              " while the CUDA context and communicator are usable, then release TE state.");
 }
 
-void Resource::bind_context(int device) {
+void Resource::set_device(int device) {
   NVTE_CHECK(device >= -1, "Invalid CUDA cleanup device ordinal.");
   auto &state = registry();
   std::lock_guard<std::mutex> lock(state.mutex);
-  if (!registered_) {
-    state.resources.push_back(this);
-    registered_ = true;
-  }
   device_ = device;
 }
 
@@ -123,7 +123,10 @@ void reset() {
       state.generation.load(std::memory_order_relaxed) != std::numeric_limits<uint64_t>::max(),
       "CUDA state generation overflow.");
   for (auto *resource : state.resources) resource->check_context_loss();
-  const auto resources = state.resources;
+  auto resources = state.resources;
+  std::reverse(resources.begin(), resources.end());
+  std::stable_sort(resources.begin(), resources.end(),
+                   [](auto *a, auto *b) { return a->release_order_ < b->release_order_; });
   // All users are stopped and all contexts backing registered resources have
   // been lost. No CUDA calls or new registrations are allowed during reset.
   for (auto *resource : resources) {
@@ -146,8 +149,9 @@ void release() {
       "CUDA state generation overflow.");
   for (auto *resource : state.resources) resource->check_release();
   auto resources = state.resources;
+  std::reverse(resources.begin(), resources.end());
   std::stable_sort(resources.begin(), resources.end(),
-                   [](auto *a, auto *b) { return a->release_order() < b->release_order(); });
+                   [](auto *a, auto *b) { return a->release_order_ < b->release_order_; });
   std::exception_ptr error;
   for (auto *resource : resources) {
     if (std::find(state.resources.begin(), state.resources.end(), resource) ==
@@ -169,10 +173,9 @@ void release() {
 
 struct NVTECudaStateRegistrationImpl : transformer_engine::cuda_context::Resource {
   NVTECudaStateRegistrationImpl(int device, NVTECudaStateCallbacks callbacks, void *data)
-      : callbacks(callbacks), data(data) {
+      : Resource(device, callbacks.release_order), callbacks(callbacks), data(data) {
     NVTE_CHECK(callbacks.release != nullptr && callbacks.invalidate != nullptr,
                "CUDA state release/invalidate callbacks must not be null.");
-    bind_context(device);
   }
   void check_context_loss() const override {
     if (callbacks.check_context_loss) callbacks.check_context_loss(data);
@@ -180,7 +183,6 @@ struct NVTECudaStateRegistrationImpl : transformer_engine::cuda_context::Resourc
   void check_release() const override {
     if (callbacks.check_release) callbacks.check_release(data);
   }
-  int release_order() const override { return callbacks.release_order; }
   void release_context() override { callbacks.release(data); }
   void invalidate_context() noexcept override { callbacks.invalidate(data); }
   NVTECudaStateCallbacks callbacks;
@@ -193,6 +195,11 @@ NVTECudaStateRegistration nvte_register_cuda_state(int device, NVTECudaStateCall
 }
 
 void nvte_unregister_cuda_state(NVTECudaStateRegistration registration) { delete registration; }
+
+void nvte_set_cuda_state_device(NVTECudaStateRegistration registration, int device) {
+  NVTE_CHECK(registration != nullptr, "CUDA state registration must not be null.");
+  registration->set_device(device);
+}
 
 void nvte_reset_cuda_state() { transformer_engine::cuda_context::reset(); }
 

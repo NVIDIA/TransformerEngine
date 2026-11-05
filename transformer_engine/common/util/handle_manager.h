@@ -29,27 +29,27 @@ class HandleManager {
     NVTE_CHECK(0 <= device_id && device_id < handles_.size(), "invalid CUDA device ID");
     auto& slot = handles_[device_id];
     if (!slot) slot = acquire_slot(device_id);
-    if (slot->handle == nullptr) {
+    slot->ensure_valid([&] {
       Handle handle = nullptr;
       Create(&handle);
       slot->handle = handle;
-    }
+    });
     return slot->handle;
   }
 
  private:
-  struct Slot : cuda_context::Resource {
-    explicit Slot(int device) { bind_context(device); }
+  struct Slot : cuda_context::LazyResource {
+    explicit Slot(int device) : LazyResource(device, NVTE_CUDA_STATE_RELEASE_HANDLES) {}
     // Explicit release owns teardown. Calling CUDA from TLS/static destruction
     // is unsafe when the runtime is already terminating.
-    int release_order() const override { return 100; }
-    void release_context() override {
+    void release_resources() override {
       if (handle == nullptr) return;
       Destroy(handle);
       handle = nullptr;
     }
-    void invalidate_context() noexcept override {
-      // cudnnDestroy may dereference memory released by cudaDeviceReset.
+    void invalidate_resources() noexcept override {
+      // The context has already destroyed its device resources. Do not pass
+      // dead handles to a vendor destructor that may call CUDA.
       handle = nullptr;
     }
     Handle handle = nullptr;

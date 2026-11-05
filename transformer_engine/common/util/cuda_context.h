@@ -7,22 +7,27 @@
 #ifndef TRANSFORMER_ENGINE_UTIL_CUDA_CONTEXT_H_
 #define TRANSFORMER_ENGINE_UTIL_CUDA_CONTEXT_H_
 
+#include <transformer_engine/cuda_context.h>
+
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <utility>
 
 namespace transformer_engine::cuda_context {
 
 // Registered objects keep stable addresses. Reset and destruction must be
-// externally serialized with all TE calls. Registration is lazy and host-only.
+// externally serialized with all TE calls and resource construction. Base
+// construction registers the address using host operations only.
 class Resource {
  public:
-  Resource() = default;
+  explicit Resource(int device = -1, int release_order = NVTE_CUDA_STATE_RELEASE_PLANS);
   Resource(const Resource &) = delete;
   Resource &operator=(const Resource &) = delete;
   virtual ~Resource();
   // Device affinity selects a live cleanup context; -1 is host-only or multi-device.
-  void bind_context(int device);
+  // Updating affinity does not change the original registration order.
+  void set_device(int device);
 
  private:
   friend void reset();
@@ -31,11 +36,10 @@ class Resource {
   // reject a lifecycle operation that its dependency cannot safely perform.
   virtual void check_context_loss() const {}
   virtual void check_release() const {}
-  virtual int release_order() const { return 0; }
   virtual void release_context() = 0;
   virtual void invalidate_context() noexcept = 0;
-  bool registered_ = false;
-  int device_ = -1;
+  int device_;
+  const int release_order_;
 };
 
 // Communicators and VMM/IPC registrations are not owned by a CUDA context.
@@ -49,32 +53,69 @@ class ExternalResource final : public Resource {
   void check_context_loss() const override;
   void check_release() const override;
   void release_context() override;
-  int release_order() const override { return 1000; }
   void invalidate_context() noexcept override {}
   const char *owner_;
 };
 
-// A resettable once flag for context-local kernel attributes. Keep one stable
-// instance per device. The fast path does not query CUDA or lock the registry.
-class InitializationFlag final : public Resource {
+// Synchronizes successful lazy initialization. A throwing initializer leaves
+// the state invalid and may be retried. Invalidation requires quiescent users.
+class InitializationState {
  public:
   template <typename Function>
-  void call(int device, Function &&initialize) {
+  void ensure_valid(Function &&initialize) {
     if (initialized_.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lock(mutex_);
     if (initialized_.load(std::memory_order_relaxed)) return;
-    bind_context(device);
     initialize();
     initialized_.store(true, std::memory_order_release);
   }
+  void invalidate() noexcept { initialized_.store(false, std::memory_order_release); }
 
  private:
-  void release_context() override { invalidate_context(); }
-  void invalidate_context() noexcept override {
-    initialized_.store(false, std::memory_order_release);
-  }
   std::atomic<bool> initialized_{false};
   std::mutex mutex_;
+};
+
+// Optional lazy initialization for owners such as library handles and modules.
+// Parameters belong to the caller's initializer, not to a universal virtual init.
+class LazyResource : public Resource {
+ public:
+  using Resource::Resource;
+  template <typename Function>
+  void ensure_valid(Function &&initialize) {
+    initialization_.ensure_valid(std::forward<Function>(initialize));
+  }
+
+ private:
+  void release_context() final {
+    // Always visit the owner: failed initialization may have acquired part of
+    // its state before throwing. Empty owners must support no-op cleanup.
+    release_resources();
+    initialization_.invalidate();
+  }
+  void invalidate_context() noexcept final {
+    invalidate_resources();
+    initialization_.invalidate();
+  }
+  virtual void release_resources() = 0;
+  virtual void invalidate_resources() noexcept = 0;
+  InitializationState initialization_;
+};
+
+// Resettable context-local kernel attributes share the same initialization state.
+class InitializationFlag final : public LazyResource {
+ public:
+  template <typename Function>
+  void call(int device, Function &&initialize) {
+    ensure_valid([&] {
+      set_device(device);
+      initialize();
+    });
+  }
+
+ private:
+  void release_resources() override {}
+  void invalidate_resources() noexcept override {}
 };
 
 // Process-wide notification for host TLS that needs to recheck CUDA following

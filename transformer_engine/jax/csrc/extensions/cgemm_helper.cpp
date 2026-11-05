@@ -134,7 +134,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
   handler._initialize = true;
   // Cleanup starts in the barrier allocation's context; the registry is global.
-  handler.bind_context(handler.local_device_ids_within_process.back());
+  handler.set_device(handler.local_device_ids_within_process.back());
 
   // Bootstrap UB/cuBlasMp via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
@@ -252,7 +252,8 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
   cudaDeviceSynchronize();
 }
 
-CommunicatorHandler::CommunicatorHandler() : _device_barrier(nullptr) {
+CommunicatorHandler::CommunicatorHandler()
+    : FrontendResource(-1, NVTE_CUDA_STATE_RELEASE_COMMUNICATORS), _device_barrier(nullptr) {
   allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf,
                           size_t input_bytes, ExtComm comm) {
     this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);

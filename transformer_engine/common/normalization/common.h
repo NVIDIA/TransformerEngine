@@ -241,7 +241,7 @@ class NormalizationPlanRegistry {
   NormalizationPlanRegistry& operator=(const NormalizationPlanRegistry&) = delete;
 
   struct DevicePlans : cuda_context::Resource {
-    explicit DevicePlans(int device) { bind_context(device); }
+    explicit DevicePlans(int device) : cuda_context::Resource(device) {}
     void invalidate_context() noexcept override { plans.clear(); }
     void release_context() override { plans.clear(); }
     std::unordered_map<TupleKeyType, std::unique_ptr<NormalizationPlanBase>, TupleHash> plans;

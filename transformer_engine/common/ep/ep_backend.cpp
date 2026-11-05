@@ -145,8 +145,7 @@ EPBackend& EPBackend::instance(int device) {
   std::lock_guard<std::mutex> lock(devices_mutex_);
   auto it = devices_.find(device);
   if (it == devices_.end()) {
-    it = devices_.emplace(device, std::unique_ptr<EPBackend>(new EPBackend())).first;
-    it->second->bind_context(device);
+    it = devices_.emplace(device, std::unique_ptr<EPBackend>(new EPBackend(device))).first;
   }
   return *it->second;
 }

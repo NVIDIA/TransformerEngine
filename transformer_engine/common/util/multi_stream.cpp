@@ -29,16 +29,14 @@ struct ComputeResources : cuda_context::Resource {
     std::atomic<cudaStream_t> stream{nullptr};
     std::atomic<cudaEvent_t> event{nullptr};
   };
-  explicit ComputeResources(int device) : slots(nvte_get_num_compute_streams()) {
-    bind_context(device);
-  }
+  explicit ComputeResources(int device)
+      : Resource(device, NVTE_CUDA_STATE_RELEASE_STREAMS), slots(nvte_get_num_compute_streams()) {}
   void invalidate_context() noexcept override {
     for (auto &slot : slots) {
       slot.stream.store(nullptr, std::memory_order_release);
       slot.event.store(nullptr, std::memory_order_release);
     }
   }
-  int release_order() const override { return 300; }
   void release_context() override {
     for (auto &slot : slots) {
       if (auto event = slot.event.load(std::memory_order_acquire)) {

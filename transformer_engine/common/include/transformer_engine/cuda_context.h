@@ -51,11 +51,26 @@ void nvte_release_cuda_state(void);
  */
 uint64_t nvte_get_cuda_state_version(void);
 
+/*! Cleanup phases, in dependency order. Callbacks in the same phase run in
+ *  reverse registration order for both release and post-loss invalidation.
+ *  Custom integer priorities may be used between these standard phases.
+ */
+typedef enum {
+  NVTE_CUDA_STATE_RELEASE_PLANS = 0,
+  NVTE_CUDA_STATE_RELEASE_HANDLES = 100,
+  NVTE_CUDA_STATE_RELEASE_MODULES = 200,
+  NVTE_CUDA_STATE_RELEASE_STREAMS = 300,
+  NVTE_CUDA_STATE_RELEASE_COLLECTIVE_CONFIG = 800,
+  NVTE_CUDA_STATE_RELEASE_COMMUNICATORS = 900,
+  NVTE_CUDA_STATE_RELEASE_EXTERNAL_OWNERS = 1000
+} NVTECudaStateReleaseOrder;
+
 /*! Callbacks for framework bindings which own context-dependent state. All
  *  callbacks run at an externally serialized lifecycle boundary; they must not
  *  register new resources or re-enter lifecycle APIs. Check callbacks must not
  *  mutate state. C++ check/release callbacks may throw; invalidate must not.
- *  Release order is ascending (plans precede library handles and streams).
+ *  Cleanup order is ascending priority, then reverse registration order.
+ *  The same ordering applies to live release and post-loss invalidation.
  */
 typedef void (*NVTECudaStateCallback)(void *user_data);
 typedef struct {
@@ -76,6 +91,12 @@ typedef struct NVTECudaStateRegistrationImpl *NVTECudaStateRegistration;
 NVTECudaStateRegistration nvte_register_cuda_state(int device, NVTECudaStateCallbacks callbacks,
                                                    void *user_data);
 void nvte_unregister_cuda_state(NVTECudaStateRegistration registration);
+
+/*! Update live-cleanup affinity without changing registration order. This is
+ *  host-only and must be serialized with lifecycle calls. Device must be -1 or
+ *  a nonnegative ordinal, as for registration. Registration must not be null.
+ */
+void nvte_set_cuda_state_device(NVTECudaStateRegistration registration, int device);
 
 #ifdef __cplusplus
 }  // extern "C"
