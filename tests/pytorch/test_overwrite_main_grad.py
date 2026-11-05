@@ -47,9 +47,7 @@ def test_reused_weight_accumulates_after_first_wgrad(module_cls, uses, delay):
     for _ in range(2):
         _reset_main_grad(weight)
         reference.weight.grad = None
-        xs = [
-            torch.randn(TOKENS, HIDDEN, device="cuda", dtype=torch.bfloat16) for _ in range(uses)
-        ]
+        xs = [torch.randn(TOKENS, HIDDEN, device="cuda", dtype=torch.bfloat16) for _ in range(uses)]
         dys = [torch.randn(TOKENS, OUT, device="cuda", dtype=torch.bfloat16) for _ in range(uses)]
         for model in (fused, reference):
             loss = sum((model(x).float() * dy.float()).sum() for x, dy in zip(xs, dys))
