@@ -809,7 +809,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             attention_mask,
             attn_mask_type,
             softmax_scale,
-            overwrite=not any(
+            allow_inplace_backward=not any(
                 (
                     self.attention_dropout._forward_hooks,
                     self.attention_dropout._forward_pre_hooks,
