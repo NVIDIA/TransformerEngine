@@ -109,8 +109,8 @@ void FusedAttnConfig::derive() {
   uses_ragged_graph = cudnn_runtime_version >= 90600 && sm_arch >= 90 && sm_arch != 120;
   uses_ragged_stats = is_ragged_q && uses_ragged_graph;
   const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_ragged_graph;
-  graph_batch_size_fwd =
-      (buckets_the_batch && !uses_cu_seqlens_directly) ? bucketed_batch_size : batch_size;
+  // The direct cu_seqlens path pads the buffer tails at launch, so it buckets the batch as well
+  graph_batch_size_fwd = buckets_the_batch ? bucketed_batch_size : batch_size;
   graph_batch_size_bwd = buckets_the_batch ? bucketed_batch_size : batch_size;
   graph_max_seqlen_q = (is_ragged_q && uses_ragged_graph) ? bucketed_num_tokens_q : max_seqlen_q;
   graph_max_seqlen_kv =

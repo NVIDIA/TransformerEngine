@@ -402,6 +402,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
     size_t actual_seqlen_workspace_size = 0;
     size_t seqlen_offsets_workspace_size = 0;
+    // The direct path launches one kernel to pad the cu_seqlens/offset tails when the graph batch
+    // size is bucketed above the actual batch size.
+    const bool pad_direct_tails = use_cu_seqlens_directly && b != actual_b;
+    size_t padded_cu_seqlens_workspace_size = 0;
+    if (pad_direct_tails) {
+      padded_cu_seqlens_workspace_size = 4 * alignTo<16>((b + 1) * sizeof(int32_t));
+    }
     if (!use_cu_seqlens_directly) {
       if (is_padding) {
         actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
@@ -414,13 +421,34 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       }
     }
     if (workspace == nullptr) {
-      *workspace_size =
-          plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
+      *workspace_size = plan_workspace_size + actual_seqlen_workspace_size +
+                        seqlen_offsets_workspace_size + padded_cu_seqlens_workspace_size;
       return;
     }
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+
+    // Pad the user's cumulative buffers to the bucketed batch size so cuDNN never reads past them.
+    if (pad_direct_tails) {
+      const size_t stride = alignTo<16>((b + 1) * sizeof(int32_t));
+      int8_t *pad_ws = static_cast<int8_t *>(workspace) + plan_workspace_size +
+                       actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
+      void **ptrs[4] = {&devPtrCuSeqlensQ, &devPtrCuSeqlensKV, &devPtrSeqOffsetsQ, &devPtrSeqOffsetsKV};
+      const bool needed[4] = {is_padding, is_padding, is_ragged_q,
+                              is_ragged_kv && !offset_mults.kv_from_q};
+      PaddedCuSeqlensArgs pad_args;
+      for (int i = 0; i < 4; ++i) {
+        if (!needed[i]) continue;
+        pad_args.src[i] = static_cast<const int32_t *>(*ptrs[i]);
+        pad_args.dst[i] = reinterpret_cast<int32_t *>(pad_ws + i * stride);
+        *ptrs[i] = pad_args.dst[i];
+      }
+      constexpr size_t nthreads_per_block = 128;
+      const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
+      pad_cu_seqlens_tails<<<grid, nthreads_per_block, 0, stream>>>(pad_args, actual_b, b);
+      NVTE_CHECK_CUDA(cudaGetLastError());
+    }
 
     // Build variant pack
     std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void *> variant_pack = {

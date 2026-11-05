@@ -324,6 +324,18 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
   }
 }
 
+// pad cumulative buffers out to the bucketed batch size
+__global__ void pad_cu_seqlens_tails(PaddedCuSeqlensArgs args, int64_t actual_b, int64_t max_b) {
+  const int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid > max_b) return;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    if (args.src[i] != nullptr) {
+      args.dst[i][tid] = args.src[i][tid < actual_b ? tid : actual_b];
+    }
+  }
+}
+
 // convert cu_seqlens to actual_seqlens
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const q_cu_seqlens,
