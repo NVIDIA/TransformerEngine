@@ -114,8 +114,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     if (!mxfp8_quantizer_cpp->with_2d_quantization &&
         transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
         inner_size % 128 == 0) {
-      impl = quantizer_cpp->optimize_for_gemm ? Impl::FUSED_NORM_QUANT_UNSWIZZLED
-                                              : Impl::FULLY_FUSED;
+      impl =
+          quantizer_cpp->optimize_for_gemm ? Impl::FUSED_NORM_QUANT_UNSWIZZLED : Impl::FULLY_FUSED;
     }
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
              !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
