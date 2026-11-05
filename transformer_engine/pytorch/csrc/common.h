@@ -395,10 +395,8 @@ class NVFP4Quantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
-  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+  void quantize_impl(const TensorWrapper& input, TensorWrapper& output,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
-  void quantize_kernel(const TensorWrapper& input, TensorWrapper& out,
-                       const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 
   /*! @brief Quantize to NVFP4, skipping local amax computation
    *

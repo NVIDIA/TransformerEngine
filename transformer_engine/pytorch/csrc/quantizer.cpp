@@ -2572,25 +2572,18 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
   }
 }
 
-void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& output,
                                    const std::optional<TensorWrapper>& noop_flag,
                                    bool compute_amax) {
-  const bool needs_swizzle = input.numel() != 0 && out.get_with_gemm_swizzled_scales() &&
-                             !emits_gemm_swizzled_scales(convertShape(input.shape()));
-  if (!needs_swizzle) {
-    quantize_kernel(input, out, noop_flag, compute_amax);
-    return;
-  }
   at::Tensor rowwise_scales, columnwise_scales;
-  auto kernel_out =
-      make_compact_output_view(out, rowwise_scales, columnwise_scales, noop_flag.has_value());
-  quantize_kernel(input, kernel_out, noop_flag, compute_amax);
-  swizzle_scales_into(kernel_out, out);
-}
+  std::optional<TensorWrapper> compact_out;
+  if (input.numel() != 0 && output.get_with_gemm_swizzled_scales() &&
+      !emits_gemm_swizzled_scales(convertShape(input.shape()))) {
+    compact_out.emplace(
+        make_compact_output_view(output, rowwise_scales, columnwise_scales, noop_flag.has_value()));
+  }
+  TensorWrapper& out = compact_out ? *compact_out : output;
 
-void NVFP4Quantizer::quantize_kernel(const TensorWrapper& input, TensorWrapper& out,
-                                     const std::optional<TensorWrapper>& noop_flag,
-                                     bool compute_amax) {
   auto reduce_amaxes = [&]() {
     if (!this->with_amax_reduction || this->disable_second_level_scale) {
       return;
@@ -2817,6 +2810,7 @@ void NVFP4Quantizer::quantize_kernel(const TensorWrapper& input, TensorWrapper& 
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
   }
+  if (compact_out) swizzle_scales_into(*compact_out, output);
 }
 
 void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
