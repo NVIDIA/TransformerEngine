@@ -135,8 +135,6 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     }
   }
 
-  const bool cudnn_mxfp8_output = impl == Impl::FULLY_FUSED && IsMXFP8Quantizers(quantizer.ptr());
-
   // Output tensor
   TensorWrapper out_nvte;
   if (out.is_none()) {
@@ -146,7 +144,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   }
   at::Tensor rowwise_scales, columnwise_scales;
   std::optional<TensorWrapper> compact_out_nvte;
-  if (cudnn_mxfp8_output && quantizer_cpp->optimize_for_gemm) {
+  if (impl == Impl::FULLY_FUSED && IsMXFP8Quantizers(quantizer.ptr()) &&
+      quantizer_cpp->optimize_for_gemm) {
     compact_out_nvte.emplace(make_compact_output_view(out_nvte, rowwise_scales, columnwise_scales));
   }
 

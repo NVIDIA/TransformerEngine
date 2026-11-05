@@ -2012,7 +2012,6 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
   NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
@@ -2091,7 +2090,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["fp4_dtype"] = MakePythonDType(this->dtype);
     kwargs["scale_dtype"] = MakePythonDType(this->scale_dtype);
     kwargs["quantizer"] = this->quantizer;
-    kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["with_gemm_swizzled_scales"] = py::cast(this->optimize_for_gemm);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
     kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
     kwargs["nvfp4_e4m3_max"] = py::cast(this->nvfp4_e4m3_max);
@@ -2123,7 +2122,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["fp4_dtype"] = MakePythonDType(this->dtype);
     kwargs["scale_dtype"] = MakePythonDType(this->scale_dtype);
     kwargs["quantizer"] = this->quantizer;
-    kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["with_gemm_swizzled_scales"] = py::cast(this->optimize_for_gemm);
     kwargs["device"] = py::cast(device);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
     kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
@@ -2163,7 +2162,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
                                   getTensorShape(amax_columnwise));
     }
   }
-  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  out_cpp.set_with_gemm_swizzled_scales(this->optimize_for_gemm);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
   if (this->nvfp4_e4m3_max != 0) {
     out_cpp.set_nvfp4_e4m3_max(this->nvfp4_e4m3_max);
@@ -2362,8 +2361,6 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
-
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
@@ -2371,7 +2368,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
   }
   tensor.attr("_row_scaled_nvfp4") = row_scaled_nvfp4;
-  tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
+  tensor.attr("_with_gemm_swizzled_scales") = this->optimize_for_gemm;
   tensor.attr("_nvfp4_use_4over6") = py::cast(nvfp4_use_4over6);
   tensor.attr("_nvfp4_e4m3_max") = py::cast(this->nvfp4_e4m3_max);
   tensor.attr("_scale_dtype") = MakePythonDType(this->scale_dtype);
@@ -2488,7 +2485,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
                                   getTensorShape(*amax_columnwise));
     }
   }
-  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  out_cpp.set_with_gemm_swizzled_scales(this->optimize_for_gemm);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
   if (this->nvfp4_e4m3_max != 0) {
     out_cpp.set_nvfp4_e4m3_max(this->nvfp4_e4m3_max);

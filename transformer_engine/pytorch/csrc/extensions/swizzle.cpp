@@ -857,7 +857,9 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::obje
 }
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
+  // Convert Python tensor to C++ tensor
   auto tensor_nvte = makeTransformerEngineTensor(tensor, py::none());
+
   // Return early if scale swizzling is not required
   const auto scaling_mode = tensor_nvte.scaling_mode();
   switch (scaling_mode) {

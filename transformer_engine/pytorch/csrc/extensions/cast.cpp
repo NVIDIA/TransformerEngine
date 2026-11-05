@@ -58,11 +58,11 @@ std::vector<TensorWrapper> make_quantization_output_views(
       });
   std::vector<bool> needs_swizzle(outputs.size());
   for (size_t i = 0; i < outputs.size(); ++i) {
-    const auto &quantizer = *static_cast<NVFP4Quantizer *>(quantizers[i].get());
     needs_swizzle[i] =
         inputs[i].numel() != 0 &&
         !(grouped_kernel ? grouped_swizzles
-                         : quantizer.emits_gemm_swizzled_scales(get_tensor_shape(inputs[i])));
+                         : static_cast<NVFP4Quantizer *>(quantizers[i].get())
+                               ->emits_gemm_swizzled_scales(get_tensor_shape(inputs[i])));
   }
   if (std::none_of(needs_swizzle.begin(), needs_swizzle.end(), [](bool value) { return value; })) {
     return {};
@@ -1414,7 +1414,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   return retval;
 }
 
-// Bulk-allocate FP4 data, scales, and amax values.
+// allocate fp4 data, fp8 scalings, and amax values
+// layout: [fp4_data0, ..., fp4_dataN, fp8_scaling0, ..., fp8_scalingN, amax0, ..., amaxN]
 // amax buffer will be zeroed out by later amax kernels, so we can use empty to allocate
 std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_allocate_nvfp4_tensors(
     std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
@@ -1462,7 +1463,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                "NVFP4 bulk allocation requires all quantizers in the group to share "
                "the same disable_second_level_scale value.");
   }
-  const bool with_gemm_swizzled_scales = group_optimize_for_gemm;
 
   // Helper function to get size of byte buffer holding FP4 data (last dim divided by 2)
   auto fp4_byte_shape = [](const std::vector<size_t> &shape) -> std::vector<size_t> {
@@ -1614,7 +1614,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
         NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
                          amax_rowwise, amax_columnwise, MakePythonDType(fp4_dtype),
                          MakePythonDType(scale_dtype), quantizer_py_list[i],
-                         with_gemm_swizzled_scales, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
+                         group_optimize_for_gemm, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
                          py::arg("nvfp4_use_4over6") = nvfp4_use_4over6,
                          py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
 
@@ -1643,7 +1643,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                                              getTensorShape(amax_columnwise_list[i]));
         }
       }
-      tensor_wrapper.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+      tensor_wrapper.set_with_gemm_swizzled_scales(group_optimize_for_gemm);
       tensor_wrapper.set_row_scaled_nvfp4(row_scaled_nvfp4);
       if (nvfp4_e4m3_max != 0) {
         tensor_wrapper.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
@@ -2096,7 +2096,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
           if (input_list[i].numel() == 0) {
             continue;
           }
-          quantizers[i]->quantize(input_list[i], output_list[i]);
+          quantizers[i]->quantize(input_list[i], output_list[i], std::nullopt);
         }
       }
     } else {  // NVFP4 quantize

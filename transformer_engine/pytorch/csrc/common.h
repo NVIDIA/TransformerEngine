@@ -131,7 +131,7 @@ class Quantizer {
   virtual std::pair<TensorWrapper, py::object> convert_and_update_tensor(
       py::object tensor) const = 0;
 
-  /*! @brief Quantize into the layout requested by the output tensor. */
+  /*! @brief Convert to a quantized data format */
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
                         const std::optional<TensorWrapper>& noop_flag = std::nullopt) = 0;
 
