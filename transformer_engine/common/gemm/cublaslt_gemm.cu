@@ -896,8 +896,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
              m, ", n=", n, ", k=", k, ", A.scaling_mode=", to_string(inputA->scaling_mode),
              ", B.scaling_mode=", to_string(inputB->scaling_mode),
              ")."
-             " This may be caused by unsupported tensor dimensions for the"
-             " current quantization recipe."
              " Set CUBLASLT_LOG_LEVEL=5 to get the exact reason from cuBLAS."
              " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
 
