@@ -1015,23 +1015,25 @@ class TestQuantizedTensor:
 
 
 @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
-def test_nvfp4_packing_requires_even_last_dimension():
-    """Reject odd packed dimensions while allowing partial columnwise blocks."""
-    quantizer = make_quantizer("nvfp4")
+class TestNVFP4Tensor:
 
-    with pytest.raises(ValueError, match="even last dimension"):
-        quantizer.inner_tensor_specs((17, 32))
-    with pytest.raises(RuntimeError, match="even last dimension"):
-        quantizer.make_empty((17, 32), dtype=torch.bfloat16, device="cuda")
-    with pytest.raises(ValueError, match="even last dimension"):
-        quantizer.inner_tensor_specs((18, 31))
-    with pytest.raises(RuntimeError, match="divisible by 2"):
-        quantizer.make_empty((18, 31), dtype=torch.bfloat16, device="cuda")
+    def test_packing_requires_even_last_dimension(self) -> None:
+        """Reject odd packed dimensions while allowing partial columnwise blocks."""
+        quantizer = make_quantizer("nvfp4")
 
-    specs = quantizer.inner_tensor_specs((18, 32))
-    assert specs["_columnwise_data"][0] == (32, 9)
-    empty = quantizer.make_empty((18, 32), dtype=torch.bfloat16, device="cuda")
-    assert empty._columnwise_data.shape == (32, 9)
+        with pytest.raises(ValueError, match="even last dimension"):
+            quantizer.inner_tensor_specs((17, 32))
+        with pytest.raises(RuntimeError, match="even last dimension"):
+            quantizer.make_empty((17, 32), dtype=torch.bfloat16, device="cuda")
+        with pytest.raises(ValueError, match="even last dimension"):
+            quantizer.inner_tensor_specs((18, 31))
+        with pytest.raises(RuntimeError, match="divisible by 2"):
+            quantizer.make_empty((18, 31), dtype=torch.bfloat16, device="cuda")
+
+        specs = quantizer.inner_tensor_specs((18, 32))
+        assert specs["_columnwise_data"][0] == (32, 9)
+        empty = quantizer.make_empty((18, 32), dtype=torch.bfloat16, device="cuda")
+        assert empty._columnwise_data.shape == (32, 9)
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
