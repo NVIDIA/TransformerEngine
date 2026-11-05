@@ -1475,7 +1475,9 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
-def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False, recipe=None):
+def _test_granular_accuracy(
+    block, bs, dtype, config, delay_wgrad_compute=False, recipe=None, grad_output=None
+):
     reset_rng_states()
     fp8 = recipe is not None
     if fp8:
@@ -1493,8 +1495,11 @@ def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False,
         out = block(inp_hidden_states)
         if isinstance(out, (List, Tuple)):
             out = out[0]
-    loss = out.sum()
-    loss.backward()
+    if grad_output is None:
+        loss = out.sum()
+        loss.backward()
+    else:
+        out.backward(grad_output)
     if delay_wgrad_compute:
         block.backward_dw()
 
@@ -1897,15 +1902,35 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
         assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", ["small"])
-@pytest.mark.parametrize("normalization", all_normalizations)
-@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-@pytest.mark.parametrize("return_bias", all_boolean)
-@pytest.mark.parametrize("bias", all_boolean)
+@pytest.mark.parametrize(
+    "dtype,bs,model,normalization,zero_centered_gamma,return_bias,bias,split_storage",
+    [
+        (dtype, bs, "small", normalization, zero_centered_gamma, return_bias, bias, None)
+        for dtype in param_types
+        for bs in batch_sizes
+        for normalization in all_normalizations
+        for zero_centered_gamma in all_boolean
+        for return_bias in all_boolean
+        for bias in all_boolean
+    ]
+    + [
+        pytest.param(
+            torch.bfloat16,
+            1,
+            "small",
+            "LayerNorm",
+            False,
+            False,
+            True,
+            storage,
+            id=f"split-{storage}-storage",
+            marks=pytest.mark.skipif(not is_bf16_available(), reason="BF16 is not supported"),
+        )
+        for storage in ("shared", "separate")
+    ],
+)
 def test_layernorm_linear_accuracy(
-    dtype, bs, model, normalization, zero_centered_gamma, return_bias, bias
+    dtype, bs, model, normalization, zero_centered_gamma, return_bias, bias, split_storage
 ):
     config = model_configs[model]
 
@@ -1920,7 +1945,24 @@ def test_layernorm_linear_accuracy(
         return_bias=return_bias,
         bias=bias,
         device="cuda",
+        parameters_split=(
+            dict(q=2 * config.hidden_size, k=config.hidden_size, v=config.hidden_size)
+            if split_storage
+            else None
+        ),
     )
+
+    te_module = te_ln_linear.te_module
+    weights = [getattr(te_module, name) for name in te_module.weight_names]
+    biases = [getattr(te_module, name) for name in te_module.bias_names] if bias else []
+    if split_storage:
+        for parts in (weights, biases):
+            if split_storage == "separate":
+                for part in parts:
+                    part.data = part.detach().clone()
+            assert len({part.untyped_storage().data_ptr() for part in parts}) == (
+                len(parts) if split_storage == "separate" else 1
+            )
 
     torch_ln_linear = (
         TorchLayerNormLinear(
@@ -1944,12 +1986,26 @@ def test_layernorm_linear_accuracy(
             torch_ln_linear.layernorm.bias = Parameter(
                 te_ln_linear.te_module.layer_norm_bias.clone()
             )
-        torch_ln_linear.linear.weight = Parameter(te_ln_linear.te_module.weight.clone())
+        torch_ln_linear.linear.weight = Parameter(torch.cat(weights))
         if bias:
-            torch_ln_linear.linear.bias = Parameter(te_ln_linear.te_module.bias.clone())
+            torch_ln_linear.linear.bias = Parameter(torch.cat(biases))
 
-    te_outputs = _test_granular_accuracy(te_ln_linear, bs, dtype, config)
-    torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
+    grad_output = (
+        torch.randn(config.max_seqlen_q, bs, 4 * config.hidden_size, dtype=dtype, device="cuda")
+        if split_storage
+        else None
+    )
+    te_outputs = _test_granular_accuracy(te_ln_linear, bs, dtype, config, grad_output=grad_output)
+    torch_outputs = _test_granular_accuracy(
+        torch_ln_linear, bs, dtype, config, grad_output=grad_output
+    )
+    if split_storage:
+        torch_outputs = [
+            *torch_outputs[:-2],
+            *torch_outputs[-2].split(te_module.parameter_split_sizes),
+            *torch_outputs[-1].split(te_module.parameter_split_sizes),
+        ]
+    assert len(te_outputs) == len(torch_outputs)
 
     atol = {
         torch.float32: 2.5e-4,
