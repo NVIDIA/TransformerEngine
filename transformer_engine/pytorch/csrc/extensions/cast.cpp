@@ -1168,9 +1168,9 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
   for (size_t i = 0; i < num_tensors; ++i) {
     compact_scales[i] = needs_compact_scales(*quantizer_cpp_list[i], input_cpp_list[i]);
   }
-  quantize_with_compact_scales(output_cpp_list, compact_scales, [&] {
-    multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
-  });
+  auto redirected_scales = redirect_scales_to_scratch(output_cpp_list, compact_scales);
+  multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+  restore_and_swizzle_scales(output_cpp_list, redirected_scales);
 
   return output_py_list;
 }
@@ -2257,10 +2257,10 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
         compact_scales[i] = quantizer.optimize_for_gemm && !emits_gemm_swizzled_scales &&
                             input_list[i].numel() != 0;
       }
-      quantize_with_compact_scales(output_cpp_list, compact_scales, [&] {
-        split_quantize_nvfp4_impl(input_nvte, input_list, output_cpp_list, split_sections,
-                                  nvfp4_quantizers);
-      });
+      auto redirected_scales = redirect_scales_to_scratch(output_cpp_list, compact_scales);
+      split_quantize_nvfp4_impl(input_nvte, input_list, output_cpp_list, split_sections,
+                                nvfp4_quantizers);
+      restore_and_swizzle_scales(output_cpp_list, redirected_scales);
       break;
     }
     default: {
@@ -2269,9 +2269,9 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (size_t i = 0; i < num_splits; ++i) {
         compact_scales[i] = needs_compact_scales(*quantizer_cpp_list[i], input_list[i]);
       }
-      quantize_with_compact_scales(output_cpp_list, compact_scales, [&] {
-        multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
-      });
+      auto redirected_scales = redirect_scales_to_scratch(output_cpp_list, compact_scales);
+      multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+      restore_and_swizzle_scales(output_cpp_list, redirected_scales);
     }
   }
 

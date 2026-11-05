@@ -151,12 +151,16 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   TensorWrapper unquantized_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
+  RedirectedScales redirected_scales;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
       NoneQuantizer q{none};
       std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
+    } break;
+    case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
+      redirected_scales = redirect_scales_to_scratch(out_nvte);
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
@@ -174,42 +178,37 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     }
   }
 
-  // Launch normalization kernel
-  auto launch_norm = [&]() {
-    // Query workspace size
-    TensorWrapper workspace;
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
-                         kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
-                         workspace.data(),
-                         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                         zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-    });
+  // Query workspace size
+  TensorWrapper workspace;
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
+                       kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
+                       workspace.data(),
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+  });
 
-    // Allocate workspace
-    auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-    workspace = makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(),
-                                            workspace.dtype());
+  // Allocate workspace
+  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
+  workspace =
+      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 
-    // Launch kernel
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
-                         kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
-                         workspace.data(),
-                         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                         zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-    });
-  };
-  if (impl == Impl::FUSED_NORM_QUANT_UNSWIZZLED) {
-    quantize_with_compact_scales(out_nvte, false, launch_norm);
-  } else {
-    launch_norm();
-  }
+  // Launch kernel
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
+                       kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
+                       workspace.data(),
+                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+  });
 
   // Quantize output if needed
   switch (impl) {
     case Impl::UNFUSED: {
       quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
+    } break;
+    case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
+      restore_and_swizzle_scales(out_nvte, redirected_scales);
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
@@ -400,12 +399,16 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   TensorWrapper unquantized_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
+  RedirectedScales redirected_scales;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
       NoneQuantizer q{none};
       std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
       kernel_out_nvte = &unquantized_out_nvte;
+    } break;
+    case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
+      redirected_scales = redirect_scales_to_scratch(out_nvte);
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
@@ -423,40 +426,35 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     }
   }
 
-  // Launch normalization kernel
-  auto launch_norm = [&]() {
-    // Query workspace size
-    TensorWrapper workspace;
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
-                       rsigma_nvte.data(), workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-    });
+  // Query workspace size
+  TensorWrapper workspace;
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
+                     rsigma_nvte.data(), workspace.data(),
+                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+  });
 
-    // Allocate workspace
-    auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-    workspace = makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(),
-                                            workspace.dtype());
+  // Allocate workspace
+  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
+  workspace =
+      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 
-    // Launch kernel
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
-                       rsigma_nvte.data(), workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-    });
-  };
-  if (impl == Impl::FUSED_NORM_QUANT_UNSWIZZLED) {
-    quantize_with_compact_scales(out_nvte, false, launch_norm);
-  } else {
-    launch_norm();
-  }
+  // Launch kernel
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
+                     rsigma_nvte.data(), workspace.data(),
+                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+  });
 
   // Quantize output if needed
   switch (impl) {
     case Impl::UNFUSED: {
       quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
+    } break;
+    case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
+      restore_and_swizzle_scales(out_nvte, redirected_scales);
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());

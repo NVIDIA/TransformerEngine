@@ -4,8 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <algorithm>
-#include <functional>
 #include <optional>
 #include <tuple>
 #include <utility>
@@ -68,12 +66,6 @@ TensorWrapper scale_view(const TensorWrapper &tensor, bool rowwise, void *scales
   return view;
 }
 
-// Compact scratch scales of an output and its own GEMM-swizzled scale buffers
-struct RedirectedScales {
-  at::Tensor scratch[2];  // rowwise, columnwise
-  void *swizzled[2] = {nullptr, nullptr};
-};
-
 void redirect_scales(TensorWrapper &output, bool rowwise, at::Tensor scratch,
                      RedirectedScales &redirected, bool preserve_scales) {
   void *swizzled = get_scales(output, rowwise).data_ptr;
@@ -101,8 +93,7 @@ void *restore_scales(TensorWrapper &output, bool rowwise, const RedirectedScales
 
 }  // namespace
 
-void quantize_with_compact_scales(TensorWrapper &output, bool preserve_scales,
-                                  const std::function<void()> &quantize) {
+RedirectedScales redirect_scales_to_scratch(TensorWrapper &output, bool preserve_scales) {
   NVTE_CHECK(output.get_with_gemm_swizzled_scales(), "Expected a GEMM-ready output");
   RedirectedScales redirected;
   for (bool rowwise : {true, false}) {
@@ -112,12 +103,17 @@ void quantize_with_compact_scales(TensorWrapper &output, bool preserve_scales,
                     preserve_scales);
   }
   output.set_with_gemm_swizzled_scales(false);
-  quantize();
+  redirected.active = true;
+  return redirected;
+}
+
+void restore_and_swizzle_scales(TensorWrapper &output, const RedirectedScales &redirected) {
+  if (!redirected.active) return;
   output.set_with_gemm_swizzled_scales(true);
   for (bool rowwise : {true, false}) {
-    void *compact_scales = restore_scales(output, rowwise, redirected);
-    if (compact_scales == nullptr || output.numel() == 0) continue;
-    auto input_scales = scale_view(output, rowwise, compact_scales, false);
+    void *compact = restore_scales(output, rowwise, redirected);
+    if (compact == nullptr || output.numel() == 0) continue;
+    auto input_scales = scale_view(output, rowwise, compact, false);
     auto output_scales = scale_view(output, rowwise, get_scales(output, rowwise).data_ptr, true);
     NVTE_SCOPED_GIL_RELEASE({
       nvte_swizzle_scaling_factors(input_scales.data(), output_scales.data(),
@@ -126,21 +122,14 @@ void quantize_with_compact_scales(TensorWrapper &output, bool preserve_scales,
   }
 }
 
-void quantize_with_compact_scales(std::vector<TensorWrapper> &outputs,
-                                  const std::vector<bool> &compact_scales,
-                                  const std::function<void()> &quantize) {
+std::vector<RedirectedScales> redirect_scales_to_scratch(std::vector<TensorWrapper> &outputs,
+                                                         const std::vector<bool> &compact_scales) {
   NVTE_CHECK(outputs.size() == compact_scales.size(), "Mismatched output layouts");
-  if (std::none_of(compact_scales.begin(), compact_scales.end(), [](bool b) { return b; })) {
-    quantize();
-    return;
-  }
+  std::vector<RedirectedScales> redirected(outputs.size());
   for (size_t i = 0; i < outputs.size(); ++i) {
     NVTE_CHECK(!compact_scales[i] || outputs[i].get_with_gemm_swizzled_scales(),
                "Expected a GEMM-ready output");
   }
-
-  // Redirect scales to scratch buffers, allocated together per usage
-  std::vector<RedirectedScales> redirected(outputs.size());
   for (bool rowwise : {true, false}) {
     std::vector<std::vector<size_t>> shapes;
     std::vector<size_t> indices;
@@ -160,14 +149,18 @@ void quantize_with_compact_scales(std::vector<TensorWrapper> &outputs,
     }
   }
   for (size_t i = 0; i < outputs.size(); ++i) {
-    if (compact_scales[i]) outputs[i].set_with_gemm_swizzled_scales(false);
+    if (!compact_scales[i]) continue;
+    outputs[i].set_with_gemm_swizzled_scales(false);
+    redirected[i].active = true;
   }
+  return redirected;
+}
 
-  quantize();
-
-  // Restore the outputs and swizzle all compact scales with one kernel per usage
+void restore_and_swizzle_scales(std::vector<TensorWrapper> &outputs,
+                                const std::vector<RedirectedScales> &redirected) {
+  NVTE_CHECK(outputs.size() == redirected.size(), "Mismatched quantization outputs");
   for (size_t i = 0; i < outputs.size(); ++i) {
-    if (compact_scales[i]) outputs[i].set_with_gemm_swizzled_scales(true);
+    if (redirected[i].active) outputs[i].set_with_gemm_swizzled_scales(true);
   }
   for (bool rowwise : {true, false}) {
     std::vector<TensorWrapper> input_views, output_views;

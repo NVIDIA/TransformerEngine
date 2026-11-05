@@ -2572,11 +2572,10 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
 void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                                    const std::optional<TensorWrapper>& noop_flag,
                                    bool compute_amax) {
+  RedirectedScales redirected_scales;
   if (input.numel() != 0 && out.get_with_gemm_swizzled_scales() &&
       !emits_gemm_swizzled_scales(convertShape(input.shape()))) {
-    quantize_with_compact_scales(out, noop_flag.has_value(),
-                                 [&] { quantize_impl(input, out, noop_flag, compute_amax); });
-    return;
+    redirected_scales = redirect_scales_to_scratch(out, noop_flag.has_value());
   }
 
   auto reduce_amaxes = [&]() {
@@ -2805,6 +2804,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
   }
+  restore_and_swizzle_scales(out, redirected_scales);
 }
 
 void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
