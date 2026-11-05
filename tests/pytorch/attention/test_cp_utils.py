@@ -28,7 +28,7 @@ except ImportError:
 
 class TestTHDPartitioning(unittest.TestCase):
     def test_default_partition_rejects_cpu_metadata(self):
-        with self.assertRaisesRegex(AssertionError, "requires CUDA cu_seqlens"):
+        with self.assertRaisesRegex(AssertionError, "requires cuda cu_seqlens"):
             get_thd_partitioned_indices(torch.tensor([0, 8]), 8, 2, 0)
 
     def test_no_load_balance_metadata_handles_document_padding_boundary(self):
