@@ -252,6 +252,14 @@ struct RaggedOffsetMultipliers {
   bool kv_from_q = false;
 };
 
+// Extend up to 4 int32 cumulative buffers of actual_b+1 entries to max_b+1 entries by repeating the
+// last value, which appends zero-length sequences. Null sources are skipped.
+struct PaddedCuSeqlensArgs {
+  const int32_t *src[4] = {nullptr, nullptr, nullptr, nullptr};
+  int32_t *dst[4] = {nullptr, nullptr, nullptr, nullptr};
+};
+__global__ void pad_cu_seqlens_tails(PaddedCuSeqlensArgs args, int64_t actual_b, int64_t max_b);
+
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const q_cu_seqlens,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,
