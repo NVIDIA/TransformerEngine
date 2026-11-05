@@ -90,16 +90,24 @@ def _none_grad_context_wrapper(inputs):
         input_tensor.grad = original_grad
 
 
-def _reset_wgrad_written(params):
-    """Make the next fused wgrad of each ``overwrite_main_grad`` weight overwrite ``main_grad``.
+def _snapshot_wgrad_written(per_callable_params):
+    """Record the ``_fsdp_wgrad_written`` flags (see ``overwrite_main_grad_wgrad_gemm``).
 
-    The overwrite-or-accumulate choice is baked into each captured GEMM, so every captured
-    backward starts from a cleared flag, like an eager backward after the caller consumed
-    ``main_grad`` (see ``overwrite_main_grad_wgrad_gemm``).
+    Each captured wgrad GEMM keeps the overwrite-or-accumulate choice the flag gave at capture
+    time. Restoring this snapshot after warmup lets the captures see the flags the caller set,
+    as eager backwards would.
     """
-    for param in params:
-        if getattr(param, "_fsdp_wgrad_written", None) is not None:
-            param._fsdp_wgrad_written = False
+    params = dict.fromkeys(p for params in per_callable_params for p in params)
+    return tuple(
+        (p, p._fsdp_wgrad_written)
+        for p in params
+        if getattr(p, "_fsdp_wgrad_written", None) is not None
+    )
+
+
+def _restore_wgrad_written(snapshot):
+    for param, written in snapshot:
+        param._fsdp_wgrad_written = written
 
 
 @contextlib.contextmanager
@@ -661,6 +669,7 @@ def _make_graphed_callables(
         need_bwd_dw_graph[func_idx] = need_backward_dw
 
     # Run warmup and do the above filtering.
+    wgrad_written = _snapshot_wgrad_written(per_callable_module_params)
     with torch.cuda.stream(torch.cuda.Stream()):
         if pre_warmup_hook is not None:
             pre_warmup_hook()
@@ -717,6 +726,7 @@ def _make_graphed_callables(
                                 del outputs
                             bwd_idx[m_chunk] += 1
 
+        _restore_wgrad_written(wgrad_written)
         if post_warmup_hook is not None:
             post_warmup_hook()
     torch.cuda.synchronize()
@@ -873,7 +883,6 @@ def _make_graphed_callables(
                             callables[callable_idx],
                         )
 
-                        _reset_wgrad_written(per_callable_module_params[per_callable_bwd_idx])
                         inputs = tuple(i for i in static_input_surface if i.requires_grad)
                         with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
                             bwd_graph, pool=mempool
@@ -1011,7 +1020,6 @@ def _make_graphed_callables(
                     callables[bwd_idx],
                 )
 
-                _reset_wgrad_written(per_callable_module_params[bwd_idx])
                 inputs = tuple(i for i in static_input_surface if i.requires_grad)
                 with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
                     bwd_graph, pool=mempool
@@ -1062,8 +1070,7 @@ def _make_graphed_callables(
         per_callable_returned_param_grad_clone_slots = list(
             reversed(per_callable_returned_param_grad_clone_slots)
         )
-    for module_params in per_callable_module_params:
-        _reset_wgrad_written(module_params)
+    _restore_wgrad_written(wgrad_written)
     # Now for every per_callable list, per_callable_*[i] holds the stuff for the ith callable.
 
     def make_graphed_autograd_function(
@@ -1551,7 +1558,10 @@ def make_graphed_callables(
                    Each element corresponds to one callable and is a dict with any subset
                    of these keys: ``"forward_pre_hooks"``, ``"forward_hooks"``,
                    ``"backward_pre_hooks"``, and ``"backward_hooks"``. Each value is a
-                   ``{hook_id: hook_fn}`` dict.
+                   ``{hook_id: hook_fn}`` dict. For example, a caller that consumes a
+                   weight's ``main_grad`` before each backward clears its
+                   ``_fsdp_wgrad_written`` flag in ``"backward_pre_hooks"``, so the
+                   captured fused wgrad overwrites ``main_grad`` instead of accumulating.
 
     Quantization parameters
     -----------------------

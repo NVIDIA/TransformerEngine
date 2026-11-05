@@ -108,10 +108,10 @@ class _Uses(torch.nn.Module):
 @pytest.mark.parametrize("module_cls", [te.Linear, te.LayerNormLinear])
 @pytest.mark.parametrize("uses", [1, 2])
 @pytest.mark.parametrize("with_order", [False, True])
-def test_weight_shared_by_graphed_microbatches_overwrites_stale_main_grad(
-    module_cls, uses, with_order
-):
-    """Each captured backward overwrites first, even when another capture already set the flag."""
+@pytest.mark.parametrize("consume", [False, True], ids=["shared_main_grad", "consumed_each"])
+def test_weight_shared_by_graphed_callables(module_cls, uses, with_order, consume):
+    """Captures follow the flag like eager backwards: graphs feeding one ``main_grad`` accumulate,
+    and a caller that consumes ``main_grad`` between them clears the flag in a capture-time hook."""
     torch.manual_seed(1234)
     fused = _build(module_cls, True, False)
     reference = _build(module_cls, False, False)
@@ -124,6 +124,12 @@ def test_weight_shared_by_graphed_microbatches_overwrites_stale_main_grad(
         (torch.randn(TOKENS, HIDDEN, device="cuda", dtype=torch.bfloat16),)
         for _ in range(microbatches)
     )
+    num_callables = 1 if with_order else microbatches
+    hooks = None
+    if consume:
+        # The caller consumes main_grad before each backward, so it clears the flag at capture too.
+        clear = {"clear": lambda module: setattr(weight, "_fsdp_wgrad_written", False)}
+        hooks = [{"backward_pre_hooks": clear} for _ in range(num_callables)]
     if with_order:
         # One layer, both microbatches forward, then both backward, as pipelined schedules capture.
         graphed = te.make_graphed_callables(
@@ -131,26 +137,37 @@ def test_weight_shared_by_graphed_microbatches_overwrites_stale_main_grad(
             samples,
             _order=[1] * microbatches + [-1] * microbatches,
             _num_layers_per_chunk=[1],
+            capture_time_hooks=hooks,
         )
         bwd_order = list(range(microbatches))
     else:
         graphed = te.make_graphed_callables(
-            tuple(_Uses(fused, uses) for _ in range(microbatches)), samples
+            tuple(_Uses(fused, uses) for _ in range(microbatches)),
+            samples,
+            capture_time_hooks=hooks,
         )
         bwd_order = list(reversed(range(microbatches)))
     assert len(graphed) == microbatches
+    assert weight._fsdp_wgrad_written is False
     for _ in range(2):
         xs = [torch.randn(TOKENS, HIDDEN, device="cuda", dtype=torch.bfloat16) for _ in graphed]
         dys = [torch.randn(TOKENS, OUT, device="cuda", dtype=torch.bfloat16) for _ in graphed]
         outs = [g(x) for g, x in zip(graphed, xs)]
-        # Backward in capture order, the caller consuming main_grad after each one.
-        for i in bwd_order:
-            _reset_main_grad(weight)
-            reference.weight.grad = None
+        _reset_main_grad(weight)
+        reference.weight.grad = None
+        for i in bwd_order:  # Replay backwards in capture order.
+            if consume:
+                _reset_main_grad(weight)
+                reference.weight.grad = None
             (outs[i].float() * dys[i].float()).sum().backward()
             (_Uses(reference, uses)(xs[i]).float() * dys[i].float()).sum().backward()
+            if consume:
+                expected = reference.weight.grad.float()
+                atol = 8 * uses * torch.finfo(torch.bfloat16).eps * expected.abs().max().item()
+                torch.testing.assert_close(weight.main_grad, expected, rtol=1e-2, atol=atol)
+        if not consume:
             expected = reference.weight.grad.float()
-            atol = 8 * uses * torch.finfo(torch.bfloat16).eps * expected.abs().max().item()
+            atol = 16 * uses * torch.finfo(torch.bfloat16).eps * expected.abs().max().item()
             torch.testing.assert_close(weight.main_grad, expected, rtol=1e-2, atol=atol)
 
 
