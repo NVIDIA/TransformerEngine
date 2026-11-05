@@ -227,24 +227,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   }
 
   DType output_dtype = out_dtype ? *out_dtype : A_tensor.dtype();
-  // Output tensor
-  TensorWrapper D_tensor;
-  if (D.is_none()) {
-    std::tie(D_tensor, D) = createOutputTensor(D_shape, output_dtype, quantizer);
-  } else {
-    D_tensor = makeTransformerEngineTensor(D, quantizer);
-    NVTE_CHECK(detail::checkGemmShape(D_shape, D_tensor.shape()),
-               "GEMM output has invalid dims (expected ", std::to_string(D_shape), ", got ",
-               std::to_string(D_tensor.shape()), ")");
-    if (out_dtype) {
-      NVTE_CHECK(*out_dtype == D_tensor.dtype(), "GEMM output has invalid dtype (expected ",
-                 static_cast<int>(*out_dtype), ", found ", static_cast<int>(D_tensor.dtype()), ")");
-    }
-  }
-
-  // maintain unquantized tensor in case we need unfused quantization support.
-  TensorWrapper unquantized_D_tensor;
-  py::object unquantized_out;
   // Unfused quantization is needed in the following cases
   // 1. Inputs: BF16, Output: FP8 (GEMM output has to be BF16, so FP8 quantization needed after that)
   // 2. Inputs: FP8, Output: FP8 (For any quantization apart from delayed scaling,
@@ -258,6 +240,28 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       unfused_quantization_needed = false;
   }
 
+  // Output tensor
+  TensorWrapper D_tensor;
+  if (D.is_none()) {
+    std::tie(D_tensor, D) = createOutputTensor(D_shape, output_dtype, quantizer);
+  } else {
+    if (unfused_quantization_needed) {
+      std::tie(D_tensor, D) = convert_quantizer(quantizer)->convert_and_update_tensor(D);
+    } else {
+      D_tensor = makeTransformerEngineTensor(D, quantizer);
+    }
+    NVTE_CHECK(detail::checkGemmShape(D_shape, D_tensor.shape()),
+               "GEMM output has invalid dims (expected ", std::to_string(D_shape), ", got ",
+               std::to_string(D_tensor.shape()), ")");
+    if (out_dtype) {
+      NVTE_CHECK(*out_dtype == D_tensor.dtype(), "GEMM output has invalid dtype (expected ",
+                 static_cast<int>(*out_dtype), ", found ", static_cast<int>(D_tensor.dtype()), ")");
+    }
+  }
+
+  // maintain unquantized tensor in case we need unfused quantization support.
+  TensorWrapper unquantized_D_tensor;
+  py::object unquantized_out;
   if (unfused_quantization_needed) {
     NoneQuantizer q{none};
     std::tie(unquantized_D_tensor, unquantized_out) = q.create_tensor(D_shape, output_dtype);
