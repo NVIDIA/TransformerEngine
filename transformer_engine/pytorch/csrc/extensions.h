@@ -731,7 +731,6 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 TensorWrapper make_compact_output_view(const TensorWrapper &output, at::Tensor &rowwise_scales,
                                        at::Tensor &columnwise_scales, bool preserve_scales = false);
 std::vector<TensorWrapper> make_compact_output_views(const std::vector<TensorWrapper> &outputs,
-                                                     const std::vector<bool> &needs_swizzle,
                                                      std::vector<at::Tensor> &scratch);
 void swizzle_scales_into(const TensorWrapper &input, const TensorWrapper &output);
 void multi_tensor_swizzle_scales_into(const std::vector<TensorWrapper> &inputs,

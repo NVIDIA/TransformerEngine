@@ -38,38 +38,6 @@ std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-std::vector<TensorWrapper> make_quantization_output_views(
-    const std::vector<TensorWrapper> &inputs,
-    const std::vector<std::unique_ptr<Quantizer>> &quantizers,
-    const std::vector<TensorWrapper> &outputs, std::vector<at::Tensor> &scratch,
-    bool grouped_kernel = false) {
-  if (outputs.empty() || (outputs.size() == 1 && !grouped_kernel) ||
-      !std::all_of(quantizers.begin(), quantizers.end(), [](const auto &quantizer) {
-        return quantizer->optimize_for_gemm &&
-               quantizer->get_scaling_mode() == NVTE_NVFP4_1D_SCALING;
-      })) {
-    return {};
-  }
-  const bool grouped_swizzles =
-      grouped_kernel && static_cast<NVFP4Quantizer *>(quantizers.front().get())->with_rht &&
-      std::all_of(inputs.begin(), inputs.end(), [](const auto &input) {
-        return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(get_tensor_shape(input),
-                                                               /*for_grouped_kernel=*/true);
-      });
-  std::vector<bool> needs_swizzle(outputs.size());
-  for (size_t i = 0; i < outputs.size(); ++i) {
-    needs_swizzle[i] =
-        inputs[i].numel() != 0 &&
-        !(grouped_kernel ? grouped_swizzles
-                         : static_cast<NVFP4Quantizer *>(quantizers[i].get())
-                               ->emits_gemm_swizzled_scales(get_tensor_shape(inputs[i])));
-  }
-  if (std::none_of(needs_swizzle.begin(), needs_swizzle.end(), [](bool value) { return value; })) {
-    return {};
-  }
-  return make_compact_output_views(outputs, needs_swizzle, scratch);
-}
-
 void allreduce_nvfp4_amax_tensors(NVFP4Quantizer *nvfp4_quantizer_cpp,
                                   std::vector<at::Tensor> &&amax_tensors) {
   if (!nvfp4_quantizer_cpp->with_amax_reduction || amax_tensors.empty()) {
@@ -1186,12 +1154,8 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
   }
 
   // Perform multi-tensor quantization
-  std::vector<at::Tensor> scratch;
-  auto kernel_outputs =
-      make_quantization_output_views(input_cpp_list, quantizer_cpp_list, output_cpp_list, scratch);
-  multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list,
-                             kernel_outputs.empty() ? output_cpp_list : kernel_outputs);
-  if (!kernel_outputs.empty()) multi_tensor_swizzle_scales_into(kernel_outputs, output_cpp_list);
+  multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+
   return output_py_list;
 }
 
@@ -2256,11 +2220,6 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   }
 
   // Quantize into output tensors
-  std::vector<at::Tensor> scratch;
-  auto kernel_outputs =
-      make_quantization_output_views(input_list, quantizer_cpp_list, output_cpp_list, scratch,
-                                     quantization_method == QuantizationMethod::FUSED_NVFP4);
-  auto &quantized_outputs = kernel_outputs.empty() ? output_cpp_list : kernel_outputs;
   switch (quantization_method) {
     case QuantizationMethod::FUSED_NVFP4: {
       // Fused NVFP4 quantize kernel
@@ -2269,16 +2228,31 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (auto &quantizer : quantizer_cpp_list) {
         nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
       }
-      split_quantize_nvfp4_impl(input_nvte, input_list, quantized_outputs, split_sections,
-                                nvfp4_quantizers);
+      // Grouped kernels emit GEMM-swizzled scales only with RHT cast fusion
+      const auto &quantizer = *nvfp4_quantizers.front();
+      const bool emits_gemm_swizzled_scales =
+          quantizer.with_rht &&
+          std::all_of(input_list.begin(), input_list.end(), [](const auto &input) {
+            return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(get_tensor_shape(input),
+                                                                   /*for_grouped_kernel=*/true);
+          });
+      if (quantizer.optimize_for_gemm && !emits_gemm_swizzled_scales) {
+        std::vector<at::Tensor> scratch;
+        auto compact_outputs = make_compact_output_views(output_cpp_list, scratch);
+        split_quantize_nvfp4_impl(input_nvte, input_list, compact_outputs, split_sections,
+                                  nvfp4_quantizers);
+        multi_tensor_swizzle_scales_into(compact_outputs, output_cpp_list);
+      } else {
+        split_quantize_nvfp4_impl(input_nvte, input_list, output_cpp_list, split_sections,
+                                  nvfp4_quantizers);
+      }
       break;
     }
     default:
       // General multi-tensor quantization
-      multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, quantized_outputs);
+      multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
   }
 
-  if (!kernel_outputs.empty()) multi_tensor_swizzle_scales_into(kernel_outputs, output_cpp_list);
   return output_py_list;
 }
 
