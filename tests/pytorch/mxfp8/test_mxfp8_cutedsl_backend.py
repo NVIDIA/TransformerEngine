@@ -144,7 +144,8 @@ def cutedsl_kernel_loaded(key):
 
 def test_enable_cutedsl_backend_after_import():
     """Test if we can manually enable the CuTeDSL backend without enabling CuTeDSL backend in the beginning."""
-    script = textwrap.dedent("""
+    script = textwrap.dedent(
+        """
         import ctypes
 
         import torch
@@ -171,7 +172,8 @@ def test_enable_cutedsl_backend_after_import():
 
         quantizer(x)
         assert cutedsl_kernel_loaded()
-        """)
+        """
+    )
     env = os.environ.copy()
     env["NVTE_ENABLE_CUTEDSL_BACKEND"] = "0"
     result = subprocess.run(
