@@ -47,8 +47,8 @@ def dequantize_mxfp8_smem_tile(
 
     sQ, sO: (TILE_ROWS, TILE_COLS)
     gS:
-    - rowwise: (TILE_ROWS, min(1, TILE_COLS // MXFP8_BLOCK_SCALING_SIZE))
-    - colwise: (min(1, TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE), TILE_COLS)
+    - rowwise: (TILE_ROWS, max(1, TILE_COLS // MXFP8_BLOCK_SCALING_SIZE))
+    - colwise: (max(1, TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE), TILE_COLS)
     """
 
     tidx, _, _ = cute.arch.thread_idx()
@@ -58,34 +58,42 @@ def dequantize_mxfp8_smem_tile(
     FRAGS_SHARING_SAME_SCALE = MXFP8_BLOCK_SCALING_SIZE // ELEMS_PER_THREAD
     if cutlass.const_expr(DEQUANTIZE_FROM_ROWWISE):
         assert TILE_COLS % ELEMS_PER_THREAD == 0
-        thr_layout = cute.make_layout((TILE_ROWS, TILE_COLS // ELEMS_PER_THREAD))
+        THR_ROWS = TILE_ROWS
+        THR_COLS = TILE_COLS // ELEMS_PER_THREAD
+        thr_layout = cute.make_layout((THR_ROWS, THR_COLS))
         val_layout = cute.make_layout((1, ELEMS_PER_THREAD), stride=(0, 1))
-        (scale_row_idx, scale_col_idx) = cute.idx2crd(thr_layout, tidx)
-        gS_frag = gS[(scale_row_idx, scale_col_idx // FRAGS_SHARING_SAME_SCALE)]
+        scale_y = tidx % THR_ROWS
+        scale_x = tidx // THR_ROWS
+        # Every `FRAGS_SHARING_SAME_SCALE` threads along x direction share the same scale
+        scale_e8m0 = gS[scale_y, scale_x // FRAGS_SHARING_SAME_SCALE]
     else:
         assert TILE_ROWS % ELEMS_PER_THREAD == 0 and MXFP8_BLOCK_SCALING_SIZE % TILE_ROWS == 0
-        thr_layout = cute.make_layout((TILE_ROWS // ELEMS_PER_THREAD, TILE_COLS))
+        THR_ROWS = TILE_ROWS // ELEMS_PER_THREAD
+        THR_COLS = TILE_COLS
+        thr_layout = cute.make_layout((THR_ROWS, THR_COLS))
         val_layout = cute.make_layout((ELEMS_PER_THREAD, 1), stride=(1, 0))
-        (scale_row_idx, scale_col_idx) = cute.idx2crd(thr_layout, tidx)
-        gS_frag = gS[(scale_row_idx // FRAGS_SHARING_SAME_SCALE, scale_col_idx)]
+        scale_y = tidx % THR_ROWS
+        scale_x = tidx // THR_ROWS
+        # Every `FRAGS_SHARING_SAME_SCALE` threads along y direction share the same scale
+        scale_e8m0 = gS[scale_y // FRAGS_SHARING_SAME_SCALE, scale_x]
 
     _, tv_layout = cute.make_layout_tv(
         thr_layout=thr_layout,
         val_layout=val_layout,
     )
 
-
     sQ_frag = cute.composition(sQ, tv_layout)[tidx, None]
     sO_frag = cute.composition(sO, tv_layout)[tidx, None]
 
-    rQ = cute.make_rmem_tensor(cute.make_layout(ELEMS_PER_THREAD), sQ.element_type)
-    rO = cute.make_rmem_tensor(cute.make_layout(ELEMS_PER_THREAD), sO.element_type)
+    rQ_frag = cute.make_rmem_tensor(cute.make_layout(ELEMS_PER_THREAD), sQ.element_type)
+    rO_frag = cute.make_rmem_tensor(cute.make_layout(ELEMS_PER_THREAD), sO.element_type)
 
-    cute.autovec_copy(sQ_frag, rQ)
+    cute.autovec_copy(sQ_frag, rQ_frag)
 
-    block_scale = exp2f(gS_frag[tidx])
-    rO.store((rQ.load().to(Float32) * block_scale).to(sO.element_type))
-    cute.autovec_copy(rO, sO_frag)
+    scale_f32 = exp2f(scale_e8m0)
+    rO_frag.store((rQ_frag.load().to(Float32) * scale_f32).to(sO.element_type))
+
+    cute.autovec_copy(rO_frag, sO_frag)
 
 
 class MXFP8DequantizeConfig:
@@ -231,15 +239,30 @@ class MXFP8DequantizeKernel:
                 self.CTA_BLOCK_ROWS,
                 self.CTA_BLOCK_COLS // MXFP8_BLOCK_SCALING_SIZE,
             )
-            scale_tiler = (self._TILE_ROWS, self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE)
-            gS = cute.local_tile(mS, scale_cta_block_tiler, (bidy, bidx))
-            tiles_per_scale_tile = 1
+            # self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE might be fractional meaning a tile only owns a
+            # partial MXFP8 block. In which case this tile still own at least 1 scale on that direction
+            scale_tiler = (
+                self._TILE_ROWS,
+                max(1, self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE),
+            )
+            # Each data row has its own scales, so tiles never share them
+            tiles_sharing_same_scale = 1
         else:
             scale_cta_block_tiler = (
                 self.CTA_BLOCK_ROWS // MXFP8_BLOCK_SCALING_SIZE,
                 self.CTA_BLOCK_COLS,
             )
-            scale_tiler = (1, self._TILE_COLS)
+            # self._TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE might be fractional meaning a tile only owns a
+            # partial MXFP8 block. In which case this tile still own at least 1 scale on that direction
+            scale_tiler = (
+                max(1, self._TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE),
+                self._TILE_COLS,
+            )
+            # A tile shorter than an MXFP8 block shares its scale row with the other tiles in it
+            tiles_sharing_same_scale = max(1, MXFP8_BLOCK_SCALING_SIZE // self._TILE_ROWS)
+        # If tiles_sharing_same_scale > 1, then this tile owns only a fraction of the MXFP8 block and
+        # shares its scale with the other tiles, so we need to index with tile_idx // tiles_sharing_same_scale
+        # to obtain the scale slice that belongs to this tile
         mS = cute.local_tile(mS, scale_cta_block_tiler, (bidy, bidx))
 
         @cute.struct
@@ -306,13 +329,6 @@ class MXFP8DequantizeKernel:
 
             mainloop_pipeline.consumer_wait(cons_state)
 
-            if cutlass.const_expr(self.DEQUANTIZE_FROM_ROWWISE):
-                scale_tiler = (self._TILE_ROWS, cute.min(1, self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE))
-            else:
-                scale_tiler = (cute.min(1, self._TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE), self._TILE_COLS)
-            # A tile may share a scale with other tiles if it only handles a partial MXFP8 block,
-            # so when we index we use tile_idx // tiles_sharing_same_scale
-            tiles_sharing_same_scale = MXFP8_BLOCK_SCALING_SIZE // self._ELEMS_PER_THREAD
             gS = cute.local_tile(mS, scale_tiler, (tile_idx // tiles_sharing_same_scale, 0))
 
             dequantize_mxfp8_smem_tile(
