@@ -93,6 +93,24 @@ struct Scalar {
   alignas(16) std::array<uint8_t, 16> value{};
 };
 
+const std::vector<Scalar> &GetScalars(ffi::Span<const uint8_t> values) {
+  // cuDNN's FP8 GQA reductions can read host scalars after execute returns.
+  // Immutable cached storage must also outlive CUDA graph capture and replay.
+  const std::string key(values.begin(), values.end());
+  static std::mutex mutex;
+  static std::unordered_map<std::string, std::vector<Scalar>> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  auto [entry, inserted] = cache.try_emplace(key);
+  if (inserted) {
+    auto &scalars = entry->second;
+    scalars.resize(values.size() / 16);
+    for (size_t i = 0; i < scalars.size(); ++i) {
+      std::copy_n(values.begin() + i * 16, 16, scalars[i].value.begin());
+    }
+  }
+  return entry->second;
+}
+
 ffi::Error InitializeGraph(cudaStream_t stream, ffi::RemainingArgs, ffi::RemainingRets,
                            ffi::Dictionary attrs) {
   try {
@@ -157,13 +175,12 @@ ffi::Error ExecuteGraph(cudaStream_t stream, ffi::RemainingArgs args, ffi::Remai
         scalar_values.size() != scalar_uids.size() * 16) {
       throw std::runtime_error("Invalid cuDNN pass-by-value scalar bindings.");
     }
-    std::vector<Scalar> scalars(scalar_uids.size());
+    const auto &scalars = GetScalars(scalar_values);
     for (size_t i = 0; i < scalars.size(); ++i) {
       if (scalar_sizes[i] < 0 || scalar_sizes[i] > 16) {
         throw std::runtime_error("Invalid cuDNN pass-by-value scalar size.");
       }
-      std::copy_n(scalar_values.begin() + i * 16, 16, scalars[i].value.begin());
-      pointers.emplace(scalar_uids[i], scalars[i].value.data());
+      pointers.emplace(scalar_uids[i], const_cast<uint8_t *>(scalars[i].value.data()));
     }
     auto workspace = rets.get<ffi::AnyBuffer>(rets.size() - 1);
     if (workspace.has_error()) throw std::runtime_error("Missing cuDNN graph workspace.");

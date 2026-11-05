@@ -2593,6 +2593,7 @@ def test_cudnn_python_attention_does_not_call_common(monkeypatch):
     np.testing.assert_array_equal(gradients, tensor)
 
 
+@pytest.mark.parametrize("scaling_factor", [0.125, 0.25])
 @pytest.mark.parametrize(
     "kind,sm_arch",
     [
@@ -2607,8 +2608,8 @@ def test_cudnn_python_attention_does_not_call_common(monkeypatch):
         ("ragged_dense_stats_f16", 129),
     ],
 )
-def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, monkeypatch, request):
-    """Compare non-uniform FP8 attention and gradients against native FP32 GQA."""
+def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, scaling_factor, monkeypatch, request):
+    """Compare FP8 GQA against FP32, including cached plans with different scalar values."""
     ragged = kind.startswith("ragged")
     fp8 = not kind.endswith("_f16")
     if ragged and get_device_compute_capability(0) < 100:
@@ -2662,13 +2663,14 @@ def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, monkeypatch, request):
         max_segments_per_seq=2 if ragged else 1,
         window_size=window if window is not None else (-1, -1),
         fp8=fp8,
+        attn_scale=scaling_factor,
         return_max_logit=True,
     )
 
     def reference(arrays):
         query, key, value = (tensor.astype(jnp.float32) for tensor in arrays)
         key, value = (jnp.repeat(tensor, 2, axis=-2) for tensor in (key, value))
-        scores = jnp.einsum("bqhd,bkhd->bhqk", query, key) * 0.125
+        scores = jnp.einsum("bqhd,bkhd->bhqk", query, key) * scaling_factor
         scores = jnp.where(mask[:, None], scores, -jnp.inf)
         result = jnp.einsum("bhqk,bkhd->bqhd", jax.nn.softmax(scores, axis=-1), value)
         if kind == "padding":
@@ -2687,7 +2689,7 @@ def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, monkeypatch, request):
             attn_mask_type=attn_mask,
             qkv_layout=layout,
             softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
-            scaling_factor=0.125,
+            scaling_factor=scaling_factor,
             dropout_probability=0.0,
             is_training=True,
             max_segments_per_seq=2 if ragged else 1,
@@ -2711,8 +2713,9 @@ def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, monkeypatch, request):
     assert relative_error(actual, expected) < (0.06 if fp8 else 0.01)
     actual_grads = jax.jit(jax.grad(lambda xs: jnp.sum(attention(xs) * weight)))(arrays)
     expected_grads = jax.jit(jax.grad(lambda xs: jnp.sum(reference(xs) * weight)))(arrays)
-    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
-        assert relative_error(actual_grad, expected_grad) < (0.1 if fp8 else 0.01)
+    for name, actual_grad, expected_grad in zip(("dQ", "dK", "dV"), actual_grads, expected_grads):
+        error = relative_error(actual_grad, expected_grad)
+        assert error < (0.1 if fp8 else 0.01), f"{name} relative error: {error}"
     _, max_logit = jax.jit(
         lambda xs: fused_attn(
             xs,
@@ -2723,7 +2726,7 @@ def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, monkeypatch, request):
             attn_mask_type=attn_mask,
             qkv_layout=layout,
             softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
-            scaling_factor=0.125,
+            scaling_factor=scaling_factor,
             dropout_probability=0.0,
             is_training=True,
             max_segments_per_seq=2 if ragged else 1,
@@ -2738,7 +2741,7 @@ def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, monkeypatch, request):
             q.astype(jnp.float32),
             jnp.repeat(k.astype(jnp.float32), 2, axis=-2),
         )
-        * 0.125
+        * scaling_factor
     )
     max_mask = mask
     if kind == "padding":
