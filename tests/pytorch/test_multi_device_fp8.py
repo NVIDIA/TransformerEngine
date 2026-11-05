@@ -19,9 +19,14 @@ import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
-pytestmark = pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="needs >= 2 CUDA devices in one process"
-)
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+
+pytestmark = [
+    pytest.mark.skipif(
+        torch.cuda.device_count() < 2, reason="needs >= 2 CUDA devices in one process"
+    ),
+    pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+]
 
 DT = torch.bfloat16
 RECIPE = DelayedScaling(fp8_format=Format.HYBRID)
