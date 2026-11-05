@@ -688,26 +688,16 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return tensor.to(dtype=dtype)
 
 
-def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, fp8: bool) -> None:
-    """Emit the TN GEMM (``y = x @ w^T``) dim constraints as ``torch._check``
-    guards at trace time. torch.compile path only; eager validation lives in
-    the op impl. Messages are constant: Dynamo forbids tensor closures here.
+def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor) -> None:
+    """Check contracting dimensions at trace time for ``torch.compile``.
+
+    Recipe-specific alignment requirements are checked by the runtime implementation.
     """
     # pylint: disable=protected-access
     torch._check(
         inp.shape[-1] == weight.shape[-1],
         lambda: "GEMM not possible: input last dim must equal in_features",
     )
-    if not fp8:
-        return
-    for tensor, name in ((inp, "input"), (weight, "weight")):
-        torch._check(
-            math.prod(tensor.shape[:-1]) % 8 == 0 and tensor.shape[-1] % 16 == 0,
-            lambda n=name: (
-                f"FP8 execution requires the {n}'s product of all dimensions except the"
-                " last to be divisible by 8 and its last dimension to be divisible by 16"
-            ),
-        )
 
 
 def is_bf16_compatible() -> bool:

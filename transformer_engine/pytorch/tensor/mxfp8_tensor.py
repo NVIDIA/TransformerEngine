@@ -131,7 +131,7 @@ class MXFP8Quantizer(Quantizer):
         dimension must be aligned to the block size so that no scaling
         block spans across GPU boundaries.
         """
-        if inp.ndim < 2:
+        if len(inp.shape) < 2:
             return False
         if inp.shape[-1] % 16 != 0:
             return False
@@ -566,11 +566,11 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 return super().__torch_dispatch__(func, types, args, kwargs)
             rowwise_scale_inv_shape = [
                 first_dim,
-                ceil_div(last_dim, MXFP8_BLOCK_SCALING_SIZE),
+                round_up_to_nearest_multiple(ceil_div(last_dim, MXFP8_BLOCK_SCALING_SIZE), 4),
             ]
             columnwise_scale_inv_shape = [
                 ceil_div(first_dim, MXFP8_BLOCK_SCALING_SIZE),
-                last_dim,
+                round_up_to_nearest_multiple(last_dim, 128),
             ]
             if tensor._rowwise_data is not None:
                 rowwise_data = tensor._rowwise_data.__torch_dispatch__(

@@ -1581,13 +1581,9 @@ def _all_gather_mxfp8(
     if out_shape is None:
         out_shape = [in_shape[0] * world_size] + in_shape[1:]
 
-    # For cases where inp has dimensions that cannot be quantized,
-    # we gather in high precision followed by a cast to FP8.
-    if (
-        not isinstance(inp, MXFP8TensorStorage)
-        and quantizer is not None
-        and not quantizer.supports_quantized_allgather(inp)
-    ):
+    # For shapes that cannot be gathered in MXFP8, gather in high precision
+    # followed by a cast to FP8.
+    if quantizer is not None and not quantizer.supports_quantized_allgather(inp):
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):
             inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
