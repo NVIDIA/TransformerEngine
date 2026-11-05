@@ -440,7 +440,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
     const bool pad_direct_tails = use_cu_seqlens_directly && b != actual_b;
     size_t padded_cu_seqlens_workspace_size = 0;
     if (pad_direct_tails) {
-      padded_cu_seqlens_workspace_size = 4 * alignTo<16>((b + 1) * sizeof(int32_t));
+      padded_cu_seqlens_workspace_size = fused_attn::padded_cu_seqlens_workspace_size(b);
     }
     if (!use_cu_seqlens_directly) {
       if (is_padding) {
@@ -464,24 +464,17 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
 
     // Pad the user's cumulative buffers to the bucketed batch size so cuDNN never reads past them.
     if (pad_direct_tails) {
-      const size_t stride = alignTo<16>((b + 1) * sizeof(int32_t));
-      int8_t* pad_ws = static_cast<int8_t*>(workspace) + plan_workspace_size +
-                       actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
-      void** ptrs[4] = {&devPtrcuSeqlensQ, &devPtrcuSeqlensKV, &devPtrSeqOffsetsQ,
-                        &devPtrSeqOffsetsKV};
+      void *ptrs[4] = {devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV};
       const bool needed[4] = {is_padding, is_padding, is_ragged_q,
                               is_ragged_kv && !offset_mults.kv_from_q};
-      PaddedCuSeqlensArgs pad_args;
-      for (int i = 0; i < 4; ++i) {
-        if (!needed[i]) continue;
-        pad_args.src[i] = static_cast<const int32_t*>(*ptrs[i]);
-        pad_args.dst[i] = reinterpret_cast<int32_t*>(pad_ws + i * stride);
-        *ptrs[i] = pad_args.dst[i];
-      }
-      constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
-      pad_cu_seqlens_tails<<<grid, nthreads_per_block, 0, stream>>>(pad_args, actual_b, b);
-      NVTE_CHECK_CUDA(cudaGetLastError());
+      pad_direct_cu_seqlens(ptrs, needed, actual_b, b,
+                            static_cast<int8_t *>(workspace) + plan_workspace_size +
+                                actual_seqlen_workspace_size + seqlen_offsets_workspace_size,
+                            stream);
+      devPtrcuSeqlensQ = ptrs[0];
+      devPtrcuSeqlensKV = ptrs[1];
+      devPtrSeqOffsetsQ = ptrs[2];
+      devPtrSeqOffsetsKV = ptrs[3];
     }
 
     // Build variant pack

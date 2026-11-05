@@ -260,6 +260,15 @@ struct PaddedCuSeqlensArgs {
 };
 __global__ void pad_cu_seqlens_tails(PaddedCuSeqlensArgs args, int64_t actual_b, int64_t max_b);
 
+// Workspace needed by pad_direct_cu_seqlens for a graph batch size of max_b.
+size_t padded_cu_seqlens_workspace_size(int64_t max_b);
+
+// Direct cu_seqlens path with a bucketed graph batch size: replace each pointer flagged in `needed`
+// ({cu_seqlens_q, cu_seqlens_kv, offsets_q, offsets_kv}) by a copy in `workspace` extended from
+// actual_b+1 to max_b+1 entries, so cuDNN never reads past the user's buffers.
+void pad_direct_cu_seqlens(void *ptrs[4], const bool needed[4], int64_t actual_b, int64_t max_b,
+                           void *workspace, cudaStream_t stream);
+
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const q_cu_seqlens,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,
