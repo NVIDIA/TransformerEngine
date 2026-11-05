@@ -223,7 +223,7 @@ struct QueryData {
   GroupedTensorWrapper output;
   GroupedTensorWrapper dequantized{2, shape};
 
-  explicit QueryData(NVTEScalingMode mode) : output(2, shape, mode) {
+  explicit QueryData(NVTEScalingMode mode, bool varying_last_dim = false) : output(2, shape, mode) {
     input.set_rowwise_data(values.rowwise_dptr(), DType::kBFloat16, std::vector<size_t>{256 * 128});
     dequantized.set_rowwise_data(values.rowwise_dptr(), DType::kFloat32,
                                  std::vector<size_t>{256 * 128});
@@ -231,6 +231,22 @@ struct QueryData {
         .set_rowwise_data(result.rowwise_dptr(), DType::kFloat8E4M3, std::vector<size_t>{256 * 128})
         .set_rowwise_scale_inv(scales.rowwise_dptr(), DType::kFloat32, std::vector<size_t>{4096})
         .set_scale(scales.rowwise_dptr(), DType::kFloat32, std::vector<size_t>{2});
+    if (mode == NVTE_MXFP8_1D_SCALING) {
+      output.set_rowwise_scale_inv(scales.rowwise_dptr(), DType::kFloat8E8M0,
+                                   std::vector<size_t>{256, 4});
+    }
+    if (varying_last_dim) {
+      for (auto *tensor : {&input, &output, &dequantized}) {
+        tensor->set_last_dims(rows.rowwise_dptr(), DType::kInt64, std::vector<size_t>{2})
+            .set_tensor_offsets(offsets.rowwise_dptr(), DType::kInt64, std::vector<size_t>{3});
+      }
+      const std::array<int64_t, 2> host_cols{32, 96};
+      const std::array<int64_t, 3> host_offsets{0, 256 * 32, 256 * 128};
+      NVTE_CHECK_CUDA(cudaMemcpy(rows.rowwise_dptr(), host_cols.data(), sizeof(host_cols),
+                                 cudaMemcpyHostToDevice));
+      NVTE_CHECK_CUDA(cudaMemcpy(offsets.rowwise_dptr(), host_offsets.data(), sizeof(host_offsets),
+                                 cudaMemcpyHostToDevice));
+    }
     if (mode == NVTE_NVFP4_1D_SCALING) {
       output.set_row_scaled_nvfp4(true);
       output
@@ -254,6 +270,185 @@ struct QueryData {
     NVTE_CHECK_CUDA(cudaMemset(amax.rowwise_dptr(), 0x5a, 256 * sizeof(float)));
   }
 };
+
+// Exercise both the one-byte marker and the per-group descriptor allocation.
+class GroupedMxfp8WorkspaceQuery : public ::testing::TestWithParam<bool> {
+ protected:
+  void SetUp() override {
+    if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
+      GTEST_SKIP() << "Grouped MXFP8 requires Blackwell or newer.";
+    }
+  }
+};
+
+TEST_P(GroupedMxfp8WorkspaceQuery, RejectsUnsupportedTypes) {
+  QueryData data(NVTE_MXFP8_1D_SCALING, GetParam());
+  TensorWrapper workspace;
+  nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(), nullptr, 0);
+  Tensor storage("query_workspace", workspace.shape(), workspace.dtype());
+  TensorWrapper execution(storage.rowwise_dptr(), workspace.shape(), workspace.dtype());
+  data.input.set_rowwise_data(data.values.rowwise_dptr(), DType::kInt32,
+                              std::vector<size_t>{256 * 128});
+  EXPECT_THROW(
+      nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(), nullptr, 0),
+      std::runtime_error);
+  EXPECT_THROW(
+      nvte_group_quantize_v2(data.input.data(), data.output.data(), execution.data(), nullptr, 0),
+      std::runtime_error);
+  data.dequantized.set_rowwise_data(data.values.rowwise_dptr(), DType::kInt32,
+                                    std::vector<size_t>{256 * 128});
+  EXPECT_THROW(
+      nvte_group_dequantize_v2(data.output.data(), data.dequantized.data(), workspace.data(), 0),
+      std::runtime_error);
+  EXPECT_THROW(
+      nvte_group_dequantize_v2(data.output.data(), data.dequantized.data(), execution.data(), 0),
+      std::runtime_error);
+}
+
+TEST_P(GroupedMxfp8WorkspaceQuery, RejectsMisalignedTensorMaps) {
+  for (int operand = 0; operand < 4; ++operand) {
+    SCOPED_TRACE(operand);
+    QueryData data(NVTE_MXFP8_1D_SCALING, GetParam());
+    GroupedTensorWrapper activations(2, data.shape);
+    activations.set_rowwise_data(static_cast<char *>(data.values.rowwise_dptr()) + 1,
+                                 DType::kBFloat16, std::vector<size_t>{256 * 128});
+    if (operand == 0) {
+      data.input.set_rowwise_data(static_cast<char *>(data.values.rowwise_dptr()) + 1,
+                                  DType::kBFloat16, std::vector<size_t>{256 * 128});
+    } else if (operand == 1) {
+      data.output.set_rowwise_data(static_cast<char *>(data.result.rowwise_dptr()) + 1,
+                                   DType::kFloat8E4M3, std::vector<size_t>{256 * 128});
+    } else if (operand == 2) {
+      data.output
+          .set_columnwise_data(static_cast<char *>(data.result.rowwise_dptr()) + 1,
+                               DType::kFloat8E4M3, std::vector<size_t>{256 * 128})
+          .set_columnwise_scale_inv(data.scales.rowwise_dptr(), DType::kFloat8E8M0,
+                                    std::vector<size_t>{8, 128});
+    }
+    TensorWrapper workspace;
+    if (operand == 3) {
+      EXPECT_THROW(nvte_group_dgelu_v2(data.input.data(), activations.data(), data.output.data(),
+                                       workspace.data(), 0),
+                   std::runtime_error);
+    } else {
+      EXPECT_THROW(nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(),
+                                          nullptr, 0),
+                   std::runtime_error);
+    }
+  }
+  for (int operand = 0; operand < 3; ++operand) {
+    SCOPED_TRACE(operand);
+    QueryData data(NVTE_MXFP8_1D_SCALING, GetParam());
+    if (operand == 0) {
+      data.output.set_rowwise_data(static_cast<char *>(data.result.rowwise_dptr()) + 1,
+                                   DType::kFloat8E4M3, std::vector<size_t>{256 * 128});
+    } else if (operand == 1) {
+      data.output.set_rowwise_data(nullptr, DType::kFloat8E4M3, std::vector<size_t>{0})
+          .set_columnwise_data(static_cast<char *>(data.result.rowwise_dptr()) + 1,
+                               DType::kFloat8E4M3, std::vector<size_t>{256 * 128})
+          .set_columnwise_scale_inv(data.scales.rowwise_dptr(), DType::kFloat8E8M0,
+                                    std::vector<size_t>{8, 128});
+    } else {
+      data.dequantized.set_rowwise_data(static_cast<char *>(data.values.rowwise_dptr()) + 1,
+                                        DType::kFloat32, std::vector<size_t>{256 * 128});
+    }
+    TensorWrapper workspace;
+    EXPECT_THROW(
+        nvte_group_dequantize_v2(data.output.data(), data.dequantized.data(), workspace.data(), 0),
+        std::runtime_error);
+  }
+}
+
+TEST_P(GroupedMxfp8WorkspaceQuery, SupportedQueriesDoNotLaunchOrWrite) {
+  QueryData data(NVTE_MXFP8_1D_SCALING, GetParam());
+  const auto expected_values = read_bytes(data.values.rowwise_dptr(), 256 * 128 * sizeof(float));
+  const auto expected = read_bytes(data.result.rowwise_dptr(), 256 * 128);
+  const auto expected_scales = read_bytes(data.scales.rowwise_dptr(), 4096 * sizeof(float));
+  TensorWrapper workspace;
+  nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(), nullptr, 0);
+  const auto bytes = workspace.shape().data[0];
+  EXPECT_EQ(workspace.dtype(), DType::kByte);
+  EXPECT_EQ(workspace.shape().ndim, 1);
+  if (GetParam()) {
+    EXPECT_GT(bytes, 1);
+  } else {
+    EXPECT_EQ(bytes, 1);
+  }
+  nvte_group_dequantize_v2(data.output.data(), data.dequantized.data(), workspace.data(), 0);
+  EXPECT_EQ(workspace.shape().data[0], bytes);
+  cudaStream_t stream;
+  ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+  ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), cudaSuccess);
+  EXPECT_NO_THROW(nvte_group_quantize_v2(data.input.data(), data.output.data(), workspace.data(),
+                                         nullptr, stream));
+  EXPECT_NO_THROW(nvte_group_dequantize_v2(data.output.data(), data.dequantized.data(),
+                                           workspace.data(), stream));
+  EXPECT_NO_THROW(
+      nvte_group_gelu_v2(data.input.data(), data.output.data(), workspace.data(), stream));
+  EXPECT_NO_THROW(nvte_group_dgelu_v2(data.input.data(), data.input.data(), data.output.data(),
+                                      workspace.data(), stream));
+  cudaGraph_t graph;
+  ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
+  size_t nodes = 0;
+  ASSERT_EQ(cudaGraphGetNodes(graph, nullptr, &nodes), cudaSuccess);
+  EXPECT_EQ(nodes, 0);
+  EXPECT_EQ(read_bytes(data.values.rowwise_dptr(), expected_values.size()), expected_values);
+  EXPECT_EQ(read_bytes(data.result.rowwise_dptr(), expected.size()), expected);
+  EXPECT_EQ(read_bytes(data.scales.rowwise_dptr(), expected_scales.size()), expected_scales);
+  ASSERT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+  ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
+TEST(GroupedWorkspaceQueryConfig, Mxfp8RejectsInvalidTensorMapShapes) {
+  if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) GTEST_SKIP();
+  QueryData data(NVTE_MXFP8_1D_SCALING);
+  // BF16 rows are 16-byte aligned, but FP8 rows are not.
+  const std::vector<size_t> shape{256, 120};
+  GroupedTensorWrapper input(2, shape), output(2, shape, NVTE_MXFP8_1D_SCALING),
+      dequantized(2, shape);
+  input.set_rowwise_data(data.values.rowwise_dptr(), DType::kBFloat16, shape);
+  output.set_rowwise_data(data.result.rowwise_dptr(), DType::kFloat8E4M3, shape)
+      .set_rowwise_scale_inv(data.scales.rowwise_dptr(), DType::kFloat8E8M0,
+                             std::vector<size_t>{256, 4});
+  dequantized.set_rowwise_data(data.values.rowwise_dptr(), DType::kFloat32, shape);
+  TensorWrapper workspace;
+  EXPECT_THROW(nvte_group_quantize_v2(input.data(), output.data(), workspace.data(), nullptr, 0),
+               std::runtime_error);
+  EXPECT_THROW(nvte_group_dequantize_v2(output.data(), dequantized.data(), workspace.data(), 0),
+               std::runtime_error);
+}
+
+TEST(GroupedWorkspaceQueryConfig, Mxfp8DbiasValidatesTypesAndTensorMaps) {
+  if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) GTEST_SKIP();
+  QueryData data(NVTE_MXFP8_1D_SCALING);
+  Tensor dbias_values("dbias", std::vector<size_t>{2, 128}, DType::kFloat32);
+  GroupedTensorWrapper dbias(2, std::vector<size_t>{2, 128});
+  dbias.set_rowwise_data(dbias_values.rowwise_dptr(), DType::kBFloat16,
+                         std::vector<size_t>{2, 128});
+  TensorWrapper workspace;
+  nvte_group_quantize_dbias(data.input.data(), data.output.data(), dbias.data(), workspace.data(),
+                            nullptr, 0);
+  EXPECT_EQ(workspace.dtype(), DType::kFloat32);
+  ASSERT_EQ(workspace.shape().ndim, 2);
+  EXPECT_EQ(workspace.shape().data[0], 2);
+  EXPECT_EQ(workspace.shape().data[1], 128);
+  for (bool invalid_type : {true, false}) {
+    SCOPED_TRACE(invalid_type);
+    const DType dtype = invalid_type ? DType::kInt32 : DType::kBFloat16;
+    data.input.set_rowwise_data(
+        static_cast<char *>(data.values.rowwise_dptr()) + (invalid_type ? 0 : 1), dtype,
+        std::vector<size_t>{256 * 128});
+    dbias.set_rowwise_data(dbias_values.rowwise_dptr(), dtype, std::vector<size_t>{2, 128});
+    EXPECT_THROW(nvte_group_quantize_dbias(data.input.data(), data.output.data(), dbias.data(),
+                                           workspace.data(), nullptr, 0),
+                 std::runtime_error);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(Layouts, GroupedMxfp8WorkspaceQuery, ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool> &info) {
+                           return info.param ? "VaryingLastDim" : "SameShape";
+                         });
 
 class GroupedWorkspaceQuery : public ::testing::TestWithParam<NVTEScalingMode> {
  protected:

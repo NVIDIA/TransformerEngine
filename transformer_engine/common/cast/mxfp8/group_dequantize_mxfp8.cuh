@@ -440,15 +440,6 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output, 
   }
 
   common::GroupedTmaStorageView storage;
-  if (workspace != nullptr) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {std::max(size_t{1}, common::grouped_tma_workspace_bytes(*input))};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-    storage = common::get_grouped_tma_storage(workspace, is_single_tensor ? 0 : num_tensors);
-  }
-
   const dim3 grid(blocks);
   const dim3 block(THREADS_PER_CHUNK);
 
@@ -476,6 +467,18 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output, 
           create_2D_tensor_map(tensor_map_output, output->data, first_logical_dim, last_logical_dim,
                                SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim, 0,
                                typeToNumBits(output->dtype()));
+
+          // Queries validate types and tensor maps without updating device descriptors.
+          if (workspace != nullptr) {
+            if (workspace->data.dptr == nullptr) {
+              workspace->data.shape = {
+                  std::max(size_t{1}, common::grouped_tma_workspace_bytes(*input))};
+              workspace->data.dtype = DType::kByte;
+              return;
+            }
+            storage =
+                common::get_grouped_tma_storage(workspace, is_single_tensor ? 0 : num_tensors);
+          }
 
           // Update tensor descriptors before launching the kernel
           if (!is_single_tensor) {

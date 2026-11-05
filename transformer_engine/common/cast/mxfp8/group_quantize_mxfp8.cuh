@@ -1223,26 +1223,6 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     NVTE_CHECK(dbias->data.shape == expected_shape_dbias_tensor, "Wrong shape of DBias.");
 
     NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
-    const size_t dbias_workspace_rows = DIVUP(first_logical_dim, tile_dim_y);
-    const size_t dbias_workspace_cols = last_logical_dim;
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {dbias_workspace_rows, dbias_workspace_cols};
-      workspace->data.dtype = DType::kFloat32;
-      return;
-    }
-  }
-
-  GroupedTmaStorageView storage;
-  if constexpr (!IS_DBIAS) {
-    if (workspace != nullptr) {
-      const size_t descriptor_count = is_single_tensor ? 0 : num_tensors;
-      if (workspace->data.dptr == nullptr) {
-        workspace->data.shape = {get_grouped_tma_workspace_size(descriptor_count)};
-        workspace->data.dtype = DType::kByte;
-        return;
-      }
-      storage = get_grouped_tma_storage(workspace, descriptor_count);
-    }
   }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
@@ -1296,6 +1276,27 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                                                first_logical_dim, last_logical_dim, BUFF_DIM_Y,
                                                BUFF_DIM_X, last_logical_dim, 0,
                                                output_type_bit_size);
+                        }
+
+                        // Queries validate the same types and tensor maps as execution, but
+                        // return before descriptor updates or any other GPU work.
+                        GroupedTmaStorageView storage;
+                        if constexpr (IS_DBIAS) {
+                          if (workspace->data.dptr == nullptr) {
+                            workspace->data.shape = {DIVUP(first_logical_dim, tile_dim_y),
+                                                     last_logical_dim};
+                            workspace->data.dtype = DType::kFloat32;
+                            return;
+                          }
+                        } else if (workspace != nullptr) {
+                          const size_t descriptor_count = is_single_tensor ? 0 : num_tensors;
+                          if (workspace->data.dptr == nullptr) {
+                            workspace->data.shape = {
+                                get_grouped_tma_workspace_size(descriptor_count)};
+                            workspace->data.dtype = DType::kByte;
+                            return;
+                          }
+                          storage = get_grouped_tma_storage(workspace, descriptor_count);
                         }
 
                         constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
