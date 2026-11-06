@@ -115,6 +115,11 @@ class _MoEBlock(TransformerEngineBase):
     dispatch_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the EP dispatch outputs.
         ``None`` leaves them unnamed.
+    dispatch_quantization_recipe : Optional[Recipe]
+        Recipe used to quantize tokens before EP dispatch so that the dispatch moves quantized
+        data plus compact scales instead of high-precision activations. Only MXFP8 recipes are
+        supported, and the hidden size must be a multiple of 512. Defaults to ``None`` (no
+        dispatch quantization).
     collect_expert_counts : bool
         Compute global per-expert assignment counts. Set to ``False`` when
         callers do not consume the counts to avoid the associated all-reduce;
@@ -166,6 +171,7 @@ class _MoEBlock(TransformerEngineBase):
     apply_topk_weights_early: bool = False
     recv_capacity_per_rank: Optional[int] = None
     dispatch_checkpoint_name: Optional[str] = None
+    dispatch_quantization_recipe: Optional[Recipe] = None
     collect_expert_counts: bool = True
 
     # Dtypes / init / misc
@@ -302,6 +308,12 @@ class _MoEBlock(TransformerEngineBase):
                     dgrad=token_set.dgrad,
                 )
 
+            dispatch_quantizer = None
+            if self.dispatch_quantization_recipe is not None:
+                dispatch_quantizer = self.generate_quantizer_set(
+                    "_dispatch", fp8_recipe=self.dispatch_quantization_recipe
+                ).x
+
             quantizer_sets = (
                 make_grouped_quantizer_set("_fc1"),
                 make_grouped_quantizer_set("_fc2"),
@@ -342,4 +354,5 @@ class _MoEBlock(TransformerEngineBase):
                 wo_kernel_axes=self.wo_kernel_axes,
                 dtype=self.dtype,
                 dispatch_checkpoint_name=self.dispatch_checkpoint_name,
+                dispatch_quantizer=dispatch_quantizer,
             )
