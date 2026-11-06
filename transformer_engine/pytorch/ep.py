@@ -397,12 +397,6 @@ class EpBuffer:
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
-#
-# Optional tensors in ``mutates_args`` must not have a default value. When the
-# dispatcher calls a Python kernel it drops trailing arguments that equal their
-# default, so a mutated ``None`` with a ``= None`` default is missing from the
-# boxed args, and torch's ADInplaceOrView kernel indexes past their end
-# (IndexError, issue #3814). Callers pass these explicitly, ``None`` included.
 
 _LIB = "transformer_engine_ep"
 
