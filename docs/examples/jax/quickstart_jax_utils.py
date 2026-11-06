@@ -45,12 +45,12 @@ def speedometer(
     jax.block_until_ready(result)
 
     # Timing runs
-    start = time.time()
+    start = time.perf_counter()
     for _ in range(timing_iters):
         rngs, step_rngs = _split_step_rngs(rngs)
         result = train_step_fn(variables, input, output_grad, step_rngs)
     jax.block_until_ready(result)
-    end = time.time()
+    end = time.perf_counter()
 
     print(f"Mean time: {(end - start) * 1000 / timing_iters} ms")
 
