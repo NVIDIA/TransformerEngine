@@ -13,8 +13,9 @@ requires = [
     "nvidia-cudnn-frontend>=1.29.0",
 ]
 
-# CUDA and framework-specific requirements are defined in `build_tools/build_backend.py`.
-# Isolated builds must select a framework with --config-settings framework=<framework>
-# or NVTE_FRAMEWORK. Select CUDA with --config-settings cuda-version=<version>.
+# CUDA, framework, and optional feature requirements are defined in
+# `build_tools/build_backend.py`. Isolated builds must select a framework with
+# --config-settings framework=<framework> or NVTE_FRAMEWORK. Select CUDA with
+# --config-settings cuda-version=<version>.
 build-backend = "build_tools.build_backend"
 backend-path = ["."]
