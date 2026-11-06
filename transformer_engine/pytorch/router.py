@@ -111,6 +111,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         expert_bias: Optional[torch.Tensor],
         routing_map_format: int,
         topk_indices: Optional[torch.Tensor],
+        bias_in_logit_space: bool,
     ):
         # pylint: disable=missing-function-docstring
         probs, routing_output, intermediate_output = tex.fused_topk_with_score_function_fwd(
@@ -124,6 +125,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             expert_bias,
             routing_map_format,
             topk_indices,
+            bias_in_logit_space,
         )
         if topk_indices is not None:
             routing_output = topk_indices
@@ -172,7 +174,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             ctx.use_dense_indices,
             ctx.routing_map_format,
         )
-        return grad_logits, None, None, None, None, None, None, None, None, None
+        return grad_logits, None, None, None, None, None, None, None, None, None, None
 
 
 class FusedTopkScoreFunctionQB(torch.autograd.Function):
@@ -190,6 +192,7 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
         histogram: torch.Tensor,
         bin_bounds: torch.Tensor,
         histogram_mode: int,
+        bias_in_logit_space: bool,
     ):
         # pylint: disable=missing-function-docstring
         (
@@ -208,6 +211,7 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
             histogram,
             bin_bounds,
             histogram_mode,
+            bias_in_logit_space,
         )
         ctx.compiled = False
         if topk_indices is not None:
@@ -255,7 +259,7 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
             ctx.use_dense_indices,
             ctx.routing_map_format,
         )
-        return grad_logits, None, None, None, None, None, None, None, None
+        return grad_logits, None, None, None, None, None, None, None, None, None
 
 
 class _CompiledFusedTopkScoreFunction(FusedTopkScoreFunction):
@@ -389,6 +393,7 @@ def fused_topk_with_score_function(
     qb_histogram: Optional[torch.Tensor] = None,
     qb_bin_bounds: Optional[torch.Tensor] = None,
     qb_histogram_mode: Optional[str] = None,
+    qb_bias_space: str = "score",
 ):
     """
     Fused topk with score function router. Supports ``torch.compile(fullgraph=True)``.
@@ -433,6 +438,14 @@ def fused_topk_with_score_function(
     qb_histogram_mode : str, optional
         ``"two_kernel"`` or ``"fused_atomic"``. Must be provided with the two QB tensors.
 
+    qb_bias_space : str, optional
+        "score" (default) selects using sigmoid(logits) + bias; "logit" selects
+        using logits + bias and accumulates cutoff - logits in QB histograms.
+        Logit mode requires an ungrouped sigmoid router with expert bias. It also
+        works without histogram tensors (evaluation/recompute). Contribution
+        weights always use the original sigmoid scores. Logit mode explicitly
+        uses the simple kernel, independent of NVTE_RADIX_TOPK_THRESHOLD.
+
     Returns
     -------
     probs : torch.Tensor in the same dtype as the "logits".
@@ -448,6 +461,16 @@ def fused_topk_with_score_function(
     """
     if logits.dtype == torch.float64:
         raise ValueError("Current TE does not support float64 router type.")
+    if qb_bias_space not in ("score", "logit"):
+        raise ValueError("qb_bias_space must be 'score' or 'logit'")
+    bias_in_logit_space = qb_bias_space == "logit"
+    if bias_in_logit_space and (
+        score_function != "sigmoid"
+        or expert_bias is None
+        or use_pre_softmax
+        or any(group is not None for group in (num_groups, group_topk))
+    ):
+        raise ValueError("Logit-space bias requires an ungrouped sigmoid router with expert bias")
     routing_map_format = _validate_routing_map_format(routing_map_format)
     qb_arguments = (qb_histogram, qb_bin_bounds, qb_histogram_mode)
     if any(value is not None for value in qb_arguments):
@@ -482,6 +505,7 @@ def fused_topk_with_score_function(
             qb_histogram,
             qb_bin_bounds,
             mode,
+            bias_in_logit_space,
         )
         return outputs[:2]
     function = (
@@ -498,6 +522,7 @@ def fused_topk_with_score_function(
         expert_bias,
         routing_map_format,
         topk_indices,
+        bias_in_logit_space,
     )
     return outputs[:2]
 

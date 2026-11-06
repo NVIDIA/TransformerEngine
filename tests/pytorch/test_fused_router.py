@@ -2135,3 +2135,161 @@ def profile_topk_softmax(
         scaling_factor,
         enable_bias,
     )
+
+
+# Logit-space selection keeps unbiased sigmoid contribution weights.
+
+
+def _logit_bias_route(logits, bias, k, **kwargs):
+    return fused_topk_with_score_function(
+        logits, k, False, None, None, 3.16, "sigmoid", bias, qb_bias_space="logit", **kwargs
+    )
+
+
+def _logit_bias_reference(logits, bias, k):
+    indices = (logits.float() + bias).topk(k, dim=-1).indices
+    raw = logits.float().sigmoid().gather(-1, indices)
+    weights = raw / (raw.sum(-1, keepdim=True) + 1e-20) if k > 1 else raw
+    probs = torch.zeros_like(logits).scatter(-1, indices, (3.16 * weights).to(logits.dtype))
+    mask = torch.zeros_like(logits, dtype=torch.bool).scatter(-1, indices, True)
+    return probs, mask
+
+
+def _logit_bias_histogram_reference(logits, bias, k, bounds, bins):
+    z = logits.float()
+    cutoff = (z + bias).topk(k + 1, dim=-1).values[:, -1:]
+    indices = ((cutoff - z - bounds[0]) * (bins / (bounds[1] - bounds[0]))).floor().long()
+    indices.clamp_(0, bins - 1)
+    return torch.zeros(z.shape[1], bins, device=z.device, dtype=torch.int32).scatter_add_(
+        1, indices.T, torch.ones_like(indices.T, dtype=torch.int32)
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("k", [1, 10, 32])
+@pytest.mark.parametrize("layout", ["bytemap", "bitmap_u8", torch.int16, torch.int32, torch.int64])
+@pytest.mark.parametrize("mode", [None, "fused_atomic", "two_kernel"])
+def test_logit_bias_forward_backward_histogram(dtype, k, layout, mode, monkeypatch):
+    monkeypatch.setenv("NVTE_RADIX_TOPK_THRESHOLD", "1")
+    # 65 experts exercises partial bitmap bytes and warp tails. Tiny sigmoid scores
+    # remain nonzero in FP32 even though large biases make those experts selectable.
+    torch.manual_seed(421)
+    offsets = torch.linspace(-30, 0, 65, device="cuda")
+    logits = (torch.randn(17, 65, device="cuda") + offsets).to(dtype).requires_grad_(True)
+    bias = -offsets + torch.rand(65, device="cuda")
+    expected_logits = logits.detach().clone().requires_grad_(True)
+    bounds = torch.tensor([-64.0, 64.0], device="cuda")
+    hist = torch.zeros(65, 256, dtype=torch.int32, device="cuda")
+    kwargs = {}
+    if isinstance(layout, str):
+        kwargs["routing_map_format"] = layout
+    else:
+        kwargs["topk_indices"] = torch.empty(17, k, dtype=layout, device="cuda")
+    if mode is not None:
+        kwargs.update(qb_histogram=hist, qb_bin_bounds=bounds, qb_histogram_mode=mode)
+    probs, routing = _logit_bias_route(logits, bias, k, **kwargs)
+    expected, mask = _logit_bias_reference(expected_logits, bias, k)
+    rtol = {torch.float32: 5e-6, torch.float16: 2e-3, torch.bfloat16: 2e-2}[dtype]
+    torch.testing.assert_close(probs, expected, atol=0, rtol=rtol)
+    if layout == "bitmap_u8":
+        ids = torch.arange(65, device="cuda")
+        actual_mask = ((routing[:, ids // 8].int() >> (ids % 8)) & 1).bool()
+        assert (routing[:, -1].int() & 254).count_nonzero() == 0
+    elif isinstance(layout, str):
+        actual_mask = routing
+    else:
+        actual_mask = torch.zeros_like(mask).scatter(-1, routing.long(), True)
+        assert routing.data_ptr() == kwargs["topk_indices"].data_ptr()
+    assert torch.equal(actual_mask, mask)
+    upstream = torch.randn_like(probs)
+    (probs * upstream).sum().backward()
+    (expected * upstream).sum().backward()
+    torch.testing.assert_close(logits.grad, expected_logits.grad, atol=2e-6, rtol=rtol * 4)
+    if mode is not None:
+        assert torch.equal(
+            hist, _logit_bias_histogram_reference(logits.detach(), bias, k, bounds, 256)
+        )
+        before = hist.clone()
+        _logit_bias_route(logits.detach(), bias, k, **kwargs)
+        assert torch.equal(hist, 2 * before)
+    assert torch.isfinite(probs).all() and torch.isfinite(logits.grad).all()
+
+
+@pytest.mark.parametrize("mode", [None, "fused_atomic", "two_kernel"])
+def test_logit_bias_preserves_tiny_scores_and_gradients(mode):
+    logits = torch.tensor([[-20.0, -2.0, 20.0, 19.0]], device="cuda", requires_grad=True)
+    bias = torch.tensor([42.0, 0.0, 0.0, 0.0], device="cuda")
+    kwargs = {}
+    if mode is not None:
+        kwargs.update(
+            qb_histogram=torch.zeros(4, 1000, dtype=torch.int32, device="cuda"),
+            qb_bin_bounds=torch.tensor([-64.0, 64.0], device="cuda"),
+            qb_histogram_mode=mode,
+        )
+    p, mask = _logit_bias_route(logits, bias, 2, **kwargs)
+    assert mask.tolist() == [[True, False, True, False]]
+    assert p[0, 0] > 0
+    p[0, 0].backward()
+    assert logits.grad[0, 0] > 0
+    expected = logits.detach().sigmoid()[0, 0] / logits.detach().sigmoid()[0, [0, 2]].sum() * 3.16
+    torch.testing.assert_close(p[0, 0], expected, atol=0, rtol=5e-6)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("mode", ["fused_atomic", "two_kernel"])
+def test_logit_bias_cuda_graph_mutable_logits_bias_and_bounds(mode, dtype):
+    torch.manual_seed(123)
+    logits = torch.randn(129, 512, device="cuda", dtype=dtype)
+    bias = torch.zeros(512, device="cuda")
+    bounds = torch.tensor([-16.0, 16.0], device="cuda")
+    hist = torch.zeros(512, 1000, device="cuda", dtype=torch.int32)
+    kwargs = dict(qb_histogram=hist, qb_bin_bounds=bounds, qb_histogram_mode=mode)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            _logit_bias_route(logits, bias, 10, **kwargs)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probs, mask = _logit_bias_route(logits, bias, 10, **kwargs)
+    rtol = {torch.float32: 5e-6, torch.float16: 2e-3, torch.bfloat16: 2e-2}[dtype]
+    for factor in (1.0, 2.0):
+        # Changing logits also exercises the captured FP32 copy in the two-kernel path.
+        logits.copy_(torch.randn_like(logits) * factor)
+        bias.copy_(torch.linspace(-factor, factor, 512, device="cuda"))
+        bounds.copy_(torch.tensor([-32.0 * factor, 32.0 * factor], device="cuda"))
+        hist.zero_()
+        graph.replay()
+        expected, expected_mask = _logit_bias_reference(logits, bias, 10)
+        torch.testing.assert_close(probs, expected, atol=0, rtol=rtol)
+        assert torch.equal(mask, expected_mask)
+        assert torch.equal(hist, _logit_bias_histogram_reference(logits, bias, 10, bounds, 1000))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"qb_bias_space": "bad"},
+        {"score_function": "softmax"},
+        {"expert_bias": None},
+        {"use_pre_softmax": True},
+        {"num_groups": 1},
+        {"group_topk": 1},
+    ],
+)
+def test_logit_bias_rejects_unsupported_options(overrides):
+    kwargs = dict(
+        logits=torch.zeros(2, 4, device="cuda"),
+        topk=2,
+        use_pre_softmax=False,
+        num_groups=None,
+        group_topk=None,
+        scaling_factor=1.0,
+        score_function="sigmoid",
+        expert_bias=torch.zeros(4, device="cuda"),
+        qb_bias_space="logit",
+    )
+    kwargs.update(overrides)
+    with pytest.raises(ValueError):
+        fused_topk_with_score_function(**kwargs)
