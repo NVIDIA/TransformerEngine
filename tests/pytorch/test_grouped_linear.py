@@ -4,6 +4,7 @@
 
 import os
 import random
+from contextlib import nullcontext
 from unittest.mock import Mock
 from typing import Dict, List, Optional, Sequence
 
@@ -38,6 +39,7 @@ from transformer_engine.pytorch.module.grouped_linear import (
     _GroupedLinear,
     is_module_grouped_tensor_path_supported,
 )
+from transformer_engine.pytorch.module import _split_quantization
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     get_align_size_for_quantization,
@@ -149,6 +151,242 @@ def nvfp4_row_scaled_quantized_backward():
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
     nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
     return nvfp4_recipe
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize(
+    "backward_override,m_splits",
+    [
+        (None, (128, 256)),
+        (None, (64, 192)),
+        ("high_precision", (128, 256)),
+        ("high_precision", (64, 0, 192)),
+        ("dequantized", (128, 256)),
+        ("dequantized", (64, 0, 192)),
+    ],
+)
+def test_batch_rowwise_grouped_linear_exact(monkeypatch, m_splits, bias, backward_override):
+    """Batched activation quantization must preserve forward and all parameter/input gradients."""
+    FP8GlobalStateManager.reset()
+    torch.manual_seed(307)
+    fp4_recipe = nvfp4_row_scaled()
+    fp4_recipe.backward_override = backward_override
+    module = GroupedLinear(
+        len(m_splits),
+        128,
+        128,
+        bias=bias,
+        params_dtype=torch.bfloat16,
+        use_grouped_tensor=False,
+    )
+    reference = GroupedLinear(
+        len(m_splits),
+        128,
+        128,
+        bias=bias,
+        params_dtype=torch.bfloat16,
+        use_grouped_tensor=False,
+    )
+    reference.load_state_dict(module.state_dict())
+    x = torch.randn(sum(m_splits), 128, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn_like(x)
+    batched_calls = []
+    batched = _split_quantization._batch_nvfp4_rowwise
+
+    def record_batch(*args, **kwargs):
+        batched_calls.append(True)
+        return batched(*args, **kwargs)
+
+    monkeypatch.setattr(_split_quantization, "_batch_nvfp4_rowwise", record_batch)
+    actual_x = x.clone().requires_grad_()
+    with autocast(recipe=fp4_recipe):
+        actual = module(actual_x, list(m_splits))
+    actual.backward(dy)
+    assert bool(batched_calls) == (backward_override is not None)
+    with monkeypatch.context() as patch:
+        patch.setattr(_split_quantization, "_can_batch_nvfp4_rowwise", lambda *_: False)
+        expected_x = x.clone().requires_grad_()
+        with autocast(recipe=fp4_recipe):
+            expected = reference(expected_x, list(m_splits))
+        expected.backward(dy)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    torch.testing.assert_close(actual_x.grad, expected_x.grad, atol=0, rtol=0)
+    for actual_param, expected_param in zip(module.parameters(), reference.parameters()):
+        torch.testing.assert_close(actual_param.grad, expected_param.grad, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("mode", ["train", "eval", "no_grad", "frozen_weights", "frozen_input"])
+def test_batch_rowwise_grouped_linear_grad_modes(monkeypatch, backward_override, bias, mode):
+    """Requested gradients, rather than train/eval alone, determine required representations."""
+    FP8GlobalStateManager.reset()
+    torch.manual_seed(319)
+    fp4_recipe = nvfp4_row_scaled()
+    fp4_recipe.backward_override = backward_override
+    models = [GroupedLinear(2, 128, 128, bias=bias, params_dtype=torch.bfloat16) for _ in range(2)]
+    models[1].load_state_dict(models[0].state_dict())
+    for model in models:
+        if mode in ("eval", "no_grad"):
+            model.eval()
+        if mode == "frozen_weights":
+            for name, parameter in model.named_parameters():
+                if name.startswith("weight"):
+                    parameter.requires_grad_(False)
+    x = torch.randn(384, 128, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn_like(x)
+    batch_calls = []
+    batch = _split_quantization._batch_nvfp4_rowwise
+
+    def record_batch(*args, **kwargs):
+        batch_calls.append(True)
+        return batch(*args, **kwargs)
+
+    monkeypatch.setattr(_split_quantization, "_batch_nvfp4_rowwise", record_batch)
+    results = []
+    inputs = []
+    for index, model in enumerate(models):
+        inp = x.clone().requires_grad_(mode != "frozen_input")
+        inputs.append(inp)
+        with monkeypatch.context() as patch:
+            if index:
+                patch.setattr(_split_quantization, "_can_batch_nvfp4_rowwise", lambda *_: False)
+            with torch.no_grad() if mode == "no_grad" else nullcontext():
+                with autocast(recipe=fp4_recipe):
+                    result = model(inp, [128, 256])
+                if result.requires_grad:
+                    result.backward(dy)
+            results.append(result)
+    assert bool(batch_calls) == (
+        backward_override is not None or mode in ("no_grad", "frozen_weights")
+    )
+    torch.testing.assert_close(results[0], results[1], atol=0, rtol=0)
+    for actual, expected in [
+        (inputs[0], inputs[1]),
+        *zip(models[0].parameters(), models[1].parameters()),
+    ]:
+        if expected.grad is None:
+            assert actual.grad is None
+        else:
+            assert torch.isfinite(actual.grad).all()
+            torch.testing.assert_close(actual.grad, expected.grad, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not (mxfp8_available and nvfp4_available), reason="Requires MXFP8 and NVFP4")
+@pytest.mark.parametrize("quantization", ["mxfp8", "nvfp4"])
+def test_batch_rowwise_preserves_automatic_grouped_tensor(monkeypatch, quantization):
+    """The existing GroupedTensor backend must retain automatic routing and exact outputs."""
+    FP8GlobalStateManager.reset()
+    torch.manual_seed(319)
+    fp_recipe = (
+        recipe.MXFP8BlockScaling() if quantization == "mxfp8" else nvfp4_rht_and_2d_quantization()
+    )
+    if not is_module_grouped_tensor_path_supported(fp_recipe, torch.bfloat16):
+        pytest.skip("GroupedTensor backend is unavailable for this recipe and cuBLAS version")
+    models = [
+        GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16, use_grouped_tensor=True)
+        for _ in range(2)
+    ]
+    models[1].load_state_dict(models[0].state_dict())
+    x = torch.randn(384, 128, device="cuda", dtype=torch.bfloat16)
+    dispatch = []
+    forward = _GroupedLinear.forward
+
+    def record_forward(ctx, inp, args, *parameters):
+        dispatch.append(args.use_grouped_tensor_path)
+        return forward(ctx, inp, args, *parameters)
+
+    monkeypatch.setattr(_GroupedLinear, "forward", record_forward)
+    monkeypatch.setattr(
+        _split_quantization,
+        "_batch_nvfp4_rowwise",
+        lambda *_: pytest.fail("Unexpected split batching"),
+        raising=False,
+    )
+    with torch.no_grad(), autocast(recipe=fp_recipe):
+        splits = torch.tensor([128, 256], device="cuda", dtype=torch.int64)
+        actual = models[0](x, splits)
+        expected = models[1](x, splits)
+    assert dispatch == [True, True]
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+def test_batch_rowwise_grouped_linear_cpu_offload(monkeypatch, backward_override):
+    """Real activation offload/reload must preserve outputs and all gradients via fallback."""
+    from transformer_engine.pytorch import cpu_offload
+
+    FP8GlobalStateManager.reset()
+    torch.manual_seed(319)
+    fp4_recipe = nvfp4_row_scaled()
+    fp4_recipe.backward_override = backward_override
+    models = [
+        nn.ModuleList(
+            [GroupedLinear(2, 512, 512, bias=True, params_dtype=torch.bfloat16) for _ in range(2)]
+        )
+        for _ in range(2)
+    ]
+    models[1].load_state_dict(models[0].state_dict())
+    x = torch.randn(2048, 512, device="cuda", dtype=torch.bfloat16)
+    dy = torch.randn_like(x)
+    offloaded_bytes = []
+    native_calls = []
+    start_offload = cpu_offload.OffloadableLayerState.start_offload
+    split_quantize = tex.split_quantize
+
+    def record_offload(state):
+        start_offload(state)
+        offloaded_bytes.append(
+            sum(t.numel() * t.element_size() for t in state.cpu_tensor_group.tensor_list)
+        )
+
+    def record_native(*args, **kwargs):
+        native_calls.append(kwargs.get("disable_bulk_allocation", False))
+        return split_quantize(*args, **kwargs)
+
+    monkeypatch.setattr(cpu_offload.OffloadableLayerState, "start_offload", record_offload)
+    monkeypatch.setattr(tex, "split_quantize", record_native)
+    results, inputs = [], []
+    for index, model in enumerate(models):
+        inp = x.clone().requires_grad_()
+        inputs.append(inp)
+        with monkeypatch.context() as patch:
+            if index:
+                patch.setattr(
+                    _split_quantization, "_can_batch_nvfp4_rowwise", lambda *_: False, raising=False
+                )
+            else:
+                patch.setattr(
+                    _split_quantization,
+                    "_batch_nvfp4_rowwise",
+                    lambda *_: pytest.fail("Offload must retain independent allocation"),
+                    raising=False,
+                )
+            offload_context, sync = cpu_offload.get_cpu_offload_context(
+                enabled=index == 0, num_layers=1, model_layers=2
+            )
+            out = inp
+            for layer in model:
+                with offload_context, autocast(recipe=fp4_recipe):
+                    out = layer(out, [1024, 1024])
+                if sync is not None:
+                    out = sync(out)
+            if index == 0:
+                assert native_calls and all(native_calls)
+            out.backward(dy)
+            results.append(out)
+    torch.cuda.synchronize()
+    assert sum(offloaded_bytes) > 0
+    torch.testing.assert_close(results[0], results[1], atol=0, rtol=0)
+    for actual, expected in [
+        (inputs[0], inputs[1]),
+        *zip(models[0].parameters(), models[1].parameters()),
+    ]:
+        assert torch.isfinite(actual.grad).all()
+        torch.testing.assert_close(actual.grad, expected.grad, atol=0, rtol=0)
 
 
 def nvfp4_4over6():

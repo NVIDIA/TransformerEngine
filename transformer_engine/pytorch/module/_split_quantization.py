@@ -21,6 +21,7 @@ from ..tensor import (
     NVFP4Quantizer,
 )
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
+from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..utils import cast_if_needed
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
@@ -212,6 +213,94 @@ def validate_grouped_quantizer_list(
             )
 
 
+def _can_batch_nvfp4_rowwise(
+    tensor: torch.Tensor,
+    split_sizes: Sequence[int],
+    quantizers: Sequence[Quantizer],
+) -> bool:
+    """Whether independent row scales allow quantizing the concatenation once."""
+    if not quantizers:
+        return False
+    if type(quantizers[0]) is not NVFP4Quantizer:  # pylint: disable=unidiomatic-typecheck
+        return False
+    reference = quantizers[0]
+    if (  # pylint: disable=too-many-boolean-expressions
+        tensor.ndim != 2
+        or tensor.device.type != "cuda"
+        or tensor.dtype != torch.bfloat16
+        or not tensor.is_contiguous()
+        or tensor.shape[1] == 0
+        or tensor.shape[1] % 64 != 0
+        or tensor.shape[0] == 0
+        or len(split_sizes) < 2
+        or len(split_sizes) != len(quantizers)
+        or sum(split_sizes) != tensor.shape[0]
+        or any(rows < 0 or rows % 32 != 0 for rows in split_sizes)
+    ):
+        return False
+    if (  # pylint: disable=too-many-boolean-expressions
+        not reference.row_scaled_nvfp4
+        or reference.with_rht
+        or reference.with_post_rht_amax
+        or reference.with_2d_quantization
+        or reference.stochastic_rounding
+        or reference.with_amax_reduction
+        or reference.nvfp4_use_4over6
+        or reference.disable_second_level_scale
+    ):
+        return False
+    signature = _backend_quantizer_signature(reference)
+    return all(
+        type(quantizer) is NVFP4Quantizer  # pylint: disable=unidiomatic-typecheck
+        and quantizer.internal
+        and quantizer.rowwise_usage
+        and not quantizer.columnwise_usage
+        and _backend_quantizer_signature(quantizer) == signature
+        for quantizer in quantizers
+    )
+
+
+def _batch_nvfp4_rowwise(
+    tensor: torch.Tensor,
+    split_sizes: Sequence[int],
+    quantizers: Sequence[NVFP4Quantizer],
+) -> Sequence[NVFP4TensorStorage]:
+    """Quantize independent rows once and expose disjoint per-expert storage."""
+    # Match split_quantize's unswizzled layout. Swizzling the concatenation
+    # before splitting would mix experts that are not 128-row aligned.
+    quantizer = quantizers[0].copy()
+    quantizer.optimize_for_gemm = False
+    whole = tex.quantize(tensor, quantizer)
+    # Each expert needs its own 128-row scale padding.
+    padded_sizes = [(rows + 127) // 128 * 128 for rows in split_sizes]
+    if list(split_sizes) == padded_sizes:
+        scales = torch.split(whole._rowwise_scale_inv, split_sizes)
+    else:
+        buffer = whole._rowwise_scale_inv.new_zeros(
+            (sum(padded_sizes), whole._rowwise_scale_inv.shape[1])
+        )
+        scales = torch.split(buffer, padded_sizes)
+        live_scales = torch.split(whole._rowwise_scale_inv[: tensor.shape[0]], split_sizes)
+        # Padding must not alias another expert's live scales: a later in-place
+        # quantization of one result must leave every other result intact.
+        torch._foreach_copy_(  # pylint: disable=protected-access
+            [scale[:rows] for scale, rows in zip(scales, split_sizes)], live_scales
+        )
+    data = torch.split(whole._rowwise_data, split_sizes)
+    amaxes = torch.split(whole._amax_rowwise, split_sizes)
+    outputs = []
+    for payload, scale, amax, quantizer in zip(data, scales, amaxes, quantizers):
+        metadata = whole.get_metadata()
+        metadata.update(
+            rowwise_data=payload,
+            rowwise_scale_inv=scale,
+            amax_rowwise=amax,
+            quantizer=quantizer,
+        )
+        outputs.append(NVFP4TensorStorage(**metadata))
+    return outputs
+
+
 def _split_quantize_non_hybrid(
     tensor: torch.Tensor,
     split_sizes: Sequence[int],
@@ -223,6 +312,8 @@ def _split_quantize_non_hybrid(
 ) -> Sequence[Union[torch.Tensor, QuantizedTensorStorage]]:
     """Split and quantize one homogeneous, non-Hybrid quantizer list."""
     reference = quantizers[0]
+    if not disable_bulk_allocation and _can_batch_nvfp4_rowwise(tensor, split_sizes, quantizers):
+        return _batch_nvfp4_rowwise(tensor, split_sizes, quantizers)
     if _supports_native_split_quantize(reference):
         return tex.split_quantize(
             tensor,
