@@ -417,6 +417,26 @@ def nvshmem_home_path() -> Optional[Path]:
     return _python_package_path(f"nvidia-nvshmem-cu{cuda_version()[0]}", "nvidia/nvshmem")
 
 
+def mpi_home_path() -> Optional[Path]:
+    """Return the MPI installation root.
+
+    Prefers MPI_HOME, then the openmpi Python package, which installs into the
+    environment prefix rather than site-packages. Returns `None` if MPI is not found."""
+    if mpi_home := os.getenv("MPI_HOME"):
+        return Path(mpi_home)
+
+    try:
+        openmpi_distribution = distribution("openmpi")
+    except PackageNotFoundError:
+        return None
+
+    for package_path in openmpi_distribution.files or []:
+        if package_path.name == "mpi.h" and package_path.parent.name == "include":
+            return Path(openmpi_distribution.locate_file(package_path)).resolve().parent.parent
+
+    return None
+
+
 @functools.lru_cache(maxsize=None)
 def cuda_toolkit_include_path() -> Optional[Path]:
     """Return the CUDA Toolkit include directory."""
@@ -609,10 +629,11 @@ def get_frameworks() -> List[str]:
 def setup_mpi_flags(include_dirs: List, cxx_flags: List) -> None:
     """Add MPI include path and compile definition if NVTE_UB_WITH_MPI is enabled."""
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
-        mpi_path = Path(os.getenv("MPI_HOME"))
+        mpi_path = mpi_home_path()
+        assert mpi_path is not None, (
+            "MPI_HOME=/path/to/mpi must be set, or the openmpi Python package installed, "
+            "when compiling with NVTE_UB_WITH_MPI=1!"
+        )
         include_dirs.append(mpi_path / "include")
         cxx_flags.append("-DNVTE_UB_WITH_MPI")
 

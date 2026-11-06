@@ -98,7 +98,7 @@ installed. Not intended for external use.
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable MPI support for userbuffers. When set to ``1``, requires ``MPI_HOME`` to be set to the MPI installation directory.
+   :Description: Enable MPI support for userbuffers. Requires the MPI installation directory in ``MPI_HOME`` or the ``openmpi`` Python package. Config setting: ``ub-with-mpi``.
 
 .. envvar:: NVTE_ENABLE_NVSHMEM
 

@@ -27,6 +27,7 @@ from build_tools.utils import (
     get_frameworks,
     remove_dups,
     min_python_version_str,
+    mpi_home_path,
     nccl_ep_enabled,
     get_max_jobs_for_parallel_build,
     nvcc_path,
@@ -77,10 +78,13 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
 
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+        mpi_home = mpi_home_path()
+        assert mpi_home is not None, (
+            "MPI_HOME must be set, or the openmpi Python package installed, when compiling with"
+            " NVTE_UB_WITH_MPI=1"
+        )
         cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+        cmake_flags.append(f"-DMPI_HOME={mpi_home}")
 
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
         nvshmem_home = nvshmem_home_path()

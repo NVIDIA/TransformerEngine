@@ -66,6 +66,7 @@ _FEATURES = {
     "enable-nvshmem": _Feature(
         "NVTE_ENABLE_NVSHMEM", "NVSHMEM_HOME", ("nvidia-nvshmem-cu{cuda_major}",)
     ),
+    "ub-with-mpi": _Feature("NVTE_UB_WITH_MPI", "MPI_HOME", ("openmpi",)),
     "with-cutedsl": _Feature("NVTE_WITH_CUTEDSL", None, ("apache-tvm-ffi>=0.1.12",)),
 }
 _PRIVATE_SETTINGS = ("cuda-version", "framework", *_FEATURES)
