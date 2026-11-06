@@ -29,12 +29,26 @@ logger = logging.getLogger("transformer_engine.cutedsl.utils")
 
 def device_compute_capability(device_id: Optional[int] = None) -> tuple:
     """(major, minor) compute capability of a CUDA device (current by default), or (0, 0) if it can't be queried."""
-    from cuda.core import Device  # pylint: disable=no-name-in-module
+    # pylint: disable=c-extension-no-member
+    from cuda.bindings import runtime as cudart  # pylint: disable=no-name-in-module
+
+    def check(result):
+        err, *values = result
+        if err != cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(f"CUDA runtime error {err}")
+        return values[0]
 
     try:
-        device_id = Device().device_id if device_id is None else device_id
-        major_minor = Device(device_id).arch
-        return (int(major_minor[:-1]), int(major_minor[-1])) if major_minor else (0, 0)
+        if device_id is None:
+            device_id = check(cudart.cudaGetDevice())
+        attr = cudart.cudaDeviceAttr
+        major = check(
+            cudart.cudaDeviceGetAttribute(attr.cudaDevAttrComputeCapabilityMajor, device_id)
+        )
+        minor = check(
+            cudart.cudaDeviceGetAttribute(attr.cudaDevAttrComputeCapabilityMinor, device_id)
+        )
+        return (major, minor)
     except Exception as e:  # pylint: disable=broad-except
         logger.warning("Could not query CUDA device compute capability (%s); assuming (0, 0).", e)
         return (0, 0)

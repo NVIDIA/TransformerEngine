@@ -13,6 +13,7 @@ import functools
 import torch
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
 from ..utils import (
@@ -330,29 +331,11 @@ class NVFP4Quantizer(Quantizer):
 
     @staticmethod
     def get_columnwise_shape(shape: Iterable[int]) -> Tuple[int, ...]:
-        """Calculate the shape of a tensor after columnwise quantization.
-
-        For NVFP4 columnwise quantization, it's performing 16x1 quantization block scaling.
-
-        Parameters
-        ----------
-        shape : Iterable[int]
-            Original shape of the tensor
-
-        Returns
-        -------
-        Tuple[int, ...]
-            New shape with dimensions rearranged for columnwise layout.
-            For a shape (d1, d2, ..., dn), returns (dn, d1, d2, ..., dn-1).
-            Returns empty tuple for empty input shape.
-        """
-        if len(shape) == 0:
-            return tuple()
-        # and then after AG, a reorganize kernel will be called to restore the shape
-        colwise_shape = [shape[-1]]
-        for i in range(len(shape) - 1):
-            colwise_shape.append(shape[i])
-        return tuple(colwise_shape)
+        """Return the flattened columnwise shape before FP4 packing."""
+        shape = tuple(shape)
+        if not shape:
+            return ()
+        return (shape[-1], math.prod(shape[:-1]))
 
     @staticmethod
     def convert_shape_for_fp4(shape: Iterable[int]) -> Tuple[int, ...]:
@@ -418,7 +401,8 @@ class NVFP4Quantizer(Quantizer):
             amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
             specs["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
         if self.columnwise_usage:
-            specs["_amax_columnwise"] = ((1,), torch.float32)
+            amax_columnwise_shape = (shape[-1],) if self.row_scaled_nvfp4 else (1,)
+            specs["_amax_columnwise"] = (amax_columnwise_shape, torch.float32)
         return specs
 
 
@@ -813,7 +797,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 qt._amax_rowwise,
                 qt._amax_columnwise,
             ):
-                if t is not None and t.is_cuda:
+                if t is not None and t.device.type == te_device_type():
                     t.record_stream(stream)
             return None
 
@@ -971,7 +955,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         """
 
         # Tensor device
-        new_device = tensor.device if tensor.is_cuda else self.device
+        new_device = tensor.device if tensor.device.type == te_device_type() else self.device
         if not devices_match(new_device, tensor.device):
             tensor = tensor.to(device=new_device)
 

@@ -839,6 +839,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 }  // namespace transformer_engine
 
+int nvte_get_cublaslt_build_version() { return CUBLAS_VERSION; }
+
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
                       NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
                       NVTETensor workspace, bool accumulate, bool use_split_accumulator,

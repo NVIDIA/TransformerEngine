@@ -57,7 +57,9 @@ void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax
 
   const TensorWrapper input_cu = makeTransformerEngineTensor(input);
   TensorWrapper amax_rowwise_cu = makeTransformerEngineTensor(amax_rowwise);
-  TensorWrapper amax_colwise_cu = makeTransformerEngineTensor(amax_colwise);
+  // Empty PyTorch views may have a backing pointer. Normalize omission at this boundary.
+  TensorWrapper amax_colwise_cu =
+      amax_colwise.numel() == 0 ? TensorWrapper() : makeTransformerEngineTensor(amax_colwise);
 
   nvte_mxfp8_scaling_compute_partial_amax(input_cu.data(), amax_rowwise_cu.data(),
                                           amax_colwise_cu.data(), rows, cols, start_offset,
@@ -72,13 +74,19 @@ void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwi
   TORCH_CHECK(output_rowwise.is_contiguous(), "output_rowwise must be contiguous");
   TORCH_CHECK(output_colwise.is_contiguous(), "output_colwise must be contiguous");
   TORCH_CHECK(scale_inv_rowwise.is_contiguous(), "scale_inv_rowwise must be contiguous");
-  TORCH_CHECK(scale_inv_colwise.is_contiguous(), "scale_inv_colwise must be contiguous");
 
   const TensorWrapper input_cu = makeTransformerEngineTensor(input);
   TensorWrapper output_rowwise_cu = makeTransformerEngineTensor(output_rowwise);
-  TensorWrapper output_colwise_cu = makeTransformerEngineTensor(output_colwise);
+  const bool with_columnwise = output_colwise.numel() != 0;
+  if (with_columnwise) {
+    TORCH_CHECK(scale_inv_colwise.numel() != 0, "Columnwise output requires columnwise scales");
+    TORCH_CHECK(scale_inv_colwise.is_contiguous(), "scale_inv_colwise must be contiguous");
+  }
+  TensorWrapper output_colwise_cu =
+      with_columnwise ? makeTransformerEngineTensor(output_colwise) : TensorWrapper();
   const TensorWrapper scale_inv_rowwise_cu = makeTransformerEngineTensor(scale_inv_rowwise);
-  const TensorWrapper scale_inv_colwise_cu = makeTransformerEngineTensor(scale_inv_colwise);
+  const TensorWrapper scale_inv_colwise_cu =
+      with_columnwise ? makeTransformerEngineTensor(scale_inv_colwise) : TensorWrapper();
 
   nvte_mxfp8_scaling_partial_cast(input_cu.data(), output_rowwise_cu.data(),
                                   output_colwise_cu.data(), scale_inv_rowwise_cu.data(),

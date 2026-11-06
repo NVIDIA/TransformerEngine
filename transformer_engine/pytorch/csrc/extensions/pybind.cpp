@@ -149,7 +149,7 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
         py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
-        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
+        py::arg("bin_bounds"), py::arg("histogram_mode"),
         "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
@@ -164,13 +164,16 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_score_for_moe_aux_loss_bwd", &fused_score_for_moe_aux_loss_bwd,
         py::arg("intermediate_output"), py::arg("grad_scores"), py::arg("grad_logits"),
         py::arg("topk"), py::arg("score_function"), "Fused aux loss with score function bwd");
+  m.def("get_moe_aux_loss_workspace_config", &get_moe_aux_loss_workspace_config);
   m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        py::arg("deterministic") = false, py::arg("workspace") = py::none(),
         "Fused aux loss fwd (host-int total_num_tokens, host-folded C_coeff)");
   m.def("fused_moe_aux_loss_fwd_graph_safe", &fused_moe_aux_loss_fwd_graph_safe, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        py::arg("deterministic") = false, py::arg("workspace") = py::none(),
         "Fused aux loss fwd (device-tensor total_num_tokens, CUDA-graph-safe)");
   m.def("fused_moe_aux_loss_bwd", &fused_moe_aux_loss_bwd, py::arg("Const_buf"),
         py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
@@ -210,6 +213,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+  m.def("nvfp4_gemm_swizzled_scales_alignment",
+        &transformer_engine::pytorch::NVFP4Quantizer::gemm_swizzled_scales_alignment,
+        py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
+        py::arg("row_scaled_nvfp4"), py::arg("nvfp4_use_4over6"), py::arg("sm_arch"),
+        py::arg("disable_rht_cast_fusion"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
@@ -251,6 +259,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+  m.def("strided_batched_gemm", transformer_engine::pytorch::strided_batched_gemm,
+        "Compute experimental strided batched GEMM", py::arg("A"), py::arg("transA"),
+        py::arg("batch_dim_A"), py::arg("B"), py::arg("transB"), py::arg("batch_dim_B"),
+        py::arg("D"), py::arg("batch_dim_D"), py::arg("workspace"), py::arg("accumulate"),
+        py::arg("use_split_accumulator"), py::arg("math_sm_count"), py::arg("alpha") = 1.0f,
+        py::arg("beta") = std::nullopt);
   /* GLU (sigmoid gate) */
   m.def("glu", transformer_engine::pytorch::glu, "GLU activation", py::arg("input"),
         py::arg("quantizer"));
@@ -374,27 +388,33 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scaled_softmax_forward", &transformer_engine::pytorch::scaled_softmax_forward,
         "Scaled Softmax FWD", py::call_guard<py::gil_scoped_release>());
   m.def("scaled_softmax_backward", &transformer_engine::pytorch::scaled_softmax_backward,
-        "Scaled Softmax BWD", py::call_guard<py::gil_scoped_release>());
+        "Scaled Softmax BWD", py::arg("output_grads"), py::arg("softmax_results"),
+        py::arg("scale_factor"), py::arg("overwrite_output_grads") = false,
+        py::call_guard<py::gil_scoped_release>());
   m.def("scaled_masked_softmax_forward",
         &transformer_engine::pytorch::scaled_masked_softmax_forward, "Scaled Masked Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
   m.def("scaled_masked_softmax_backward",
         &transformer_engine::pytorch::scaled_masked_softmax_backward, "Scaled Masked Softmax BWD",
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("output_grads"), py::arg("softmax_results"), py::arg("scale_factor"),
+        py::arg("overwrite_output_grads") = false, py::call_guard<py::gil_scoped_release>());
   m.def("scaled_upper_triang_masked_softmax_forward",
         &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_forward,
         "Scaled Upper-Triangular Masked Softmax FWD", py::call_guard<py::gil_scoped_release>());
   m.def("scaled_upper_triang_masked_softmax_backward",
         &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_backward,
-        "Scaled Upper-Triangular Masked Softmax BWD", py::call_guard<py::gil_scoped_release>());
+        "Scaled Upper-Triangular Masked Softmax BWD", py::arg("output_grads"),
+        py::arg("softmax_results"), py::arg("scale_factor"),
+        py::arg("overwrite_output_grads") = false, py::call_guard<py::gil_scoped_release>());
   m.def("scaled_aligned_causal_masked_softmax_forward",
         &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_forward,
         "Scaled Bottom-Right Corner Aligned Masked Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
   m.def("scaled_aligned_causal_masked_softmax_backward",
         &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_backward,
-        "Scaled Bottom-Right Corner Aligned Masked Softmax BWD",
-        py::call_guard<py::gil_scoped_release>());
+        "Scaled Bottom-Right Corner Aligned Masked Softmax BWD", py::arg("output_grads"),
+        py::arg("softmax_results"), py::arg("scale_factor"),
+        py::arg("overwrite_output_grads") = false, py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
   m.def("layernorm_fwd", &transformer_engine::pytorch::layernorm_fwd, "LayerNorm", py::arg("input"),
@@ -607,6 +627,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Misc
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
+  m.def("get_cublasLt_build_version", &nvte_get_cublaslt_build_version,
+        "Get the cublasLt version that Transformer Engine was built against",
+        py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
@@ -617,7 +640,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("splits_to_offsets_multi", &transformer_engine::pytorch::splits_to_offsets_multi,
         "Compute multiple scaled inclusive-scan offsets from a split-sizes vector",
         py::arg("split_sizes"), py::arg("device"), py::kw_only(), py::arg("strides"),
-        py::arg("include_leading_zero"), py::arg("dtypes"), py::arg("bulk_allocate") = false);
+        py::arg("include_leading_zero"), py::arg("dtypes"), py::arg("bulk_allocate") = false,
+        py::arg("split_alignment") = 1);
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
 

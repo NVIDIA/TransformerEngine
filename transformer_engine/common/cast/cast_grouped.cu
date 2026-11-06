@@ -8,6 +8,7 @@
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/recipe.h>
 
 #include <vector>
@@ -101,16 +102,5 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
 void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
                                    const size_t *split_sections, const size_t num_tensors,
                                    cudaStream_t stream) {
-  NVTE_API_CALL(nvte_group_nvfp4_compute_amax);
-  using namespace transformer_engine;
-
-  const Tensor *input_tensor = convertNVTETensorCheck(input);
-  std::vector<Tensor *> output_tensors;
-  output_tensors.reserve(num_tensors);
-  for (size_t i = 0; i < num_tensors; ++i) {
-    output_tensors.push_back(convertNVTETensorCheck(outputs[i]));
-  }
-
-  dispatch::nvfp4::group_compute_fused_amax(*input_tensor, /*noop=*/nullptr, output_tensors,
-                                            split_sections, num_tensors, stream);
+  nvte_group_amax(input, outputs, split_sections, num_tensors, stream);
 }
