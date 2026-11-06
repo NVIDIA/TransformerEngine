@@ -47,6 +47,7 @@ add_executable(test_operator
                test_swizzle_block_scaling.cu
                test_swap_first_dims.cu
                test_grouped_gemm.cu
+               test_linear_attention.cu
                ../test_common.cu)
 
 # Find required packages
