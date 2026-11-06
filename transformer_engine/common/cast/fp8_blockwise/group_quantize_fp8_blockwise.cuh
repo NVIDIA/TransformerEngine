@@ -818,8 +818,8 @@ inline GroupedBlockwiseLaunchInfo prepare_grouped_blockwise_launch(const Grouped
 inline void group_quantize_blockwise_2d(const GroupedTensor* input, GroupedTensor* output,
                                         const Tensor* noop, const float epsilon,
                                         const bool pow_2_scales, cudaStream_t stream,
-                                        GroupedTensor* dbias = nullptr,
-                                        Tensor* workspace = nullptr) {
+                                        GroupedTensor* dbias = nullptr, Tensor* workspace = nullptr,
+                                        bool query_only = false) {
   const int sm = transformer_engine::cuda::sm_arch();
   NVTE_CHECK(sm >= 90, "Grouped FP8 block-scaling quantize requires SM90 or newer. Got SM", sm,
              ".");
@@ -871,6 +871,7 @@ inline void group_quantize_blockwise_2d(const GroupedTensor* input, GroupedTenso
                         CUtensorMap tensor_map_input{};
                         create_2D_tensor_map(tensor_map_input, input->data, info.R_total, info.K,
                                              kTileDim, kTileDim, info.K, 0, sizeof(IType) * 8);
+                        if (query_only) return;
                         auto tma_kernel =
                             group_block_scaled_2d_tma_kernel<kSameBothDims, kRowwise, kColwise,
                                                              CType, IType, OType>;
@@ -914,8 +915,8 @@ inline void group_quantize_blockwise_2d(const GroupedTensor* input, GroupedTenso
 inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTensor* output,
                                         const Tensor* noop, const float epsilon,
                                         const bool pow_2_scales, cudaStream_t stream,
-                                        GroupedTensor* dbias = nullptr,
-                                        Tensor* workspace = nullptr) {
+                                        GroupedTensor* dbias = nullptr, Tensor* workspace = nullptr,
+                                        bool query_only = false) {
   const int sm = transformer_engine::cuda::sm_arch();
   NVTE_CHECK(sm >= 90, "Grouped FP8 block-scaling quantize requires SM90 or newer. Got SM", sm,
              ".");
@@ -968,6 +969,7 @@ inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTenso
                       constexpr bool kRwOnly = kRowwise && !kColwise;
                       const bool use_rw_fast_path = kRwOnly && (dbias_workspace == nullptr);
                       if (use_rw_fast_path) {
+                        if (query_only) return;
                         if constexpr (kRwOnly) {
                           group_block_scaled_1d_rw_kernel<kSameBothDims, CType, IType, OType>
                               <<<grid, kThreadsPerBlock, 0, stream>>>(
@@ -989,14 +991,15 @@ inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTenso
                         auto tma_kernel =
                             group_block_scaled_1d_tma_kernel<kSameBothDims, kRowwise, kColwise,
                                                              CType, IType, OType>;
+                        CUtensorMap tensor_map_input{};
+                        create_2D_tensor_map(tensor_map_input, input->data, info.R_total, info.K,
+                                             kTileDim, kTileDim, info.K, 0, sizeof(IType) * 8);
+                        if (query_only) return;
                         if (total_smem_tma >= 48 * 1024) {
                           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                               tma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                               static_cast<int>(tma_smem_bytes)));
                         }
-                        CUtensorMap tensor_map_input{};
-                        create_2D_tensor_map(tensor_map_input, input->data, info.R_total, info.K,
-                                             kTileDim, kTileDim, info.K, 0, sizeof(IType) * 8);
                         tma_kernel<<<grid, kThreadsPerBlock, tma_smem_bytes, stream>>>(
                             tensor_map_input,
                             kRowwise ? reinterpret_cast<OType*>(output->data.dptr) : nullptr,
