@@ -630,6 +630,15 @@ def test_fused_attn_graph_cache():
             actual=len(miss_keys["reshape"][pass_name]),
         )
 
+        if "[CACHE-TEST] thd=1" in result.stdout:
+            expect("thd_first", "CREATE_GRAPH", 1, "expected one cold THD graph")
+            expect("thd_first", "BUILD_PLANS", 1, "expected one cold THD plan")
+            for phase in ("thd_repack", "thd_replay"):
+                expect(phase, "MISS", 0, "packed counts in one bucket should share a graph")
+                expect(phase, "CREATE_GRAPH", 0, "packed count forced a new graph")
+                expect(phase, "BUILD_PLANS", 0, "packed count recompiled the plan")
+                expect(phase, "EXECUTE", "1+", "THD fused attention never ran")
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
