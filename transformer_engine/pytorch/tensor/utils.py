@@ -5,6 +5,7 @@
 """Helper functions for using fp8/nvfp4 tensors as weights"""
 
 from typing import Optional, Union, List
+import os
 import torch
 
 import transformer_engine_torch as tex
@@ -22,6 +23,7 @@ from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantize
 from .hybrid_tensor import HybridQuantizedTensor, HybridQuantizer
 from .identity_tensor import IdentityQuantizer
 from .storage.identity_tensor_storage import IdentityTensorStorage
+from .storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 from ..utils import is_non_tn_fp8_gemm_supported
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, DType
@@ -1452,6 +1454,7 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
     """
     if not isinstance(model_weights, list):
         model_weights = [model_weights]
+    _PARAM_GATHER_GENERATION[0] += 1
 
     # Collect NVFP4 tensors for batched processing
     nvfp4_tensors = []
@@ -1483,6 +1486,89 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
     # Batch process all NVFP4 tensors with multi-tensor approach
     if nvfp4_tensors:
         _nvfp4_2d_multi_tensor_transpose(nvfp4_tensors)
+        refresh_nvfp4_weight_gemm_swizzle_cache(nvfp4_tensors)
+
+
+_NVFP4_WEIGHT_SWIZZLE_CACHE = os.getenv("NVTE_NVFP4_WEIGHT_SWIZZLE_CACHE", "0") == "1"
+
+# Bumped on every post-all-gather call, i.e. whenever quantized weights may have changed.
+_PARAM_GATHER_GENERATION = [0]
+
+
+def nvfp4_weight_swizzle_cache_enabled() -> bool:
+    """Whether GEMMs reuse GEMM-swizzled scales of all-gathered NVFP4 weights.
+
+    Enabled with ``NVTE_NVFP4_WEIGHT_SWIZZLE_CACHE=1``. The cached scales are refreshed by
+    ``post_all_gather_processing``, so weights must not change in any other way while the
+    cache is in use.
+    """
+    return _NVFP4_WEIGHT_SWIZZLE_CACHE
+
+
+def param_gather_generation() -> int:
+    """Host-side counter of quantized-weight refreshes, for caches keyed on weight contents."""
+    return _PARAM_GATHER_GENERATION[0]
+
+
+def _nvfp4_storage_like(
+    t: NVFP4Tensor,
+    rowwise_scale_inv: torch.Tensor,
+    columnwise_scale_inv: torch.Tensor,
+    with_gemm_swizzled_scales: bool,
+    **kwargs,
+) -> NVFP4TensorStorage:
+    """NVFP4 storage that shares the data and amaxes of ``t`` but has its own scales."""
+    return NVFP4TensorStorage(
+        rowwise_data=t._rowwise_data,
+        rowwise_scale_inv=rowwise_scale_inv,
+        columnwise_data=t._columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        amax_rowwise=t._amax_rowwise,
+        amax_columnwise=t._amax_columnwise,
+        fp4_dtype=t._fp4_dtype,
+        scale_dtype=t._scale_dtype,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+        row_scaled_nvfp4=t._row_scaled_nvfp4,
+        nvfp4_use_4over6=t._nvfp4_use_4over6,
+        nvfp4_e4m3_max=t._nvfp4_e4m3_max,
+        **kwargs,
+    )
+
+
+def refresh_nvfp4_weight_gemm_swizzle_cache(nvfp4_tensors: List[NVFP4Tensor]) -> None:
+    """Swizzle the scales of freshly gathered NVFP4 weights once for GEMM.
+
+    Primary NVFP4 weights keep compact scales (the all-gather and dequantize need that
+    layout), so every GEMM that reads them would otherwise swizzle the weight scales again,
+    once per microbatch. Only weights that a GEMM has asked for (``_gsw_wanted``, set by
+    ``general_gemm`` and the grouped GEMM) are cached. The swizzled scales are written into
+    persistent buffers in place, so GEMMs captured in a CUDA graph keep reading valid scales
+    on every replay.
+    """
+    if not nvfp4_weight_swizzle_cache_enabled():
+        return
+    for t in nvfp4_tensors:
+        if not getattr(t, "_gsw_wanted", False) or t._with_gemm_swizzled_scales:
+            continue
+        if t._rowwise_data is None or t._columnwise_data is None:
+            continue
+        tmp = _nvfp4_storage_like(
+            t, t._rowwise_scale_inv, t._columnwise_scale_inv, False, quantizer=None
+        )
+        tex.swizzle_scales_for_gemm_(tmp)
+        row = getattr(t, "_gsw_row", None)
+        col = getattr(t, "_gsw_col", None)
+        if row is None or row.shape != tmp._rowwise_scale_inv.shape:
+            row = torch.empty_like(tmp._rowwise_scale_inv)
+            t._gsw_row = row
+        if col is None or col.shape != tmp._columnwise_scale_inv.shape:
+            col = torch.empty_like(tmp._columnwise_scale_inv)
+            t._gsw_col = col
+        row.copy_(tmp._rowwise_scale_inv)
+        col.copy_(tmp._columnwise_scale_inv)
+        t._gsw_view = _nvfp4_storage_like(
+            t, row, col, True, quantizer=t._quantizer, fake_dtype=t.dtype
+        )
 
 
 def _nvfp4_2d_multi_tensor_transpose(nvfp4_tensors: List[NVFP4Tensor]):
