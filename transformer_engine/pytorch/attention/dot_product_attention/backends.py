@@ -801,7 +801,18 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # attention scores and attention mask
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
         attention_probs = self.scale_mask_softmax(
-            matmul_result, attention_mask, attn_mask_type, softmax_scale
+            matmul_result,
+            attention_mask,
+            attn_mask_type,
+            softmax_scale,
+            overwrite_output_grads=not any(
+                (
+                    self.attention_dropout._forward_hooks,
+                    self.attention_dropout._forward_pre_hooks,
+                    self.attention_dropout._backward_hooks,
+                    self.attention_dropout._backward_pre_hooks,
+                )
+            ),
         )
 
         # mask out the pad positions in softmax results, mostly for the rows (pad tokens from q)

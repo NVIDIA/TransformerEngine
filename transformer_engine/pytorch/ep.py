@@ -436,8 +436,8 @@ def _dispatch_op(
     recv_topk_weights: torch.Tensor,
     top_k: int,
     alignment: int,
-    tokens_scale_inv: Optional[torch.Tensor] = None,
-    recv_scale_inv: Optional[torch.Tensor] = None,
+    tokens_scale_inv: Optional[torch.Tensor],
+    recv_scale_inv: Optional[torch.Tensor],
 ) -> None:
     tex.ep_dispatch(
         handle_mem,
@@ -481,8 +481,8 @@ def _prepare_and_dispatch_op(
     alignment: int,
     recv_tokens: torch.Tensor,
     recv_topk_weights: torch.Tensor,
-    recv_scale_inv: Optional[torch.Tensor] = None,
-    tokens_scale_inv: Optional[torch.Tensor] = None,
+    recv_scale_inv: Optional[torch.Tensor],
+    tokens_scale_inv: Optional[torch.Tensor],
 ) -> None:
     tex.ep_prepare_and_dispatch(
         handle_mem,
@@ -570,8 +570,8 @@ def _combine_bwd_op(
     top_k: int,
     alignment: int,
     topk_idx_dtype: torch.dtype,
-    grad_scale_inv: Optional[torch.Tensor] = None,
-    grad_expert_out_scale_inv: Optional[torch.Tensor] = None,
+    grad_scale_inv: Optional[torch.Tensor],
+    grad_expert_out_scale_inv: Optional[torch.Tensor],
 ) -> None:
     tex.ep_combine_bwd(
         handle_mem,
@@ -958,7 +958,7 @@ def _ep_combine_bwd(state: "_CombineState", g_result: torch.Tensor):
             tex.ep_combine_bwd(handle_mem, g_result, grad_expert_out, *state.layer_args, None, None)
         else:
             torch.ops.transformer_engine_ep.combine_bwd(
-                handle_mem, g_result, grad_expert_out, *state.layer_args
+                handle_mem, g_result, grad_expert_out, *state.layer_args, None, None
             )
     else:
         from .tensor.mxfp8_tensor import MXFP8Quantizer
