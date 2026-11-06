@@ -5,3 +5,4 @@
 """CuTeDSL cast/quantize kernels."""
 
 from . import mxfp8
+from . import nvfp4

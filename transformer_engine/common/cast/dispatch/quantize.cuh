@@ -33,6 +33,7 @@
 
 #ifdef NVTE_WITH_CUTEDSL
 #include "../mxfp8/quantize_mxfp8_cutedsl.cuh"
+#include "../nvfp4/quantize_transpose_nvfp4_cutedsl.cuh"
 #endif
 
 namespace transformer_engine {
@@ -167,11 +168,27 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
         }
       } else if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
-          nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
-              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+          bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+          quantized_with_cutedsl =
+              cutedsl_backend::nvfp4_quantize_transpose_cutedsl</*use_2d_quantization=*/true>(
+                  *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+#endif
+          if (!quantized_with_cutedsl) {
+            nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
+                *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+          }
         } else {
-          nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
-              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+          bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+          quantized_with_cutedsl =
+              cutedsl_backend::nvfp4_quantize_transpose_cutedsl</*use_2d_quantization=*/false>(
+                  *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+#endif
+          if (!quantized_with_cutedsl) {
+            nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
+                *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+          }
         }
       } else {
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
@@ -356,11 +373,27 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
         }
       } else if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
-          nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
-              *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+          bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+          quantized_with_cutedsl =
+              cutedsl_backend::nvfp4_quantize_transpose_cutedsl</*use_2d_quantization=*/true>(
+                  *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+#endif
+          if (!quantized_with_cutedsl) {
+            nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
+                *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+          }
         } else {
-          nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
-              *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+          bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+          quantized_with_cutedsl =
+              cutedsl_backend::nvfp4_quantize_transpose_cutedsl</*use_2d_quantization=*/false>(
+                  *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+#endif
+          if (!quantized_with_cutedsl) {
+            nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
+                *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+          }
         }
       } else {
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
