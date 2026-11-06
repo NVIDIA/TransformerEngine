@@ -23,6 +23,30 @@ Checkpointing
 -------------
 When using checkpointing with Transformer Engine JAX, please be aware of the checkpointing policy being applied to your model. Any JAX checkpointing policy using `dot`, such as `jax.checkpoint_policies.dots_with_no_batch_dims`, may not work with GEMMs provided by Transformer Engine as they do not always use the `jax.lax.dot_general` primitive. Instead, you can use `transformer_engine.jax.checkpoint_policies.dots_and_te_gemms_with_no_batch_dims` or similar policies that are designed to work with Transformer Engine's GEMMs and `jax.lax.dot_general` GEMMs. You may also use any JAX policies that do not filter by primitive, such as `jax.checkpoint_policies.save_only_these_names` or `jax.checkpoint_policies.everything_saveable`.
 
+Per-call dense mesh resources
+-----------------------------
+The functional ``dense``, ``layernorm_dense``, and ``layernorm_mlp`` APIs accept
+an optional ``mesh_resource`` argument. An explicit resource is
+copied into an immutable static argument and carried through the custom VJP to
+GEMM, quantization, activation, and normalization partitioning, including
+parameter-gradient and amax reductions. It does not
+modify the enclosing global mesh resource context. Omitting the argument keeps
+the existing global-context behavior.
+
+For example, a dense region can treat both the FSDP and expert mesh axes as
+FSDP, while a routed MoE region assigns them separate roles::
+
+    from transformer_engine.jax.dense import dense
+    from transformer_engine.jax.sharding import MeshResource
+
+    y = dense(x, kernel, mesh_resource=MeshResource(
+        fsdp_resource=("fsdp", "expert"),
+    ))
+
+The tuple order should match the physical axes in the tensors' partition
+specifications. GEMM gathers weight shards on these FSDP axes rather than
+gathering activations to accommodate the weight sharding.
+
 Modules
 -------
 .. autoapiclass:: transformer_engine.jax.flax.TransformerLayerType

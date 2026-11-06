@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for amax calculation"""
+
 from enum import Enum
 
 
@@ -18,13 +19,13 @@ from .misc import (
 )
 from ..sharding import (
     global_mesh_resource,
+    _mesh_resource_snapshot,
     lax_paral_op,
 )
 from ..quantize import (
     get_wgrad_sign_vector,
     get_sign_from_vector,
 )
-
 
 __all__ = ["AmaxScope", "calculate_amax", "calculate_post_rht_amax"]
 
@@ -38,9 +39,11 @@ class AmaxScope(Enum):
     TPSP = 2
     FSDP = 3
 
-    def all_reduce_amax_along_TPSP_and_FSDP(self, amax, data_spec, transpose_batch_sequence, mesh):
+    def all_reduce_amax_along_TPSP_and_FSDP(
+        self, amax, data_spec, transpose_batch_sequence, mesh, mesh_resource=None
+    ):
         """Reduce the amax based on its scope"""
-        gmesh = global_mesh_resource()
+        gmesh = global_mesh_resource() if mesh_resource is None else mesh_resource
         sequence_dim = 0 if transpose_batch_sequence else 1
         # Run AR across TPSP only when tensor-sequence is detected in the input spec
         if self is AmaxScope.TPSP and data_spec[sequence_dim] == gmesh.tpsp_resource:
@@ -58,10 +61,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
 
     name = "jax_local_amax"
     multiple_results = False
-    impl_static_args = (
-        1,
-        2,
-    )  # amax_scope, transpose_batch_sequence
+    impl_static_args = (1, 2, 3)  # amax_scope, transpose_batch_sequence, mesh_resource
     inner_primitive = None
     outer_primitive = None
 
@@ -71,10 +71,12 @@ class AmaxCalculationPrimitive(BasePrimitive):
         *,
         amax_scope,
         transpose_batch_sequence,
+        mesh_resource=None,
     ):
         """
         amax calculation abstract
         """
+        del mesh_resource
         del amax_scope, transpose_batch_sequence
 
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
@@ -88,10 +90,12 @@ class AmaxCalculationPrimitive(BasePrimitive):
         x,
         amax_scope,
         transpose_batch_sequence,
+        mesh_resource=None,
     ):
         """
         amax calcuation implementation
         """
+        del mesh_resource
         del amax_scope, transpose_batch_sequence
         amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32).reshape((1,))
         return amax
@@ -100,6 +104,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
     def infer_sharding_from_operands(
         amax_scope,
         transpose_batch_sequence,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
@@ -107,6 +112,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
         """
         amax calcuation infer_sharding_from_operands
         """
+        del mesh_resource
         del (amax_scope, transpose_batch_sequence, arg_infos, result_infos)  # Unused.
         amax_sharding = NamedSharding(
             mesh,
@@ -119,6 +125,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
     def partition(
         amax_scope,
         transpose_batch_sequence,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
@@ -139,9 +146,14 @@ class AmaxCalculationPrimitive(BasePrimitive):
                 x,
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
+                mesh_resource=mesh_resource,
             )
             amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
-                amax, x_spec, transpose_batch_sequence, mesh
+                amax,
+                x_spec,
+                transpose_batch_sequence,
+                mesh,
+                mesh_resource=mesh_resource,
             )
 
             return amax
@@ -150,10 +162,13 @@ class AmaxCalculationPrimitive(BasePrimitive):
         return mesh, sharded_impl, amax_sharding, arg_shardings
 
     @staticmethod
-    def shardy_sharding_rule(amax_scope, transpose_batch_sequence, mesh, value_types, result_types):
+    def shardy_sharding_rule(
+        amax_scope, transpose_batch_sequence, mesh_resource, mesh, value_types, result_types
+    ):
         """
         amax calcuation shardy_sharding_rule
         """
+        del mesh_resource
         del amax_scope, transpose_batch_sequence, mesh, result_types
         prefix = "AmaxCal"
         input_spec = tuple(f"{prefix}_{i}" for i in range(len(value_types[0].shape)))
@@ -177,6 +192,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         3,  # rht_matrix_random_sign_mask_t
         4,  # produce_regular_amax
         5,  # flatten_axis
+        6,  # mesh_resource
     )
     inner_primitive = None
     outer_primitive = None
@@ -190,10 +206,12 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         rht_matrix_random_sign_mask_t,
         produce_regular_amax,
         flatten_axis,
+        mesh_resource=None,
     ):
         """
         amax calcuation abstract
         """
+        del mesh_resource
         del (
             amax_scope,
             transpose_batch_sequence,
@@ -220,10 +238,12 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         rht_matrix_random_sign_mask_t,
         produce_regular_amax,
         flatten_axis,
+        mesh_resource=None,
     ):
         """
         te_dbias_quantize_p lowering rules
         """
+        del mesh_resource
         del amax_scope, transpose_batch_sequence
         (x_aval,) = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -249,6 +269,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         rht_matrix_random_sign_mask_t,
         produce_regular_amax,
         flatten_axis,
+        mesh_resource=None,
     ):
         """
         amax calculation implementation
@@ -264,6 +285,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
             rht_matrix_random_sign_mask_t=rht_matrix_random_sign_mask_t,
             produce_regular_amax=produce_regular_amax,
             flatten_axis=flatten_axis,
+            mesh_resource=_mesh_resource_snapshot(mesh_resource),
         )
         return amax, post_rht_amax
 
@@ -274,6 +296,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         rht_matrix_random_sign_mask_t,
         produce_regular_amax,
         flatten_axis,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
@@ -281,6 +304,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         """
         amax calcuation infer_sharding_from_operands
         """
+        del mesh_resource
         del (
             amax_scope,
             transpose_batch_sequence,
@@ -304,6 +328,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         rht_matrix_random_sign_mask_t,
         produce_regular_amax,
         flatten_axis,
+        mesh_resource,
         mesh,
         arg_infos,
         result_infos,
@@ -328,12 +353,21 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
                 rht_matrix_random_sign_mask_t=rht_matrix_random_sign_mask_t,
                 produce_regular_amax=produce_regular_amax,
                 flatten_axis=flatten_axis,
+                mesh_resource=mesh_resource,
             )
             amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
-                amax, x_spec, transpose_batch_sequence, mesh
+                amax,
+                x_spec,
+                transpose_batch_sequence,
+                mesh,
+                mesh_resource=mesh_resource,
             )
             post_rht_amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
-                post_rht_amax, x_spec, transpose_batch_sequence, mesh
+                post_rht_amax,
+                x_spec,
+                transpose_batch_sequence,
+                mesh,
+                mesh_resource=mesh_resource,
             )
 
             return amax, post_rht_amax
@@ -348,6 +382,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         rht_matrix_random_sign_mask_t,
         produce_regular_amax,
         flatten_axis,
+        mesh_resource,
         mesh,
         value_types,
         result_types,
@@ -355,6 +390,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         """
         amax calcuation shardy_sharding_rule
         """
+        del mesh_resource
         del (
             amax_scope,
             transpose_batch_sequence,
@@ -374,7 +410,9 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
 register_primitive(RHTAmaxCalculationPrimitive)
 
 
-def calculate_amax(x: jnp.ndarray, amax_scope: AmaxScope, transpose_batch_sequence: bool):
+def calculate_amax(
+    x: jnp.ndarray, amax_scope: AmaxScope, transpose_batch_sequence: bool, mesh_resource=None
+):
     """
     Compute the maximum absolute value (amax) of the input tensor.
     """
@@ -383,6 +421,7 @@ def calculate_amax(x: jnp.ndarray, amax_scope: AmaxScope, transpose_batch_sequen
         x,
         amax_scope=amax_scope,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=_mesh_resource_snapshot(mesh_resource),
     )
 
 
@@ -392,6 +431,7 @@ def calculate_post_rht_amax(
     transpose_batch_sequence: bool,
     produce_regular_amax: bool,
     flatten_axis: int,
+    mesh_resource=None,
 ):
     """Compute the post-Random Hadamard Transform (RHT) amax of the input tensor, and optionally the regular amax.
 
@@ -413,6 +453,7 @@ def calculate_post_rht_amax(
         rht_matrix_random_sign_mask_t=get_sign_from_vector(get_wgrad_sign_vector()),
         produce_regular_amax=produce_regular_amax,
         flatten_axis=flatten_axis,
+        mesh_resource=_mesh_resource_snapshot(mesh_resource),
     )
 
     if produce_regular_amax:

@@ -17,6 +17,7 @@ import jax.numpy as jnp
 
 from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
+from .sharding import MeshResource, _mesh_resource_snapshot
 
 from .quantize import (
     QuantizerSet,
@@ -40,6 +41,7 @@ def layernorm_dense(
     dot_input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
+    mesh_resource: MeshResource | None = None,
 ) -> jnp.ndarray:
     """Apply layer normalization followed by dense layer transformation.
 
@@ -61,6 +63,8 @@ def layernorm_dense(
         dot_input_axes: Logical axes for sharding the matrix multiplication input
         kernel_axes: Logical axes for sharding the weight matrix
         quantizer_set: Set of quantizers for different tensor types
+        mesh_resource: Optional mesh role override for the fused operation. None uses
+            the global mesh resource context.
 
     Returns:
         Output tensor with shape [batch..., hidden_out]
@@ -90,6 +94,7 @@ def layernorm_dense(
         dot_input_axes,
         kernel_axes,
         quantizer_set,
+        _mesh_resource_snapshot(mesh_resource),
     )
     return output
 
@@ -104,6 +109,7 @@ def layernorm_dense(
         9,
         10,
         11,
+        13,
     ),
 )
 def _layernorm_dense(
@@ -120,6 +126,7 @@ def _layernorm_dense(
     dot_input_axes: Tuple[str, ...],
     kernel_axes: Tuple[str, ...],
     quantizer_set,
+    mesh_resource,
 ):
     """Internal implementation of layernorm_dense with custom VJP.
 
@@ -158,6 +165,7 @@ def _layernorm_dense(
         dot_input_axes,
         kernel_axes,
         quantizer_set,
+        mesh_resource,
     )
     return output
 
@@ -176,6 +184,7 @@ def _layernorm_dense_fwd_rule(
     dot_input_axes,
     kernel_axes,
     quantizer_set,
+    mesh_resource,
 ):
     """Forward pass rule for layernorm_dense.
 
@@ -204,6 +213,7 @@ def _layernorm_dense_fwd_rule(
         quantizer=quantizer_set.x,
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
 
@@ -215,6 +225,7 @@ def _layernorm_dense_fwd_rule(
         quantizer=quantizer_set.kernel,
         amax_scope=AmaxScope.FSDP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
@@ -226,6 +237,7 @@ def _layernorm_dense_fwd_rule(
         contracting_dims=(x_contracting_dims, k_contracting_dims),
         transpose_batch_sequence=transpose_batch_sequence,
         bias=bias,
+        mesh_resource=mesh_resource,
     )
 
     has_bias = bias is not None
@@ -257,6 +269,7 @@ def _layernorm_dense_bwd_rule(
     layernorm_input_axes,
     dot_input_axes,
     kernel_axes,
+    mesh_resource,
     ctx,
     grad,
 ):
@@ -296,6 +309,7 @@ def _layernorm_dense_bwd_rule(
         quantizer=quantizer_set.dgrad,
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
@@ -313,6 +327,7 @@ def _layernorm_dense_bwd_rule(
         casted_kernel,
         contracting_dims=(g_constracting_dim, k_constracting_dim),
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
@@ -327,6 +342,7 @@ def _layernorm_dense_bwd_rule(
         casted_grad.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_constracting_dim, g_constracting_dim),
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
@@ -341,6 +357,7 @@ def _layernorm_dense_bwd_rule(
         zero_centered_gamma=zero_centered_gamma,
         epsilon=epsilon,
         norm_type=norm_type,
+        mesh_resource=mesh_resource,
     )
 
     return dx, wgrad, dgamma, dbeta, dbias, quantizer_set

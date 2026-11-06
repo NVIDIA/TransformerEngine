@@ -9,9 +9,12 @@ tensor parallelism (TP), pipeline parallelism (PP), and full-sharded data
 parallelism (FSDP). It includes functions for sharding constraints, mesh management,
 and collective operations.
 """
+
 from contextlib import contextmanager
+from collections import namedtuple
 from dataclasses import dataclass
 from typing import Callable, Optional
+import math
 import warnings
 
 import jax
@@ -47,6 +50,8 @@ def _get_mesh():
 
 
 def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
+    if isinstance(resource, tuple):
+        return math.prod(_get_mesh_info(axis, mesh)[0] for axis in resource), resource
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
@@ -277,6 +282,9 @@ def get_mesh_axis_size(axis, mesh=None):
     if axis is None:
         return 1
 
+    if isinstance(axis, tuple):
+        return math.prod(get_mesh_axis_size(name, mesh) for name in axis)
+
     assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"
     return mesh.shape[axis]
 
@@ -328,7 +336,8 @@ class MeshResource:
         dp_resource: Axis name for data parallelism (batch sharding), default is None
         tp_resource: Axis name for tensor parallelism (hidden dimension sharding), default is None
         tpsp_resource: Axis name for tensor sequence parallelism (hidden and sequence sharding), default is None
-        fsdp_resource: Axis name for full-sharded data parallelism, default is None
+        fsdp_resource: Axis name or tuple of axis names for full-sharded data parallelism,
+            default is None. Tuple order follows the corresponding PartitionSpec.
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
         ep_resource: Axis name for expert parallelism. Dispatch input tokens
@@ -342,10 +351,24 @@ class MeshResource:
     dp_resource: str = None
     tp_resource: str = None
     tpsp_resource: str = None
-    fsdp_resource: str = None
+    fsdp_resource: str | tuple[str, ...] = None
     pp_resource: str = None
     cp_resource: str = None
     ep_resource: str = None
+
+
+_MeshResourceSnapshot = namedtuple("_MeshResourceSnapshot", MeshResource.__dataclass_fields__)
+
+
+def _mesh_resource_snapshot(resource):
+    """Copy an explicit resource into an immutable, hashable primitive parameter."""
+    if resource is None or isinstance(resource, _MeshResourceSnapshot):
+        return resource
+    if not isinstance(resource, MeshResource):
+        raise TypeError("mesh_resource must be a MeshResource or None.")
+    return _MeshResourceSnapshot(
+        *(getattr(resource, name) for name in MeshResource.__dataclass_fields__)
+    )
 
 
 _GLOBAL_MESH_RESOURCE = None
@@ -417,7 +440,7 @@ def get_active_resource_axis(resource_name: str) -> Optional[str]:
     return axis
 
 
-def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
+def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh, mesh_resource=None):
     """Perform all-reduce sum operation along data parallelism and FSDP axes.
 
     Args:
@@ -427,11 +450,12 @@ def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
     Returns:
         Reduced tensor
     """
-    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
-    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
+    resource = global_mesh_resource() if mesh_resource is None else mesh_resource
+    x = lax_paral_op(x, jax.lax.psum, resource.dp_resource, mesh)
+    return lax_paral_op(x, jax.lax.psum, resource.fsdp_resource, mesh)
 
 
-def all_reduce_sum_along_dp_fsdp_tpsp(x: jnp.array, mesh: jax.sharding.Mesh):
+def all_reduce_sum_along_dp_fsdp_tpsp(x: jnp.array, mesh: jax.sharding.Mesh, mesh_resource=None):
     """Perform all-reduce sum operation along data parallelism and sequence parallelism axes.
 
     Args:
@@ -441,12 +465,14 @@ def all_reduce_sum_along_dp_fsdp_tpsp(x: jnp.array, mesh: jax.sharding.Mesh):
     Returns:
         Reduced tensor
     """
-    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().tpsp_resource, mesh)
-    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
-    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
+    resource = global_mesh_resource() if mesh_resource is None else mesh_resource
+    x = lax_paral_op(x, jax.lax.psum, resource.tpsp_resource, mesh)
+    return all_reduce_sum_along_dp_fsdp(x, mesh, mesh_resource=resource)
 
 
-def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mesh):
+def all_reduce_max_along_all_axes_except_PP(
+    x: jnp.array, mesh: jax.sharding.Mesh, mesh_resource=None
+):
     """Perform all-reduce max operation along all axes except pipeline parallelism.
 
     Args:
@@ -458,26 +484,29 @@ def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mes
     """
     all_axes = get_all_mesh_axes()
     for axis in all_axes:
-        if axis != global_mesh_resource().pp_resource:
+        resource = global_mesh_resource() if mesh_resource is None else mesh_resource
+        if axis != resource.pp_resource:
             x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
 
 
-def tpsp_axis_size():
+def tpsp_axis_size(mesh_resource=None):
     """
     Get the size of the tensor parallelism axis.
     Return 1 if no TP axis is set.
     """
-    return get_mesh_axis_size(global_mesh_resource().tpsp_resource)
+    resource = global_mesh_resource() if mesh_resource is None else mesh_resource
+    return get_mesh_axis_size(resource.tpsp_resource)
 
 
-def dp_or_fsdp_axis_size():
+def dp_or_fsdp_axis_size(mesh_resource=None):
     """
     Get the size of the data parallelism or FSDP axis.
     Return 1 if no DP/FSDP axis is set.
     """
-    dp_size = get_mesh_axis_size(global_mesh_resource().dp_resource)
-    fsdp_size = get_mesh_axis_size(global_mesh_resource().fsdp_resource)
+    resource = global_mesh_resource() if mesh_resource is None else mesh_resource
+    dp_size = get_mesh_axis_size(resource.dp_resource)
+    fsdp_size = get_mesh_axis_size(resource.fsdp_resource)
     return dp_size if dp_size > 1 else fsdp_size
 
 
