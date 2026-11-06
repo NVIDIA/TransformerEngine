@@ -30,7 +30,9 @@ void nvfp4_2d_partial_cast(const at::Tensor& inp, py::handle out, const at::Tens
                            size_t block_len, const DType scale_dtype) {
   TORCH_CHECK(block_len == 16, "Currently only block_len = 16 is supported for NVFP4 2D");
   TORCH_CHECK(scale.dim() == 2, "scale must be a 2D tensor");
-  TORCH_CHECK(scale.scalar_type() == at::ScalarType::Float, "scale must be a float tensor");
+  TORCH_CHECK(scale.scalar_type() == at::ScalarType::Byte,
+              "scale must contain encoded NVFP4 inverse scales in uint8 storage");
+  TORCH_CHECK(scale.is_contiguous(), "scale must be contiguous");
   TORCH_CHECK(global_scale.numel() == 1, "global_scale must be a scalar tensor");
   TORCH_CHECK(global_scale.scalar_type() == at::ScalarType::Float,
               "global_scale must be a float tensor");
@@ -38,15 +40,18 @@ void nvfp4_2d_partial_cast(const at::Tensor& inp, py::handle out, const at::Tens
       inp.scalar_type() == at::ScalarType::Float || inp.scalar_type() == at::ScalarType::BFloat16,
       "input must be a float or bfloat16 tensor");
 
-  const TensorWrapper inp_cu = makeTransformerEngineTensor(inp.contiguous());
-  const TensorWrapper out_cu = makeTransformerEngineTensor(out, py::none());
-  const TensorWrapper scale_cu = makeTransformerEngineTensor(scale);
-  const TensorWrapper global_scale_cu = makeTransformerEngineTensor(global_scale);
+  const auto contiguous_inp = inp.contiguous();
+  const TensorWrapper inp_cu = makeTransformerEngineTensor(contiguous_inp);
+  const TensorWrapper output_storage = makeTransformerEngineTensor(out, py::none());
+  TensorWrapper out_cu(NVTE_NVFP4_1D_SCALING);
+  out_cu
+      .set_rowwise_data(output_storage.dptr(), DType::kFloat4E2M1,
+                        std::vector<size_t>{static_cast<size_t>(inp.numel())})
+      .set_rowwise_scale_inv(scale.data_ptr(), scale_dtype, getTensorShape(scale))
+      .set_scale(global_scale.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
 
-  nvte_nvfp4_2d_partial_cast_v2(inp_cu.data(), out_cu.data(), scale_cu.data(),
-                                global_scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
-                                start_offset, block_len, static_cast<NVTEDType>(scale_dtype),
-                                at::cuda::getCurrentCUDAStream());
+  nvte_partial_cast(inp_cu.data(), out_cu.data(), h, w, start_offset,
+                    at::cuda::getCurrentCUDAStream());
 }
 
 void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
@@ -82,7 +87,9 @@ void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
     const size_t start_offset = static_cast<size_t>(start_offset_list[i]);
 
     TORCH_CHECK(scale.dim() == 2, "scale must be a 2D tensor");
-    TORCH_CHECK(scale.scalar_type() == at::ScalarType::Float, "scale must be a float tensor");
+    TORCH_CHECK(scale.scalar_type() == at::ScalarType::Byte,
+                "scale must contain encoded NVFP4 inverse scales in uint8 storage");
+    TORCH_CHECK(scale.is_contiguous(), "scale must be contiguous");
     TORCH_CHECK(global_scale.numel() == 1, "global_scale must be a scalar tensor");
     TORCH_CHECK(global_scale.scalar_type() == at::ScalarType::Float,
                 "global_scale must be a float tensor");
@@ -90,15 +97,19 @@ void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
         inp.scalar_type() == at::ScalarType::Float || inp.scalar_type() == at::ScalarType::BFloat16,
         "input must be a float or bfloat16 tensor");
 
-    const TensorWrapper inp_cu = makeTransformerEngineTensor(inp.contiguous());
-    const TensorWrapper out_cu = makeTransformerEngineTensor(out);
-    const TensorWrapper scale_cu = makeTransformerEngineTensor(scale);
-    const TensorWrapper global_scale_cu = makeTransformerEngineTensor(global_scale);
+    TORCH_CHECK(out.scalar_type() == at::ScalarType::Byte && out.is_contiguous(),
+                "output must be contiguous uint8 storage");
+    TORCH_CHECK(out.numel() >= (inp.numel() + 1) / 2, "output storage is too small");
+    const auto contiguous_inp = inp.contiguous();
+    const TensorWrapper inp_cu = makeTransformerEngineTensor(contiguous_inp);
+    TensorWrapper out_cu(NVTE_NVFP4_1D_SCALING);
+    out_cu
+        .set_rowwise_data(out.data_ptr(), DType::kFloat4E2M1,
+                          std::vector<size_t>{static_cast<size_t>(inp.numel())})
+        .set_rowwise_scale_inv(scale.data_ptr(), scale_dtype, getTensorShape(scale))
+        .set_scale(global_scale.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
 
-    nvte_nvfp4_2d_partial_cast_v2(inp_cu.data(), out_cu.data(), scale_cu.data(),
-                                  global_scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
-                                  start_offset, static_cast<size_t>(block_len),
-                                  static_cast<NVTEDType>(scale_dtype), stream);
+    nvte_partial_cast(inp_cu.data(), out_cu.data(), h, w, start_offset, stream);
   }
 }
 

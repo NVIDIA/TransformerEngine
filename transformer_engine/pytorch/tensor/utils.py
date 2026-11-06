@@ -941,7 +941,7 @@ def _cast_master_weights_to_nvfp4_2d(
 
             partial_cast_inp_list.append(master_weight)
             partial_cast_out_list.append(model_weight_fragment)
-            partial_cast_scale_list.append(per_block_decode_scale)
+            partial_cast_scale_list.append(target_scale)
             partial_cast_global_scale_list.append(global_scale)
             partial_cast_h_list.append(h)
             partial_cast_w_list.append(w)

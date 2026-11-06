@@ -6,9 +6,12 @@
 
 #include <transformer_engine/recipe.h>
 
+#include <limits>
+
 #include "../common.h"
 #include "../util/ptx.cuh"
 #include "../utils.cuh"
+#include "partial_cast.h"
 
 namespace transformer_engine {
 namespace mxfp8_scaling_recipe {
@@ -84,7 +87,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                       int scale_inv_colwise_stride, int rows, int cols,
                                       size_t start_offset, size_t len) {
   __shared__ float smem_scales_rowwise[kRowsPerTile][kColsPerTile / 32];
-  __shared__ float smem_scales_colwise[kColsPerTile];
+  __shared__ float smem_scales_colwise[kWithColumnwise ? kColsPerTile : 1];
 
   // Load scales_rowwise
   {
@@ -182,9 +185,19 @@ void mxfp8_scaling_compute_partial_amax(const Tensor input, Tensor amax_rowwise,
               cols, start_offset, input.data.shape[0]);))
 }
 
-void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tensor output_colwise,
-                                const Tensor scale_inv_rowwise, const Tensor scale_inv_colwise,
-                                int rows, int cols, size_t start_offset, cudaStream_t stream) {
+void partial_cast(const Tensor &input, Tensor &output, size_t h, size_t w, size_t start_offset,
+                  cudaStream_t stream) {
+  NVTE_CHECK(h <= static_cast<size_t>(std::numeric_limits<int>::max()) &&
+                 w <= static_cast<size_t>(std::numeric_limits<int>::max()),
+             "MXFP8 matrix dimensions exceed int range");
+  const int rows = static_cast<int>(h);
+  const int cols = static_cast<int>(w);
+  const auto &output_rowwise = output.data;
+  const auto &output_colwise = output.columnwise_data;
+  const auto &scale_inv_rowwise = output.scale_inv;
+  const auto &scale_inv_colwise = output.columnwise_scale_inv;
+  const bool with_columnwise = output_colwise.has_data();
+  NVTE_CHECK(scale_inv_rowwise.dptr != nullptr, "MXFP8 requires rowwise inverse scales");
   NVTE_CHECK(rows % 32 == 0, "rows must be divisible by 32");
   NVTE_CHECK(cols % 32 == 0, "cols must be divisible by 32");
 
@@ -192,43 +205,37 @@ void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tenso
   NVTE_CHECK(start_offset + input.data.shape[0] <= static_cast<size_t>(rows) * cols,
              "Invalid start_offset");
 
-  NVTE_CHECK(output_rowwise.data.shape.size() == 1, "output_rowwise must be a 1D tensor");
-  NVTE_CHECK(output_rowwise.data.shape[0] == input.data.shape[0],
+  NVTE_CHECK(output_rowwise.shape.size() == 1, "output_rowwise must be a 1D tensor");
+  NVTE_CHECK(output_rowwise.shape[0] == input.data.shape[0],
              "Size of input and output_rowwise mismatch");
 
-  NVTE_CHECK(output_rowwise.dtype() == DType::kFloat8E4M3 || output_rowwise.dtype() == DType::kByte,
-             "output_rowwise should be e4m3 or uint8");
-  const bool with_columnwise = output_colwise.has_data();
-  if (with_columnwise) {
-    NVTE_CHECK(scale_inv_colwise.has_data(), "Columnwise output requires columnwise scales");
-    NVTE_CHECK(output_colwise.data.shape.size() == 1, "output_colwise must be a 1D tensor");
-    NVTE_CHECK(output_colwise.data.shape[0] == input.data.shape[0],
-               "Size of input and output_colwise mismatch");
-    NVTE_CHECK(input.data.shape[0] == 0 || output_colwise.data.dptr != nullptr,
-               "Columnwise output must have a data pointer");
-    NVTE_CHECK(
-        output_colwise.dtype() == DType::kFloat8E4M3 || output_colwise.dtype() == DType::kByte,
-        "output_colwise should be e4m3 or uint8");
-  }
+  NVTE_CHECK(output_rowwise.dtype == DType::kFloat8E4M3, "output_rowwise should be E4M3");
 
-  NVTE_CHECK(scale_inv_rowwise.data.shape.size() == 2, "scale_inv_rowwise must be a 2D tensor");
-  NVTE_CHECK(scale_inv_rowwise.data.shape[0] % rowwise_row_padding == 0,
+  NVTE_CHECK(scale_inv_rowwise.shape.size() == 2, "scale_inv_rowwise must be a 2D tensor");
+  NVTE_CHECK(scale_inv_rowwise.shape[0] % rowwise_row_padding == 0,
              "Wrong padding of scale_inv_rowwise's rows");
-  NVTE_CHECK(scale_inv_rowwise.data.shape[0] >= rows, "Invalid rows");
-  NVTE_CHECK(scale_inv_rowwise.data.shape[1] % rowwise_col_padding == 0,
+  NVTE_CHECK(scale_inv_rowwise.shape[0] >= rows, "Invalid rows");
+  NVTE_CHECK(scale_inv_rowwise.shape[1] % rowwise_col_padding == 0,
              "Wrong padding of scale_inv_rowwise's cols");
-  NVTE_CHECK(scale_inv_rowwise.data.shape[1] >= cols / 32, "Invalid cols");
-  NVTE_CHECK(scale_inv_rowwise.dtype() == DType::kByte, "Wrong dtype of scale_inv_rowwise");
+  NVTE_CHECK(scale_inv_rowwise.shape[1] >= cols / 32, "Invalid cols");
+  NVTE_CHECK(scale_inv_rowwise.dtype == DType::kFloat8E8M0, "Wrong dtype of scale_inv_rowwise");
 
   if (with_columnwise) {
-    NVTE_CHECK(scale_inv_colwise.data.shape.size() == 2, "scale_inv_colwise must be a 2D tensor");
-    NVTE_CHECK(scale_inv_colwise.data.shape[0] % colwise_row_padding == 0,
+    NVTE_CHECK(output_colwise.dptr != nullptr, "MXFP8 requires columnwise output data");
+    NVTE_CHECK(output_colwise.shape.size() == 1, "output_colwise must be a 1D tensor");
+    NVTE_CHECK(output_colwise.shape[0] == input.data.shape[0],
+               "Size of input and output_colwise mismatch");
+    NVTE_CHECK(output_colwise.dtype == DType::kFloat8E4M3, "output_colwise should be E4M3");
+    NVTE_CHECK(scale_inv_colwise.dptr != nullptr && scale_inv_colwise.numel() != 0,
+               "Columnwise output requires columnwise scales");
+    NVTE_CHECK(scale_inv_colwise.shape.size() == 2, "scale_inv_colwise must be a 2D tensor");
+    NVTE_CHECK(scale_inv_colwise.shape[0] % colwise_row_padding == 0,
                "Wrong padding of scale_inv_colwise's rows");
-    NVTE_CHECK(scale_inv_colwise.data.shape[0] >= rows / 32, "Invalid rows");
-    NVTE_CHECK(scale_inv_colwise.data.shape[1] % colwise_col_padding == 0,
+    NVTE_CHECK(scale_inv_colwise.shape[0] >= rows / 32, "Invalid rows");
+    NVTE_CHECK(scale_inv_colwise.shape[1] % colwise_col_padding == 0,
                "Wrong padding of scale_inv_colwise's cols");
-    NVTE_CHECK(scale_inv_colwise.data.shape[1] >= cols, "Invalid cols");
-    NVTE_CHECK(scale_inv_colwise.dtype() == DType::kByte, "Wrong dtype of scale_inv_colwise");
+    NVTE_CHECK(scale_inv_colwise.shape[1] >= cols, "Invalid cols");
+    NVTE_CHECK(scale_inv_colwise.dtype == DType::kFloat8E8M0, "Wrong dtype of scale_inv_colwise");
   }
 
   int blocks_x = (cols + kColsPerTile - 1) / kColsPerTile;
@@ -242,14 +249,13 @@ void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tenso
           mxfp8_scaling_partial_cast_kernel<IType, fp8e4m3, kWithColumnwise>
           <<<grid, kColsPerTile, 0, stream>>>(
               reinterpret_cast<const IType *>(input.data.dptr),
-              reinterpret_cast<fp8e4m3 *>(output_rowwise.data.dptr),
-              with_columnwise ? reinterpret_cast<fp8e4m3 *>(output_colwise.data.dptr) : nullptr,
-              reinterpret_cast<const e8m0_t *>(scale_inv_rowwise.data.dptr),
-              with_columnwise ? reinterpret_cast<const e8m0_t *>(scale_inv_colwise.data.dptr)
-                              : nullptr,
-              scale_inv_rowwise.data.shape[1],
-              with_columnwise ? scale_inv_colwise.data.shape[1] : 0, rows, cols, start_offset,
-              input.data.shape[0]);))
+              reinterpret_cast<fp8e4m3 *>(output_rowwise.dptr),
+              with_columnwise ? reinterpret_cast<fp8e4m3 *>(output_colwise.dptr) : nullptr,
+              reinterpret_cast<const e8m0_t *>(scale_inv_rowwise.dptr),
+              with_columnwise ? reinterpret_cast<const e8m0_t *>(scale_inv_colwise.dptr) : nullptr,
+              scale_inv_rowwise.shape[1], with_columnwise ? scale_inv_colwise.shape[1] : 0, rows,
+              cols, start_offset, input.data.shape[0]);))
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace mxfp8_scaling_recipe
@@ -271,8 +277,28 @@ void nvte_mxfp8_scaling_partial_cast(const NVTETensor input, NVTETensor output_r
                                      size_t start_offset, cudaStream_t stream) {
   NVTE_API_CALL(nvte_mxfp8_scaling_partial_cast);
   using namespace transformer_engine;
-  mxfp8_scaling_recipe::mxfp8_scaling_partial_cast(
-      *convertNVTETensorCheck(input), *convertNVTETensorCheck(output_rowwise),
-      *convertNVTETensorCheck(output_colwise), *convertNVTETensorCheck(scale_inv_rowwise),
-      *convertNVTETensorCheck(scale_inv_colwise), rows, cols, start_offset, stream);
+  const auto &row = *convertNVTETensorCheck(output_rowwise);
+  const auto &col = *convertNVTETensorCheck(output_colwise);
+  const auto &row_scale = *convertNVTETensorCheck(scale_inv_rowwise);
+  NVTE_CHECK(row.dtype() == DType::kFloat8E4M3 || row.dtype() == DType::kByte,
+             "output_rowwise should be E4M3 or uint8");
+  NVTE_CHECK(row_scale.dtype() == DType::kByte || row_scale.dtype() == DType::kFloat8E8M0,
+             "Wrong dtype of scale_inv_rowwise");
+  TensorWrapper view(NVTE_MXFP8_1D_SCALING);
+  view.set_rowwise_data(row.data.dptr, DType::kFloat8E4M3, row.data.shape)
+      .set_rowwise_scale_inv(row_scale.data.dptr, DType::kFloat8E8M0, row_scale.data.shape);
+  // Normalize empty views by their output size, even if they have a backing
+  // pointer. Columnwise scale metadata never selects whether to produce data.
+  if (col.has_data() && col.numel() != 0) {
+    const auto &col_scale = *convertNVTETensorCheck(scale_inv_colwise);
+    NVTE_CHECK(col.dtype() == DType::kFloat8E4M3 || col.dtype() == DType::kByte,
+               "output_colwise should be E4M3 or uint8");
+    NVTE_CHECK(col_scale.dtype() == DType::kByte || col_scale.dtype() == DType::kFloat8E8M0,
+               "Wrong dtype of scale_inv_colwise");
+    view.set_columnwise_data(col.data.dptr, DType::kFloat8E4M3, col.data.shape)
+        .set_columnwise_scale_inv(col_scale.data.dptr, DType::kFloat8E8M0, col_scale.data.shape);
+  }
+  NVTE_CHECK(rows > 0 && cols > 0, "Invalid logical matrix dimensions");
+  nvte_partial_cast(input, view.data(), static_cast<size_t>(rows), static_cast<size_t>(cols),
+                    start_offset, stream);
 }

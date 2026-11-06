@@ -200,10 +200,49 @@ void nvte_fp8_block_scaling_compute_partial_amax(const NVTETensor inp, NVTETenso
                                                  size_t amax_stride_w, size_t start_offset,
                                                  size_t block_len, cudaStream_t stream);
 
+/*! \brief Cast a contiguous shard using the output tensor's scaling mode and metadata.
+ *
+ *  Supports NVTE_BLOCK_SCALING_2D (128x128 blocks), NVTE_MXFP8_1D_SCALING
+ *  (1x32 and 32x1 blocks), and NVTE_NVFP4_1D_SCALING with 16x16 quantization.
+ *  The input and output data describe only the local shard. h and w describe
+ *  the full logical matrix, and start_offset is measured in logical elements.
+ *  Scale buffers describe the full matrix and must be contiguous and unswizzled.
+ *
+ *  The output tensor supplies the buffers and their datatypes:
+ *  - Block FP8: rowwise data (E4M3 or E5M2) and float32 encoding scales in
+ *    kNVTEScale, shaped [ceil(h/128), ceil(w/128)]. The data pointer points at
+ *    the shard within a full-matrix allocation: stores may touch other elements
+ *    of overlapping 128x128 blocks, as required by the in-place all-gather path.
+ *  - MXFP8: rowwise and columnwise E4M3 data, with E8M0 inverse scales in
+ *    kNVTERowwiseScaleInv and kNVTEColumnwiseScaleInv, using the usual padded
+ *    MXFP8 layouts. Both data buffers use the same flattened shard order.
+ *    Columnwise casting is selected solely by the presence of columnwise data;
+ *    columnwise scale metadata is ignored when that data field is absent.
+ *  - NVFP4: rowwise E2M1 data (two logical values per byte), a scalar float32
+ *    global encoding scale in kNVTEScale, and E4M3 or UE5M3 inverse scales in
+ *    kNVTERowwiseScaleInv. The inverse scales use the usual rowwise layout
+ *    [rows_padded, cols_padded/16], with each 16x16 tile's scale repeated for
+ *    its 16 rows. Shards must start at an even logical offset.
+ *
+ *  Scale metadata is read only. This operation does not compute scales or amax.
+ *
+ *  \param[in]  inp          Contiguous high-precision input shard.
+ *  \param[out] out          Quantized output shard with precomputed scale metadata.
+ *  \param[in]  h            Number of rows in the full logical matrix.
+ *  \param[in]  w            Number of columns in the full logical matrix.
+ *  \param[in]  start_offset Starting logical element offset in the full matrix.
+ *  \param[in]  stream       CUDA stream used for the operation.
+ */
+void nvte_partial_cast(const NVTETensor inp, NVTETensor out, size_t h, size_t w,
+                       size_t start_offset, cudaStream_t stream);
+
 /*! \brief Perform partial FP8 casting with blockwise scaling.
+ *
+ *  \deprecated Use nvte_partial_cast with scale metadata attached to the output tensor.
  *
  *  This function casts the input tensor to FP8 format using blockwise scaling factors.
  *  `inp` contains a continuous segment from the flattened original tensor.
+ *  The compatibility adapter may allocate temporary CUDA storage for strided scales.
  *
  *  \param[in]     inp              Input tensor.
  *  \param[out]    out              Output tensor in FP8 format.
@@ -302,6 +341,8 @@ void nvte_mxfp8_scaling_compute_partial_amax(const NVTETensor input, NVTETensor 
 
 /*! \brief Perform partial MXFP8 casting.
  *
+ *  \deprecated Use nvte_partial_cast with scale metadata attached to the output tensor.
+ *
  *  This function casts the input tensor to MXFP8 format, producing both row-wise and
  *  column-wise scaled outputs. input contains a continuous segment from the flattened
  *  original tensor. To skip column-wise computation, pass an empty NVTETensor for
@@ -362,10 +403,13 @@ void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, s
 
 /*! \brief Cast a partial shard of a tensor to NVFP4 using 2D tile-based quantization.
  *
+ *  \deprecated Use nvte_partial_cast with encoded inverse scales in the output tensor.
+ *
  *  Quantizes elements in [start_offset, start_offset + len) of the flattened tensor
  *  using precomputed per-tile scales. Each 16x16 tile uses its own scale factor.
  *  Used in distributed settings where each rank casts its owned shard.
  *  Uses E4M3 scale dtype. Use nvte_nvfp4_2d_partial_cast_v2 to specify another scale type.
+ *  The compatibility adapter converts tile scales using temporary CUDA storage.
  *
  *  \param[in]     inp             Input tensor (partial shard, high-precision).
  *  \param[out]    out             Output NVFP4 packed tensor (2 values per byte).
@@ -386,7 +430,10 @@ void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTE
 
 /*! \brief Cast a partial shard of a tensor to NVFP4 using 2D tile-based quantization.
  *
+ *  \deprecated Use nvte_partial_cast with encoded inverse scales in the output tensor.
+ *
  *  This variant allows the NVFP4 scale storage type to be specified explicitly.
+ *  The compatibility adapter converts tile scales using temporary CUDA storage.
  *
  *  \param[in]     inp             Input tensor (partial shard, high-precision).
  *  \param[out]    out             Output NVFP4 packed tensor (2 values per byte).
@@ -479,7 +526,7 @@ void nvte_nvfp4_compute_per_block_scale_v2(const NVTETensor block_amax, NVTETens
  *
  *  \param[in]     block_amax      Input block amax tensor [tile_rows, tile_cols], float32.
  *  \param[in]     global_amax     Global amax tensor [1], float32.
- *  \param[out]    per_block_scale Output per-block scale [tile_rows, tile_cols], float32 (for partial_cast).
+ *  \param[out]    per_block_scale Output per-block scale [tile_rows, tile_cols], float32.
  *  \param[out]    target_scale    Output scale tensor [rows_padded, tile_cols], uint8.
  *  \param[out]    target_amax     Output amax tensor [1], float32 (copy of global_amax).
  *  \param[in]     tile_rows       Number of tile rows.
@@ -499,7 +546,7 @@ void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global
  *
  *  \param[in]     block_amax      Input block amax tensor [tile_rows, tile_cols], float32.
  *  \param[in]     global_amax     Global amax tensor [1], float32.
- *  \param[out]    per_block_scale Output per-block scale [tile_rows, tile_cols], float32 (for partial_cast).
+ *  \param[out]    per_block_scale Output per-block scale [tile_rows, tile_cols], float32.
  *  \param[out]    target_scale    Output scale tensor [rows_padded, tile_cols], uint8.
  *  \param[out]    target_amax     Output amax tensor [1], float32 (copy of global_amax).
  *  \param[in]     tile_rows       Number of tile rows.

@@ -10,12 +10,21 @@
 
 #include "../common.h"
 #include "../utils.cuh"
+#include "partial_cast.h"
 
 namespace transformer_engine {
 namespace fp8_block_scaling_recipe {
 
 constexpr int kTileDim = 128;
 constexpr int kThreadsPerBlock = 256;
+
+__global__ void pack_partial_cast_scales(const float *input, float *output, size_t rows,
+                                         size_t cols, size_t stride_h, size_t stride_w) {
+  const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index < rows * cols) {
+    output[index] = input[(index / cols) * stride_h + (index % cols) * stride_w];
+  }
+}
 
 template <typename IType>
 __global__ void __launch_bounds__(kThreadsPerBlock)
@@ -186,11 +195,18 @@ void fp8_block_scaling_compute_partial_amax(const Tensor inp, Tensor amax, size_
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void fp8_block_scaling_partial_cast(const Tensor inp, Tensor out, const Tensor scale, size_t h,
-                                    size_t w, size_t scale_stride_h, size_t scale_stride_w,
-                                    size_t start_offset, size_t block_len, const DType out_dtype,
-                                    cudaStream_t stream) {
-  NVTE_CHECK(block_len == 128, "Currently only block_len = 128 is supported");
+void partial_cast(const Tensor &inp, Tensor &out, size_t h, size_t w, size_t start_offset,
+                  cudaStream_t stream) {
+  const auto &scale = out.scale;
+  NVTE_CHECK(out.dtype() == DType::kFloat8E4M3 || out.dtype() == DType::kFloat8E5M2,
+             "Block FP8 output must be E4M3 or E5M2");
+  NVTE_CHECK(scale.dptr != nullptr && scale.dtype == DType::kFloat32,
+             "Block FP8 encoding scales must be float32");
+  NVTE_CHECK(scale.shape.size() == 2 && scale.shape[0] >= DIVUP<size_t>(h, kTileDim) &&
+                 scale.shape[1] >= DIVUP<size_t>(w, kTileDim),
+             "Invalid block FP8 scale shape");
+  const size_t scale_stride_h = scale.shape[1];
+  constexpr size_t scale_stride_w = 1;
 
   size_t len = inp.numel();
 
@@ -207,15 +223,15 @@ void fp8_block_scaling_partial_cast(const Tensor inp, Tensor out, const Tensor s
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       inp.dtype(), inp_dtype,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          out_dtype, fp8_type,
+          out.dtype(), fp8_type,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               w % kTileDim == 0, kWidthAligned,
               fp8_block_scaling_partial_cast_kernel<inp_dtype, fp8_type, kWidthAligned>
               <<<grid, kThreadsPerBlock, 0, stream>>>(
                   reinterpret_cast<const inp_dtype *>(inp.data.dptr),
                   reinterpret_cast<fp8_type *>(out.data.dptr),
-                  reinterpret_cast<const float *>(scale.data.dptr), scale_stride_h, scale_stride_w,
-                  h, w, start_offset, len);)))
+                  reinterpret_cast<const float *>(scale.dptr), scale_stride_h, scale_stride_w, h, w,
+                  start_offset, len);)))
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -240,8 +256,37 @@ void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
                                          const NVTEDType out_dtype, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fp8_block_scaling_partial_cast);
   using namespace transformer_engine;
-  fp8_block_scaling_recipe::fp8_block_scaling_partial_cast(
-      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(out), *convertNVTETensorCheck(scale), h,
-      w, scale_stride_h, scale_stride_w, start_offset, block_len, static_cast<DType>(out_dtype),
-      stream);
+  NVTE_CHECK(block_len == 128, "Currently only block_len = 128 is supported");
+  const auto &input = *convertNVTETensorCheck(inp);
+  const auto &output = *convertNVTETensorCheck(out);
+  const auto &scales = *convertNVTETensorCheck(scale);
+  TensorWrapper view(NVTE_BLOCK_SCALING_2D);
+  view.set_rowwise_data(output.data.dptr, static_cast<DType>(out_dtype),
+                        std::vector<size_t>{input.numel()});
+  if (input.numel() == 0) {
+    nvte_partial_cast(inp, view.data(), h, w, start_offset, stream);
+    return;
+  }
+  NVTE_CHECK(h > 0 && w > 0 && h <= std::numeric_limits<size_t>::max() / w,
+             "Invalid logical matrix dimensions");
+  NVTE_CHECK(scales.dtype() == DType::kFloat32 && scales.data.dptr != nullptr,
+             "Block FP8 encoding scales must be float32");
+  const size_t rows = DIVUP<size_t>(h, 128);
+  const size_t cols = DIVUP<size_t>(w, 128);
+  const bool needs_pack = scale_stride_w != 1 || scale_stride_h < cols;
+  detail::PartialCastWorkspace workspace(needs_pack ? rows * cols * sizeof(float) : 0, stream);
+  void *scale_ptr = scales.data.dptr;
+  size_t row_stride = scale_stride_h;
+  if (needs_pack) {
+    constexpr size_t threads = 256;
+    fp8_block_scaling_recipe::
+        pack_partial_cast_scales<<<DIVUP(rows * cols, threads), threads, 0, stream>>>(
+            static_cast<const float *>(scales.data.dptr), static_cast<float *>(workspace.data()),
+            rows, cols, scale_stride_h, scale_stride_w);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    scale_ptr = workspace.data();
+    row_stride = cols;
+  }
+  view.set_scale(scale_ptr, DType::kFloat32, std::vector<size_t>{rows, row_stride});
+  nvte_partial_cast(inp, view.data(), h, w, start_offset, stream);
 }
