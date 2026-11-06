@@ -361,28 +361,34 @@ def restore_from_saved(
     Note: please use `restore_from_func_ctx` instead if you are restoring tensors from a function context to make sure tensor_objects is detached and its memory can be freed
     """
     tensor_objects = []
+    offset = 0
     for tensor in tensors:
         if tensor is None or isinstance(tensor, torch.Tensor):
-            tensor_objects.append(saved_tensors[0])
-            saved_tensors = saved_tensors[1:]
+            tensor_objects.append(saved_tensors[offset])
+            offset += 1
         elif isinstance(tensor, _SavedTensorRef):
             # The saved tensor was unpacked (running autograd's version check), but
             # may have lost its subclass under hooks; use the original object.
             tensor_objects.append(tensor.weight)
-            saved_tensors = saved_tensors[1:]
+            offset += 1
         elif isinstance(tensor, _SavedQuantizedTensor):
             count = len(tensor.inner_names)
-            inner = dict(zip(tensor.inner_names, saved_tensors[:count]))
+            inner = dict(zip(tensor.inner_names, saved_tensors[offset : offset + count]))
             tensor_objects.append(
                 QuantizedTensorStorage.__tensor_unflatten__(inner, tensor.metadata, None, None)
             )
-            saved_tensors = saved_tensors[count:]
+            offset += count
         else:
+            # Storage restorers receive the full remaining list/tuple and own the
+            # returned remainder. Preserve that protocol for custom implementations.
+            if offset:
+                saved_tensors = saved_tensors[offset:]
             saved_tensors = tensor.restore_from_saved(saved_tensors)
+            offset = 0
             tensor_objects.append(tensor)
 
     if return_saved_tensors:
-        return tensor_objects, saved_tensors
+        return tensor_objects, saved_tensors[offset:] if offset else saved_tensors
     return tensor_objects
 
 
@@ -669,13 +675,15 @@ class Quantizer(abc.ABC):
         """
         return False
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
-        """Whether tensor supports quantized all-gather
+    # pylint: disable-next=unused-argument
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
 
-        Consider a less misleading function name.
-
+        When False, the distributed all-gather falls back to gathering
+        in high precision and quantizing afterward. This is needed when
+        the quantizer does not support gathering its packed data directly.
         """
-        return True
+        return False
 
     def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the quantizer"""

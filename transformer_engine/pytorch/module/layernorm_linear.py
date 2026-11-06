@@ -34,7 +34,6 @@ from .base import (
 )
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
-    assert_dim_for_fp8_exec,
     cast_if_needed,
     clear_tensor_data,
     divide,
@@ -352,8 +351,6 @@ def _layernorm_linear_forward_impl(
     inp_shape = inp.shape
     assert inp_shape[-1] == in_features, "GEMM not possible"
     inputmat = inp
-    if fp8:
-        assert_dim_for_fp8_exec(inputmat, weight)
 
     # Cast for native AMP
     nvtx_range_push(f"{nvtx_label}.norm_input_cast")
@@ -1440,15 +1437,16 @@ def _layernorm_linear_backward_impl(
         # Handle custom DDP from mcore.
         if args.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
             origin_weight.grad_added_to_main_grad = True
+            # The dummy gradient must match the original autograd input.
             if getattr(origin_weight, "zero_out_wgrad", False):
                 wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
+                    list(origin_weight.shape),
                     origin_weight.dtype,
                     zero=True,
                 )
             else:
                 wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
+                    list(origin_weight.shape),
                     origin_weight.dtype,
                     zero_tensor=getattr(origin_weight, "zero_tensor_dummy_wgrad", False),
                 )
