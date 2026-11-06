@@ -22,6 +22,10 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.LayerNormMLP(hidden_size, ffn_hidden_size, eps=1e-5, bias=True, **kwargs)
   :members: forward, set_tensor_parallel_group
 
+.. autoapifunction:: transformer_engine.pytorch.attention.register_cu_seqlens
+
+.. autoapifunction:: transformer_engine.pytorch.attention.attention_backend_workspace
+
 .. autoapiclass:: transformer_engine.pytorch.DotProductAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward, set_context_parallel_group
 
