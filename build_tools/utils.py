@@ -366,6 +366,77 @@ def nccl_lib_path() -> Optional[Path]:
     return None
 
 
+def _python_package_path(package_name: str, relative_path: str) -> Optional[Path]:
+    """Return a path inside an installed Python package, or `None` if it does not exist."""
+    try:
+        package_distribution = distribution(package_name)
+    except PackageNotFoundError:
+        return None
+
+    path = Path(package_distribution.locate_file(relative_path))
+    return path if path.exists() else None
+
+
+def cublasmp_home_path() -> Optional[Path]:
+    """Return the cuBLASMp installation root.
+
+    Prefers CUBLASMP_HOME, then the nvidia-cublasmp-cu* Python package.
+    Returns `None` if cuBLASMp is not found."""
+    if cublasmp_home := os.getenv("CUBLASMP_HOME"):
+        return Path(cublasmp_home)
+
+    cuda_major = cuda_version()[0]
+    return _python_package_path(
+        f"nvidia-cublasmp-cu{cuda_major}", f"nvidia/cublasmp/cu{cuda_major}"
+    )
+
+
+def cusolvermp_home_path() -> Path:
+    """Return the cuSOLVERMp installation root.
+
+    Prefers CUSOLVERMP_HOME, then the nvidia-cusolvermp-cu* Python package,
+    then `/usr`."""
+    if cusolvermp_home := os.getenv("CUSOLVERMP_HOME"):
+        return Path(cusolvermp_home)
+
+    cuda_major = cuda_version()[0]
+    package_path = _python_package_path(
+        f"nvidia-cusolvermp-cu{cuda_major}", f"nvidia/cu{cuda_major}"
+    )
+    return package_path if package_path is not None else Path("/usr")
+
+
+def nvshmem_home_path() -> Optional[Path]:
+    """Return the NVSHMEM installation root.
+
+    Prefers NVSHMEM_HOME, then the nvidia-nvshmem-cu* Python package.
+    Returns `None` if NVSHMEM is not found."""
+    if nvshmem_home := os.getenv("NVSHMEM_HOME"):
+        return Path(nvshmem_home)
+
+    return _python_package_path(f"nvidia-nvshmem-cu{cuda_version()[0]}", "nvidia/nvshmem")
+
+
+def mpi_home_path() -> Optional[Path]:
+    """Return the MPI installation root.
+
+    Prefers MPI_HOME, then the openmpi Python package, which installs into the
+    environment prefix rather than site-packages. Returns `None` if MPI is not found."""
+    if mpi_home := os.getenv("MPI_HOME"):
+        return Path(mpi_home)
+
+    try:
+        openmpi_distribution = distribution("openmpi")
+    except PackageNotFoundError:
+        return None
+
+    for package_path in openmpi_distribution.files or []:
+        if package_path.name == "mpi.h" and package_path.parent.name == "include":
+            return Path(openmpi_distribution.locate_file(package_path)).resolve().parent.parent
+
+    return None
+
+
 @functools.lru_cache(maxsize=None)
 def cuda_toolkit_include_path() -> Optional[Path]:
     """Return the CUDA Toolkit include directory."""
@@ -377,30 +448,37 @@ def cuda_toolkit_include_path() -> Optional[Path]:
 
 
 @functools.lru_cache(maxsize=None)
-def get_cuda_include_dirs() -> Tuple[str, str]:
-    """Returns the CUDA header directory."""
+def get_cuda_include_dirs() -> List[Path]:
+    """Returns the CUDA header directories."""
 
     force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
-    # If cuda is installed via toolkit, all necessary headers
-    # are bundled inside the top level cuda directory.
-    if not force_wheels and cuda_toolkit_include_path() is not None:
-        return [cuda_toolkit_include_path()]
-
-    # Use pip wheels to include all headers.
     try:
         import nvidia
-    except ModuleNotFoundError as e:
-        raise RuntimeError("CUDA not found.")
-
-    if nvidia.__file__ is not None:
-        cuda_root = Path(nvidia.__file__).parent
+    except ModuleNotFoundError:
+        nvidia_roots = []
     else:
-        cuda_root = Path(nvidia.__path__[0])  # namespace
-    return [
+        nvidia_roots = [Path(path).resolve() for path in nvidia.__path__]
+
+    cuda_home = cuda_home_path()
+    cuda_home_from_wheel = cuda_home is not None and any(
+        cuda_home.is_relative_to(root) for root in nvidia_roots
+    )
+
+    # A system toolkit contains all necessary headers under one include
+    # directory. NVIDIA wheels split them across namespace packages.
+    if not force_wheels and not cuda_home_from_wheel:
+        if (include_path := cuda_toolkit_include_path()) is not None:
+            return [include_path]
+
+    include_dirs = [
         subdir / "include"
-        for subdir in cuda_root.iterdir()
+        for root in nvidia_roots
+        for subdir in root.iterdir()
         if subdir.is_dir() and (subdir / "include").is_dir()
     ]
+    if not include_dirs:
+        raise RuntimeError("CUDA not found.")
+    return include_dirs
 
 
 @functools.lru_cache(maxsize=None)
@@ -551,10 +629,11 @@ def get_frameworks() -> List[str]:
 def setup_mpi_flags(include_dirs: List, cxx_flags: List) -> None:
     """Add MPI include path and compile definition if NVTE_UB_WITH_MPI is enabled."""
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
-        mpi_path = Path(os.getenv("MPI_HOME"))
+        mpi_path = mpi_home_path()
+        assert mpi_path is not None, (
+            "MPI_HOME=/path/to/mpi must be set, or the openmpi Python package installed, "
+            "when compiling with NVTE_UB_WITH_MPI=1!"
+        )
         include_dirs.append(mpi_path / "include")
         cxx_flags.append("-DNVTE_UB_WITH_MPI")
 

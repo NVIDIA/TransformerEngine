@@ -18,17 +18,20 @@ from wheel.bdist_wheel import bdist_wheel
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
+    cublasmp_home_path,
     cuda_archs,
     cuda_home_path,
-    cuda_version,
     cudnn_frontend_include_path,
+    cusolvermp_home_path,
     get_bolt_build_flags,
     get_frameworks,
     remove_dups,
     min_python_version_str,
+    mpi_home_path,
     nccl_ep_enabled,
     get_max_jobs_for_parallel_build,
     nvcc_path,
+    nvshmem_home_path,
 )
 
 frameworks = get_frameworks()
@@ -75,31 +78,38 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
 
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+        mpi_home = mpi_home_path()
+        assert mpi_home is not None, (
+            "MPI_HOME must be set, or the openmpi Python package installed, when compiling with"
+            " NVTE_UB_WITH_MPI=1"
+        )
         cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+        cmake_flags.append(f"-DMPI_HOME={mpi_home}")
 
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
-        assert (
-            os.getenv("NVSHMEM_HOME") is not None
-        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+        nvshmem_home = nvshmem_home_path()
+        assert nvshmem_home is not None, (
+            "NVSHMEM_HOME must be set, or the nvidia-nvshmem-cu* Python package installed, when"
+            " compiling with NVTE_ENABLE_NVSHMEM=1"
+        )
         cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+        cmake_flags.append(f"-DNVSHMEM_HOME={nvshmem_home}")
 
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
+        cublasmp_dir = cublasmp_home_path()
+        assert cublasmp_dir is not None, (
+            "CUBLASMP_HOME must be set, or the nvidia-cublasmp-cu* Python package installed, when"
+            " compiling with NVTE_WITH_CUBLASMP=1"
+        )
         cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
-        cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
-            f"nvidia-cublasmp-cu{cuda_version()[0]}"
-        ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
         cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
 
     if bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0"))):
         cmake_flags.append("-DNVTE_WITH_CUSOLVERMP=ON")
-        cusolvermp_dir = os.getenv("CUSOLVERMP_HOME", "/usr")
-        cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
+        cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_home_path()}")
 
     # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
     # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
@@ -175,10 +185,11 @@ def _discover_nccl_home() -> str:
     lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
 
     # Prefer the NCCL the dynamic loader will actually resolve at runtime so the
-    # EP build links against the same libnccl that gets loaded. libtransformer_engine
-    # carries no NCCL RUNPATH, so the loader uses ldconfig/system paths; building
-    # against a different NCCL (e.g. a pip wheel) causes ABI mismatches. ldconfig is
-    # the ground truth for runtime resolution, so consult it before well-known prefixes.
+    # EP build links against the same libnccl that gets loaded. Unless an nvidia-nccl
+    # wheel is installed next to it, which libtransformer_engine's RUNPATH prefers,
+    # the loader uses ldconfig/system paths; building against a different NCCL causes
+    # ABI mismatches. ldconfig is the ground truth for runtime resolution, so consult
+    # it before well-known prefixes.
     try:
         out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode()
         for line in out.splitlines():

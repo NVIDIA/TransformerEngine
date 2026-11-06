@@ -24,7 +24,7 @@ git checkout $TARGET_BRANCH
 git submodule update --init --recursive
 
 # Install deps
-/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel 'nvidia-cudnn-frontend>=1.25.0' 'apache-tvm-ffi>=0.1.12'
+/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
@@ -44,8 +44,12 @@ if $BUILD_COMMON ; then
                 WHEEL_ABI_TAG=none
         fi
 
-        # Create the wheel.
-        /opt/python/cp310-cp310/bin/python setup.py bdist_wheel --verbose --python-tag=$WHEEL_PYTHON_TAG --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
+        # Create the wheel in an isolated build environment. build_tools/build_backend.py
+        # installs the CUDA and optional feature (NVTE_WITH_*) build requirements.
+        /opt/python/cp310-cp310/bin/python -m pip wheel . --no-deps --wheel-dir dist --verbose \
+                --config-settings framework=none \
+                --config-settings=--build-option=--python-tag=$WHEEL_PYTHON_TAG \
+                --config-settings=--build-option=--plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
 
         # Repack the wheel for specific cuda version.
         /opt/python/cp310-cp310/bin/wheel unpack dist/*

@@ -534,9 +534,11 @@ if (NVTE_WITH_CUBLASMP)
                  PATHS ${CUBLASMP_DIR}
                  PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu lib/sbsa-linux-gnu lib/x86_64-linux-gnu
                  REQUIRED)
+    # NCCL Python packages only provide the versioned shared library.
     find_library(NCCL_LIB
-                 NAMES nccl libnccl
-                 PATH_SUFFIXES lib
+                 NAMES nccl libnccl.so.2
+                 HINTS "${NCCL_INCLUDE_DIR}/.."
+                 PATH_SUFFIXES lib lib64
                  REQUIRED)
     # cuBLASMp 0.8.1 adds MXFP8 support to the CUDA-graph-safe overlap algos,
     # and NCCL 2.30 is the first release with graph-safe one-sided RMA
@@ -561,14 +563,16 @@ option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
 if (NVTE_WITH_CUSOLVERMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
     target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
+    # cuSOLVERMp and NCCL Python packages only provide the versioned shared libraries.
     find_library(CUSOLVERMP_LIB
-                 NAMES cusolverMp libcusolverMp
+                 NAMES cusolverMp libcusolverMp.so.0
                  PATHS ${CUSOLVERMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
     find_library(NCCL_LIB
-                 NAMES nccl libnccl
-                 PATH_SUFFIXES lib
+                 NAMES nccl libnccl.so.2
+                 HINTS "${NCCL_INCLUDE_DIR}/.."
+                 PATH_SUFFIXES lib lib64
                  REQUIRED)
     target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB})
     message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
@@ -608,8 +612,10 @@ file(REAL_PATH "${NCCL_EP_SHARED_LINK}" NCCL_EP_SHARED_LIB)
 
 # -- NCCL core library -------------------------------------------------------
 if(NOT NCCL_LIB)
+  # NCCL Python packages only provide the versioned shared library.
   find_library(NCCL_LIB
-      NAMES nccl libnccl
+      NAMES nccl libnccl.so.2
+      HINTS "${NCCL_INCLUDE_DIR}/.."
       PATH_SUFFIXES lib lib64
       REQUIRED)
 endif()
@@ -837,6 +843,34 @@ if (NOT BUILD_THREADS_PER_JOB)
 endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
 message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
+
+# Find optional dependencies that are installed from Python packages into the
+# same environment as the installed library.
+set(NVTE_SITE_PACKAGES_RPATH "" CACHE STRING
+    "Python site-packages directory relative to the installed library, e.g. \$ORIGIN/..")
+if (NVTE_SITE_PACKAGES_RPATH)
+  set(nvte_python_package_rpath)
+  if (NVTE_WITH_CUBLASMP)
+    list(APPEND nvte_python_package_rpath
+         "${NVTE_SITE_PACKAGES_RPATH}/nvidia/cublasmp/cu${CUDAToolkit_VERSION_MAJOR}/lib")
+  endif()
+  if (NVTE_WITH_CUSOLVERMP)
+    list(APPEND nvte_python_package_rpath
+         "${NVTE_SITE_PACKAGES_RPATH}/nvidia/cu${CUDAToolkit_VERSION_MAJOR}/lib")
+  endif()
+  if (NVTE_WITH_NCCL_EP OR NVTE_WITH_CUBLASMP OR NVTE_WITH_CUSOLVERMP)
+    list(APPEND nvte_python_package_rpath "${NVTE_SITE_PACKAGES_RPATH}/nvidia/nccl/lib")
+  endif()
+  if (NVTE_ENABLE_NVSHMEM)
+    list(APPEND nvte_python_package_rpath "${NVTE_SITE_PACKAGES_RPATH}/nvidia/nvshmem/lib")
+  endif()
+  if (NVTE_UB_WITH_MPI)
+    # The openmpi package installs into <prefix>/lib, two levels above site-packages.
+    list(APPEND nvte_python_package_rpath "${NVTE_SITE_PACKAGES_RPATH}/../..")
+  endif()
+  set_target_properties(transformer_engine PROPERTIES
+                        INSTALL_RPATH "${nvte_python_package_rpath}")
+endif()
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
