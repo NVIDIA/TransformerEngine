@@ -1096,7 +1096,7 @@ class BasicLinear(BasicOperation):
         prev_op_grad_output_quantizer,
         next_op_input_quantizer,
         basic_op_kwargs,
-        **unused,  # pylint: disable=unused-argument
+        **_unused,
     ) -> BasicLinearFwdArgs:
         if basic_op_kwargs[0]:
             raise ValueError("BasicLinear forward does not expect keyword arguments")
