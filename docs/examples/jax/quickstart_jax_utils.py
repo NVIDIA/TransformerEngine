@@ -23,8 +23,10 @@ def speedometer(
     warmup_iters: int = 50,
     rngs: Dict[str, jax.random.PRNGKey] = None,
 ) -> None:
-    """Measure average runtime for a JAX module
-    Perform forward and backward passes .
+    """Measure average forward/backward runtime for a JAX module.
+
+    Wait for warmup and timed results so asynchronous dispatch does not skew
+    the elapsed wall time.
     """
     if autocast_kwargs is None:
         autocast_kwargs = {"enabled": False}
@@ -36,15 +38,18 @@ def speedometer(
     train_step_fn = create_train_step_fn(model_apply_fn, autocast_kwargs, forward_kwargs)
 
     # Warm up runs
+    result = None
     for _ in range(warmup_iters):
         rngs, step_rngs = _split_step_rngs(rngs)
-        loss, (param_grads, other_grads) = train_step_fn(variables, input, output_grad, step_rngs)
+        result = train_step_fn(variables, input, output_grad, step_rngs)
+    jax.block_until_ready(result)
 
     # Timing runs
     start = time.time()
     for _ in range(timing_iters):
         rngs, step_rngs = _split_step_rngs(rngs)
-        loss, (param_grads, other_grads) = train_step_fn(variables, input, output_grad, step_rngs)
+        result = train_step_fn(variables, input, output_grad, step_rngs)
+    jax.block_until_ready(result)
     end = time.time()
 
     print(f"Mean time: {(end - start) * 1000 / timing_iters} ms")
