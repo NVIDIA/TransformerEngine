@@ -1059,22 +1059,30 @@ def strided_batched_gemm(
 # against a 4608-wide output for several rounds.
 
 
+# Injected into transformer_engine/pytorch/cpp_extensions/gemm.py (prototype).
+#
+# Custom-recipe dispatch for the LIST-based grouped GEMM. The operand roles are taken from
+# GroupedLinear's own call site (module/grouped_linear.py:873-884):
+#
+#     out = _validate_or_alloc_output(out, sum(m_splits), weights_fp8[0].size(0), ...)
+#     general_grouped_gemm(weights_fp8, inputmats, [out], ..., single_output=True, m_splits=m_splits)
+#
+#   A    = list of weights   (one per expert)
+#   B    = list of inputs    (per-expert activation buffers, padded)
+#   out  = [single tensor]   of shape [sum(m_splits), A[0].size(0)]
+#   m_splits[i] = VALID activation rows for expert i
+#
+# So for each expert: activation rows are B[i][0:m_splits[i]], the weight is A[i], and the result is
+# written to out[0][offset : offset+m_splits[i]]. An earlier version (gpt-6.1-sol's first draft) had
+# A and B swapped and assumed the groups split columns; that is why it reported a 128-wide weight
+# against a 4608-wide output for several rounds.
+
+
 def _custom_grouped_gemm(
-    A,
-    B,
-    out,
-    quantization_params,
-    out_dtype,
-    layout="TN",
-    m_splits=None,
-    gelu=False,
-    grad=False,
-    accumulate=False,
-    bias=None,
-    use_bias=False,
-    use_split_accumulator=False,
-    D_dtype=None,
-    single_output=False,
+    A, B, out, quantization_params, out_dtype,
+    layout="TN", m_splits=None, gelu=False, grad=False,
+    accumulate=False, bias=None, use_bias=False,
+    use_split_accumulator=False, D_dtype=None, single_output=False,
 ):
     """Grouped GEMM over per-expert weight/activation lists using a custom quantizer's qgemm."""
     if gelu:
@@ -1091,8 +1099,13 @@ def _custom_grouped_gemm(
         raise TypeError("custom grouped GEMM cannot mix custom and ordinary tensors")
     if m_splits is None:
         raise ValueError("m_splits is required for the per-expert layout")
-    if not single_output or len(out) != 1:
-        raise NotImplementedError("custom grouped GEMM supports single_output only")
+    # Two output layouts occur: a single concatenated buffer (`single_output=True`) or one tensor
+    # per group. Both are supported; the earlier version refused the list form, which is the one
+    # TEGroupedLinear actually uses.
+    if single_output and len(out) != 1:
+        raise ValueError("single_output=True requires exactly one output tensor")
+    if not single_output and len(out) != len(m_splits):
+        raise ValueError(f"expected {len(m_splits)} outputs, got {len(out)}")
 
     n = len(m_splits)
     if len(A) != n or len(B) != n:
@@ -1110,10 +1123,16 @@ def _custom_grouped_gemm(
 
     m_params = MMParams(out_dtype=out_dtype, use_split_accumulator=use_split_accumulator)
 
-    dst_full = out[0]
-    if dst_full.shape[0] < total_rows:
-        raise ValueError(f"output has {dst_full.shape[0]} rows but sum(m_splits)={total_rows}")
-    width = dst_full.shape[-1]
+    dst_full = out[0] if single_output else None
+    if single_output:
+        if dst_full.shape[0] < total_rows:
+            raise ValueError(f"output has {dst_full.shape[0]} rows but sum(m_splits)={total_rows}")
+        width = dst_full.shape[-1]
+    else:
+        width = out[0].shape[-1]
+        for i, o in enumerate(out):
+            if o.shape[-1] != width:
+                raise ValueError(f"out[{i}] width {o.shape[-1]} != {width}")
 
     offset = 0
     for i in range(n):
@@ -1135,14 +1154,7 @@ def _custom_grouped_gemm(
             sx = sx[:rows]
 
         result = quantizer.qgemm(
-            qx,
-            qw,
-            m_params,
-            out_dtype,
-            sx,
-            sw,
-            None,
-            gemm_type=GEMMType.FPROP,
+            qx, qw, m_params, out_dtype, sx, sw, None, gemm_type=GEMMType.FPROP,
         )
         if tuple(result.shape) != (rows, width):
             raise ValueError(
@@ -1150,17 +1162,22 @@ def _custom_grouped_gemm(
                 f"(qx={tuple(qx.shape)} qw={tuple(qw.shape)} sx={tuple(sx.shape)} "
                 f"sw={tuple(sw.shape)} widths={width})"
             )
+        dst = dst_full[offset:offset + rows] if single_output else out[i]
+        if tuple(dst.shape) != (rows, width):
+            raise ValueError(
+                f"group {i}: output segment is {tuple(dst.shape)}, expected {(rows, width)}"
+            )
         with torch.no_grad():
             if accumulate:
-                dst_full[offset : offset + rows].add_(result)
+                dst.add_(result)
             else:
-                dst_full[offset : offset + rows].copy_(result)
+                dst.copy_(result)
         offset += rows
 
-    bias_output = [torch.empty(0, dtype=dst_full.dtype, device=dst_full.device)]
-    gelu_input = [torch.empty(0, dtype=dst_full.dtype, device=dst_full.device)]
+    ref = dst_full if single_output else out[0]
+    bias_output = [torch.empty(0, dtype=ref.dtype, device=ref.device)]
+    gelu_input = [torch.empty(0, dtype=ref.dtype, device=ref.device)]
     return out, bias_output, gelu_input
-
 
 def general_grouped_gemm(
     A: List[torch.Tensor],
