@@ -667,7 +667,8 @@ __device__ __forceinline__ void quantize_columnwise_rht_stage(
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
-          bool ROW_SCALED_NVFP4, bool RETURN_ROWWISE = true, bool APPLY_COLUMNWISE_RHT = false>
+          bool ROW_SCALED_NVFP4, bool RETURN_ROWWISE = true, bool APPLY_COLUMNWISE_RHT = false,
+          bool WITH_GEMM_SWIZZLED_SCALES = false>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                     const __grid_constant__ CUtensorMap tensor_map_output,
@@ -679,6 +680,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
                                     const size_t cols, const size_t scale_stride,
                                     const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  static_assert(!(WITH_GEMM_SWIZZLED_SCALES && ROW_SCALED_NVFP4),
+                "Row-scaled NVFP4 does not support GEMM-swizzled scales.");
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT =
       (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
 
@@ -1147,7 +1150,15 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const size_t scales_offset_Y =
               scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
           const size_t scales_offset_X = scales_offset_X_rowwise;
-          const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
+          size_t scale_idx_global;
+          if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+            // Write the scale directly into the cuBLAS GEMM-swizzled layout (as the 2D kernel
+            // does), so no separate swizzle pass is needed before the GEMM.
+            scale_idx_global =
+                swizzle::gemm_swizzled_scale_idx(scales_offset_Y, scales_offset_X, SFs_per_row);
+          } else {
+            scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
+          }
 
           const bool rowwise_scale_is_within_bounds_Y =
               (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
@@ -1230,20 +1241,30 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
   // Vectorized store scaling factors through SHMEM
   if (RETURN_TRANSPOSE && colwise_scale_is_within_bounds_Y) {
-    using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_Y>;
     const size_t scale_idx_sh = tid_Y_t * SCALES_PER_CHUNK_Y;
-    ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(&out_colwise_scales_sh[scale_idx_sh]);
-    const size_t scale_idx_global = scales_offset_Y_t * scale_stride_t + scales_offset_X_t;
     const size_t count =  // number of scales in Y dimension of this chunk
         (chunk_rows >= CHUNK_DIM_Y) ? SCALES_PER_CHUNK_Y : (chunk_rows / SCALE_DIM);
-    ScaleType *dst = &scales_t_ptr[scale_idx_global];
-    constexpr size_t vec_bytes = SCALES_PER_CHUNK_Y * sizeof(ScaleType);
-    if (count == SCALES_PER_CHUNK_Y && (reinterpret_cast<uintptr_t>(dst) % vec_bytes == 0)) {
-      // Fast path: vectorized store when destination is properly aligned
-      scales_vec.store_to(dst);
+    if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+      // The swizzled layout scatters the contiguous columnwise scales in groups of four, so emit
+      // each group at its swizzled offset (same scheme as the 2D kernel). The transposed scale
+      // matrix has rows / SCALE_DIM columns (exact: the swizzled path requires 128-aligned dims).
+      const size_t col_length_t = rows / SCALE_DIM;
+      swizzle::store_gemm_swizzled_scales(scales_t_ptr, &out_colwise_scales_sh[scale_idx_sh],
+                                          scales_offset_Y_t, scales_offset_X_t, col_length_t,
+                                          static_cast<int>(count));
     } else {
-      // Safe path: element-wise store for tails or unaligned destinations
-      scales_vec.store_to_elts(dst, 0, count);
+      using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_Y>;
+      ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(&out_colwise_scales_sh[scale_idx_sh]);
+      const size_t scale_idx_global = scales_offset_Y_t * scale_stride_t + scales_offset_X_t;
+      ScaleType *dst = &scales_t_ptr[scale_idx_global];
+      constexpr size_t vec_bytes = SCALES_PER_CHUNK_Y * sizeof(ScaleType);
+      if (count == SCALES_PER_CHUNK_Y && (reinterpret_cast<uintptr_t>(dst) % vec_bytes == 0)) {
+        // Fast path: vectorized store when destination is properly aligned
+        scales_vec.store_to(dst);
+      } else {
+        // Safe path: element-wise store for tails or unaligned destinations
+        scales_vec.store_to_elts(dst, 0, count);
+      }
     }
   }
 
@@ -1791,18 +1812,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
     const size_t count =  // number of scales in Y dimension of this chunk
         (chunk_rows >= CHUNK_DIM_Y) ? SCALES_PER_CHUNK_Y : (chunk_rows / SCALE_DIM);
     if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-      // The swizzled layout scatters the contiguous columnwise scales, so the
-      // vectorized store cannot be used. Emit each scale at its swizzled offset.
+      // The swizzled layout scatters the contiguous columnwise scales in groups
+      // of four, so the full-chunk vectorized store cannot be used. Emit each
+      // group of four at its swizzled offset with one 4-byte store.
       // The transposed scale matrix has `rows / SCALE_DIM` (= M/16) column tiles
       // (exact because the swizzled path requires 128-aligned dims). Read
       // SCALE_DIM by value; passing the namespace-scope constexpr by reference
       // (e.g. via DIVUP) would ODR-use it and fail to compile in device code.
       const size_t col_length_t = rows / SCALE_DIM;
-      for (size_t k = 0; k < count; ++k) {
-        const size_t off = swizzle::gemm_swizzled_scale_idx(scales_offset_Y_t,
-                                                            scales_offset_X_t + k, col_length_t);
-        scales_t_ptr[off] = out_colwise_scales_sh[scale_idx_sh + k];
-      }
+      swizzle::store_gemm_swizzled_scales(scales_t_ptr, &out_colwise_scales_sh[scale_idx_sh],
+                                          scales_offset_Y_t, scales_offset_X_t, col_length_t,
+                                          static_cast<int>(count));
     } else {
       using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_Y>;
       ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(&out_colwise_scales_sh[scale_idx_sh]);
@@ -1885,12 +1905,11 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
              "Row-scaled NVFP4 does not support disabling second-level scaling.");
   NVTE_CHECK(!row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
-  // In-kernel GEMM-swizzled scale output is only implemented on the 2D quantization
-  // path; every other configuration must emit compact scales.
+  // In-kernel GEMM-swizzled scale output is implemented by every kernel below (2D, 1D,
+  // columnwise-RHT 1D) and by the tuned 1D kernel; row-scaled NVFP4 must emit compact scales.
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
-  NVTE_CHECK(!with_gemm_swizzled_scales || use_2d_quantization,
-             "In-kernel GEMM-swizzled NVFP4 scales are only supported on the 2D quantization path; "
-             "other paths must emit scales in compact format.");
+  NVTE_CHECK(!with_gemm_swizzled_scales || !row_scaled_nvfp4,
+             "Row-scaled NVFP4 quantization does not support GEMM-swizzled scales.");
   if (return_transpose) {
     NVTE_CHECK(output->has_columnwise_data(), "NVFP4 transposed output tensor must be allocated.");
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
@@ -1996,6 +2015,14 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
                                                   ScaleType, USE_STOCHASTIC_ROUNDING,
                                                   RETURN_TRANSPOSE, ROW_SCALED_NVFP4,
                                                   RETURN_ROWWISE, /*APPLY_COLUMNWISE_RHT=*/true>;
+              if constexpr (!ROW_SCALED_NVFP4) {
+                if (with_gemm_swizzled_scales) {
+                  kernel = quantize_transpose_nvfp4_kernel<
+                      COMPUTE_ACTIVATIONS, ParamOP, OP, IType, ScaleType, USE_STOCHASTIC_ROUNDING,
+                      RETURN_TRANSPOSE, ROW_SCALED_NVFP4, RETURN_ROWWISE,
+                      /*APPLY_COLUMNWISE_RHT=*/true, /*WITH_GEMM_SWIZZLED_SCALES=*/true>;
+                }
+              }
               cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    dshmem_size);
               kernel<<<grid, block_size, dshmem_size, stream>>>(
@@ -2026,6 +2053,14 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
               auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
                                                             ScaleType, USE_STOCHASTIC_ROUNDING,
                                                             RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
+              if constexpr (!ROW_SCALED_NVFP4) {
+                if (with_gemm_swizzled_scales) {
+                  kernel = quantize_transpose_nvfp4_kernel<
+                      COMPUTE_ACTIVATIONS, ParamOP, OP, IType, ScaleType, USE_STOCHASTIC_ROUNDING,
+                      RETURN_TRANSPOSE, ROW_SCALED_NVFP4, /*RETURN_ROWWISE=*/true,
+                      /*APPLY_COLUMNWISE_RHT=*/false, /*WITH_GEMM_SWIZZLED_SCALES=*/true>;
+                }
+              }
               cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    dshmem_size);
               kernel<<<grid, block_size, dshmem_size, stream>>>(
