@@ -1116,22 +1116,29 @@ class GroupedTensorStorage:
                     cum += math.prod(scale_shape)
                     columnwise_scale_inv_offsets.append(cum)
                 self.columnwise_scale_inv_offsets = columnwise_scale_inv_offsets
-        nvfp4_rowwise_amax_offsets = None
-        nvfp4_columnwise_amax_offsets = None
+
         row_scaled_nvfp4 = self.row_scaled_nvfp4
         nvfp4_use_4over6 = self.nvfp4_use_4over6
         nvfp4_e4m3_max = self.nvfp4_e4m3_max
         scale_inv_dtype = self.scale_inv_dtype
-        if recipe.nvfp4() and row_scaled_nvfp4:
-            cum = 0
-            nvfp4_rowwise_amax_offsets = [0]
-            ccum = 0
-            nvfp4_columnwise_amax_offsets = [0]
-            for i in range(self.num_tensors):
-                cum += math.prod(self.tensor_shapes[i][:-1])
-                nvfp4_rowwise_amax_offsets.append(cum)
-                ccum += self.tensor_shapes[i][-1]
-                nvfp4_columnwise_amax_offsets.append(ccum)
+
+        # Determine amax offsets for NVFP4 tensors
+        nvfp4_rowwise_amax_offsets = None
+        nvfp4_columnwise_amax_offsets = None
+        if recipe.nvfp4():
+            if row_scaled_nvfp4:
+                off_row = 0
+                off_col = 0
+                nvfp4_rowwise_amax_offsets = [0]
+                nvfp4_columnwise_amax_offsets = [0]
+                for shape in self.tensor_shapes:
+                    off_row += math.prod(shape[:-1])
+                    off_col += shape[-1]
+                    nvfp4_rowwise_amax_offsets.append(off_row)
+                    nvfp4_columnwise_amax_offsets.append(off_col)
+            else:
+                nvfp4_rowwise_amax_offsets = list(range(self.num_tensors + 1))
+                nvfp4_columnwise_amax_offsets = list(range(self.num_tensors + 1))
 
         for i in range(self.num_tensors):
             quantizer = self.quantizer
@@ -1327,20 +1334,12 @@ class GroupedTensorStorage:
                     )
 
                 if self.amax is not None:
-                    if nvfp4_rowwise_amax_offsets is not None:
-                        amax_start = nvfp4_rowwise_amax_offsets[i]
-                        amax_end = nvfp4_rowwise_amax_offsets[i + 1]
-                        amax_rowwise = self.amax[amax_start:amax_end]
-                    else:
-                        amax_rowwise = self.amax[i : i + 1]
+                    amax_start, amax_end = nvfp4_rowwise_amax_offsets[i : i + 2]
+                    amax_rowwise = self.amax[amax_start:amax_end]
 
                 if self.columnwise_amax is not None:
-                    if nvfp4_columnwise_amax_offsets is not None:
-                        camax_start = nvfp4_columnwise_amax_offsets[i]
-                        camax_end = nvfp4_columnwise_amax_offsets[i + 1]
-                        amax_columnwise = self.columnwise_amax[camax_start:camax_end]
-                    else:
-                        amax_columnwise = self.columnwise_amax[i : i + 1]
+                    amax_start, amax_end = nvfp4_columnwise_amax_offsets[i : i + 2]
+                    amax_columnwise = self.columnwise_amax[amax_start:amax_end]
 
                 if quantizer.internal:
                     nvfp4_tensor_class = NVFP4TensorStorage

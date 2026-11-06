@@ -845,17 +845,14 @@ def test_nvfp4_ue5m3_gemm_leaves_operands_unswizzled(M: int, K: int, N: int):
     assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"
 
 
-def _row_scaled_grouped_tensor_gemm_supported() -> bool:
-    if not torch.cuda.is_available():
-        return False
-    if torch.cuda.get_device_capability() < (10, 0):
-        return False
-    return tex.get_cublasLt_version() >= 130400
-
-
-_reason_for_no_grouped_tensor_gemm = (
-    "Row-scaled grouped-tensor NVFP4 GEMM requires Blackwell (SM100) and cuBLAS 13.4+."
-)
+_grouped_tensor_gemm_supported = True
+_reason_for_no_grouped_tensor_gemm = ""
+if torch.cuda.get_device_capability() < (10, 0):
+    _grouped_tensor_gemm_supported = False
+    _reason_for_no_grouped_tensor_gemm = "NVFP4 grouped-tensor GEMM requires Blackwell+."
+elif tex.get_cublasLt_version() < 130400:
+    _grouped_tensor_gemm_supported = False
+    _reason_for_no_grouped_tensor_gemm = "NVFP4 grouped-tensor GEMM requires cuBLAS 13.4+."
 
 
 def _make_row_scaled_grouped_activation(
@@ -914,7 +911,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_fprop(
     m_splits: list[int], k: int, n: int, out_dtype: torch.dtype
 ) -> None:
     """Row-scaled grouped-tensor TN GEMM matches a per-expert dense GEMM."""
-    if not _row_scaled_grouped_tensor_gemm_supported():
+    if not _grouped_tensor_gemm_supported:
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
     torch.manual_seed(7)
@@ -962,7 +959,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_cudagraph(
     m_splits: list[int], k: int, n: int
 ) -> None:
     """A captured row-scaled grouped-tensor GEMM replays correctly."""
-    if not _row_scaled_grouped_tensor_gemm_supported():
+    if not _grouped_tensor_gemm_supported:
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
     torch.manual_seed(11)
@@ -1032,7 +1029,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad(
     m_splits: list[int], k: int, n: int, out_dtype: torch.dtype
 ) -> None:
     """Row-scaled grouped-tensor NT GEMM matches a per-expert dense GEMM."""
-    if not _row_scaled_grouped_tensor_gemm_supported():
+    if not _grouped_tensor_gemm_supported:
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
     torch.manual_seed(13)
@@ -1067,7 +1064,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad_discrete_out(
     m_splits: list[int], k: int, n: int
 ) -> None:
     """Row-scaled NT GEMM into a list output matches a per-expert dense GEMM."""
-    if not _row_scaled_grouped_tensor_gemm_supported():
+    if not _grouped_tensor_gemm_supported:
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
     torch.manual_seed(17)
@@ -1098,7 +1095,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_uneven_colscale(
     m_splits: list[int], k: int, n: int
 ) -> None:
     """Column post-scale with uneven groups matches a per-expert dense GEMM."""
-    if not _row_scaled_grouped_tensor_gemm_supported():
+    if not _grouped_tensor_gemm_supported:
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
     torch.manual_seed(23)
@@ -1130,7 +1127,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_colscale_cudagraph(
     m_splits: list[int], k: int, n: int
 ) -> None:
     """A captured column post-scale with uneven groups replays correctly."""
-    if not _row_scaled_grouped_tensor_gemm_supported():
+    if not _grouped_tensor_gemm_supported:
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
     torch.manual_seed(29)
@@ -1182,7 +1179,7 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_output_capacity(
     m_splits: list[int], k: int, n: int
 ) -> None:
     """Output capacity rows beyond the live region do not affect the result."""
-    if not _row_scaled_grouped_tensor_gemm_supported():
+    if not _grouped_tensor_gemm_supported:
         pytest.skip(_reason_for_no_grouped_tensor_gemm)
 
     torch.manual_seed(31)

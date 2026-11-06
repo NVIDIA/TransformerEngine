@@ -1573,12 +1573,11 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
       ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFrowwise[row]);
       const size_t local_row = static_cast<size_t>(local_row_base) + row;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        const ScaleType *scales = reinterpret_cast<const ScaleType *>(&scales_vec);
 #pragma unroll
         for (int k = 0; k < SCALES_PER_CHUNK_X; ++k) {
           const size_t col = scales_block_offset_X_rowwise + k;
           s_dec_row_base[swizzle::gemm_swizzled_scale_idx(local_row, col, scale_stride_row)] =
-              scales[k];
+              scales_vec.data.elt[k];
         }
       } else {
         const size_t scale_idx = local_row * scale_stride_row + scales_block_offset_X_rowwise;
@@ -1595,11 +1594,11 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
       ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);
       const size_t global_col = static_cast<size_t>(block_offset_X) + row_tr;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        const ScaleType *scales = reinterpret_cast<const ScaleType *>(&scales_vec);
 #pragma unroll
         for (int k = 0; k < SCALES_PER_CHUNK_Y; ++k) {
           s_dec_col_base[swizzle::gemm_swizzled_scale_idx(global_col, local_block_offset_M + k,
-                                                          scale_stride_col)] = scales[k];
+                                                          scale_stride_col)] =
+              scales_vec.data.elt[k];
         }
       } else {
         const size_t scale_idx = global_col * scale_stride_col + local_block_offset_M;

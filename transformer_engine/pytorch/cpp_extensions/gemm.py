@@ -1139,49 +1139,18 @@ def general_grouped_gemm_for_grouped_tensor(
     if is_discrete_in and is_discrete_out:
         raise ValueError("Both A and out are discrete. This is not supported yet.")
 
-    def _is_row_scaled(operand) -> bool:
-        return isinstance(operand, GroupedTensorStorage) and operand.row_scaled_nvfp4
-
-    def _list_has_row_scaled(operand) -> bool:
-        return isinstance(operand, (list, tuple)) and any(
-            getattr(t, "_row_scaled_nvfp4", False) for t in operand
+    if _is_row_scaled_nvfp4(A) or _is_row_scaled_nvfp4(B):
+        return _grouped_gemm_row_scaled_nvfp4(
+            A,
+            B,
+            out,
+            layout=layout,
+            accumulate=accumulate,
+            use_split_accumulator=use_split_accumulator,
+            bias=bias,
+            beta=beta,
+            alpha=alpha,
         )
-
-    if _list_has_row_scaled(A) or _list_has_row_scaled(B):
-        raise NotImplementedError(
-            "Row-scaled NVFP4 operands passed as a list are not supported; pass a GroupedTensor."
-        )
-
-    row_scaled = _is_row_scaled(A) or _is_row_scaled(B)
-    row_scaled_accumulate = accumulate
-    post_scale_rows = None  # per-row outer scale -> output rows (from B)
-    post_scale_cols = None  # per-group per-col outer scale -> output cols (from A)
-    if row_scaled:
-        if bias is not None:
-            raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support fused bias.")
-        if beta is not None:
-            raise NotImplementedError(
-                "Row-scaled NVFP4 grouped GEMM does not support explicit beta; use accumulate."
-            )
-        if _is_row_scaled(A):
-            A = A.copy()
-            if transa:
-                post_scale_cols = A.amax
-                A.amax = post_scale_cols.new_ones(A.num_tensors)
-            else:
-                post_scale_cols = A.columnwise_amax
-                A.columnwise_amax = post_scale_cols.new_ones(A.num_tensors)
-            A.row_scaled_nvfp4 = False
-        if _is_row_scaled(B):
-            B = B.copy()
-            if transb:
-                post_scale_rows = B.columnwise_amax
-                B.columnwise_amax = post_scale_rows.new_ones(B.num_tensors)
-            else:
-                post_scale_rows = B.amax
-                B.amax = post_scale_rows.new_ones(B.num_tensors)
-            B.row_scaled_nvfp4 = False
-        accumulate = False
 
     def _is_fp8_blockwise(operand) -> bool:
         if isinstance(operand, (list, tuple)):
@@ -1248,37 +1217,14 @@ def general_grouped_gemm_for_grouped_tensor(
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
 
-    if not row_scaled:
-        return grouped_gemm_impl(
-            A,
-            transa,
-            B,
-            transb,
-            out,
-            bias,
-            bias_scale,
-            alpha,
-            beta,
-            workspace_setup,
-            workspace_cublas,
-            use_split_accumulator,
-            sm_count,
-        )
-
-    if is_discrete_out:
-        scratch = [torch.empty_like(o, dtype=torch.float32) for o in out]
-    else:
-        scratch = out.copy()
-        scratch.rowwise_data = torch.empty_like(out.rowwise_data, dtype=torch.float32)
-        scratch.fake_dtype = torch.float32
-    grouped_gemm_impl(
+    return grouped_gemm_impl(
         A,
         transa,
         B,
         transb,
-        scratch,
-        None,
-        None,
+        out,
+        bias,
+        bias_scale,
         alpha,
         beta,
         workspace_setup,
@@ -1287,12 +1233,94 @@ def general_grouped_gemm_for_grouped_tensor(
         sm_count,
     )
 
+
+def _is_row_scaled_nvfp4(tensors) -> bool:
+    """Whether a grouped GEMM operand carries row-scaled NVFP4 data."""
+    if isinstance(tensors, GroupedTensorStorage):
+        return tensors.row_scaled_nvfp4
+    if isinstance(tensors, (list, tuple)):
+        return any(_is_nvfp4_row_scaled_tensor(t) for t in tensors)
+    return False
+
+
+def _grouped_gemm_row_scaled_nvfp4(
+    A,
+    B,
+    out,
+    *,
+    layout: str,
+    accumulate: bool,
+    use_split_accumulator: bool,
+    bias,
+    beta: Optional[torch.Tensor],
+    alpha: Optional[torch.Tensor],
+) -> Union[torch.Tensor, List[torch.Tensor]]:
+    """Grouped GEMM with row-scaled NVFP4 operands.
+
+    Runs the grouped GEMM with unit global scales into an FP32 buffer, then applies
+    the per-row scales of B to the output rows and the per-column scales of A to the
+    output columns.
+    """
+    if bias is not None:
+        raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support fused bias.")
+    if beta is not None:
+        raise NotImplementedError(
+            "Row-scaled NVFP4 grouped GEMM does not support explicit beta; use accumulate."
+        )
+    for operand in (A, B):
+        if isinstance(operand, (list, tuple)) and _is_row_scaled_nvfp4(operand):
+            raise NotImplementedError(
+                "Row-scaled NVFP4 operands passed as a list are not supported; pass a GroupedTensor."
+            )
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+
+    col_scales = None
+    if _is_row_scaled_nvfp4(A):
+        A = A.copy()
+        if transa:
+            col_scales = A.amax
+            A.amax = col_scales.new_ones(A.num_tensors)
+        else:
+            col_scales = A.columnwise_amax
+            A.columnwise_amax = col_scales.new_ones(A.num_tensors)
+        A.row_scaled_nvfp4 = False
+
+    row_scales = None
+    if _is_row_scaled_nvfp4(B):
+        B = B.copy()
+        if transb:
+            row_scales = B.columnwise_amax
+            B.columnwise_amax = row_scales.new_ones(B.num_tensors)
+        else:
+            row_scales = B.amax
+            B.amax = row_scales.new_ones(B.num_tensors)
+        B.row_scaled_nvfp4 = False
+
+    is_discrete_out = isinstance(out, list)
+    if is_discrete_out:
+        scratch = [torch.empty_like(o, dtype=torch.float32) for o in out]
+    else:
+        scratch = out.copy()
+        scratch.rowwise_data = torch.empty_like(out.rowwise_data, dtype=torch.float32)
+        scratch.fake_dtype = torch.float32
+    general_grouped_gemm_for_grouped_tensor(
+        A,
+        B,
+        scratch,
+        layout=layout,
+        accumulate=False,
+        use_split_accumulator=use_split_accumulator,
+        alpha=alpha,
+    )
+
     def _store(dst: torch.Tensor, src: torch.Tensor) -> None:
-        if row_scaled_accumulate:
+        if accumulate:
             dst.add_(src.to(dst.dtype))
         else:
             dst.copy_(src.to(dst.dtype))
 
+    num_tensors = B.num_tensors
     if is_discrete_out:
         row_offset = 0
         col_offset = 0
@@ -1300,11 +1328,11 @@ def general_grouped_gemm_for_grouped_tensor(
             scaled = scratch[i]
             rows = scaled.shape[-2]
             cols = scaled.shape[-1]
-            if post_scale_rows is not None:
-                row_scale_i = post_scale_rows[row_offset : row_offset + rows]
+            if row_scales is not None:
+                row_scale_i = row_scales[row_offset : row_offset + rows]
                 scaled = scaled.mul_(row_scale_i.reshape((1,) * (scaled.dim() - 2) + (rows, 1)))
-            if post_scale_cols is not None:
-                col_scale_i = post_scale_cols[col_offset : col_offset + cols]
+            if col_scales is not None:
+                col_scale_i = col_scales[col_offset : col_offset + cols]
                 scaled = scaled.mul_(col_scale_i.reshape((1,) * (scaled.dim() - 1) + (cols,)))
             _store(out[i], scaled)
             row_offset += rows
@@ -1317,11 +1345,11 @@ def general_grouped_gemm_for_grouped_tensor(
         last_dim = out.logical_shape[-1]
         live_rows = out.logical_shape[0]
         flat = scratch.rowwise_data.view(-1, last_dim)[:live_rows]
-        if post_scale_rows is not None:
-            flat.mul_(post_scale_rows.view(-1, 1))
-        if post_scale_cols is not None:
+        if row_scales is not None:
+            flat.mul_(row_scales.view(-1, 1))
+        if col_scales is not None:
             # output_size avoids a host sync under CUDA-graph capture.
-            col_scales = post_scale_cols.view(num_tensors, last_dim)
+            col_scales = col_scales.view(num_tensors, last_dim)
             if out.first_dims is None:
                 rows = live_rows // num_tensors
                 repeats = torch.full((num_tensors,), rows, dtype=torch.int64, device=flat.device)
