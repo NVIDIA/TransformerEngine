@@ -17,6 +17,8 @@ from .utils import (
     debug_build_enabled,
     get_bolt_build_flags,
     nccl_ep_enabled,
+    cudnn_include_path,
+    nccl_include_path,
     setup_mpi_flags,
 )
 from typing import List
@@ -60,6 +62,10 @@ def setup_pytorch_extension(
 
     # Header files
     include_dirs = get_cuda_include_dirs()
+    if (discovered_nccl_include_path := nccl_include_path()) is not None:
+        include_dirs.append(discovered_nccl_include_path)
+    if (discovered_cudnn_include_path := cudnn_include_path()) is not None:
+        include_dirs.append(discovered_cudnn_include_path)
     include_dirs.extend(
         [
             common_header_files,
