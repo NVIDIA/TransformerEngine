@@ -1912,6 +1912,128 @@ __device__ __forceinline__ void prefetch_l2_evict_last(const void *addr) {
   NVTE_DEVICE_ERROR("prefetch_l2_evict_last is only supported on SM 8.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 }
+
+// Bring one global cache line into L2 with the default eviction priority.  A
+// prefetch names no destination register, so it can be issued ahead of a chain
+// the thread is already stalled on.
+__device__ __forceinline__ void prefetch_l2(const void *addr) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  asm volatile("prefetch.global.L2 [%0];" : : "l"(addr));
+#else
+  NVTE_DEVICE_ERROR("prefetch_l2 is only supported on SM 8.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+}
+
+// Coherent 256-bit global loads for data that is read more than once, so they
+// stay off the read-only path, which would not keep the line for the re-read.
+// The evict_last form additionally keeps the line resident in L2 until then.
+// Neither is `volatile` and neither clobbers memory: use them only on data the
+// kernel does not write, so the compiler is free to schedule them early.
+// Needs sm_100 or later, PTX ISA 8.8 (CUDA 12.9) and a 32-byte aligned address.
+__device__ __forceinline__ void ld_global_b32x8(uint32_t (&dst)[8], const void *src) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
+  asm("ld.global.v8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+      : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3]), "=r"(dst[4]), "=r"(dst[5]),
+        "=r"(dst[6]), "=r"(dst[7])
+      : "l"(src));
+#else
+  NVTE_DEVICE_ERROR("ld_global_b32x8 is only supported on SM 10.0+ with CUDA 12.9+.");
+#endif
+}
+
+__device__ __forceinline__ void ld_global_evict_last_b32x8(uint32_t (&dst)[8], const void *src) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
+  asm("ld.global.L2::evict_last.v8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+      : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3]), "=r"(dst[4]), "=r"(dst[5]),
+        "=r"(dst[6]), "=r"(dst[7])
+      : "l"(src));
+#else
+  NVTE_DEVICE_ERROR("ld_global_evict_last_b32x8 is only supported on SM 10.0+ with CUDA 12.9+.");
+#endif
+}
+
+// As ld_global_nc_evict_first_b32x8, but not `volatile`, so the compiler may
+// hoist the load above independent work.  For input the kernel never writes.
+__device__ __forceinline__ void ld_global_nc_evict_first_b32x8_relaxed(uint32_t (&dst)[8],
+                                                                       const void *src) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
+  asm("ld.global.nc.L2::evict_first.v8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+      : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3]), "=r"(dst[4]), "=r"(dst[5]),
+        "=r"(dst[6]), "=r"(dst[7])
+      : "l"(src));
+#else
+  NVTE_DEVICE_ERROR(
+      "ld_global_nc_evict_first_b32x8_relaxed is only supported on SM 10.0+ with CUDA 12.9+.");
+#endif
+}
+
+// 256-bit global store.  Needs sm_100 or later, PTX ISA 8.8 (CUDA 12.9) and a
+// 32-byte aligned address.
+__device__ __forceinline__ void st_global_b32x8(void *dst, const uint32_t (&src)[8]) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
+  asm volatile("st.global.v8.b32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};" ::"l"(dst), "r"(src[0]),
+               "r"(src[1]), "r"(src[2]), "r"(src[3]), "r"(src[4]), "r"(src[5]), "r"(src[6]),
+               "r"(src[7])
+               : "memory");
+#else
+  NVTE_DEVICE_ERROR("st_global_b32x8 is only supported on SM 10.0+ with CUDA 12.9+.");
+#endif
+}
+
+// Packed FP32 pairs held in one 64-bit register, as `mul.f32x2` consumes them.
+// The low 32 bits are the first element.
+
+// Widen a packed BF16 pair to a packed FP32 pair: BF16 -> FP32 is exact and is
+// just the 16 bits placed at the top of the word.
+__device__ __forceinline__ uint64_t bf16x2_to_f32x2(uint32_t v) {
+  const uint32_t lo = v << 16;
+  const uint32_t hi = v & 0xffff0000u;
+  return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+__device__ __forceinline__ uint64_t splat_f32x2(float v) {
+  const uint64_t bits = __float_as_uint(v);
+  return (bits << 32) | bits;
+}
+
+__device__ __forceinline__ uint64_t mul_f32x2(uint64_t a, uint64_t b) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  uint64_t d;
+  asm("mul.f32x2 %0, %1, %2;" : "=l"(d) : "l"(a), "l"(b));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("mul_f32x2 is only supported on SM 10.0+.");
+  return 0;
+#endif
+}
+
+__device__ __forceinline__ void unpack_f32x2(uint64_t p, float &lo, float &hi) {
+  lo = __uint_as_float(static_cast<uint32_t>(p));
+  hi = __uint_as_float(static_cast<uint32_t>(p >> 32));
+}
+
+// Elementwise max of |x| over two packed BF16 pairs.  The result may carry a
+// sign bit (max.xorsign.abs), so mask it off before using the magnitude.  Not
+// `volatile`, unlike abs_max_2x, so it schedules freely inside amax trees.
+__device__ __forceinline__ uint32_t abs_max_bf16x2(uint32_t a, uint32_t b) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+  uint32_t d;
+  asm("max.xorsign.abs.bf16x2 %0, %1, %2;" : "=r"(d) : "r"(a), "r"(b));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("abs_max_bf16x2 is only supported on SM 8.9+.");
+  return 0;
+#endif
+}
+
+// Exchange the two 16-bit halves of a word.
+__device__ __forceinline__ uint32_t swap_halves_b32(uint32_t v) {
+  return __byte_perm(v, v, 0x1032);
+}
 }  // namespace ptx
 
 namespace {

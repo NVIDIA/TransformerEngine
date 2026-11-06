@@ -845,7 +845,8 @@ void performTest(float (*OP)(const float),
                  const NVFP4ScalingMode scaling_mode = NVFP4ScalingMode::Block1D,
                  const NVTENVFP44Over6Mode mode = kNVTENVFP44Over6Disabled,
                  const int scale_max = 0,
-                 const bool use_4over6_err_use_fast_math = false) {
+                 const bool use_4over6_err_use_fast_math = false,
+                 const bool rowwise_only = false) {
     using namespace test;
     const bool use_4over6 = mode != kNVTENVFP44Over6Disabled;
 
@@ -863,7 +864,7 @@ void performTest(float (*OP)(const float),
     const bool is_2d_quantization = use_2d_quantization(scaling_mode);
     const bool row_scaled_nvfp4 = scaling_mode == NVFP4ScalingMode::RowScaled1D;
     const bool rowwise = true;
-    const bool columnwise = !row_scaled_nvfp4;
+    const bool columnwise = !row_scaled_nvfp4 && !rowwise_only;
 
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
@@ -1083,7 +1084,7 @@ void performTest(float (*OP)(const float),
                                         cols,
                                         unpadded_blocks_X,
                                         scales_stride);
-        if (!row_scaled_nvfp4) {
+        if (columnwise) {
             compare_nvfp4_4over6_candidates<ScaleType>("output_t",
                                             output.columnwise_cpu_dptr<fp4e2m1>(),
                                             output.columnwise_cpu_scale_inv_ptr<ScaleType>(),
@@ -1099,7 +1100,7 @@ void performTest(float (*OP)(const float),
     } else {
         // Set dump_data=true to enable dumping tensor data to files for analysis
         compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol,
-                             true, false, !row_scaled_nvfp4);
+                             true, false, columnwise);
 
         size_t scale_mismatches_num = 0;
         if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
@@ -1112,7 +1113,7 @@ void performTest(float (*OP)(const float),
                 unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
         }
 
-        if (!row_scaled_nvfp4) {
+        if (columnwise) {
             if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
                 compare_scaling_factors<ScaleType>(
                     "scales_t", output.columnwise_cpu_scale_inv_ptr<ScaleType>(),
@@ -1365,7 +1366,8 @@ class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
                 bool,
                 NVFP4ScalingMode,
                 NVFP4FourOverSixTestConfig,
-                transformer_engine::DType>> {};
+                transformer_engine::DType,
+                bool>> {};
 
 TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     // Skip tests for pre-Blackwell architectures
@@ -1383,6 +1385,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     const NVFP4ScalingMode scaling_mode = std::get<4>(GetParam());
     const NVFP4FourOverSixTestConfig config = std::get<5>(GetParam());
     const DType scale_type = std::get<6>(GetParam());
+    const bool rowwise_only = std::get<7>(GetParam());
 
     // Skip tests if the input tensor is 1D
     if (tensor_dims.size() < 2) {
@@ -1403,12 +1406,12 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
         if (scale_type == DType::kFloat8E4M3) {
             performTest<InputType, fp8e4m3>(
                 OP, tensor_dims, use_fast_math, scaling_mode, config.mode, config.scale_max,
-                config.err_use_fast_math);
+                config.err_use_fast_math, rowwise_only);
 #if CUDA_VERSION >= 13040
         } else if (scale_type == DType::kFloat8UE5M3) {
             performTest<InputType, fp8ue5m3>(
                 OP, tensor_dims, use_fast_math, scaling_mode, config.mode, config.scale_max,
-                config.err_use_fast_math);
+                config.err_use_fast_math, rowwise_only);
 #endif
         } else {
             FAIL() << "Unsupported NVFP4 scale dtype " << static_cast<int>(scale_type);
@@ -1467,6 +1470,9 @@ std::string test_name(const FusedCastTransposeNVFP4TestSuite::ParamType& param) 
     if (std::get<6>(param) != DType::kFloat8E4M3) {
         name += "X" + test::typeName(std::get<6>(param));
     }
+    if (std::get<7>(param)) {
+        name += "XROWWISE_ONLY";
+    }
     return name;
 }
 
@@ -1477,10 +1483,11 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(Activation_types),           // activation_type
         ::testing::ValuesIn(tensor_dims),                // tensor_dims
         ::testing::Values(DType::kBFloat16),             // input_type
-        ::testing::Values(false),                       // use_fast_math
+        ::testing::Values(false, true),                 // use_fast_math
         ::testing::Values(NVFP4ScalingMode::Block1D),   // scaling_mode
         ::testing::Values(NVFP4FourOverSixTestConfig{}), // four_over_six_config
-        ::testing::Values(DType::kFloat8E4M3)),          // scale_type
+        ::testing::Values(DType::kFloat8E4M3),           // scale_type
+        ::testing::Values(false, true)),                 // rowwise_only
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
     });
@@ -1495,7 +1502,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(false),                           // use_fast_math
         ::testing::Values(NVFP4ScalingMode::RowScaled1D),   // scaling_mode
         ::testing::Values(NVFP4FourOverSixTestConfig{}),   // four_over_six_config
-        ::testing::Values(DType::kFloat8E4M3)),            // scale_type
+        ::testing::Values(DType::kFloat8E4M3),             // scale_type
+        ::testing::Values(false)),                         // rowwise_only
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
     });
@@ -1520,7 +1528,8 @@ INSTANTIATE_TEST_SUITE_P(
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMAE, 256, true},
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 256, false},
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 256, true}), // four_over_six_config
-        ::testing::Values(DType::kFloat8E4M3)),                             // scale_type
+        ::testing::Values(DType::kFloat8E4M3),                              // scale_type
+        ::testing::Values(false)),                                          // rowwise_only
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
     });
@@ -1586,7 +1595,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(NVFP4ScalingMode::Block1D,
                           NVFP4ScalingMode::Block2D),   // scaling_mode
         ::testing::Values(NVFP4FourOverSixTestConfig{}),  // four_over_six_config
-        ::testing::Values(DType::kFloat8UE5M3)),
+        ::testing::Values(DType::kFloat8UE5M3),  // scale_type
+        ::testing::Values(false, true)),  // rowwise_only
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
     });

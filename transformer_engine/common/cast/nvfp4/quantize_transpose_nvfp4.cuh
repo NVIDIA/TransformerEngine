@@ -24,6 +24,7 @@
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "core_nvfp4.cuh"
+#include "specialized/quantize_transpose_nvfp4_register_1D.cuh"
 #include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
 #include "swizzle.cuh"
 
@@ -1860,6 +1861,12 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
   }
 
   if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
+    // The register-resident kernel serves every 1D request it supports; row-scaled NVFP4,
+    // fast math, swizzled scales and RHT stay on the TMA kernel.
+    if (!apply_columnwise_rht && register_1D_supported(input, *output, quant_config)) {
+      quantize_transpose_register_1D<ScaleType>(input, noop, output, quant_config, stream);
+      return;
+    }
     quantize_transpose_tuned_1D<ScaleType>(input, noop, output, quant_config, stream);
     return;
   }
