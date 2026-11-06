@@ -345,12 +345,11 @@ def _nvidia_cudart_include_dir(cuda_major_version: int) -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def _load_cuda_library_from_python(lib_name: str, strict: bool = False):
+def _load_cuda_library_from_python(lib_name: str):
     """
     Attempts to load shared object file installed via python packages.
 
     `lib_name` : Name of package as found in the `nvidia` dir in python environment.
-    `strict` : If set to `True`, throw an error if lib is not found.
     """
 
     ext = _get_sys_extension()
@@ -382,19 +381,24 @@ def _load_cuda_library_from_python(lib_name: str, strict: bool = False):
         for so_path in so_paths:
             ctypes_handles.append(ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL))
 
-    if strict and not path_found:
-        raise RuntimeError(f"{lib_name} shared object not found.")
-
     return path_found, ctypes_handles
+
+
+def _newest_cuda_library(pattern: str) -> Optional[str]:
+    """Return the highest-sorted non-stub library that matches a glob pattern."""
+    libs = [lib for lib in glob.glob(pattern, recursive=True) if "stub" not in lib]
+    return max(libs, key=os.path.basename, default=None)
 
 
 @functools.lru_cache(maxsize=None)
 def _load_cuda_library_from_system(lib_name: str):
     """
-    Attempts to load shared object file installed via system/cuda-toolkit.
+    Attempts to load shared object file from a location selected by the environment or toolkit.
 
     `lib_name`: Name of library to load without extension or `lib` prefix.
     """
+
+    file_name = f"lib{lib_name}{_get_sys_extension()}"
 
     # Where to look for the shared lib in decreasing order of preference.
     paths = (
@@ -408,16 +412,41 @@ def _load_cuda_library_from_system(lib_name: str):
     for path in paths:
         if path is None:
             continue
-        libs = glob.glob(f"{path}/**/lib{lib_name}{_get_sys_extension()}*", recursive=True)
-        libs = [lib for lib in libs if "stub" not in lib]
-        libs.sort(reverse=True, key=os.path.basename)
-        if libs:
-            return True, ctypes.CDLL(libs[0], mode=ctypes.RTLD_GLOBAL)
+        lib = _newest_cuda_library(f"{path}/**/{file_name}*")
+        if lib:
+            return True, ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
 
-    # Search in LD_LIBRARY_PATH.
+    origin = os.path.dirname(os.path.realpath(sys.executable))
+    for path in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep):
+        if not path:
+            continue
+        # In this variable, $ORIGIN is the executable's directory. dlopen would use the caller's.
+        path = path.replace("${ORIGIN}", origin).replace("$ORIGIN", origin)
+        exact = os.path.join(path, file_name)
+        # dlopen expands the other tokens, such as $LIB, but a file search cannot.
+        if "$" in path:
+            try:
+                return True, ctypes.CDLL(exact, mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                continue
+        # Follow the unversioned name as the linker does. Python packages only have versioned names.
+        lib = exact if os.path.exists(exact) else _newest_cuda_library(f"{exact}*")
+        if lib:
+            return True, ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+
+    return False, None
+
+
+@functools.lru_cache(maxsize=None)
+def _load_cuda_library_from_linker_default(lib_name: str):
+    """
+    Attempts to load shared object file through the dynamic linker's default search.
+
+    `lib_name`: Name of library to load without extension or `lib` prefix.
+    """
+
     try:
-        _lib_handle = ctypes.CDLL(f"lib{lib_name}{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
-        return True, _lib_handle
+        return True, ctypes.CDLL(f"lib{lib_name}{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
     except OSError:
         return False, None
 
@@ -426,11 +455,11 @@ def _load_cuda_library_from_system(lib_name: str):
 def _load_cuda_library(lib_name: str):
     """
     Load given shared library.
-    Prioritize loading from system/toolkit
-    before checking python packages.
+    Prioritize locations selected by the environment or toolkit, then python packages,
+    then the dynamic linker's default search.
     """
 
-    # Attempt to locate library in system.
+    # Attempt to locate library in a selected location.
     found, handle = _load_cuda_library_from_system(lib_name)
     if found:
         return True, handle
@@ -439,6 +468,12 @@ def _load_cuda_library(lib_name: str):
     found, handle = _load_cuda_library_from_python(lib_name)
     if found:
         return False, handle
+
+    # A host-wide library comes last: pip-installed frameworks depend on the version in their own
+    # Python environment, and loading another copy globally would replace it in this process.
+    found, handle = _load_cuda_library_from_linker_default(lib_name)
+    if found:
+        return True, handle
 
     raise RuntimeError(f"{lib_name} shared object not found.")
 
@@ -503,16 +538,14 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
     # and an error is thrown if not found.
     _, _CUDNN_LIB_CTYPES = _load_cuda_library("cudnn")
     system_nvrtc, _NVRTC_LIB_CTYPES = _load_cuda_library("nvrtc")
-    system_curand, _CURAND_LIB_CTYPES = _load_cuda_library("curand")
 
     # This additional step is necessary to be able to install TE wheels
     # and import TE (without any guards) in an environment where the cuda
     # toolkit might be absent without being guarded
-    load_libs_for_no_ctk = not system_nvrtc and not system_curand
+    load_libs_for_no_ctk = not system_nvrtc
     if load_libs_for_no_ctk:
-        _CUBLAS_LIB_CTYPES = _load_cuda_library_from_python("cublas", strict=True)
-        _CUDART_LIB_CTYPES = _load_cuda_library_from_python("cudart", strict=True)
-        _CUDNN_ALL_LIB_CTYPES = _load_cuda_library_from_python("cudnn", strict=True)
+        _CUBLAS_LIB_CTYPES = _load_cuda_library_from_python("cublas")
+        _CUDART_LIB_CTYPES = _load_cuda_library_from_python("cudart")
 
     # Prepare CuTeDSL backend for on-demand compilation via TVM-FFI if user enables it.
     if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0":
