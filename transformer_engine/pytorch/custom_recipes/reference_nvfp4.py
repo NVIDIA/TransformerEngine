@@ -392,6 +392,23 @@ class NVFP4TensorRef(QuantizedTensorStorage):
             ")"
         )
 
+    def quantize_(self, tensor, noop_flag=None):
+        """Quantise into this tensor in place.
+
+        `module/base.py::quantize_weight` calls `workspace.quantize_(...)` when the
+        workspace exposes it and otherwise falls back to `tex.quantize(...)`, a C++
+        entry that cannot drive a Python reference quantizer — the workspace then stays
+        empty and the GEMM fails on `data is None`.
+        """
+        del noop_flag
+        fresh = self._quantizer.quantize(tensor)
+        self.data = fresh.data
+        self.scale = fresh.scale
+        self.data_t = fresh.data_t
+        self.scale_t = fresh.scale_t
+        self.original_shape = tuple(tensor.shape)
+        return self
+
     def update_usage(
         self,
         rowwise_usage: Optional[bool] = None,
@@ -407,6 +424,11 @@ class NVFP4TensorRef(QuantizedTensorStorage):
             needs_data = rowwise_usage
         if columnwise_usage is not None:
             needs_data_transpose = columnwise_usage
+
+        # A placeholder (neither direction populated) has nothing to generate from;
+        # refusing here turns workspace allocation into a hard error.
+        if not has_data and not has_data_transpose:
+            return self
 
         # Generate data that is required
         if needs_data and not has_data:
@@ -429,16 +451,20 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         self.data_t = self.data.t().contiguous()
         self.scale_t = self.scale
 
-    def size(self, *args, **kwargs):  # pylint: disable=unused-argument
-        """Return the original tensor shape, not the internal packed data shape.
+    def size(self, dim=None):
+        """Return the logical original shape, honouring `dim`.
 
-        FP4 quantization packs two 4-bit values into each 8-bit value, which reduces
-        the second dimension by half. This method returns the logical shape that
-        users expect, not the internal packed storage shape.
+        FP4 packs two 4-bit values into each 8-bit value, halving the second dimension, so
+        the logical shape is not the storage shape. The no-argument form returns the full
+        logical shape. Passing `dim` must return that dimension's size: callers such as
+        `GroupedLinear._validate_or_alloc_output` compute `rows = x.size(0)` and hand it to
+        `torch.empty`, which raises `type must be tuple of ints, but got torch.Size` when
+        the whole shape comes back instead.
         """
         if self.original_shape is None:
             raise RuntimeError("NVFP4TensorRef.size() called but original_shape has not been set")
-        return torch.Size(self.original_shape)
+        shape = torch.Size(self.original_shape)
+        return shape if dim is None else shape[dim]
 
 
 def get_wgrad_sign_vector() -> torch.Tensor:
@@ -975,6 +1001,21 @@ class NVFP4QuantizerRef(Quantizer):
                 )
             if self.row_scaled_nvfp4:
                 raise ValueError("Row-scaled NVFP4 is only supported for NVFP4 (non-pow2) mode.")
+            # MXFP4 path: the branch above validated the configuration but never
+            # prepared the operands, so the common tail raised UnboundLocalError at
+            # `x_input = row_input`. Prepare them here, and guard the empty splits
+            # that _split_quantization can produce (torch.max() with no dim raises on
+            # a 0-element tensor).
+            row_input = tensor
+            col_input = tensor.t().contiguous()
+            if row_input.numel():
+                global_amax_row = torch.max(torch.abs(row_input)).to(torch.float32).view(1)
+            else:
+                global_amax_row = torch.zeros(1, device=row_input.device, dtype=torch.float32)
+            if col_input.numel():
+                global_amax_col = torch.max(torch.abs(col_input)).to(torch.float32).view(1)
+            else:
+                global_amax_col = torch.zeros(1, device=col_input.device, dtype=torch.float32)
             # TODO(etsykunov): Fix bug where global_amax_row and
             # global_amax_col are not defined
             # global_amax = torch.empty(0, device=tensor.device, dtype=torch.float32)
