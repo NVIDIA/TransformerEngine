@@ -6,6 +6,17 @@
 PyTorch
 =======
 
+CUDA state lifecycle
+--------------------
+
+See :doc:`c/cuda_context` for restart boundaries, ordering and context-loss limits.
+
+.. autoapifunction:: transformer_engine.pytorch.release_cuda_state
+.. autoapifunction:: transformer_engine.pytorch.reset_cuda_state
+
+Modules
+-------
+
 .. autoapiclass:: transformer_engine.pytorch.Linear(in_features, out_features, **kwargs)
   :members: forward, set_tensor_parallel_group
 

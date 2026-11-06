@@ -2772,6 +2772,21 @@ def compile_cutedsl_function_from_cfg(cfg):
     return compiled
 
 
+# Keep ownership until native references and the registry entry are released.
+# Cleanup is explicit and runs with a live context, outside all TE executions.
+_registered_kernels = {}
+
+
+def release_cuda_state(device=None) -> None:
+    """Remove TE-owned compiled entries globally or for one live cleanup callback."""
+    for name in tuple(_registered_kernels):
+        marker = f"_device_{device}_generation_"
+        if device is not None and marker not in name:
+            continue
+        tvm_ffi.remove_global_func(name)
+        del _registered_kernels[name]
+
+
 def get_mxfp8_quantization_function(
     fn_name: str,
     dtype: str,
@@ -2845,6 +2860,7 @@ def get_mxfp8_quantization_function(
         tvm_ffi.register_global_func(
             fn_name, native if native is not None else compiled, override=True
         )
+        _registered_kernels[fn_name] = compiled
         return True
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(

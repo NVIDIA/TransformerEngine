@@ -13,6 +13,7 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 from contextlib import nullcontext
 import numpy as np
 import torch
+from transformer_engine.pytorch._cuda_state import device_cache
 
 from transformer_engine.pytorch.device import te_device_type
 from .torch_version import torch_version
@@ -99,7 +100,7 @@ def warn_compile_eager_fallback(reason: str) -> None:
     )
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=2)
 def get_cached_ones_tensor(
     num_elements: int,
     dtype: torch.dtype,
@@ -120,7 +121,7 @@ def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     return False
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=None)
 def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor().cuda()

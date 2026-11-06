@@ -10,9 +10,13 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <cassert>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <numeric>
 
 #include "common/common.h"
+#include "common/util/cuda_context.h"
 #include "common/util/cuda_driver.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
@@ -33,6 +37,24 @@ bool nvte_built_with_cublasmp() {
 }
 
 namespace transformer_engine {
+
+namespace {
+struct OverlapLifetimes {
+  std::mutex mutex;
+  std::map<const CommOverlapCore *, std::unique_ptr<cuda_context::ExternalResource>> owners;
+};
+OverlapLifetimes &overlap_lifetimes() {
+  static auto &state = *new OverlapLifetimes;
+  return state;
+}
+void register_overlap(const CommOverlapCore *owner) {
+  auto &state = overlap_lifetimes();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.owners.emplace(owner,
+                       std::make_unique<cuda_context::ExternalResource>(
+                           cuda::current_device(), "Userbuffers communication overlap object"));
+}
+}  // namespace
 
 namespace {
 
@@ -77,6 +99,7 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
 
   initialize(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
              num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
+  register_overlap(this);
 }
 
 // Constructor for cuBLASMp backend
@@ -178,6 +201,11 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
 }
 
 CommOverlapCore::~CommOverlapCore() {
+  {
+    auto &state = overlap_lifetimes();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.owners.erase(this);
+  }
   if (_with_cublasmp) {
     nvte_comm_gemm_ctx_destroy(_cublasmp_ctx);
   } else {

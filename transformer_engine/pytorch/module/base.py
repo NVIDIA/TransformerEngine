@@ -22,6 +22,7 @@ from torch.distributed.tensor import DTensor
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.device import te_device_type
+from .._cuda_state import register_module
 from ._common import _ParameterInitMeta, noop_cat, sum_bias_grad
 from .._extra_state import (
     extra_state_pickle_advisory,
@@ -90,6 +91,7 @@ _2X_ACC_WGRAD = True
 _dummy_wgrads = {}
 _ub_communicators = None
 _ub_initialized = False
+_ub_device: Optional[int] = None
 _ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
@@ -629,7 +631,8 @@ def initialize_ub(
                 ub_cfg["fp8_buf"] = fp8_buf
             add_ub(name, quantization_mode, **ub_cfg)
 
-    global _ub_initialized
+    global _ub_initialized, _ub_device
+    _ub_device = torch.cuda.current_device()
     _ub_initialized = True
 
 
@@ -654,10 +657,11 @@ def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
 
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
-    global _ub_communicators, _ub_with_cublasmp, _ub_initialized
+    global _ub_communicators, _ub_with_cublasmp, _ub_initialized, _ub_device
     _ub_communicators = None
     _ub_with_cublasmp = False
     _ub_initialized = False
+    _ub_device = None
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
     # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;
@@ -1031,6 +1035,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
+        register_module(self)
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
         self.wgrad_store = None
@@ -1040,6 +1045,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
         self._validate_name()
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        register_module(self)
 
     def fast_setattr(self, name: str, value: Any) -> None:
         """

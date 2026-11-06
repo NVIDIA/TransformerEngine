@@ -43,6 +43,7 @@ load_framework_extension("jax")
 
 from . import flax
 from . import quantize
+from .cuda_context import release_cuda_state, reset_cuda_state
 
 from .quantize import autocast, fp8_autocast, update_collections
 from .quantize import NVTE_FP8_COLLECTION_NAME
@@ -54,6 +55,8 @@ from ..common.utils import DeprecatedEnum
 
 
 __all__ = [
+    "release_cuda_state",
+    "reset_cuda_state",
     "NVTE_FP8_COLLECTION_NAME",
     "autocast",
     "fp8_autocast",

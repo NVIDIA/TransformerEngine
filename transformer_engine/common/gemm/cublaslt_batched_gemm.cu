@@ -27,8 +27,13 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
   NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
 }
 
+inline void DestroyCublasHandle(cublasLtHandle_t handle) {
+  NVTE_CHECK_CUBLAS(cublasLtDestroy(handle));
+}
+
 using cublasHandleManager =
-    transformer_engine::detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
+    transformer_engine::detail::HandleManager<cublasLtHandle_t, CreateCublasHandle,
+                                              DestroyCublasHandle>;
 
 uint32_t GetAlignment(uintptr_t address) {
   // Alignment in bytes

@@ -20,6 +20,8 @@
 #include <vector>
 
 #include "../common.h"
+#include "../util/cuda_context.h"
+#include "../util/cuda_runtime.h"
 #include "../util/logging.h"
 
 #ifdef NVTE_WITH_CUBLASMP
@@ -150,6 +152,7 @@ struct NVTECommGemmCtx {
   CudaDeviceFloats device_scalars;
   void* workspace;
   size_t workspace_size;
+  std::shared_ptr<cuda_context::ExternalResource> context_lifetime;
 };
 
 namespace {
@@ -663,6 +666,8 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
       .device_scalars = std::move(device_scalars),
       .workspace = nullptr,
       .workspace_size = 0,
+      .context_lifetime = std::make_shared<cuda_context::ExternalResource>(
+          transformer_engine::cuda::current_device(), "cuBLASMp communication context"),
   };
 }
 

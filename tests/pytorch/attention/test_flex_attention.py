@@ -9,7 +9,7 @@ import pathlib
 import pytest
 import torch
 
-from transformer_engine.pytorch import DotProductAttention, is_bf16_available
+from transformer_engine.pytorch import DotProductAttention, is_bf16_available, release_cuda_state
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 import transformer_engine.pytorch.attention.dot_product_attention.flex_attention as flex_attention
 from transformer_engine.pytorch.utils import get_device_compute_capability
@@ -705,3 +705,24 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     torch.testing.assert_close(q.grad, q_ref.grad, **tols)
     torch.testing.assert_close(k.grad, k_ref.grad, **tols)
     torch.testing.assert_close(v.grad, v_ref.grad, **tols)
+
+    if (
+        dtype == torch.bfloat16
+        and qkv_format == "bshd"
+        and score_mod_case == "causal"
+        and not scalar_loss
+    ):
+        device = q.device.index
+        assert flex_attention._cudnn_score_mod_graph_cache
+        release_cuda_state()
+        assert torch.device("cuda", device) not in flex_attention._cudnn_score_mod_handles
+        assert not flex_attention._cudnn_score_mod_graph_cache
+        for tensor in (q, k, v):
+            tensor.grad = None
+        actual = flex_attn(
+            q, k, v, qkv_format=qkv_format, attn_mask_type="no_mask", **score_mod_kwargs
+        )
+        actual.backward(d_out)
+        torch.testing.assert_close(actual, out_ref, **tols)
+        for tensor, reference in zip((q, k, v), (q_ref, k_ref, v_ref)):
+            torch.testing.assert_close(tensor.grad, reference.grad, **tols)

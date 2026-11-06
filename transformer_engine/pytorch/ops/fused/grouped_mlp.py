@@ -19,6 +19,7 @@ from packaging.version import Version as PkgVersion
 
 import transformer_engine_torch as tex
 from ....common.recipe import Format as RecipeFormat
+from ..._cuda_state import device_cache
 from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
@@ -183,7 +184,7 @@ def _cudnn_wgrad_workspace_size_fn() -> Optional[Callable]:
     return get_grouped_gemm_wgrad_workspace_size_sm100
 
 
-@functools.lru_cache(maxsize=None)
+@device_cache(device_arg=4)
 def _cudnn_wgrad_workspace(
     op_name: str,  # pylint: disable=unused-argument
     num_experts: int,

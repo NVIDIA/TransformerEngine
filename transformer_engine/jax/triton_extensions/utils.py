@@ -210,6 +210,12 @@ __all__ = ["triton_call_lowering", "get_triton_info"]
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
 
+
+def release_cuda_state():
+    """Drop TE's process-wide kernel owners after JAX executables are retired."""
+    _TRITON_KERNEL_CACHE.clear()
+
+
 # Alignment (bytes) assumed for every array argument, as declared to the launcher by
 # gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES).
 _ARRAY_ALIGNMENT_BYTES = 16

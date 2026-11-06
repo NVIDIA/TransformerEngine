@@ -145,7 +145,7 @@ EPBackend& EPBackend::instance(int device) {
   std::lock_guard<std::mutex> lock(devices_mutex_);
   auto it = devices_.find(device);
   if (it == devices_.end()) {
-    it = devices_.emplace(device, std::unique_ptr<EPBackend>(new EPBackend())).first;
+    it = devices_.emplace(device, std::unique_ptr<EPBackend>(new EPBackend(device))).first;
   }
   return *it->second;
 }
@@ -268,6 +268,17 @@ void EPBackend::shutdown_locked() {
   }
   ep_comm_ = nullptr;  // borrowed; caller destroys
   initialized_ = false;
+}
+
+void EPBackend::check_context_loss() const {
+  NVTE_CHECK(!initialized_,
+             "Active NCCL EP state cannot be freed safely after CUDA context loss. "
+             "Finalize EP before destroying its communicator/context, or restart the worker.");
+}
+
+void EPBackend::release_context() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  shutdown_locked();
 }
 
 ncclEpHandle_t EPBackend::open_handle(void* handle_mem, size_t handle_mem_size, int num_topk,

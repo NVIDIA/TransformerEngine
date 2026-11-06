@@ -81,6 +81,8 @@ def _check_nccl_runtime_version() -> None:
 
 
 _BOOTSTRAPPED = False
+_BOOTSTRAP_DEVICE: Optional[int] = None
+_EP_GENERATION = 0
 _ATEXIT_REGISTERED = False
 # EP group captured at bootstrap; used by the zero-copy symm-mem pool allocator.
 _EP_GROUP: Optional[dist.ProcessGroup] = None
@@ -125,7 +127,7 @@ class EpConfig:
 
 def _atexit_finalize() -> None:
     """Best-effort teardown at interpreter shutdown; swallows errors."""
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS, _BOOTSTRAP_DEVICE
     if _BOOTSTRAPPED:
         try:
             tex.ep_finalize()
@@ -135,6 +137,7 @@ def _atexit_finalize() -> None:
             traceback.print_exc()
         finally:
             _BOOTSTRAPPED = False
+            _BOOTSTRAP_DEVICE = None
             _EP_GROUP = None
             _EAGER = False
             _BOOTSTRAP_SETTINGS = None
@@ -173,7 +176,7 @@ def ep_bootstrap(
     ``drop_on_overflow`` drops tokens exceeding ``recv_capacity_per_rank`` instead
     of trapping. Requires ``recv_capacity_per_rank``.
     """
-    global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
+    global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS, _BOOTSTRAP_DEVICE, _EP_GENERATION
     eager = recv_capacity_per_rank is None
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")
@@ -217,6 +220,8 @@ def ep_bootstrap(
         int(num_topk),
         bool(drop_on_overflow),
     )
+    _EP_GENERATION += 1
+    _BOOTSTRAP_DEVICE = torch.cuda.current_device()
     _BOOTSTRAPPED = True
     _EP_GROUP = ep_group
     _EAGER = bool(eager)
@@ -269,7 +274,7 @@ def ep_finalize() -> None:
     a caller that used ``symm_mem_alloc(use_pool=True)`` does not need a separate
     ``release_symm_mem_pool()`` before destroying the PG.
     """
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS, _BOOTSTRAP_DEVICE
     if not _BOOTSTRAPPED:
         return
     try:
@@ -278,6 +283,7 @@ def ep_finalize() -> None:
         tex.ep_finalize()
     finally:
         _BOOTSTRAPPED = False
+        _BOOTSTRAP_DEVICE = None
         _EP_GROUP = None
         _EAGER = False
         _BOOTSTRAP_SETTINGS = None
@@ -315,6 +321,7 @@ class EpBuffer:
     """
 
     __slots__ = (
+        "_generation",
         "handle_mem",
         "top_k",
         "alignment",
@@ -349,6 +356,7 @@ class EpBuffer:
     ) -> None:
         if not _BOOTSTRAPPED:
             raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
+        self._generation = _EP_GENERATION
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
         alignment = int(alignment)
@@ -394,6 +402,11 @@ class EpBuffer:
         else:
             self.total_recv_tokens = torch.empty(1, dtype=torch.int64, device=device)
             mark_not_offload(self.total_recv_tokens)
+
+    def check_generation(self):
+        """A routing buffer belongs to one bootstrap session, even with live CUDA."""
+        if not _BOOTSTRAPPED or self._generation != _EP_GENERATION:
+            raise RuntimeError("EpBuffer belongs to a finalized EP session; create a new EpBuffer")
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
@@ -1227,6 +1240,7 @@ def ep_dispatch(
     Returns (recv_tokens, recv_topk_weights, tokens_per_expert); tokens_per_expert is non-diff. See
     ``buffer.total_recv_tokens`` for the per-step recv total.
     """
+    buffer.check_generation()
     if topk_weights.dtype is not torch.float32:
         raise TypeError(
             f"topk_weights must be float32; got dtype={topk_weights.dtype}. "
@@ -1285,6 +1299,7 @@ def ep_combine(
     capture a graph. Result shape is (num_local_tokens, hidden_dim); num_local_tokens defaults to
     buffer.max_tokens_per_rank.
     """
+    buffer.check_generation()
     _require_bf16("expert_out", expert_out)
     if buffer.eager and grad_out is not None:
         raise ValueError(

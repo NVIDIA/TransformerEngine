@@ -59,7 +59,7 @@ if(TE_LIB_UNDEFINED_SYMBOLS MATCHES "[ \t]U _?Py[A-Za-z_]")
   message(STATUS "${TE_LIB} requires CPython symbols, linking the tests against libpython")
   # Find the interpreter too so older CMake versions use its version to locate libpython.
   find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
-  foreach(test_target test_operator test_util)
+  foreach(test_target test_operator test_util test_cuda_context)
     target_link_libraries(${test_target} PRIVATE
                           "-Wl,--no-as-needed"
                           Python::Python

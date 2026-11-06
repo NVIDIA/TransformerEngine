@@ -24,11 +24,13 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "../util/cuda_context.h"
+
 namespace transformer_engine {
 namespace ep {
 
 /*! \brief EP backend per CUDA device; owns the NCCL EP group, borrows the comm. */
-class EPBackend {
+class EPBackend : public cuda_context::Resource {
  public:
   /*! \brief Access the current device's backend. Aborts if not initialized. */
   static EPBackend& get();
@@ -92,7 +94,10 @@ class EPBackend {
   ~EPBackend();
 
  private:
-  EPBackend() = default;
+  explicit EPBackend(int device) : cuda_context::Resource(device) {}
+  void check_context_loss() const override;
+  void release_context() override;
+  void invalidate_context() noexcept override {}
   EPBackend(const EPBackend&) = delete;
   EPBackend& operator=(const EPBackend&) = delete;
 
