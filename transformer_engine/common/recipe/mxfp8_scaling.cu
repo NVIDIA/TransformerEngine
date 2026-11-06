@@ -253,8 +253,8 @@ void partial_cast(const Tensor &input, Tensor &output, size_t h, size_t w, size_
               with_columnwise ? reinterpret_cast<fp8e4m3 *>(output_colwise.dptr) : nullptr,
               reinterpret_cast<const e8m0_t *>(scale_inv_rowwise.dptr),
               with_columnwise ? reinterpret_cast<const e8m0_t *>(scale_inv_colwise.dptr) : nullptr,
-              scale_inv_rowwise.shape[1], with_columnwise ? scale_inv_colwise.shape[1] : 0,
-              rows, cols, start_offset, input.data.shape[0]);))
+              scale_inv_rowwise.shape[1], with_columnwise ? scale_inv_colwise.shape[1] : 0, rows,
+              cols, start_offset, input.data.shape[0]);))
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

@@ -963,8 +963,8 @@ void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTE
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
                                 size_t block_len, cudaStream_t stream) {
   NVTE_API_CALL(nvte_nvfp4_2d_partial_cast);
-  nvte_nvfp4_2d_partial_cast_v2(inp, out, scale, global_scale, h, w, scale_stride_h,
-                                scale_stride_w, start_offset, block_len, kNVTEFloat8E4M3, stream);
+  nvte_nvfp4_2d_partial_cast_v2(inp, out, scale, global_scale, h, w, scale_stride_h, scale_stride_w,
+                                start_offset, block_len, kNVTEFloat8E4M3, stream);
 }
 
 void nvte_nvfp4_2d_partial_cast_v2(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
@@ -982,8 +982,7 @@ void nvte_nvfp4_2d_partial_cast_v2(const NVTETensor inp, NVTETensor out, const N
   const auto &global = *convertNVTETensorCheck(global_scale);
   NVTE_CHECK(output.dtype() == DType::kByte, "NVFP4 rowwise data must be uint8.");
   TensorWrapper view(NVTE_NVFP4_1D_SCALING);
-  view.set_rowwise_data(output.data.dptr, DType::kFloat4E2M1,
-                        std::vector<size_t>{input.numel()})
+  view.set_rowwise_data(output.data.dptr, DType::kFloat4E2M1, std::vector<size_t>{input.numel()})
       .set_scale(global.data.dptr, global.dtype(), global.data.shape);
   if (input.numel() == 0) {
     nvte_partial_cast(inp, view.data(), h, w, start_offset, stream);

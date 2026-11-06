@@ -168,9 +168,7 @@ def test_mxfp8_partial_cast_requires_scales_for_columnwise_output():
     scales = torch.full((128, 4), 127, dtype=torch.uint8, device="cuda")
     missing_scales = torch.empty((0, 0), dtype=torch.uint8, device="cuda")
     with pytest.raises(RuntimeError, match="Columnwise output requires columnwise scales"):
-        tex.mxfp8_scaling_partial_cast(
-            inp, output, columnwise, scales, missing_scales, 64, 64, 31
-        )
+        tex.mxfp8_scaling_partial_cast(inp, output, columnwise, scales, missing_scales, 64, 64, 31)
 
 
 @pytest.mark.parametrize("input_dtype", [torch.float32, torch.bfloat16])

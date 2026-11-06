@@ -279,10 +279,10 @@ void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
   size_t row_stride = scale_stride_h;
   if (needs_pack) {
     constexpr size_t threads = 256;
-    fp8_block_scaling_recipe::pack_partial_cast_scales<<<DIVUP(rows * cols, threads), threads, 0,
-                                                        stream>>>(
-        static_cast<const float *>(scales.data.dptr), static_cast<float *>(workspace.data()),
-        rows, cols, scale_stride_h, scale_stride_w);
+    fp8_block_scaling_recipe::
+        pack_partial_cast_scales<<<DIVUP(rows * cols, threads), threads, 0, stream>>>(
+            static_cast<const float *>(scales.data.dptr), static_cast<float *>(workspace.data()),
+            rows, cols, scale_stride_h, scale_stride_w);
     NVTE_CHECK_CUDA(cudaGetLastError());
     scale_ptr = workspace.data();
     row_stride = cols;
