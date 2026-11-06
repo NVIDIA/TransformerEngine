@@ -44,13 +44,14 @@ def test_bshd_gqa_swa_runs():
     assert out.dtype == attention.dtype
 
 
+# The skip reason refers to the 4K baseline; the 1K comparison keeps the gate unchanged.
 @requires_hopper_or_newer
 def test_bshd_gqa_swa_matches_baseline():
     import attention
 
     # The native baseline materializes fp32 attention scores, so at the tutorial's 4K
-    # sequence its backward pass needs a ~49 GiB buffer, which does not fit when CI runs
-    # several test workers per GPU. Compare on a 1K prefix instead (1/16 of the memory).
+    # sequence its backward pass needs a much larger buffer, which does not fit when CI runs
+    # several test workers per GPU. Compare on a smaller prefix instead
     seq = 1024
     qkv = tuple(t[:, :seq] for t in attention.qkv)
     seq_desc = SequenceDescriptor.from_seqlens(jnp.full((attention.batch,), seq, dtype=jnp.int32))
