@@ -938,8 +938,10 @@ inline void set_nvfp4_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
                  transformer_engine::cuda::cublas_version(), ".");
       return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE5M3;
 #else
-      NVTE_ERROR("NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
-                 "but compile-time cuBLAS version is ", CUBLAS_VERSION, ".");
+      NVTE_ERROR(
+          "NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
+          "but compile-time cuBLAS version is ",
+          CUBLAS_VERSION, ".");
 #endif
     }
     NVTE_ERROR("Unsupported dtype for NVFP4 scales (", transformer_engine::to_string(dtype), ").");
