@@ -26,7 +26,7 @@ PyTorch
   :members: forward, set_context_parallel_group
 
 .. autoapiclass:: transformer_engine.pytorch.GatedDeltaNetAttention(num_attention_heads, kv_channels, **kwargs)
-  :members: forward
+  :members: forward, set_context_parallel_group
 
 .. autoapiclass:: transformer_engine.pytorch.GatedDeltaNet2Attention(num_attention_heads, kv_channels, **kwargs)
   :members: forward
