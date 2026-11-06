@@ -322,6 +322,12 @@ Operation fuser
 
 .. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_projection
 
+Optimizers
+----------
+
+.. autoapiclass:: transformer_engine.pytorch.optimizers.FusedAdam
+  :members: reload_master_param, get_unscaled_state, set_scaled_state
+
 Deprecated functions
 --------------------
 
