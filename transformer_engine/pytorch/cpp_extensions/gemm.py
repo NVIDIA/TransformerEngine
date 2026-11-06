@@ -1060,10 +1060,21 @@ def strided_batched_gemm(
 
 
 def _custom_grouped_gemm(
-    A, B, out, quantization_params, out_dtype,
-    layout="TN", m_splits=None, gelu=False, grad=False,
-    accumulate=False, bias=None, use_bias=False,
-    use_split_accumulator=False, D_dtype=None, single_output=False,
+    A,
+    B,
+    out,
+    quantization_params,
+    out_dtype,
+    layout="TN",
+    m_splits=None,
+    gelu=False,
+    grad=False,
+    accumulate=False,
+    bias=None,
+    use_bias=False,
+    use_split_accumulator=False,
+    D_dtype=None,
+    single_output=False,
 ):
     """Grouped GEMM over per-expert weight/activation lists using a custom quantizer's qgemm."""
     if gelu:
@@ -1124,7 +1135,14 @@ def _custom_grouped_gemm(
             sx = sx[:rows]
 
         result = quantizer.qgemm(
-            qx, qw, m_params, out_dtype, sx, sw, None, gemm_type=GEMMType.FPROP,
+            qx,
+            qw,
+            m_params,
+            out_dtype,
+            sx,
+            sw,
+            None,
+            gemm_type=GEMMType.FPROP,
         )
         if tuple(result.shape) != (rows, width):
             raise ValueError(
@@ -1134,9 +1152,9 @@ def _custom_grouped_gemm(
             )
         with torch.no_grad():
             if accumulate:
-                dst_full[offset:offset + rows].add_(result)
+                dst_full[offset : offset + rows].add_(result)
             else:
-                dst_full[offset:offset + rows].copy_(result)
+                dst_full[offset : offset + rows].copy_(result)
         offset += rows
 
     bias_output = [torch.empty(0, dtype=dst_full.dtype, device=dst_full.device)]
@@ -1166,8 +1184,21 @@ def general_grouped_gemm(
     """
     if any(is_custom(a) for a in A) or any(is_custom(b) for b in B):
         return _custom_grouped_gemm(
-            A, B, out, quantization_params, out_dtype, layout, m_splits, gelu, grad,
-            accumulate, bias, use_bias, use_split_accumulator, D_dtype, single_output,
+            A,
+            B,
+            out,
+            quantization_params,
+            out_dtype,
+            layout,
+            m_splits,
+            gelu,
+            grad,
+            accumulate,
+            bias,
+            use_bias,
+            use_split_accumulator,
+            D_dtype,
+            single_output,
         )
 
     num_gemms = len(A)
@@ -1349,13 +1380,17 @@ def _custom_grouped_tensor_gemm(
     if alpha is not None or beta is not None:
         raise NotImplementedError("custom grouped-tensor GEMM does not support alpha/beta")
     if layout != "TN":
-        raise NotImplementedError(f"custom grouped-tensor GEMM supports layout TN only, got {layout!r}")
+        raise NotImplementedError(
+            f"custom grouped-tensor GEMM supports layout TN only, got {layout!r}"
+        )
 
     def expect_grouped(x, name):
         if not hasattr(x, "rowwise_data"):
             raise TypeError(f"{name} must be a GroupedTensorStorage, got {type(x).__name__}")
         if getattr(x, "rowwise_data", None) is None:
-            raise ValueError(f"{name}.rowwise_data is None (columnwise-only storage is unsupported)")
+            raise ValueError(
+                f"{name}.rowwise_data is None (columnwise-only storage is unsupported)"
+            )
         return x
 
     A = expect_grouped(A, "A")
@@ -1420,15 +1455,22 @@ def _custom_grouped_tensor_gemm(
 
         sx = None
         if getattr(A, "rowwise_scale_inv", None) is not None and a_s_off is not None:
-            sx = A.rowwise_scale_inv[a_s_off[i]:a_s_off[i + 1]]
+            sx = A.rowwise_scale_inv[a_s_off[i] : a_s_off[i + 1]]
         sw = None
         if getattr(B, "rowwise_scale_inv", None) is not None and b_s_off is not None:
-            sw = B.rowwise_scale_inv[b_s_off[i]:b_s_off[i + 1]]
+            sw = B.rowwise_scale_inv[b_s_off[i] : b_s_off[i + 1]]
         if sx is None or sw is None:
             raise ValueError(f"group {i}: missing rowwise scale_inv for a custom quantizer")
 
         result = quantizer.qgemm(
-            qx, qw, m_params, out_dtype, sx, sw, None, gemm_type=GEMMType.FPROP,
+            qx,
+            qw,
+            m_params,
+            out_dtype,
+            sx,
+            sw,
+            None,
+            gemm_type=GEMMType.FPROP,
         )
         target = out.rowwise_data[o0:o1]
         if tuple(result.shape) != tuple(target.shape):
@@ -1470,9 +1512,17 @@ def general_grouped_gemm_for_grouped_tensor(
     """
     if is_custom(A) or is_custom(B) or is_custom(out):
         return _custom_grouped_tensor_gemm(
-            A, B, out, layout=layout, accumulate=accumulate,
-            use_split_accumulator=use_split_accumulator, bias=bias,
-            bias_scale=bias_scale, grad=grad, alpha=alpha, beta=beta,
+            A,
+            B,
+            out,
+            layout=layout,
+            accumulate=accumulate,
+            use_split_accumulator=use_split_accumulator,
+            bias=bias,
+            bias_scale=bias_scale,
+            grad=grad,
+            alpha=alpha,
+            beta=beta,
         )
 
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
