@@ -44,7 +44,12 @@ class CMakeExtension(setuptools.Extension):
         self.cmake_path: Path = cmake_path
         self.cmake_flags: List[str] = [] if cmake_flags is None else cmake_flags
 
-    def _build_cmake(self, build_dir: Path, install_dir: Path) -> None:
+    def _build_cmake(
+        self,
+        build_dir: Path,
+        install_dir: Path,
+        site_packages_rpath: Optional[str] = None,
+    ) -> None:
         # Make sure paths are str
         _cmake_bin = str(cmake_bin())
         cmake_path = str(self.cmake_path)
@@ -108,6 +113,8 @@ class CMakeExtension(setuptools.Extension):
                 f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache_bin}",
             ]
         configure_command += self.cmake_flags
+        if site_packages_rpath is not None:
+            configure_command.append(f"-DNVTE_SITE_PACKAGES_RPATH={site_packages_rpath}")
 
         import pybind11
 
@@ -147,6 +154,19 @@ def get_build_ext(
         """Setuptools command with support for CMake extension modules"""
 
         def run(self) -> None:
+            # Ensure that shared objects files for source and PyPI installations live
+            # in separate directories to avoid conflicts during install and runtime.
+            lib_dir = (
+                "wheel_lib"
+                if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or framework_extension_only
+                else ""
+            )
+
+            # Non-inplace builds move shared objects into site-packages/transformer_engine/<lib_dir>.
+            site_packages_rpath = None
+            if not self.inplace:
+                site_packages_rpath = "$ORIGIN/../.." if lib_dir else "$ORIGIN/.."
+
             # Build CMake extensions
             for ext in self.extensions:
                 package_path = Path(self.get_ext_fullpath(ext.name))
@@ -167,6 +187,7 @@ def get_build_ext(
                     ext._build_cmake(
                         build_dir=build_dir,
                         install_dir=install_dir,
+                        site_packages_rpath=site_packages_rpath,
                     )
                     continue
 
@@ -181,6 +202,7 @@ def get_build_ext(
                     ext._build_cmake(
                         build_dir=Path(build_dir),
                         install_dir=install_dir,
+                        site_packages_rpath=site_packages_rpath,
                     )
 
             # Build non-CMake extensions as usual
@@ -190,14 +212,6 @@ def get_build_ext(
             ]
             super().run()
             self.extensions = all_extensions
-
-            # Ensure that shared objects files for source and PyPI installations live
-            # in separate directories to avoid conflicts during install and runtime.
-            lib_dir = (
-                "wheel_lib"
-                if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or framework_extension_only
-                else ""
-            )
 
             # Ensure that binaries are not in global package space.
             # For editable/inplace builds this is not a concern as

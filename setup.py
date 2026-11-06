@@ -185,10 +185,11 @@ def _discover_nccl_home() -> str:
     lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
 
     # Prefer the NCCL the dynamic loader will actually resolve at runtime so the
-    # EP build links against the same libnccl that gets loaded. libtransformer_engine
-    # carries no NCCL RUNPATH, so the loader uses ldconfig/system paths; building
-    # against a different NCCL (e.g. a pip wheel) causes ABI mismatches. ldconfig is
-    # the ground truth for runtime resolution, so consult it before well-known prefixes.
+    # EP build links against the same libnccl that gets loaded. Unless an nvidia-nccl
+    # wheel is installed next to it, which libtransformer_engine's RUNPATH prefers,
+    # the loader uses ldconfig/system paths; building against a different NCCL causes
+    # ABI mismatches. ldconfig is the ground truth for runtime resolution, so consult
+    # it before well-known prefixes.
     try:
         out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode()
         for line in out.splitlines():

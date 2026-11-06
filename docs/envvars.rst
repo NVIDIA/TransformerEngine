@@ -92,7 +92,8 @@ Each of the following options can also be set for an isolated PEP 517 build with
 In an isolated build, the Python package listed for an option is installed as a build
 requirement unless the option's installation directory variable is set. Without build
 isolation, the installation directory variable is used if set, and the package is used if
-installed. Not intended for external use.
+installed. ``libtransformer_engine.so`` finds these packages at runtime when they are installed
+in the same environment. Not intended for external use.
 
 .. envvar:: NVTE_UB_WITH_MPI
 
