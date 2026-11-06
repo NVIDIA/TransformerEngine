@@ -176,6 +176,9 @@ class TestEP(unittest.TestCase):
                 max_tokens_per_rank=TOKENS_PER_DP_SHARD,
                 recv_capacity_per_rank=cls.recv_capacity_per_rank,
                 hidden_dim=HIDDEN_DIM,
+                # Widest payload dtype the group will dispatch; lets
+                # test_primitive_dispatch_combine_identity_dtypes sweep bf16/fp16/fp32.
+                max_token_dtype=jnp.float32,
             )
         # Bootstrap must snapshot ep_size and num_ep_groups onto EpConfig so
         # abstract-eval never needs the active mesh.
@@ -242,6 +245,8 @@ class TestEP(unittest.TestCase):
         finally:
             _cuda_set_device(owner)
             # Re-bootstrap on every rank before an assertion can interrupt the collective.
+            # Must match _bootstrap's max_token_dtype: this re-init replaces the group
+            # config for the rest of the class's tests (e.g. the dtype sweep below).
             with self.mesh, global_shard_guard(self.mr):
                 ep_bootstrap(
                     world_size=self.num_procs,
@@ -250,12 +255,13 @@ class TestEP(unittest.TestCase):
                     max_tokens_per_rank=TOKENS_PER_DP_SHARD,
                     recv_capacity_per_rank=self.recv_capacity_per_rank,
                     hidden_dim=HIDDEN_DIM,
+                    max_token_dtype=jnp.float32,
                 )
         self.assertEqual(current, other)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
-    def _make_identity_inputs(self, nonuniform=False):
+    def _make_identity_inputs(self, nonuniform=False, dtype=jnp.bfloat16):
         """Identity routing + uniform weights — combined output ≈ tokens.
 
         ``nonuniform=False``: ``(t*TOP_K+k) % E`` (round-robin, near-balanced).
@@ -281,7 +287,7 @@ class TestEP(unittest.TestCase):
             np.linspace(0.1, 0.9, T_global * HIDDEN_DIM, dtype=np.float32).reshape(
                 T_global, HIDDEN_DIM
             ),
-            dtype=jnp.bfloat16,
+            dtype=dtype,
         )
         return T_global, topk_idx, tokens, topk_weights
 
@@ -466,8 +472,10 @@ class TestEP(unittest.TestCase):
             finally:
                 jax.clear_caches()
 
-    def _run_identity_round_trip(self, nonuniform):
-        T_global, topk_idx, tokens, topk_w = self._make_identity_inputs(nonuniform=nonuniform)
+    def _run_identity_round_trip(self, nonuniform, dtype=jnp.bfloat16):
+        T_global, topk_idx, tokens, topk_w = self._make_identity_inputs(
+            nonuniform=nonuniform, dtype=dtype
+        )
         dp_spec = PartitionSpec(("dp", "ep"), None)
         with self.mesh, global_shard_guard(self.mr):
             idx_s = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
@@ -511,13 +519,15 @@ class TestEP(unittest.TestCase):
             # Allgather so the rank-0 numpy comparison sees the full global tensor.
             out_global = jmu.process_allgather(out, tiled=True)
 
-        # Identity expert + uniform weights → out ≈ tokens (rank-0 check).
+        # Identity expert + uniform weights → out ≈ tokens (rank-0 check). fp32 is held tight so a
+        # payload narrowed to bf16 in flight fails.
+        tol = {jnp.float32: 1e-5, jnp.float16: 3e-3}.get(dtype, 5e-2)
         if self.rank == 0:
             np.testing.assert_allclose(
                 np.asarray(out_global.astype(jnp.float32)),
                 np.asarray(tokens.astype(jnp.float32)),
-                atol=5e-2,
-                rtol=5e-2,
+                atol=tol,
+                rtol=tol,
             )
 
     def test_primitive_dispatch_combine_identity_uniform(self):
@@ -527,6 +537,13 @@ class TestEP(unittest.TestCase):
     def test_primitive_dispatch_combine_identity_nonuniform(self):
         """Skewed routing (top1=0 always) → identity round-trip via the primitive layer."""
         self._run_identity_round_trip(nonuniform=True)
+
+    def test_primitive_dispatch_combine_identity_dtypes(self):
+        """Round-robin identity round-trip for each high-precision payload dtype
+        the group can stage (bf16/fp16/fp32; group bootstrapped with max_token_dtype=fp32)."""
+        for dt in (jnp.bfloat16, jnp.float16, jnp.float32):
+            with self.subTest(dtype=dt):
+                self._run_identity_round_trip(nonuniform=False, dtype=dt)
 
     def test_primitive_dispatch_combine_identity_bwd_uniform(self):
         """Bwd through identity round-trip: ∇(0.5 ||out||²) w.r.t. tokens ≈ tokens.
