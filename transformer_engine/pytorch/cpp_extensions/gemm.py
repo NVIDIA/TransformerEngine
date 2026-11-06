@@ -1270,7 +1270,8 @@ def _grouped_gemm_row_scaled_nvfp4(
     for operand in (A, B):
         if isinstance(operand, (list, tuple)) and _is_row_scaled_nvfp4(operand):
             raise NotImplementedError(
-                "Row-scaled NVFP4 operands passed as a list are not supported; pass a GroupedTensor."
+                "Row-scaled NVFP4 operands passed as a list are not supported; pass a"
+                " GroupedTensor."
             )
     transa = layout[0] == "T"
     transb = layout[1] == "T"
