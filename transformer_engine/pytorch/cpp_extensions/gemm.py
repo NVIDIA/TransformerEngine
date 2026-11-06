@@ -34,7 +34,7 @@ from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
-from ..custom_recipes.gemm import custom_gemm
+from ..custom_recipes.gemm import custom_gemm, GEMMType, MMParams
 from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
 
 __all__ = [
@@ -1040,6 +1040,110 @@ def strided_batched_gemm(
     )
 
 
+# Injected into transformer_engine/pytorch/cpp_extensions/gemm.py (prototype).
+#
+# Custom-recipe dispatch for the LIST-based grouped GEMM. The operand roles are taken from
+# GroupedLinear's own call site (module/grouped_linear.py:873-884):
+#
+#     out = _validate_or_alloc_output(out, sum(m_splits), weights_fp8[0].size(0), ...)
+#     general_grouped_gemm(weights_fp8, inputmats, [out], ..., single_output=True, m_splits=m_splits)
+#
+#   A    = list of weights   (one per expert)
+#   B    = list of inputs    (per-expert activation buffers, padded)
+#   out  = [single tensor]   of shape [sum(m_splits), A[0].size(0)]
+#   m_splits[i] = VALID activation rows for expert i
+#
+# So for each expert: activation rows are B[i][0:m_splits[i]], the weight is A[i], and the result is
+# written to out[0][offset : offset+m_splits[i]]. An earlier version (gpt-6.1-sol's first draft) had
+# A and B swapped and assumed the groups split columns; that is why it reported a 128-wide weight
+# against a 4608-wide output for several rounds.
+
+
+def _custom_grouped_gemm(
+    A, B, out, quantization_params, out_dtype,
+    layout="TN", m_splits=None, gelu=False, grad=False,
+    accumulate=False, bias=None, use_bias=False,
+    use_split_accumulator=False, D_dtype=None, single_output=False,
+):
+    """Grouped GEMM over per-expert weight/activation lists using a custom quantizer's qgemm."""
+    if gelu:
+        raise NotImplementedError("custom grouped GEMM does not define GELU outputs")
+    if grad and use_bias:
+        raise NotImplementedError("custom grouped GEMM does not define bias gradients")
+    if D_dtype is not None:
+        raise NotImplementedError("custom grouped GEMM does not define D_dtype")
+    if quantization_params is not None and any(q is not None for q in quantization_params):
+        raise NotImplementedError("custom grouped GEMM does not define output quantization")
+    if not A or not B:
+        raise ValueError("A and B must both be non-empty")
+    if not all(is_custom(x) for x in (*A, *B)):
+        raise TypeError("custom grouped GEMM cannot mix custom and ordinary tensors")
+    if m_splits is None:
+        raise ValueError("m_splits is required for the per-expert layout")
+    if not single_output or len(out) != 1:
+        raise NotImplementedError("custom grouped GEMM supports single_output only")
+
+    n = len(m_splits)
+    if len(A) != n or len(B) != n:
+        raise ValueError(f"expected {n} weights and {n} inputs, got {len(A)} and {len(B)}")
+    total_rows = sum(m_splits)
+
+    quantizer = None
+    for candidate in (*A, *B):
+        q = getattr(candidate, "_quantizer", None)
+        if q is not None and callable(getattr(q, "qgemm", None)):
+            quantizer = q
+            break
+    if quantizer is None:
+        raise TypeError("no quantizer with a callable qgemm on the grouped operands")
+
+    m_params = MMParams(out_dtype=out_dtype, use_split_accumulator=use_split_accumulator)
+
+    dst_full = out[0]
+    if dst_full.shape[0] < total_rows:
+        raise ValueError(f"output has {dst_full.shape[0]} rows but sum(m_splits)={total_rows}")
+    width = dst_full.shape[-1]
+
+    offset = 0
+    for i in range(n):
+        rows = m_splits[i]
+        if rows == 0:
+            continue
+        w, act = A[i], B[i]
+        if w.data is None or act.data is None:
+            raise ValueError(f"group {i}: missing quantized data (weight or activation)")
+        if w.scale is None or act.scale is None:
+            raise ValueError(f"group {i}: missing scale_inv (weight or activation)")
+
+        qw = w.data
+        sw = w.scale
+        qx = act.data[:rows]
+        sx = act.scale
+        # Activation scales are per-row, so slice the same prefix as the data.
+        if hasattr(sx, "shape") and sx.ndim >= 1 and sx.shape[0] >= rows:
+            sx = sx[:rows]
+
+        result = quantizer.qgemm(
+            qx, qw, m_params, out_dtype, sx, sw, None, gemm_type=GEMMType.FPROP,
+        )
+        if tuple(result.shape) != (rows, width):
+            raise ValueError(
+                f"group {i}: qgemm returned {tuple(result.shape)}, expected {(rows, width)} "
+                f"(qx={tuple(qx.shape)} qw={tuple(qw.shape)} sx={tuple(sx.shape)} "
+                f"sw={tuple(sw.shape)} widths={width})"
+            )
+        with torch.no_grad():
+            if accumulate:
+                dst_full[offset:offset + rows].add_(result)
+            else:
+                dst_full[offset:offset + rows].copy_(result)
+        offset += rows
+
+    bias_output = [torch.empty(0, dtype=dst_full.dtype, device=dst_full.device)]
+    gelu_input = [torch.empty(0, dtype=dst_full.dtype, device=dst_full.device)]
+    return out, bias_output, gelu_input
+
+
 def general_grouped_gemm(
     A: List[torch.Tensor],
     B: List[torch.Tensor],
@@ -1060,6 +1164,12 @@ def general_grouped_gemm(
     """
     TN layout Grouped GEMM with fp8 inputs.
     """
+    if any(is_custom(a) for a in A) or any(is_custom(b) for b in B):
+        return _custom_grouped_gemm(
+            A, B, out, quantization_params, out_dtype, layout, m_splits, gelu, grad,
+            accumulate, bias, use_bias, use_split_accumulator, D_dtype, single_output,
+        )
+
     num_gemms = len(A)
 
     transa = layout[0] == "T"
@@ -1205,6 +1315,137 @@ def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
     return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
 
 
+# Injected into transformer_engine/pytorch/cpp_extensions/gemm.py (prototype).
+# Custom-recipe dispatch for the *grouped-tensor* GEMM — the entry point MoE experts actually use
+# (GroupedLinear fprop -> general_grouped_gemm_for_grouped_tensor -> nvte_grouped_gemm).
+#
+# Authorship: designed by gpt-6.1-sol against the contracts recorded in
+# engine/scripts/wip/ds41-b300/worklog.md; the grouped-offset slicing here is the parent's, written
+# from the field names read out of tensor/storage/grouped_tensor_storage.py
+# (`offsets`, `scale_inv_offsets`, `rowwise_data`, `rowwise_scale_inv`, `num_tensors`).
+
+
+def _custom_grouped_tensor_gemm(
+    A,
+    B,
+    out,
+    *,
+    layout="TN",
+    accumulate=False,
+    use_split_accumulator=False,
+    bias=None,
+    bias_scale=None,
+    grad=False,
+    alpha=None,
+    beta=None,
+):
+    """Grouped GEMM over GroupedTensorStorage operands using a custom quantizer's qgemm."""
+    import math
+
+    if grad:
+        raise NotImplementedError("custom grouped-tensor GEMM does not support grad")
+    if bias is not None or bias_scale is not None:
+        raise NotImplementedError("custom grouped-tensor GEMM does not support bias")
+    if alpha is not None or beta is not None:
+        raise NotImplementedError("custom grouped-tensor GEMM does not support alpha/beta")
+    if layout != "TN":
+        raise NotImplementedError(f"custom grouped-tensor GEMM supports layout TN only, got {layout!r}")
+
+    def expect_grouped(x, name):
+        if not hasattr(x, "rowwise_data"):
+            raise TypeError(f"{name} must be a GroupedTensorStorage, got {type(x).__name__}")
+        if getattr(x, "rowwise_data", None) is None:
+            raise ValueError(f"{name}.rowwise_data is None (columnwise-only storage is unsupported)")
+        return x
+
+    A = expect_grouped(A, "A")
+    B = expect_grouped(B, "B")
+    out = expect_grouped(out, "out")
+
+    num = getattr(A, "num_tensors", None)
+    if not num:
+        raise ValueError("A.num_tensors is unset; cannot iterate groups")
+
+    def offsets_of(x, name):
+        offsets = getattr(x, "offsets", None)
+        if offsets is None:
+            raise ValueError(f"{name}.offsets is None; per-group slicing is impossible")
+        offsets = list(offsets)
+        if len(offsets) != num + 1:
+            raise ValueError(f"{name}.offsets has {len(offsets)} entries, expected {num + 1}")
+        return offsets
+
+    a_off = offsets_of(A, "A")
+    b_off = offsets_of(B, "B")
+    o_off = offsets_of(out, "out")
+
+    def scale_offsets_of(x, name):
+        so = getattr(x, "scale_inv_offsets", None)
+        if so is None:
+            return None
+        so = list(so)
+        if len(so) != num + 1:
+            raise ValueError(f"{name}.scale_inv_offsets has {len(so)} entries, expected {num + 1}")
+        return so
+
+    a_s_off = scale_offsets_of(A, "A")
+    b_s_off = scale_offsets_of(B, "B")
+
+    quantizer = getattr(A, "quantizer", None)
+    if quantizer is None:
+        quantizer = getattr(B, "quantizer", None)
+    if quantizer is None or not callable(getattr(quantizer, "qgemm", None)):
+        raise TypeError("no quantizer with a callable qgemm on the grouped operands")
+
+    m_params = MMParams(out_dtype=None, use_split_accumulator=use_split_accumulator)
+    out_dtype = out.rowwise_data.dtype
+
+    # scipy-free zip over adjacent offsets
+    for i in range(num):
+        a0, a1 = a_off[i], a_off[i + 1]
+        rows = a1 - a0
+        if rows == 0:
+            continue
+
+        b0, b1 = b_off[i], b_off[i + 1]
+        o0, o1 = o_off[i], o_off[i + 1]
+        if o1 - o0 != rows:
+            raise ValueError(
+                f"group {i}: out segment has {o1 - o0} rows but A has {rows} "
+                f"(a_off={a_off[:3]}..., o_off={o_off[:3]}...)"
+            )
+
+        qx = A.rowwise_data[a0:a1]
+        qw = B.rowwise_data[b0:b1]
+
+        sx = None
+        if getattr(A, "rowwise_scale_inv", None) is not None and a_s_off is not None:
+            sx = A.rowwise_scale_inv[a_s_off[i]:a_s_off[i + 1]]
+        sw = None
+        if getattr(B, "rowwise_scale_inv", None) is not None and b_s_off is not None:
+            sw = B.rowwise_scale_inv[b_s_off[i]:b_s_off[i + 1]]
+        if sx is None or sw is None:
+            raise ValueError(f"group {i}: missing rowwise scale_inv for a custom quantizer")
+
+        result = quantizer.qgemm(
+            qx, qw, m_params, out_dtype, sx, sw, None, gemm_type=GEMMType.FPROP,
+        )
+        target = out.rowwise_data[o0:o1]
+        if tuple(result.shape) != tuple(target.shape):
+            raise ValueError(
+                f"group {i}: qgemm returned {tuple(result.shape)} but the out segment is "
+                f"{tuple(target.shape)} (qx={tuple(qx.shape)} qw={tuple(qw.shape)} "
+                f"sx={tuple(sx.shape)} sw={tuple(sw.shape)})"
+            )
+        with torch.no_grad():
+            if accumulate:
+                target.add_(result)
+            else:
+                target.copy_(result)
+
+    return out
+
+
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -1227,6 +1468,13 @@ def general_grouped_gemm_for_grouped_tensor(
     The caller must ensure that GroupedTensor metadata is already compatible with the
     underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
     """
+    if is_custom(A) or is_custom(B) or is_custom(out):
+        return _custom_grouped_tensor_gemm(
+            A, B, out, layout=layout, accumulate=accumulate,
+            use_split_accumulator=use_split_accumulator, bias=bias,
+            bias_scale=bias_scale, grad=grad, alpha=alpha, beta=beta,
+        )
+
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     if grad:
         raise NotImplementedError("grad is not supported for grouped_tensor GEMM yet.")
