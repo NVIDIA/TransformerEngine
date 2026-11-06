@@ -8,6 +8,7 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.cpp_extensions import general_grouped_gemm
 from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     get_device_compute_capability,
@@ -20,6 +21,55 @@ def fp8_blockwise_gemm_supported() -> bool:
     supported = te.is_fp8_block_scaling_available()
     emulated = get_device_compute_capability() >= (10, 0)
     return supported and not emulated
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("single_output", [False, True])
+def test_grouped_split_accumulator_enforced(dtype, single_output):
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    torch.manual_seed(0)
+    quantizers = [
+        Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+            force_pow_2_scales=True,
+            block_scaling_dim=dim,
+        )
+        for dim in (1, 2)
+    ]
+    splits = [128, 256]
+    # Exactly representable operands isolate accumulation-mode selection from rounding.
+    inputs = [
+        quantizers[0](torch.randint(-4, 5, (rows, 128), device="cuda") / 8) for rows in splits
+    ]
+    weights = [quantizers[1](torch.randint(-4, 5, (128, 128), device="cuda") / 8) for _ in splits]
+    outputs = (
+        [torch.empty(sum(splits), 128, device="cuda", dtype=dtype)]
+        if single_output
+        else [torch.empty(rows, 128, device="cuda", dtype=dtype) for rows in splits]
+    )
+    general_grouped_gemm(
+        weights,
+        inputs,
+        outputs,
+        [None] * len(splits),
+        dtype,
+        m_splits=splits,
+        single_output=single_output,
+        use_split_accumulator=False,
+    )
+    actual = outputs[0] if single_output else torch.cat(outputs)
+    expected = torch.cat(
+        [
+            x.dequantize(dtype=torch.float32) @ weight.dequantize(dtype=torch.float32).T
+            for x, weight in zip(inputs, weights)
+        ]
+    ).to(dtype)
+    torch.testing.assert_close(actual, expected)
 
 
 def cublas_gemm_fp8_blockwise_case(
