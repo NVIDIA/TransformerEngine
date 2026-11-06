@@ -1079,10 +1079,21 @@ def strided_batched_gemm(
 
 
 def _custom_grouped_gemm(
-    A, B, out, quantization_params, out_dtype,
-    layout="TN", m_splits=None, gelu=False, grad=False,
-    accumulate=False, bias=None, use_bias=False,
-    use_split_accumulator=False, D_dtype=None, single_output=False,
+    A,
+    B,
+    out,
+    quantization_params,
+    out_dtype,
+    layout="TN",
+    m_splits=None,
+    gelu=False,
+    grad=False,
+    accumulate=False,
+    bias=None,
+    use_bias=False,
+    use_split_accumulator=False,
+    D_dtype=None,
+    single_output=False,
 ):
     """Grouped GEMM over per-expert weight/activation lists using a custom quantizer's qgemm."""
     if gelu:
@@ -1154,7 +1165,14 @@ def _custom_grouped_gemm(
             sx = sx[:rows]
 
         result = quantizer.qgemm(
-            qx, qw, m_params, out_dtype, sx, sw, None, gemm_type=GEMMType.FPROP,
+            qx,
+            qw,
+            m_params,
+            out_dtype,
+            sx,
+            sw,
+            None,
+            gemm_type=GEMMType.FPROP,
         )
         if tuple(result.shape) != (rows, width):
             raise ValueError(
@@ -1162,7 +1180,7 @@ def _custom_grouped_gemm(
                 f"(qx={tuple(qx.shape)} qw={tuple(qw.shape)} sx={tuple(sx.shape)} "
                 f"sw={tuple(sw.shape)} widths={width})"
             )
-        dst = dst_full[offset:offset + rows] if single_output else out[i]
+        dst = dst_full[offset : offset + rows] if single_output else out[i]
         if tuple(dst.shape) != (rows, width):
             raise ValueError(
                 f"group {i}: output segment is {tuple(dst.shape)}, expected {(rows, width)}"
@@ -1178,6 +1196,7 @@ def _custom_grouped_gemm(
     bias_output = [torch.empty(0, dtype=ref.dtype, device=ref.device)]
     gelu_input = [torch.empty(0, dtype=ref.dtype, device=ref.device)]
     return out, bias_output, gelu_input
+
 
 def general_grouped_gemm(
     A: List[torch.Tensor],
