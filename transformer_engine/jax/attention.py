@@ -1623,11 +1623,15 @@ def fused_attn(
     """
     Perform cuDNN fused attention.
 
-    This function implements the following formula:
+    This function implements the following formula::
+
         BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
+
     Args:
         qkv (Tuple[jnp.ndarray, ...]): A tuple containing query, key, and value tensors.
-        It supports three formats:
+
+            It supports three formats:
+
             - `(qkv_packed,)`: For interleaved QKV packed format, typically used when query, key,
               and value have the same shape (e.g., self-attention).
             - `(query, kv_packed)`: For separate query and KV packed format, typically used when
@@ -1687,9 +1691,8 @@ def fused_attn(
         return_max_logit (bool): If True, also return per-head maximum attention logits
             with shape ``[h]``.
     Returns:
-        jnp.ndarray:
-            Attention output when ``return_max_logit`` is False.
-        tuple[jnp.ndarray, jnp.ndarray]:
+        jnp.ndarray or tuple[jnp.ndarray, jnp.ndarray]:
+            Attention output when ``return_max_logit`` is False, or
             ``(output, max_logit)`` when ``return_max_logit`` is True.
 
     Examples (non-THD, also known as non-packed):

@@ -17,7 +17,7 @@ head dimensions, as used by the attention operation after the projection
 stages in DeepSeek-style MLA.
 
 cuDNN execution and FP8
-----------------------
+-----------------------
 
 JAX fused attention constructs and selects cuDNN execution plans with the
 ``nvidia-cudnn-frontend`` Python package. The compiled JAX FFI executor caches
