@@ -42,11 +42,16 @@ Pure E5M2 training is not supported.
 Block size is 32.
 Blocks are one-dimensional, containing 32 consecutive values. No 2D scaling is performed.
 
-There are some assumptions on the dimensions of the tensor:
-
-* the tensor must have at least 2 dimensions,
-* the last dimension must be divisible by 32,
-* the product of all dimensions except the last must be divisible by 32.
+There are some assumptions on the dimensions of the tensor.
+Partial blocks are supported. If a quantized dimension is not divisible by 32,
+the missing values in the final block are treated as zero and the scale tensor
+is padded to the layout required by cuBLAS. GEMM operands still have alignment
+requirements: an FP8 leading dimension must be divisible by 16 elements, and a
+contracting dimension must contain at least one 32-element scaling block. For a
+typical inference ``Linear(K, N)``, this permits an arbitrary batch dimension,
+with ``K >= 32`` divisible by 16 and ``N`` divisible by 16. Training also uses
+``M`` and ``N`` as contracting dimensions in the backward GEMMs, so they must
+each be at least 32 and divisible by 16.
 
 
 **Scaling factors**
@@ -107,7 +112,11 @@ unlike :doc:`FP8 Current <../fp8_current_scaling/fp8_current_scaling>`/:doc:`Del
 
 **Quantized all-gather**
 
-MXFP8 all-gather is supported.
+MXFP8 all-gather is supported when the local shard's last dimension is
+divisible by 16. If columnwise data is gathered, the product of the preceding
+dimensions must also be divisible by the 32-element block size, so a scaling
+block never spans two ranks. Transformer Engine falls back to a high-precision
+all-gather for other shapes.
 
 
 Examples
