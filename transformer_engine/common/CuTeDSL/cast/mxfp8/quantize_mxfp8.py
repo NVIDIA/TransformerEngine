@@ -30,7 +30,6 @@ from cutlass import cute
 from cutlass import pipeline
 from cutlass import Boolean, Float32, Float8E8M0FNU, Int32, Int64, Uint16, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
-import tvm_ffi
 
 from transformer_engine.common.CuTeDSL.utils import (
     device_compute_capability,
@@ -2773,7 +2772,6 @@ def compile_cutedsl_function_from_cfg(cfg):
 
 
 def get_mxfp8_quantization_function(
-    fn_name: str,
     dtype: str,
     fp8_dtype: str,
     rowwise: bool,
@@ -2785,17 +2783,12 @@ def get_mxfp8_quantization_function(
     with_act: bool,
     use_2d_quantization: bool,
     activation: str,
-) -> bool:
-    """Compile the MXFP8 quantize kernel for this config and register it in the TVM-FFI global registry
-    under EXACTLY `fn_name` (the key the C++ dispatcher built; Python treats it as an opaque name).
-    Returns True if a kernel is successfully registered under `fn_name` (the C++ side then fetches it with GetGlobal(fn_name));
-    False if the config is unsupported, so the caller caches the negative result and falls back to the CUDA C++ kernel.
+):
+    """Compile the MXFP8 quantize kernel for this config.
+    Returns the compiled TVM-FFI function, or None if the config is unsupported or compilation
+    fails, in which case the C++ dispatcher falls back to the CUDA C++ kernel.
     """
     try:
-        # Already registered (e.g. by a prior call) -> supported.
-        if tvm_ffi.get_global_func(fn_name, allow_missing=True) is not None:
-            return True
-
         major, minor = device_compute_capability()
         if major < 10:
             logger.warning(
@@ -2804,7 +2797,7 @@ def get_mxfp8_quantization_function(
                 major,
                 minor,
             )
-            return False
+            return None
 
         try:
             cfg = MXFP8QuantizeConfig(
@@ -2829,28 +2822,14 @@ def get_mxfp8_quantization_function(
                 "falling back to the CUDA C++ kernel: %s",
                 e,
             )
-            return False
+            return None
 
         logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
-        compiled = compile_cutedsl_function_from_cfg(cfg)
-        # The returned compiled object is not neccessarily the compiled function itself. It could be a Python
-        # wrapper that parses arguments and calls the underlying function. This is needed in the general case
-        # as TVM-FFI is positional-only, however, for us this is unnecessary launch overhead as we pass the
-        # arguments in the correct order on the C++ side.
-        # Relevant issue: https://github.com/NVIDIA/cutlass/issues/3527
-        # https://github.com/NVIDIA/cutlass/pull/3589 recommends using an explicit positional only marker (/)
-        # in the function signature, however it is not merged and it is something easy to miss and silently
-        # introduce unnecessarry overhead.
-        native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
-        tvm_ffi.register_global_func(
-            fn_name, native if native is not None else compiled, override=True
-        )
-        return True
+        return compile_cutedsl_function_from_cfg(cfg)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(
-            "CuTeDSL MXFP8 kernel compilation & registration failed, falling back to the CUDA"
-            " C++ kernel: %s",
+            "CuTeDSL MXFP8 kernel compilation failed, falling back to the CUDA C++ kernel: %s",
             e,
         )
         # Unconditionally fallback to CUDA path because we can't tell if this exception is transient or permanent.
-        return False
+        return None

@@ -57,7 +57,7 @@ target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS} OpenMP::
 target_compile_options(test_operator PRIVATE -O2 -fopenmp)
 
 # Keep all operator tests in one process so CUDA initialization and, when enabled,
-# the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
+# the CuTeDSL kernel cache are each initialized only once.
 # TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
 # For debugging, configure with NVTE_TEST_DEBUG_CPP_UT_IN_PARALLEL=1 to register each GoogleTest case as
 # its own ctest test, so failures are reported per case and can be selected with `ctest -R`.

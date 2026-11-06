@@ -4,21 +4,11 @@
 
 """CuTeDSL kernels for Transformer Engine.
 
-To expose CuTeDSL kernels to C++, they should be registered via `register_cutedsl_backends()`.
-They should provide a string function name which can be used to retrieve the corresponding CuTeDSL kernel function via TVM-FFI.
+Each kernel factory exported here takes a kernel config and returns the compiled TVM-FFI
+function, or None if the config is unsupported. The C++ dispatcher calls it by name through
+`compile_kernel.py` in a separate process and loads the exported library.
 """
-
-import tvm_ffi
 
 from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8 import (
     get_mxfp8_quantization_function,
 )
-
-
-def register_cutedsl_backends():
-    """Register all available CuTeDSL backends for on-demand compilation via TVM-FFI.
-    The C++ dispatcher retrieves them by the names defined here.
-    """
-    tvm_ffi.register_global_func(
-        "get_mxfp8_quantization_function", get_mxfp8_quantization_function, override=True
-    )

@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-tvm_ffi = pytest.importorskip("tvm_ffi")
+pytest.importorskip("tvm_ffi")
 pytest.importorskip("cutlass")
 
 from utils import assert_allclose
@@ -112,6 +112,12 @@ def set_cutedsl_backend(enabled):
     CORE_LIB.nvte_set_cutedsl_backend(1 if enabled else 0)
 
 
+def cutedsl_kernel_loaded(key):
+    """Whether the C++ dispatcher has loaded the CuTeDSL kernel library exported under `key`."""
+    with open("/proc/self/maps", encoding="utf-8") as maps:
+        return f"/{key}.so" in maps.read()
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _restore_backend_choice_from_env():
     """Restore the flag that decides the CuTeDSL / CUDA backend choice when this pytest module is done."""
@@ -160,8 +166,8 @@ def run_quantize(method, act_type, x, act_input, q_layout, fp8_dtype):
 
 def get_cfg_key(method, act_desc, in_dtype, fp8_dtype, q_layout):
     """Mirror of MXFP8QuantConfig::to_key (quantize_mxfp8_cutedsl.cuh): the name the CuTeDSL backend
-    registers its compiled kernel under for this config.
-    Used to check if the CuTeDSL implementation is registered
+    exports its compiled kernel under for this config.
+    Used to check if the CuTeDSL implementation is loaded
     """
     with_dbias = method in ("CAST_DBIAS", "CAST_DBIAS_DACT")
     with_dact = method in ("CAST_DACT", "CAST_DBIAS_DACT")
@@ -228,12 +234,12 @@ def run_test_case(method, act_type, act_desc, shape, q_layout, in_dtype, fp8_dty
         set_cutedsl_backend(False)
 
     # Guard against a silent CUDA fallback: every config in the matrix is one the
-    # CuTeDSL backend supports, so its kernel must have been registered under the
+    # CuTeDSL backend supports, so its kernel must have been loaded under the
     # config key. If not, the backend rejected or missed the config and the
     # comparison above was CUDA vs CUDA.
     key = get_cfg_key(method, act_desc, in_dtype, fp8_dtype, q_layout)
-    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
-        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+    assert cutedsl_kernel_loaded(key), (
+        f"CuTeDSL kernel not loaded for {key}; the CuTeDSL backend fell back "
         "to CUDA and this case compared CUDA against itself"
     )
 

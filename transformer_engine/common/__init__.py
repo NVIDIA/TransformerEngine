@@ -468,28 +468,6 @@ def _load_tvm_ffi_library() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def _register_cutedsl_backends() -> bool:
-    """
-    Attempt to register CuTeDSL backends for on-demand compilation via TVM-FFI.
-    Returns True if the CuTeDSL backends are successfully registered.
-    Otherwise, return False. In this case C++ will fail to retrieve CuTeDSL kernels via TVM-FFI,
-    and skip dispatching to CuTeDSL kernels, falling back to the default TE CUDA C++ kernels.
-    """
-    try:
-        from transformer_engine.common import CuTeDSL
-
-        CuTeDSL.register_cutedsl_backends()
-        return True
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning(
-            "Failed to register CuTeDSL backends: %s. Will fall back to default TE CUDA C++"
-            " kernels",
-            e,
-        )
-        return False
-
-
-@functools.lru_cache(maxsize=None)
 def _load_core_library():
     """Load shared library with Transformer Engine C extensions"""
     return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL | os.RTLD_LAZY)
@@ -514,10 +492,10 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         _CUDART_LIB_CTYPES = _load_cuda_library_from_python("cudart", strict=True)
         _CUDNN_ALL_LIB_CTYPES = _load_cuda_library_from_python("cudnn", strict=True)
 
-    # Prepare CuTeDSL backend for on-demand compilation via TVM-FFI if user enables it.
+    # CuTeDSL kernels are compiled in a separate process running this interpreter.
+    os.environ.setdefault("NVTE_CUTEDSL_PYTHON", sys.executable)
     if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0":
         _load_tvm_ffi_library()
-        _register_cutedsl_backends()
 
     _TE_LIB_CTYPES = _load_core_library()
 

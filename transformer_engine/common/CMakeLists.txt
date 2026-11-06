@@ -282,7 +282,7 @@ list(APPEND transformer_engine_cpp_sources
      )
 
 if(NVTE_WITH_CUTEDSL)
-  list(APPEND transformer_engine_cpp_sources init_python.cpp)
+  list(APPEND transformer_engine_cpp_sources tvm_ffi_bridge.cpp)
 endif()
 
 list(APPEND transformer_engine_cuda_sources
@@ -491,9 +491,7 @@ if(NVTE_WITH_CUTEDSL)
   target_include_directories(transformer_engine PRIVATE ${TVM_FFI_INCLUDE_DIR})
   target_compile_definitions(
     transformer_engine PRIVATE
-    NVTE_WITH_CUTEDSL
-    Py_LIMITED_API=0x030A0000)
-  target_link_libraries(transformer_engine PRIVATE Python::Module)
+    NVTE_WITH_CUTEDSL)
 endif()
 
 target_include_directories(transformer_engine PRIVATE

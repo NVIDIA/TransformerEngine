@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "../../common.h"
 #include "../../tvm_ffi_bridge.h"
@@ -66,8 +67,7 @@ struct MXFP8QuantConfig {
     return cache.get_or_load(*this);
   }
 
-  // Globally unique TVM-FFI registry key used when the CuTeDSL function is
-  // compiled and registered on a cache miss.
+  // Unique name the compiled CuTeDSL kernel is exported and loaded under.
   std::string to_key() const {
     std::string key;
     key.reserve(72);  // longest: cutedsl_mxfp8_smXXX_BFloat16_Float8E4M3_..._dqgelu
@@ -98,16 +98,20 @@ struct MXFP8QuantConfig {
     return key;
   }
 
-  bool retrieve_func_from_python(const std::string &fn_name) const {
-    auto entrypoint = tvm::ffi::Function::GetGlobal(kEntrypointName);
-    if (!entrypoint.has_value()) {
-      return false;
-    }
-    tvm::ffi::Any result = (*entrypoint)(
-        tvm::ffi::String(fn_name), tvm::ffi::String(to_string(dtype)),
-        tvm::ffi::String(to_string(fp8_dtype)), rowwise, colwise, swizzled, with_amax, with_dbias,
-        with_dact, with_act, use_2d_quantization, tvm::ffi::String(activation_to_str(activation)));
-    return result.try_cast<bool>().value_or(false);
+  // Positional arguments of get_mxfp8_quantization_function.
+  std::vector<std::string> compile_args() const {
+    auto flag = [](bool b) { return std::string(b ? "true" : "false"); };
+    return {to_string(dtype),
+            to_string(fp8_dtype),
+            flag(rowwise),
+            flag(colwise),
+            flag(swizzled),
+            flag(with_amax),
+            flag(with_dbias),
+            flag(with_dact),
+            flag(with_act),
+            flag(use_2d_quantization),
+            activation_to_str(activation)};
   }
 };
 
