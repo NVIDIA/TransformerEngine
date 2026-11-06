@@ -16,6 +16,7 @@ from jax.typing import DTypeLike
 
 from utils import assert_allclose
 
+from transformer_engine.common.testing import Case, CaseSkip, benchmark
 from transformer_engine.jax.cpp_extensions import is_softmax_kernel_available
 from transformer_engine.jax.cpp_extensions.attention import AttnSoftmaxType
 from transformer_engine.jax.softmax import SoftmaxFusionType, softmax
@@ -98,15 +99,6 @@ class SoftmaxRunner:
             case _:
                 raise ValueError(f"Unknown {self.softmax_fusion_type=}")
 
-    def test_forward(self):
-        """
-        Test transformer_engine.jax.softmax.softmax fwd rule
-        """
-        self._setup_inputs()
-        primitive_out = softmax(self.logits, self.mask, self.scale_factor, self.softmax_fusion_type)
-        reference_out = __class__.reference_softmax(self.logits, self.mask, self.scale_factor)
-        assert_allclose(primitive_out, reference_out, dtype=self.dtype)
-
     def test_backward(self):
         """
         Test transformer_engine.jax.softmax.softmax bwd rule
@@ -149,10 +141,6 @@ class SoftmaxPrimitivesRunner(SoftmaxRunner):
     """
 
     @catch_unsupported
-    def test_forward(self):
-        return super().test_forward()
-
-    @catch_unsupported
     def test_backward(self):
         return super().test_backward()
 
@@ -187,6 +175,7 @@ class SoftmaxModuleRunner:
 
 
 # Run softmax primitives test
+@benchmark("b,s_q,s_kv,h", [(8, 2048, 2048, 16)])
 @pytest.mark.parametrize(
     "b, s_q, s_kv, h",
     [
@@ -222,12 +211,39 @@ class TestSoftmaxPrimitives:
         Test forward with parameterized configs
         """
         runner = SoftmaxPrimitivesRunner(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype)
-        runner.test_forward()
+
+        def setup(state):
+            # The negative assertion lives here so an unsupported config skips in both
+            # modes; returning None from evaluate would let the benchmark time the raise.
+            if not runner._is_support():
+                with pytest.raises(AssertionError):
+                    runner._setup_inputs()
+                    softmax(
+                        runner.logits,
+                        runner.mask,
+                        runner.scale_factor,
+                        runner.softmax_fusion_type,
+                    )
+                raise CaseSkip(f"softmax kernel unavailable for {softmax_fusion_type}")
+            runner._setup_inputs()
+            return runner
+
+        def evaluate(state):
+            return softmax(state.logits, state.mask, state.scale_factor, state.softmax_fusion_type)
+
+        def reference(state):
+            return state.reference_softmax(state.logits, state.mask, state.scale_factor)
+
+        def verify(actual, expected):
+            assert_allclose(actual, expected, dtype=dtype)
+
+        return Case(setup=setup, evaluate=evaluate, reference=reference, verify=verify)
 
     @staticmethod
+    @benchmark.skip(reason="returns no Case; keeps the class's axes out of collection")
     def test_backward(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype):
         """
-        Test forward with parameterized configs
+        Test backward with parameterized configs
         """
         runner = SoftmaxPrimitivesRunner(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype)
         runner.test_backward()
