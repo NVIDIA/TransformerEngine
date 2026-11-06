@@ -212,6 +212,36 @@ Quantizer
          qtensor = quantizer.quantize(x)
          roundtrip = qtensor.dequantize()
 
+Exporting values and scales
+---------------------------
+
+Integrations that pass MXFP8 weights to another library, for example when syncing training
+weights to an inference engine, can get the FP8 values and E8M0 scales of a PyTorch MXFP8 tensor
+with :meth:`~transformer_engine.pytorch.MXFP8TensorStorage.export_components`. It works for
+quantized parameters and for tensors returned by a quantizer, and the layout of the result does
+not depend on how Transformer Engine stores the tensor: ``data`` has the tensor's shape, and
+``scale_inv`` holds one biased exponent per 32 consecutive values along the last dimension, with
+shape ``(*shape[:-1], shape[-1] // 32)``.
+
+.. code-block:: python
+
+   import torch
+   import transformer_engine.pytorch as te
+
+   weight = torch.randn(1024, 4096, device="cuda", dtype=torch.bfloat16)
+   quantizer = te.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, columnwise=False)
+
+   data, scale_inv = quantizer(weight).export_components()
+   # data: torch.float8_e4m3fn with shape (1024, 4096)
+   # scale_inv: torch.uint8 with shape (1024, 128)
+   scales = torch.exp2(scale_inv.float() - 127).repeat_interleave(32, dim=-1)
+   dequantized = data.float() * scales
+
+The values are a view of the tensor's data, so they change when the tensor is updated in place,
+for example by an optimizer step. The scales are a view as well, unless the stored scales are
+padded along the last dimension or swizzled for GEMM (see `Swizzling scaling factors`_), in which
+case they are copied. Clone the returned tensors to keep a snapshot.
+
 Developer Notes
 ---------------
 
