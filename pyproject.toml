@@ -10,7 +10,7 @@ requires = [
     "wheel",
     "pybind11[global]",
     "ninja",
-    "nvidia-cudnn-frontend>=1.28.0",
+    "nvidia-cudnn-frontend>=1.29.0",
 ]
 
 # CUDA and framework-specific requirements are defined in `build_tools/build_backend.py`.
