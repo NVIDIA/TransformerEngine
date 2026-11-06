@@ -781,7 +781,9 @@ class TestQuantizedTensor:
         # Ops that are dispatched through the dequantizing fallback
         torch.testing.assert_close(x_cpu + 0, ref_cpu, rtol=0, atol=0)
         torch.testing.assert_close(x_cpu, ref_cpu, rtol=0, atol=0)
-        torch.testing.assert_close(x_cpu.float(), ref_cpu.float(), rtol=0, atol=0)
+        torch.testing.assert_close(
+            x_cpu.float(), x_cuda.dequantize(dtype=torch.float32).cpu(), rtol=0, atol=0
+        )
 
         # Moving back to CUDA preserves the quantized tensor type
         x_roundtrip = x_cpu.to(device="cuda")
