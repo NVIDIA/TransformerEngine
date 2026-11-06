@@ -646,6 +646,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Support THD format for Context Parallel
+  m.def("linear_attention_affine_prefix",
+        &transformer_engine::pytorch::linear_attention_affine_prefix,
+        "Apply ordered linear-attention state summaries", py::call_guard<py::gil_scoped_release>());
   m.def("thd_read_half_tensor", &transformer_engine::pytorch::thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
         "tensor",
