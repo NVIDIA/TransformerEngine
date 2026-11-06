@@ -6,12 +6,14 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
+import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
+from transformer_engine.pytorch.utils import get_cached_ones_tensor
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -745,6 +747,262 @@ def _check_ue5m3_gemm_versus_dequantized(
     # whole result instead.
     rel_err = (y.float() - ref).norm() / ref.norm()
     assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"
+
+
+def _make_scale_cache_operands(device="cuda", row_scaled_weights=True):
+    """Make both GEMM orientations available without stochastic quantization."""
+    operands = []
+    for row_scaled in (row_scaled_weights, True):
+        quantizer = NVFP4Quantizer(
+            rowwise=True,
+            columnwise=True,
+            with_rht=False,
+            with_post_rht_amax=False,
+            row_scaled_nvfp4=row_scaled,
+        )
+        data = torch.randn(128, 128, dtype=torch.bfloat16, device=device)
+        operands.append(quantizer(data))
+    return operands
+
+
+def _uncached_row_scaled_gemm_inputs(a, b, *, transa, transb):
+    """Reference alias preparation before caching immutable scale metadata."""
+    a_metadata, b_metadata = a.get_metadata(), b.get_metadata()
+    a_key = "amax_rowwise" if transa else "amax_columnwise"
+    b_key = "amax_columnwise" if transb else "amax_rowwise"
+    col_scales, row_scales = a_metadata[a_key], b_metadata[b_key]
+    a_metadata[a_key] = col_scales.new_ones(1)
+    b_metadata[b_key] = row_scales.new_ones(1)
+    a_metadata["row_scaled_nvfp4"] = b_metadata["row_scaled_nvfp4"] = False
+    return (
+        NVFP4TensorStorage(**a_metadata),
+        NVFP4TensorStorage(**b_metadata),
+        row_scales.view(-1, 1),
+        col_scales.view(1, -1),
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("row_scaled_weights", [False, True])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize("grad", [False, True])
+def test_nvfp4_scale_cache_matches_uncached(
+    monkeypatch, layout, row_scaled_weights, out_dtype, accumulate, grad
+):
+    """Caching constants must preserve exact results as operand scales change."""
+    torch.manual_seed(73)
+    a, b = _make_scale_cache_operands(row_scaled_weights=row_scaled_weights)
+    a_scales = a._amax_rowwise if layout[0] == "T" else a._amax_columnwise
+    b_scales = b._amax_columnwise if layout[1] == "T" else b._amax_rowwise
+    bias = None if grad else torch.randn(128, dtype=out_dtype, device="cuda")
+    initial = torch.randn(128, 128, dtype=out_dtype, device="cuda")
+    for factor in (1.0, 0.25, 8.0):
+        a_scales.mul_(factor)
+        b_scales.mul_(factor)
+        actual = general_gemm(
+            a,
+            b,
+            out_dtype=out_dtype,
+            layout=layout,
+            bias=bias,
+            out=initial.clone(),
+            accumulate=accumulate,
+            grad=grad,
+        )[0]
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                gemm_module, "_nvfp4_row_scaled_gemm_inputs", _uncached_row_scaled_gemm_inputs
+            )
+            expected = general_gemm(
+                a,
+                b,
+                out_dtype=out_dtype,
+                layout=layout,
+                bias=bias,
+                out=initial.clone(),
+                accumulate=accumulate,
+                grad=grad,
+            )[0]
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_nvfp4_scale_cache_reuses_only_constants():
+    """Alias preparation must reuse one constant and preserve operand storage."""
+    a, b = _make_scale_cache_operands()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        before = get_cached_ones_tensor.cache_info()
+        first = gemm_module._nvfp4_row_scaled_gemm_inputs(a, b, transa=True, transb=False)
+        after = get_cached_ones_tensor.cache_info()
+        assert after.misses == before.misses + 1
+        a._amax_rowwise.mul_(2)
+        b._amax_rowwise.mul_(3)
+        second = gemm_module._nvfp4_row_scaled_gemm_inputs(a, b, transa=True, transb=False)
+        assert get_cached_ones_tensor.cache_info().misses == after.misses
+        assert first[0]._amax_rowwise.data_ptr() == second[0]._amax_rowwise.data_ptr()
+        assert second[0]._amax_rowwise.data_ptr() == second[1]._amax_rowwise.data_ptr()
+        assert a._row_scaled_nvfp4 and b._row_scaled_nvfp4
+        assert not second[0]._row_scaled_nvfp4 and not second[1]._row_scaled_nvfp4
+        for original, alias in ((a, second[0]), (b, second[1])):
+            assert alias._rowwise_data.data_ptr() == original._rowwise_data.data_ptr()
+            assert alias._rowwise_scale_inv.data_ptr() == original._rowwise_scale_inv.data_ptr()
+        torch.testing.assert_close(second[2].flatten(), b._amax_rowwise, atol=0, rtol=0)
+        torch.testing.assert_close(second[3].flatten(), a._amax_rowwise, atol=0, rtol=0)
+        snapshot = second[0]._amax_rowwise.clone()
+    stream.synchronize()
+    torch.testing.assert_close(snapshot, torch.ones_like(snapshot), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_nvfp4_scale_cache_independent_streams():
+    """A second stream must not consume another stream's pending initialization."""
+    a, b = _make_scale_cache_operands()
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    constants, snapshots = [], []
+    for index, stream in enumerate(streams):
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            if index == 0:
+                torch.cuda._sleep(10_000_000)
+            aliases = gemm_module._nvfp4_row_scaled_gemm_inputs(a, b, transa=True, transb=False)
+            constants.append(aliases[0]._amax_rowwise)
+            snapshots.append(constants[-1].clone())
+    assert constants[0].data_ptr() != constants[1].data_ptr()
+    for stream, snapshot in zip(streams, snapshots):
+        stream.synchronize()
+        torch.testing.assert_close(snapshot, torch.ones_like(snapshot), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_nvfp4_scale_cache_graph_capture(warm_cache):
+    """Captured initialization must not leak into eager calls before replay."""
+    a, b = _make_scale_cache_operands()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        if warm_cache:
+            gemm_module._nvfp4_row_scaled_gemm_inputs(a, b, transa=True, transb=False)
+    stream.synchronize()
+    before = get_cached_ones_tensor.cache_info()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = gemm_module._nvfp4_row_scaled_gemm_inputs(a, b, transa=True, transb=False)
+        captured_value = captured[0]._amax_rowwise.clone()
+    assert get_cached_ones_tensor.cache_info() == before
+    with torch.cuda.stream(stream):
+        eager = gemm_module._nvfp4_row_scaled_gemm_inputs(a, b, transa=True, transb=False)
+        eager_value = eager[0]._amax_rowwise.clone()
+    stream.synchronize()
+    assert eager[0]._amax_rowwise.data_ptr() != captured[0]._amax_rowwise.data_ptr()
+    torch.testing.assert_close(eager_value, torch.ones_like(eager_value), atol=0, rtol=0)
+    for _ in range(3):
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(captured_value, torch.ones_like(captured_value), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
+def test_nvfp4_scale_cache_gemm_graph_replay(monkeypatch, layout, out_dtype):
+    """Replay real GEMMs with changing runtime scales against the uncached path."""
+    a, b = _make_scale_cache_operands()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                gemm_module, "_nvfp4_row_scaled_gemm_inputs", _uncached_row_scaled_gemm_inputs
+            )
+            for _ in range(3):
+                general_gemm(a, b, out_dtype=out_dtype, layout=layout)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        actual = general_gemm(a, b, out_dtype=out_dtype, layout=layout)[0]
+    for factor in (1.0, 0.25, 8.0):
+        with torch.cuda.stream(stream):
+            a_scales = a._amax_rowwise if layout[0] == "T" else a._amax_columnwise
+            b_scales = b._amax_columnwise if layout[1] == "T" else b._amax_rowwise
+            a_scales.mul_(factor)
+            b_scales.mul_(factor)
+            graph.replay()
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    gemm_module, "_nvfp4_row_scaled_gemm_inputs", _uncached_row_scaled_gemm_inputs
+                )
+                expected = general_gemm(a, b, out_dtype=out_dtype, layout=layout)[0]
+        stream.synchronize()
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires two CUDA devices")
+def test_nvfp4_scale_cache_independent_devices():
+    """Keep constants and GEMM aliases on their operands' CUDA device."""
+    constants = []
+    for index in (0, 1):
+        with torch.cuda.device(index):
+            a, b = _make_scale_cache_operands(device=f"cuda:{index}")
+            aliases = gemm_module._nvfp4_row_scaled_gemm_inputs(a, b, transa=True, transb=False)
+            constant = aliases[0]._amax_rowwise
+            assert constant.device == torch.device("cuda", index)
+            assert aliases[1]._amax_rowwise is constant
+            torch.testing.assert_close(constant, torch.ones_like(constant), atol=0, rtol=0)
+            constants.append(constant)
+    assert constants[0] is not constants[1]
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_nvfp4_scale_cache_hybrid_operands(monkeypatch, layout, out_dtype):
+    """Hybrid direction selection must preserve native row/column scaling with caching."""
+    torch.manual_seed(319)
+    operands = []
+    shapes = {
+        "TN": ((256, 128), (384, 128)),
+        "NN": ((128, 256), (384, 128)),
+        "NT": ((128, 256), (128, 384)),
+    }
+    for shape in shapes[layout]:
+        quantizer = te.HybridQuantizer(
+            rowwise_quantizer=NVFP4Quantizer(row_scaled_nvfp4=True, columnwise=False),
+            columnwise_quantizer=NVFP4Quantizer(),
+        )
+        quantizer.internal = True
+        quantizer.rowwise_quantizer.internal = True
+        quantizer.columnwise_quantizer.internal = True
+        operands.append(quantizer(torch.randn(shape, dtype=torch.bfloat16, device="cuda")))
+    if layout == "NT" and out_dtype == torch.float16:
+        # Both selected directions use per-tensor scaling here. Its native
+        # GEMM rejects FP16 output; the row-scaled FP32-intermediate path can cast it.
+        message = "FP4 GEMM does not support FP16"
+        with pytest.raises(RuntimeError, match=message):
+            general_gemm(*operands, out_dtype=out_dtype, layout=layout)
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                gemm_module, "_nvfp4_row_scaled_gemm_inputs", _uncached_row_scaled_gemm_inputs
+            )
+            with pytest.raises(RuntimeError, match=message):
+                general_gemm(*operands, out_dtype=out_dtype, layout=layout)
+        return
+    for factor in (1.0, 0.25, 8.0):
+        for operand in operands:
+            operand.rowwise_sub_storage._amax_rowwise.mul_(factor)
+        actual = general_gemm(*operands, out_dtype=out_dtype, layout=layout)[0]
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                gemm_module, "_nvfp4_row_scaled_gemm_inputs", _uncached_row_scaled_gemm_inputs
+            )
+            expected = general_gemm(*operands, out_dtype=out_dtype, layout=layout)[0]
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)

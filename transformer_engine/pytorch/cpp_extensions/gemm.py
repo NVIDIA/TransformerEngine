@@ -105,14 +105,25 @@ def _nvfp4_row_scaled_gemm_inputs(
     a_amax_key = "amax_rowwise" if transa else "amax_columnwise"
     output_col_scales = A_metadata[a_amax_key]
     assert output_col_scales is not None
-    A_metadata[a_amax_key] = output_col_scales.new_ones(1)
+    # Keep captured constants local to the graph. A cold cache populated during
+    # capture could otherwise expose an uninitialized tensor before replay.
+    if torch.cuda.is_current_stream_capturing():
+        one = output_col_scales.new_ones(1)
+    else:
+        one = get_cached_ones_tensor(
+            1,
+            dtype=output_col_scales.dtype,
+            device=output_col_scales.device,
+            stream=torch.cuda.current_stream(output_col_scales.device),
+        )
+    A_metadata[a_amax_key] = one
     A_metadata["row_scaled_nvfp4"] = False
 
     B_metadata = B.get_metadata()
     b_amax_key = "amax_columnwise" if transb else "amax_rowwise"
     output_row_scales = B_metadata[b_amax_key]
     assert output_row_scales is not None
-    B_metadata[b_amax_key] = output_row_scales.new_ones(1)
+    B_metadata[b_amax_key] = one
     B_metadata["row_scaled_nvfp4"] = False
 
     assert output_row_scales.dtype == torch.float32 and output_col_scales.dtype == torch.float32

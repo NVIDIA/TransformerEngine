@@ -104,12 +104,19 @@ def get_cached_ones_tensor(
     num_elements: int,
     dtype: torch.dtype,
     device: torch.device,
+    *,
+    stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
     """Return a cached ``torch.ones`` tensor.
-    Tensors are cached by ``(num_elements, dtype, device)`` and kept alive
-    by the cache, ensuring stable data pointers across CUDA graph replays.
+
+    If provided, ``stream`` selects the initialization stream and is part of
+    the cache key, so independent streams do not share a pending initialization.
+    Cached tensors are read-only and kept alive for stable data pointers.
+    Do not populate the cache during CUDA graph capture: initialization would
+    only execute when that graph is replayed.
     """
-    return torch.ones(num_elements, dtype=dtype, device=device)
+    with torch.cuda.stream(stream) if stream is not None else nullcontext():
+        return torch.ones(num_elements, dtype=dtype, device=device)
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
