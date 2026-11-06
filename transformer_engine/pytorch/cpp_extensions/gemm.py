@@ -4,7 +4,7 @@
 
 """Python interface for GEMM extensions"""
 
-from typing import Callable, Iterable, Literal, Optional, Tuple, Union, List
+from typing import Iterable, Literal, Optional, Tuple, Union, List
 import itertools
 import math
 import os
@@ -12,10 +12,8 @@ import functools
 import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.device import te_device_type
-from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
+from ..constants import TE_DType, DType
 from ..utils import (
-    ceil_div,
-    get_cached_ones_tensor,
     get_device_compute_capability,
     get_sm_count,
     _empty_tensor,
