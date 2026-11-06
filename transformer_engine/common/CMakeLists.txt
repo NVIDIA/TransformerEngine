@@ -534,9 +534,11 @@ if (NVTE_WITH_CUBLASMP)
                  PATHS ${CUBLASMP_DIR}
                  PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu lib/sbsa-linux-gnu lib/x86_64-linux-gnu
                  REQUIRED)
+    # NCCL Python packages only provide the versioned shared library.
     find_library(NCCL_LIB
-                 NAMES nccl libnccl
-                 PATH_SUFFIXES lib
+                 NAMES nccl libnccl.so.2
+                 HINTS "${NCCL_INCLUDE_DIR}/.."
+                 PATH_SUFFIXES lib lib64
                  REQUIRED)
     # cuBLASMp 0.8.1 adds MXFP8 support to the CUDA-graph-safe overlap algos,
     # and NCCL 2.30 is the first release with graph-safe one-sided RMA
@@ -561,14 +563,16 @@ option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
 if (NVTE_WITH_CUSOLVERMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
     target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
+    # cuSOLVERMp and NCCL Python packages only provide the versioned shared libraries.
     find_library(CUSOLVERMP_LIB
-                 NAMES cusolverMp libcusolverMp
+                 NAMES cusolverMp libcusolverMp.so.0
                  PATHS ${CUSOLVERMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
     find_library(NCCL_LIB
-                 NAMES nccl libnccl
-                 PATH_SUFFIXES lib
+                 NAMES nccl libnccl.so.2
+                 HINTS "${NCCL_INCLUDE_DIR}/.."
+                 PATH_SUFFIXES lib lib64
                  REQUIRED)
     target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB})
     message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
@@ -608,8 +612,10 @@ file(REAL_PATH "${NCCL_EP_SHARED_LINK}" NCCL_EP_SHARED_LIB)
 
 # -- NCCL core library -------------------------------------------------------
 if(NOT NCCL_LIB)
+  # NCCL Python packages only provide the versioned shared library.
   find_library(NCCL_LIB
-      NAMES nccl libnccl
+      NAMES nccl libnccl.so.2
+      HINTS "${NCCL_INCLUDE_DIR}/.."
       PATH_SUFFIXES lib lib64
       REQUIRED)
 endif()

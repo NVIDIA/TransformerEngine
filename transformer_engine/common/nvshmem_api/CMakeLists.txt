@@ -13,8 +13,15 @@ set(NVSHMEM_HOME "$ENV{NVSHMEM_HOME}" CACHE STRING "Location of NVSHMEM installa
 
 add_library(nvshmemapi STATIC nvshmem_waitkernel.cu)
 set(NVSHMEMAPI_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" PARENT_SCOPE)
+# NVSHMEM Python packages only provide the versioned host library.
+find_library(NVSHMEM_HOST_LIB
+             NAMES nvshmem_host libnvshmem_host.so.3
+             PATHS ${NVSHMEM_HOME}
+             PATH_SUFFIXES lib lib64
+             NO_DEFAULT_PATH
+             REQUIRED)
 target_link_directories(nvshmemapi PUBLIC ${NVSHMEM_HOME}/lib)
-target_link_libraries(nvshmemapi PUBLIC -static-libstdc++ nvshmem_device nvshmem_host CUDA::nvml CUDA::cublas CUDA::cuda_driver)
+target_link_libraries(nvshmemapi PUBLIC -static-libstdc++ nvshmem_device ${NVSHMEM_HOST_LIB} CUDA::nvml CUDA::cublas CUDA::cuda_driver)
 target_include_directories(nvshmemapi PRIVATE
                            ${NVSHMEM_HOME}/include/
                            ${CMAKE_CURRENT_SOURCE_DIR}/../include)

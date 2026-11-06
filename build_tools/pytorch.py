@@ -117,7 +117,11 @@ def setup_pytorch_extension(
         )
         include_dirs.append(nvshmem_home / "include")
         library_dirs.append(nvshmem_home / "lib")
-        libraries.append("nvshmem_host")
+        if (nvshmem_home / "lib" / "libnvshmem_host.so").is_file():
+            libraries.append("nvshmem_host")
+        else:
+            # NVSHMEM Python packages only provide the versioned shared library.
+            libraries.append(":libnvshmem_host.so.3")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
