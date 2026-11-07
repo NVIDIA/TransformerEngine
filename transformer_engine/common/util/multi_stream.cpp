@@ -23,30 +23,34 @@ cudaStream_t get_compute_stream(int idx) {
   const size_t num_streams = nvte_get_num_compute_streams();
   NVTE_CHECK(0 <= idx && idx < num_streams, "Invalid compute stream (requested idx ", idx,
              ", but there are ", num_streams, " streams)");
-  static std::vector<cudaStream_t> streams(num_streams);
-  static std::once_flag stream_init_flag;
+  const int device = cuda::current_device();
+  static std::vector<std::vector<cudaStream_t>> streams(cuda::num_devices(),
+                                                        std::vector<cudaStream_t>(num_streams));
+  static std::vector<std::once_flag> stream_init_flags(cuda::num_devices());
   auto init = [&]() {
     for (size_t i = 0; i < num_streams; i++) {
-      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&streams[i], cudaStreamNonBlocking, -1));
+      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&streams[device][i], cudaStreamNonBlocking, -1));
     }
   };
-  std::call_once(stream_init_flag, init);
-  return streams[idx];
+  std::call_once(stream_init_flags[device], init);
+  return streams[device][idx];
 }
 
 cudaEvent_t get_compute_stream_event(int idx) {
   const size_t num_streams = nvte_get_num_compute_streams();
   NVTE_CHECK(0 <= idx && idx < num_streams, "Invalid compute stream (requested idx ", idx,
              ", but there are ", num_streams, " streams)");
-  static std::vector<cudaEvent_t> events(num_streams);
-  static std::once_flag event_init_flag;
+  const int device = cuda::current_device();
+  static std::vector<std::vector<cudaEvent_t>> events(cuda::num_devices(),
+                                                      std::vector<cudaEvent_t>(num_streams));
+  static std::vector<std::once_flag> event_init_flags(cuda::num_devices());
   auto init = [&]() {
     for (size_t i = 0; i < num_streams; i++) {
-      NVTE_CHECK_CUDA(cudaEventCreate(&events[i]));
+      NVTE_CHECK_CUDA(cudaEventCreate(&events[device][i]));
     }
   };
-  std::call_once(event_init_flag, init);
-  return events[idx];
+  std::call_once(event_init_flags[device], init);
+  return events[device][idx];
 }
 
 int get_num_compute_streams() {

@@ -3827,3 +3827,83 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
         swizzled_scales_buffer,
         expected_swizzled_scales_buffer,
     )
+
+
+@pytest.mark.parametrize("precision", ["nvfp4", "mxfp8"])
+@pytest.mark.parametrize("backward_override", ["high_precision", "dequantized", None])
+@pytest.mark.parametrize("mode", ["train", "eval", "no_grad", "frozen_weights", "frozen_input"])
+def test_row_grouped_dispatch_integration(monkeypatch, precision, backward_override, mode):
+    """Grouped forward preserves full module outputs and all applicable gradients."""
+    import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
+
+    if precision == "nvfp4":
+        available, reason = te.is_nvfp4_available(return_reason=True)
+        fp_recipe = nvfp4_row_scaled()
+        fp_recipe.backward_override = backward_override
+    else:
+        available, reason = te.is_mxfp8_available(return_reason=True)
+        fp_recipe = recipe.MXFP8BlockScaling(backward_override=backward_override)
+    if not available:
+        pytest.skip(reason)
+    torch.manual_seed(901)
+    FP8GlobalStateManager.reset()
+    module = GroupedLinear(
+        3, 128, 96, bias=False, params_dtype=torch.bfloat16, device="cuda", use_grouped_tensor=False
+    )
+    if mode == "eval":
+        module.eval()
+    if mode == "frozen_weights":
+        module.requires_grad_(False)
+    # No empty experts in quantized backward: the upstream empty-amax defect
+    # is independent of grouped forward. Empty experts are tested at GEMM level.
+    splits = [64, 128, 32]
+    x = torch.randn(sum(splits), 128, dtype=torch.bfloat16, device="cuda")
+    dy = torch.randn(sum(splits), 96, dtype=torch.bfloat16, device="cuda")
+    enabled = gemm_module._can_group_nvfp4_row_scaled_gemm
+    native = gemm_module._nvfp4_row_scaled_grouped_gemm
+    calls = []
+    scale_copy = gemm_module._batched_row_scale_copy
+    scale_calls = []
+
+    def recorded(*args, **kwargs):
+        calls.append(True)
+        return native(*args, **kwargs)
+
+    def recorded_scale_copy(*args):
+        scale_calls.append(True)
+        return scale_copy(*args)
+
+    monkeypatch.setattr(gemm_module, "_nvfp4_row_scaled_grouped_gemm", recorded)
+    monkeypatch.setattr(gemm_module, "_batched_row_scale_copy", recorded_scale_copy)
+
+    def run(grouped):
+        monkeypatch.setattr(
+            gemm_module,
+            "_can_group_nvfp4_row_scaled_gemm",
+            enabled if grouped else lambda *_: False,
+        )
+        FP8GlobalStateManager.reset()
+        module.zero_grad(set_to_none=True)
+        inp = x.clone().requires_grad_(mode != "frozen_input")
+        with torch.set_grad_enabled(mode != "no_grad"):
+            with autocast(enabled=True, recipe=fp_recipe):
+                y = module(inp, splits)
+            if mode != "no_grad":
+                y.backward(dy)
+        grads = [inp.grad] + [p.grad for p in module.parameters()]
+        return y.detach().clone(), [g.clone() if g is not None else None for g in grads]
+
+    try:
+        reference, ref_grads = run(False)
+        actual, grads = run(True)
+        assert bool(calls) == (precision == "nvfp4")
+        assert bool(scale_calls) == (precision == "nvfp4")
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+        for grad, ref in zip(grads, ref_grads):
+            if ref is None:
+                assert grad is None
+            else:
+                assert torch.isfinite(grad).all()
+                torch.testing.assert_close(grad, ref, rtol=0, atol=0)
+    finally:
+        FP8GlobalStateManager.reset()
