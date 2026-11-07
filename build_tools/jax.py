@@ -7,7 +7,6 @@
 import os
 import warnings
 from pathlib import Path
-from packaging import version
 
 import setuptools
 
@@ -27,7 +26,7 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0", "triton"]
+    return ["jax>=0.5.3", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0", "triton"]
 
 
 def test_requirements() -> List[str]:
@@ -61,13 +60,7 @@ def xla_path() -> str:
     Throws FileNotFoundError if XLA source is not found."""
 
     try:
-        import jax
-
-        if version.parse(jax.__version__) >= version.parse("0.5.0"):
-            from jax import ffi  # pylint: disable=ungrouped-imports
-        else:
-            from jax.extend import ffi  # pylint: disable=ungrouped-imports
-
+        from jax import ffi
     except ImportError:
         if os.getenv("XLA_HOME"):
             xla_home = Path(os.getenv("XLA_HOME"))
