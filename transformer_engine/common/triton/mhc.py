@@ -47,14 +47,13 @@ def projection_prune_fwd(configs, named_args, **kwargs):
         # Deterministic path: a single K block covers the whole reduction, so each program
         # stores its result instead of atomic-adding across split-K blocks.
         K = named_args.get("K", kwargs.get("K", None))
-        block_m = [16, 64, 128]
+        block_m_and_warps = [(16, 2), (16, 8), (64, 8)]
         block_k = align_to(K, 32)
         step_k = [256]
-        warps = [2, 8]
         stages = [2, 3, 4]
 
         pruned_configs = []
-        for bm, sk, w, s in itertools.product(block_m, step_k, warps, stages):
+        for (bm, w), sk, s in itertools.product(block_m_and_warps, step_k, stages):
             pruned_configs.append(
                 triton.Config(
                     {

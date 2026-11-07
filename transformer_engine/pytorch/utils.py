@@ -14,6 +14,7 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 
+from transformer_engine.pytorch.device import te_device_type
 from .torch_version import torch_version
 from ..common import decode_cudnn_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
@@ -687,44 +688,16 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return tensor.to(dtype=dtype)
 
 
-def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
-    """Check if tensor dimensions are supported for FP8 TN GEMM"""
-    return tensor.dim() == 2 and tensor.size(0) % 8 == 0 and tensor.size(1) % 16 == 0
+def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor) -> None:
+    """Check contracting dimensions at trace time for ``torch.compile``.
 
-
-def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
-    """Assert that tensor or tensors dimensions are supported for FP8 TN GEMM."""
-
-    for tensor in tensors:
-        if math.prod(tensor.shape[:-1]) % 8 != 0 or tensor.shape[-1] % 16 != 0:
-            raise ValueError(
-                "FP8 execution requires the product of all dimensions except the last to be"
-                " divisible by 8 and the last dimension to be divisible by 16, but got tensor"
-                f" with dims={list(tensor.size())} (product of leading dims ="
-                f" {math.prod(tensor.shape[:-1])}, last dim = {tensor.shape[-1]})"
-            )
-
-
-def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, fp8: bool) -> None:
-    """Emit the TN GEMM (``y = x @ w^T``) dim constraints as ``torch._check``
-    guards at trace time. torch.compile path only; eager validation lives in
-    the op impl. Messages are constant: Dynamo forbids tensor closures here.
+    Recipe-specific alignment requirements are checked by the runtime implementation.
     """
     # pylint: disable=protected-access
     torch._check(
         inp.shape[-1] == weight.shape[-1],
         lambda: "GEMM not possible: input last dim must equal in_features",
     )
-    if not fp8:
-        return
-    for tensor, name in ((inp, "input"), (weight, "weight")):
-        torch._check(
-            math.prod(tensor.shape[:-1]) % 8 == 0 and tensor.shape[-1] % 16 == 0,
-            lambda n=name: (
-                f"FP8 execution requires the {n}'s product of all dimensions except the"
-                " last to be divisible by 8 and its last dimension to be divisible by 16"
-            ),
-        )
 
 
 def is_bf16_compatible() -> bool:
@@ -789,12 +762,12 @@ def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
     if device is None:
         # Use default CUDA device
         device = torch.get_default_device()
-        if device.type != "cuda":
-            device = torch.device("cuda", torch.cuda.current_device())
+        if device.type != te_device_type():
+            device = torch.device(te_device_type(), torch.cuda.current_device())
     elif not isinstance(device, torch.device):
         device = torch.device(device)
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+    if device.type == te_device_type() and device.index is None:
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     return device
 
 
@@ -816,7 +789,7 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
     device2 = torch.device(device2)
     if device1.type != device2.type:
         return False
-    if device1.type == "cuda":
+    if device1.type == te_device_type():
         index1 = device1.index
         index2 = device2.index
         if index1 == index2:
@@ -952,15 +925,22 @@ def canonicalize_process_group(
     return group
 
 
+def torch_is_autocast_gpu_enabled() -> bool:
+    """Check whether PyTorch autocast is enabled for the GPU device."""
+    if torch_version() >= (2, 4, 0):
+        return torch.is_autocast_enabled(te_device_type())
+    return torch.is_autocast_enabled()
+
+
 def torch_get_autocast_gpu_dtype() -> torch.dtype:
     """Get PyTorch autocast GPU dtype."""
     if torch_version() >= (2, 4, 0):
-        return torch.get_autocast_dtype("cuda")
+        return torch.get_autocast_dtype(te_device_type())
     return torch.get_autocast_gpu_dtype()
 
 
 if torch_version() >= (2, 4, 0):
-    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type="cuda")
+    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type=te_device_type())
 else:
     gpu_autocast_ctx = torch.cuda.amp.autocast
 
