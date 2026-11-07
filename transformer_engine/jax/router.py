@@ -145,14 +145,15 @@ def fused_topk_with_score_function(
     Returns
     -------
     probs_or_scores : jnp.ndarray
-        When compute_aux_scores=False: Sparse probability tensor, shape [num_tokens, num_experts].
-            Non-zero only at selected expert positions.
-        When compute_aux_scores=True: Dense score tensor, shape [num_tokens, num_experts].
-            All expert positions contain scores.
+        When ``compute_aux_scores=False``: sparse probability tensor, shape
+        ``[num_tokens, num_experts]``, non-zero only at selected expert positions.
+        When ``compute_aux_scores=True``: dense score tensor, shape
+        ``[num_tokens, num_experts]``, all expert positions contain scores.
     routing_map : jnp.ndarray
-        Shape/dtype depend on routing_map_format:
-        - BYTEMAP: bool[num_tokens, num_experts]; True at selected expert positions.
-        - BITMAP_U8: uint8[num_tokens, ceil(num_experts/8)]; LSB-first bit-packed
+        Shape/dtype depend on ``routing_map_format``:
+
+        - BYTEMAP: ``bool[num_tokens, num_experts]``; True at selected expert positions.
+        - BITMAP_U8: ``uint8[num_tokens, ceil(num_experts/8)]``; LSB-first bit-packed
           along the expert axis.
     """
     if not isinstance(scaling_factor, (int, float)):

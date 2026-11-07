@@ -22,7 +22,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     QKVFormat,
@@ -149,8 +149,12 @@ class FlashAttentionUtils:
 
     v4_is_installed = False
     fa4_version = PkgVersion("0")
+    # Older FA4 releases call quack.activation.sub_packed_f32x2, removed in quack-kernels 0.6.5.
+    v4_version_required = PkgVersion("4.0.0b26")
     v4_0_0_beta31 = PkgVersion("4.0.0b31")
     v4_0_0_beta33 = PkgVersion("4.0.0b33")
+    quack_version: Optional[PkgVersion] = None
+    cutlass_dsl_version: Optional[PkgVersion] = None
     use_v4 = False
     # Set by a signature probe in backends.py; fail-closed default.
     fa3_supports_softcap = False

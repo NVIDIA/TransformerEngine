@@ -10,7 +10,7 @@ import inspect
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 
 _cudnn_score_mod_handles: Dict[torch.device, Any] = {}
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}

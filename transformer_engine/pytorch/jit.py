@@ -10,7 +10,7 @@ from functools import wraps
 from typing import Callable, Optional, Tuple
 import torch
 
-from .. import te_device_type
+from .device import te_device_type
 from .torch_version import torch_version
 from .export import is_in_onnx_export_mode
 from .utils import gpu_autocast_ctx

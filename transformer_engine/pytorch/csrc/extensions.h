@@ -58,15 +58,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
 void fused_score_for_moe_aux_loss_bwd(at::Tensor intermediate_output, at::Tensor grad_scores,
                                       at::Tensor grad_logits, int topk, std::string score_function);
 
-std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
-                                                          at::Tensor tokens_per_expert,
-                                                          int total_num_tokens, int num_experts,
-                                                          int num_rows, int num_cols, int topk,
-                                                          float coeff);
+std::pair<std::vector<size_t>, DType> get_moe_aux_loss_workspace_config();
+
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(
+    at::Tensor probs, at::Tensor tokens_per_expert, int total_num_tokens, int num_experts,
+    int num_rows, int num_cols, int topk, float coeff, bool deterministic = false,
+    std::optional<at::Tensor> workspace = std::nullopt);
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_graph_safe(
     at::Tensor probs, at::Tensor tokens_per_expert, at::Tensor total_num_tokens, int num_experts,
-    int num_rows, int num_cols, int topk, float coeff);
+    int num_rows, int num_cols, int topk, float coeff, bool deterministic = false,
+    std::optional<at::Tensor> workspace = std::nullopt);
 
 at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
                                   int num_cols, at::Tensor grad_aux_loss);
@@ -155,6 +157,12 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              std::optional<CommOverlapType> comm_type = std::nullopt,
                              MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false,
                              float alpha = 1.0f, std::optional<float> beta = std::nullopt);
+
+at::Tensor strided_batched_gemm(py::handle A, bool transa, int64_t batch_dim_a, py::handle B,
+                                bool transb, int64_t batch_dim_b, at::Tensor D, int64_t batch_dim_d,
+                                at::Tensor workspace, bool accumulate, bool use_split_accumulator,
+                                int math_sm_count, float alpha = 1.0f,
+                                std::optional<float> beta = std::nullopt);
 
 void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
@@ -478,24 +486,26 @@ py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
 at::Tensor scaled_softmax_forward(at::Tensor input, float scale_factor);
 
 at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                   float scale_factor);
+                                   float scale_factor, bool overwrite_output_grads = false);
 
 at::Tensor scaled_masked_softmax_forward(at::Tensor input, at::Tensor mask, float scale_factor);
 
 at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                          float scale_factor);
+                                          float scale_factor, bool overwrite_output_grads = false);
 
 at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input, float scale_factor);
 
 at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        at::Tensor softmax_results_,
-                                                       float scale_factor);
+                                                       float scale_factor,
+                                                       bool overwrite_output_grads = false);
 
 at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input, float scale_factor);
 
 at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads_,
                                                          at::Tensor softmax_results_,
-                                                         float scale_factor);
+                                                         float scale_factor,
+                                                         bool overwrite_output_grads = false);
 
 /***************************************************************************************************
  * FP8 recipe
@@ -585,7 +595,7 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
 std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
     const at::Tensor &split_sizes, const c10::Device &device, const std::vector<int64_t> &strides,
     const std::vector<bool> &include_leading_zero, const std::vector<at::ScalarType> &dtypes,
-    bool bulk_allocate_outputs);
+    bool bulk_allocate_outputs, size_t split_alignment);
 
 at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
                                     const c10::Device &device);
@@ -764,6 +774,7 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
 
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
+                 int64_t top_k, int64_t dispatch_output_per_expert_alignment,
                  std::optional<at::Tensor> tokens_scale_inv = std::nullopt,
                  std::optional<at::Tensor> recv_scale_inv = std::nullopt);
 
@@ -785,12 +796,16 @@ std::vector<at::Tensor> ep_prepare_and_dispatch(
     std::optional<at::Tensor> recv_scale_inv = std::nullopt,
     std::optional<at::Tensor> tokens_scale_inv = std::nullopt);
 
-void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
+void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result, int64_t top_k,
+                int64_t dispatch_output_per_expert_alignment, at::ScalarType topk_idx_dtype);
 
 void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,
-                     at::Tensor grad_tokens, at::Tensor grad_topk_weights);
+                     at::Tensor grad_tokens, at::Tensor grad_topk_weights, int64_t top_k,
+                     int64_t dispatch_output_per_expert_alignment, at::ScalarType topk_idx_dtype);
 
 void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expert_out,
+                    int64_t top_k, int64_t dispatch_output_per_expert_alignment,
+                    at::ScalarType topk_idx_dtype,
                     std::optional<at::Tensor> grad_scale_inv = std::nullopt,
                     std::optional<at::Tensor> grad_expert_out_scale_inv = std::nullopt);
 

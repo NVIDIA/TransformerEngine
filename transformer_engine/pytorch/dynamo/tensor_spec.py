@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch._prims_common import make_contiguous_strides_for
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 
 
 @dataclass

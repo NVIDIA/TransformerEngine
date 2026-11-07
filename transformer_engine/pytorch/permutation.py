@@ -7,7 +7,7 @@ import warnings
 from typing import Optional, Tuple
 import torch
 import transformer_engine_torch as tex
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 import transformer_engine.pytorch.triton.permutation as triton_permutation
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.quantized_tensor import (
