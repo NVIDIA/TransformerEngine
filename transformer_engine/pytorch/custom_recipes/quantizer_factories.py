@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
-from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.quantizer_types import QuantizerRole, DelayedScalingRequest
 from transformer_engine.pytorch.device import te_device_type
 from ..constants import DType
 
@@ -64,7 +64,6 @@ def delayed_scaling_factory(
     * amax_history_len = 1024
     * reduce_amax = True
     """
-    from transformer_engine.pytorch.quantization import DelayedScalingRequest
     from transformer_engine.common.recipe import Format
 
     return DelayedScalingRequest(fp8_format=Format.HYBRID)
