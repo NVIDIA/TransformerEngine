@@ -52,6 +52,7 @@ from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.mxfp4_tensor import MXFP4Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
@@ -59,6 +60,7 @@ from ..tensor.identity_tensor import IdentityQuantizer
 from ..tensor.utils import is_custom
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..utils import (
@@ -889,7 +891,7 @@ def _is_weight_workspace_valid(
             return False
         if quantizer.columnwise_usage and workspace._columnwise_data is None:
             return False
-    elif isinstance(workspace, NVFP4TensorStorage):
+    elif isinstance(workspace, (NVFP4TensorStorage, MXFP4TensorStorage)):
         if quantizer.rowwise_usage and workspace._rowwise_data is None:
             return False
         if quantizer.columnwise_usage and workspace._columnwise_data is None:
@@ -1409,7 +1411,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         if self.primary_weights_in_fp8:
             return False
-        if isinstance(quantizer, MXFP8Quantizer):
+        if isinstance(quantizer, (MXFP8Quantizer, MXFP4Quantizer)):
             return True
         if isinstance(quantizer, NVFP4Quantizer):
             rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]

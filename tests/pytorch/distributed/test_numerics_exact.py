@@ -68,3 +68,20 @@ def test_distributed(quantization, batch_size, hidden_size, out_size):
         pytest.skip(reason_for_no_nvfp4)
 
     _run_test(quantization, batch_size, hidden_size, out_size)
+
+
+# MXFP4 x MXFP8 GEMMs need K and the column-wise MXFP4 M to be multiples of 128 on every rank.
+@pytest.mark.parametrize(
+    "batch_size, hidden_size, out_size",
+    [
+        (128, 512, 512),
+        (256, 1024, 512),
+        (512, 512, 2048),
+        (2048, 2048, 2048),
+    ],
+)
+def test_distributed_mxfp4_mxfp8(batch_size, hidden_size, out_size):
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+
+    _run_test("mxfp4_mxfp8", batch_size, hidden_size, out_size)

@@ -97,6 +97,38 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
   return ret;
 }
 
+TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer) {
+  auto ret = TensorWrapper(NVTE_MXFP8_1D_SCALING);
+
+  const bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  const bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  const bool with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
+
+  NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for MXFP4 Tensor.");
+
+  if (rowwise_usage) {
+    const auto &data = tensor.attr("_rowwise_data").cast<at::Tensor>();
+    const auto &scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
+    ret.set_rowwise_data(data.data_ptr(), DType::kFloat4E2M1,
+                         convert_shape_back_from_fp4(getTensorShape(data), false));
+    ret.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0, getTensorShape(scale_inv));
+  }
+
+  if (columnwise_usage) {
+    const auto &data = tensor.attr("_columnwise_data").cast<at::Tensor>();
+    const auto &scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
+    ret.set_columnwise_data(data.data_ptr(), DType::kFloat4E2M1,
+                            convert_shape_back_from_fp4(getTensorShape(data), false));
+    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                 getTensorShape(scale_inv));
+  }
+
+  ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  quantizer->set_quantization_params(&ret);
+
+  return ret;
+}
+
 TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer *quantizer) {
   const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
   bool is_2D_scaled = tensor.attr("_is_2D_scaled").cast<bool>();

@@ -2862,4 +2862,187 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
   return scale_shape;
 }
 
+MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
+  this->dtype = DType::kFloat4E2M1;
+}
+
+std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
+
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
+  const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+  const std::vector<int64_t> data_shape_int64 = convert_shape_for_fp4(shape_int64);
+  const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
+  const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
+
+  at::Tensor rowwise_data_tensor, rowwise_scale_inv_tensor;
+  at::Tensor columnwise_data_tensor, columnwise_scale_inv_tensor;
+  const auto uint8_tensor_opts =
+      at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
+  if (rowwise_usage) {
+    const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape.begin(),
+                                                     rowwise_scale_inv_shape.end());
+    rowwise_data_tensor = at::empty(data_shape_int64, uint8_tensor_opts);
+    rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, uint8_tensor_opts);
+  }
+  if (columnwise_usage) {
+    const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
+                                                     columnwise_scale_inv_shape.end());
+    columnwise_data_tensor = at::empty(data_shape_int64, uint8_tensor_opts);
+    columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, uint8_tensor_opts);
+  }
+
+  auto py_cast = [](at::Tensor& tensor, bool need_cast) -> py::object {
+    return need_cast ? py::cast(tensor) : py::none();
+  };
+  py::dict kwargs;
+  kwargs["rowwise_data"] = py_cast(rowwise_data_tensor, rowwise_usage);
+  kwargs["rowwise_scale_inv"] = py_cast(rowwise_scale_inv_tensor, rowwise_usage);
+  kwargs["columnwise_data"] = py_cast(columnwise_data_tensor, columnwise_usage);
+  kwargs["columnwise_scale_inv"] = py_cast(columnwise_scale_inv_tensor, columnwise_usage);
+  kwargs["quantizer"] = this->quantizer;
+  kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+  PyTypeObject* py_class = MXFP4TensorStoragePythonClass;
+  if (internal) {
+    kwargs["fake_dtype"] = GetATenDType(dtype);
+  } else {
+    kwargs["shape"] = py::cast(shape_int64);
+    kwargs["stride"] = py::cast(stride_from_shape(shape_int64));
+    kwargs["dtype"] = py::cast(GetATenDType(dtype));
+    kwargs["device"] = py::cast(device);
+    py_class = MXFP4TensorPythonClass;
+  }
+  py::tuple args(0);
+  PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(py_class), args.ptr(), kwargs.ptr());
+  if (result == nullptr) {
+    PyErr_Print();
+  }
+  NVTE_CHECK(result != nullptr, "Failed to create MXFP4 tensor instance");
+  py::object out_py = py::reinterpret_steal<py::object>(result);
+
+  TensorWrapper out_cpp(NVTE_MXFP8_1D_SCALING);
+  if (rowwise_usage) {
+    out_cpp.set_rowwise_data(rowwise_data_tensor.data_ptr(), DType::kFloat4E2M1, shape);
+    out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E8M0,
+                                  rowwise_scale_inv_shape);
+  }
+  if (columnwise_usage) {
+    out_cpp.set_columnwise_data(columnwise_data_tensor.data_ptr(), DType::kFloat4E2M1, shape);
+    out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E8M0,
+                                     columnwise_scale_inv_shape);
+  }
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+
+  return {std::move(out_cpp), std::move(out_py)};
+}
+
+std::pair<GroupedTensorWrapper, py::object> MXFP4Quantizer::create_grouped_tensor(
+    size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype, py::object quantizer,
+    const std::optional<at::Tensor>& first_dims, const std::optional<at::Tensor>& last_dims,
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, size_t logical_first_dim,
+    size_t logical_last_dim) const {
+  NVTE_ERROR("Grouped tensors are not supported for MXFP4.");
+}
+
+std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
+    py::object tensor) const {
+  NVTE_CHECK(detail::IsMXFP4Tensor(tensor.ptr()), "MXFP4Quantizer must output to MXFP4Tensor.");
+
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
+
+  auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {
+    auto attr_py = tensor.attr(name);
+    if (attr_py.is_none()) {
+      return std::nullopt;
+    }
+    return attr_py.cast<at::Tensor>();
+  };
+  auto rowwise_data = get_tensor("_rowwise_data");
+  auto rowwise_scale_inv = get_tensor("_rowwise_scale_inv");
+  auto columnwise_data = get_tensor("_columnwise_data");
+  auto columnwise_scale_inv = get_tensor("_columnwise_scale_inv");
+  NVTE_CHECK(rowwise_data || columnwise_data, "MXFP4Tensor has no data.");
+
+  const at::Tensor& reference_data = rowwise_data ? *rowwise_data : *columnwise_data;
+  const auto data_shape = getTensorShape(reference_data);
+  if (rowwise_data && columnwise_data) {
+    NVTE_CHECK(
+        getTensorShape(*columnwise_data) == data_shape, "MXFP4 row-wise data (shape=", data_shape,
+        ") and column-wise data (shape=", getTensorShape(*columnwise_data), ") do not match");
+  }
+  const std::vector<int64_t> data_shape_int64(data_shape.begin(), data_shape.end());
+  const auto shape = convert_shape_back_from_fp4(data_shape, false);
+  const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(reference_data.device());
+
+  auto coerce = [&](bool usage, std::optional<at::Tensor>& data,
+                    std::optional<at::Tensor>& scale_inv, const char* data_name,
+                    const char* scale_inv_name, bool columnwise) {
+    if (usage) {
+      if (!data) {
+        data = at::empty(data_shape_int64, opts);
+        tensor.attr(data_name) = *data;
+      }
+      if (!scale_inv) {
+        const auto scale_inv_shape = get_scale_shape(shape, columnwise);
+        scale_inv =
+            at::empty(std::vector<int64_t>(scale_inv_shape.begin(), scale_inv_shape.end()), opts);
+        tensor.attr(scale_inv_name) = *scale_inv;
+      }
+    } else {
+      data.reset();
+      scale_inv.reset();
+      tensor.attr(data_name) = py::none();
+      tensor.attr(scale_inv_name) = py::none();
+    }
+  };
+  coerce(rowwise_usage, rowwise_data, rowwise_scale_inv, "_rowwise_data", "_rowwise_scale_inv",
+         false);
+  coerce(columnwise_usage, columnwise_data, columnwise_scale_inv, "_columnwise_data",
+         "_columnwise_scale_inv", true);
+  tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
+
+  TensorWrapper out_cpp(NVTE_MXFP8_1D_SCALING);
+  if (rowwise_usage) {
+    out_cpp.set_rowwise_data(rowwise_data->data_ptr(), DType::kFloat4E2M1, shape);
+    out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+                                  getTensorShape(*rowwise_scale_inv));
+  }
+  if (columnwise_usage) {
+    out_cpp.set_columnwise_data(columnwise_data->data_ptr(), DType::kFloat4E2M1, shape);
+    out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+                                     getTensorShape(*columnwise_scale_inv));
+  }
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+
+  return {std::move(out_cpp), std::move(tensor)};
+}
+
+void MXFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
+                              const std::optional<TensorWrapper>& noop_flag) {
+  if (input.numel() == 0) {
+    return;
+  }
+  QuantizationConfigWrapper quant_config;
+  if (noop_flag) {
+    quant_config.set_noop_tensor(noop_flag->data());
+  }
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
+  });
+}
+
+std::vector<size_t> MXFP4Quantizer::get_scale_shape(const std::vector<size_t>& shape,
+                                                    bool columnwise) const {
+  const auto [flat_first_dim, last_dim] = get_2d_dims(shape);
+  NVTE_CHECK(last_dim % MXFP8_BLOCK_SIZE == 0 && flat_first_dim % MXFP8_BLOCK_SIZE == 0,
+             "MXFP4 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
+             " (got shape=", shape, ")");
+  if (columnwise) {
+    return {roundup(flat_first_dim / MXFP8_BLOCK_SIZE, 4), roundup(last_dim, 128)};
+  }
+  return {roundup(flat_first_dim, 128), roundup(last_dim / MXFP8_BLOCK_SIZE, 4)};
+}
+
 }  // namespace transformer_engine::pytorch

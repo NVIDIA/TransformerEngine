@@ -16,6 +16,7 @@
 #include "../../common.h"
 #include "../fp8/dequantize_fp8.cuh"
 #include "../fp8_blockwise/group_dequantize_fp8_blockwise.cuh"
+#include "../mxfp4/dequantize_mxfp4.cuh"
 #include "../mxfp8/dequantize_mxfp8.cuh"
 #include "../mxfp8/group_dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
@@ -40,7 +41,9 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      if (is_supported_by_CC_100()) {
+      if (is_fp4_dtype(input.dtype())) {
+        mxfp4::dequantize(input, output, stream);
+      } else if (is_supported_by_CC_100()) {
         mxfp8::dequantize(input, output, stream);
       } else {
         NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
