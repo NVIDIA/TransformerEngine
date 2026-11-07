@@ -480,6 +480,75 @@ class FusedAdam(torch.optim.Optimizer):
                     master = local_param.clone().detach().float()
                 self.set_scaled_state(param, "master_param", master)
 
+    @torch.no_grad()
+    def reload_master_param(self, param: torch.nn.Parameter, master_param: torch.Tensor) -> None:
+        """Replace a parameter and its master weights without resetting Adam history.
+
+        Use this after loading model weights without loading optimizer state. Unlike
+        :meth:`set_scaled_state`, this method accepts full FP32 values even when
+        ``store_param_remainders`` is enabled. It updates the model parameter as well,
+        including the high bits needed to reconstruct the master from its remainders.
+        Moment buffers are initialized if absent; existing moments and step counters
+        are preserved. Distributed callers must synchronize updated parameter shards.
+        Call this outside CUDA graph capture. The configured master-weight dtype still
+        determines storage precision when remainders are disabled.
+
+        Parameters
+        ----------
+        param : torch.nn.Parameter
+            A parameter belonging to this optimizer (the parameter object itself,
+            not ``param.data`` or another view of it).
+        master_param : torch.Tensor
+            FP32 weights with the same local shape as ``param``. A DTensor must have
+            the same device mesh, placements and global shape as ``param``. Values
+            are copied to the parameter's device if necessary.
+        """
+        if not self.master_weights:
+            raise RuntimeError("reload_master_param requires master_weights=True")
+        if not any(p is param for group in self.param_groups for p in group["params"]):
+            raise ValueError("param is not managed by this optimizer")
+        if isinstance(master_param, DTensor) and (
+            not isinstance(param, DTensor)
+            or master_param.device_mesh != param.device_mesh
+            or master_param.placements != param.placements
+            or master_param.shape != param.shape
+        ):
+            raise ValueError(
+                "DTensor master values must have the same device mesh, placements and shape"
+                " as the parameter"
+            )
+        local_param = param._local_tensor if isinstance(param, DTensor) else param
+        master = master_param._local_tensor if isinstance(master_param, DTensor) else master_param
+        if master.dtype != torch.float32:
+            raise ValueError("reload_master_param requires FP32 master values")
+        if master.shape != local_param.shape:
+            raise ValueError("Master values must have the same local shape as the parameter")
+        store_remainders = self.store_param_remainders and param.dtype == torch.bfloat16
+        if store_remainders and isinstance(local_param, QuantizedTensor):
+            raise ValueError("Parameter remainders require non-quantized BF16 parameters")
+        # set_scaled_state scales its FP32 input in-place for non-FP32 master storage,
+        # so copy the caller's tensor in that case.
+        master = master.detach().to(
+            device=local_param.device, copy=self.master_weight_dtype != torch.float32
+        )
+
+        # Create missing moments directly; set_scaled_state creates the master below.
+        # initialize_state would also copy the parameter into a master we overwrite.
+        for name in ("exp_avg", "exp_avg_sq"):
+            if name not in self.state[param]:
+                self._initialize_state(param, name, zero_buffer=True)
+
+        if store_remainders:
+            # Match AdamFunctorMasterParamRemainder's signed low bits and round-up convention.
+            bits = master.contiguous().view(torch.int32)
+            remainders = bits.to(torch.int16)
+            high_bits = (bits >> 16).to(torch.int16) + (remainders < 0).to(torch.int16)
+            local_param.copy_(high_bits.view(torch.bfloat16))
+            self.set_scaled_state(param, "master_param", remainders)
+        else:
+            local_param.copy_(master)
+            self.set_scaled_state(param, "master_param", master)
+
     def state_dict(self):
         """Override the state_dict() of pytorch. Before returning the state_dict, cast all
         non-fp32 states to fp32.
