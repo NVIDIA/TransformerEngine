@@ -1145,6 +1145,12 @@ def _custom_grouped_gemm(
             if o.shape[-1] != width:
                 raise ValueError(f"out[{i}] width {o.shape[-1]} != {width}")
 
+    # NOTE (known cost, not a correctness gap): this issues one single-group GEMM per expert group, so a
+    # step pays ~40x more kernel launches than it has GEMMs of work (~40,000 launches for ~1,000 GEMMs,
+    # measured on a real training step 2026-11). Per-launch cost is small (~0.05 ms of device time), which
+    # is why it never shows up in a per-phase average, but the sum is now the largest identified item in
+    # the custom-recipe path. Replacing this loop with a grouped GEMM kernel (one launch for all groups)
+    # is the intended fix and is what the surviving difference to the native FP4 path is made of.
     offset = 0
     for i in range(n):
         rows = m_splits[i]
