@@ -256,17 +256,12 @@ except PackageNotFoundError:
     _flash_attn_bwd_v4 = None
 else:
     try:
-        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
-
-        # FA4 4.0.0b24 requires CUTLASS DSL 4.6.2 or newer.
-        if fa_utils.fa4_version == PkgVersion("4.0.0b24") and cutlass_dsl_version < PkgVersion(
-            "4.6.2"
-        ):
+        if fa_utils.fa4_version < fa_utils.v4_version_required:
             raise ImportError(
-                "flash-attn-4 4.0.0b24 requires nvidia-cutlass-dsl>=4.6.2; "
-                f"found {cutlass_dsl_version}"
+                f"flash-attn-4>={fa_utils.v4_version_required} is required; "
+                f"found {fa_utils.fa4_version}"
             )
-
+        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
         from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
             flash_attn_func as _flash_attn_func_v4,
             flash_attn_varlen_func as _flash_attn_varlen_func_v4,
@@ -805,7 +800,18 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # attention scores and attention mask
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
         attention_probs = self.scale_mask_softmax(
-            matmul_result, attention_mask, attn_mask_type, softmax_scale
+            matmul_result,
+            attention_mask,
+            attn_mask_type,
+            softmax_scale,
+            overwrite_output_grads=not any(
+                (
+                    self.attention_dropout._forward_hooks,
+                    self.attention_dropout._forward_pre_hooks,
+                    self.attention_dropout._backward_hooks,
+                    self.attention_dropout._backward_pre_hooks,
+                )
+            ),
         )
 
         # mask out the pad positions in softmax results, mostly for the rows (pad tokens from q)

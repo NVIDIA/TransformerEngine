@@ -208,7 +208,9 @@ def quantize_rowwise_mxfp8(
     # and keep the elements in half precision instead of upcasting every one of them to f32.
     USE_HALF_PRECISION = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU)
 
-    amax_r = Float32(0.0)
+    # Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+    # so per-block amax will be NaN if all values in the block are NaN.
+    amax_r = Float32(float("nan"))
 
     # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
     # to avoid bank conflict.
@@ -516,12 +518,18 @@ def quantize_colwise_mxfp8(
         if cutlass.const_expr(CACHE_ACTIVATION):
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 sX_thread[i] = DTYPE(rX_thread_f32[i])
-        amax_c = Float32(0.0)
+        # Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+        # so per-block amax will be NaN if all values in the block are NaN.
+        amax_c = Float32(float("nan"))
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
             if cutlass.const_expr(FUSE_RELU):
                 amax_c = cute.arch.fmax(amax_c, rX_thread_f32[i])
             else:
                 amax_c = cute.arch.fmax(amax_c, fabs_f32(rX_thread_f32[i]))
+        if cutlass.const_expr(FUSE_RELU):
+            # For relu the max is at least 0
+            # We see relu(nan) = 0.0 here which is consistent with CUDA's relu implementation with fmaxf
+            amax_c = cute.arch.fmax(amax_c, Float32(0.0))
 
     # Irregular shapes: skip when this stage's row range or this thread's
     # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SCALING_SIZE so each stage
@@ -747,7 +755,9 @@ def quantize_bidimensional_mxfp8_swizzled(
         rX = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, Float32)
         cute.autovec_copy(tXsX, rX)
 
-        row_amax = Float32(0.0)
+        # Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+        # so per-block amax will be NaN if all values in the block are NaN.
+        row_amax = Float32(float("nan"))
         for c in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
             a = fabs_f32(rX[c])
             row_amax = cute.arch.fmax(row_amax, a)

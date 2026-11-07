@@ -9,6 +9,7 @@ import itertools
 import math
 import os
 import functools
+import warnings
 import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.device import te_device_type
@@ -38,6 +39,7 @@ from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuant
 
 __all__ = [
     "general_gemm",
+    "strided_batched_gemm",
     "general_grouped_gemm",
     "general_grouped_gemm_for_grouped_tensor",
     "get_cublas_workspace",
@@ -950,6 +952,94 @@ def general_gemm(
     return out, bias_grad, gelu_input, extra_output
 
 
+def strided_batched_gemm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    batch_dim_a: int = 0,
+    batch_dim_b: int = 0,
+    batch_dim_out: int = 0,
+    layout: str = "TN",
+    accumulate: bool = False,
+    use_split_accumulator: bool = False,
+    alpha: float = 1.0,
+    beta: Optional[float] = None,
+) -> torch.Tensor:
+    """Experimental strided batched GEMM.
+
+    Each tensor holds a batch of matrices and is flattened to 3D based on
+    its batch dim: with ``batch_dim=0``, ``[G, ..., C]`` is interpreted as
+    ``[G, R, C]``, and with ``batch_dim=-2``, ``[..., G, C]`` is interpreted
+    as ``[R, G, C]``. Following the same convention as ``general_gemm``,
+    this computes per batch entry (e.g. for ``layout="TN"``):
+    ``out[i] = B[i] @ A[i].T``. ``out`` serves as both the C and D
+    matrices, so accumulation applies ``beta`` to the existing contents of
+    ``out`` in place.
+
+    MXFP8 inputs must use compact scales. The extension packs and
+    GEMM-swizzles the required scaling direction for each operand before
+    launching cuBLASLt. A 2D MXFP8 tensor with ``batch_dim=-2`` is always
+    interpreted as a ``[R, G*C]`` view of a ``[R, G, C]`` tensor, which is
+    required for column-wise MXFP8 data with ``batch_dim=-2``. A 2D
+    ``[G, C]`` tensor (one row per batch entry) has the same layout with
+    ``batch_dim=0``, so pass ``batch_dim=0`` or a 3D tensor in that case.
+    Other input formats fall back to a high-precision GEMM.
+    """
+    assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+
+    # Output dtype
+    dtype = out.dtype
+    if dtype not in (torch.float32, torch.float16, torch.bfloat16):
+        raise ValueError(f"Strided batched GEMM requires a high-precision output (got {dtype}).")
+
+    # Make sure data is in supported format
+    if isinstance(A, MXFP8TensorStorage) and isinstance(B, MXFP8TensorStorage):
+        # MXFP8 GEMM
+        if A._with_gemm_swizzled_scales or B._with_gemm_swizzled_scales:
+            raise ValueError("Strided batched GEMM expects compact MXFP8 scales.")
+    else:
+        # Fallback to high-precision GEMM
+        A_is_quantized = isinstance(A, QuantizedTensorStorage)
+        B_is_quantized = isinstance(B, QuantizedTensorStorage)
+        if A_is_quantized or B_is_quantized:
+            warnings.warn(
+                "Strided batched GEMM does not support this quantization format "
+                f"(A is {A.__class__.__name__}, B is {B.__class__.__name__}). "
+                "Falling back to high-precision GEMM."
+            )
+        if A_is_quantized:
+            A = A.dequantize(dtype=dtype)
+        elif A.dtype != dtype:
+            A = A.to(dtype=dtype)
+        if B_is_quantized:
+            B = B.dequantize(dtype=dtype)
+        elif B.dtype != dtype:
+            B = B.to(dtype=dtype)
+
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    beta = validate_gemm_scale(beta, accumulate)
+    workspace = get_cublas_workspace(out.device.index, False, False)
+    sm_count = get_sm_count()
+    return tex.strided_batched_gemm(
+        A,
+        transa,
+        batch_dim_a,
+        B,
+        transb,
+        batch_dim_b,
+        out,
+        batch_dim_out,
+        workspace,
+        accumulate,
+        use_split_accumulator,
+        sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
+        alpha,
+        beta,
+    )
+
+
 def general_grouped_gemm(
     A: List[torch.Tensor],
     B: List[torch.Tensor],
@@ -1154,14 +1244,13 @@ def general_grouped_gemm_for_grouped_tensor(
     if isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
 
-    def _is_fp8_blockwise(operand) -> bool:
-        if isinstance(operand, (list, tuple)):
-            return any(isinstance(t, Float8BlockwiseQTensorStorage) for t in operand)
-        if isinstance(operand, GroupedTensorStorage):
-            return isinstance(operand.quantizer, Float8BlockQuantizer)
-        return False
-
-    if _is_fp8_blockwise(A) or _is_fp8_blockwise(B):
+    # Discrete expert tensors share a scaling mode, so inspect only the first one.
+    is_fp8_blockwise_A = (
+        isinstance(A[0], Float8BlockwiseQTensorStorage)
+        if is_discrete_in
+        else isinstance(A.quantizer, Float8BlockQuantizer)
+    )
+    if is_fp8_blockwise_A or isinstance(B.quantizer, Float8BlockQuantizer):
         # The fused grouped FP8 block-scaling GEMM only supports split accumulation,
         # so force it on and intentionally override any caller-supplied value. This
         # matches the Float8BlockScaling recipe, which fixes use_split_accumulator=True
@@ -1195,7 +1284,7 @@ def general_grouped_gemm_for_grouped_tensor(
 
     # Hopper (SM90) uses a single shared alpha/beta scalar;
     # Blackwell+ (SM100) supports per-group alpha/beta arrays.
-    per_group = get_device_compute_capability() >= (10, 0)
+    per_group = get_device_compute_capability(device) >= (10, 0)
     num_alphabeta = num_tensors if per_group else 1
 
     if alpha is None:
