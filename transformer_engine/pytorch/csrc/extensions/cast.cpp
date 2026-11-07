@@ -38,6 +38,65 @@ std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
+void optimize_tensors_for_gemm(const std::vector<std::unique_ptr<Quantizer>> &quantizers,
+                               std::vector<TensorWrapper> &tensors,
+                               std::vector<py::object> &tensors_py) {
+  if (tensors.empty()) {
+    return;
+  }
+  if (std::all_of(tensors.begin(), tensors.end(),
+                  [](const auto &tensor) { return tensor.get_with_gemm_swizzled_scales(); })) {
+    return;
+  }
+  const auto scaling_mode = tensors.front().scaling_mode();
+  const bool use_batch =
+      tensors.size() > 1 &&
+      (scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING) &&
+      std::all_of(quantizers.begin(), quantizers.end(),
+                  [](const auto &quantizer) { return quantizer->optimize_for_gemm; }) &&
+      std::all_of(tensors.begin(), tensors.end(), [scaling_mode](const auto &tensor) {
+        return tensor.scaling_mode() == scaling_mode;
+      });
+  if (!use_batch) {
+    for (size_t i = 0; i < tensors.size(); ++i) {
+      quantizers[i]->optimize_tensor_for_gemm(tensors[i], tensors_py[i]);
+    }
+    return;
+  }
+
+  for (bool rowwise : {true, false}) {
+    const bool has_scales =
+        std::any_of(tensors.begin(), tensors.end(), [rowwise](const auto &tensor) {
+          const auto scales =
+              rowwise ? tensor.get_rowwise_scale_inv() : tensor.get_columnwise_scale_inv();
+          return !tensor.get_with_gemm_swizzled_scales() && scales.data_ptr != nullptr;
+        });
+    if (has_scales) {
+      inplace_multi_tensor_swizzle_scales_for_gemm(tensors_py, rowwise, !rowwise);
+    }
+  }
+  for (size_t i = 0; i < tensors.size(); ++i) {
+    auto &tensor = tensors[i];
+    if (tensor.get_with_gemm_swizzled_scales()) {
+      continue;
+    }
+    for (bool rowwise : {true, false}) {
+      const auto scales =
+          rowwise ? tensor.get_rowwise_scale_inv() : tensor.get_columnwise_scale_inv();
+      if (scales.data_ptr != nullptr) {
+        const auto scales_py = tensors_py[i]
+                                   .attr(rowwise ? "_rowwise_scale_inv" : "_columnwise_scale_inv")
+                                   .cast<at::Tensor>();
+        tensor.set_parameter(rowwise ? kNVTERowwiseScaleInv : kNVTEColumnwiseScaleInv,
+                             scales_py.data_ptr(), static_cast<DType>(scales.dtype), scales.shape);
+      }
+    }
+    // Both orientations must be converted before publishing the shared layout flag.
+    tensors_py[i].attr("_with_gemm_swizzled_scales") = true;
+    tensor.set_with_gemm_swizzled_scales(true);
+  }
+}
+
 void allreduce_nvfp4_amax_tensors(NVFP4Quantizer *nvfp4_quantizer_cpp,
                                   std::vector<at::Tensor> &&amax_tensors) {
   if (!nvfp4_quantizer_cpp->with_amax_reduction || amax_tensors.empty()) {
@@ -81,11 +140,7 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   // Perform quantization
   quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
 
-  // Post-quantize swizzle for quantizers whose kernel does not bake
-  // the GEMM-swizzled scale layout in directly
-  if (quantizer_cpp->optimize_for_gemm && !output_cpp.get_with_gemm_swizzled_scales()) {
-    inplace_swizzle_scale_for_gemm(output_py);
-  }
+  quantizer_cpp->optimize_tensor_for_gemm(output_cpp, output_py);
 
   return output_py;
 }
@@ -128,9 +183,7 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
   }
 
   nvfp4_quantizer_cpp->quantize_impl(input_cpp, output_cpp, std::nullopt, false);
-  if (quantizer_cpp->optimize_for_gemm && !output_cpp.get_with_gemm_swizzled_scales()) {
-    inplace_swizzle_scale_for_gemm(output_py);
-  }
+  quantizer_cpp->optimize_tensor_for_gemm(output_cpp, output_py);
 
   return output_py;
 }
@@ -1156,6 +1209,7 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
   // Perform multi-tensor quantization
   multi_tensor_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
 
+  optimize_tensors_for_gemm(quantizer_cpp_list, output_cpp_list, output_py_list);
   return output_py_list;
 }
 
@@ -2256,6 +2310,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
   }
 
+  optimize_tensors_for_gemm(quantizer_cpp_list, output_cpp_list, output_py_list);
   return output_py_list;
 }
 
