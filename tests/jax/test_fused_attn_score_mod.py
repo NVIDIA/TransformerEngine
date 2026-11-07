@@ -2,7 +2,9 @@
 #
 # See LICENSE for license information.
 """Tests for cuDNN frontend score_mod fused attention."""
+
 from math import sqrt
+from types import FunctionType
 
 import jax
 import jax.numpy as jnp
@@ -10,6 +12,7 @@ import numpy as np
 import pytest
 
 import transformer_engine.jax.cpp_extensions.flex_attention as tex_attention
+import transformer_engine.jax.cpp_extensions.cudnn_graph as tex_cudnn_graph
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -20,7 +23,6 @@ from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_conf
 from transformer_engine.jax.flax import transformer as flax_transformer
 from transformer_engine_jax import get_device_compute_capability, NVTE_Fused_Attn_Backend
 from test_fused_attn import FusedAttnRunner, SeqDescFormat
-
 
 _CONFIG_TEST_HEAD_DIM = 128
 _CONFIG_TEST_SCALING_FACTOR = 1.0 / sqrt(_CONFIG_TEST_HEAD_DIM)
@@ -659,19 +661,58 @@ def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
         __version__ = "1.22.0"
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        tex_cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12200,
     )
     assert tex_attention._check_cudnn_frontend_version_match(FakeCudnn) == 12200
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        tex_cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12100,
     )
     with pytest.raises(RuntimeError, match="Python/C\\+\\+ version mismatch"):
         tex_attention._check_cudnn_frontend_version_match(FakeCudnn)
+
+
+def test_fused_attn_score_mod_module_lambda_keys_do_not_collide():
+    """Different anonymous functions cannot share a serialized attention graph."""
+    first = lambda graph, score, tensors: score  # noqa: E731
+    second = lambda graph, score, tensors: graph.tanh(score)  # noqa: E731
+    first.__qualname__ = second.__qualname__ = "<lambda>"
+    assert first.__qualname__ == second.__qualname__ == "<lambda>"
+    assert tex_attention._score_mod_callback_cache_key(first) != (
+        tex_attention._score_mod_callback_cache_key(second)
+    )
+
+
+@pytest.mark.parametrize("keyword", (False, True))
+def test_fused_attn_score_mod_config_separates_function_defaults(keyword):
+    """Defaults must participate in both the static config and serialized-graph cache key."""
+    first = FunctionType(_default_mode_score_mod.__code__, globals(), argdefs=(False,))
+    second = FunctionType(_default_mode_score_mod.__code__, globals(), argdefs=(False,))
+    first.__kwdefaults__ = second.__kwdefaults__ = {"keyword_mode": False}
+    if keyword:
+        second.__kwdefaults__ = {"keyword_mode": True}
+    else:
+        first.__defaults__ = (False,)
+        second.__defaults__ = (True,)
+    configs = [
+        make_fused_attn_score_mod_config(
+            callback, None, None, None, _CONFIG_TEST_SCALING_FACTOR, True
+        )[0]
+        for callback in (first, first, second)
+    ]
+    assert configs[0] == configs[1]
+    assert configs[0] != configs[2]
+    assert tex_attention._graph_cache_key("fwd", configs[0], ()) != (
+        tex_attention._graph_cache_key("fwd", configs[2], ())
+    )
+
+
+def _default_mode_score_mod(graph, score, _tensors, mode=False, *, keyword_mode=False):
+    return graph.tanh(input=score) if mode or keyword_mode else score
 
 
 def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():

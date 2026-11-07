@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
+
 import logging
 import operator
 import os
@@ -12,21 +13,15 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax, ffi
+from jax import dtypes, lax
+from jax.interpreters import mlir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
-import transformer_engine_jax
 from transformer_engine_jax import (
-    DType,
-    JAXX_Scaling_Mode,
-    NVTE_Bias_Type,
     NVTE_Fused_Attn_Backend,
-    NVTE_Mask_Type,
-    NVTE_QKV_Format,
-    NVTE_QKV_Layout,
-    NVTE_Softmax_Type,
 )
+from transformer_engine.common.cudnn.graph import uses_ragged_attention_graph
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -39,13 +34,10 @@ from transformer_engine.jax.attention import (
 from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES, is_mesh_available
 
 from .base import BasePrimitive, register_primitive
+from . import cudnn_attention
 from .misc import (
     check_valid_batch_dims,
-    jax_dtype_to_te_dtype,
-    te_dtype_to_jax_dtype,
     get_padded_spec,
-    get_cudnn_version,
-    get_all_device_compute_capability,
 )
 from ..sharding import (
     global_mesh_resource,
@@ -58,7 +50,6 @@ from ..sharding import (
     num_of_devices,
     with_sharding_constraint,
 )
-
 
 __all__ = [
     "FusedAttnHelper",
@@ -118,6 +109,7 @@ class AttentionLogging:
         "stripe_size",
         "return_max_logit",
         "allow_fast_causal_path",
+        "fp8",
     ],
 )
 @dataclass(frozen=True)
@@ -144,6 +136,7 @@ class _FusedAttnConfig:
     )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
     return_max_logit: bool = False
     allow_fast_causal_path: bool = True
+    fp8: bool | str = False
 
     @property
     def effective_window_size(self) -> Tuple[int, int]:
@@ -151,64 +144,6 @@ class _FusedAttnConfig:
         if self.cp_striped_window_size is not None:
             return self.cp_striped_window_size
         return self.window_size
-
-
-@dataclass
-class FusedAttnParams:
-    """
-    Attention parameters used to select the fused attention backend.
-
-    Fields are declared in the order of the ``FusedAttnConfig`` struct in
-    ``common/fused_attn/config_and_params.h``, which is the order the C++ binding reads them in
-    and the order it fills the config with. Fields JAX does not use, are left at their ``FusedAttnConfig``
-    defaults.
-    """
-
-    # basic attention settings
-    is_training: bool = True
-    deterministic: bool = False
-    cuda_graph: bool = False
-    return_max_logit: bool = False
-    attn_mask_type: NVTE_Mask_Type = NVTE_Mask_Type.NVTE_NO_MASK
-    bias_type: NVTE_Bias_Type = NVTE_Bias_Type.NVTE_NO_BIAS
-    window_size_left: int = -1
-    window_size_right: int = -1
-    bottom_right_diagonal: bool = True
-    softmax_type: NVTE_Softmax_Type = NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX
-    scaling_mode: JAXX_Scaling_Mode = JAXX_Scaling_Mode.NO_SCALING
-    dropout: float = 0.0
-    attn_scale: float = 1.0
-
-    # tensor types
-    qkv_dtype: DType = DType.kBFloat16
-    o_dtype: DType = DType.kBFloat16
-    do_dtype: DType = DType.kBFloat16
-    dqkv_dtype: DType = DType.kBFloat16
-
-    # tensor layouts
-    qkv_layout: NVTE_QKV_Layout = NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
-    o_format: NVTE_QKV_Format = NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
-    do_format: NVTE_QKV_Format = NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
-    dqkv_layout: NVTE_QKV_Layout = NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
-    qkv_scale_inv_format: NVTE_QKV_Format = NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
-    do_scale_inv_format: NVTE_QKV_Format = NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
-
-    # tensor dimensions
-    batch_size: int = 0
-    num_attn_heads: int = 0
-    num_gqa_groups: int = 0
-    head_dim_qk: int = 0
-    head_dim_v: int = 0
-    max_seqlen_q: int = 0
-    max_seqlen_kv: int = 0
-    num_tokens_q: int = 0
-    num_tokens_kv: int = 0
-
-    # bias dimensions
-    bias_batch_size: int = 0
-    bias_num_heads: int = 0
-    bias_seqlen_q: int = 0
-    bias_seqlen_kv: int = 0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -241,6 +176,7 @@ class FusedAttnHelper:
     bias_seqlen_q: Optional[int] = None
     bias_seqlen_kv: Optional[int] = None
     max_segments_per_seq: int = 1
+    fp8: bool | str = False
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -257,55 +193,70 @@ class FusedAttnHelper:
         that no fused backend is available), and ``NVTE_DEBUG_LEVEL=2`` additionally logs the
         resolved config and the reason fused attention was rejected.
         """
-        q_type = jax_dtype_to_te_dtype(self.q_dtype)
-        kv_type = jax_dtype_to_te_dtype(self.kv_dtype)
-        if q_type != kv_type:
+        if self.fp8 not in (False, True, "mxfp8"):
+            raise ValueError('fp8 must be False, True, or "mxfp8".')
+        if self.q_dtype != self.kv_dtype:
             raise ValueError("Q and KV must have the same data type.")
-        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = 0
-        if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
-            bias_batch = self.bias_batch or 0
-            bias_heads = self.bias_heads or 0
-            bias_seqlen_q = self.bias_seqlen_q or 0
-            bias_seqlen_kv = self.bias_seqlen_kv or 0
-        num_segments = self.batch_size
-        num_tokens_q = num_tokens_kv = 0
-        if self.qkv_layout.is_thd():
-            num_segments = self.batch_size * self.max_segments_per_seq
-            num_tokens_q = self.batch_size * self.q_max_seqlen
-            num_tokens_kv = self.batch_size * self.kv_max_seqlen
-        backend, message = transformer_engine_jax.get_fused_attn_backend(
-            FusedAttnParams(
+        backend = NVTE_Fused_Attn_Backend.NVTE_No_Backend
+        message = ""
+        if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
+            message = "Fused attention does not support pre-scale bias."
+        elif self.q_dtype not in (jnp.float16, jnp.bfloat16):
+            message = "Fused attention requires FP16/BF16 inputs."
+        else:
+            config = _FusedAttnConfig(
+                attn_bias_type=self.attn_bias_type,
+                attn_mask_type=self.attn_mask_type,
+                softmax_type=self.softmax_type,
+                qkv_layout=self.qkv_layout,
+                scaling_factor=self.attn_scale,
+                dropout_probability=self.dropout_probability,
                 is_training=self.is_training,
-                deterministic=not self.is_non_deterministic_allowed(),
-                return_max_logit=self.return_max_logit,
-                attn_mask_type=self.attn_mask_type.value,
-                bias_type=self.attn_bias_type.value,
-                window_size_left=self.window_size[0],
-                window_size_right=self.window_size[1],
+                max_segments_per_seq=self.max_segments_per_seq,
+                window_size=self.window_size,
                 bottom_right_diagonal=self.bottom_right_diagonal,
-                softmax_type=self.softmax_type.value,
-                dropout=self.dropout_probability,
-                attn_scale=self.attn_scale,
-                qkv_dtype=q_type,
-                o_dtype=q_type,
-                do_dtype=q_type,
-                dqkv_dtype=q_type,
-                qkv_layout=self.qkv_layout.value,
-                batch_size=num_segments,
-                num_attn_heads=self.q_num_heads,
-                num_gqa_groups=self.kv_num_heads,
-                head_dim_qk=self.head_dim_qk,
-                head_dim_v=self.head_dim_v,
-                max_seqlen_q=self.q_max_seqlen,
-                max_seqlen_kv=self.kv_max_seqlen,
-                num_tokens_q=num_tokens_q,
-                num_tokens_kv=num_tokens_kv,
-                bias_batch_size=bias_batch,
-                bias_num_heads=bias_heads,
-                bias_seqlen_q=bias_seqlen_q,
-                bias_seqlen_kv=bias_seqlen_kv,
+                context_parallel_load_balanced=False,
+                cp_axis="",
+                cp_striped_window_size=None,
+                stripe_size=None,
+                return_max_logit=self.return_max_logit,
+                fp8=self.fp8,
             )
-        )
+            qshape = (self.batch_size, self.q_max_seqlen, self.q_num_heads, self.head_dim_qk)
+            kshape = (self.batch_size, self.kv_max_seqlen, self.kv_num_heads, self.head_dim_qk)
+            vshape = (self.batch_size, self.kv_max_seqlen, self.kv_num_heads, self.head_dim_v)
+            if self.qkv_layout.is_qkvpacked():
+                qshape = (*qshape[:-2], 3, *qshape[-2:])
+                kshape = vshape = (0,)
+            elif self.qkv_layout.is_kvpacked():
+                kshape = (*kshape[:-2], 2, *kshape[-2:])
+                vshape = (0,)
+            bias_shape = (
+                (
+                    self.bias_batch or 1,
+                    self.bias_heads or self.q_num_heads,
+                    self.bias_seqlen_q or self.q_max_seqlen,
+                    self.bias_seqlen_kv or self.kv_max_seqlen,
+                )
+                if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
+                else (0,)
+            )
+            avals = tuple(
+                jax.ShapeDtypeStruct(shape, self.q_dtype)
+                for shape in (qshape, kshape, vshape, bias_shape)
+            )
+            avals += (jax.ShapeDtypeStruct((1, self.q_num_heads, 1, 1), jnp.float32),)
+            try:
+                cudnn_attention.check_attention_support("fwd", avals, config)
+                if self.is_training:
+                    cudnn_attention.check_attention_support("bwd", avals, config)
+                backend = (
+                    NVTE_Fused_Attn_Backend.NVTE_FP8
+                    if self.fp8
+                    else NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                )
+            except ValueError as exc:
+                message = str(exc)
 
         AttentionLogging.setup_logging()
         logger = AttentionLogging.logger
@@ -401,7 +352,8 @@ class _FusedAttnRNGStateChecker:
     The fused attention backend requires a 64 bits seed and a 64 bits offset.
     However, JAX doesn't enable 64 bits by default,
     so we have to emulate seed as two 32 bits array.
-    The offset calculation is maintained in the backend.
+    The explicit JAX key supplies the seed; the saved zero offset makes
+    dropout replayable when a forward pass is recomputed.
     """
 
     rng_state_dtype: jnp.dtype = jnp.uint32
@@ -538,9 +490,13 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
             max_segments_per_seq=config.max_segments_per_seq,
+            fp8=config.fp8,
         ).get_fused_attn_backend()
 
-        if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+        if backend in (
+            NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+            NVTE_Fused_Attn_Backend.NVTE_FP8,
+        ):
             if config.qkv_layout.is_thd():
                 softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
             else:
@@ -550,8 +506,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             raise ValueError(f"Unsupported backend: {message}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
         if config.return_max_logit:
-            # cuDNN Max is row-wise over S_kv. Dense and SM120 THD use
-            # [..., H, S_q, 1]; non-SM120 THD uses [..., S_q, H, 1].
+            # cuDNN Max is row-wise over S_kv. Dense and SM12x THD use
+            # [..., H, S_q, 1]; other THD layouts use [..., S_q, H, 1].
             # Both raw layouts are reduced to the public per-head [H] result below.
             if FusedAttnFwdPrimitive._uses_thd_ragged_max_tensor(config):
                 max_tensor_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
@@ -571,42 +527,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        if config.attn_bias_type == AttnBiasType.NO_BIAS:
+        if config.attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
             bias_batch = bias_heads = 0
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
-        # prepare for the active fused-attn backend
-        input_batch = reduce(operator.mul, batch_shape)
-        wkspace_info = transformer_engine_jax.get_fused_attn_fwd_workspace_sizes(
-            input_batch,
-            bias_batch,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            bias_heads,
-            q_head_dim,
-            v_head_dim,
-            config.scaling_factor,
-            config.dropout_probability,
-            config.attn_bias_type.value,
-            config.attn_mask_type.value,
-            config.softmax_type.value,
-            config.qkv_layout.value,
-            jax_dtype_to_te_dtype(q_aval.dtype),
-            config.is_training,
-            config.max_segments_per_seq,
-            config.effective_window_size[0],
-            config.effective_window_size[1],
-            config.return_max_logit,
-            config.bottom_right_diagonal,
+        graph = cudnn_attention.get_graph(
+            "fwd", (q_aval, k_aval, v_aval, bias_aval, softmax_offset_aval), config
         )
-        wkspace_aval = q_aval.update(
-            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
-        )
+        wkspace_aval = q_aval.update(shape=(graph.graph.workspace_size,), dtype=jnp.uint8)
 
         assert (
             softmax_offset_aval.dtype == jnp.float32
@@ -656,32 +586,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         *,
         config: _FusedAttnConfig,
     ):
-        """
-        Fused attention fwd lowering rules
-        """
-        q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
+        """Lower Python-built cuDNN attention through the JAX-owned graph executor."""
 
-        (
-            batch_shape,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            q_head_dim,
-            v_head_dim,
-        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
+        def execute(*args):
+            return cudnn_attention.execute("fwd", args, config, ctx.avals_out)
 
-        input_batch = reduce(operator.mul, batch_shape)
-
-        if config.attn_bias_type == AttnBiasType.NO_BIAS:
-            bias_batch = bias_heads = 0
-        else:
-            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
-            bias_batch = reduce(operator.mul, bias_batch_shape)
-
-        window_size_left, window_size_right = config.effective_window_size
-
-        return ffi.ffi_lowering(FusedAttnFwdPrimitive.name)(
+        return mlir.lower_fun(execute, multiple_results=True)(
             ctx,
             q,
             k,
@@ -696,29 +606,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             _q_segment_ids,
             _kv_segment_ids,
             _q_segment_pos,
-            _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-            input_batch=input_batch,
-            bias_batch=bias_batch,
-            q_max_seqlen=q_max_seqlen,
-            kv_max_seqlen=kv_max_seqlen,
-            attn_heads=attn_heads,
-            num_gqa_groups=num_gqa_groups,
-            bias_heads=bias_heads,
-            qk_head_dim=q_head_dim,
-            v_head_dim=v_head_dim,
-            max_segments_per_seq=config.max_segments_per_seq,
-            scaling_factor=float(config.scaling_factor),
-            dropout_probability=float(config.dropout_probability),
-            bias_type=int(config.attn_bias_type.value),
-            mask_type=int(config.attn_mask_type.value),
-            qkv_layout=int(config.qkv_layout.value),
-            is_training=config.is_training,
-            return_max_logit=config.return_max_logit,
-            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-            window_size_left=window_size_left,
-            window_size_right=window_size_right,
-            bottom_right_diagonal=config.bottom_right_diagonal,
-            softmax_type=int(config.softmax_type.value),
+            _kv_segment_pos,
         )
 
     @staticmethod
@@ -839,8 +727,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     def _reduce_max_logit(max_tensor, output, q_seqlen, q_seq_offsets, config):
         """Reduce cuDNN's row-wise Max tensor to the public per-head max_logit.
 
-        Dense and SM120 THD use ``[..., H, S_q, 1]``; non-SM120
-        THD uses ``[..., S_q, H, 1]``. A rank-3 THD result is ``[T_q, H, 1]``.
+        Dense and SM12x THD use ``[..., H, S_q, 1]``; THD with packed statistics
+        uses ``[..., S_q, H, 1]``. A rank-3 THD result is ``[T_q, H, 1]``.
         All layouts reduce to ``[H]``. Static THD buffers can contain invalid query
         rows, so those rows are masked before reduction.
         """
@@ -879,7 +767,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     @staticmethod
     def _uses_thd_ragged_max_tensor(config):
         """Return whether cuDNN writes THD Max with BSH-like ragged-stats layout."""
-        return config.qkv_layout.is_thd() and 120 not in get_all_device_compute_capability()
+        return config.qkv_layout.is_thd() and uses_ragged_attention_graph(
+            cudnn_attention.device_capabilities()[0]
+        )
 
     @staticmethod
     def _empty_or_neg_inf_max_logit(head, dtype, config):
@@ -1114,57 +1004,13 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             f" kv_seqlen_or_cu_seqlen_aval.dtype={kv_seqlen_or_cu_seqlen_aval.dtype}"
         )
 
-        (
-            batch_shape,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            qk_head_dim,
-            v_head_dim,
-        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
+        attn_heads = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)[3]
 
-        if config.attn_bias_type == AttnBiasType.NO_BIAS:
-            bias_batch = bias_heads = 0
-        else:
-            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
-            bias_batch = reduce(operator.mul, bias_batch_shape)
-
-        deterministic = not FusedAttnHelper.is_non_deterministic_allowed()
-
-        input_batch = reduce(operator.mul, batch_shape)
-        wkspace_shape, wkspace_dtype = transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
-            input_batch,
-            bias_batch,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            bias_heads,
-            qk_head_dim,
-            v_head_dim,
-            config.scaling_factor,
-            config.dropout_probability,
-            config.attn_bias_type.value,
-            config.attn_mask_type.value,
-            config.softmax_type.value,
-            config.qkv_layout.value,
-            jax_dtype_to_te_dtype(q_aval.dtype),
-            config.is_training,
-            deterministic,
-            config.max_segments_per_seq,
-            config.effective_window_size[0],
-            config.effective_window_size[1],
-            config.bottom_right_diagonal,
+        graph = cudnn_attention.get_graph(
+            "bwd", (q_aval, k_aval, v_aval, bias_aval, softmax_offset_aval), config
         )
-
-        dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
-        dk_aval = k_aval.update(shape=k_aval.shape, dtype=k_dtype)
-        dv_aval = v_aval.update(shape=v_aval.shape, dtype=v_dtype)
-        dbias_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
-        wkspace_aval = q_aval.update(
-            shape=wkspace_shape, dtype=te_dtype_to_jax_dtype(wkspace_dtype)
-        )
+        dq_aval, dk_aval, dv_aval, dbias_aval = q_aval, k_aval, v_aval, bias_aval
+        wkspace_aval = q_aval.update(shape=(graph.graph.workspace_size,), dtype=jnp.uint8)
 
         # Validate incoming softmax_offset shape and dtype
         assert (
@@ -1223,32 +1069,12 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         *,
         config,
     ):
-        """
-        Fused attention bwd lowering rules
-        """
-        q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
+        """Lower Python-built cuDNN attention through the JAX-owned graph executor."""
 
-        (
-            batch_shape,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            qk_head_dim,
-            v_head_dim,
-        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
+        def execute(*args):
+            return cudnn_attention.execute("bwd", args, config, ctx.avals_out)
 
-        input_batch = reduce(operator.mul, batch_shape)
-
-        if config.attn_bias_type == AttnBiasType.NO_BIAS:
-            bias_batch = bias_heads = 0
-        else:
-            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
-            bias_batch = reduce(operator.mul, bias_batch_shape)
-
-        window_size_left, window_size_right = config.effective_window_size
-
-        return ffi.ffi_lowering(FusedAttnBwdPrimitive.name)(
+        return mlir.lower_fun(execute, multiple_results=True)(
             ctx,
             q,
             k,
@@ -1266,28 +1092,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             q_segment_ids,
             kv_segment_ids,
             q_segment_pos,
-            kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-            input_batch=input_batch,
-            bias_batch=bias_batch,
-            q_max_seqlen=q_max_seqlen,
-            kv_max_seqlen=kv_max_seqlen,
-            attn_heads=attn_heads,
-            num_gqa_groups=num_gqa_groups,
-            bias_heads=bias_heads,
-            qk_head_dim=qk_head_dim,
-            v_head_dim=v_head_dim,
-            max_segments_per_seq=config.max_segments_per_seq,
-            scaling_factor=float(config.scaling_factor),
-            dropout_probability=float(config.dropout_probability),
-            bias_type=int(config.attn_bias_type.value),
-            mask_type=int(config.attn_mask_type.value),
-            qkv_layout=int(config.qkv_layout.value),
-            is_training=config.is_training,
-            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-            window_size_left=window_size_left,
-            window_size_right=window_size_right,
-            bottom_right_diagonal=config.bottom_right_diagonal,
-            softmax_type=int(config.softmax_type.value),
+            kv_segment_pos,
         )
 
     @staticmethod
@@ -1714,6 +1519,7 @@ class _FusedAttnCPWithAllGatherHelper:
             cp_striped_window_size=None,
             stripe_size=self.config.stripe_size,
             return_max_logit=self.config.return_max_logit,
+            fp8=self.config.fp8,
         )
 
     def get_step_config_for_striped(self, max_seqlen, cp_size) -> _FusedAttnConfig:
@@ -1735,6 +1541,7 @@ class _FusedAttnCPWithAllGatherHelper:
             cp_striped_window_size=None,
             stripe_size=self.config.stripe_size,
             return_max_logit=self.config.return_max_logit,
+            fp8=self.config.fp8,
         )
 
     def all_gather_kv(self, k, v):
@@ -2807,6 +2614,7 @@ class _FusedAttnCPWithP2PHelper:
             cp_striped_window_size=None,
             stripe_size=self.config.stripe_size,
             return_max_logit=self.config.return_max_logit,
+            fp8=self.config.fp8,
         )
 
     def get_striped_thd_step_config(self) -> _FusedAttnConfig:
@@ -3089,7 +2897,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             else:
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
-            (kv, output, softmax_aux, max_logit) = carry
+            kv, output, softmax_aux, max_logit = carry
 
             output = output.astype(q.dtype)
             # Globalize the rank-local running [H] max across DP/CP.
@@ -3314,7 +3122,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
             else:
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
-            (kv, dq, dk_dv, dbias) = carry
+            kv, dq, dk_dv, dbias = carry
 
             # Final permute to put gradients back to their final resting place.
             dk_dv = helper.permute_kv(dk_dv, cp_perm)
@@ -3553,7 +3361,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             else:
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
-            (_, _, _, output, softmax_aux, max_logit) = carry
+            _, _, _, output, softmax_aux, max_logit = carry
 
             output = output.astype(q.dtype)
             # Globalize the rank-local running [H] max across DP/CP.
@@ -3685,7 +3493,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             else:
                 for idx in range(cp_size):
                     carry = scan_kv_block(idx, carry)
-            (_, _, _, dq, dkv, dbias) = carry
+            _, _, _, dq, dkv, dbias = carry
 
             # Final permute to put gradients back to their final resting place.
             dkv = helper.permute_kv(dkv, cp_perm)
@@ -3735,6 +3543,8 @@ def fused_attn_fwd(
     context_parallel_axis: str = "",
     stripe_size: int | None = None,
     return_max_logit: bool = False,
+    fp8: bool | str = False,
+    quantized_qkv=None,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -3798,7 +3608,7 @@ def fused_attn_fwd(
     else:
         raise ValueError(f"Unknown {qkv_layout=}")
 
-    if attn_bias_type == AttnBiasType.NO_BIAS:
+    if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
         assert (
             bias is None
         ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias={bias}"
@@ -3851,6 +3661,7 @@ def fused_attn_fwd(
         cp_striped_window_size=None,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        fp8=fp8,
     )
 
     primitive = None
@@ -3868,14 +3679,21 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    output, softmax_aux, rng_state, max_logit = primitive.bind(
+    operands = (
         *qkv_for_primitive,
         bias,
         softmax_offset,
         seed,
         *seq_desc_flatten,
-        config=fused_config,
     )
+    if quantized_qkv is None:
+        output, softmax_aux, rng_state, max_logit = primitive.bind(*operands, config=fused_config)
+    else:
+        from .mxfp8_attention import execute_prequantized
+
+        output, softmax_aux, rng_state, max_logit = execute_prequantized(
+            operands, quantized_qkv, fused_config, False
+        )
     rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
     return (output, softmax_aux, rng_state, max_logit)
 
@@ -3902,6 +3720,8 @@ def fused_attn_bwd(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     stripe_size: int | None = None,
+    fp8: bool | str = False,
+    quantized_qkv=None,
 ):
     """
     Perform the backward pass of the cuDNN fused attention implementations.
@@ -3967,7 +3787,7 @@ def fused_attn_bwd(
     else:
         raise ValueError(f"Unknown {qkv_layout=}")
 
-    if attn_bias_type == AttnBiasType.NO_BIAS:
+    if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
         assert (
             bias is None
         ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias with type={type(bias)}"
@@ -3995,15 +3815,18 @@ def fused_attn_bwd(
                 softmax_offset, (None, HEAD_AXES, None, None)
             )
 
-    compute_capabilities = get_all_device_compute_capability()
+    compute_capabilities = cudnn_attention.device_capabilities()
     if any(x >= 100 for x in compute_capabilities) and is_training:
         assert (
             FusedAttnHelper.is_non_deterministic_allowed()
-            and (attn_bias_type == AttnBiasType.NO_BIAS or dropout_probability == 0.0)
+            and (
+                attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI)
+                or dropout_probability == 0.0
+            )
         ) or (
             not FusedAttnHelper.is_non_deterministic_allowed()
-            and get_cudnn_version() >= (9, 18, 1)
-            and attn_bias_type == AttnBiasType.NO_BIAS
+            and cudnn_attention.cudnn_version() >= 91801
+            and attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI)
             and dropout_probability == 0.0
         ), (
             "For sm100+, non-deterministic bprop does not support bias with dropout,"
@@ -4012,6 +3835,7 @@ def fused_attn_bwd(
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,
+        fp8=fp8,
         attn_mask_type=attn_mask_type,
         qkv_layout=qkv_layout,
         softmax_type=softmax_type,
@@ -4041,7 +3865,7 @@ def fused_attn_bwd(
                 primitive = FusedRingAttnBwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    *qkv_grads, bias_grad, softmax_offset_grad = primitive.bind(
+    operands = (
         *qkv_for_primitive,
         bias,
         softmax_offset,
@@ -4050,6 +3874,12 @@ def fused_attn_bwd(
         output,
         doutput,
         *seq_desc_flatten,
-        config=fused_config,
     )
+    if quantized_qkv is None:
+        results = primitive.bind(*operands, config=fused_config)
+    else:
+        from .mxfp8_attention import execute_prequantized
+
+        results = execute_prequantized(operands, quantized_qkv, fused_config, True)
+    *qkv_grads, bias_grad, softmax_offset_grad = results
     return tuple(qkv_grads[: len(qkv)]), bias_grad, softmax_offset_grad

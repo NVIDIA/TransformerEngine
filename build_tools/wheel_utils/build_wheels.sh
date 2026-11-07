@@ -24,7 +24,7 @@ git checkout $TARGET_BRANCH
 git submodule update --init --recursive
 
 # Install deps
-/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel 'nvidia-cudnn-frontend>=1.25.0' 'apache-tvm-ffi>=0.1.12'
+/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel 'nvidia-cudnn-frontend>=1.29.0' 'apache-tvm-ffi>=0.1.12'
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine

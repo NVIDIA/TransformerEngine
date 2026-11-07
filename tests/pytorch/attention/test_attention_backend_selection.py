@@ -5,10 +5,12 @@
 """Focused FA4 eligibility and backend-cache regressions."""
 
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 import pytest
 import torch
 from packaging.version import Version as PkgVersion
+from transformer_engine.common import recipe
 
 from transformer_engine.pytorch import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention import (
@@ -82,6 +84,45 @@ def test_fa4_deterministic_backend_selection(
     assert not fused
     assert bool(selected_unfused) is (unfused and not expect_flash)
     assert available == [expect_flash, False, unfused]
+
+
+@pytest.mark.parametrize("capability", ((12, 0), (12, 1), (12, 9)))
+@pytest.mark.parametrize("case", ("fp8", "kv_cache", "mla", "thd_version", "thd_packed"))
+def test_sm12x_fused_backend_restrictions(monkeypatch, capability, case):
+    """SM121 and other SM12x variants must retain the SM120 backend restrictions."""
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setattr(dpa_utils, "get_device_compute_capability", lambda _device: capability)
+    version = (9, 18, 0) if case == "thd_version" else (9, 27, 0)
+    monkeypatch.setattr(dpa_utils, "get_cudnn_version", lambda: version)
+    probe = Mock(return_value=(dpa_utils.FusedAttnBackend.F16_arbitrary_seqlen.value, ""))
+    monkeypatch.setattr(dpa_utils, "_get_fused_attn_backend", probe)
+    options = dict(
+        device=torch.device("cuda:0"),
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="bshd_bshd_bshd",
+        num_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=64,
+        head_dim_v=64,
+        deterministic=False,
+    )
+    if case == "fp8":
+        options.update(fp8=True, fp8_meta={"recipe": recipe.DelayedScaling(fp8_dpa=True)})
+    elif case == "kv_cache":
+        options.update(inference_params=SimpleNamespace(is_paged=False), is_training=False)
+    elif case == "mla":
+        options.update(head_dim_qk=192, head_dim_v=128)
+    else:
+        options.update(
+            qkv_layout="t3hd" if case == "thd_packed" else "thd_thd_thd",
+            attn_mask_type="padding",
+            num_tokens_q=128,
+            num_tokens_kv=128,
+        )
+    result = dpa_utils.get_attention_backend(dpa_utils.AttentionParams(**options))
+    assert not result[2]
+    probe.assert_not_called()
 
 
 @pytest.mark.parametrize(

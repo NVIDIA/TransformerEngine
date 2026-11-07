@@ -310,6 +310,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
     score_mod: Optional[Callable] = None
     score_mod_bprop: Optional[Callable] = None
+    fp8: bool | str = False
     score_mod_requested: bool = False
     return_max_logit: bool = False
 
@@ -326,6 +327,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         deterministic: bool = False,
         score_mod_tensors: Optional[Mapping[str, Any]] = None,
         score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
+        quantized_qkv=None,
     ) -> Array:
 
         seed = None
@@ -369,6 +371,10 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             "score_mod_bprop_tensors": score_mod_bprop_tensors,
             "return_max_logit": self.return_max_logit,
         }
+        if self.fp8:
+            fused_attn_kwargs["fp8"] = self.fp8
+        if quantized_qkv is not None:
+            fused_attn_kwargs["quantized_qkv"] = quantized_qkv
 
         if self.qkv_layout.is_qkvpacked():
             """qkvpacked format, treat
@@ -632,6 +638,11 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     return_max_logit: bool, default = False
         If True, return ``(output, max_logit)`` where ``max_logit`` contains the per-head
         maximum attention logits with shape ``[h]``. This path requires fused attention.
+    fp8: bool | str, default = False
+        Use cuDNN FP8 attention with current tensor scaling. Inputs, outputs and input
+        gradients remain FP16/BF16. Fused attention is required, and this option is
+        independent of the GEMM quantization recipe. Set to ``"mxfp8"`` for
+        block-scaled MXFP8 attention on SM100 or later.
 
     Optimization parameters
     -----------------------
@@ -661,6 +672,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     score_mod: Optional[Callable] = None
     score_mod_bprop: Optional[Callable] = None
     return_max_logit: bool = False
+    fp8: bool | str = False
 
     def __post_init__(self):
         # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
@@ -704,6 +716,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         mask: Optional[Union[SequenceDescriptor, Array]] = None,
         score_mod_tensors: Optional[Mapping[str, Any]] = None,
         score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
+        quantized_qkv=None,
     ) -> Array:
         """
         Parameters
@@ -728,6 +741,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             Additional tensor/scalar operands passed to ``score_mod``.
         score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
             Additional tensor/scalar operands passed to ``score_mod_bprop``.
+        quantized_qkv: Optional[Tuple[ScaledTensor2x, ...]], default = None
+            Separate prequantized MXFP8 Q/K/V in BHSD order, independent of the
+            model input layout. Requires ``fp8="mxfp8"`` and a SequenceDescriptor.
+            See :func:`transformer_engine.jax.attention.quantize_attention_qkv`.
 
         Returns
         -------
@@ -735,6 +752,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             Output tensor, or ``(output, max_logit)`` when ``return_max_logit`` is enabled.
         """
         input_dtype = query.dtype
+        if quantized_qkv is not None and self.fp8 != "mxfp8":
+            raise ValueError('quantized_qkv requires fp8="mxfp8".')
 
         if mask is not None:
             if sequence_descriptor is not None:
@@ -761,7 +780,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             or score_mod_bprop_tensors is not None
         )
 
-        if attn_bias_type == AttnBiasType.NO_BIAS:
+        if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
             assert (
                 bias is None
             ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias={bias}"
@@ -791,6 +810,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         # Use fused attn (if kernel check below passes) by default
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        if self.fp8 and not enable_fused_attn:
+            raise ValueError("FP8 attention requires fused attention, but NVTE_FUSED_ATTN=0.")
         if self.return_max_logit and not enable_fused_attn:
             raise ValueError("return_max_logit requires fused attention, but NVTE_FUSED_ATTN=0.")
 
@@ -832,7 +853,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             softmax_type=softmax_type,
             dropout_probability=self.attention_dropout,
             q_num_heads=self.num_attention_heads,
-            kv_num_heads=self.num_gqa_groups,
+            kv_num_heads=self.num_gqa_groups or self.num_attention_heads,
             q_max_seqlen=seqlen_q,
             kv_max_seqlen=seqlen_kv,
             head_dim_qk=head_dim_qk,
@@ -845,9 +866,16 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
             max_segments_per_seq=self.max_segments_per_seq,
+            fp8=self.fp8,
         )
         fused_attn_backend, _ = fused_attn_helper.get_fused_attn_backend()
         has_fused_attn_kernel = fused_attn_backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
+        if attn_bias_type == AttnBiasType.ALIBI and (
+            not enable_fused_attn or not has_fused_attn_kernel
+        ):
+            raise ValueError("ALiBi requires an available cuDNN fused attention kernel.")
+        if self.fp8 and not has_fused_attn_kernel:
+            raise ValueError("No cuDNN FP8 attention kernel supports this configuration.")
         if score_mod_requested and not has_fused_attn_kernel:
             raise ValueError(
                 "score_mod requires fused attention, but no fused attention kernel is available."
@@ -949,6 +977,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 softmax_type=softmax_type,
                 score_mod=self.score_mod,
                 score_mod_bprop=self.score_mod_bprop,
+                fp8=self.fp8,
                 score_mod_requested=score_mod_requested,
                 return_max_logit=self.return_max_logit,
             )(
@@ -961,6 +990,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 deterministic=deterministic,
                 score_mod_tensors=score_mod_tensors,
                 score_mod_bprop_tensors=score_mod_bprop_tensors,
+                quantized_qkv=quantized_qkv,
             )
         output = x[0] if self.return_max_logit else x
         assert (
@@ -1272,6 +1302,10 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         argument to keep tensor operands as normal JAX inputs.
     score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
         Additional tensors or pass-by-value scalars for ``score_mod_bprop``.
+    fp8: bool | str, default = False
+        Use cuDNN FP8 dot product attention with current tensor scaling. Inputs and
+        outputs retain their FP16/BF16 dtype; the GEMM quantization recipe is independent.
+        Set to ``"mxfp8"`` for block-scaled MXFP8 attention.
     """
 
     head_dim: int
@@ -1313,6 +1347,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     output_layernorm: Optional[bool] = None
     apply_residual_connection_post_layernorm: Optional[bool] = None
     fuse_qkv: Optional[bool] = None
+
+    fp8: bool | str = False
 
     def __post_init__(self):
         # Deal with changed defaults in API
@@ -1735,6 +1771,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             softmax_type=self.softmax_type,
             score_mod=self.score_mod,
             score_mod_bprop=self.score_mod_bprop,
+            fp8=self.fp8,
         )(
             *dpa_args,
             mask,
@@ -2061,6 +2098,11 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         argument to keep tensor operands as normal JAX inputs.
     score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
         Additional tensors or pass-by-value scalars for ``score_mod_bprop``.
+    fp8: bool | str, default = False
+        Use cuDNN FP8 attention in the self-attention and encoder-decoder blocks.
+        Attention uses current tensor scaling and retains FP16/BF16 inputs and outputs,
+        independently of the GEMM quantization recipe.
+        Set to ``"mxfp8"`` for block-scaled MXFP8 attention.
 
     Optimization parameters
     -----------------------
@@ -2129,6 +2171,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     softmax_type: str = "vanilla"
     score_mod: Optional[Callable] = None
     score_mod_bprop: Optional[Callable] = None
+    fp8: bool | str = False
 
     def __post_init__(self):
         if self.mha_kernel_init is None:
@@ -2300,6 +2343,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             softmax_type=self.softmax_type,
             score_mod=self.score_mod,
             score_mod_bprop=self.score_mod_bprop,
+            fp8=self.fp8,
         )(
             inputs,
             inputs,
@@ -2395,6 +2439,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 name="encoder_decoder_attention",
                 window_size=self.window_size,
                 softmax_type=self.softmax_type,
+                fp8=self.fp8,
             )(x, encoded, encoder_decoder_mask, deterministic=deterministic)
 
             y = with_sharding_constraint_by_logical_axes(
