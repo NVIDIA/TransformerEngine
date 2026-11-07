@@ -30,6 +30,10 @@ inputs:
   aarch:
     description: 'The architecture to use for the build'
     required: true
+  smoke-test:
+    description: 'Install and import the wheel after building it'
+    required: false
+    default: 'false'
 outputs:
   wheel_name:
     description: 'The name of the built wheel'
@@ -38,11 +42,23 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    - name: Check runner disk layout
+      shell: bash -euxo pipefail {0}
+      id: disk-layout
+      run: |
+        if [[ "$(stat -c %d /)" != "$(stat -c %d /mnt)" ]]; then
+          echo "separate-temp-disk=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "separate-temp-disk=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Move /var/lib/docker/
+      if: ${{ steps.disk-layout.outputs.separate-temp-disk == 'true' }}
       shell: bash -euxo pipefail {0}
       run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
 
     - name: Maximize build space
+      if: ${{ steps.disk-layout.outputs.separate-temp-disk == 'true' }}
       uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
       with:
         root-reserve-mb: 5120
@@ -55,6 +71,7 @@ runs:
         build-mount-path: '/var/lib/docker/'
 
     - name: Restore /var/lib/docker/
+      if: ${{ steps.disk-layout.outputs.separate-temp-disk == 'true' }}
       shell: bash -euxo pipefail {0}
       run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
 
@@ -93,24 +110,35 @@ runs:
       shell: bash -euxo pipefail {0}
       id: build_wheel
       env:
+        AARCH: ${{ inputs.aarch }}
         CXX11_ABI: ${{ inputs.cxx11_abi }}
+        PYTHON_VERSION: ${{ inputs.python-version }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+        SMOKE_TEST: ${{ inputs.smoke-test }}
       run: |
         echo ::group::Build wheel
 
-        EXIT_CODE=$(docker run \
+        set +e
+        docker run \
             --rm \
             --shm-size=64g \
             --workdir /workspace/transformer_engine/pytorch \
-            --volume $(pwd):/workspace \
-            --volume $GITHUB_OUTPUT:$GITHUB_OUTPUT \
+            --volume "$(pwd):/workspace" \
+            --volume "$GITHUB_OUTPUT:$GITHUB_OUTPUT" \
+            -e AARCH="$AARCH" \
             -e PIP_CONSTRAINT= \
-            -e CXX11_ABI=$CXX11_ABI \
-            -e GITHUB_OUTPUT=$GITHUB_OUTPUT \
-            transformer-engine-build bash /workspace/build-tools/.github/actions/build-pytorch-wheel/build.sh | tail -n 1)
-
-        # Do not fail the job if timeout killed the build
-        exit $EXIT_CODE
+            -e CXX11_ABI="$CXX11_ABI" \
+            -e GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            -e MAX_JOBS \
+            -e NVTE_FRAMEWORK \
+            -e PYTHON_VERSION="$PYTHON_VERSION" \
+            -e RELEASE_VERSION="$RELEASE_VERSION" \
+            -e SMOKE_TEST="$SMOKE_TEST" \
+            transformer-engine-build bash /workspace/build-tools/.github/actions/build-pytorch-wheel/build.sh
+        exit_code=$?
+        set -e
         echo ::endgroup::
+        exit "$exit_code"
 
     - name: Log Built Wheels
       shell: bash -euxo pipefail {0}
