@@ -730,6 +730,9 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
 void swizzle_scales_into(py::handle src, py::handle dst, std::optional<at::Tensor> noop);
 
+void multi_tensor_swizzle_scales_into(std::vector<py::handle> srcs, std::vector<py::handle> dsts,
+                                      std::optional<at::Tensor> noop);
+
 void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tensors,
                                                   bool rowwise_usage, bool columnwise_usage);
 
@@ -738,6 +741,10 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::obje
                                                             bool columnwise_usage);
 
 void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
+
+py::tuple grouped_swizzled_scale_inv_shapes(py::handle tensor);
+
+void grouped_swizzle_scales_into(py::handle src, py::handle dst, std::optional<at::Tensor> noop);
 
 /***************************************************************************************************
  * Expert Parallelism

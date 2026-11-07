@@ -2303,16 +2303,19 @@ def test_single_grouped_weight_with_disabled_weight_preswizzle(fp8_recipe):
     )
 
     assert weight_quantizer.optimize_for_gemm is False
+    # The parameter keeps its compact scales; the GEMMs use a cached view of it that shares
+    # its data and holds GEMM-swizzled scales.
+    assert grouped_linear.weight._with_gemm_swizzled_scales is False
     assert len(new_workspaces) == 1
-    assert new_workspaces[0] is None
-    assert grouped_weight is grouped_linear.weight
-    assert hasattr(grouped_weight, "_with_gemm_swizzled_scales")
-    assert grouped_weight._with_gemm_swizzled_scales is False
+    assert new_workspaces[0] is grouped_weight
+    assert grouped_weight is not grouped_linear.weight
+    assert grouped_weight.rowwise_data.data_ptr() == grouped_linear.weight.rowwise_data.data_ptr()
+    assert grouped_weight._with_gemm_swizzled_scales is True
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
 def test_single_grouped_primary_mxfp8_bypasses_weight_workspace():
-    """An MXFP8 primary grouped parameter is already GEMM-ready and is not requantized."""
+    """An MXFP8 primary grouped parameter is not requantized; only its scales are swizzled."""
     mxfp8_recipe = recipe.MXFP8BlockScaling()
     if not is_module_grouped_tensor_path_supported(
         mxfp8_recipe,
@@ -2336,8 +2339,15 @@ def test_single_grouped_primary_mxfp8_bypasses_weight_workspace():
     m_splits = torch.tensor([256, 256], dtype=torch.int64, device="cuda")
     with torch.no_grad(), autocast(enabled=True, recipe=mxfp8_recipe):
         grouped_linear(x, m_splits, is_first_microbatch=True)
-    assert grouped_linear.weight.quantizer is not None
-    assert "weight" not in grouped_linear._fp8_workspaces
+    weight = grouped_linear.weight
+    assert weight.quantizer is not None
+    # The cached entry is a swizzled-scale view sharing the parameter's data, not a requantized
+    # copy, and the parameter keeps its compact scales.
+    view = grouped_linear._fp8_workspaces["weight"]
+    assert view.rowwise_data.data_ptr() == weight.rowwise_data.data_ptr()
+    assert view.columnwise_data.data_ptr() == weight.columnwise_data.data_ptr()
+    assert view._with_gemm_swizzled_scales is True
+    assert weight._with_gemm_swizzled_scales is False
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)

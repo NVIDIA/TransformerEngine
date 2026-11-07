@@ -63,6 +63,23 @@ void nvte_swizzle_scaling_factors_noop(const NVTETensor input, NVTETensor output
 void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
                                                const size_t num_tensors, cudaStream_t stream);
 
+/*! \brief Same as nvte_multi_tensor_swizzle_scaling_factors, but the kernels return without
+ *         writing ``outputs`` when ``noop`` holds 1.0.
+ *
+ *  The flag is read on the device, so the decision can change between CUDA graph replays.
+ *
+ *  \param[in]     inputs                  Input tensors with non-swizzled scale_inv.
+ *  \param[in,out] outputs                 Output tensors which hosts swizzled scale_inv.
+ *  \param[in]     num_tensors             Number of input and output tensors.
+ *  \param[in]     noop                    Single FP32 value; skip the swizzle if it equals 1.0.
+ *                                         May be an empty tensor, in which case the swizzle
+ *                                         always runs.
+ *  \param[in]     stream                  CUDA stream used for the operation.
+ */
+void nvte_multi_tensor_swizzle_scaling_factors_noop(const NVTETensor* inputs, NVTETensor* outputs,
+                                                    const size_t num_tensors, const NVTETensor noop,
+                                                    cudaStream_t stream);
+
 /*! \brief Same as nvte_multi_tensor_swizzle_scaling_factors, but skips
  *         scale_inv shape/padding validation.
  *
@@ -192,6 +209,21 @@ size_t nvte_get_grouped_block_scaling_to_mxfp8_scale_inv_size(const NVTEGroupedT
  */
 void nvte_swizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                                           cudaStream_t stream);
+
+/*! \brief Same as nvte_swizzle_grouped_scaling_factors, but the kernels return without
+ *         writing ``output`` when ``noop`` holds 1.0.
+ *
+ *  The flag is read on the device, so the decision can change between CUDA graph replays.
+ *
+ *  \param[in]     input        Grouped input tensor with non-swizzled scale_inv.
+ *  \param[in,out] output       Grouped output tensor which hosts swizzled scale_inv.
+ *  \param[in]     noop         Single FP32 value; skip the swizzle if it equals 1.0.
+ *                              May be an empty tensor, in which case the swizzle always runs.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ */
+void nvte_swizzle_grouped_scaling_factors_noop(const NVTEGroupedTensor input,
+                                               NVTEGroupedTensor output, const NVTETensor noop,
+                                               cudaStream_t stream);
 
 /*! \brief Unswizzling scaling factors from the interleaved GEMM layout back to row-major (grouped)
  *

@@ -61,6 +61,8 @@ from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
+from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
+from ..tensor.grouped_tensor import GroupedTensor
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
@@ -908,10 +910,64 @@ def _is_weight_workspace_valid(
 
 
 def _needs_gemm_view(tensor: QuantizedTensor) -> bool:
-    """Whether a primary quantized weight keeps compact scales that each GEMM would swizzle."""
+    """Whether a primary quantized weight keeps compact scales that each GEMM would swizzle.
+
+    Grouped weights are swizzled by the grouped GEMM only for MXFP8.
+    """
+    if isinstance(tensor, GroupedTensorStorage):
+        needs_swizzle = isinstance(tensor.quantizer, MXFP8Quantizer)
+    else:
+        needs_swizzle = isinstance(tensor, (MXFP8TensorStorage, NVFP4TensorStorage))
+    return needs_swizzle and not tensor._with_gemm_swizzled_scales
+
+
+def _gemm_view_buffers(tensor: QuantizedTensorStorage) -> Tuple[Optional[torch.Tensor], ...]:
+    """(rowwise data, rowwise scales, columnwise data, columnwise scales) of a weight or view."""
+    if isinstance(tensor, GroupedTensorStorage):
+        return (
+            tensor.rowwise_data,
+            tensor.scale_inv,
+            tensor.columnwise_data,
+            tensor.columnwise_scale_inv,
+        )
     return (
-        isinstance(tensor, (MXFP8TensorStorage, NVFP4TensorStorage))
-        and not tensor._with_gemm_swizzled_scales
+        tensor._rowwise_data,
+        tensor._rowwise_scale_inv,
+        tensor._columnwise_data,
+        tensor._columnwise_scale_inv,
+    )
+
+
+def _make_grouped_gemm_view(tensor: GroupedTensorStorage) -> GroupedTensor:
+    """Grouped counterpart of :func:`_make_gemm_view`.
+
+    The swizzled scales are laid out per expert with padding, so their buffers can be larger
+    than the compact ones; their shapes come from the grouped swizzle itself.
+    """
+    rowwise_shape, columnwise_shape = tex.grouped_swizzled_scale_inv_shapes(tensor)
+
+    def empty_scales(shape, like):
+        return None if shape is None else torch.empty(shape, dtype=like.dtype, device=like.device)
+
+    return GroupedTensor(
+        shape=tensor.logical_shape,
+        dtype=tensor.fake_dtype,
+        num_tensors=tensor.num_tensors,
+        shapes=tensor.tensor_shapes,
+        quantizer=tensor.quantizer,
+        data=tensor.rowwise_data,
+        columnwise_data=tensor.columnwise_data,
+        scale_inv=empty_scales(rowwise_shape, tensor.scale_inv),
+        columnwise_scale_inv=empty_scales(columnwise_shape, tensor.columnwise_scale_inv),
+        amax=tensor.amax,
+        columnwise_amax=tensor.columnwise_amax,
+        scale=tensor.scale,
+        first_dims=tensor.first_dims,
+        last_dims=tensor.last_dims,
+        tensor_offsets=tensor.tensor_offsets,
+        offsets=tensor.offsets,
+        with_gemm_swizzled_scales=True,
+        scale_inv_dtype=tensor._scale_inv_dtype,
     )
 
 
@@ -921,6 +977,8 @@ def _make_gemm_view(tensor: QuantizedTensor) -> QuantizedTensor:
     The parameter keeps its compact scales, which all-gather, dequantization and
     checkpointing expect. The scale buffers are filled by ``tex.swizzle_scales_into_``.
     """
+    if isinstance(tensor, GroupedTensorStorage):
+        return _make_grouped_gemm_view(tensor)
     kwargs = tensor.get_metadata()
     for key in ("rowwise_scale_inv", "columnwise_scale_inv"):
         if kwargs[key] is not None:
@@ -937,21 +995,30 @@ def _make_gemm_view(tensor: QuantizedTensor) -> QuantizedTensor:
 
 def _is_gemm_view_valid(view: Optional[QuantizedTensorStorage], tensor: QuantizedTensor) -> bool:
     """Whether a cached GEMM view still describes ``tensor``'s current buffers."""
-    if type(view) is not type(tensor) or view.shape != tensor.shape:
+    grouped = isinstance(tensor, GroupedTensorStorage)
+    if grouped:
+        if not isinstance(view, GroupedTensor) or (view.num_tensors, view.logical_shape) != (
+            tensor.num_tensors,
+            tensor.logical_shape,
+        ):
+            return False
+    elif type(view) is not type(tensor) or view.shape != tensor.shape:
         return False
     if not view._with_gemm_swizzled_scales:
         return False
-    for data_attr, scale_attr in (
-        ("_rowwise_data", "_rowwise_scale_inv"),
-        ("_columnwise_data", "_columnwise_scale_inv"),
+    buffers, view_buffers = _gemm_view_buffers(tensor), _gemm_view_buffers(view)
+    for data, scales, view_data, view_scales in (
+        (buffers[0], buffers[1], view_buffers[0], view_buffers[1]),
+        (buffers[2], buffers[3], view_buffers[2], view_buffers[3]),
     ):
-        data, view_data = getattr(tensor, data_attr), getattr(view, data_attr)
         if (data is None) != (view_data is None):
             return False
-        if data is not None and data.data_ptr() != view_data.data_ptr():
+        if data is None:
+            continue
+        if data.data_ptr() != view_data.data_ptr() or (scales is None) != (view_scales is None):
             return False
-        scales, view_scales = getattr(tensor, scale_attr), getattr(view, scale_attr)
-        if data is not None and (view_scales is None or scales.numel() != view_scales.numel()):
+        # Grouped swizzled scales are padded per expert, so only per-tensor sizes must match.
+        if not grouped and scales is not None and scales.numel() != view_scales.numel():
             return False
     return True
 
@@ -959,21 +1026,45 @@ def _is_gemm_view_valid(view: Optional[QuantizedTensorStorage], tensor: Quantize
 _warned_gemm_view_miss_in_capture = False
 
 
-def _get_gemm_view(
-    tensor: QuantizedTensor,
-    view: Optional[QuantizedTensorStorage],
-    update_view: bool,
-    skip_update_flag: Optional[torch.Tensor],
-) -> Tuple[QuantizedTensor, Optional[QuantizedTensor]]:
-    """Return the cached GEMM view of a primary quantized weight, refreshing it if needed.
+def _swizzle_scales_into(
+    tensors: List[QuantizedTensor],
+    views: List[QuantizedTensor],
+    noop: Optional[torch.Tensor] = None,
+) -> None:
+    """Write each tensor's GEMM-swizzled scales into its view, one launch per orientation."""
+    if isinstance(tensors[0], GroupedTensorStorage):
+        (tensor,), (view,) = tensors, views
+        tex.grouped_swizzle_scales_into_(tensor, view, noop)
+    elif len(tensors) == 1:
+        tex.swizzle_scales_into_(tensors[0], views[0], noop)
+    else:
+        tex.multi_tensor_swizzle_scales_into_(tensors, views, noop)
 
-    The view is refreshed when the caller signals that the weight may have changed
-    (``update_view``, i.e. the first micro-batch). Under CUDA graphs the refresh is
+
+def _get_gemm_views(
+    tensors: List[QuantizedTensor],
+    views: List[Optional[QuantizedTensorStorage]],
+    update_views: bool,
+    skip_update_flag: Optional[torch.Tensor],
+) -> Tuple[List[QuantizedTensor], List[Optional[QuantizedTensor]]]:
+    """Return cached GEMM views of primary quantized weights, refreshing them if needed.
+
+    The views are refreshed when the caller signals that the weights may have changed
+    (``update_views``, i.e. the first micro-batch). Under CUDA graphs the refresh is
     recorded on every capture and skipped on the device when ``skip_update_flag``
-    holds 1. Refreshes write into the existing buffers, so captured graphs stay valid.
+    holds 1. Refreshes write into the existing buffers, so captured graphs stay valid,
+    and all weights share one launch per scale orientation.
+
+    Returns the tensors to use in the GEMMs and, per weight, a newly built view for
+    the caller to cache (``None`` if the cached view was reused).
     """
     global _warned_gemm_view_miss_in_capture
-    if not _is_gemm_view_valid(view, tensor):
+    gemm_tensors, new_views = [], []
+    for tensor, view in zip(tensors, views):
+        if _is_gemm_view_valid(view, tensor):
+            gemm_tensors.append(view)
+            new_views.append(None)
+            continue
         if torch.cuda.is_current_stream_capturing():
             # Never keep an allocation made during capture; fall back to swizzling in the GEMM.
             if not _warned_gemm_view_miss_in_capture:
@@ -983,15 +1074,26 @@ def _get_gemm_view(
                     " warmup iteration with is_first_microbatch set before capturing."
                 )
                 _warned_gemm_view_miss_in_capture = True
-            return tensor, None
+            return list(tensors), [None] * len(tensors)
         view = _make_gemm_view(tensor)
-        tex.swizzle_scales_into_(tensor, view)
-        return view, view
-    if skip_update_flag is not None:
-        tex.swizzle_scales_into_(tensor, view, skip_update_flag)
-    elif update_view:
-        tex.swizzle_scales_into_(tensor, view)
-    return view, None
+        gemm_tensors.append(view)
+        new_views.append(view)
+    if any(view is not None for view in new_views):
+        # Newly built views must be filled, whatever the flag says.
+        _swizzle_scales_into(tensors, gemm_tensors)
+    elif skip_update_flag is not None:
+        _swizzle_scales_into(tensors, gemm_tensors, skip_update_flag)
+    elif update_views:
+        _swizzle_scales_into(tensors, gemm_tensors)
+    return gemm_tensors, new_views
+
+
+def _update_primary_weight_usage(tensor: QuantizedTensor, quantizer: Quantizer) -> None:
+    """Make an already-quantized weight hold the data orientations its quantizer uses."""
+    tensor.update_usage(
+        rowwise_usage=True if quantizer.rowwise_usage else None,
+        columnwise_usage=True if quantizer.columnwise_usage else None,
+    )
 
 
 def quantize_weight(
@@ -1042,18 +1144,16 @@ def quantize_weight(
 
     # Already-quantized weight (primary FP8 parameters)
     if isinstance(tensor, QuantizedTensor):
-        update_rowwise = True if quantizer.rowwise_usage else None
-        update_columnwise = True if quantizer.columnwise_usage else None
-        tensor.update_usage(
-            rowwise_usage=update_rowwise,
-            columnwise_usage=update_columnwise,
-        )
+        _update_primary_weight_usage(tensor, quantizer)
         if isinstance(quantizer, DebugQuantizer):
             tensor = quantizer.wrap_quantized_tensor(tensor)
             return tensor, None
         if not cache or fsdp_group is not None or not _needs_gemm_view(tensor):
             return tensor, None
-        return _get_gemm_view(tensor, workspace, update_workspace, skip_update_flag)
+        (view,), (new_view,) = _get_gemm_views(
+            [tensor], [workspace], update_workspace, skip_update_flag
+        )
+        return view, new_view
 
     # Validate workspace
     if workspace is not None and quantizer is not None:
@@ -1096,6 +1196,59 @@ def quantize_weight(
         quantizer.internal = saved_internal
         return out, out
     return out, None
+
+
+def quantize_weights(
+    *,
+    tensors: List[torch.Tensor],
+    quantizers: List[Optional[Quantizer]],
+    workspaces: Optional[List[Optional[QuantizedTensorStorage]]],
+    update_workspace: bool = True,
+    skip_update_flag: Optional[torch.Tensor] = None,
+    workspace_dtype: Optional[torch.dtype] = None,
+    cache: bool = False,
+) -> Tuple[List[QuantizedTensorStorage], List[Optional[QuantizedTensorStorage]]]:
+    """Apply :func:`quantize_weight` to several weights, e.g. the experts of a grouped GEMM.
+
+    Primary MXFP8/NVFP4 weights refresh their cached GEMM views together, with one
+    swizzle launch per scale orientation instead of one per weight. Other weights go
+    through :func:`quantize_weight` one at a time.
+
+    Returns per-weight ``(weightmat, new_workspace)`` lists, as :func:`quantize_weight`.
+    """
+    workspaces = workspaces if workspaces else [None] * len(tensors)
+    weightmats = [None] * len(tensors)
+    new_workspaces = [None] * len(tensors)
+    batched = []
+    for idx, (tensor, quantizer, workspace) in enumerate(zip(tensors, quantizers, workspaces)):
+        if (
+            cache
+            and isinstance(tensor, QuantizedTensor)
+            and not isinstance(quantizer, DebugQuantizer)
+            and _needs_gemm_view(tensor)
+        ):
+            _update_primary_weight_usage(tensor, quantizer)
+            batched.append(idx)
+            continue
+        weightmats[idx], new_workspaces[idx] = quantize_weight(
+            tensor=tensor,
+            quantizer=quantizer,
+            workspace=workspace,
+            update_workspace=update_workspace,
+            skip_update_flag=skip_update_flag,
+            workspace_dtype=workspace_dtype,
+            cache=cache,
+        )
+    if batched:
+        views, new_views = _get_gemm_views(
+            [tensors[idx] for idx in batched],
+            [workspaces[idx] for idx in batched],
+            update_workspace,
+            skip_update_flag,
+        )
+        for idx, view, new_view in zip(batched, views, new_views):
+            weightmats[idx], new_workspaces[idx] = view, new_view
+    return weightmats, new_workspaces
 
 
 class TransformerEngineBaseModule(torch.nn.Module, ABC):

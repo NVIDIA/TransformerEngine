@@ -548,6 +548,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Write GEMM-swizzled block scales of src into dst's preallocated scale buffers, "
         "skipping the work on the device when noop holds 1.0",
         py::arg("src"), py::arg("dst"), py::arg("noop") = py::none());
+  m.def("multi_tensor_swizzle_scales_into_",
+        &transformer_engine::pytorch::multi_tensor_swizzle_scales_into,
+        "Write GEMM-swizzled block scales of each src into the matching dst's preallocated "
+        "scale buffers, one launch per orientation, skipping the work on the device when noop "
+        "holds 1.0",
+        py::arg("srcs"), py::arg("dsts"), py::arg("noop") = py::none());
   m.def("multi_tensor_swizzle_scales_for_gemm_",
         &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm,
         "Convert multiple tensors' block scales into GEMM swizzled format", py::arg("tensors"),
@@ -560,6 +566,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("grouped_swizzle_for_gemm", &transformer_engine::pytorch::grouped_swizzle_for_gemm,
         "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
         py::arg("columnwise"));
+  m.def("grouped_swizzled_scale_inv_shapes",
+        &transformer_engine::pytorch::grouped_swizzled_scale_inv_shapes,
+        "Shapes of the GEMM-swizzled (row-wise, column-wise) scale buffers of a grouped MXFP8 "
+        "tensor, None for an absent orientation",
+        py::arg("tensor"));
+  m.def("grouped_swizzle_scales_into_", &transformer_engine::pytorch::grouped_swizzle_scales_into,
+        "Write GEMM-swizzled block scales of a grouped src into dst's preallocated scale buffers, "
+        "skipping the work on the device when noop holds 1.0",
+        py::arg("src"), py::arg("dst"), py::arg("noop") = py::none());
 
   // Tensor allocation
   m.def("bulk_allocate", &transformer_engine::pytorch::bulk_allocate,

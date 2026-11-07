@@ -581,6 +581,8 @@ struct MultiSwizzleArgs {
   int block_range[kMaxTensorsPerKernel + 1];
   // Number of tensors being processed by kernel
   int num_tensors;
+  // Skip all work when noop[0] == 1 (swizzle kernels only)
+  const float* noop = nullptr;
 };
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
@@ -589,7 +591,9 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
                                                      const int K, const int original_M,
                                                      const int original_K,
                                                      const size_t input_stride_bytes,
-                                                     const size_t output_stride_bytes) {
+                                                     const size_t output_stride_bytes,
+                                                     const float* noop = nullptr) {
+  if (swizzle_is_noop(noop)) return;
   const int tensor_id = blockIdx.z;
   // Input and output strides may differ: input is in the kernel-produced "compact"
   // layout (per-tensor stride = original_M * padded_k * elem_size) when callers
@@ -611,7 +615,9 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
                                                      const int K, const int original_M,
                                                      const int original_K,
                                                      const size_t input_stride_bytes,
-                                                     const size_t output_stride_bytes) {
+                                                     const size_t output_stride_bytes,
+                                                     const float* noop = nullptr) {
+  if (swizzle_is_noop(noop)) return;
   const int tensor_id = blockIdx.z;
   // See the rowwise kernel for stride semantics. For columnwise the per-tensor
   // compact stride is DIVUP(original_K, 1) * padded_m * elem_size (i.e. the
@@ -702,6 +708,7 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
 __global__ void __launch_bounds__(TB_DIM* TB_DIM)
     multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_args) {
+  if (swizzle_is_noop(kernel_args.noop)) return;
   // Find tensor corresponding to block
   const int bid = blockIdx.x;
   int tensor_id = 0;
@@ -1439,7 +1446,7 @@ namespace {
 // (16-byte) loads and stores.
 void int4_vectorized_multi_tensor_swizzle(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, bool rowwise,
-                                          cudaStream_t stream) {
+                                          cudaStream_t stream, const float* noop) {
   const size_t num_tensors = input.size();
   std::vector<SwizzleTensorDescriptor> tensors(num_tensors);
   for (size_t i = 0; i < num_tensors; i++) {
@@ -1474,9 +1481,9 @@ void int4_vectorized_multi_tensor_swizzle(const std::vector<Tensor*>& input,
   for (size_t first = 0; first < num_tensors; first += kMaxTensorsPerLaunch) {
     const int count = static_cast<int>(std::min<size_t>(kMaxTensorsPerLaunch, num_tensors - first));
     if (rowwise) {
-      launch_multi_tensor_rowwise_full_width_swizzle(tensors.data() + first, count, stream);
+      launch_multi_tensor_rowwise_full_width_swizzle(tensors.data() + first, count, stream, noop);
     } else {
-      launch_multi_tensor_columnwise_chunk_swizzle(tensors.data() + first, count, stream);
+      launch_multi_tensor_columnwise_chunk_swizzle(tensors.data() + first, count, stream, noop);
     }
   }
 }
@@ -1485,7 +1492,8 @@ void int4_vectorized_multi_tensor_swizzle(const std::vector<Tensor*>& input,
 
 void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, cudaStream_t stream,
-                                          bool check_scale_inv_shapes) {
+                                          bool check_scale_inv_shapes,
+                                          const float* noop = nullptr) {
   auto num_tensors = input.size();
   bool all_has_data = true;
   bool all_has_columnwise_data = true;
@@ -1534,11 +1542,11 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
   }
   if (rowwise_swizzle) {
     if (should_use_rowwise_full_width_swizzle(max_rowwise_padded_k, total_rowwise_tiles)) {
-      int4_vectorized_multi_tensor_swizzle(input, output, true, stream);
+      int4_vectorized_multi_tensor_swizzle(input, output, true, stream, noop);
       return;
     }
   } else if (columnwise_swizzle) {
-    int4_vectorized_multi_tensor_swizzle(input, output, false, stream);
+    int4_vectorized_multi_tensor_swizzle(input, output, false, stream, noop);
     return;
   }
   // Fallback to the generic rowwise swizzle kernel.
@@ -1547,6 +1555,7 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
   if (rowwise_swizzle) {
     MultiSwizzleArgs kernel_args;
     kernel_args.num_tensors = 0;
+    kernel_args.noop = noop;
     kernel_args.block_range[0] = 0;
     int vec_load_size = 4;
     for (size_t i = 0; i < num_tensors; i++) {
@@ -1957,19 +1966,28 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
   swizzle_scaling_factors(convertNVTETensorCheck(input), convertNVTETensorCheck(output), stream);
 }
 
+namespace {
+
+// Device pointer of an optional single-FP32 noop tensor, or nullptr if it is absent or empty.
+const float* swizzle_noop_ptr(const NVTETensor noop) {
+  const transformer_engine::Tensor* noop_tensor = transformer_engine::convertNVTETensor(noop);
+  if (noop_tensor == nullptr || !noop_tensor->data.has_data()) {
+    return nullptr;
+  }
+  NVTE_CHECK(noop_tensor->data.dtype == transformer_engine::DType::kFloat32 &&
+                 noop_tensor->data.numel() == 1,
+             "Expected noop tensor to be a single FP32 value.");
+  return reinterpret_cast<const float*>(noop_tensor->data.dptr);
+}
+
+}  // namespace
+
 void nvte_swizzle_scaling_factors_noop(const NVTETensor input, NVTETensor output,
                                        const NVTETensor noop, cudaStream_t stream) {
   NVTE_API_CALL(nvte_swizzle_scaling_factors_noop);
   using namespace transformer_engine;
-  const Tensor* noop_tensor = convertNVTETensor(noop);
-  const float* noop_ptr = nullptr;
-  if (noop_tensor != nullptr && noop_tensor->data.has_data()) {
-    NVTE_CHECK(noop_tensor->data.dtype == DType::kFloat32 && noop_tensor->data.numel() == 1,
-               "Expected noop tensor to be a single FP32 value.");
-    noop_ptr = reinterpret_cast<const float*>(noop_tensor->data.dptr);
-  }
   swizzle_scaling_factors(convertNVTETensorCheck(input), convertNVTETensorCheck(output), stream,
-                          noop_ptr);
+                          swizzle_noop_ptr(noop));
 }
 
 void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
@@ -1986,6 +2004,23 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
   }
   multi_tensor_swizzle_scaling_factors(input_list, output_list, stream,
                                        /*check_scale_inv_shapes=*/true);
+}
+
+void nvte_multi_tensor_swizzle_scaling_factors_noop(const NVTETensor* inputs, NVTETensor* outputs,
+                                                    const size_t num_tensors, const NVTETensor noop,
+                                                    cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_swizzle_scaling_factors_noop);
+  using namespace transformer_engine;
+  NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
+  std::vector<Tensor*> input_list, output_list;
+  input_list.reserve(num_tensors);
+  output_list.reserve(num_tensors);
+  for (size_t i = 0; i < num_tensors; i++) {
+    input_list.push_back(convertNVTETensorCheck(inputs[i]));
+    output_list.push_back(convertNVTETensorCheck(outputs[i]));
+  }
+  multi_tensor_swizzle_scaling_factors(input_list, output_list, stream,
+                                       /*check_scale_inv_shapes=*/true, swizzle_noop_ptr(noop));
 }
 
 void nvte_multi_tensor_swizzle_scaling_factors_unchecked(const NVTETensor* inputs,
@@ -2032,7 +2067,8 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
                                                   const int64_t* m_array, const int64_t* k_array,
                                                   int num_tensors, bool rowwise,
                                                   size_t scale_elem_size, size_t common_m,
-                                                  size_t common_k) {
+                                                  size_t common_k, const float* noop = nullptr) {
+  if (swizzle_is_noop(noop)) return;
   extern __shared__ int s_metadata[];
   int* s_total_blocks = &s_metadata[0];
 
@@ -2175,7 +2211,7 @@ int grouped_swizzle_variable_max_active_blocks_per_sm(int device_id) {
 }
 
 void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* output,
-                                     cudaStream_t stream) {
+                                     cudaStream_t stream, const float* noop = nullptr) {
   // Check scaling mode
   NVTE_CHECK(input->scaling_mode == NVTE_MXFP8_1D_SCALING,
              "Grouped swizzle supports only MXFP8 scaling.");
@@ -2295,7 +2331,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
           grouped_swizzle_row_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(
                   input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
-                  input_stride_bytes, output_stride_bytes);
+                  input_stride_bytes, output_stride_bytes, noop);
         });
       } else {
         TRANSFORMER_ENGINE_VECTORIZED_LOAD_INTEGER_TYPE_SWITCH(vec_load_size, LType, {
@@ -2305,7 +2341,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
           grouped_swizzle_col_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(
                   input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
-                  input_stride_bytes, output_stride_bytes);
+                  input_stride_bytes, output_stride_bytes, noop);
         });
       }
       NVTE_CHECK_CUDA(cudaGetLastError());
@@ -2352,7 +2388,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
       grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>
           <<<num_blocks, block_size, dynamic_smem_size, stream>>>(
               input_ptr, output_ptr, m_array, k_array, num_tensors, rowwise, scale_elem_size,
-              common_m, common_k);
+              common_m, common_k, noop);
 
       NVTE_CHECK_CUDA(cudaGetLastError());
     };
@@ -2480,6 +2516,16 @@ void nvte_swizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGro
   using namespace transformer_engine;
   swizzle_grouped_scaling_factors(convertNVTEGroupedTensorCheck(input),
                                   convertNVTEGroupedTensorCheck(output), stream);
+}
+
+void nvte_swizzle_grouped_scaling_factors_noop(const NVTEGroupedTensor input,
+                                               NVTEGroupedTensor output, const NVTETensor noop,
+                                               cudaStream_t stream) {
+  NVTE_API_CALL(nvte_swizzle_grouped_scaling_factors_noop);
+  using namespace transformer_engine;
+  swizzle_grouped_scaling_factors(convertNVTEGroupedTensorCheck(input),
+                                  convertNVTEGroupedTensorCheck(output), stream,
+                                  swizzle_noop_ptr(noop));
 }
 
 void nvte_unswizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGroupedTensor output,

@@ -24,7 +24,9 @@ from transformer_engine.pytorch.tensor.grouped_tensor import (
 )
 from .base import (
     get_dummy_wgrad,
-    quantize_weight,
+    quantize_weights,
+    _get_gemm_views,
+    _needs_gemm_view,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -390,19 +392,15 @@ def _grouped_linear_forward_impl(
     weights_fp8: list
     new_workspaces = [None] * num_gemms
     if fp8 or debug:
-        weights_fp8 = []
-        update_ws = args.is_first_microbatch is None or args.is_first_microbatch
-        for i in range(num_gemms):
-            weight_fp8, new_workspaces[i] = quantize_weight(
-                tensor=weights[i],
-                quantizer=weight_quantizers[i],
-                workspace=args.weight_workspaces[i] if args.weight_workspaces else None,
-                update_workspace=update_ws,
-                skip_update_flag=args.skip_fp8_weight_update,
-                workspace_dtype=activation_dtype,
-                cache=args.cache_weight and not is_dist_weight,
-            )
-            weights_fp8.append(weight_fp8)
+        weights_fp8, new_workspaces = quantize_weights(
+            tensors=weights,
+            quantizers=weight_quantizers,
+            workspaces=args.weight_workspaces,
+            update_workspace=args.is_first_microbatch is None or args.is_first_microbatch,
+            skip_update_flag=args.skip_fp8_weight_update,
+            workspace_dtype=activation_dtype,
+            cache=args.cache_weight and not is_dist_weight,
+        )
     else:
         weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
 
@@ -1417,6 +1415,13 @@ class _GroupedLinear(torch.autograd.Function):
                     rowwise=True,
                     columnwise=True if columnwise_usage else None,
                 )
+                if cache_weight and _needs_gemm_view(weight):
+                    (weight,), new_workspaces = _get_gemm_views(
+                        [weight],
+                        [weight_workspaces[0] if weight_workspaces else None],
+                        is_first_microbatch is None or is_first_microbatch,
+                        skip_fp8_weight_update,
+                    )
                 return weight, new_workspaces
 
             if not with_quantized_compute:
@@ -1486,15 +1491,13 @@ class _GroupedLinear(torch.autograd.Function):
                 new_workspaces[0] = grouped_weight
             return grouped_weight, new_workspaces
 
-        weights_for_gemm: List[torch.Tensor] = []
-        new_workspaces: List[Optional[QuantizedTensorStorage]] = [None] * len(weights)
         if not with_quantized_compute:
             return (
                 [_GroupedLinear._maybe_dequantize(weight, activation_dtype) for weight in weights],
-                new_workspaces,
+                [None] * len(weights),
             )
 
-        update_ws = is_first_microbatch is None or is_first_microbatch
+        quantizers = []
         for idx, weight in enumerate(weights):
             if isinstance(weight, QuantizedTensorStorage):
                 weight_quantizer = weight._quantizer
@@ -1505,17 +1508,16 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 weight_quantizer = weight_quantizers[idx]
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-            weight_fp8, new_workspaces[idx] = quantize_weight(
-                tensor=weight,
-                quantizer=weight_quantizer,
-                workspace=weight_workspaces[idx] if weight_workspaces else None,
-                update_workspace=update_ws,
-                skip_update_flag=skip_fp8_weight_update,
-                workspace_dtype=activation_dtype,
-                cache=cache_weight,
-            )
-            weights_for_gemm.append(weight_fp8)
-        return weights_for_gemm, new_workspaces
+            quantizers.append(weight_quantizer)
+        return quantize_weights(
+            tensors=weights,
+            quantizers=quantizers,
+            workspaces=weight_workspaces,
+            update_workspace=is_first_microbatch is None or is_first_microbatch,
+            skip_update_flag=skip_fp8_weight_update,
+            workspace_dtype=activation_dtype,
+            cache=cache_weight,
+        )
 
     @staticmethod
     def _validate_or_alloc_output(
