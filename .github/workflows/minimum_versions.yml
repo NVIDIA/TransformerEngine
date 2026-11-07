@@ -6,7 +6,12 @@
 name: 'Minimum supported versions'
 on:
   pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
+permissions:
+  contents: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -27,7 +32,7 @@ jobs:
           apt-get install -y --allow-change-held-packages git python3.10 python3-pip cudnn9-cuda-12 libnccl-dev libnccl2
           python3.10 --version
           python3.10 -m pip install torch==${MIN_TORCH_VERSION}
-          python3.10 -m pip install cmake pybind11[global] ninja pydantic "importlib-metadata>=1.0" packaging einops onnxscript "nvidia-cudnn-frontend>=1.25.0"
+          python3.10 -m pip install cmake pybind11[global] ninja pydantic "importlib-metadata>=1.0" packaging einops onnxscript "nvidia-cudnn-frontend>=1.25.0" "apache-tvm-ffi>=0.1.12"
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -65,7 +70,7 @@ jobs:
           apt-get install -y git python3.10 python3-pip cudnn9-cuda-12
           python3.10 --version
           python3.10 -m pip install jax==${MIN_JAX_VERSION} "flax>=0.7.1"
-          python3.10 -m pip install cmake pybind11[global] ninja packaging pydantic "nvidia-cudnn-frontend>=1.25.0"
+          python3.10 -m pip install cmake pybind11[global] ninja packaging pydantic "nvidia-cudnn-frontend>=1.25.0" "apache-tvm-ffi>=0.1.12"
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:

@@ -1224,7 +1224,7 @@ class FusedAttnRunner:
             # JAX through the inverse reorder. TE must align it inside the backward rule.
             doutput_sharding = (
                 NamedSharding(self.mesh, PartitionSpec())
-                if self.cp_size > 1
+                if self.cp_size > 1 and self.cp_load_balanced
                 else self.qkvo_sharding
             )
             customcall_args.append(jax.device_put(self.doutput, doutput_sharding))

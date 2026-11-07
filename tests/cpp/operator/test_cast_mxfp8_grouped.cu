@@ -657,10 +657,10 @@ std::vector<ProcessingMethod> processing_methods = {
 std::vector<ActivationKind> activation_kinds = {
     ActivationKind::Identity,
     ActivationKind::GeLU,
-    // ActivationKind::SiLU,
-    // ActivationKind::ReLU,
-    // ActivationKind::QGeLU,
-    // ActivationKind::SReLU,
+    ActivationKind::SiLU,
+    ActivationKind::ReLU,
+    ActivationKind::QGeLU,
+    ActivationKind::SReLU,
 };
 
 enum ScalingDirection {
@@ -1012,7 +1012,7 @@ INSTANTIATE_TEST_SUITE_P(
     GroupedFusedCastMXFP8TestSuite,
     ::testing::Combine(
         ::testing::Values(ProcessingMethod::CAST_DBIAS_DACT),
-        ::testing::Values(ActivationKind::GeLU),
+        ::testing::ValuesIn(activation_kinds),
         ::testing::ValuesIn(scaling_directions),
         ::testing::ValuesIn(input_config_same_both_multichunk),
         ::testing::Values(DType::kBFloat16),

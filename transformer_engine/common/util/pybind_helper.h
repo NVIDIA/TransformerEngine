@@ -23,7 +23,9 @@
       .value("kBFloat16", transformer_engine::DType::kBFloat16)                                    \
       .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)                                \
       .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2)                                \
+      .value("kFloat8E8M0", transformer_engine::DType::kFloat8E8M0)                                \
       .value("kFloat4E2M1", transformer_engine::DType::kFloat4E2M1)                                \
+      .value("kFloat8UE5M3", transformer_engine::DType::kFloat8UE5M3)                              \
       .def("__reduce_ex__",                                                                        \
            [](transformer_engine::DType self, pybind11::object /*protocol*/) {                     \
              return pybind11::make_tuple(pybind11::type::of(pybind11::cast(self)),                 \
@@ -161,6 +163,7 @@
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
         py::call_guard<py::gil_scoped_release>());                                                 \
   m.def("nvte_built_with_cublasmp", &nvte_built_with_cublasmp,                                     \
-        py::call_guard<py::gil_scoped_release>());
+        py::call_guard<py::gil_scoped_release>());                                                 \
+  m.def("nvte_cublasmp_version", &nvte_cublasmp_version, py::call_guard<py::gil_scoped_release>());
 
 #endif

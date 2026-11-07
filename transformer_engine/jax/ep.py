@@ -318,7 +318,7 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     """Scatter tokens and weights to expert ranks.
 
     ``cfg`` is a per-layer ``EpLayerConfig``; distinct layers may share a
-    ``cfg`` (the pointer-keyed C++ cache keys on handle_mem, not on cfg).
+    ``cfg``. ``handle_mem`` may be relocated between calls (e.g. under ``lax.scan``).
     Inputs are ``[..., H]`` with only the leading dim sharded as ``ep`` or
     ``(dp, ep)``. Returns
     ``(recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)``;
@@ -338,9 +338,8 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
         raise TypeError(
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
-    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx)
-    recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
+        tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
     )
     out_leading = tuple(tokens.shape[:-1])
     primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)

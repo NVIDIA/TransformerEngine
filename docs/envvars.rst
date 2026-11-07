@@ -93,6 +93,15 @@ Optional Dependencies
    :Default: ``0``
    :Description: Enable NVSHMEM support. When set to ``1``, requires ``NVSHMEM_HOME`` to be set to the NVSHMEM installation directory.
 
+.. envvar:: NVTE_WITH_CUTEDSL
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable CuTeDSL support when building ``libtransformer_engine.so``. When set to ``1``, requires
+                 CPython Stable ABIs from Python 3.10 and above, and ``apache-tvm-ffi`` installed.
+                 Note: when linking ``libtransformer_engine.so`` built with ``NVTE_WITH_CUTEDSL=1`` to a standalone C++ executable,
+                 you must provide the definition of these CPython symbols. See ``tests/cpp/CMakeLists.txt`` for an example.
+
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
    :Type: CMake option
@@ -136,6 +145,22 @@ General
                  value if an application legitimately creates more tensor handles than
                  the default pool can hold.
 
+.. envvar:: NVTE_ENABLE_CUTEDSL_BACKEND
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use CuTeDSL kernel implementations when available. This requires that Transformer Engine was built with ``NVTE_WITH_CUTEDSL=1``.
+                 It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
+                 If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
+
+.. envvar:: NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN
+
+   :Type: ``str`` (``WARN`` or ``ERROR``)
+   :Default: None
+   :Description: Control what happens when TE fails dispatch to a CuTeDSL kernel and would fall back to the CUDA C++ kernel.
+                 ``WARN`` emits a warning explaining why CuTeDSL kernels are unavailable and falls back to CUDA kernels. ``ERROR`` raises an error and fails instead.
+                 Only effective when the CuTeDSL backend is enabled (see :envvar:`NVTE_ENABLE_CUTEDSL_BACKEND`).
+
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
    :Type: ``int`` (positive integer)
@@ -143,6 +168,15 @@ General
    :Description: Size in MiB of the internal ``NVTEGroupedTensor`` handle pool. Increase
                  this value if an application legitimately creates more grouped tensor
                  handles than the default pool can hold.
+
+.. envvar:: NVTE_CUTEDSL_FUSED_GROUPED_MLP
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: **Deprecated** (use ``split_alignment=256`` when constructing
+                 :class:`transformer_engine.pytorch.ops.GroupedLinear` instead).
+                 When set to ``1``, overrides the operation's declared split alignment
+                 to 256, enabling grouped MLP fusion when its other requirements are met.
 
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -312,7 +346,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable fast math optimizations in runtime-compiled (NVRTC) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
+   :Description: Enable fast math optimizations in runtime-compiled (NVRTC / CuTeDSL) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
 
 .. envvar:: NVTE_DISABLE_NVRTC
 
@@ -533,6 +567,12 @@ JAX-Specific Variables
    :Type: ``str``
    :Default: None
    :Description: Test level for JAX unit tests (``"L0"``, ``"L1"``, ``"L2"``). Used internally by the test suite.
+
+.. envvar:: NVTE_EP_FUSED_PREPARE_DISPATCH
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use the fused prepare + dispatch path for expert parallelism (NCCL EP count mode) instead of separate prepare and dispatch calls. Supported only when EP stays within a single NVLink domain, and the received row order within an expert block may differ from the unfused path. In JAX the value is latched on first use.
 
 JAX Triton Extensions
 ^^^^^^^^^^^^^^^^^^^^^

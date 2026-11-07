@@ -198,7 +198,7 @@ __device__ __forceinline__ void mbarrier_arrive_expect_tx_cta_relaxed_shared_cta
 
 __device__ __forceinline__ void fence_mbarrier_init_release_cluster() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  asm volatile("fence.mbarrier_init.release.cluster;");
+  asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("fence_mbarrier_init_release_cluster is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -391,7 +391,7 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global(
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-wait-group
 __device__ __forceinline__ void cp_async_bulk_wait_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group 0;");
+  asm volatile("cp.async.bulk.wait_group 0;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -401,7 +401,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group() {
 template <size_t W>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 0;");
+  asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -410,7 +410,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<0>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 0;");
+  asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -418,7 +418,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<0>() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<1>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 1;");
+  asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -426,7 +426,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<1>() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<2>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 2;");
+  asm volatile("cp.async.bulk.wait_group.read 2;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -434,7 +434,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<2>() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 4;");
+  asm volatile("cp.async.bulk.wait_group.read 4;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -443,7 +443,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-commit-group
 __device__ __forceinline__ void cp_async_bulk_commit_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.commit_group;");
+  asm volatile("cp.async.bulk.commit_group;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_commit_group is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -452,7 +452,7 @@ __device__ __forceinline__ void cp_async_bulk_commit_group() {
 // Proxy fence (bi-directional):
 __device__ __forceinline__ void fence_proxy_async() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("fence.proxy.async;");
+  asm volatile("fence.proxy.async;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("fence_proxy_async is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -460,7 +460,7 @@ __device__ __forceinline__ void fence_proxy_async() {
 
 __device__ __forceinline__ void fence_proxy_async_shared_cta() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("fence.proxy.async.shared::cta;");
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("fence_proxy_async_shared_cta is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -752,7 +752,7 @@ __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
 
 __device__ __forceinline__ void numbered_barrier_sync(uint32_t num_threads,
                                                       uint32_t barrier_id = 1u) {
-  asm volatile("bar.sync %0, %1;\n" ::"r"(barrier_id), "r"(num_threads));
+  asm volatile("bar.sync %0, %1;\n" ::"r"(barrier_id), "r"(num_threads) : "memory");
 }
 
 __device__ __forceinline__ void fma_f32_f16(float &out, uint16_t const &a, uint16_t const &b,
@@ -1802,7 +1802,8 @@ __device__ __forceinline__ void ld_global_nc_b32x8(uint32_t (&dst)[8], const voi
 
 // As above, but streaming the lines past L2 rather than letting them displace
 // resident data.  Equivalent to tagging the load with a `create_l2_policy_
-// evict_first(1.0)` hint, without needing to materialise the policy token.
+// evict_first(1.0)` hint; the 256-bit form does so without needing to
+// materialise the policy token.
 __device__ __forceinline__ void ld_global_nc_evict_first_b32x8(uint32_t (&dst)[8],
                                                                const void *src) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
@@ -1812,13 +1813,16 @@ __device__ __forceinline__ void ld_global_nc_evict_first_b32x8(uint32_t (&dst)[8
                  "=r"(dst[6]), "=r"(dst[7])
                : "l"(src));
 #elif (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  // The `.L2::evict_first` load qualifier is only valid on 256-bit accesses,
+  // so the 128-bit fallback expresses the same hint through an L2 policy.
+  const uint64_t policy = create_l2_policy_evict_first(1.0f);
   const uint8_t *bytes = reinterpret_cast<const uint8_t *>(src);
-  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
                : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
-               : "l"(bytes));
-  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "l"(bytes), "l"(policy));
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
                : "=r"(dst[4]), "=r"(dst[5]), "=r"(dst[6]), "=r"(dst[7])
-               : "l"(bytes + 16));
+               : "l"(bytes + 16), "l"(policy));
 #else
   NVTE_DEVICE_ERROR("ld_global_nc_evict_first_b32x8 is only supported on SM 8.0+.");
 #endif

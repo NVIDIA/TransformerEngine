@@ -195,7 +195,6 @@ def main():
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
-            window_size=config.window_size,
             pad_between_seqs=pad_between_seqs,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends

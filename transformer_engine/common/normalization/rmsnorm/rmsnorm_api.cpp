@@ -27,11 +27,6 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       !is_mxfp8_scaling(z->scaling_mode)) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
-  if (is_mxfp8_scaling(z->scaling_mode)) {
-    NVTE_CHECK(!z->with_gemm_swizzled_scales,
-               "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
-  }
-
   NVTE_CHECK(!x.data.shape.empty(), "x must have at least one dimension.");
   const auto [rows, cols] = x.flat_2d_dims();
 
@@ -51,6 +46,26 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
     CheckOutputTensor(*z, "z");
     CheckOutputTensor(*rsigma, "rsigma");
+  }
+
+  // MXFP8 output: Transformer Engine's fused kernel, which alone writes GEMM-swizzled scales,
+  // unless cuDNN is requested or the kernel does not support the tensors.
+  if (is_mxfp8_scaling(z->scaling_mode)) {
+    const bool te_supported = is_supported_by_te_rmsnorm_fwd_mxfp8(x, gamma, *z);
+    if (z->with_gemm_swizzled_scales || (!use_cudnn_norm_fwd() && te_supported)) {
+      NVTE_CHECK(te_supported,
+                 "RMSNorm forward with GEMM-swizzled MXFP8 scales requires FP32, BF16 or FP16 "
+                 "input and weight, and rows and columns that are multiples of 128.");
+      if (workspace->data.numel() == 0) {
+        // The fused kernel needs no workspace, but a zero size denotes a workspace query.
+        workspace->data.shape = {1};
+        workspace->data.dtype = DType::kByte;
+        return;
+      }
+      rmsnorm_fwd_mxfp8(x, gamma, epsilon, z, rsigma, multiprocessorCount, zero_centered_gamma,
+                        stream);
+      return;
+    }
   }
 
   NVTE_Norm_Backend norm_backend;

@@ -15,6 +15,7 @@ import platform
 import subprocess
 import sys
 import sysconfig
+import logging
 from typing import Optional, Tuple
 import warnings
 
@@ -231,6 +232,16 @@ def load_framework_extension(framework: str) -> None:
             sys.modules[module_name + "_nv"] = solib
             _plugin = importlib.import_module(_nvte_plugin)
             _plugin.load_plugins()
+            # Apply device patches last: they rewrite process-global state in
+            # place and cannot be rolled back, so load_plugins() runs first and
+            # must not depend on the patched state. Still ahead of the PyTorch
+            # submodules that capture torch.cuda entry points. The submodule is
+            # optional: a CUDA-like plugin may omit it, and a single-file plugin
+            # has no submodules to search.
+            if hasattr(_plugin, "__path__") and (
+                importlib.util.find_spec(f"{_nvte_plugin}.patches") is not None
+            ):
+                importlib.import_module(f"{_nvte_plugin}.patches").apply_patches()
         except Exception as e:  # pylint: disable=broad-exception-caught
             # Rollback to pre-plugin state if plugin failed to fully initialize
             sys.modules.pop(module_name + "_nv", None)
@@ -433,6 +444,52 @@ def _load_cuda_library(lib_name: str):
 
 
 @functools.lru_cache(maxsize=None)
+def _load_tvm_ffi_library() -> bool:
+    """
+    Attempt to load the tvm-ffi shared library (libtvm_ffi.so) for the optional CuTeDSL backend.
+    Returns True if the library is successfully loaded.
+    Otherwise, return False. In this case C++ will fail to load libtvmffi.so via dlopen,
+    and skip dispatching to CuTeDSL kernels, falling back to the default TE CUDA C++ kernels.
+    """
+    try:
+        import tvm_ffi.libinfo as li
+
+        # No binding flag given, so dlopen defaults to RTLD_LAZY, and function symbols will not be resolved immediately here.
+        # RTLD_GLOBAL adds this lib's symbols to the global scope and TVMFFICentral in C++ will reuse this loaded library and bind to these symbols.
+        ctypes.CDLL(li.find_libtvm_ffi(), mode=ctypes.RTLD_GLOBAL)
+        return True
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "Failed to load tvm-ffi dynamic library for CuTeDSL backend: %s. Will fall back to"
+            " default TE CUDA C++ kernels",
+            e,
+        )
+        return False
+
+
+@functools.lru_cache(maxsize=None)
+def _register_cutedsl_backends() -> bool:
+    """
+    Attempt to register CuTeDSL backends for on-demand compilation via TVM-FFI.
+    Returns True if the CuTeDSL backends are successfully registered.
+    Otherwise, return False. In this case C++ will fail to retrieve CuTeDSL kernels via TVM-FFI,
+    and skip dispatching to CuTeDSL kernels, falling back to the default TE CUDA C++ kernels.
+    """
+    try:
+        from transformer_engine.common import CuTeDSL
+
+        CuTeDSL.register_cutedsl_backends()
+        return True
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "Failed to register CuTeDSL backends: %s. Will fall back to default TE CUDA C++"
+            " kernels",
+            e,
+        )
+        return False
+
+
+@functools.lru_cache(maxsize=None)
 def _load_core_library():
     """Load shared library with Transformer Engine C extensions"""
     return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL | os.RTLD_LAZY)
@@ -456,6 +513,11 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         _CUBLAS_LIB_CTYPES = _load_cuda_library_from_python("cublas", strict=True)
         _CUDART_LIB_CTYPES = _load_cuda_library_from_python("cudart", strict=True)
         _CUDNN_ALL_LIB_CTYPES = _load_cuda_library_from_python("cudnn", strict=True)
+
+    # Prepare CuTeDSL backend for on-demand compilation via TVM-FFI if user enables it.
+    if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0":
+        _load_tvm_ffi_library()
+        _register_cutedsl_backends()
 
     _TE_LIB_CTYPES = _load_core_library()
 
