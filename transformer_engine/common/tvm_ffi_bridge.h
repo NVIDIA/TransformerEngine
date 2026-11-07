@@ -35,6 +35,40 @@ namespace tvm_ffi_bridge {
 
 bool initialize_python_cutedsl_backend();
 
+// A helper class to pause python GC temporarily. This is needed for CuTeDSL kernels compilation
+// which is performed by python, which would trigger GC if it's not paused.
+
+// This is a workaround for the issue that occurs due to the following factors:
+// 1. In TE JAX, we do a temporary CUDA graph capture for operations to trigger their "lazy load"
+//    before executing them. See https://github.com/NVIDIA/TransformerEngine/pull/2219 for context.
+// 2. This process only happens in C++ until we introduce CuTeDSL kernels, where we exit C++ and
+//    enter Python again to compile them.
+// 3. During this process, Python GC can be triggered if too many objects are created to compile
+//    the kernel.
+// 4. This GC cleans up JAX objects from earlier that are no longer used, which ultimately may cause
+//    the destruction of a `GpuExecutable` and its "thunks".
+// Sidenote: JAX executables are compiled and executed by XLA, which has a "thunk"-based runtime,
+//    where a thunk represents a single kernel, cuBLAS call, cuDNN call, custom call, etc.
+// 5. The problem is that one of these thunks (for example, `CollectiveKernelThunk`) may own some
+//    CUDA virtual memory, and when it's destroyed, it will attempt to free that memory.
+// 6. Before this virtual memory is deallocated, it must wait for in-flight GPU operations that may
+//    still use it, so it calls `cuCtxSynchronize` to wait for all work in that GPU's context.
+// 7. Synchronizing the GPU during a CUDA graph capture is invalid and triggers
+//    `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`, which also invalidates the capture.
+// Note: TE's graph capture is not visible to XLA, so XLA can't know it's unsafe to free its virtual
+// memory at this point.
+class PythonGCPause {
+ public:
+  // The class method definitions are in init_python.cpp.
+  PythonGCPause();
+  ~PythonGCPause();
+  PythonGCPause(const PythonGCPause &) = delete;
+  PythonGCPause &operator=(const PythonGCPause &) = delete;
+
+ private:
+  bool active_;
+};
+
 inline DLDataType convert_to_dltype(NVTEDType type) {
   switch (type) {
     case kNVTEFloat32:
@@ -258,8 +292,13 @@ class TVMFFICentral {
       return std::nullopt;
     }
     const std::string key = cfg.to_key();
+    bool success = false;
+    {
+      PythonGCPause gc_pause;
+      success = cfg.retrieve_func_from_python(key);
+    }
     std::optional<tvm::ffi::Function> fn =
-        cfg.retrieve_func_from_python(key) ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
+        success ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
     if (!fn) {
       maybe_warn_not_chosen("no TVM-FFI kernel is registered for config `", key, "`.");
     }
