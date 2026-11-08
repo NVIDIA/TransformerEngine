@@ -23,7 +23,7 @@ from ...constants import (
     DType,
 )
 
-from ...utils import _empty_tensor, round_up_to_nearest_multiple
+from ...utils import _empty_tensor, ceil_div, round_up_to_nearest_multiple
 
 
 class _FromMXFP8Func(torch.autograd.Function):
@@ -66,7 +66,8 @@ class MXFP8Components(NamedTuple):
     """FP8 values and E8M0 scales of an MXFP8 tensor
 
     Each block of 32 consecutive values along the last dimension
-    shares one scale, so the dequantized value at ``[..., j]`` is
+    shares one scale (the last block may be shorter), so the
+    dequantized value at ``[..., j]`` is
     ``data[..., j] * 2 ** (scale_inv[..., j // 32] - 127)``.
 
     """
@@ -75,7 +76,7 @@ class MXFP8Components(NamedTuple):
     # tensor's shape
     data: torch.Tensor
     # E8M0 scales as biased exponents (torch.uint8) with shape
-    # (*shape[:-1], shape[-1] // 32)
+    # (*shape[:-1], ceil(shape[-1] / 32))
     scale_inv: torch.Tensor
 
 
@@ -233,7 +234,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             )
         shape = self._rowwise_data.shape
         rows = math.prod(shape[:-1])
-        scale_cols = shape[-1] // MXFP8_BLOCK_SCALING_SIZE
+        scale_cols = ceil_div(shape[-1], MXFP8_BLOCK_SCALING_SIZE)
 
         data = self._rowwise_data.view(TE_DType_To_Torch[self._fp8_dtype])
         scale_inv = self._rowwise_scale_inv

@@ -208,7 +208,8 @@ def _swizzle_mxfp8_rowwise_scale_inv(scale_inv: torch.Tensor) -> torch.Tensor:
 def _decode_mxfp8_components(data: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
     """Dequantize exported MXFP8 values and E8M0 scales with plain PyTorch"""
     scales = torch.exp2(scale_inv.to(torch.float32) - 127)
-    return data.to(torch.float32) * scales.repeat_interleave(32, dim=-1)
+    scales = scales.repeat_interleave(32, dim=-1)[..., : data.shape[-1]]
+    return data.to(torch.float32) * scales
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -840,7 +841,7 @@ class TestQuantizedTensor:
         torch.testing.assert_close(extracted_scale_inv, columnwise_scale_inv[:2], rtol=0, atol=0)
 
     @pytest.mark.parametrize("with_gemm_swizzled_scales", [False, True])
-    @pytest.mark.parametrize("shape", [(128, 128), (96, 160), (2, 64, 128)])
+    @pytest.mark.parametrize("shape", [(128, 128), (96, 160), (2, 64, 128), (100, 48)])
     def test_mxfp8_export_components_layout(
         self,
         shape: Tuple[int, ...],
@@ -848,7 +849,7 @@ class TestQuantizedTensor:
     ) -> None:
         """MXFP8 export gives FP8 views of the data and compact, unswizzled scales"""
         rows = math.prod(shape[:-1])
-        scale_cols = shape[-1] // 32
+        scale_cols = math.ceil(shape[-1] / 32)
         padded_shape = (math.ceil(rows / 128) * 128, math.ceil(scale_cols / 4) * 4)
         compact_scale_inv = torch.randint(0, 255, padded_shape, dtype=torch.uint8)
         stored_scale_inv = compact_scale_inv
@@ -1330,7 +1331,29 @@ class TestMXFP8Tensor:
             atol=0,
         )
 
-    @pytest.mark.parametrize("dims", [[128, 256], [96, 160], [4, 64, 128]])
+    @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
+    @pytest.mark.parametrize("dims", [[100, 48], [32, 16]])
+    def test_mxfp8_export_components_partial_block(
+        self,
+        fp8_dtype: te.DType,
+        dims: DimsType,
+    ) -> None:
+        """A last block shorter than 32 values keeps its own exported scale"""
+        x = torch.randn(_to_list(dims), dtype=torch.bfloat16, device="cuda")
+        quantizer = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=False)
+        x_mxfp8 = quantizer(x)
+
+        data, scale_inv = x_mxfp8.export_components()
+
+        assert scale_inv.shape == (*dims[:-1], math.ceil(dims[-1] / 32))
+        torch.testing.assert_close(
+            _decode_mxfp8_components(data, scale_inv),
+            x_mxfp8.dequantize(dtype=torch.float32),
+            rtol=0,
+            atol=0,
+        )
+
+    @pytest.mark.parametrize("dims", [[128, 256], [96, 160], [4, 64, 128], [100, 48]])
     def test_mxfp8_export_components_unswizzles_gemm_scales(self, dims: DimsType) -> None:
         """MXFP8 export gives the same scales whether or not they are swizzled for GEMM"""
         x = torch.randn(_to_list(dims), dtype=torch.bfloat16, device="cuda")

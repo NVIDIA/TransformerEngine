@@ -221,7 +221,7 @@ with :meth:`~transformer_engine.pytorch.MXFP8TensorStorage.export_components`. I
 quantized parameters and for tensors returned by a quantizer, and the layout of the result does
 not depend on how Transformer Engine stores the tensor: ``data`` has the tensor's shape, and
 ``scale_inv`` holds one biased exponent per 32 consecutive values along the last dimension, with
-shape ``(*shape[:-1], shape[-1] // 32)``.
+shape ``(*shape[:-1], ceil(shape[-1] / 32))``; the last block may be shorter than 32.
 
 .. code-block:: python
 
@@ -234,7 +234,7 @@ shape ``(*shape[:-1], shape[-1] // 32)``.
    data, scale_inv = quantizer(weight).export_components()
    # data: torch.float8_e4m3fn with shape (1024, 4096)
    # scale_inv: torch.uint8 with shape (1024, 128)
-   scales = torch.exp2(scale_inv.float() - 127).repeat_interleave(32, dim=-1)
+   scales = torch.exp2(scale_inv.float() - 127).repeat_interleave(32, dim=-1)[..., : data.shape[-1]]
    dequantized = data.float() * scales
 
 The values are a view of the tensor's data, so they change when the tensor is updated in place,
