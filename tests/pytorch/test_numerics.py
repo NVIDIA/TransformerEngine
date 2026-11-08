@@ -10,6 +10,7 @@ import pytest
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import Parameter
 
 from transformer_engine.pytorch.quantization import (
@@ -45,6 +46,8 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch import checkpoint as te_checkpoint
 from transformer_engine.pytorch.distributed import (
+    CudaRNGStatesTracker,
+    graph_safe_rng_available,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
 )
@@ -1130,6 +1133,99 @@ def test_ineligible_reentrant_checkpoint_preserves_outer_recompute_context():
     assert inner.weight.grad is None
     assert tail.weight.grad is not None and torch.isfinite(tail.weight.grad).all()
     _assert_fp8_recompute_state_drained(inner, tail)
+
+
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+@pytest.mark.parametrize("rng_source", ("default", "tracker", "shared"))
+def test_checkpoint_recompute_preserves_tracker_rng_state(use_reentrant, rng_source):
+    """Recomputed dropout must match forward for default, tracked, and shared RNG."""
+
+    def run(checkpointed):
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        tracker = CudaRNGStatesTracker()
+        tracker.add("model-parallel-rng", 4321)
+        tracker_state = tracker.get_states()["model-parallel-rng"]
+        inp = torch.ones(4096, device="cuda", requires_grad=True)
+        draws = []
+
+        def body(value):
+            if rng_source == "tracker":
+                with tracker.fork():
+                    out = F.dropout(value, p=0.5, training=True)
+            else:
+                out = F.dropout(value, p=0.5, training=True)
+                if rng_source == "shared":
+                    with tracker.fork():
+                        out = out + 2 * F.dropout(value, p=0.5, training=True)
+            draws.append(out.detach().clone())
+            return out
+
+        # Leave the fork before backward so the checkpoint must restore the
+        # sharing between the default generator and the tracker for recompute.
+        with tracker.fork() if rng_source == "shared" else nullcontext():
+            if checkpointed:
+                out = te_checkpoint(
+                    body,
+                    inp,
+                    use_reentrant=use_reentrant,
+                    get_rng_state_tracker=lambda: tracker,
+                    distribute_saved_activations=False,
+                    tp_group=None,
+                )
+            else:
+                out = body(inp)
+        out.sum().backward()
+        return out.detach(), inp.grad.detach(), draws, tracker, tracker_state
+
+    ref_out, ref_grad, _, _, _ = run(checkpointed=False)
+    out, grad, draws, tracker, tracker_state = run(checkpointed=True)
+    assert torch.equal(out, ref_out)
+    assert len(draws) == 2
+    assert torch.equal(draws[0], draws[1])
+    assert torch.equal(grad, ref_grad)
+    if isinstance(tracker_state, torch.Generator):
+        assert tracker.get_states()["model-parallel-rng"] is tracker_state
+
+
+@pytest.mark.skipif(not graph_safe_rng_available(), reason="Requires graph-safe CUDA RNG")
+@pytest.mark.parametrize("fork_tracker", all_boolean)
+def test_checkpoint_preserves_captured_rng_state(fork_tracker):
+    """Graph replay must still advance its registered RNG after eager recompute."""
+    tracker = CudaRNGStatesTracker()
+    tracker.add("model-parallel-rng", 4321)
+    rng_context = tracker.fork if fork_tracker else nullcontext
+    generator = (
+        tracker.get_states()["model-parallel-rng"]
+        if fork_tracker
+        else torch.cuda.default_generators[torch.cuda.current_device()]
+    )
+    sample = torch.empty(128, device="cuda")
+    with rng_context():
+        sample.uniform_()
+    graph = torch.cuda.CUDAGraph()
+    if fork_tracker:
+        graph.register_generator_state(generator)
+    with torch.cuda.graph(graph), rng_context():
+        sample.uniform_()
+
+    offset = generator.get_offset()
+    graph.replay()
+    increment = generator.get_offset() - offset
+    assert increment > 0
+
+    def body(value):
+        with rng_context():
+            return F.dropout(value, p=0.5, training=True)
+
+    inp = torch.ones(4096, device="cuda", requires_grad=True)
+    out = te_checkpoint(body, inp, use_reentrant=True, get_rng_state_tracker=lambda: tracker)
+    out.sum().backward()
+    assert torch.equal(inp.grad, out)
+
+    offset = generator.get_offset()
+    graph.replay()
+    assert generator.get_offset() - offset == increment
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
