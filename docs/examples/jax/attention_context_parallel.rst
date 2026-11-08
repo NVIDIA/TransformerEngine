@@ -162,7 +162,7 @@ while keeping those sharding controls visible.
       :start-after: # AG_OUTPUT_START
       :end-before: # AG_OUTPUT_END
 
-On four GB200s, Ring is roughly **2.22x faster** and AllGather roughly **2.36x
+On four GB200s, Ring is roughly **2.38x faster** and AllGather roughly **2.33x
 faster** than the equivalent single-GPU fused-attention forward+backward pass.
 These results are specific to this workload and system. Applications with long
 segments and wide attention windows generally have more attention computation
