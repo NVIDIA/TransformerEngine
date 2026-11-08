@@ -50,12 +50,23 @@ def _graph_rng_registration_required() -> bool:
     """Return whether CUDA graph RNG state must be registered explicitly."""
     if not graph_safe_rng_available():
         return False
-    graph = torch.cuda.CUDAGraph()
+
     generator = torch.cuda.default_generators[torch.cuda.current_device()]
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        graph.register_generator_state(generator)
-    return not any("is now a no-op" in str(warning.message).lower() for warning in caught)
+    original_state = generator.get_state()
+    graph = torch.cuda.CUDAGraph()
+    output = torch.empty(8, dtype=torch.int64, device="cuda")
+    try:
+        with torch.cuda.graph(graph):
+            output.random_()
+        graph.replay()
+        torch.cuda.synchronize()
+        first = output.clone()
+        graph.replay()
+        torch.cuda.synchronize()
+        return torch.equal(first, output)
+    finally:
+        graph.reset()
+        generator.set_state(original_state)
 
 
 class _GraphedCallableHelpers(NamedTuple):

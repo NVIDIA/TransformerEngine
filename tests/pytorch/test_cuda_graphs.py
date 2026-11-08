@@ -5,8 +5,8 @@
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 import copy
+import contextlib
 import gc
-import warnings
 import weakref
 
 import torch
@@ -56,29 +56,46 @@ def nvfp4_vanilla():
 
 
 @pytest.mark.parametrize(
-    "warning_message, expected",
+    "advances, expected",
     (
-        (None, True),
-        (
-            (
-                "CUDAGraph.register_generator_state() is deprecated ... "
-                "It is now a no-op and can be safely removed from your code."
-            ),
-            False,
-        ),
+        (False, True),
+        (True, False),
     ),
 )
-def test_graph_rng_registration_capability(monkeypatch, warning_message, expected):
-    """Distinguish required registration from PyTorch's deprecated no-op."""
+def test_graph_rng_registration_capability(monkeypatch, advances, expected):
+    """Detect whether graph replay advances RNG without explicit registration."""
 
     class FakeGraph:
-        def register_generator_state(self, generator):
-            if warning_message is not None:
-                warnings.warn(warning_message, DeprecationWarning)
+        def __init__(self):
+            self.replays = 0
+
+        def replay(self):
+            self.replays += 1
+
+        def reset(self):
+            pass
+
+    class FakeOutput:
+        def random_(self):
+            pass
+
+        def clone(self):
+            return 0
+
+    class FakeGenerator:
+        def get_state(self):
+            return None
+
+        def set_state(self, state):
+            pass
 
     monkeypatch.setattr(torch.cuda, "CUDAGraph", FakeGraph)
-    monkeypatch.setattr(torch.cuda, "default_generators", [object()])
+    monkeypatch.setattr(torch.cuda, "default_generators", [FakeGenerator()])
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "graph", lambda graph: contextlib.nullcontext())
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch, "empty", lambda *args, **kwargs: FakeOutput())
+    monkeypatch.setattr(torch, "equal", lambda first, second: not advances)
     monkeypatch.setattr(graph_module, "graph_safe_rng_available", lambda: True)
     graph_module._graph_rng_registration_required.cache_clear()
     try:
