@@ -1490,12 +1490,24 @@ def _custom_grouped_tensor_gemm(
         qx = B.rowwise_data[b0:b1]
         qw = A.rowwise_data[a0:a1]
 
+        # GroupedTensorStorage names its block scales `scale_inv`; `rowwise_scale_inv` is the name
+        # the per-tensor storages use, so accept either rather than only the one this entry point
+        # never actually receives.
+        def block_scales(x):
+            for field in ("scale_inv", "rowwise_scale_inv"):
+                buffer = getattr(x, field, None)
+                if buffer is not None:
+                    return buffer
+            return None
+
         sx = None
-        if getattr(B, "rowwise_scale_inv", None) is not None and b_s_off is not None:
-            sx = B.rowwise_scale_inv[b_s_off[i] : b_s_off[i + 1]]
+        b_scales = block_scales(B)
+        if b_scales is not None and b_s_off is not None:
+            sx = b_scales[b_s_off[i] : b_s_off[i + 1]]
         sw = None
-        if getattr(A, "rowwise_scale_inv", None) is not None and a_s_off is not None:
-            sw = A.rowwise_scale_inv[a_s_off[i] : a_s_off[i + 1]]
+        a_scales = block_scales(A)
+        if a_scales is not None and a_s_off is not None:
+            sw = a_scales[a_s_off[i] : a_s_off[i + 1]]
         if sx is None or sw is None:
             raise ValueError(f"group {i}: missing rowwise scale_inv for a custom quantizer")
 
