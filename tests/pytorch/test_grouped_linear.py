@@ -3803,30 +3803,6 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
         expected_swizzled_scales_buffer,
     )
 
-
-def test_grouped_tensor_custom_dispatch_classifies_plain_operands():
-    """A plain GroupedTensorStorage must not be classified as a custom operand.
-
-    `is_custom` raises on any type that is neither a Quantizer/QuantizedTensorStorage nor a
-    Tensor, so dispatching on the container itself made every grouped-tensor GEMM raise
-    before it reached the native implementation.
-    """
-    from transformer_engine.pytorch.cpp_extensions.gemm import _grouped_operand_is_custom
-    from transformer_engine.pytorch.tensor.storage.grouped_tensor_storage import (
-        GroupedTensorStorage,
-    )
-
-    grouped = GroupedTensorStorage(
-        shape=(32, 32),
-        dtype=torch.bfloat16,
-        num_tensors=2,
-        quantizer=None,
-        data=torch.zeros(32, 32, dtype=torch.bfloat16, device="cuda"),
-    )
-    assert not _grouped_operand_is_custom(grouped)
-    assert not _grouped_operand_is_custom([grouped])
-    assert not _grouped_operand_is_custom(None)
-
     # Poison the padded compact scales
     if swizzle_type == "mxfp8_rowwise":
         unpadded_scale_shape = (shape[0], shape[1] // 32)
@@ -3851,3 +3827,27 @@ def test_grouped_tensor_custom_dispatch_classifies_plain_operands():
         swizzled_scales_buffer,
         expected_swizzled_scales_buffer,
     )
+
+
+def test_grouped_tensor_custom_dispatch_classifies_plain_operands():
+    """A plain GroupedTensorStorage must not be classified as a custom operand.
+
+    `is_custom` raises on any type that is neither a Quantizer/QuantizedTensorStorage nor a
+    Tensor, so dispatching on the container itself made every grouped-tensor GEMM raise
+    before it reached the native implementation.
+    """
+    from transformer_engine.pytorch.cpp_extensions.gemm import _grouped_operand_is_custom
+    from transformer_engine.pytorch.tensor.storage.grouped_tensor_storage import (
+        GroupedTensorStorage,
+    )
+
+    grouped = GroupedTensorStorage(
+        shape=(32, 32),
+        dtype=torch.bfloat16,
+        num_tensors=2,
+        quantizer=None,
+        data=torch.zeros(32, 32, dtype=torch.bfloat16, device="cuda"),
+    )
+    assert not _grouped_operand_is_custom(grouped)
+    assert not _grouped_operand_is_custom([grouped])
+    assert not _grouped_operand_is_custom(None)
