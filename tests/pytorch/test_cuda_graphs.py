@@ -6,6 +6,7 @@ from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 import copy
 import gc
+import warnings
 import weakref
 
 import torch
@@ -28,6 +29,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
+import transformer_engine.pytorch.graph as graph_module
 from transformer_engine.common import recipe
 from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
 
@@ -51,6 +53,38 @@ def nvfp4_vanilla():
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
     nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
     return nvfp4_recipe
+
+
+@pytest.mark.parametrize(
+    "warning_message, expected",
+    (
+        (None, True),
+        (
+            (
+                "CUDAGraph.register_generator_state() is deprecated ... "
+                "It is now a no-op and can be safely removed from your code."
+            ),
+            False,
+        ),
+    ),
+)
+def test_graph_rng_registration_capability(monkeypatch, warning_message, expected):
+    """Distinguish required registration from PyTorch's deprecated no-op."""
+
+    class FakeGraph:
+        def register_generator_state(self, generator):
+            if warning_message is not None:
+                warnings.warn(warning_message, DeprecationWarning)
+
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", FakeGraph)
+    monkeypatch.setattr(torch.cuda, "default_generators", [object()])
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(graph_module, "graph_safe_rng_available", lambda: True)
+    graph_module._graph_rng_registration_required.cache_clear()
+    try:
+        assert graph_module._graph_rng_registration_required() is expected
+    finally:
+        graph_module._graph_rng_registration_required.cache_clear()
 
 
 def nvfp4_rht_and_2d_quantization():

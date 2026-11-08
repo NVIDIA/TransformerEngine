@@ -5,6 +5,7 @@
 """Functions for CUDA Graphs support in FP8"""
 from collections.abc import Iterable
 import contextlib
+import functools
 import gc
 import warnings
 from math import ceil
@@ -42,6 +43,19 @@ _CAPTURE_TIME_HOOK_NAMES = (
     "backward_pre_hooks",
     "backward_hooks",
 )
+
+
+@functools.lru_cache(maxsize=1)
+def _graph_rng_registration_required() -> bool:
+    """Return whether CUDA graph RNG state must be registered explicitly."""
+    if not graph_safe_rng_available():
+        return False
+    graph = torch.cuda.CUDAGraph()
+    generator = torch.cuda.default_generators[torch.cuda.current_device()]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        graph.register_generator_state(generator)
+    return not any("is now a no-op" in str(warning.message).lower() for warning in caught)
 
 
 class _GraphedCallableHelpers(NamedTuple):
@@ -482,7 +496,7 @@ def _make_graphed_callables(
         )
 
     # For cases with multiple active RNG states, e.g. TP.
-    if graph_safe_rng_available():
+    if _graph_rng_registration_required():
         for _, state in get_all_rng_states().items():
             for fwd_graph, bwd_graph, bwd_dw_graph in zip(fwd_graphs, bwd_graphs, bwd_dw_graphs):
                 fwd_graph.register_generator_state(state)
