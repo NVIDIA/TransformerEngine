@@ -392,22 +392,28 @@ class NVFP4TensorRef(QuantizedTensorStorage):
             ")"
         )
 
-    def quantize_(self, tensor, noop_flag=None):
+    def quantize_(self, tensor, *, noop_flag=None):
         """Quantise into this tensor in place.
 
-        `module/base.py::quantize_weight` calls `workspace.quantize_(...)` when the
-        workspace exposes it and otherwise falls back to `tex.quantize(...)`, a C++
-        entry that cannot drive a Python reference quantizer — the workspace then stays
-        empty and the GEMM fails on `data is None`.
-
-        Delegated to the quantizer's `update_quantized`, exactly like the shipped
-        `QuantizedTensorStorage.quantize_`: that path refreshes every field a later GEMM
-        reads — including `global_amax_row`/`global_amax_col`, which a non-pow-2 (NVFP4)
-        recipe turns into the global scale, so copying only the packed data and block
-        scales would combine fresh values with a stale scale — and honours `noop_flag`,
-        the flag that lets a replayed graph skip re-quantisation on later microbatches.
+        Same contract as `QuantizedTensorStorage.quantize_`: the packed data, the block scales
+        and every other field a later GEMM reads are refreshed — including
+        `global_amax_row`/`global_amax_col`, which a non-pow-2 (NVFP4) recipe turns into the
+        global scale, so refreshing only the data and block scales would pair fresh values with
+        a stale scale. A non-zero `noop_flag` leaves the tensor untouched, which is what lets a
+        replayed graph skip re-quantisation on later microbatches. Returns `self`.
         """
+        if tensor.dtype not in reference_utils.HIGH_PRECISION_FLOAT_DTYPES:
+            raise TypeError(
+                f"Unsupported input dtype {tensor.dtype}, expected one of"
+                f" {reference_utils.HIGH_PRECISION_FLOAT_DTYPES}"
+            )
+        original_shape = tuple(tensor.shape)
+        if tensor.ndim < 2:
+            # `update_quantized` reshapes ndim > 2 only, and `_quantize` below needs a matrix;
+            # the old `quantize` call folded every non-2-D input into a single row.
+            tensor = tensor.reshape(1, -1)
         self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
+        self.original_shape = original_shape
         return self
 
     def update_usage(
@@ -1254,9 +1260,6 @@ class NVFP4QuantizerRef(Quantizer):
         qresult_w: QuantizedTensorStorage | None = None,
     ) -> torch.Tensor:
         """Python implementation of microblock FP4 GEMM."""
-        if bias is not None:
-            raise ValueError("Bias is not supported in NVFP4QuantizerRef.qgemm")
-
         high_precision_x = cast_from_fp4x2(qx, out_dtype)
         high_precision_w = cast_from_fp4x2(qw, out_dtype)
 
@@ -1410,6 +1413,11 @@ class NVFP4QuantizerRef(Quantizer):
         else:
             if out is not None:
                 raise ValueError("Output tensor should be None when accumulate is False.")
+
+        # Bias is an epilogue term, as in the native path: add it while the accumulator is still
+        # float32, so the result is rounded once when it is cast to `out_dtype`.
+        if bias is not None:
+            y = y + bias.to(torch.float32)
 
         y = y.to(out_dtype)
         return y

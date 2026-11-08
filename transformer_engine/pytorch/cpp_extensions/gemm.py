@@ -1040,10 +1040,8 @@ def strided_batched_gemm(
     )
 
 
-# Injected into transformer_engine/pytorch/cpp_extensions/gemm.py (prototype).
-#
 # Custom-recipe dispatch for the LIST-based grouped GEMM. The operand roles are taken from
-# GroupedLinear's own call site (module/grouped_linear.py:873-884):
+# GroupedLinear's fprop call site:
 #
 #     out = _validate_or_alloc_output(out, sum(m_splits), weights_fp8[0].size(0), ...)
 #     general_grouped_gemm(weights_fp8, inputmats, [out], ..., single_output=True, m_splits=m_splits)
@@ -1053,10 +1051,8 @@ def strided_batched_gemm(
 #   out  = [single tensor]   of shape [sum(m_splits), A[0].size(0)]
 #   m_splits[i] = VALID activation rows for expert i
 #
-# So for each expert: activation rows are B[i][0:m_splits[i]], the weight is A[i], and the result is
-# written to out[0][offset : offset+m_splits[i]]. An earlier version (gpt-6.1-sol's first draft) had
-# A and B swapped and assumed the groups split columns; that is why it reported a 128-wide weight
-# against a 4608-wide output for several rounds.
+# So for each expert: activation rows are B[i][0:m_splits[i]], the weight is A[i], and the result
+# is written to out[0][offset : offset+m_splits[i]].
 
 
 def _custom_grouped_gemm(
@@ -1079,8 +1075,8 @@ def _custom_grouped_gemm(
     """Grouped GEMM over per-expert weight/activation lists using a custom quantizer's qgemm."""
     if gelu:
         raise NotImplementedError("custom grouped GEMM does not define GELU outputs")
-    # fprop only. dgrad/wgrad ask for the transposed weight direction while every shape check
-    # still passes, so running the fprop computation for them is a silently wrong gradient.
+    # dgrad/wgrad use different operand roles and a transposed weight; only TN fprop is
+    # implemented here, so they are refused instead of computing the wrong product.
     if grad:
         raise NotImplementedError("custom grouped GEMM implements fprop only")
     if layout != "TN":
@@ -1134,6 +1130,8 @@ def _custom_grouped_gemm(
 
     if use_bias and bias is None:
         raise ValueError("use_bias=True requires a per-group bias list")
+    if use_bias and len(bias) != n:
+        raise ValueError(f"expected {n} biases, got {len(bias)}")
 
     # NOTE (known cost, not a correctness gap): this issues one single-group GEMM per expert group, so a
     # step pays ~40x more kernel launches than it has GEMMs of work (~40,000 launches for ~1,000 GEMMs,
@@ -1382,14 +1380,14 @@ def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
     return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
 
 
-# Injected into transformer_engine/pytorch/cpp_extensions/gemm.py (prototype).
-# Custom-recipe dispatch for the *grouped-tensor* GEMM — the entry point MoE experts actually use
-# (GroupedLinear fprop -> general_grouped_gemm_for_grouped_tensor -> nvte_grouped_gemm).
+# Custom-recipe dispatch for the *grouped-tensor* GEMM, the entry point GroupedLinear's fprop uses.
+# A carries the per-expert weights, B the per-expert activations and `out` the grouped result;
+# `offsets` / `scale_inv_offsets` slice each group's rows out of `rowwise_data` /
+# `rowwise_scale_inv`, and `num_tensors` is the group count. Only TN fprop is implemented.
 #
-# Authorship: designed by gpt-6.1-sol against the contracts recorded in
-# engine/scripts/wip/ds41-b300/worklog.md; the grouped-offset slicing here is the parent's, written
-# from the field names read out of tensor/storage/grouped_tensor_storage.py
-# (`offsets`, `scale_inv_offsets`, `rowwise_data`, `rowwise_scale_inv`, `num_tensors`).
+# Unlike the list form, this layout has no per-group QuantizedTensorStorage to hand a quantizer as
+# `qresult_x` / `qresult_w`, so a recipe that derives its global scale from them (non-pow-2 NVFP4)
+# is refused inside `qgemm` rather than served wrong.
 
 
 def _custom_grouped_tensor_gemm(
@@ -1471,30 +1469,33 @@ def _custom_grouped_tensor_gemm(
     m_params = MMParams(out_dtype=None, use_split_accumulator=use_split_accumulator)
     out_dtype = out.rowwise_data.dtype
 
-    # scipy-free zip over adjacent offsets
+    # Every caller of this function that reaches the custom path passes `layout="TN"` with
+    # A = per-expert weight and B = per-expert activation (`module/grouped_linear.py`,
+    # `ops/basic/grouped_linear.py`), so the operand that feeds qgemm first is B and the row
+    # count that has to match the output segment is B's, not A's.
     for i in range(num):
         a0, a1 = a_off[i], a_off[i + 1]
-        rows = a1 - a0
+        b0, b1 = b_off[i], b_off[i + 1]
+        rows = b1 - b0
         if rows == 0:
             continue
 
-        b0, b1 = b_off[i], b_off[i + 1]
         o0, o1 = o_off[i], o_off[i + 1]
         if o1 - o0 != rows:
             raise ValueError(
-                f"group {i}: out segment has {o1 - o0} rows but A has {rows} "
-                f"(a_off={a_off[:3]}..., o_off={o_off[:3]}...)"
+                f"group {i}: out segment has {o1 - o0} rows but the activation slice has {rows} "
+                f"(b_off={b_off[:3]}..., o_off={o_off[:3]}...)"
             )
 
-        qx = A.rowwise_data[a0:a1]
-        qw = B.rowwise_data[b0:b1]
+        qx = B.rowwise_data[b0:b1]
+        qw = A.rowwise_data[a0:a1]
 
         sx = None
-        if getattr(A, "rowwise_scale_inv", None) is not None and a_s_off is not None:
-            sx = A.rowwise_scale_inv[a_s_off[i] : a_s_off[i + 1]]
-        sw = None
         if getattr(B, "rowwise_scale_inv", None) is not None and b_s_off is not None:
-            sw = B.rowwise_scale_inv[b_s_off[i] : b_s_off[i + 1]]
+            sx = B.rowwise_scale_inv[b_s_off[i] : b_s_off[i + 1]]
+        sw = None
+        if getattr(A, "rowwise_scale_inv", None) is not None and a_s_off is not None:
+            sw = A.rowwise_scale_inv[a_s_off[i] : a_s_off[i + 1]]
         if sx is None or sw is None:
             raise ValueError(f"group {i}: missing rowwise scale_inv for a custom quantizer")
 
