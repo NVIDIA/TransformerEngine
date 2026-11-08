@@ -65,8 +65,10 @@ def _graph_rng_registration_required() -> bool:
         torch.cuda.synchronize()
         return torch.equal(first, output)
     finally:
-        graph.reset()
-        generator.set_state(original_state)
+        try:
+            graph.reset()
+        finally:
+            generator.set_state(original_state)
 
 
 class _GraphedCallableHelpers(NamedTuple):
