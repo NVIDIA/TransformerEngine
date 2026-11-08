@@ -1584,14 +1584,13 @@ def general_grouped_gemm_for_grouped_tensor(
     if isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
 
-    def _is_fp8_blockwise(operand) -> bool:
-        if isinstance(operand, (list, tuple)):
-            return any(isinstance(t, Float8BlockwiseQTensorStorage) for t in operand)
-        if isinstance(operand, GroupedTensorStorage):
-            return isinstance(operand.quantizer, Float8BlockQuantizer)
-        return False
-
-    if _is_fp8_blockwise(A) or _is_fp8_blockwise(B):
+    # Discrete expert tensors share a scaling mode, so inspect only the first one.
+    is_fp8_blockwise_A = (
+        isinstance(A[0], Float8BlockwiseQTensorStorage)
+        if is_discrete_in
+        else isinstance(A.quantizer, Float8BlockQuantizer)
+    )
+    if is_fp8_blockwise_A or isinstance(B.quantizer, Float8BlockQuantizer):
         # The fused grouped FP8 block-scaling GEMM only supports split accumulation,
         # so force it on and intentionally override any caller-supplied value. This
         # matches the Float8BlockScaling recipe, which fixes use_split_accumulator=True
@@ -1625,7 +1624,7 @@ def general_grouped_gemm_for_grouped_tensor(
 
     # Hopper (SM90) uses a single shared alpha/beta scalar;
     # Blackwell+ (SM100) supports per-group alpha/beta arrays.
-    per_group = get_device_compute_capability() >= (10, 0)
+    per_group = get_device_compute_capability(device) >= (10, 0)
     num_alphabeta = num_tensors if per_group else 1
 
     if alpha is None:
