@@ -576,6 +576,73 @@ class TestGroupedTensor:
             expected_offset = _rowwise_offset_bytes(i * numel, quantization)
             assert rowwise_data.data_ptr() == original_data_ptr + expected_offset
 
+    @pytest.mark.parametrize(
+        "quantization", [pytest.param(None, id="unquantized"), *_quantization_params]
+    )
+    def test_split_with_multidimensional_buffers(self, quantization: Optional[str]) -> None:
+        """Test splitting views of contiguous storage with non-flat buffer shapes."""
+        num_tensors = 3
+        shapes = (
+            [(128, 512), (256, 512), (384, 512)]
+            if quantization is None
+            else [(256, 512)] * num_tensors
+        )
+        quantizer = (
+            None if quantization is None else make_quantizer(quantization, num_tensors, shapes)
+        )
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
+            num_tensors=num_tensors,
+            shapes=shapes,
+            quantizer=quantizer,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        flat_parts = grouped_tensor.split_into_quantized_tensors()
+
+        for name in (
+            "rowwise_data",
+            "columnwise_data",
+            "scale_inv",
+            "columnwise_scale_inv",
+            "amax",
+            "columnwise_amax",
+        ):
+            buffer = getattr(grouped_tensor, name)
+            if buffer is not None:
+                setattr(grouped_tensor, name, buffer.view(1, -1))
+
+        shaped_parts = grouped_tensor.split_into_quantized_tensors()
+        assert len(shaped_parts) == len(flat_parts)
+        tensor_fields = (
+            "_data",
+            "_transpose",
+            "_scale_inv",
+            "_rowwise_data",
+            "_columnwise_data",
+            "_rowwise_scale_inv",
+            "_columnwise_scale_inv",
+            "_amax_rowwise",
+            "_amax_columnwise",
+        )
+        for flat_part, shaped_part in zip(flat_parts, shaped_parts):
+            assert flat_part.shape == shaped_part.shape
+            if quantization is None:
+                assert flat_part.data_ptr() == shaped_part.data_ptr()
+                continue
+            for field in tensor_fields:
+                flat_buffer = getattr(flat_part, field, None)
+                shaped_buffer = getattr(shaped_part, field, None)
+                if isinstance(flat_buffer, torch.Tensor):
+                    assert shaped_buffer.shape == flat_buffer.shape
+                    assert shaped_buffer.data_ptr() == flat_buffer.data_ptr()
+                else:
+                    assert shaped_buffer is None
+
+        if quantization is None:
+            grouped_tensor.rowwise_data = grouped_tensor.rowwise_data.view(2, -1).T
+            with pytest.raises(ValueError, match="contiguous"):
+                grouped_tensor.split_into_quantized_tensors()
+
     def test_split_varying_shapes(self) -> None:
         """Test split_into_quantized_tensors with varying shapes"""
         num_tensors = 3
