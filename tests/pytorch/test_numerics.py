@@ -1138,7 +1138,7 @@ def test_ineligible_reentrant_checkpoint_preserves_outer_recompute_context():
 @pytest.mark.parametrize("use_reentrant", all_boolean)
 @pytest.mark.parametrize("rng_source", ("default", "tracker", "shared"))
 def test_checkpoint_recompute_preserves_tracker_rng_state(use_reentrant, rng_source):
-    """Recomputed dropout must match forward for default, tracked, and shared RNG."""
+    """Recompute must match forward and preserve the live RNG states."""
 
     def run(checkpointed):
         torch.manual_seed(seed)
@@ -1148,6 +1148,10 @@ def test_checkpoint_recompute_preserves_tracker_rng_state(use_reentrant, rng_sou
         tracker_state = tracker.get_states()["model-parallel-rng"]
         inp = torch.ones(4096, device="cuda", requires_grad=True)
         draws = []
+
+        def get_tracked_rng_state():
+            state = tracker.get_states()["model-parallel-rng"]
+            return state.get_state() if isinstance(state, torch.Generator) else state.clone()
 
         def body(value):
             if rng_source == "tracker":
@@ -1175,7 +1179,20 @@ def test_checkpoint_recompute_preserves_tracker_rng_state(use_reentrant, rng_sou
                 )
             else:
                 out = body(inp)
+
+        # Backward must preserve the RNG positions after unrelated draws.
+        torch.rand(8, device=inp.device)
+        with tracker.fork():
+            torch.rand(8, device=inp.device)
+        default_rng_before = torch.cuda.get_rng_state(inp.device)
+        tracked_rng_before = get_tracked_rng_state()
         out.sum().backward()
+        assert torch.equal(
+            torch.cuda.get_rng_state(inp.device), default_rng_before
+        ), "Default RNG changed during backward"
+        assert torch.equal(
+            get_tracked_rng_state(), tracked_rng_before
+        ), "Tracked RNG changed during backward"
         return out.detach(), inp.grad.detach(), draws, tracker, tracker_state
 
     ref_out, ref_grad, _, _, _ = run(checkpointed=False)
