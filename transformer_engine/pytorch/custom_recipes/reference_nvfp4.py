@@ -399,14 +399,15 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         workspace exposes it and otherwise falls back to `tex.quantize(...)`, a C++
         entry that cannot drive a Python reference quantizer — the workspace then stays
         empty and the GEMM fails on `data is None`.
+
+        Delegated to the quantizer's `update_quantized`, exactly like the shipped
+        `QuantizedTensorStorage.quantize_`: that path refreshes every field a later GEMM
+        reads — including `global_amax_row`/`global_amax_col`, which a non-pow-2 (NVFP4)
+        recipe turns into the global scale, so copying only the packed data and block
+        scales would combine fresh values with a stale scale — and honours `noop_flag`,
+        the flag that lets a replayed graph skip re-quantisation on later microbatches.
         """
-        del noop_flag
-        fresh = self._quantizer.quantize(tensor)
-        self.data = fresh.data
-        self.scale = fresh.scale
-        self.data_t = fresh.data_t
-        self.scale_t = fresh.scale_t
-        self.original_shape = tuple(tensor.shape)
+        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
         return self
 
     def update_usage(

@@ -1059,25 +1059,6 @@ def strided_batched_gemm(
 # against a 4608-wide output for several rounds.
 
 
-# Injected into transformer_engine/pytorch/cpp_extensions/gemm.py (prototype).
-#
-# Custom-recipe dispatch for the LIST-based grouped GEMM. The operand roles are taken from
-# GroupedLinear's own call site (module/grouped_linear.py:873-884):
-#
-#     out = _validate_or_alloc_output(out, sum(m_splits), weights_fp8[0].size(0), ...)
-#     general_grouped_gemm(weights_fp8, inputmats, [out], ..., single_output=True, m_splits=m_splits)
-#
-#   A    = list of weights   (one per expert)
-#   B    = list of inputs    (per-expert activation buffers, padded)
-#   out  = [single tensor]   of shape [sum(m_splits), A[0].size(0)]
-#   m_splits[i] = VALID activation rows for expert i
-#
-# So for each expert: activation rows are B[i][0:m_splits[i]], the weight is A[i], and the result is
-# written to out[0][offset : offset+m_splits[i]]. An earlier version (gpt-6.1-sol's first draft) had
-# A and B swapped and assumed the groups split columns; that is why it reported a 128-wide weight
-# against a 4608-wide output for several rounds.
-
-
 def _custom_grouped_gemm(
     A,
     B,
@@ -1098,8 +1079,14 @@ def _custom_grouped_gemm(
     """Grouped GEMM over per-expert weight/activation lists using a custom quantizer's qgemm."""
     if gelu:
         raise NotImplementedError("custom grouped GEMM does not define GELU outputs")
-    if grad and use_bias:
-        raise NotImplementedError("custom grouped GEMM does not define bias gradients")
+    # fprop only. dgrad/wgrad ask for the transposed weight direction while every shape check
+    # still passes, so running the fprop computation for them is a silently wrong gradient.
+    if grad:
+        raise NotImplementedError("custom grouped GEMM implements fprop only")
+    if layout != "TN":
+        raise NotImplementedError(
+            f"custom grouped GEMM supports the TN layout only, got {layout!r}"
+        )
     if D_dtype is not None:
         raise NotImplementedError("custom grouped GEMM does not define D_dtype")
     if quantization_params is not None and any(q is not None for q in quantization_params):
@@ -1145,6 +1132,9 @@ def _custom_grouped_gemm(
             if o.shape[-1] != width:
                 raise ValueError(f"out[{i}] width {o.shape[-1]} != {width}")
 
+    if use_bias and bias is None:
+        raise ValueError("use_bias=True requires a per-group bias list")
+
     # NOTE (known cost, not a correctness gap): this issues one single-group GEMM per expert group, so a
     # step pays ~40x more kernel launches than it has GEMMs of work (~40,000 launches for ~1,000 GEMMs,
     # measured on a real training step 2026-11). Per-launch cost is small (~0.05 ms of device time), which
@@ -1170,6 +1160,8 @@ def _custom_grouped_gemm(
         if hasattr(sx, "shape") and sx.ndim >= 1 and sx.shape[0] >= rows:
             sx = sx[:rows]
 
+        # The quantized tensors themselves carry the global scales that a non-pow-2 (NVFP4)
+        # recipe turns into the GEMM alpha, so they go along with the packed data.
         result = quantizer.qgemm(
             qx,
             qw,
@@ -1177,8 +1169,10 @@ def _custom_grouped_gemm(
             out_dtype,
             sx,
             sw,
-            None,
+            bias[i] if use_bias else None,
             gemm_type=GEMMType.FPROP,
+            qresult_x=act,
+            qresult_w=w,
         )
         if tuple(result.shape) != (rows, width):
             raise ValueError(
@@ -1530,6 +1524,22 @@ def _custom_grouped_tensor_gemm(
     return out
 
 
+def _grouped_operand_is_custom(x) -> bool:
+    """Whether a grouped-GEMM operand is routed to a custom quantizer.
+
+    Operands of `general_grouped_gemm_for_grouped_tensor` are `GroupedTensorStorage`
+    containers or discrete lists of tensors, and `is_custom` raises on any type that is
+    neither a `Quantizer`/`QuantizedTensorStorage` nor a `torch.Tensor`. Handing it a
+    container therefore turned every grouped-tensor GEMM, native ones included, into an
+    `AssertionError`; the quantizer (or the list members) have to be inspected instead.
+    """
+    if isinstance(x, (list, tuple)):
+        return any(_grouped_operand_is_custom(item) for item in x)
+    if isinstance(x, (Quantizer, QuantizedTensorStorage)):
+        return is_custom(x)
+    return is_custom(getattr(x, "quantizer", None))
+
+
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -1552,7 +1562,7 @@ def general_grouped_gemm_for_grouped_tensor(
     The caller must ensure that GroupedTensor metadata is already compatible with the
     underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
     """
-    if is_custom(A) or is_custom(B) or is_custom(out):
+    if any(_grouped_operand_is_custom(x) for x in (A, B, out)):
         return _custom_grouped_tensor_gemm(
             A,
             B,
