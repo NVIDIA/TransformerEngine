@@ -81,8 +81,8 @@ Build Configuration
 .. envvar:: NVTE_CUDA_VERSION
 
    :Type: ``str``
-   :Default: Auto-detected based on system CUDA version, falling back to ``"13.3"``
-   :Description: CUDA version to build for. Valid values: ``"12.*"``, ``"13.*"``. If not set, automatically determined based on the installed CUDA Toolkit version. Not intended for external use.
+   :Default: Auto-detected based on system CUDA version
+   :Description: CUDA version to build for. Valid values: ``"12.*"``, ``"13.*"``. If not set, automatically determined based on the installed CUDA Toolkit version. Isolated builds fail if no CUDA Toolkit is found and neither this variable nor pip's ``--config-settings cuda-version=<major>.<minor>`` option is set. Not intended for external use.
 
 Optional Dependencies
 ^^^^^^^^^^^^^^^^^^^^^

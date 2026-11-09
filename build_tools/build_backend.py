@@ -39,7 +39,6 @@ _FRAMEWORK_BUILD_PACKAGES = {
     "jax": ["jax>=0.5.0", "flax>=0.7.1"],
 }
 _SUPPORTED_FRAMEWORKS = tuple(_FRAMEWORK_BUILD_PACKAGES)
-_DEFAULT_CUDA_VERSION = "13.3"
 
 
 class _Feature(NamedTuple):
@@ -269,13 +268,19 @@ def _framework_cuda_version(config_settings: ConfigSettings) -> Optional[str]:
 
 def _cuda_version(config_settings: ConfigSettings) -> str:
     """Resolve the CUDA version in descending order of precedence."""
-    return (
+    cuda_version = (
         _config_cuda_version(config_settings)
         or _environment_cuda_version()
         or _nvcc_cuda_version()
         or _framework_cuda_version(config_settings)
-        or _DEFAULT_CUDA_VERSION
     )
+    if cuda_version is None:
+        raise ValueError(
+            "Could not determine the CUDA version for an isolated build; install a CUDA "
+            "toolkit, set CUDA_HOME, or pass --config-settings cuda-version=<major>.<minor> "
+            "(or set NVTE_CUDA_VERSION)"
+        )
+    return cuda_version
 
 
 def _cuda_build_requirements(config_settings: ConfigSettings) -> List[str]:
