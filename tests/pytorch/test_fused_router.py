@@ -2098,6 +2098,230 @@ def test_score_for_aux_loss_bitmap_vs_bytemap(
     torch.testing.assert_close(logits_byte.grad, logits_bit.grad, atol=0.0, rtol=0.0)
 
 
+def _bits(t: torch.Tensor) -> torch.Tensor:
+    """Bit pattern of a floating-point tensor, so that equality also distinguishes -0 and +0."""
+    return t.view({2: torch.int16, 4: torch.int32}[t.element_size()])
+
+
+def _router_logits(num_tokens, num_experts, dtype, mode, generator):
+    if mode == "randn":
+        logits = torch.randn(num_tokens, num_experts, device="cuda", generator=generator)
+    elif mode == "ties":
+        # few distinct values: many equal scores, including equal group scores
+        logits = torch.randint(-3, 4, (num_tokens, num_experts), device="cuda", generator=generator)
+        logits = logits.float() / 2
+    elif mode == "saturated":
+        # sigmoid saturates to exactly 0 or 1 for many experts
+        logits = 40 * torch.randn(num_tokens, num_experts, device="cuda", generator=generator)
+    else:
+        raise ValueError(mode)
+    return logits.to(dtype)
+
+
+def _separate_router_kernels(
+    logits,
+    topk,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    expert_bias,
+    probs_dtype,
+    index_dtype,
+):
+    """The unfused path: dense-index top-k + gather, aux scores + column sums, route counts."""
+    num_experts = logits.shape[-1]
+    topk_indices = torch.empty(*logits.shape[:-1], topk, dtype=index_dtype, device="cuda")
+    dense_probs, topk_indices = fused_topk_with_score_function(
+        logits,
+        topk,
+        False,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        "sigmoid",
+        expert_bias,
+        topk_indices=topk_indices,
+    )
+    probs = dense_probs.gather(-1, topk_indices.long())
+    if probs_dtype is not None:
+        probs = probs.to(probs_dtype)
+    aux_map, aux_scores = fused_compute_score_for_moe_aux_loss(logits, topk, "sigmoid")
+    aux_counts = aux_map.reshape(-1, num_experts).sum(dim=0)
+    route_counts = torch.zeros(num_experts, dtype=torch.int64, device="cuda")
+    route_counts.scatter_add_(
+        0, topk_indices.reshape(-1).long(), torch.ones_like(topk_indices.reshape(-1).long())
+    )
+    return probs, topk_indices, aux_scores, aux_counts, route_counts
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float16])
+@pytest.mark.parametrize("num_tokens", [1, 37, 4093, 4096])
+@pytest.mark.parametrize("grouped", [True, False], ids=["grouped", "ungrouped"])
+@pytest.mark.parametrize("with_bias", [True, False], ids=["bias", "nobias"])
+@pytest.mark.parametrize("mode", ["randn", "ties", "saturated"])
+def test_fused_topk_with_aux_loss_scores(dtype, num_tokens, grouped, with_bias, mode):
+    """Forward and backward are bitwise equal to the separate fused router kernels."""
+    num_experts, topk, scaling_factor = 256, 8, 2.5
+    num_groups, group_topk = (8, 4) if grouped else (None, None)
+    generator = torch.Generator(device="cuda").manual_seed(1234 + num_tokens)
+    logits = _router_logits(num_tokens, num_experts, dtype, mode, generator)
+    expert_bias = (
+        0.05 * torch.randn(num_experts, device="cuda", generator=generator) if with_bias else None
+    )
+    grad_probs = torch.randn(num_tokens, topk, device="cuda", generator=generator).to(dtype)
+    grad_scores = torch.randn(num_tokens, num_experts, device="cuda", generator=generator)
+    assert te_router.fused_topk_with_aux_loss_scores_is_supported(
+        num_experts, topk, num_groups, group_topk, "sigmoid"
+    )
+
+    ref_logits = logits.clone().requires_grad_(True)
+    ref = _separate_router_kernels(
+        ref_logits, topk, num_groups, group_topk, scaling_factor, expert_bias, None, torch.int64
+    )
+    ((ref[0].float() * grad_probs.float()).sum() + (ref[2] * grad_scores).sum()).backward()
+
+    fused_logits = logits.clone().requires_grad_(True)
+    route_counts = torch.zeros(num_experts, dtype=torch.int64, device="cuda")
+    probs, topk_indices, aux_scores, aux_counts = te_router.fused_topk_with_aux_loss_scores(
+        fused_logits,
+        topk,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        "sigmoid",
+        expert_bias,
+        tokens_per_expert=route_counts,
+    )
+    ((probs.float() * grad_probs.float()).sum() + (aux_scores * grad_scores).sum()).backward()
+
+    assert probs.dtype == dtype and probs.shape == (num_tokens, topk)
+    assert torch.equal(topk_indices, ref[1])
+    assert torch.equal(_bits(probs), _bits(ref[0]))
+    assert torch.equal(_bits(aux_scores), _bits(ref[2]))
+    assert torch.equal(aux_counts, ref[3])
+    assert torch.equal(route_counts, ref[4])
+    assert torch.equal(_bits(fused_logits.grad), _bits(ref_logits.grad))
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("index_dtype", [torch.int64, torch.int32])
+@pytest.mark.parametrize("aux_grad", ["aux_loss", "none"])
+def test_fused_topk_with_aux_loss_scores_fp32_probs(dtype, index_dtype, aux_grad):
+    """probs_dtype=float32 equals probs.float() of the separate kernels, gradient included,
+    and with the gradient that fused_moe_aux_loss produces (or no aux-score gradient)."""
+    num_tokens, num_experts, topk, scaling_factor = 4096, 256, 8, 2.5
+    generator = torch.Generator(device="cuda").manual_seed(7)
+    logits = _router_logits(num_tokens, num_experts, dtype, "randn", generator)
+    expert_bias = 0.05 * torch.randn(num_experts, device="cuda", generator=generator)
+    grad_probs = torch.randn(num_tokens, topk, device="cuda", generator=generator)
+
+    def run(fused):
+        x = logits.clone().requires_grad_(True)
+        if fused:
+            probs, indices, scores, counts = te_router.fused_topk_with_aux_loss_scores(
+                x,
+                topk,
+                8,
+                4,
+                scaling_factor,
+                "sigmoid",
+                expert_bias,
+                probs_dtype=torch.float32,
+                index_dtype=index_dtype,
+            )
+        else:
+            probs, indices, scores, counts, _ = _separate_router_kernels(
+                x, topk, 8, 4, scaling_factor, expert_bias, torch.float32, index_dtype
+            )
+        loss = (probs * grad_probs).sum()
+        if aux_grad == "aux_loss":
+            # deterministic, so both runs get the same aux-loss gradient
+            loss = loss + fused_moe_aux_loss(
+                scores, counts, num_tokens, num_experts, topk, 1e-3, deterministic=True
+            )
+        loss.backward()
+        return probs, indices, x.grad
+
+    ref, out = run(False), run(True)
+    assert out[0].dtype == torch.float32 and out[1].dtype == index_dtype
+    assert torch.equal(_bits(out[0]), _bits(ref[0]))
+    assert torch.equal(out[1], ref[1])
+    assert torch.equal(_bits(out[2]), _bits(ref[2]))
+
+
+def test_fused_topk_with_aux_loss_scores_cuda_graph():
+    """Capture forward + backward once, replay with new logits and accumulate route counts."""
+    num_tokens, num_experts, topk = 4096, 256, 8
+    generator = torch.Generator(device="cuda").manual_seed(11)
+    static_logits = torch.zeros(num_tokens, num_experts, dtype=torch.bfloat16, device="cuda")
+    static_logits.requires_grad_(True)
+    expert_bias = 0.05 * torch.randn(num_experts, device="cuda", generator=generator)
+    route_counts = torch.zeros(num_experts, dtype=torch.int64, device="cuda")
+    grad_probs = torch.randn(num_tokens, topk, device="cuda", generator=generator)
+
+    def step():
+        probs, indices, scores, counts = te_router.fused_topk_with_aux_loss_scores(
+            static_logits,
+            topk,
+            8,
+            4,
+            1.0,
+            "sigmoid",
+            expert_bias,
+            tokens_per_expert=route_counts,
+            probs_dtype=torch.float32,
+        )
+        loss = (probs * grad_probs).sum() + fused_moe_aux_loss(
+            scores, counts, num_tokens, num_experts, topk, 1e-3, deterministic=True
+        )
+        grad = torch.autograd.grad(loss, static_logits)[0]
+        return probs, indices, counts, grad
+
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        step()  # warm-up
+    torch.cuda.current_stream().wait_stream(side)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        static_out = step()
+    route_counts.zero_()
+
+    expected_counts = torch.zeros_like(route_counts)
+    for _ in range(3):
+        new_logits = torch.randn(num_tokens, num_experts, device="cuda", generator=generator)
+        with torch.no_grad():
+            static_logits.copy_(new_logits.to(torch.bfloat16))
+        graph.replay()
+        x = static_logits.detach().clone().requires_grad_(True)
+        probs, indices, scores, counts, ref_routes = _separate_router_kernels(
+            x, topk, 8, 4, 1.0, expert_bias, torch.float32, torch.int64
+        )
+        loss = (probs * grad_probs).sum() + fused_moe_aux_loss(
+            scores, counts, num_tokens, num_experts, topk, 1e-3, deterministic=True
+        )
+        loss.backward()
+        expected_counts += ref_routes
+        assert torch.equal(_bits(static_out[0]), _bits(probs))
+        assert torch.equal(static_out[1], indices)
+        assert torch.equal(static_out[2], counts)
+        assert torch.equal(_bits(static_out[3]), _bits(x.grad))
+        assert torch.equal(route_counts, expected_counts)
+
+
+def test_fused_topk_with_aux_loss_scores_unsupported():
+    supported = te_router.fused_topk_with_aux_loss_scores_is_supported
+    assert supported(256, 8, 8, 4, "sigmoid")
+    assert supported(256, 8, None, None, "sigmoid")
+    assert not supported(128, 8, 8, 4, "sigmoid")
+    assert not supported(256, 6, 8, 4, "sigmoid")
+    assert not supported(256, 8, 4, 2, "sigmoid")
+    assert not supported(256, 8, 8, 4, "softmax")
+    logits = torch.randn(16, 128, device="cuda")
+    with pytest.raises(RuntimeError, match="does not support"):
+        te_router.fused_topk_with_aux_loss_scores(logits, 8, 8, 4, 1.0, "sigmoid", None)
+
+
 def profile_topk_softmax(
     dtype,
     num_tokens,
