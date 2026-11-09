@@ -82,7 +82,7 @@ Build Configuration
 
    :Type: ``str``
    :Default: Auto-detected based on system CUDA version
-   :Description: CUDA version to build for. Valid values: ``"12.*"``, ``"13.*"``. If not set, automatically determined based on the installed CUDA Toolkit version. Isolated builds fail if no CUDA Toolkit is found and neither this variable nor pip's ``--config-settings cuda-version=<major>.<minor>`` option is set. Not intended for external use.
+   :Description: CUDA version to build for. Valid values: ``"12.*"``, ``"13.*"``. If not set, automatically determined based on the installed CUDA Toolkit version. Isolated builds fail if no CUDA Toolkit is found and neither this variable nor pip's ``--config-settings cuda-version=<major>.<minor>`` option is set.
 
 Optional Dependencies
 ^^^^^^^^^^^^^^^^^^^^^
@@ -93,7 +93,7 @@ In an isolated build, the Python package listed for an option is installed as a 
 requirement unless the option's installation directory variable is set. Without build
 isolation, the installation directory variable is used if set, and the package is used if
 installed. ``libtransformer_engine.so`` finds these packages at runtime when they are installed
-in the same environment. Not intended for external use.
+in the same environment.
 
 .. envvar:: NVTE_UB_WITH_MPI
 
