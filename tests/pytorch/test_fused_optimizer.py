@@ -4,12 +4,18 @@
 
 import copy
 from contextlib import nullcontext
+import socket
 
 import pytest
 import torch
 from torch import nn
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling, MXFP8BlockScaling, Float8BlockScaling
+from transformer_engine.common.recipe import (
+    DelayedScaling,
+    Float8BlockScaling,
+    Float8CurrentScaling,
+    MXFP8BlockScaling,
+)
 from transformer_engine.pytorch import MultiheadAttention, quantized_model_init, is_bf16_available
 from transformer_engine.pytorch import QuantizedTensor
 from transformer_engine.pytorch.optimizers.fused_adam import (
@@ -19,6 +25,10 @@ from transformer_engine.pytorch.utils import gpu_autocast_ctx
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
 
 
 class TestFusedOptimizer:
@@ -99,6 +109,219 @@ class TestFusedAdam(TestFusedOptimizer):
         }
         self.ref_optim = torch.optim.Adam
         self.fused_optim = te.optimizers.FusedAdam
+
+    @pytest.mark.parametrize("param_dtype", [torch.bfloat16, torch.float16, torch.float32])
+    @pytest.mark.parametrize("store_remainders", [False, True])
+    @pytest.mark.parametrize("initialized", [False, True])
+    @pytest.mark.parametrize("source_device", ["cpu", "cuda"])
+    def test_reload_master_param(self, param_dtype, store_remainders, initialized, source_device):
+        """Reload FP32 values exactly, preserving Adam history and the source tensor."""
+        param = nn.Parameter(torch.ones(32, dtype=param_dtype, device="cuda"))
+        optimizer = self.fused_optim(
+            [param], master_weights=True, store_param_remainders=store_remainders, **self.options
+        )
+        if initialized:
+            param.grad = torch.full_like(param, 0.125)
+            optimizer.step()
+        old_state = {
+            name: (value, value.clone())
+            for name, value in optimizer.state[param].items()
+            if name != "master_param"
+        }
+        step = optimizer.param_groups[0].get("step")
+        # A strided FP32 source with positive/negative BF16 rounding ties and adjacent values.
+        source = torch.full((64,), 1.001, device=source_device)[::2]
+        source[:8] = torch.tensor(
+            [1.00390625, 1.01171875, -1.00390625, -1.01171875, 0.0, -0.0, 2**-130, -(2**-130)],
+            device=source_device,
+        )
+        saved_source = source.clone()
+        optimizer.reload_master_param(param, source)
+        assert torch.equal(source.view(torch.int32), saved_source.view(torch.int32))
+        assert optimizer.param_groups[0].get("step") == step
+        for name, (old_tensor, old_value) in old_state.items():
+            assert optimizer.state[param][name] is old_tensor
+            assert torch.equal(optimizer.state[param][name], old_value)
+        if not initialized:
+            for name in ("exp_avg", "exp_avg_sq"):
+                assert torch.count_nonzero(optimizer.state[param][name]) == 0
+
+        if store_remainders and param_dtype == torch.bfloat16:
+            assert torch.equal(
+                param[:4],
+                torch.tensor(
+                    [1.0078125, 1.015625, -1.0078125, -1.015625],
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                ),
+            )
+            remainder = optimizer.state[param]["master_param"]
+            high = param.view(torch.int16) - (remainder < 0).to(torch.int16)
+            restored = (high.to(torch.int32) << 16) | (remainder.to(torch.int32) & 0xFFFF)
+            assert torch.equal(restored.cpu(), source.contiguous().view(torch.int32).cpu())
+        else:
+            master = optimizer.get_unscaled_state(param, "master_param")
+            assert torch.equal(master.cpu(), source.cpu())
+            assert torch.equal(param.cpu(), source.to(dtype=param_dtype, device="cpu"))
+
+        # Reload must create complete optimizer state, so the following real update works too.
+        reference = nn.Parameter(source.to(device="cuda").clone())
+        reference_optimizer = self.fused_optim([reference], **self.options)
+        reference_optimizer.state[reference] = {
+            name: optimizer.state[param][name].clone() for name in ("exp_avg", "exp_avg_sq")
+        }
+        if step is not None:
+            reference_optimizer.param_groups[0]["step"] = step
+        param.grad = torch.full_like(param, 0.125)
+        reference.grad = torch.full_like(reference, 0.125)
+        optimizer.step()
+        reference_optimizer.step()
+        torch.testing.assert_close(param.float(), reference.float(), rtol=2**-7, atol=1e-7)
+
+    @pytest.mark.parametrize(
+        "recipe",
+        [
+            pytest.param(
+                DelayedScaling,
+                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+            ),
+            pytest.param(
+                Float8CurrentScaling,
+                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+            ),
+            pytest.param(
+                MXFP8BlockScaling,
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+            ),
+            pytest.param(
+                Float8BlockScaling,
+                marks=pytest.mark.skipif(
+                    not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling
+                ),
+            ),
+        ],
+    )
+    def test_reload_quantized_master_param(self, recipe):
+        """Quantized parameters keep exact FP32 masters and quantized model storage."""
+        with quantized_model_init(enabled=True, recipe=recipe()):
+            model = te.Linear(256, 256, bias=False, params_dtype=torch.bfloat16).cuda()
+        param = model.weight
+        assert isinstance(param, QuantizedTensor)
+        optimizer = self.fused_optim(
+            [param], master_weights=True, use_decoupled_grad=True, **self.options
+        )
+        source = torch.full(param.shape, 1.001, device="cuda")
+        expected = param.detach().clone()
+        expected.copy_(source)
+        optimizer.reload_master_param(param, source)
+        assert isinstance(param, QuantizedTensor)
+        assert torch.equal(optimizer.state[param]["master_param"], source)
+        assert torch.equal(
+            param.dequantize(dtype=torch.float32), expected.dequantize(dtype=torch.float32)
+        )
+
+        # The reloaded state must be complete enough for a real update.
+        param.decoupled_grad = torch.full(param.shape, 0.125, device="cuda")
+        optimizer.step()
+        master = optimizer.state[param]["master_param"]
+        assert torch.all(master < source)
+        torch.testing.assert_close(
+            param.dequantize(dtype=torch.float32), master, rtol=0.125, atol=0
+        )
+
+    @pytest.mark.parametrize("master_dtype", [torch.float32, torch.float16])
+    def test_reload_master_param_mixed_dtypes(self, master_dtype):
+        """Remainders apply only to BF16 parameters, and scaled masters use the existing setter."""
+        params = [
+            nn.Parameter(torch.ones(16, dtype=dtype, device="cuda"))
+            for dtype in (torch.bfloat16, torch.float32)
+        ]
+        optimizer = self.fused_optim(
+            params,
+            master_weights=True,
+            master_weight_dtype=master_dtype,
+            store_param_remainders=True,
+            **self.options,
+        )
+        source = torch.full((16,), 1.001, device="cuda")
+        original_source = source.clone()
+        for param in params:
+            optimizer.reload_master_param(param, source)
+        assert torch.equal(source, original_source)
+        assert torch.equal(params[1], source)
+        for param in params:
+            state = optimizer.state[param]["master_param"]
+            remainders = master_dtype == torch.float32 and param.dtype == torch.bfloat16
+            assert state.dtype == (torch.int16 if remainders else master_dtype)
+            if not remainders:
+                torch.testing.assert_close(
+                    optimizer.get_unscaled_state(param, "master_param"),
+                    source,
+                    rtol=2**-10,
+                    atol=0,
+                )
+
+    @pytest.mark.parametrize("invalid", ["dtype", "shape", "no_master", "not_owned"])
+    def test_reload_master_param_rejects_invalid_input(self, invalid):
+        param = nn.Parameter(torch.ones(4, device="cuda", dtype=torch.bfloat16))
+        optimizer = self.fused_optim([param], master_weights=invalid != "no_master", **self.options)
+        source = torch.ones(3 if invalid == "shape" else 4, device="cuda")
+        if invalid == "dtype":
+            source = source.bfloat16()
+        # A view such as param.data shares storage but is not the optimizer's parameter.
+        target = param.data if invalid == "not_owned" else param
+        with pytest.raises((ValueError, RuntimeError)):
+            optimizer.reload_master_param(target, source)
+        assert len(optimizer.state) == 0
+        assert torch.equal(param, torch.ones_like(param))
+
+    @pytest.mark.parametrize("master_layout", ["matching", "local", "replicated", "plain_param"])
+    def test_reload_dtensor_master_param(self, master_layout):
+        """DTensor masters must match the parameter's distribution; local tensors are accepted."""
+        from torch.distributed.device_mesh import init_device_mesh
+        from torch.distributed.tensor import DTensor, Replicate, Shard
+
+        created_group = not torch.distributed.is_initialized()
+        if created_group:
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            torch.distributed.init_process_group(
+                "nccl", init_method=f"tcp://127.0.0.1:{port}", rank=0, world_size=1
+            )
+        try:
+            mesh = init_device_mesh("cuda", (1,))
+            values = torch.ones(8, device="cuda", dtype=torch.bfloat16)
+            if master_layout == "plain_param":
+                param = nn.Parameter(values)
+            else:
+                param = nn.Parameter(DTensor.from_local(values, mesh, [Shard(0)]))
+            optimizer = self.fused_optim([param], master_weights=True, **self.options)
+            local = torch.full((8,), 1.001, device="cuda")
+            if master_layout == "local":
+                source = local
+            else:
+                # On one rank Shard(0) and Replicate() have identical local shapes,
+                # so only the explicit layout check can tell them apart.
+                placement = Replicate() if master_layout == "replicated" else Shard(0)
+                source = DTensor.from_local(local, mesh, [placement])
+
+            if master_layout in ("replicated", "plain_param"):
+                with pytest.raises(ValueError):
+                    optimizer.reload_master_param(param, source)
+                assert len(optimizer.state) == 0
+                return
+
+            optimizer.reload_master_param(param, source)
+            state = optimizer.state[param]
+            for name in ("exp_avg", "exp_avg_sq", "master_param"):
+                assert isinstance(state[name], DTensor)
+                assert state[name].placements == param.placements
+            assert torch.equal(optimizer.get_unscaled_state(param, "master_param"), local)
+            assert torch.equal(param.to_local(), local.bfloat16())
+        finally:
+            if created_group:
+                torch.distributed.destroy_process_group()
 
     def test_float(self):
         self.gen_single_type_test(param_type=torch.float)
