@@ -5,75 +5,12 @@
 """Data-free descriptions of quantized operation outputs."""
 
 from __future__ import annotations
-import math
-import os
 from typing import Optional
 
 import torch
-import transformer_engine_torch as tex
 
 from .tensor_spec import TensorSpec
 from ..quantized_tensor import Quantizer
-from ..tensor.nvfp4_tensor import NVFP4Quantizer
-from ..utils import get_device_compute_capability
-
-
-@torch.compiler.assume_constant_result
-def _nvfp4_gemm_swizzled_scales_alignment(
-    optimize_for_gemm: bool,
-    with_rht: bool,
-    with_2d_quantization: bool,
-    row_scaled_nvfp4: bool,
-    nvfp4_use_4over6: bool,
-    sm_arch: int,
-    disable_rht_cast_fusion: bool,
-) -> Optional[tuple[int, int]]:
-    return tex.nvfp4_gemm_swizzled_scales_alignment(
-        optimize_for_gemm,
-        with_rht,
-        with_2d_quantization,
-        row_scaled_nvfp4,
-        nvfp4_use_4over6,
-        sm_arch,
-        disable_rht_cast_fusion,
-    )
-
-
-def _make_fused_quantization_output_spec(
-    shape: tuple[int, ...],
-    dtype: torch.dtype,
-    device: Optional[torch.device],
-    quantizer: Optional[Quantizer],
-) -> TensorSpec:
-    """Describe a native output without a separate post-quantize swizzle."""
-    spec = TensorSpec(shape=tuple(shape), dtype=dtype, device=device, quantizer=quantizer)
-    quantizer = spec.quantizer
-    if not isinstance(quantizer, NVFP4Quantizer):
-        return spec
-    major, minor = get_device_compute_capability(device)
-    # Direct environ access lets Dynamo guard changes to the flag.
-    disable_rht_cast_fusion = bool(
-        int(os.environ.get("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", "0") or "0")
-    )
-    alignment = _nvfp4_gemm_swizzled_scales_alignment(
-        quantizer.optimize_for_gemm,
-        quantizer.with_rht,
-        quantizer.with_2d_quantization,
-        quantizer.row_scaled_nvfp4,
-        quantizer.nvfp4_use_4over6,
-        major * 10 + minor,
-        disable_rht_cast_fusion,
-    )
-    # Keep divisibility checks visible to Dynamo without specializing the dimensions.
-    rows, cols = math.prod(shape[:-1]), shape[-1]
-    if alignment is None:
-        spec.with_gemm_swizzled_scales = False
-    else:
-        row_alignment, col_alignment = alignment
-        spec.with_gemm_swizzled_scales = bool(
-            rows % row_alignment == 0 and cols % col_alignment == 0
-        )
-    return spec
 
 
 def fake_activation(
@@ -82,13 +19,10 @@ def fake_activation(
     *,
     gated: bool = False,
     dtype: Optional[torch.dtype] = None,
-    fused_quantization: bool = True,
 ) -> TensorSpec:
-    """Describe an activation output, including optional fused quantization."""
+    """Describe an activation output, including optional quantization."""
     shape = (*input_.shape[:-1], input_.shape[-1] // 2 if gated else input_.shape[-1])
     dtype = dtype or input_.dtype
-    if fused_quantization:
-        return _make_fused_quantization_output_spec(shape, dtype, input_.device, quantizer)
     return TensorSpec(shape=shape, dtype=dtype, device=input_.device, quantizer=quantizer)
 
 
@@ -99,8 +33,11 @@ def fake_activation_backward(
     dtype: Optional[torch.dtype] = None,
 ) -> TensorSpec:
     """Describe the gradient of the original, pre-activation input."""
-    return _make_fused_quantization_output_spec(
-        input_.shape, dtype or input_.dtype, input_.device, quantizer
+    return TensorSpec(
+        shape=input_.shape,
+        dtype=dtype or input_.dtype,
+        device=input_.device,
+        quantizer=quantizer,
     )
 
 
@@ -116,8 +53,11 @@ def fake_bgrad(
     dx = (
         grad_output
         if quantizer is None and dtype == grad_output.dtype
-        else _make_fused_quantization_output_spec(
-            grad_output.shape, dtype, grad_output.device, quantizer
+        else TensorSpec(
+            shape=grad_output.shape,
+            dtype=dtype,
+            device=grad_output.device,
+            quantizer=quantizer,
         )
     )
     return db, dx

@@ -21,7 +21,7 @@ from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import _compile_safe_warn, clear_tensor_data
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize
+from .._common import maybe_autocast_dtype, maybe_dequantize
 
 __all__ = [
     "GELU",
@@ -133,7 +133,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
     ) -> ActivationFwdArgs:
         if basic_op_kwargs[0]:
             raise ValueError("Activation forward does not expect keyword arguments")
-        dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled() else input_.dtype
+        dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise RuntimeError(f"Unsupported dtype ({dtype})")
         input_quantizer = None
@@ -502,12 +502,8 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
                 "in the fused grouped MLP path."
             )
 
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
-            extra_input_dtype = dtype
-        else:
-            dtype = input_.dtype
-            extra_input_dtype = extra_input.dtype
+        dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
+        extra_input_dtype = maybe_autocast_dtype(default_dtype=extra_input.dtype)
 
         x = maybe_dequantize(input_.contiguous(), dtype)
         scales = maybe_dequantize(extra_input.contiguous(), extra_input_dtype)

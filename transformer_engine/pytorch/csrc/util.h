@@ -36,6 +36,32 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<Tenso
 std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_unchecked(
     std::vector<TensorWrapper>& tensors, bool rowwise_usage, bool columnwise_usage);
 
+/*! \brief Compact scratch scales of an output and its own GEMM-swizzled scale buffers. */
+struct RedirectedScales {
+  bool active = false;
+  at::Tensor scratch[2];                   // rowwise, columnwise
+  void* swizzled[2] = {nullptr, nullptr};  // rowwise, columnwise
+};
+
+/*! \brief Point a GEMM-swizzled output's scales to compact scratch buffers.
+ *
+ *  For kernels that only emit compact scales, which can then write directly into the output.
+ *  Must be followed by restore_and_swizzle_scales. preserve_scales keeps the previous scales
+ *  if the kernel is a GPU no-op.
+ */
+RedirectedScales redirect_scales_to_scratch(TensorWrapper& output, bool preserve_scales = false);
+
+/*! \brief Restore the output's scale buffers and swizzle the compact scratch scales into them. */
+void restore_and_swizzle_scales(TensorWrapper& output, const RedirectedScales& redirected);
+
+/*! \brief Multi-tensor redirect_scales_to_scratch for the outputs where compact_scales is set. */
+std::vector<RedirectedScales> redirect_scales_to_scratch(std::vector<TensorWrapper>& outputs,
+                                                         const std::vector<bool>& compact_scales);
+
+/*! \brief Multi-tensor restore_and_swizzle_scales with one swizzle kernel per usage. */
+void restore_and_swizzle_scales(std::vector<TensorWrapper>& outputs,
+                                const std::vector<RedirectedScales>& redirected);
+
 using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>;
 
 /*! \brief Swizzle grouped tensor scales for GEMM if needed.

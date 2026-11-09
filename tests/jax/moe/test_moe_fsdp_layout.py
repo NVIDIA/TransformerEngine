@@ -365,4 +365,5 @@ def test_layout_argument_is_optional_and_static():
 
     assert inspect.signature(moe.moe).parameters["cudnn_native_weight_layout"].default is None
     assert inspect.signature(moe._moe).parameters["cudnn_native_weight_layout"].default is None
-    assert 33 in moe._moe.nondiff_argnums
+    parameters = list(inspect.signature(moe._moe).parameters)
+    assert parameters.index("cudnn_native_weight_layout") in moe._moe.nondiff_argnums
