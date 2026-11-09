@@ -691,12 +691,10 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
 
-std::tuple<at::Tensor, at::Tensor> nvfp4_group_hadamard_amax(const at::Tensor &tensor,
-                                                             py::handle quantizer,
-                                                             const size_t num_tensors,
-                                                             std::optional<at::Tensor> first_dims,
-                                                             std::optional<at::Tensor> last_dims,
-                                                             std::optional<at::Tensor> tensor_offsets) {
+std::tuple<at::Tensor, at::Tensor> nvfp4_group_hadamard_amax(
+    const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
+    std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+    std::optional<at::Tensor> tensor_offsets) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -742,8 +740,7 @@ std::tuple<at::Tensor, at::Tensor> nvfp4_group_hadamard_amax(const at::Tensor &t
   // quantized storage.
   auto grouped_amax_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
   grouped_amax_tensor.set_rowwise_data(tensor.data_ptr(), input_dtype, getTensorShape(tensor));
-  grouped_amax_tensor.set_columnwise_data(tensor.data_ptr(), input_dtype,
-                                          getTensorShape(tensor));
+  grouped_amax_tensor.set_columnwise_data(tensor.data_ptr(), input_dtype, getTensorShape(tensor));
   grouped_amax_tensor.set_amax(rowwise_amax.data_ptr(), DType::kFloat32,
                                getTensorShape(rowwise_amax));
   grouped_amax_tensor.set_columnwise_amax(columnwise_amax.data_ptr(), DType::kFloat32,

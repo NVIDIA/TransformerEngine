@@ -434,12 +434,10 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
  *  now and column-wise later from the same amax, e.g. when the column-wise copy is
  *  regenerated in the backward pass.
  */
-std::tuple<at::Tensor, at::Tensor> nvfp4_group_hadamard_amax(const at::Tensor &tensor,
-                                                             py::handle quantizer,
-                                                             const size_t num_tensors,
-                                                             std::optional<at::Tensor> first_dims,
-                                                             std::optional<at::Tensor> last_dims,
-                                                             std::optional<at::Tensor> tensor_offsets);
+std::tuple<at::Tensor, at::Tensor> nvfp4_group_hadamard_amax(
+    const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
+    std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+    std::optional<at::Tensor> tensor_offsets);
 
 py::object group_dequantize(const py::handle &input, DType otype);
 
