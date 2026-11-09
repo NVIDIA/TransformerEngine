@@ -542,6 +542,33 @@ void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
                                         std::vector<int64_t> h_list, std::vector<int64_t> w_list,
                                         std::vector<int64_t> start_offset_list, int64_t block_len,
                                         const DType scale_dtype = DType::kFloat8E4M3);
+void nvfp4_2d_multi_tensor_partial_amax(const std::vector<at::Tensor> &inp_list,
+                                        const std::vector<at::Tensor> &amax_list,
+                                        const std::vector<int64_t> &h_list,
+                                        const std::vector<int64_t> &w_list,
+                                        const std::vector<int64_t> &start_offset_list,
+                                        int64_t block_len, const DType cast_dtype);
+
+void nvfp4_2d_multi_tensor_global_amax(const std::vector<at::Tensor> &block_amax_list,
+                                       const std::vector<at::Tensor> &global_amax_list);
+
+void nvfp4_2d_multi_tensor_fused_scale(const std::vector<at::Tensor> &block_amax_list,
+                                       const std::vector<at::Tensor> &global_amax_list,
+                                       const std::vector<at::Tensor> &per_block_scale_list,
+                                       const std::vector<at::Tensor> &target_scale_list,
+                                       const std::vector<at::Tensor> &target_amax_list,
+                                       const std::vector<int64_t> &tile_rows_list,
+                                       const std::vector<int64_t> &tile_cols_list,
+                                       const std::vector<int64_t> &rows_padded_list,
+                                       int64_t block_len, const DType scale_dtype);
+
+void nvfp4_2d_multi_tensor_partial_cast(
+    const std::vector<at::Tensor> &inp_list, const std::vector<at::Tensor> &out_list,
+    const std::vector<at::Tensor> &scale_list, const std::vector<at::Tensor> &global_scale_list,
+    const std::vector<int64_t> &h_list, const std::vector<int64_t> &w_list,
+    const std::vector<int64_t> &start_offset_list, int64_t block_len, const DType cast_dtype,
+    const DType scale_dtype);
+
 void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
                                         at::Tensor amax_colwise, int rows, int cols,
                                         size_t start_offset);

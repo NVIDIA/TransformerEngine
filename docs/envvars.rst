@@ -338,6 +338,12 @@ FP8 Configuration
    :Default: ``0``
    :Description: Allow FP8 emulation in UnfusedDotProductAttention. When set to ``1``, UnfusedDotProductAttention can emulate FP8 operations using FP16/BF16 computation.
 
+.. envvar:: NVTE_NVFP4_FUSED_MASTER_WEIGHT_CAST
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: In ``quantize_master_weights`` (the master-weight cast of a distributed optimizer), cast the shards to 2D NVFP4 model weights with multi-tensor kernels: one launch per 24 tensors for the tile amaxes, the global amaxes, the scales and the cast, reading FP32 masters directly instead of a BF16 copy, and with the per-tensor global amaxes taken from the all-reduced tile amaxes instead of a second all-reduce. The FP4 data, scales and amaxes are identical to the default path. FSDP-sharded model weights and unsupported layouts use the default path.
+
 Kernel Configuration
 ^^^^^^^^^^^^^^^^^^^^
 
