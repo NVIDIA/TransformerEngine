@@ -201,6 +201,11 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
   constexpr int32_t numItersIType2 = sizeof(inputUnitType) / sizeof(IType2);
   using OType2 = typename ptx::FPx2<OType>;
 
+  // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+  // so per-block amax will be NaN if all values in the block are NaN.
+  const float nan_float = __int_as_float(0x7FC00000);
+  const IType nan_itype = static_cast<IType>(nan_float);
+
   e8m0_t *sRowwiseScale = nullptr;
   if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
     extern __shared__ char smem[];
@@ -328,7 +333,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
         output_units[j] = rOutput[j];
       }
     } else {
-      IType2 thread_amax2{0.f, 0.f};
+      IType2 thread_amax2 = {nan_itype, nan_itype};
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
       for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
@@ -449,7 +454,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
         output_units[j] = rOutput[j];
       }
     } else {
-      IType2 thread_amax2{0.f, 0.f};
+      IType2 thread_amax2 = {nan_itype, nan_itype};
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
       for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
@@ -882,6 +887,11 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   using OType2 = typename ptx::FPx2<OType>;
   constexpr int32_t numItersIType2 = sizeof(inputUnitType) / sizeof(IType2);
 
+  // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+  // so per-block amax will be NaN if all values in the block are NaN.
+  const float nan_float = __int_as_float(0x7FC00000);
+  const IType nan_itype = static_cast<IType>(nan_float);
+
   int32_t warpId = threadIdx.y;
   int32_t leader = ptx::elect_one_sync();
   int2 block_coords;
@@ -1027,8 +1037,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
         ptx::cp_async_bulk_wait_group_read<CastTraits::numStages - 1>();
         ptx::mbarrier_arrive_expect_tx(&stg_consumer[read_state.index()], 0u);
       }
+      ptx::cp_async_bulk_wait_group();
     }
-    ptx::cp_async_bulk_wait_group_read<0>();
   } else {
     PipeState<CastTraits::numStages> read_state;
 
@@ -1109,7 +1119,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
             float2 *sColwiseReduce_2x = reinterpret_cast<float2 *>(sColwiseReduce);
 
-            IType2 row_amax2{0.0f, 0.0f};
+            IType2 row_amax2 = {nan_itype, nan_itype};
 #pragma unroll
             for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
               ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
@@ -1351,6 +1361,11 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
 
+  // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+  // so per-block amax will be NaN if all values in the block are NaN.
+  const float nan_float = __int_as_float(0x7FC00000);
+  const IType nan_itype = static_cast<IType>(nan_float);
+
   int32_t warpId = threadIdx.y;
   int32_t leader = ptx::elect_one_sync();
   int2 block_coords;
@@ -1510,6 +1525,17 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   }
 #pragma unroll 1
   for (int32_t iter = 0; iter < CastTraits::iterLayout::num; iter++) {
+    // S2G bulk async-groups are thread-local. Once the output ring wraps, the issuing
+    // thread must observe completion and hand it off to the CTA before cooperative STS.
+    if constexpr (CastTraits::_need_wait_group) {
+      if (iter >= CastTraits::numStages) {
+        if (warpId == 0 && leader) {
+          ptx::cp_async_bulk_wait_group_read<CastTraits::numStages - 1>();
+        }
+        __syncthreads();
+      }
+    }
+
     {
       int32_t next = iter + (CastTraits::numStages - 1);
       int32_t next_stage = next % CastTraits::numStages;
@@ -1520,10 +1546,6 @@ __global__ void quantize_mxfp8_kernel_cast_only(
       coords.x = block_coords.x + iter_n * CastTraits::blockIterDim::N;
       if (next < CastTraits::iterLayout::num && coords.x < cols && coords.y < rows) {
         if (warpId == 0 && leader) {
-          if constexpr (CastTraits::_need_wait_group) {
-            ptx::cp_async_bulk_wait_group_read<CastTraits::numStages - 1>();
-          }
-
           ptx::cp_async_bulk_tensor_2d_global_to_shared(
               reinterpret_cast<uint64_t *>(sInput + next_stage * CastTraits::blockIterDim::num),
               reinterpret_cast<const uint64_t *>(&tensor_map_input),
@@ -1579,7 +1601,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
           IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
           float2 *sColwiseReduce_2x = reinterpret_cast<float2 *>(sColwiseReduce);
 
-          IType2 row_amax2{0.0f, 0.0f};
+          IType2 row_amax2 = {nan_itype, nan_itype};
 #pragma unroll
           for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
             ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
@@ -1984,7 +2006,10 @@ __global__ void quantize_mxfp8_kernel_cast_only(
     }
   }
 
-  ptx::cp_async_bulk_wait_group_read<0>();
+  if (warpId == 0 && leader) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
 
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }  // NOLINT(readability/fn_size)

@@ -290,9 +290,9 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
             MXFP8Quantize2DKernel if cfg.USE_2D_QUANTIZATION else MXFP8QuantizeGeneralG2SKernel
         )
         # Candidate kernels in dispatch priority order; the first one whose runtime
-        # eligible_to_dispatch check passes is launched. The specialized cast-only kernels come
-        # first, then the general kernel without and with boundary handling. The last one is
-        # always eligible.
+        # eligible_to_dispatch check passes is launched. The specialized kernels come first,
+        # then the general kernel without and with boundary handling. The last one is always
+        # eligible.
         self.preferred_kernels = [
             kernel_cls(cfg)
             for kernel_cls in (

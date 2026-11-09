@@ -304,6 +304,7 @@ list(APPEND transformer_engine_cuda_sources
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
+     gemm/cublaslt_batched_gemm.cu
      gemm/cublaslt_gemm.cu
      gemm/cublaslt_grouped_gemm.cu
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
@@ -362,7 +363,8 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast_dbias.cu
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
-     cast/fused_group_requantize.cu
+     cast/mxfp8/requantize_mxfp8.cu
+     fused_rope/fused_mla_kv_rope_mxfp8.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu
@@ -373,6 +375,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
      hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
      multi_tensor/compute_scale.cu
+     normalization/rmsnorm/rmsnorm_fwd_mxfp8.cu
      recipe/mxfp8_scaling.cu
      recipe/nvfp4.cu
      transpose/quantize_transpose_square_blockwise.cu

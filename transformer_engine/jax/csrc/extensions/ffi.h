@@ -37,6 +37,18 @@ Error_Type ffi_with_cuda_error_check();
 // Wraps a caught std::exception as an Error_Type, prefixed with `context`.
 Error_Type ffi_internal_error(const std::string& context, const std::exception& e);
 
+// Runs `f`, returning an internal error prefixed with `context` if it throws, else the CUDA error
+// status. Exceptions must not propagate into XLA.
+template <typename F>
+Error_Type ffi_guard(const std::string& context, F&& f) {
+  try {
+    f();
+  } catch (const std::exception& e) {
+    return ffi_internal_error(context, e);
+  }
+  return ffi_with_cuda_error_check();
+}
+
 // source_location is not available in C++17, so we implement it ourselves
 #if defined(__GNUC__) || defined(__clang__)
 #define CURRENT_FILE __builtin_FILE()

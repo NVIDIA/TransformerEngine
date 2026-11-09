@@ -96,6 +96,8 @@ std::vector<T> stride_from_shape(const std::vector<T>& shape) {
 /*! @brief Convert shape for FP4 data by dividing the last dimension by 2 */
 template <typename T = size_t>
 std::vector<T> convert_shape_for_fp4(const std::vector<T>& shape) {
+  NVTE_CHECK(shape.back() % 2 == 0, "FP4 packing requires an even last dimension, got shape ",
+             shape);
   std::vector<T> ret;
   for (size_t i = 0; i < shape.size() - 1; ++i) {
     ret.push_back(shape[i]);
@@ -1511,9 +1513,6 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
-  NVTE_CHECK(flat_first_dim % MXFP8_BLOCK_SIZE == 0 && flat_last_dim % MXFP8_BLOCK_SIZE == 0,
-             "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
-             " (got shape=", shape, ")");
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
 
@@ -1859,10 +1858,6 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
 
   auto last_dim = shape.back();
 
-  NVTE_CHECK(last_dim % MXFP8_BLOCK_SIZE == 0 && (numel / last_dim) % MXFP8_BLOCK_SIZE == 0,
-             "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
-             " (got shape=", shape, ")");
-
   std::vector<size_t> scale_shape;
 
   bool rowwise_usage = !columnwise;
@@ -1870,11 +1865,11 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
   if (rowwise_usage) {
     // rowwise scaling factor shape
     size_t sinv0 = roundup(numel / last_dim, 128);
-    size_t sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4);
+    size_t sinv1 = roundup(ceildiv(last_dim, MXFP8_BLOCK_SIZE), 4);
     scale_shape = {sinv0, sinv1};
   } else {
     // columnwise scaling factor shape
-    size_t sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4);
+    size_t sinv0 = roundup(ceildiv(numel / last_dim, MXFP8_BLOCK_SIZE), 4);
     size_t sinv1 = roundup(last_dim, 128);
     scale_shape = {sinv0, sinv1};
   }
@@ -1934,50 +1929,72 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
                               columnwise_data.shape);
 }
 
-bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
-                                                     bool for_grouped_kernel) {
-  if (transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION")) {
+NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::rht_cast_fusion_alignment(
+    int sm_arch, std::optional<bool> disable_rht_cast_fusion, bool for_grouped_kernel) {
+  const bool disabled =
+      disable_rht_cast_fusion.has_value()
+          ? *disable_rht_cast_fusion
+          : transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION");
+  const bool supported_arch = (sm_arch >= 100 && sm_arch <= 110) ||
+                              (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
+  if (disabled || !supported_arch) {
+    return std::nullopt;
+  }
+  return std::pair<size_t, size_t>{for_grouped_kernel ? 128 : 64, 128};
+}
+
+NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::get_2d_swizzle_fusion_alignment(int sm_arch) {
+  if (sm_arch < 100 || sm_arch > 110) {
+    return std::nullopt;
+  }
+  return std::pair<size_t, size_t>{128, 128};
+}
+
+bool NVFP4Quantizer::meets_alignment(const std::vector<size_t>& shape,
+                                     const ShapeAlignment& alignment) {
+  if (!alignment) {
     return false;
   }
   const auto [rows, cols] = get_2d_dims(shape);
-  const size_t row_align = for_grouped_kernel ? 128 : 64;
-  const int sm_arch = transformer_engine::cuda::sm_arch();
-  const bool supported_arch = (sm_arch >= 100 && sm_arch <= 110) ||
-                              (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
-  return rows % row_align == 0 && cols % 128 == 0 && supported_arch;
+  return rows % alignment->first == 0 && cols % alignment->second == 0;
+}
+
+NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::gemm_swizzled_scales_alignment(
+    bool optimize_for_gemm, bool with_rht, bool with_2d_quantization, bool row_scaled_nvfp4,
+    bool nvfp4_use_4over6, int sm_arch, std::optional<bool> disable_rht_cast_fusion) {
+  if (!optimize_for_gemm) {
+    return std::nullopt;
+  }
+  if (with_rht) {
+    // The SM12x no-TMEM RHT path reuses the compact-scale 1D TMA quantizer.
+    if (sm_arch == 120 || sm_arch == 121) {
+      return std::nullopt;
+    }
+    return rht_cast_fusion_alignment(sm_arch, disable_rht_cast_fusion);
+  }
+  if (with_2d_quantization && !row_scaled_nvfp4 && !nvfp4_use_4over6) {
+    return get_2d_swizzle_fusion_alignment(sm_arch);
+  }
+  return std::nullopt;
+}
+
+bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
+                                                     bool for_grouped_kernel) {
+  return meets_alignment(shape, rht_cast_fusion_alignment(transformer_engine::cuda::sm_arch(),
+                                                          std::nullopt, for_grouped_kernel));
 }
 
 bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape) {
-  const auto [rows, cols] = get_2d_dims(shape);
-  return rows % 128 == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
-         transformer_engine::cuda::sm_arch() <= 110;
+  return meets_alignment(shape,
+                         get_2d_swizzle_fusion_alignment(transformer_engine::cuda::sm_arch()));
 }
 
-namespace {
-
-// Whether this quantizer should emit GEMM-swizzled scale factors directly from the
-// quantize kernel (RHT cast-fusion path or the plain 2D quantize path), avoiding the
-// standalone post-quantize swizzle pass.
-bool nvfp4_emits_gemm_swizzled_scales(const NVFP4Quantizer& q, const std::vector<size_t>& shape) {
-  if (!q.optimize_for_gemm) {
-    return false;
-  }
-  if (q.with_rht) {
-    const int sm_arch = transformer_engine::cuda::sm_arch();
-    // The SM12x no-TMEM RHT path reuses the compact-scale 1D TMA quantizer.
-    // Keep the existing post-quantize swizzle until that path gains an in-kernel swizzle epilogue.
-    if (sm_arch == 120 || sm_arch == 121) {
-      return false;
-    }
-    return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
-  }
-  // Plain (non-RHT) 2D quantize kernel can bake the swizzled layout for aligned shapes.
-  return q.with_2d_quantization && !q.row_scaled_nvfp4 &&
-         q.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled &&
-         NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(shape);
+bool NVFP4Quantizer::emits_gemm_swizzled_scales(const std::vector<size_t>& shape) const {
+  return meets_alignment(shape, gemm_swizzled_scales_alignment(
+                                    optimize_for_gemm, with_rht, with_2d_quantization,
+                                    row_scaled_nvfp4, nvfp4_4over6_mode != kNVTENVFP44Over6Disabled,
+                                    transformer_engine::cuda::sm_arch(), std::nullopt));
 }
-
-}  // namespace
 
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
@@ -1992,17 +2009,23 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
   // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
   // through the standalone post-quantize swizzle pass instead.
-  const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
-  NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
-             NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
-  NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
-             "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
-             " (got shape=", shape, ")");
+  const bool with_gemm_swizzled_scales = emits_gemm_swizzled_scales(shape);
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
+  }
+  NVTE_CHECK(flat_last_dim % 2 == 0,
+             "NVFP4 requires the last tensor dimension to be divisible by 2,"
+             " got tensor with shape ",
+             shape, " (flat_first_dim=", flat_first_dim, ", flat_last_dim=", flat_last_dim, ")");
+  if (this->with_rht) {
+    NVTE_CHECK(flat_first_dim % 16 == 0,
+               "NVFP4 with random Hadamard transform requires the"
+               " product of all dimensions except the last to be divisible by 16,"
+               " got tensor with shape ",
+               shape, " (flat_first_dim=", flat_first_dim, ")");
   }
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
@@ -2183,8 +2206,6 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 grouped quantization requires rowwise usage.");
-    NVTE_CHECK(!columnwise_usage,
-               "Row-scaled NVFP4 grouped quantization does not support columnwise usage.");
   }
 
   const int64_t total_data_elements = total_elements / 2;
@@ -2207,7 +2228,11 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
     columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
     if (!disable_second_level_scale) {
-      columnwise_amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+      const int64_t col_amax_elements =
+          row_scaled_nvfp4
+              ? static_cast<int64_t>(num_tensors) * static_cast<int64_t>(logical_last_dim)
+              : static_cast<int64_t>(num_tensors);
+      columnwise_amax = at::empty({col_amax_elements}, float_opts);
     }
   }
 
@@ -2242,6 +2267,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   }
 
   out_cpp.set_with_gemm_swizzled_scales(this->optimize_for_gemm);
+  out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
@@ -2344,7 +2370,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   // Swizzled SF is emitted directly by the RHT cast-fusion kernel or by the plain
   // 2D quantize kernel (for aligned shapes); other quantize paths reject it and go
   // through the standalone post-quantize swizzle pass instead.
-  const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
+  const bool with_gemm_swizzled_scales = emits_gemm_swizzled_scales(shape);
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   const bool disable_second_level_scale = this->disable_second_level_scale;
@@ -2820,12 +2846,6 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
                                                     bool columnwise) const {
   const auto [flat_first_dim, last_dim] = get_2d_dims(shape);
 
-  NVTE_CHECK(last_dim % NVFP4_BLOCK_SIZE == 0, "Last dim for NVFP4 must be divisible by ",
-             NVFP4_BLOCK_SIZE, " (got dim=", last_dim, ")");
-  NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0,
-             "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
-             " (got shape=", shape, ")");
-
   std::vector<size_t> scale_shape;
 
   bool rowwise_usage = !columnwise;
@@ -2833,12 +2853,12 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
   if (rowwise_usage) {
     // rowwise scaling factor shape
     size_t sinv0 = roundup(flat_first_dim, 128);
-    size_t sinv1 = roundup(last_dim / NVFP4_BLOCK_SIZE, 4);
+    size_t sinv1 = roundup(ceildiv(last_dim, NVFP4_BLOCK_SIZE), 4);
     scale_shape = {sinv0, sinv1};
   } else {
     // columnwise scaling factor shape
     size_t sinv0 = roundup(last_dim, 128);
-    size_t sinv1 = roundup(flat_first_dim / NVFP4_BLOCK_SIZE, 4);
+    size_t sinv1 = roundup(ceildiv(flat_first_dim, NVFP4_BLOCK_SIZE), 4);
     scale_shape = {sinv0, sinv1};
   }
   return scale_shape;

@@ -43,17 +43,20 @@ include_directories(${CMAKE_SOURCE_DIR})
 find_package(CUDAToolkit REQUIRED)
 include(${CMAKE_SOURCE_DIR}/../../transformer_engine/common/cmake/cuDNN.cmake)
 
-# Must match how libtransformer_engine.so was built, hence the env var default.
-option(NVTE_WITH_CUTEDSL
-       "Link the tests against libpython, required when libtransformer_engine.so was built with NVTE_WITH_CUTEDSL=ON"
-       "$ENV{NVTE_WITH_CUTEDSL}")
-
 add_subdirectory(operator)
 add_subdirectory(util)
 
-if(NVTE_WITH_CUTEDSL)
-  # Executables that link libtransformerengine.so must also link to the Python::Python to provide
-  # the definitions of these CPython symbols at runtime via dynamic linking.
+# libtransformer_engine.so built with NVTE_WITH_CUTEDSL=ON leaves CPython symbols undefined, so
+# executables linking it must provide them. Detect this from the library itself rather than from
+# build flags, which are not available when the tests are built against an installed library.
+execute_process(COMMAND ${CMAKE_NM} --dynamic --undefined-only "${TE_LIB}"
+                OUTPUT_VARIABLE TE_LIB_UNDEFINED_SYMBOLS
+                RESULT_VARIABLE TE_LIB_NM_RESULT)
+if(NOT TE_LIB_NM_RESULT EQUAL 0)
+  message(FATAL_ERROR "Failed to list the undefined symbols of ${TE_LIB} with '${CMAKE_NM}'")
+endif()
+if(TE_LIB_UNDEFINED_SYMBOLS MATCHES "[ \t]U _?Py[A-Za-z_]")
+  message(STATUS "${TE_LIB} requires CPython symbols, linking the tests against libpython")
   # Find the interpreter too so older CMake versions use its version to locate libpython.
   find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
   foreach(test_target test_operator test_util)

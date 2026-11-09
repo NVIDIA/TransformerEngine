@@ -17,8 +17,10 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
+from transformer_engine.pytorch.device import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
+    get_cublasmp_all_gather_output,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -32,7 +34,6 @@ from .base import (
 )
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
-    assert_dim_for_fp8_exec,
     cast_if_needed,
     clear_tensor_data,
     divide,
@@ -350,8 +351,6 @@ def _layernorm_linear_forward_impl(
     inp_shape = inp.shape
     assert inp_shape[-1] == in_features, "GEMM not possible"
     inputmat = inp
-    if fp8:
-        assert_dim_for_fp8_exec(inputmat, weight)
 
     # Cast for native AMP
     nvtx_range_push(f"{nvtx_label}.norm_input_cast")
@@ -1182,12 +1181,13 @@ def _layernorm_linear_backward_impl(
         # Grad input tensor has been computed...
         # --------------------------------------------------
 
-        # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and
-        # does not preserve it for wgrad. Userbuffers leaves the gathered
-        # tensor in its persistent buffer; cuBLASMp does not, so we gather
-        # here. Route through the same FP8-aware all-gather as the
-        # non-overlap path in
-        # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
+        # cuBLASMp's AG+GEMM leaves the gathered grad_output at the start of
+        # its workspace, as Userbuffers leaves it in its persistent buffer,
+        # so wgrad reuses it for unquantized and per-tensor FP8 data. A
+        # delayed wgrad runs after the workspace is reused, and other formats
+        # need data the dgrad GEMM did not gather, so those gather here.
+        # Route through the same FP8-aware all-gather as the non-overlap path
+        # in ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
         # the grad_output quantizer. Columnwise data needed for wgrad is
         # produced by ``update_usage(columnwise_usage=True)`` further below.
         if (
@@ -1196,13 +1196,23 @@ def _layernorm_linear_backward_impl(
             and args.ub_obj_gradout is not None
             and args.ub_obj_gradout.with_cublasmp()
         ):
-            if args.grad_output_quantizer is not None:
-                set_quantizer_usage_for_wgrad_all_gather(args.grad_output_quantizer)
-            grad_output, _ = gather_along_first_dim(
-                grad_output,
-                args.tp_group,
-                quantizer=args.grad_output_quantizer,
-            )
+            grad_output_total = None
+            if not (args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute()):
+                grad_output_total = get_cublasmp_all_gather_output(
+                    args.ub_obj_gradout,
+                    grad_output,
+                    args.grad_output_quantizer,
+                    args.tp_group,
+                )
+            if grad_output_total is None:
+                if args.grad_output_quantizer is not None:
+                    set_quantizer_usage_for_wgrad_all_gather(args.grad_output_quantizer)
+                grad_output_total, _ = gather_along_first_dim(
+                    grad_output,
+                    args.tp_group,
+                    quantizer=args.grad_output_quantizer,
+                )
+            grad_output = grad_output_total
 
         # --------------------------------------------------
         # Compute grad weight
@@ -1427,16 +1437,18 @@ def _layernorm_linear_backward_impl(
         # Handle custom DDP from mcore.
         if args.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
             origin_weight.grad_added_to_main_grad = True
+            # The dummy gradient must match the original autograd input.
             if getattr(origin_weight, "zero_out_wgrad", False):
                 wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
+                    list(origin_weight.shape),
                     origin_weight.dtype,
                     zero=True,
                 )
             else:
                 wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
+                    list(origin_weight.shape),
                     origin_weight.dtype,
+                    zero_tensor=getattr(origin_weight, "zero_tensor_dummy_wgrad", False),
                 )
         elif args.fuse_wgrad_accumulation:
             wgrad = None
@@ -1587,7 +1599,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -1661,7 +1673,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         return_layernorm_output_gathered: bool = False,
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         zero_centered_gamma: bool = False,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,

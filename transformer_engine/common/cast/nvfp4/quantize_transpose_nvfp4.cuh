@@ -827,11 +827,16 @@ __global__ void __launch_bounds__(THREADS_NUM)
     const size_t buff_offset_out = buff * BUFF_OUT_SIZE;
     const size_t buff_offset_out_t = buff * BUFF_OUT_T_SIZE;
 
-    if (next_stage < STAGES) {
-      // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<1>();
+    if (stage >= BUFFS_NUM) {
+      if (is_master_thread) {
+        ptx::cp_async_bulk_wait_group_read<BUFFS_NUM - 1>();
+      }
+      // Bulk async-groups are thread-local. Publish the master's completion before any thread
+      // overwrites this reused output buffer.
+      __syncthreads();
+    }
 
+    if (next_stage < STAGES) {
       const size_t next_buff = next_stage % BUFFS_NUM;
       const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
@@ -1242,6 +1247,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
     }
   }
 
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
+
   destroy_barriers<STAGES>(mbar, is_master_thread);
   if constexpr (APPLY_COLUMNWISE_RHT) {
     destroy_barriers<1>(mbar_rht, is_master_thread);
@@ -1413,11 +1423,16 @@ __global__ void __launch_bounds__(THREADS_NUM)
     const size_t buff_offset_out = buff * BUFF_OUT_SIZE;
     const size_t buff_offset_out_t = buff * BUFF_OUT_T_SIZE;
 
-    if (next_stage < STAGES) {
-      // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<1>();
+    if (stage >= BUFFS_NUM) {
+      if (is_master_thread) {
+        ptx::cp_async_bulk_wait_group_read<BUFFS_NUM - 1>();
+      }
+      // Bulk async-groups are thread-local. Publish the master's completion before any thread
+      // overwrites this reused output buffer.
+      __syncthreads();
+    }
 
+    if (next_stage < STAGES) {
       const size_t next_buff = next_stage % BUFFS_NUM;
       const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
@@ -1804,6 +1819,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
     }
   }
 
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
+
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
@@ -2042,7 +2062,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
       scale_dtype, ScaleType,
       quantize_transpose_impl<ScaleType, use_2d_quantization, apply_columnwise_rht>(
-          input, noop, output, quant_config, stream, nullptr);)
+          input, noop, output, quant_config, stream, rht_matrix);)
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

@@ -142,6 +142,14 @@ class Sequential(torch.nn.Module):
         out.extend(modules)
         return out
 
+    def reset_parameters(self) -> None:
+        """Initialize parameter buffers and values"""
+        # Fusers cache params, which ops may replace
+        self._module_groups = None
+        for module in self:
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+
     @classmethod
     def _make_module_groups(
         cls,
