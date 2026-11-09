@@ -48,6 +48,7 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.triton.round_through_dtype import round_through_dtype
 from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
@@ -5063,3 +5064,210 @@ class TestGroupedMLPBf16FusedOp:
                 rtol=0,
                 atol=0,
             )
+
+
+class TestScalesGradRounding:
+    """FP32 scale (router probability) gradient of the block-scaled fused grouped MLP.
+
+    The backward rounds the FP32 scale gradient to the compute dtype. For FP32
+    scales it returns the rounded values in FP32 from one kernel; this must be
+    bitwise equal to the previous ``.to(compute_dtype)`` followed by autograd's
+    cast back to FP32.
+    """
+
+    _special_values = (
+        0.0,
+        -0.0,
+        float("inf"),
+        -float("inf"),
+        1e-45,
+        -1e-45,
+        1e-40,
+        -3e-39,
+        1.17549435e-38,
+        3.3895314e38,
+        -3.3895314e38,
+        3.4028235e38,
+        1.0 + 2**-8,
+        1.0 + 3 * 2**-9,
+        1.0 + 2**-11,
+        1.0 + 3 * 2**-12,
+        65504.0,
+        65520.0,
+        -65520.0,
+        6e-8,
+        3e-8,
+    )
+
+    @staticmethod
+    def _assert_bitwise_equal_or_both_nan(out: torch.Tensor, ref: torch.Tensor) -> None:
+        assert out.dtype == ref.dtype == torch.float32
+        assert out.shape == ref.shape
+        nan = torch.isnan(ref)
+        assert torch.equal(torch.isnan(out), nan)
+        assert torch.equal(out[~nan].view(torch.int32), ref[~nan].view(torch.int32))
+
+    @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
+    @pytest.mark.parametrize("numel", (0, 1, 4093, 131072))
+    @pytest.mark.parametrize("scale", (1e-38, 1e-3, 1.0, 1e30))
+    def test_round_through_dtype_matches_two_casts(
+        self, dtype: torch.dtype, numel: int, scale: float
+    ) -> None:
+        """Kernel equals ``x.to(dtype).to(float32)`` bitwise, incl. special values."""
+        x = torch.randn(numel, device="cuda", dtype=torch.float32) * scale
+        special = torch.tensor(self._special_values, device="cuda", dtype=torch.float32)
+        k = min(numel, special.numel())
+        x[:k] = special[:k]
+        out = round_through_dtype(x, dtype)
+        self._assert_bitwise_equal_or_both_nan(out, x.to(dtype).to(torch.float32))
+
+    @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
+    def test_round_through_dtype_random_bit_patterns(self, dtype: torch.dtype) -> None:
+        """Random FP32 bit patterns (normals, denormals, inf, NaN payloads)."""
+        bits = torch.randint(-(2**31), 2**31 - 1, (1 << 22,), device="cuda", dtype=torch.int64)
+        bits = bits.to(torch.int32)
+        x = bits.view(torch.float32)
+        out = round_through_dtype(x, dtype)
+        self._assert_bitwise_equal_or_both_nan(out, x.to(dtype).to(torch.float32))
+
+    def test_round_through_dtype_non_contiguous_and_shape(self) -> None:
+        """Non-contiguous inputs are handled and the input shape is kept."""
+        x = torch.randn(64, 96, device="cuda", dtype=torch.float32).t()
+        out = round_through_dtype(x, torch.bfloat16)
+        assert out.shape == x.shape
+        self._assert_bitwise_equal_or_both_nan(out, x.to(torch.bfloat16).to(torch.float32))
+
+    def test_round_through_dtype_cuda_graph(self) -> None:
+        """The kernel can be captured in a CUDA graph and replays on new data."""
+        x = torch.randn(32768, device="cuda", dtype=torch.float32)
+        round_through_dtype(x, torch.bfloat16)  # compile outside capture
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = round_through_dtype(x, torch.bfloat16)
+        for scale in (1.0, 1e-20, 1e20):
+            x.copy_(torch.randn_like(x) * scale)
+            graph.replay()
+            torch.cuda.synchronize()
+            self._assert_bitwise_equal_or_both_nan(out, x.to(torch.bfloat16).to(torch.float32))
+
+    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
+    @pytest.mark.parametrize("scales_dtype", (torch.float32, torch.bfloat16))
+    @pytest.mark.parametrize("bias", (False, True))
+    def test_fused_grouped_mlp_scales_grad(
+        self,
+        monkeypatch,
+        quantization: str,
+        scales_dtype: torch.dtype,
+        bias: bool,
+    ) -> None:
+        """Scale gradient of the fused op equals the old cast path bitwise.
+
+        The FP32 gradient produced by the fused kernels is recorded right before
+        it is rounded. For FP32 scales the gradient seen by the caller must be
+        ``fp32_grad.to(bf16).to(fp32)`` (what the old ``.to(bf16)`` plus autograd's
+        cast back produced) and no cast of the scale gradient may run in the
+        backward; for BF16 scales it must be ``fp32_grad.to(bf16)`` as before.
+        """
+        if quantization == "mxfp8" and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        if quantization == "nvfp4_rht" and not nvfp4_available:
+            pytest.skip(reason_for_no_nvfp4)
+        if quantization == "nvfp4_rht" and bias:
+            pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
+        if not (
+            _cudnn_frontend_version_supported()
+            and (device_is_blackwell or device_is_rubin)
+            and GroupedMLP_CuTeGEMMGLU.is_supported()
+        ):
+            pytest.skip("Block-scaled fused grouped MLP is not supported on this system")
+
+        dtype = torch.bfloat16
+        group_size, hidden_size, split_alignment = 4, 128, 256
+        split_sizes = [split_alignment * i for i in range(1, group_size + 1)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device="cuda")
+        num_tokens = int(split_sizes.sum().item())
+
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc1 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                bias=bias,
+                device="cuda",
+                dtype=dtype,
+                split_alignment=split_alignment,
+            )
+            fc2 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=bias,
+                device="cuda",
+                dtype=dtype,
+                scale_bias=bias,
+                split_alignment=split_alignment,
+            )
+            module = te.ops.Sequential(fc1, te.ops.ScaledSwiGLU(glu_interleave_size=32), fc2)
+
+        x = (torch.rand(num_tokens, hidden_size, device="cuda", dtype=dtype) - 0.5) / 2
+        x.requires_grad_(True)
+        probs = torch.rand(num_tokens, device="cuda", dtype=scales_dtype).requires_grad_(True)
+        dy = (torch.rand(num_tokens, hidden_size, device="cuda", dtype=dtype) - 0.5) / 2
+
+        recorded = []
+        cast_scales_grad = grouped_mlp_module._cast_scales_grad
+
+        def _recording_cast_scales_grad(grad_scales, **kwargs):
+            out = cast_scales_grad(grad_scales, **kwargs)
+            recorded.append((grad_scales.clone(), out))
+            return out
+
+        monkeypatch.setattr(grouped_mlp_module, "_cast_scales_grad", _recording_cast_scales_grad)
+
+        with te.autocast(enabled=True, recipe=recipe):
+            fc2_extra = (split_sizes, probs) if bias else (split_sizes,)
+            y = module(x, split_sizes, probs, *fc2_extra)
+        forward_ops = module._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1 and isinstance(forward_ops[0][0], GroupedMLP_CuTeGEMMGLU)
+
+        # Count dtype casts of the [num_tokens] scale gradient during the backward
+        from torch.utils._python_dispatch import TorchDispatchMode
+
+        class _CountScaleGradCasts(TorchDispatchMode):
+            def __init__(self):
+                super().__init__()
+                self.count = 0
+
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                out = func(*args, **(kwargs or {}))
+                if func in (torch.ops.aten._to_copy.default, torch.ops.aten.copy_.default):
+                    src = args[1] if func is torch.ops.aten.copy_.default else args[0]
+                    dst = args[0] if func is torch.ops.aten.copy_.default else out
+                    if (
+                        isinstance(src, torch.Tensor)
+                        and src.numel() == num_tokens
+                        and src.dim() == 1
+                        and src.dtype != dst.dtype
+                    ):
+                        self.count += 1
+                return out
+
+        cast_counter = _CountScaleGradCasts()
+        with cast_counter:
+            y.backward(dy)
+
+        assert len(recorded) == 1
+        grad_fp32, returned = recorded[0]
+        assert grad_fp32.dtype == torch.float32
+        assert probs.grad.dtype == scales_dtype
+        if scales_dtype == torch.float32:
+            expected = grad_fp32.to(dtype).to(torch.float32)
+            self._assert_bitwise_equal_or_both_nan(probs.grad, expected)
+            assert returned.dtype == torch.float32
+            assert cast_counter.count == 0
+        else:
+            expected = grad_fp32.to(dtype)
+            assert torch.equal(probs.grad.view(torch.int16), expected.view(torch.int16))
