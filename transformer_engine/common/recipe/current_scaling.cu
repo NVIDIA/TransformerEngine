@@ -22,13 +22,13 @@ namespace {
 constexpr int amax_kernel_threads = 512;
 
 __launch_bounds__(1) __global__
-    void zero_amax_kernel(float *amax_ptr, float *amax2_ptr, const float *noop_ptr) {
+    void zero_amax_kernel(float *rowwise_amax_ptr, float *colwise_amax_ptr, const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
   }
-  *amax_ptr = 0;
-  if (amax2_ptr != nullptr) {
-    *amax2_ptr = 0;
+  *rowwise_amax_ptr = 0;
+  if (colwise_amax_ptr != nullptr) {
+    *colwise_amax_ptr = 0;
   }
 }
 
