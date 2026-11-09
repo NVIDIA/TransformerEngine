@@ -294,10 +294,9 @@ def _framework_build_requirements(config_settings: ConfigSettings) -> List[str]:
     """Get build requirements for the requested frameworks."""
     frameworks = _requested_frameworks(config_settings)
     if frameworks is None:
-        raise ValueError(
-            "Framework must be selected for an isolated build; set NVTE_FRAMEWORK or pass "
-            "--config-settings framework=pytorch (or jax, all, none)"
-        )
+        # Without a selection, setup.py detects frameworks in the isolated build
+        # environment, which has none, so only the core library is built.
+        return []
 
     return [
         requirement
