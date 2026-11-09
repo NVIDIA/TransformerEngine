@@ -176,7 +176,7 @@ void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax, at::Tensor
 
   // block_amax: [tile_rows, tile_cols], float32
   // global_amax: [1], float32
-  // per_block_scale: [tile_rows, tile_cols], float32 (for partial_cast)
+  // per_block_scale: [tile_rows, tile_cols], float32 (float32 tile scales)
   // target_scale: [rows_padded, tile_cols], uint8 scale storage
   // target_amax: [1], float32
   NVTE_CHECK(block_amax.scalar_type() == at::kFloat, "Block amax must be float32.");

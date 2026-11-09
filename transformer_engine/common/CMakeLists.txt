@@ -261,6 +261,7 @@ set(transformer_engine_cuda_arch_specific_sources)
 list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
+     recipe/partial_cast.cpp
      fused_attn/fused_attn.cpp
      cast/nvfp4/rtc_dispatch.cpp
      fused_attn/config_and_params.cpp

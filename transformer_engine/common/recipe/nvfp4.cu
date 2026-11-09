@@ -14,6 +14,7 @@
 #include "../common.h"
 #include "../util/ptx_arch_spec.cuh"
 #include "../utils.cuh"
+#include "partial_cast.h"
 
 namespace transformer_engine {
 namespace nvfp4_recipe {
@@ -129,12 +130,24 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 }
 
+template <typename ScaleType>
+__global__ void expand_legacy_partial_cast_scales(const float *input, ScaleType *output,
+                                                  size_t rows, size_t cols, size_t stride_h,
+                                                  size_t stride_w) {
+  const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index < rows * cols) {
+    const size_t tile_row = (index / cols) / kTileDim;
+    output[index] = static_cast<ScaleType>(input[tile_row * stride_h + (index % cols) * stride_w]);
+  }
+}
+
 template <typename IType, typename ScaleType, bool kWidthAligned>
 __global__ void __launch_bounds__(kThreadsPerBlock)
-    nvfp4_2d_partial_cast_kernel(const IType *input, uint8_t *output, const float *decode_scale_ptr,
-                                 const size_t scale_stride_h, const size_t scale_stride_w,
-                                 const float *global_scale_ptr, const size_t h, const size_t w,
-                                 const size_t start_offset, const size_t len) {
+    nvfp4_2d_partial_cast_kernel(const IType *input, uint8_t *output,
+                                 const ScaleType *decode_scale_ptr, const size_t scale_stride_h,
+                                 const size_t scale_stride_w, const float *global_scale_ptr,
+                                 const size_t h, const size_t w, const size_t start_offset,
+                                 const size_t len) {
   constexpr int kNumOutputElemsPerBank = 4;
   constexpr int kThreadsPerWarp = 32;
   constexpr int kLoopsPerRow = (kTileDim + kThreadsPerWarp - 1) / kThreadsPerWarp;
@@ -154,8 +167,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
   const float global_decode_scale = 1.0f / global_encode_scale;
 
-  float tile_decode_scale = decode_scale_ptr[tile_h * scale_stride_h + tile_w * scale_stride_w];
-  tile_decode_scale = static_cast<float>(static_cast<ScaleType>(tile_decode_scale));
+  const float tile_decode_scale = static_cast<float>(
+      decode_scale_ptr[tile_h * kTileDim * scale_stride_h + tile_w * scale_stride_w]);
   constexpr float kFp32Max = 3.402823466e+38F;
   float tile_encode_val =
       (tile_decode_scale > 0.f) ? 1.0f / (tile_decode_scale * global_decode_scale) : kFp32Max;
@@ -289,12 +302,20 @@ void nvfp4_2d_compute_partial_amax(const Tensor inp, Tensor amax, size_t h, size
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
-                           const Tensor global_scale, size_t h, size_t w, size_t scale_stride_h,
-                           size_t scale_stride_w, size_t start_offset, size_t block_len,
-                           DType scale_dtype, cudaStream_t stream) {
-  NVTE_CHECK(block_len == 16, "NVFP4 2D supports 16x16 tiles only (block_len = 16).");
-  NVTE_CHECK(out.dtype() == DType::kByte, "NVFP4 rowwise data must be uint8.");
+void partial_cast(const Tensor &inp, Tensor &out, size_t h, size_t w, size_t start_offset,
+                  cudaStream_t stream) {
+  const auto &scale = out.scale_inv;
+  const auto &global_scale = out.scale;
+  NVTE_CHECK(out.dtype() == DType::kFloat4E2M1, "NVFP4 output must be E2M1");
+  NVTE_CHECK(!out.row_scaled_nvfp4, "Partial cast does not support row-scaled NVFP4");
+  NVTE_CHECK(scale.dptr != nullptr && scale.shape.size() == 2 && scale.shape[0] >= h &&
+                 scale.shape[1] >= DIVUP<size_t>(w, kTileDim),
+             "Invalid NVFP4 inverse scale buffer");
+  NVTE_CHECK(global_scale.dptr != nullptr && global_scale.dtype == DType::kFloat32 &&
+                 global_scale.numel() == 1,
+             "NVFP4 requires a scalar float32 global encoding scale");
+  const size_t scale_stride_h = scale.shape[1];
+  constexpr size_t scale_stride_w = 1;
 
   size_t len = inp.numel();
 
@@ -309,7 +330,7 @@ void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
   dim3 grid(blocks_x, blocks_y);
 
   TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
-      scale_dtype, ScaleType,
+      scale.dtype, ScaleType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
           inp.dtype(), inp_dtype,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
@@ -318,9 +339,8 @@ void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
               <<<grid, kThreadsPerBlock, 0, stream>>>(
                   reinterpret_cast<const inp_dtype *>(inp.data.dptr),
                   reinterpret_cast<uint8_t *>(out.data.dptr),
-                  reinterpret_cast<const float *>(scale.data.dptr), scale_stride_h, scale_stride_w,
-                  reinterpret_cast<const float *>(global_scale.data.dptr), h, w, start_offset,
-                  len);)))
+                  reinterpret_cast<const ScaleType *>(scale.dptr), scale_stride_h, scale_stride_w,
+                  reinterpret_cast<const float *>(global_scale.dptr), h, w, start_offset, len);)))
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -739,7 +759,7 @@ void nvfp4_compute_global_scale(const Tensor global_amax, Tensor global_scale, D
  *
  * Input (block_amax): [tile_rows, tile_cols] float32
  * Input (global_amax): [1] float32
- * Output (per_block_scale): [tile_rows, tile_cols] float32 (intermediate, for partial_cast)
+ * Output (per_block_scale): [tile_rows, tile_cols] float32 tile scales
  * Output (target_scale): [rows_padded, tile_cols] uint8 (E4M3 or UE5M3)
  * Output (target_amax): [1] float32 (copy of global_amax)
  *
@@ -751,7 +771,7 @@ template <typename ScaleType>
 __global__ void nvfp4_fused_scale_kernel(
     const float *__restrict__ block_amax,   // [tile_rows, tile_cols]
     const float *__restrict__ global_amax,  // [1]
-    float *__restrict__ per_block_scale,    // [tile_rows, tile_cols] - for partial_cast
+    float *__restrict__ per_block_scale,    // [tile_rows, tile_cols] - float32 tile scales
     ScaleType *__restrict__ target_scale,   // [rows_padded, tile_cols]
     float *__restrict__ target_amax,        // [1]
     const size_t tile_rows, const size_t tile_cols, const size_t rows_padded,
@@ -830,6 +850,11 @@ void nvfp4_fused_scale(const Tensor block_amax, const Tensor global_amax, Tensor
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+#else
+void partial_cast(const Tensor &inp, Tensor &out, size_t h, size_t w, size_t start_offset,
+                  cudaStream_t stream) {
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+}
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace nvfp4_recipe
 }  // namespace transformer_engine
@@ -947,13 +972,39 @@ void nvte_nvfp4_2d_partial_cast_v2(const NVTETensor inp, NVTETensor out, const N
                                    size_t scale_stride_h, size_t scale_stride_w,
                                    size_t start_offset, size_t block_len, NVTEDType scale_dtype,
                                    cudaStream_t stream) {
-#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_2d_partial_cast_v2);
+#if FP4_TYPE_SUPPORTED
   using namespace transformer_engine;
-  nvfp4_recipe::nvfp4_2d_partial_cast(
-      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(out), *convertNVTETensorCheck(scale),
-      *convertNVTETensorCheck(global_scale), h, w, scale_stride_h, scale_stride_w, start_offset,
-      block_len, static_cast<DType>(scale_dtype), stream);
+  NVTE_CHECK(block_len == 16, "NVFP4 2D supports 16x16 tiles only (block_len = 16).");
+  const auto &input = *convertNVTETensorCheck(inp);
+  const auto &output = *convertNVTETensorCheck(out);
+  const auto &scales = *convertNVTETensorCheck(scale);
+  const auto &global = *convertNVTETensorCheck(global_scale);
+  NVTE_CHECK(output.dtype() == DType::kByte, "NVFP4 rowwise data must be uint8.");
+  TensorWrapper view(NVTE_NVFP4_1D_SCALING);
+  view.set_rowwise_data(output.data.dptr, DType::kFloat4E2M1, std::vector<size_t>{input.numel()})
+      .set_scale(global.data.dptr, global.dtype(), global.data.shape);
+  if (input.numel() == 0) {
+    nvte_partial_cast(inp, view.data(), h, w, start_offset, stream);
+    return;
+  }
+  NVTE_CHECK(h > 0 && w > 0 && h <= std::numeric_limits<size_t>::max() / w,
+             "Invalid logical matrix dimensions");
+  NVTE_CHECK(scales.dtype() == DType::kFloat32 && scales.data.dptr != nullptr,
+             "Legacy NVFP4 tile scales must be float32");
+  const size_t cols = DIVUP<size_t>(w, 16);
+  detail::PartialCastWorkspace workspace(h * cols, stream);
+  constexpr size_t threads = 256;
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      static_cast<DType>(scale_dtype), ScaleType,
+      nvfp4_recipe::expand_legacy_partial_cast_scales<ScaleType>
+      <<<DIVUP(h * cols, threads), threads, 0, stream>>>(
+          static_cast<const float *>(scales.data.dptr), static_cast<ScaleType *>(workspace.data()),
+          h, cols, scale_stride_h, scale_stride_w);)
+  NVTE_CHECK_CUDA(cudaGetLastError());
+  view.set_rowwise_scale_inv(workspace.data(), static_cast<DType>(scale_dtype),
+                             std::vector<size_t>{h, cols});
+  nvte_partial_cast(inp, view.data(), h, w, start_offset, stream);
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
