@@ -82,7 +82,7 @@ Build Configuration
 
    :Type: ``str``
    :Default: Auto-detected based on system CUDA version
-   :Description: CUDA version to build for. Valid values: ``"12.*"``, ``"13.*"``. If not set, automatically determined based on the installed CUDA Toolkit version. Isolated builds fail if no CUDA Toolkit is found and neither this variable nor pip's ``--config-settings cuda-version=<major>.<minor>`` option is set.
+   :Description: CUDA version to build for. Valid values: ``"12.*"``, ``"13.*"``. If not set, automatically determined based on the installed CUDA Toolkit version. Isolated builds fail if no CUDA Toolkit is found and neither this variable nor pip's ``--config-settings cuda-version=<major>.<minor>`` option is set. When the JAX extension package is built with build isolation, this variable or the config setting selects the CUDA support of the JAX installed in the build environment, which defaults to CUDA 12.
 
 Optional Dependencies
 ^^^^^^^^^^^^^^^^^^^^^

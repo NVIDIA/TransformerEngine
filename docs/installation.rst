@@ -156,7 +156,11 @@ The JAX extension is installed in the same way:
 
   pip3 install --build-constraint build-constraints.txt transformer_engine[jax]
 
-With build isolation, the JAX extension is built against JAX with CUDA 12 support and depends on the core library compiled for CUDA 12. For JAX with CUDA 13 support, install the JAX extension with `--no-build-isolation`.
+With build isolation, the JAX extension is built against JAX with CUDA 12 support and depends on the core library compiled for CUDA 12 by default. For JAX with CUDA 13 support, set the `cuda-version` config setting:
+
+.. code-block:: bash
+
+  pip3 install --build-constraint build-constraints.txt --config-settings cuda-version=13.0 transformer_engine[jax]
 
 Installation (from GitHub or source)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
