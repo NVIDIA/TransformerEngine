@@ -63,11 +63,11 @@ def gated_elementwise_op(
     act_element: Float32,
     gate_element: Float32,
     y_grad_element: Optional[Float32],
-    limit: Optional[Float32], # Clamped SwiGLU only
-    alpha: Optional[Float32], # Clamped SwiGLU only
-    glu_linear_offset: Optional[Float32], # Clamped SwiGLU only
-    beta1: Optional[Float32], # SiTU-GLU only
-    beta2: Optional[Float32], # SiTU-GLU only
+    limit: Optional[Float32],  # Clamped SwiGLU only
+    alpha: Optional[Float32],  # Clamped SwiGLU only
+    glu_linear_offset: Optional[Float32],  # Clamped SwiGLU only
+    beta1: Optional[Float32],  # SiTU-GLU only
+    beta2: Optional[Float32],  # SiTU-GLU only
     ACTIVATION: cutlass.Constexpr[str],
     IS_BWD: cutlass.Constexpr[bool],
 ):
@@ -131,14 +131,14 @@ def gated_elementwise_op(
 
 @cute.jit
 def gated_elementwise_smem_tile(
-    sAct_tile: cute.Tensor, # also the y tile in FWD / the act_grad tile in BWD
-    sGate_tile: cute.Tensor, # also the gate_grad tile in BWD
-    sYGrad_tile: Optional[cute.Tensor], # BWD only
-    limit: Optional[Float32], # Clamped SwiGLU only
-    alpha: Optional[Float32], # Clamped SwiGLU only
-    glu_linear_offset: Optional[Float32], # Clamped SwiGLU only
-    beta1: Optional[Float32], # SiTU-GLU only
-    beta2: Optional[Float32], # SiTU-GLU only
+    sAct_tile: cute.Tensor,  # also the y tile in FWD / the act_grad tile in BWD
+    sGate_tile: cute.Tensor,  # also the gate_grad tile in BWD
+    sYGrad_tile: Optional[cute.Tensor],  # BWD only
+    limit: Optional[Float32],  # Clamped SwiGLU only
+    alpha: Optional[Float32],  # Clamped SwiGLU only
+    glu_linear_offset: Optional[Float32],  # Clamped SwiGLU only
+    beta1: Optional[Float32],  # SiTU-GLU only
+    beta2: Optional[Float32],  # SiTU-GLU only
     ACTIVATION: cutlass.Constexpr[str],
     IS_BWD: cutlass.Constexpr[bool],
     ROWWISE: cutlass.Constexpr[bool],
@@ -272,27 +272,29 @@ def _split_gated_scales(
     COLWISE: cutlass.Constexpr[bool],
     SWIZZLED: cutlass.Constexpr[bool],
 ):
-    """Split the scales of a gated input with logical shape [M, 2N] into the act and gate halves, each with logical shape [M, N].""" 
+    """Split the scales of a gated input with logical shape [M, 2N] into the act and gate halves, each with logical shape [M, N]."""
     mS_row_act = mS_row_gate = mS_col_act = mS_col_gate = None
     if cutlass.const_expr(SWIZZLED):
-        mS_row, mS_col = derive_swizzled_scale_layout(
-            M, 2 * N, ROWWISE, COLWISE, mS_row, mS_col
-        )
+        mS_row, mS_col = derive_swizzled_scale_layout(M, 2 * N, ROWWISE, COLWISE, mS_row, mS_col)
         # To slice the left half (act) and right half (gate) of the swizzled scales, we need to tile using the tiler
         # with the same mode pattern as the swizzled layout's shape:
         # mS_row: ((32, 4, ceil(M/128)), (4, ceil(N/64))) : ((16, 4, 512·ceil(N/64)), (1, 512))
         # mS_col: ((4, ceil(M/128)), (32, 4, ceil(N/64))) : ((1, 512), (16, 4, 512·ceil(M/128)))
         if cutlass.const_expr(ROWWISE):
             row_tiler = (
-                cute.make_layout((32, 4, cute.ceil_div(M, 128))), # slice all rows
-                cute.make_layout((4, cute.ceil_div(N, 128))), # slice half columns so cdiv uses 128 instead of 64
+                cute.make_layout((32, 4, cute.ceil_div(M, 128))),  # slice all rows
+                cute.make_layout(
+                    (4, cute.ceil_div(N, 128))
+                ),  # slice half columns so cdiv uses 128 instead of 64
             )
             mS_row_act = cute.local_tile(mS_row, row_tiler, (0, 0))
             mS_row_gate = cute.local_tile(mS_row, row_tiler, (0, 1))
         if cutlass.const_expr(COLWISE):
             col_tiler = (
-                cute.make_layout((4, cute.ceil_div(M, 128))), # slice all rows
-                cute.make_layout((32, 4, cute.ceil_div(N, 128))), # slice half columns so cdiv uses 128 instead of 64
+                cute.make_layout((4, cute.ceil_div(M, 128))),  # slice all rows
+                cute.make_layout(
+                    (32, 4, cute.ceil_div(N, 128))
+                ),  # slice half columns so cdiv uses 128 instead of 64
             )
             mS_col_act = cute.local_tile(mS_col, col_tiler, (0, 0))
             mS_col_gate = cute.local_tile(mS_col, col_tiler, (0, 1))
@@ -338,11 +340,11 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         mO_col: Optional[cute.Tensor],  # [M, C], not transposed
         mS_col: Optional[cute.Tensor],  # [roundup(ceil(M / 32), 4), roundup(C, 128)]
         # Special activation params, None if not used by the activation
-        limit: Optional[Float32], # Clamped SwiGLU only
-        alpha: Optional[Float32], # Clamped SwiGLU only
-        glu_linear_offset: Optional[Float32], # Clamped SwiGLU only
-        beta1: Optional[Float32], # SiTUGLU only
-        beta2: Optional[Float32], # SiTUGLU only
+        limit: Optional[Float32],  # Clamped SwiGLU only
+        alpha: Optional[Float32],  # Clamped SwiGLU only
+        glu_linear_offset: Optional[Float32],  # Clamped SwiGLU only
+        beta1: Optional[Float32],  # SiTUGLU only
+        beta2: Optional[Float32],  # SiTUGLU only
         stream: CUstream,
     ):
         """
@@ -354,7 +356,9 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         [act_grad | gate_grad] = quantize([ y_grad * gate(g) * dact(a)  |  y_grad * act(a) * dgate(g) ]) with shape [M, 2N]
         """
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
-            cute.printf(f"[CuTeDSL] MXFP8GatedQuantizeG2SKernel.__call__() with config: {self.cfg}\n")
+            cute.printf(
+                f"[CuTeDSL] MXFP8GatedQuantizeG2SKernel.__call__() with config: {self.cfg}\n"
+            )
 
         M = mGatedInput.shape[0]
         # Pick any mO that is used just to get N
@@ -650,8 +654,20 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                 )
             # In BWD mode we output gradient for both the act and gate halves, which are stored in sAct and sGate respectively
             tile_quantizer_params = [
-                (sAct, sO_row_act_grad, mS_row_act_grad, sO_col_act_grad, mS_col_act_grad), # We will write unquantized act_grad to sAct in-place
-                (sGate, sO_row_gate_grad, mS_row_gate_grad, sO_col_gate_grad, mS_col_gate_grad), # We will write unquantized gate_grad to sGate in-place
+                (
+                    sAct,
+                    sO_row_act_grad,
+                    mS_row_act_grad,
+                    sO_col_act_grad,
+                    mS_col_act_grad,
+                ),  # We will write unquantized act_grad to sAct in-place
+                (
+                    sGate,
+                    sO_row_gate_grad,
+                    mS_row_gate_grad,
+                    sO_col_gate_grad,
+                    mS_col_gate_grad,
+                ),  # We will write unquantized gate_grad to sGate in-place
             ]
         else:
             if cutlass.const_expr(cfg.ROWWISE):
@@ -659,7 +675,9 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
             if cutlass.const_expr(cfg.COLWISE):
                 mS_col = cute.local_tile(mS_col, cta_block_col_scales, cta_coord)
             # In FWD mode we only output the result after the gated op, which is stored in sAct
-            tile_quantizer_params = [(sAct, sO_row, mS_row, sO_col, mS_col)] # We will write unquantized output to sAct in-place
+            tile_quantizer_params = [
+                (sAct, sO_row, mS_row, sO_col, mS_col)
+            ]  # We will write unquantized output to sAct in-place
 
         # Prepare input TMA (atom, smem partition, gmem partition) triples: act and gate, and BWD's y_grad
         TMA_load_atom_and_partitions = []
@@ -681,12 +699,12 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         # Prepare output TMA (atom, smem partition, gmem partition) triples of the outputs this config has
         TMA_store_atom_and_partitions = []
         for atom_out, dst_out, sO_out in (
-            (tma_atom_row, tma_dst_row, sO_row), # FWD only
-            (tma_atom_col, tma_dst_col, sO_col), # FWD only
-            (tma_atom_row_act_grad, tma_dst_row_act_grad, sO_row_act_grad), # BWD only
-            (tma_atom_row_gate_grad, tma_dst_row_gate_grad, sO_row_gate_grad), # BWD only
-            (tma_atom_col_act_grad, tma_dst_col_act_grad, sO_col_act_grad), # BWD only
-            (tma_atom_col_gate_grad, tma_dst_col_gate_grad, sO_col_gate_grad), # BWD only
+            (tma_atom_row, tma_dst_row, sO_row),  # FWD only
+            (tma_atom_col, tma_dst_col, sO_col),  # FWD only
+            (tma_atom_row_act_grad, tma_dst_row_act_grad, sO_row_act_grad),  # BWD only
+            (tma_atom_row_gate_grad, tma_dst_row_gate_grad, sO_row_gate_grad),  # BWD only
+            (tma_atom_col_act_grad, tma_dst_col_act_grad, sO_col_act_grad),  # BWD only
+            (tma_atom_col_gate_grad, tma_dst_col_gate_grad, sO_col_gate_grad),  # BWD only
         ):
             if cutlass.const_expr(atom_out is not None):
                 tXsO_out, tXgO_out = cute.nvgpu.cpasync.tma_partition(
@@ -743,8 +761,8 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
             # FWD: write the output into sAct_tile
             # BWD: write the act half's gradient to sAct_tile, and write the gate half's gradient to sGate_tile
             gated_elementwise_smem_tile(
-                sAct_tile, # we also store the FWD output / BWD act half's gradient here
-                sGate_tile, # we also store the BWD gate half's gradient here
+                sAct_tile,  # we also store the FWD output / BWD act half's gradient here
+                sGate_tile,  # we also store the BWD gate half's gradient here
                 sYGrad_tile,
                 limit,
                 alpha,
@@ -777,11 +795,11 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                     )
                 # Use the general MXFP8 SMEM tile quantize function to quantize it
                 quantize_mxfp8_smem_tile_general_partial(
-                    sX_out[(None, stage_idx)], # The SMEM tile to quantize
-                    sO_row_tile, # SMEM tile for rowwise quantized output
-                    mS_row_stage, # GMEM tile for rowwise quantized scales
-                    sO_col_tile, # SMEM tile for columnwise quantized output
-                    mS_col_stage, # GMEM tile for columnwise quantized scales
+                    sX_out[(None, stage_idx)],  # The SMEM tile to quantize
+                    sO_row_tile,  # SMEM tile for rowwise quantized output
+                    mS_row_stage,  # GMEM tile for rowwise quantized scales
+                    sO_col_tile,  # SMEM tile for columnwise quantized output
+                    mS_col_stage,  # GMEM tile for columnwise quantized scales
                     # The tile's first row and column in the whole tensor, for bounds checks
                     (bidy * NUM_TILES + tile_idx) * TILE_ROWS,
                     bidx * TILE_COLS,

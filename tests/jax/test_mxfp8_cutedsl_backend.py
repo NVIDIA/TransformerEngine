@@ -346,7 +346,9 @@ def get_gated_cfg_key(act_desc, in_dtype, fp8_dtype, q_layout, is_bwd):
     major, minor = device_compute_capability()
     return (
         f"cutedsl_mxfp8_gated_sm{major * 10 + minor}_{DTYPE_TO_STR[in_dtype]}_"
-        f"{FP8_TO_KEY[fp8_dtype]}_" + "_".join("1" if f else "0" for f in flags) + f"_{act_desc}"
+        f"{FP8_TO_KEY[fp8_dtype]}_"
+        + "_".join("1" if f else "0" for f in flags)
+        + f"_{act_desc}"
     )
 
 
