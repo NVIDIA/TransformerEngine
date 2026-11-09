@@ -7,6 +7,7 @@
 import functools
 import glob
 import importlib
+import importlib.util
 import os
 import re
 import shlex
@@ -366,8 +367,20 @@ def nccl_lib_path() -> Optional[Path]:
     return None
 
 
-# Keep in sync with MIN_CUDNN_VERSION in transformer_engine/common/__init__.py.
-MIN_CUDNN_VERSION = "9.12"
+@functools.lru_cache(maxsize=None)
+def min_cudnn_version() -> str:
+    """Return the minimum supported cuDNN version from transformer_engine/common/_versions.py.
+
+    The file is loaded directly because importing the transformer_engine package loads its
+    shared libraries. The framework sdists do not contain it, so it is only read when needed.
+    """
+    versions_file = (
+        Path(__file__).resolve().parent.parent / "transformer_engine" / "common" / "_versions.py"
+    )
+    spec = importlib.util.spec_from_file_location("_transformer_engine_versions", versions_file)
+    versions = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(versions)
+    return ".".join(str(part) for part in versions.MIN_CUDNN_VERSION)
 
 
 def python_package_requirement(package_name: str, minimum: Optional[str] = None) -> str:

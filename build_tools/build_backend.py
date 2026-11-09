@@ -17,7 +17,7 @@ from build_tools.build_backend_utils import (
     requested_cuda_version,
     setuptools_hooks,
 )
-from build_tools.utils import MIN_CUDNN_VERSION, nvcc_path
+from build_tools.utils import min_cudnn_version, nvcc_path
 
 # cuda-toolkit pins all components to the same CUDA release. The nvcc extra includes the
 # compiler's crt and nvvm components.
@@ -216,7 +216,7 @@ def _cuda_build_requirements(config_settings: ConfigSettings) -> List[str]:
     if not os.getenv("CUDA_HOME"):
         requirements += [
             f"cuda-toolkit[{','.join(_CUDA_TOOLKIT_EXTRAS)}]=={cuda_version}.*",
-            f"nvidia-cudnn-cu{cuda_major}>={MIN_CUDNN_VERSION}",
+            f"nvidia-cudnn-cu{cuda_major}>={min_cudnn_version()}",
         ]
     return requirements
 
