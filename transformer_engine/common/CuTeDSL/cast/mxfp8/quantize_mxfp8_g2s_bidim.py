@@ -181,7 +181,9 @@ def quantize_mxfp8_smem_tile_bidimensional(
         rX = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, Float32)
         cute.autovec_copy(tXsX, rX)
 
-        row_amax = Float32(0.0)
+        # Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+        # so per-block amax will be NaN if all values in the block are NaN.
+        row_amax = Float32(float("nan"))
         for c in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
             a = fabs_f32(rX[c])
             row_amax = cute.arch.fmax(row_amax, a)
