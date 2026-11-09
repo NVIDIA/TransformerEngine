@@ -91,7 +91,8 @@ def cross_entropy_forward(
             COUNT_NON_IGNORE=reduce_loss,
             COPY_INPUT=not overwrite_input,
             COMPUTE_ARGMAX=compute_argmax,
-            BLOCK_SIZE=min(_FWD_BLOCK_SIZE, BLOCK_SIZE),
+            # At least 4: the argmax folds 4 positions per lane.
+            BLOCK_SIZE=max(4, min(_FWD_BLOCK_SIZE, BLOCK_SIZE)),
             num_warps=_FWD_NUM_WARPS,
         )
     else:
@@ -180,6 +181,41 @@ def _mxfp8_backward_block_cols(saved_input: torch.Tensor, grad_quantizer) -> Opt
     return _MXFP8_BWD_BLOCK_COLS if V % _MXFP8_BWD_BLOCK_COLS == 0 else 128
 
 
+def _use_cuda_mxfp8_backward(
+    saved_input: torch.Tensor,
+    target: torch.Tensor,
+    label_smoothing: float,
+    world_size: int,
+    grad_quantizer,
+) -> bool:
+    """Whether the CUDA kernel (tex.cross_entropy_backward_mxfp8) can write this gradient.
+
+    It handles compact and GEMM-swizzled scales and is faster than the Triton kernel, but has
+    no label smoothing and needs SM 10.0+."""
+    # pylint: disable=import-outside-toplevel
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+    import transformer_engine_torch as tex
+
+    if not isinstance(grad_quantizer, MXFP8Quantizer):
+        return False
+    if grad_quantizer.dtype not in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2):
+        return False
+    if grad_quantizer.with_2d_quantization:
+        return False
+    if not (grad_quantizer.rowwise_usage or grad_quantizer.columnwise_usage):
+        return False
+    if world_size != 1 or label_smoothing != 0.0:
+        return False
+    if saved_input.dtype != torch.bfloat16 or not saved_input.is_contiguous():
+        return False
+    if saved_input.data_ptr() % 16 != 0 or target.dtype != torch.int64:
+        return False
+    B, SQ, V = saved_input.shape
+    if (B * SQ) % 128 != 0 or V % 128 != 0:
+        return False
+    return torch.cuda.get_device_capability(saved_input.device)[0] >= 10
+
+
 def cross_entropy_backward(
     saved_input: torch.Tensor,
     stats: torch.Tensor,
@@ -197,14 +233,32 @@ def cross_entropy_backward(
 
     Without ``grad_quantizer``, the derivative overwrites the saved input buffer, which is
     returned. With it, the derivative is returned quantized by ``grad_quantizer``: a BF16 input
-    with an MXFP8 quantizer is written as MXFP8 directly by one kernel, and anything else is
-    computed in the saved input buffer and then quantized.
+    with an MXFP8 quantizer is written as MXFP8 directly by one kernel (a CUDA kernel without
+    label smoothing on SM 10.0+, which also writes GEMM-swizzled scales, else a Triton kernel
+    for compact scales), and anything else is computed in the saved input buffer and then
+    quantized.
     """
 
     B, SQ, V = saved_input.shape
     n_rows = B * SQ
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
     grad_output = grad_output.contiguous()
+
+    if grad_quantizer is not None and _use_cuda_mxfp8_backward(
+        saved_input, target, label_smoothing, world_size, grad_quantizer
+    ):
+        import transformer_engine_torch as tex  # pylint: disable=import-outside-toplevel
+
+        return tex.cross_entropy_backward_mxfp8(
+            saved_input,
+            target,
+            stats,
+            n_non_ignore if reduce_loss else None,
+            grad_output.float(),
+            ignore_idx,
+            reduce_loss,
+            grad_quantizer,
+        )
 
     if grad_quantizer is not None:
         block_cols = _mxfp8_backward_block_cols(saved_input, grad_quantizer)

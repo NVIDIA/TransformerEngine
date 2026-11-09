@@ -48,6 +48,55 @@ def _fold_block_argmax(x, offsets, n_cols, run_max, run_idx, run_nan):
 
 
 @triton.jit
+def _chain_argmax_update(x, block_start, lane_max, lane_idx, LANES: tl.constexpr):
+    """Fold one block into per-lane running maxima: lane c takes positions 4c .. 4c + 3 of the
+    block, in-thread for the default layout, and keeps the first of its maxima with a
+    strict-greater compare chain (no reduction per block). NaN never wins a compare, so rows
+    with a NaN are handled by _chain_argmax_finish."""
+    xa, xb = tl.split(tl.reshape(x, (LANES, 2, 2)))  # positions 4c + {0, 2}, 4c + {1, 3}
+    x0, x2 = tl.split(xa)
+    x1, x3 = tl.split(xb)
+    base = block_start + tl.arange(0, LANES) * 4
+    update = x0 > lane_max
+    lane_max = tl.where(update, x0, lane_max)
+    lane_idx = tl.where(update, base, lane_idx)
+    update = x1 > lane_max
+    lane_max = tl.where(update, x1, lane_max)
+    lane_idx = tl.where(update, base + 1, lane_idx)
+    update = x2 > lane_max
+    lane_max = tl.where(update, x2, lane_max)
+    lane_idx = tl.where(update, base + 2, lane_idx)
+    update = x3 > lane_max
+    lane_max = tl.where(update, x3, lane_max)
+    lane_idx = tl.where(update, base + 3, lane_idx)
+    return lane_max, lane_idx
+
+
+@triton.jit
+def _chain_argmax_finish(
+    lane_max, lane_idx, sum_exp, X_ptr, X_stride, n_cols, BLOCK_SIZE: tl.constexpr
+):
+    """Row argmax from the per-lane maxima of _chain_argmax_update: the first position of the
+    row maximum. The sum of exponentials of the softmax is NaN exactly when the row has a NaN or
+    +inf; such rows are scanned again with _fold_block_argmax, which has torch.argmax's
+    semantics (the first NaN wins, else the first maximum). An all -inf row has a zero sum and
+    gives position 0 here, as torch.argmax does."""
+    row_max = tl.max(lane_max)
+    argmax = tl.min(tl.where(lane_max == row_max, lane_idx, n_cols))
+    if _is_nan(sum_exp):
+        argmax = 0
+        argmax_max = float("-inf")
+        argmax_nan = 0
+        for i in range(0, n_cols, BLOCK_SIZE):
+            offsets = i + tl.arange(0, BLOCK_SIZE)
+            x = tl.load(X_ptr + offsets * X_stride, mask=offsets < n_cols, other=float("-inf"))
+            argmax_max, argmax, argmax_nan = _fold_block_argmax(
+                x.to(tl.float32), offsets, n_cols, argmax_max, argmax, argmax_nan
+            )
+    return argmax
+
+
+@triton.jit
 def cross_entropy_forward_kernel(
     X_ptr,
     X_stride_0,
@@ -69,7 +118,7 @@ def cross_entropy_forward_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """Compute single-rank loss/statistics and optionally preserve the input and find the
-    argmax of each row."""
+    argmax of each row (BLOCK_SIZE must be a multiple of 4)."""
 
     row = tl.program_id(0).to(tl.int64)
     row_0 = row // n_rows_1
@@ -85,9 +134,9 @@ def cross_entropy_forward_kernel(
     m = float("-inf")
     d = 0.0
     x_sum = 0.0
-    argmax = 0
-    argmax_max = float("-inf")
-    argmax_nan = 0
+    LANES: tl.constexpr = BLOCK_SIZE // 4
+    lane_max = tl.full([LANES], float("-inf"), tl.float32)
+    lane_idx = tl.zeros([LANES], dtype=tl.int32)
     for i in range(0, n_cols, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
@@ -96,9 +145,7 @@ def cross_entropy_forward_kernel(
             tl.store(saved_input_ptr + offsets, x, mask=mask)
         x = x.to(tl.float32)
         if COMPUTE_ARGMAX:
-            argmax_max, argmax, argmax_nan = _fold_block_argmax(
-                x, offsets, n_cols, argmax_max, argmax, argmax_nan
-            )
+            lane_max, lane_idx = _chain_argmax_update(x, i, lane_max, lane_idx, LANES)
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
         shift = _safe_shift(m_new)
@@ -110,6 +157,7 @@ def cross_entropy_forward_kernel(
     tl.store(stats_ptr + row * 2, m)
     tl.store(stats_ptr + row * 2 + 1, d)
     if COMPUTE_ARGMAX:
+        argmax = _chain_argmax_finish(lane_max, lane_idx, d, X_ptr, X_stride_2, n_cols, BLOCK_SIZE)
         tl.store(argmax_ptr + row, argmax.to(tl.int64))
 
     if y == ignore_idx:

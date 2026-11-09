@@ -612,6 +612,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Split MLA key/value, apply RoPE to the key and quantize both to MXFP8", py::arg("kv"),
         py::arg("k_rope"), py::arg("cos"), py::arg("sin"), py::arg("v_head_dim"),
         py::arg("key_quantizer"), py::arg("value_quantizer"));
+  m.def("cross_entropy_backward_mxfp8", &transformer_engine::pytorch::cross_entropy_backward_mxfp8,
+        "Single-rank cross entropy backward writing the gradient of the logits as MXFP8",
+        py::arg("logits"), py::arg("target"), py::arg("stats"), py::arg("n_non_ignore"),
+        py::arg("grad_output"), py::arg("ignore_idx"), py::arg("reduce_loss"),
+        py::arg("grad_quantizer"));
 
   // fused router
   transformer_engine::pytorch::init_router_bindings(m);
