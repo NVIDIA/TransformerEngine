@@ -19,7 +19,9 @@ import logging
 from typing import Optional, Tuple
 import warnings
 
-from ._versions import MIN_CUDNN_VERSION
+# Minimum cuDNN version supported by Transformer Engine, as (major, minor, patch).
+# Keep in sync with kMinCudnnVersion in transformer_engine/common/cudnn_min_version.h.
+MIN_CUDNN_VERSION = (9, 12, 0)
 
 
 def decode_cudnn_version(encoded_version: int) -> Tuple[int, int, int]:

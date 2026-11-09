@@ -18,6 +18,7 @@ from wheel.bdist_wheel import bdist_wheel
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
+    MIN_CUDNN_VERSION,
     cublasmp_home_path,
     cuda_archs,
     cuda_home_path,
@@ -30,7 +31,6 @@ from build_tools.utils import (
     get_frameworks,
     remove_dups,
     min_python_version_str,
-    min_cudnn_version,
     mpi_home_path,
     nccl_ep_enabled,
     get_max_jobs_for_parallel_build,
@@ -193,7 +193,7 @@ def python_package_runtime_requirements() -> List[str]:
             f"cuda-toolkit[cudart,cublas,nvrtc,curand]>={cuda_major_minor},<{cuda_major + 1}"
         )
     if cudnn_from_python_package():
-        require_installed(f"nvidia-cudnn-cu{cuda_major}", minimum=min_cudnn_version())
+        require_installed(f"nvidia-cudnn-cu{cuda_major}", minimum=MIN_CUDNN_VERSION)
 
     with_cublasmp = bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0")))
     with_cusolvermp = bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0")))
