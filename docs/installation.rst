@@ -178,9 +178,9 @@ The same options can be used to install from GitHub:
 
   pip3 install --build-constraint build-constraints.txt --config-settings framework=pytorch git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-The CUDA compiler and libraries for the build are installed into the build environment, matching the version of the installed CUDA Toolkit. If no CUDA Toolkit is installed, specify the CUDA version with the `cuda-version` config setting (e.g. `cuda-version=13.0`). To build with an installed CUDA Toolkit instead, set `CUDA_HOME` to its location.
+Unless `CUDA_HOME` is set, the CUDA Toolkit and cuDNN for the build are installed into the build environment from PyPI, matching the version of the installed CUDA Toolkit. If no CUDA Toolkit is installed, specify the CUDA version with the `cuda-version` config setting (e.g. `cuda-version=13.0`). The installed Transformer Engine package then depends on the CUDA Toolkit and cuDNN packages from PyPI, so when building framework support, choose the CUDA version that PyTorch or JAX was built with. To build with an installed CUDA Toolkit and cuDNN instead, set `CUDA_HOME` to the location of the CUDA Toolkit.
 
-Optional dependencies, such as cuBLASMp and NVSHMEM, are enabled with config settings as well (e.g. `with-cublasmp=1`). In an isolated build, their Python packages are installed into the build environment. Each config setting has an equivalent environment variable, e.g. `NVTE_FRAMEWORK` for `framework` and `NVTE_CUDA_VERSION` for `cuda-version`. See :doc:`envvars` for the complete list.
+Optional dependencies, such as cuBLASMp and NVSHMEM, are enabled with config settings as well (e.g. `with-cublasmp=1`). In an isolated build, their Python packages are installed into the build environment, and the installed Transformer Engine package depends on them. Each config setting has an equivalent environment variable, e.g. `NVTE_FRAMEWORK` for `framework` and `NVTE_CUDA_VERSION` for `cuda-version`. See :doc:`envvars` for the complete list.
 
 Other installers support build constraints as well. For example, with `uv`:
 

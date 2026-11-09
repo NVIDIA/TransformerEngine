@@ -17,27 +17,11 @@ from build_tools.build_backend_utils import (
     requested_cuda_version,
     setuptools_hooks,
 )
-from build_tools.utils import nvcc_path
+from build_tools.utils import MIN_CUDNN_VERSION, nvcc_path
 
-_CUDA_BUILD_PACKAGES = {
-    "12": [
-        # Also contains nvvm and crt
-        "nvidia-cuda-nvcc-cu12",
-        "nvidia-cuda-runtime-cu12",
-        "nvidia-cuda-cccl-cu12",
-        "nvidia-cuda-profiler-api-cu12",
-        "nvidia-nvml-dev-cu12",
-    ],
-    "13": [
-        "nvidia-cuda-nvcc",
-        "nvidia-cuda-runtime",
-        "nvidia-cuda-crt",
-        "nvidia-cuda-cccl",
-        "nvidia-cuda-profiler-api",
-        "nvidia-nvml-dev",
-        "nvidia-nvvm",
-    ],
-}
+# cuda-toolkit pins all components to the same CUDA release. The nvcc extra includes the
+# compiler's crt and nvvm components.
+_CUDA_TOOLKIT_EXTRAS = ("nvcc", "cudart", "cccl", "cublas", "nvml", "profiler")
 _FRAMEWORK_BUILD_PACKAGES = {
     "pytorch": ["torch>=2.1"],
     "jax": ["jax>=0.5.0", "flax>=0.7.1"],
@@ -221,14 +205,19 @@ def _cuda_version(config_settings: ConfigSettings) -> str:
 
 
 def _cuda_build_requirements(config_settings: ConfigSettings) -> List[str]:
-    """Get build requirements for the requested CUDA package version."""
+    """Get build requirements for the requested CUDA version.
+
+    The CUDA Toolkit and cuDNN are installed from Python packages unless CUDA_HOME selects an
+    installed CUDA Toolkit, in which case the installed cuDNN is used as well.
+    """
     cuda_version = _cuda_version(config_settings)
     cuda_major = cuda_version.split(".", maxsplit=1)[0]
-    component_constraint = f"=={cuda_version}.*"
-
-    packages = _CUDA_BUILD_PACKAGES[cuda_major]
-    requirements = [f"{package}{component_constraint}" for package in packages]
-    requirements.append(f"nvidia-nccl-cu{cuda_major}>=2")
+    requirements = [f"nvidia-nccl-cu{cuda_major}>=2"]
+    if not os.getenv("CUDA_HOME"):
+        requirements += [
+            f"cuda-toolkit[{','.join(_CUDA_TOOLKIT_EXTRAS)}]=={cuda_version}.*",
+            f"nvidia-cudnn-cu{cuda_major}>={MIN_CUDNN_VERSION}",
+        ]
     return requirements
 
 
