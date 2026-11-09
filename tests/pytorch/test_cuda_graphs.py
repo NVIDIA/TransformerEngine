@@ -5,6 +5,7 @@
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 import copy
+import contextlib
 import gc
 import weakref
 
@@ -28,6 +29,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
+import transformer_engine.pytorch.graph as graph_module
 from transformer_engine.common import recipe
 from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
 
@@ -51,6 +53,55 @@ def nvfp4_vanilla():
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
     nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
     return nvfp4_recipe
+
+
+@pytest.mark.parametrize(
+    "advances, expected",
+    (
+        (False, True),
+        (True, False),
+    ),
+)
+def test_graph_rng_registration_capability(monkeypatch, advances, expected):
+    """Detect whether graph replay advances RNG without explicit registration."""
+
+    class FakeGraph:
+        def __init__(self):
+            self.replays = 0
+
+        def replay(self):
+            self.replays += 1
+
+        def reset(self):
+            pass
+
+    class FakeOutput:
+        def random_(self):
+            pass
+
+        def clone(self):
+            return 0
+
+    class FakeGenerator:
+        def get_state(self):
+            return None
+
+        def set_state(self, state):
+            pass
+
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", FakeGraph)
+    monkeypatch.setattr(torch.cuda, "default_generators", [FakeGenerator()])
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "graph", lambda graph: contextlib.nullcontext())
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch, "empty", lambda *args, **kwargs: FakeOutput())
+    monkeypatch.setattr(torch, "equal", lambda first, second: not advances)
+    monkeypatch.setattr(graph_module, "graph_safe_rng_available", lambda: True)
+    graph_module._graph_rng_registration_required.cache_clear()
+    try:
+        assert graph_module._graph_rng_registration_required() is expected
+    finally:
+        graph_module._graph_rng_registration_required.cache_clear()
 
 
 def nvfp4_rht_and_2d_quantization():
