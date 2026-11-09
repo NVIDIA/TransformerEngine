@@ -3372,7 +3372,14 @@ def _mxfp8_tensor_in_src_format(fp8_2d, shape, dtype, quantizer, src_format):
 
 
 def fused_mla_kv_rope_mxfp8(
-    kv, k_rope, cos, sin, v_head_dim, key_quantizer=None, value_quantizer=None
+    kv,
+    k_rope,
+    cos,
+    sin,
+    v_head_dim,
+    key_quantizer=None,
+    value_quantizer=None,
+    transpose_swizzle_scales=False,
 ):
     """MLA key/value split, key RoPE and MXFP8 quantization in one kernel.
 
@@ -3400,13 +3407,33 @@ def fused_mla_kv_rope_mxfp8(
         Value dimensions per head in ``kv``.
     key_quantizer, value_quantizer : MXFP8Quantizer, optional
         E4M3 quantizers with row-wise and column-wise usage; created if not given.
+    transpose_swizzle_scales : bool, default = False
+        Write the scale_invs permuted to BHSD and GEMM-swizzled, the layout MXFP8 attention
+        consumes: the result of :func:`mxfp8_transpose_swizzle` applied to the outputs, without
+        running it (see ``nvte_fused_mla_kv_rope_mxfp8_attn``). Needs BF16 ``cos`` and ``sin``
+        and a sequence length that is a multiple of 128.
 
     Returns
     -------
     key, value : MXFP8Tensor
-        [s, b, h, k_dim + emb_dim] and [s, b, h, v_head_dim], data and scale_invs in SBHD
-        layout; NOT yet BHSD-permuted or swizzled (see :func:`mxfp8_transpose_swizzle`).
+        [s, b, h, k_dim + emb_dim] and [s, b, h, v_head_dim], data in SBHD layout. Scale_invs in
+        SBHD layout, NOT yet BHSD-permuted or swizzled (see :func:`mxfp8_transpose_swizzle`),
+        unless ``transpose_swizzle_scales``.
     """
+    if transpose_swizzle_scales:
+        key_quantizer, value_quantizer = (
+            _check_mla_mxfp8_quantizer(quantizer, "fused_mla_kv_rope_mxfp8")
+            for quantizer in (key_quantizer, value_quantizer)
+        )
+        key_buffers, value_buffers = tex.fused_mla_kv_rope_mxfp8_attn(
+            kv, k_rope, cos, sin, v_head_dim
+        )
+        key_shape = tuple(key_buffers[0].shape)
+        value_shape = tuple(value_buffers[0].shape)
+        return (
+            _swizzled_mxfp8_tensor(key_buffers, key_shape, kv.dtype, key_quantizer),
+            _swizzled_mxfp8_tensor(value_buffers, value_shape, kv.dtype, value_quantizer),
+        )
     s, b, h, kv_dim = kv.shape
     if s % (4 * MXFP8_BLOCK_SCALING_SIZE) != 0:
         raise ValueError(
@@ -3437,6 +3464,148 @@ def fused_mla_kv_rope_mxfp8(
         _mxfp8_tensor_in_src_format(key_2d, key_shape, kv.dtype, quantizers[0], "sbhd"),
         _mxfp8_tensor_in_src_format(value_2d, value_shape, kv.dtype, quantizers[1], "sbhd"),
     )
+
+
+def _check_mla_mxfp8_quantizer(quantizer, name):
+    """The given MXFP8 quantizer, or a new E4M3 one, checked for the fused MLA kernels."""
+    if quantizer is None:
+        return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    if not isinstance(quantizer, MXFP8Quantizer):
+        raise TypeError(f"{name} requires MXFP8 quantizers, got {type(quantizer).__name__}.")
+    if quantizer.dtype != tex.DType.kFloat8E4M3:
+        raise ValueError(f"{name} only produces E4M3 data, got {quantizer.dtype}.")
+    if getattr(quantizer, "with_2d_quantization", False):
+        raise ValueError(f"{name} does not support 2D MXFP8 quantization.")
+    return quantizer
+
+
+def _swizzled_mxfp8_tensor(buffers, shape, dtype, quantizer):
+    """MXFP8Tensor of row-wise data, row-wise scale_inv, column-wise data and column-wise
+    scale_inv buffers whose scale_invs are GEMM-swizzled."""
+    rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv = buffers
+    return MXFP8Tensor(
+        shape=shape,
+        dtype=dtype,
+        rowwise_data=rowwise_data.view(shape),
+        rowwise_scale_inv=rowwise_scale_inv,
+        columnwise_data=columnwise_data.view(shape),
+        columnwise_scale_inv=columnwise_scale_inv,
+        quantizer=quantizer,
+        requires_grad=False,
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        with_gemm_swizzled_scales=True,
+    )
+
+
+def fused_mla_q_rope_mxfp8(q, cos, sin, quantizer=None):
+    """MLA query RoPE and MXFP8 quantization for attention in one kernel.
+
+    Applies Megatron-LM's MLA RoPE (interleaved rotation pairs in, the two halves out, BF16
+    roundings) to the last 64 dimensions of each head and quantizes the query row-wise and
+    column-wise, as :func:`mxfp8_quantize_only` (``src_format="sbhd"``) followed by
+    :func:`mxfp8_transpose_swizzle` does for the RoPE'd query, with byte-identical results:
+    data in SBHD, scale_invs permuted to BHSD and GEMM-swizzled. See
+    ``nvte_fused_mla_q_rope_mxfp8_attn``. Supports DeepSeek-V3's query head dimension (128
+    without RoPE + 64 RoPE) on SM 10.0+.
+
+    Parameters
+    ----------
+    q : torch.Tensor
+        [s, b, h, 192] BF16. ``s`` must be a multiple of 128 and ``h`` even.
+    cos, sin : torch.Tensor
+        [max_s, 1, 1, 64] or [max_s, 64] BF16; row t is used for token t.
+    quantizer : MXFP8Quantizer, optional
+        E4M3 quantizer with row-wise and column-wise usage; created if not given.
+
+    Returns
+    -------
+    query : MXFP8Tensor
+        [s, b, h, 192], ready for MXFP8 attention.
+    """
+    quantizer = _check_mla_mxfp8_quantizer(quantizer, "fused_mla_q_rope_mxfp8")
+    buffers = tex.fused_mla_q_rope_mxfp8_attn(q, cos, sin)
+    return _swizzled_mxfp8_tensor(buffers, tuple(q.shape), q.dtype, quantizer)
+
+
+def fused_mla_q_rope_backward_(dq, cos, sin):
+    """Backward of the MLA query RoPE of :func:`fused_mla_q_rope_mxfp8`, in place.
+
+    The same BF16 operations as Megatron-LM's MLA query RoPE backward, so the same bytes. See
+    ``nvte_fused_mla_q_rope_backward``.
+
+    Parameters
+    ----------
+    dq : torch.Tensor
+        [s, b, h, 192] BF16, contiguous; its last 64 dimensions per head are overwritten.
+    cos, sin : torch.Tensor
+        As for the forward.
+
+    Returns
+    -------
+    dq : torch.Tensor
+    """
+    return tex.fused_mla_q_rope_backward_(dq, cos, sin)
+
+
+def fused_mla_q_rope_backward_mxfp8(dq, cos, sin, quantizer=None):
+    """MLA query RoPE backward fused with the MXFP8 quantization of its result.
+
+    Returns what an MXFP8 quantizer with ``optimize_for_gemm`` gives for
+    ``fused_mla_q_rope_backward_(dq, cos, sin).view(s, b, h * 192)``, the gradient of the query
+    up-projection output: row-wise and column-wise E4M3 data and GEMM-swizzled scale_invs,
+    byte-identical, without writing the BF16 gradient (``dq`` is not modified). See
+    ``nvte_fused_mla_q_rope_backward_mxfp8``.
+
+    Parameters
+    ----------
+    dq : torch.Tensor
+        [s, b, h, 192] BF16; ``s * b`` must be a multiple of 128 and ``h`` even.
+    cos, sin : torch.Tensor
+        As for the forward.
+    quantizer : MXFP8Quantizer, optional
+        E4M3 quantizer to attach to the result; created if not given.
+
+    Returns
+    -------
+    grad : MXFP8Tensor
+        [s, b, h * 192].
+    """
+    quantizer = _check_mla_mxfp8_quantizer(quantizer, "fused_mla_q_rope_backward_mxfp8")
+    s, b, h, d = dq.shape
+    buffers = tex.fused_mla_q_rope_backward_mxfp8(dq, cos, sin)
+    return _swizzled_mxfp8_tensor(buffers, (s, b, h * d), dq.dtype, quantizer)
+
+
+def fused_mla_kv_split_backward_mxfp8(dk, dv, k_dim, quantizer=None):
+    """MLA key/value split backward fused with the MXFP8 quantization of its result.
+
+    The gradient of the key/value up-projection output, ``[dk[..., :k_dim] | dv]`` per head
+    viewed as [s, b, h * (k_dim + v_dim)], quantized as an MXFP8 quantizer with
+    ``optimize_for_gemm`` does (row-wise and column-wise E4M3 data, GEMM-swizzled scale_invs),
+    byte-identical, without writing it in BF16. The gradient of the key RoPE dimensions
+    (``dk[..., k_dim:]`` summed over heads) is not computed. See
+    ``nvte_fused_mla_kv_split_backward_mxfp8``.
+
+    Parameters
+    ----------
+    dk : torch.Tensor
+        [s, b, h, 192] BF16; ``s * b`` must be a multiple of 128 and ``h`` even.
+    dv : torch.Tensor
+        [s, b, h, 128] BF16.
+    k_dim : int
+        Key dimensions without RoPE (128).
+    quantizer : MXFP8Quantizer, optional
+        E4M3 quantizer to attach to the result; created if not given.
+
+    Returns
+    -------
+    grad : MXFP8Tensor
+        [s, b, h * (k_dim + v_dim)].
+    """
+    quantizer = _check_mla_mxfp8_quantizer(quantizer, "fused_mla_kv_split_backward_mxfp8")
+    s, b, h, _ = dk.shape
+    buffers = tex.fused_mla_kv_split_backward_mxfp8(dk, dv, k_dim)
+    return _swizzled_mxfp8_tensor(buffers, (s, b, h * (k_dim + dv.shape[-1])), dk.dtype, quantizer)
 
 
 def mxfp8_transpose_swizzle(fp8_tensors, src_format):

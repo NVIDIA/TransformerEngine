@@ -613,6 +613,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Split MLA key/value, apply RoPE to the key and quantize both to MXFP8", py::arg("kv"),
         py::arg("k_rope"), py::arg("cos"), py::arg("sin"), py::arg("v_head_dim"),
         py::arg("key_quantizer"), py::arg("value_quantizer"));
+  m.def("fused_mla_q_rope_mxfp8_attn", &transformer_engine::pytorch::fused_mla_q_rope_mxfp8_attn,
+        "Apply RoPE to the MLA query and quantize it to MXFP8 with the attention scale layout",
+        py::arg("q"), py::arg("cos"), py::arg("sin"));
+  m.def("fused_mla_kv_rope_mxfp8_attn", &transformer_engine::pytorch::fused_mla_kv_rope_mxfp8_attn,
+        "Split MLA key/value, apply RoPE to the key and quantize both to MXFP8 with the attention "
+        "scale layout",
+        py::arg("kv"), py::arg("k_rope"), py::arg("cos"), py::arg("sin"), py::arg("v_head_dim"));
+  m.def("fused_mla_q_rope_backward_", &transformer_engine::pytorch::fused_mla_q_rope_backward_,
+        "MLA query RoPE backward, in place", py::arg("dq"), py::arg("cos"), py::arg("sin"));
+  m.def("fused_mla_q_rope_backward_mxfp8",
+        &transformer_engine::pytorch::fused_mla_q_rope_backward_mxfp8,
+        "MLA query RoPE backward quantized to MXFP8 (GEMM-swizzled scales)", py::arg("dq"),
+        py::arg("cos"), py::arg("sin"));
+  m.def("fused_mla_kv_split_backward_mxfp8",
+        &transformer_engine::pytorch::fused_mla_kv_split_backward_mxfp8,
+        "MLA key/value split backward quantized to MXFP8 (GEMM-swizzled scales)", py::arg("dk"),
+        py::arg("dv"), py::arg("k_dim"));
 
   // fused router
   transformer_engine::pytorch::init_router_bindings(m);

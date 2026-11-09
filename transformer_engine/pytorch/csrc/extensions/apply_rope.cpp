@@ -363,4 +363,178 @@ std::tuple<py::object, py::object> fused_mla_kv_rope_mxfp8(
   return {key_py, value_py};
 }
 
+namespace {
+
+// Buffers of an MXFP8 tensor: row-wise data, row-wise scale_inv, column-wise data, column-wise
+// scale_inv (uint8).
+std::vector<at::Tensor> empty_mxfp8_buffers(const std::vector<int64_t> &data_shape,
+                                            const std::vector<int64_t> &rowwise_scale_shape,
+                                            const std::vector<int64_t> &columnwise_scale_shape,
+                                            const at::Device &device) {
+  const auto opts = at::TensorOptions().dtype(at::kByte).device(device);
+  return {at::empty(data_shape, opts), at::empty(rowwise_scale_shape, opts),
+          at::empty(data_shape, opts), at::empty(columnwise_scale_shape, opts)};
+}
+
+// TE view of MXFP8 buffers (empty_mxfp8_buffers) with GEMM-swizzled scaling factors.
+TensorWrapper make_swizzled_mxfp8_tensor(std::vector<at::Tensor> &buffers) {
+  auto shape_of = [](const at::Tensor &t) {
+    std::vector<size_t> shape;
+    for (const auto d : t.sizes()) shape.push_back(static_cast<size_t>(d));
+    return shape;
+  };
+  TensorWrapper out(NVTE_MXFP8_1D_SCALING);
+  out.set_rowwise_data(buffers[0].data_ptr(), DType::kFloat8E4M3, shape_of(buffers[0]));
+  out.set_rowwise_scale_inv(buffers[1].data_ptr(), DType::kFloat8E8M0, shape_of(buffers[1]));
+  out.set_columnwise_data(buffers[2].data_ptr(), DType::kFloat8E4M3, shape_of(buffers[2]));
+  out.set_columnwise_scale_inv(buffers[3].data_ptr(), DType::kFloat8E8M0, shape_of(buffers[3]));
+  out.set_with_gemm_swizzled_scales(true);
+  return out;
+}
+
+// MXFP8 buffers of an attention input [s, b, h, d] with BHSD-permuted, GEMM-swizzled scaling
+// factors (as mxfp8_transpose_swizzle leaves them).
+std::vector<at::Tensor> empty_mxfp8_attn_buffers(const int64_t s, const int64_t b, const int64_t h,
+                                                 const int64_t d, const at::Device &device) {
+  const int64_t rows = b * h * s;
+  return empty_mxfp8_buffers({s, b, h, d}, {rows, (d / 32 + 3) / 4 * 4},
+                             {rows / 32, (d + 127) / 128 * 128}, device);
+}
+
+void check_mla_rope_inputs(const at::Tensor &x, const char *name,
+                           const std::vector<at::Tensor> &others) {
+  TORCH_CHECK(x.is_cuda(), "expected ", name, " on a CUDA device");
+  for (const auto &t : others) {
+    TORCH_CHECK(t.device() == x.device(), "expected all inputs on the device of ", name);
+  }
+  TORCH_CHECK(x.dim() == 4, "expected ", name, " of shape [s, b, h, d], got ", x.sizes());
+}
+
+}  // namespace
+
+std::vector<at::Tensor> fused_mla_q_rope_mxfp8_attn(const at::Tensor &q, const at::Tensor &cos,
+                                                    const at::Tensor &sin) {
+  check_mla_rope_inputs(q, "q", {cos, sin});
+  at::cuda::CUDAGuard device_guard(q.device());
+  const auto q_c = q.contiguous();
+  const auto cos_c = cos.contiguous();
+  const auto sin_c = sin.contiguous();
+  auto out = empty_mxfp8_attn_buffers(q.size(0), q.size(1), q.size(2), q.size(3), q.device());
+  auto q_cu = makeTransformerEngineTensor(q_c);
+  auto cos_cu = makeTransformerEngineTensor(cos_c);
+  auto sin_cu = makeTransformerEngineTensor(sin_c);
+  auto out_cu = make_swizzled_mxfp8_tensor(out);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_fused_mla_q_rope_mxfp8_attn(q_cu.data(), cos_cu.data(), sin_cu.data(), out_cu.data(),
+                                     at::cuda::getCurrentCUDAStream());
+  });
+  return out;
+}
+
+std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>> fused_mla_kv_rope_mxfp8_attn(
+    const at::Tensor &kv, const at::Tensor &k_rope, const at::Tensor &cos, const at::Tensor &sin,
+    const int64_t v_head_dim) {
+  check_mla_rope_inputs(kv, "kv", {k_rope, cos, sin});
+  at::cuda::CUDAGuard device_guard(kv.device());
+  const int64_t s = kv.size(0), b = kv.size(1), h = kv.size(2);
+  const int64_t emb_dim = k_rope.size(-1);
+  TORCH_CHECK(k_rope.dim() >= 3 && k_rope.size(0) == s && k_rope.size(1) == b &&
+                  k_rope.numel() == s * b * emb_dim,
+              "expected k_rope of shape [s, b, 1, emb_dim] or [s, b, emb_dim], got ",
+              k_rope.sizes());
+  TORCH_CHECK(v_head_dim > 0 && v_head_dim < kv.size(3), "invalid v_head_dim ", v_head_dim,
+              " for kv of shape ", kv.sizes());
+  const int64_t key_dim = kv.size(3) - v_head_dim + emb_dim;
+  // k_rope rows are read in place when they are a fixed, 16-byte aligned stride apart.
+  at::Tensor k_rope_rows = k_rope;
+  int64_t k_rope_stride = b > 1 ? k_rope_rows.stride(1) : k_rope_rows.stride(0);
+  if (k_rope_rows.stride(-1) != 1 ||
+      (b > 1 && k_rope_rows.stride(0) != b * k_rope_rows.stride(1)) || k_rope_stride < emb_dim ||
+      k_rope_stride % 8 != 0 || reinterpret_cast<uintptr_t>(k_rope_rows.data_ptr()) % 16 != 0) {
+    k_rope_rows = k_rope.contiguous();
+    k_rope_stride = emb_dim;
+  }
+  const auto kv_c = kv.contiguous();
+  const auto cos_c = cos.contiguous();
+  const auto sin_c = sin.contiguous();
+  auto key = empty_mxfp8_attn_buffers(s, b, h, key_dim, kv.device());
+  auto value = empty_mxfp8_attn_buffers(s, b, h, v_head_dim, kv.device());
+  auto kv_cu = makeTransformerEngineTensor(kv_c);
+  auto k_rope_cu = makeTransformerEngineTensor(
+      k_rope_rows.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(s * b), static_cast<size_t>(emb_dim)},
+      GetTransformerEngineDType(k_rope_rows.scalar_type()));
+  auto cos_cu = makeTransformerEngineTensor(cos_c);
+  auto sin_cu = makeTransformerEngineTensor(sin_c);
+  auto key_cu = make_swizzled_mxfp8_tensor(key);
+  auto value_cu = make_swizzled_mxfp8_tensor(value);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_fused_mla_kv_rope_mxfp8_attn(
+        kv_cu.data(), k_rope_cu.data(), static_cast<int>(k_rope_stride), cos_cu.data(),
+        sin_cu.data(), key_cu.data(), value_cu.data(), at::cuda::getCurrentCUDAStream());
+  });
+  return {key, value};
+}
+
+at::Tensor fused_mla_q_rope_backward_(at::Tensor dq, const at::Tensor &cos, const at::Tensor &sin) {
+  check_mla_rope_inputs(dq, "dq", {cos, sin});
+  TORCH_CHECK(dq.is_contiguous(), "expected a contiguous dq");
+  at::cuda::CUDAGuard device_guard(dq.device());
+  const auto cos_c = cos.contiguous();
+  const auto sin_c = sin.contiguous();
+  auto dq_cu = makeTransformerEngineTensor(dq);
+  auto cos_cu = makeTransformerEngineTensor(cos_c);
+  auto sin_cu = makeTransformerEngineTensor(sin_c);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_fused_mla_q_rope_backward(dq_cu.data(), cos_cu.data(), sin_cu.data(),
+                                   at::cuda::getCurrentCUDAStream());
+  });
+  return dq;
+}
+
+std::vector<at::Tensor> fused_mla_q_rope_backward_mxfp8(const at::Tensor &dq, const at::Tensor &cos,
+                                                        const at::Tensor &sin) {
+  check_mla_rope_inputs(dq, "dq", {cos, sin});
+  at::cuda::CUDAGuard device_guard(dq.device());
+  const auto dq_c = dq.contiguous();
+  const auto cos_c = cos.contiguous();
+  const auto sin_c = sin.contiguous();
+  const int64_t tokens = dq.size(0) * dq.size(1), columns = dq.size(2) * dq.size(3);
+  auto out = empty_mxfp8_buffers({tokens, columns}, {tokens, columns / 32}, {tokens / 32, columns},
+                                 dq.device());
+  auto dq_cu = makeTransformerEngineTensor(dq_c);
+  auto cos_cu = makeTransformerEngineTensor(cos_c);
+  auto sin_cu = makeTransformerEngineTensor(sin_c);
+  auto out_cu = make_swizzled_mxfp8_tensor(out);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_fused_mla_q_rope_backward_mxfp8(dq_cu.data(), cos_cu.data(), sin_cu.data(), out_cu.data(),
+                                         at::cuda::getCurrentCUDAStream());
+  });
+  return out;
+}
+
+std::vector<at::Tensor> fused_mla_kv_split_backward_mxfp8(const at::Tensor &dk,
+                                                          const at::Tensor &dv,
+                                                          const int64_t k_dim) {
+  check_mla_rope_inputs(dk, "dk", {dv});
+  TORCH_CHECK(dv.dim() == 4, "expected dv of shape [s, b, h, d], got ", dv.sizes());
+  at::cuda::CUDAGuard device_guard(dk.device());
+  const auto dk_c = dk.contiguous();
+  const auto dv_c = dv.contiguous();
+  const int64_t tokens = dk.size(0) * dk.size(1);
+  TORCH_CHECK(k_dim > 0 && k_dim < dk.size(3), "invalid k_dim ", k_dim, " for dk of shape ",
+              dk.sizes());
+  const int64_t columns = dk.size(2) * (k_dim + dv.size(3));
+  auto out = empty_mxfp8_buffers({tokens, columns}, {tokens, columns / 32}, {tokens / 32, columns},
+                                 dk.device());
+  auto dk_cu = makeTransformerEngineTensor(dk_c);
+  auto dv_cu = makeTransformerEngineTensor(dv_c);
+  auto out_cu = make_swizzled_mxfp8_tensor(out);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_fused_mla_kv_split_backward_mxfp8(dk_cu.data(), dv_cu.data(), out_cu.data(),
+                                           at::cuda::getCurrentCUDAStream());
+  });
+  return out;
+}
+
 }  // namespace transformer_engine::pytorch

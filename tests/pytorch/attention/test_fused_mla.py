@@ -8,6 +8,13 @@
 - fused_mla_kv_rope_mxfp8: key/value split, key RoPE and MXFP8 quantization. The reference
   applies Megatron-LM's MLA key/value RoPE (the Triton kernel in mla_rope_utils) and quantizes
   key and value with mxfp8_quantize_only; the fused kernel must produce the same bytes.
+- fused_mla_q_rope_mxfp8 and fused_mla_kv_rope_mxfp8(transpose_swizzle_scales=True): query RoPE
+  / key-value split and RoPE with MXFP8 quantization in the attention scale layout. Same bytes as
+  the RoPE kernels, mxfp8_quantize_only and mxfp8_transpose_swizzle.
+- fused_mla_q_rope_backward_, fused_mla_q_rope_backward_mxfp8 and
+  fused_mla_kv_split_backward_mxfp8: same bytes as Megatron-LM's MLA RoPE backward kernels,
+  followed (for the MXFP8 ones) by the MXFP8 quantizer with optimize_for_gemm, as TE's linear
+  layers quantize their grad_output.
 
 Run:
     pytest tests/pytorch/attention/test_fused_mla.py -v
@@ -25,14 +32,19 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.attention import FusedMLAQUpProjFunction, FusedMLAQUpProjRopeQuant
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     fused_mla_kv_rope_mxfp8,
+    fused_mla_kv_split_backward_mxfp8,
+    fused_mla_q_rope_backward_,
+    fused_mla_q_rope_backward_mxfp8,
+    fused_mla_q_rope_mxfp8,
     mxfp8_quantize_only,
+    mxfp8_transpose_swizzle,
 )
 from transformer_engine.pytorch.cpp_extensions import general_gemm as _fused_general_gemm
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path = [str(_current_file.parent)] + sys.path
-from mla_rope_utils import HAVE_TRITON, apply_mla_rope_kv, build_rope_tables
+from mla_rope_utils import HAVE_TRITON, apply_mla_rope_kv, apply_mla_rope_q, build_rope_tables
 
 # All tests in this file require GB200/SM100 hardware.
 pytestmark = pytest.mark.launch_on_gb200
@@ -462,3 +474,255 @@ def test_inputs_on_non_current_device():
     _assert_identical(value, ref_value, "value")
     with pytest.raises(RuntimeError, match="same device"):
         fused_mla_kv_rope_mxfp8(kv, k_rope.to("cuda:0"), cos, sin, HEAD_DIM_V)
+
+
+# --- MXFP8 attention scale layout and the RoPE backward kernels -----------------------------------
+
+
+def _rope_tables(s, dtype=torch.bfloat16, rows=None):
+    cos, sin = build_rope_tables(rows or s, emb_dim=HEAD_DIM_ROPE, device="cuda")
+    return (cos * 1.2).to(dtype), (sin * 1.2).to(dtype)
+
+
+def _q_input(s, b, h, seed=4321):
+    torch.manual_seed(seed)
+    q = (torch.randn(s, b, h, HEAD_DIM, device="cuda") * 4).to(torch.bfloat16)
+    q[3, 0, 0, :32] = 0
+    q[11, b - 1, h - 1, HEAD_DIM_NOPE + 9] = 2.0e4
+    q[17, 0, 1, 70] = -3.0e4
+    return q
+
+
+def _q_reference(q, cos, sin):
+    query = apply_mla_rope_q(q.clone(), cos_table=cos, sin_table=sin)
+    (query,) = mxfp8_quantize_only([(query.contiguous(), _kv_quantizer())], "sbhd")
+    mxfp8_transpose_swizzle([query], "sbhd")
+    return query
+
+
+def _assert_swizzled_identical(actual, expected, name):
+    """Same bytes, with the scale_invs compared as flat buffers."""
+    assert actual._with_gemm_swizzled_scales and expected._with_gemm_swizzled_scales, name
+    for buffer in MXFP8_BUFFERS:
+        a, e = getattr(actual, buffer), getattr(expected, buffer)
+        assert a.numel() == e.numel(), f"{name}.{buffer}: {a.numel()} vs {e.numel()} bytes"
+        a, e = a.reshape(-1).view(torch.uint8), e.reshape(-1).view(torch.uint8)
+        mismatches = int((a != e).sum())
+        assert mismatches == 0, f"{name}.{buffer}: {mismatches} of {e.numel()} bytes differ"
+
+
+ATTN_SHAPES = [(4096, 1, 128), (2048, 2, 64), (512, 1, 16), (256, 3, 6), (128, 2, 2)]
+
+
+@requires_kv_rope_kernel
+@pytest.mark.parametrize("s, b, h", ATTN_SHAPES)
+def test_q_rope_mxfp8_matches_rope_quantize_swizzle(s, b, h):
+    q = _q_input(s, b, h)
+    cos, sin = _rope_tables(s)
+    expected = _q_reference(q, cos, sin)
+    q_before = q.clone()
+    query = fused_mla_q_rope_mxfp8(q, cos.view(s, 1, 1, -1), sin.view(s, 1, 1, -1))
+    assert query.shape == q.shape
+    assert torch.equal(q, q_before), "the input must not be modified"
+    _assert_swizzled_identical(query, expected, "query")
+    assert tuple(query._rowwise_scale_inv.shape) == tuple(expected._rowwise_scale_inv.shape)
+    assert tuple(query._columnwise_scale_inv.shape) == tuple(expected._columnwise_scale_inv.shape)
+
+
+@requires_kv_rope_kernel
+@pytest.mark.parametrize("s, b, h", ATTN_SHAPES)
+def test_kv_rope_mxfp8_transpose_swizzle_scales(s, b, h):
+    kv, k_rope, cos, sin = _kv_rope_inputs(s, b, h, torch.bfloat16)
+    ref_key, ref_value = _kv_rope_reference(kv, k_rope, cos, sin)
+    mxfp8_transpose_swizzle([ref_key, ref_value], "sbhd")
+    key, value = fused_mla_kv_rope_mxfp8(
+        kv, k_rope, cos, sin, HEAD_DIM_V, transpose_swizzle_scales=True
+    )
+    _assert_swizzled_identical(key, ref_key, "key")
+    _assert_swizzled_identical(value, ref_value, "value")
+    # The compact-scale kernel followed by the scale permute and swizzle gives the same bytes.
+    key2, value2 = fused_mla_kv_rope_mxfp8(kv, k_rope, cos, sin, HEAD_DIM_V)
+    mxfp8_transpose_swizzle([key2, value2], "sbhd")
+    _assert_swizzled_identical(key, key2, "key")
+    _assert_swizzled_identical(value, value2, "value")
+
+
+@requires_kv_rope_kernel
+def test_attn_layout_non_finite_and_long_tables():
+    """Inf / NaN inputs, a contiguous k_rope and cos / sin with more rows than tokens."""
+    s, b, h = 256, 2, 4
+    q = _q_input(s, b, h)
+    q[5, 0, 0, 40] = float("inf")
+    q[70, 1, 3, HEAD_DIM_NOPE + 2] = float("nan")
+    kv, k_rope, _, _ = _kv_rope_inputs(s, b, h, torch.bfloat16)
+    kv[3, 0, 0, 40] = float("-inf")
+    kv[96:128, 1, 3, HEAD_DIM_NOPE + 32 : HEAD_DIM_NOPE + 64] = float("nan")
+    k_rope = k_rope.squeeze(-2).contiguous()
+    cos, sin = _rope_tables(s, rows=2 * s)
+    _assert_swizzled_identical(
+        fused_mla_q_rope_mxfp8(q, cos, sin), _q_reference(q, cos[:s], sin[:s]), "query"
+    )
+    ref_key, ref_value = _kv_rope_reference(kv, k_rope.unsqueeze(-2), cos[:s], sin[:s])
+    mxfp8_transpose_swizzle([ref_key, ref_value], "sbhd")
+    key, value = fused_mla_kv_rope_mxfp8(
+        kv, k_rope, cos, sin, HEAD_DIM_V, transpose_swizzle_scales=True
+    )
+    _assert_swizzled_identical(key, ref_key, "key")
+    _assert_swizzled_identical(value, ref_value, "value")
+
+
+@requires_kv_rope_kernel
+@pytest.mark.parametrize(
+    "s, h, cos_dtype, message",
+    [
+        (96, 4, torch.bfloat16, "multiple of 128"),
+        (128, 3, torch.bfloat16, "must be even"),
+        (128, 4, torch.float32, "must be BF16"),
+    ],
+    ids=["s", "h", "fp32_cos"],
+)
+def test_attn_layout_unsupported_inputs(s, h, cos_dtype, message):
+    q = _q_input(s, 1, h)
+    kv, k_rope, _, _ = _kv_rope_inputs(s, 1, h, torch.bfloat16)
+    cos, sin = _rope_tables(s, cos_dtype)
+    with pytest.raises((RuntimeError, ValueError), match=message):
+        fused_mla_q_rope_mxfp8(q, cos, sin)
+    with pytest.raises((RuntimeError, ValueError), match=message):
+        fused_mla_kv_rope_mxfp8(kv, k_rope, cos, sin, HEAD_DIM_V, transpose_swizzle_scales=True)
+
+
+def _grad_quantizer():
+    quantizer = _kv_quantizer()
+    quantizer.optimize_for_gemm = True  # As TE's linear layers quantize grad_output.
+    return quantizer
+
+
+def _q_rope_backward_reference(dq, cos, sin):
+    s, b, h, _ = dq.shape
+    q = torch.zeros(s, b, h, HEAD_DIM, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out = apply_mla_rope_q(q.clone(), cos_table=cos, sin_table=sin)
+    out.backward(dq.clone())
+    return q.grad
+
+
+def _kv_split_backward_reference(dk, dv, cos, sin):
+    s, b, h, _ = dk.shape
+    kv = torch.zeros(
+        s, b, h, HEAD_DIM_NOPE + HEAD_DIM_V, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    k_rope = torch.zeros(s, b, 1, HEAD_DIM_ROPE, device="cuda", dtype=torch.bfloat16)
+    k_rope.requires_grad_()
+    key, value = apply_mla_rope_kv(kv, k_rope, cos_table=cos, sin_table=sin)
+    torch.autograd.backward([key, value], [dk, dv])
+    return kv.grad
+
+
+def _grad_inputs(s, b, h, seed=99):
+    torch.manual_seed(seed)
+    dq = (torch.randn(s, b, h, HEAD_DIM, device="cuda") * 1e-3).to(torch.bfloat16)
+    dk = (torch.randn(s, b, h, HEAD_DIM, device="cuda") * 1e-3).to(torch.bfloat16)
+    dv = (torch.randn(s, b, h, HEAD_DIM_V, device="cuda") * 1e-3).to(torch.bfloat16)
+    for t in (dq, dk, dv):
+        t[1, 0, 0, :32] = 0
+        t[33, b - 1, h - 1, 5] = 30.0
+        t[min(64, s - 1), 0, 1, 100] = -1.0e-30
+    return dq, dk, dv
+
+
+@requires_kv_rope_kernel
+@pytest.mark.parametrize("s, b, h", ATTN_SHAPES + [(64, 2, 4)])
+def test_q_rope_backward_in_place(s, b, h):
+    dq, _, _ = _grad_inputs(s, b, h)
+    cos, sin = _rope_tables(s)
+    expected = _q_rope_backward_reference(dq, cos, sin)
+    out = fused_mla_q_rope_backward_(dq, cos, sin)
+    assert out.data_ptr() == dq.data_ptr()
+    assert torch.equal(dq.view(torch.int16), expected.view(torch.int16))
+
+
+@requires_kv_rope_kernel
+@pytest.mark.parametrize("s, b, h", ATTN_SHAPES + [(64, 2, 4)])
+def test_q_rope_backward_mxfp8(s, b, h):
+    dq, _, _ = _grad_inputs(s, b, h)
+    cos, sin = _rope_tables(s)
+    expected_bf16 = _q_rope_backward_reference(dq, cos, sin)
+    expected = _grad_quantizer()(expected_bf16.view(s * b, h * HEAD_DIM))
+    dq_before = dq.clone()
+    grad = fused_mla_q_rope_backward_mxfp8(dq, cos, sin)
+    assert torch.equal(dq, dq_before), "dq must not be modified"
+    assert grad.shape == (s, b, h * HEAD_DIM)
+    _assert_swizzled_identical(grad, expected, "grad")
+
+
+@requires_kv_rope_kernel
+@pytest.mark.parametrize("s, b, h", ATTN_SHAPES + [(64, 2, 4)])
+def test_kv_split_backward_mxfp8(s, b, h):
+    _, dk, dv = _grad_inputs(s, b, h)
+    cos, sin = _rope_tables(s)
+    expected_bf16 = _kv_split_backward_reference(dk, dv, cos, sin)
+    expected = _grad_quantizer()(expected_bf16.view(s * b, -1))
+    grad = fused_mla_kv_split_backward_mxfp8(dk, dv, HEAD_DIM_NOPE)
+    assert grad.shape == (s, b, h * (HEAD_DIM_NOPE + HEAD_DIM_V))
+    _assert_swizzled_identical(grad, expected, "grad")
+
+
+@requires_kv_rope_kernel
+def test_backward_unsupported_shapes():
+    _, dk, dv = _grad_inputs(96, 1, 4)
+    cos, sin = _rope_tables(96)
+    with pytest.raises(RuntimeError, match="multiple of 128"):
+        fused_mla_q_rope_backward_mxfp8(dk, cos, sin)
+    with pytest.raises(RuntimeError, match="multiple of 128"):
+        fused_mla_kv_split_backward_mxfp8(dk, dv, HEAD_DIM_NOPE)
+    _, dk, dv = _grad_inputs(128, 1, 3)
+    with pytest.raises(RuntimeError, match="must be even"):
+        fused_mla_kv_split_backward_mxfp8(dk, dv, HEAD_DIM_NOPE)
+
+
+@requires_kv_rope_kernel
+def test_cuda_graph_replay():
+    """All five kernels captured in a CUDA graph and replayed on new inputs."""
+    s, b, h = 256, 2, 8
+    cos, sin = _rope_tables(s)
+    q = _q_input(s, b, h)
+    kv, k_rope, _, _ = _kv_rope_inputs(s, b, h, torch.bfloat16)
+    dq, dk, dv = _grad_inputs(s, b, h)
+    dq_inplace = dq.clone()
+
+    def run():
+        query = fused_mla_q_rope_mxfp8(q, cos, sin)
+        key, value = fused_mla_kv_rope_mxfp8(
+            kv, k_rope, cos, sin, HEAD_DIM_V, transpose_swizzle_scales=True
+        )
+        fused_mla_q_rope_backward_(dq_inplace, cos, sin)
+        dq_grad = fused_mla_q_rope_backward_mxfp8(dq, cos, sin)
+        dkv_grad = fused_mla_kv_split_backward_mxfp8(dk, dv, HEAD_DIM_NOPE)
+        return query, key, value, dq_grad, dkv_grad
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run()  # Warm-up outside capture.
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        outputs = run()
+
+    for seed in (7, 8):
+        q.copy_(_q_input(s, b, h, seed=seed))
+        new_kv, new_k_rope, _, _ = _kv_rope_inputs(s, b, h, torch.bfloat16, seed=seed)
+        kv.copy_(new_kv)
+        k_rope.copy_(new_k_rope)
+        new_dq, new_dk, new_dv = _grad_inputs(s, b, h, seed=seed)
+        dq.copy_(new_dq)
+        dq_inplace.copy_(new_dq)
+        dk.copy_(new_dk)
+        dv.copy_(new_dv)
+        graph.replay()
+        torch.cuda.synchronize()
+        dq_inplace_graph = dq_inplace.clone()
+        dq_inplace.copy_(new_dq)
+        eager = run()
+        for name, a, e in zip(("query", "key", "value", "dq_grad", "dkv_grad"), outputs, eager):
+            _assert_swizzled_identical(a, e, name)
+        assert torch.equal(dq_inplace_graph, dq_inplace)
