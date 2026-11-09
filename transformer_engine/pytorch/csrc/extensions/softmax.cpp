@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <torch/csrc/autograd/variable.h>
+
 #include "../extensions.h"
 
 namespace transformer_engine::pytorch {
@@ -38,7 +40,7 @@ at::Tensor scaled_softmax_forward(at::Tensor input, float scale_factor) {
 }
 
 at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                   float scale_factor) {
+                                   float scale_factor, bool overwrite_output_grads) {
   auto output_grads = output_grad_.contiguous();
   auto softmax_results = softmax_results_.contiguous();
 
@@ -52,11 +54,10 @@ at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_r
                  (softmax_results.scalar_type() == at::ScalarType::BFloat16),
              "Only fp16 and bf16 are supported");
 
-  // Allocate a fresh output buffer so the op does not alias / mutate its
-  // inputs (required by `torch.library.custom_op`).
   auto input_grads =
-      torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
-
+      overwrite_output_grads
+          ? output_grads
+          : torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
@@ -65,6 +66,7 @@ at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_r
                                input_grads_cu.data(), scale_factor,
                                at::cuda::getCurrentCUDAStream());
 
+  if (overwrite_output_grads) torch::autograd::impl::bump_version(input_grads);
   return input_grads;
 }
 
@@ -106,7 +108,7 @@ at::Tensor scaled_masked_softmax_forward(at::Tensor input, at::Tensor mask, floa
 }
 
 at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                          float scale_factor) {
+                                          float scale_factor, bool overwrite_output_grads) {
   auto output_grads = output_grad_.contiguous();
   auto softmax_results = softmax_results_.contiguous();
 
@@ -120,11 +122,10 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor so
                  (softmax_results.scalar_type() == at::ScalarType::BFloat16),
              "Only fp16 and bf16 are supported");
 
-  // Allocate a fresh output buffer so the op does not alias / mutate its
-  // inputs (required by `torch.library.custom_op`).
   auto input_grads =
-      torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
-
+      overwrite_output_grads
+          ? output_grads
+          : torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
@@ -133,6 +134,7 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor so
                                input_grads_cu.data(), scale_factor,
                                at::cuda::getCurrentCUDAStream());
 
+  if (overwrite_output_grads) torch::autograd::impl::bump_version(input_grads);
   return input_grads;
 }
 
@@ -161,7 +163,8 @@ at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input, float sc
 
 at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        at::Tensor softmax_results_,
-                                                       float scale_factor) {
+                                                       float scale_factor,
+                                                       bool overwrite_output_grads) {
   auto output_grads = output_grads_.contiguous();
   auto softmax_results = softmax_results_.contiguous();
 
@@ -177,11 +180,10 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
 
   TORCH_CHECK(output_grads.size(1) == output_grads.size(2));
 
-  // Allocate a fresh output buffer so the op does not alias / mutate its
-  // inputs (required by `torch.library.custom_op`).
   auto input_grads =
-      torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
-
+      overwrite_output_grads
+          ? output_grads
+          : torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
@@ -190,6 +192,7 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                    softmax_results_cu.data(), input_grads_cu.data(),
                                                    scale_factor, at::cuda::getCurrentCUDAStream());
 
+  if (overwrite_output_grads) torch::autograd::impl::bump_version(input_grads);
   return input_grads;
 }
 
@@ -224,7 +227,8 @@ at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input, float 
 
 at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grad_,
                                                          at::Tensor softmax_results_,
-                                                         float scale_factor) {
+                                                         float scale_factor,
+                                                         bool overwrite_output_grads) {
   auto output_grads = output_grad_.contiguous();
   auto softmax_results = softmax_results_.contiguous();
 
@@ -238,11 +242,10 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grad_
                  (softmax_results.scalar_type() == at::ScalarType::BFloat16),
              "Only fp16 and bf16 are supported");
 
-  // Allocate a fresh output buffer so the op does not alias / mutate its
-  // inputs (required by `torch.library.custom_op`).
   auto input_grads =
-      torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
-
+      overwrite_output_grads
+          ? output_grads
+          : torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
@@ -251,6 +254,7 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grad_
       output_grads_cu.data(), softmax_results_cu.data(), input_grads_cu.data(), scale_factor,
       at::cuda::getCurrentCUDAStream());
 
+  if (overwrite_output_grads) torch::autograd::impl::bump_version(input_grads);
   return input_grads;
 }
 
