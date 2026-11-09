@@ -488,6 +488,7 @@ void nvte_group_dequantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor o
  * must alias the input. Optional output rowwise scales must alias the input
  * scales for matching layouts, or use separate storage for different layouts.
  * Each group's row and column counts must be divisible by 128.
+ * Groups with varying last dimensions require nvte_group_requantize_v2.
  *
  *  \param[in]     input          Compact rowwise MXFP8 grouped tensor.
  *  \param[in,out] output         Columnwise MXFP8 E4M3 grouped tensor with
@@ -500,6 +501,23 @@ void nvte_group_dequantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor o
 void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                            NVTETensor dequantized, const NVTEQuantizationConfig quant_config,
                            cudaStream_t stream);
+
+/*! \brief Requantizes grouped MXFP8 tensors using caller-owned workspace.
+ *
+ *  Uses the query/allocate/execute protocol and single-stream lifetime contract of
+ *  nvte_group_quantize_v2. Supports the same inputs and outputs as nvte_group_requantize,
+ *  including groups with varying last dimensions. No workspace initialization is required.
+ *
+ *  \param[in] input Compact rowwise MXFP8 grouped tensor.
+ *  \param[in,out] output Columnwise MXFP8 grouped tensor with optional rowwise fields.
+ *  \param[out] dequantized Optional BF16 output; pass NULL or an unallocated tensor to skip it.
+ *  \param[in,out] workspace Workspace tensor, or an empty tensor to query requirements.
+ *  \param[in] quant_config Unused; may be NULL.
+ *  \param[in] stream CUDA stream used for the operation.
+ */
+void nvte_group_requantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                              NVTETensor dequantized, NVTETensor workspace,
+                              const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
 /*! \brief Casts multiple input tensors to quantized output tensors.
  *

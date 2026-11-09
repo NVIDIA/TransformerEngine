@@ -130,9 +130,6 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
                "VARYING_FIRST_DIM requires a non-empty logical tensor.");
     config.grid = dim3(config.work_blocks_x, work_blocks_y);
   } else {
-    NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-               "Number of tensors exceeds the grouped TMA descriptor limit (",
-               MAX_SUPPORTED_TENSOR_DESCRIPTORS, ").");
     const size_t estimated_work_blocks = DIVUP(total_elements, chunk_dim_y * chunk_dim_x);
     const size_t static_grid_size = static_cast<size_t>(transformer_engine::cuda::sm_count()) *
                                     Traits::STATIC_PERSISTENT_BLOCKS_PER_SM;
@@ -568,7 +565,7 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
     const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, const e8m0_t *const __restrict__ input_scales,
     e8m0_t *const __restrict__ output_rowwise_scales, e8m0_t *const __restrict__ output_scales,
-    bf16 *const __restrict__ dequantized_out) {
+    bf16 *const __restrict__ dequantized_out, const GroupedTmaStorageView storage) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr ShapeRepresentation shape_rep = Traits::SHAPE_REPRESENTATION;
   constexpr bool direct_same = shape_rep == ShapeRepresentation::SAME_BOTH_DIMS;
@@ -653,9 +650,9 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
   }
 
   const CUtensorMap &tensor_map_input =
-      single_tma_tensor ? tensor_map_input_static : g_tensor_maps.input[tensor_id];
+      single_tma_tensor ? tensor_map_input_static : storage.input[tensor_id];
   const CUtensorMap &tensor_map_output =
-      single_tma_tensor ? tensor_map_output_static : g_tensor_maps.output_colwise[tensor_id];
+      single_tma_tensor ? tensor_map_output_static : storage.output_colwise[tensor_id];
   if constexpr (!single_tma_tensor) {
     if (leading_thread) {
       fence_acquire_tensormap(&tensor_map_input);
@@ -727,7 +724,8 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output, 
                              const size_t last_logical_dim, const size_t total_elements,
                              const int64_t *const offsets_ptr, const int64_t *const first_dims_ptr,
                              const int64_t *const last_dims_ptr,
-                             const ShapeRepresentation shape_rep, cudaStream_t stream) {
+                             const ShapeRepresentation shape_rep, Tensor *workspace,
+                             cudaStream_t stream) {
   using OType = fp8e4m3;
   constexpr size_t buffs_num = Traits::BUFFS_NUM;
   constexpr size_t buff_dim = Traits::BUFF_DIM;
@@ -756,9 +754,13 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output, 
                        last_logical_dim, Traits::BUFF_DIM_Y, Traits::BUFF_DIM_X, last_logical_dim,
                        0, TypeInfo<OType>::size, tma_swizzle);
 
+  if (workspace != nullptr && workspace->data.dptr == nullptr) return;
+
   constexpr bool single_tma_tensor =
       Traits::SHAPE_REPRESENTATION == ShapeRepresentation::SAME_BOTH_DIMS ||
       Traits::SHAPE_REPRESENTATION == ShapeRepresentation::VARYING_FIRST_DIM;
+  const GroupedTmaStorageView storage =
+      single_tma_tensor ? GroupedTmaStorageView{} : get_grouped_tma_storage(workspace, num_tensors);
   if constexpr (!single_tma_tensor) {
     alignas(64) CUtensorMap empty_tensor_map{};
     update_tma_descriptors<IType, OType><<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
@@ -766,7 +768,7 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output, 
         reinterpret_cast<const IType *>(input.data.dptr), nullptr, nullptr,
         reinterpret_cast<OType *>(output->columnwise_data.dptr), shape_rep, num_tensors,
         first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, false,
-        true, false);
+        true, false, storage);
   }
 
   auto kernel = group_requantize_mxfp8_kernel<Traits, IType, OType, OUTPUT_SCALES_SWIZZLED,
@@ -781,13 +783,13 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output, 
           ? nullptr
           : reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
       reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr),
-      RETURN_DEQUANTIZED ? reinterpret_cast<bf16 *>(dequantized->data.dptr) : nullptr);
+      RETURN_DEQUANTIZED ? reinterpret_cast<bf16 *>(dequantized->data.dptr) : nullptr, storage);
 }
 
 }  // namespace group_requantize_kernel
 
 void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor *dequantized,
-                      cudaStream_t stream) {
+                      NVTETensor workspace, cudaStream_t stream) {
   using namespace group_requantize_kernel;
 
   checkCuDriverContext(stream);
@@ -888,28 +890,34 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input.first_dims.dptr);
   const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input.last_dims.dptr);
 
+  common::dispatch_grouped_tma_workspace(
+      workspace, common::grouped_tma_workspace_bytes(input), [&](Tensor *workspace_cu) {
+        const bool query = workspace_cu != nullptr && workspace_cu->data.dptr == nullptr;
 #ifdef NVTE_WITH_CUTEDSL
-  if (cutedsl_backend::mxfp8_requantize_cutedsl(input, output, dequantized, stream)) {
-    NVTE_CHECK_CUDA(cudaGetLastError());
-    return;
-  }
+        if (!query &&
+            cutedsl_backend::mxfp8_requantize_cutedsl(input, output, dequantized, stream)) {
+          NVTE_CHECK_CUDA(cudaGetLastError());
+          return;
+        }
 #endif
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-      input.data.dtype, IType,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          output->with_gemm_swizzled_scales, OUTPUT_SCALES_SWIZZLED,
-          TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              return_dequantized, RETURN_DEQUANTIZED,
-              TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(shape_rep, SHAPE_REP, {
-                using ActiveTraits = RequantizeTraits<SHAPE_REP>;
-                launch_group_requantize<ActiveTraits, IType, OUTPUT_SCALES_SWIZZLED,
-                                        RETURN_DEQUANTIZED>(
-                    input, output, dequantized, input.num_tensors, first_logical_dim,
-                    last_logical_dim, total_elements, offsets_ptr, first_dims_ptr, last_dims_ptr,
-                    shape_rep, stream);
-              }););););  // NOLINT(*), readability/fn_size
-  NVTE_CHECK_CUDA(cudaGetLastError());
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+            input.data.dtype, IType,
+            TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                output->with_gemm_swizzled_scales, OUTPUT_SCALES_SWIZZLED,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                    return_dequantized, RETURN_DEQUANTIZED,
+                    TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(
+                        shape_rep, SHAPE_REP, {
+                          using ActiveTraits = RequantizeTraits<SHAPE_REP>;
+                          launch_group_requantize<ActiveTraits, IType, OUTPUT_SCALES_SWIZZLED,
+                                                  RETURN_DEQUANTIZED>(
+                              input, output, dequantized, input.num_tensors, first_logical_dim,
+                              last_logical_dim, total_elements, offsets_ptr, first_dims_ptr,
+                              last_dims_ptr, shape_rep, workspace_cu, stream);
+                        }););););  // NOLINT(*), readability/fn_size
+        if (!query) NVTE_CHECK_CUDA(cudaGetLastError());
+      });
 }
 
 }  // namespace mxfp8
@@ -925,5 +933,18 @@ void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
   GroupedTensor *const output_cu = convertNVTEGroupedTensorCheck(output);
   dispatch::mxfp8::group_requantize(
       *input_cu, output_cu, dequantized != nullptr ? convertNVTETensorCheck(dequantized) : nullptr,
-      stream);
+      nullptr, stream);
+}
+
+void nvte_group_requantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                              NVTETensor dequantized, NVTETensor workspace,
+                              const NVTEQuantizationConfig /*quant_config*/, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_requantize_v2);
+  using namespace transformer_engine;
+  convertNVTETensorCheck(workspace);
+  const GroupedTensor *const input_cu = convertNVTEGroupedTensorCheck(input);
+  GroupedTensor *const output_cu = convertNVTEGroupedTensorCheck(output);
+  dispatch::mxfp8::group_requantize(
+      *input_cu, output_cu, dequantized != nullptr ? convertNVTETensorCheck(dequantized) : nullptr,
+      workspace, stream);
 }

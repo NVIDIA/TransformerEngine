@@ -8,7 +8,7 @@ TMA descriptor workspace
 
 Grouped MXFP8 operations with varying last dimensions require caller-owned
 storage for mutable TMA descriptors and mapper metadata. This applies to grouped
-quantization, activation forward/backward, and dequantization. Their ``_v2`` APIs
+quantization, activation forward/backward, dequantization, and requantization. Their ``_v2`` APIs
 accept an ordinary ``NVTETensor`` representing the buffer. TE does not own device
 memory or attach a resource catalog to the tensor.
 

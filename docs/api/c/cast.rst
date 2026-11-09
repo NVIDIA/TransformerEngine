@@ -57,6 +57,12 @@ dequantize allocate workspace through the framework, including during graph
 capture. The JAX grouped MXFP8 FFI retains the original API: its constant last
 dimension uses launch-local descriptors and needs no descriptor arrays.
 
+``nvte_group_requantize_v2`` uses the same workspace protocol for fused grouped
+MXFP8 requantization, including varying last dimensions. The original
+``nvte_group_requantize`` supports constant last dimensions and rejects layouts
+requiring mutable descriptor arrays. Workspace queries validate the operation
+without launching either the CUDA or CuTeDSL backend.
+
 Only MXFP8 layouts with varying last dimensions need mutable descriptor arrays.
 Constant last dimensions (uniform shapes or varying first dimensions) pass tensor
 maps by value as kernel parameters. Grouped DBias, including fused activation
