@@ -71,9 +71,7 @@ class MXFP8GroupQuantizeSingleTensorViewKernel(MXFP8GroupQuantizeKernelBase):
 
     # pylint: disable-next=arguments-differ
     @staticmethod
-    def supports(
-        cfg: MXFP8GroupQuantizeConfig, kernel_cls: Type[MXFP8QuantizeKernelBase]
-    ) -> bool:
+    def supports(cfg: MXFP8GroupQuantizeConfig, kernel_cls: Type[MXFP8QuantizeKernelBase]) -> bool:
         view = MXFP8GroupQuantizeSingleTensorViewKernel.view(cfg)
         return view is not None and kernel_cls.supports(
             MXFP8GroupQuantizeSingleTensorViewKernel.single_tensor_cfg(cfg)

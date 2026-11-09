@@ -801,7 +801,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         # If SAME_BOTH_DIMS, the tensor member's start offset and rows can be obtained with division
                         member_rows = Int64(first_logical_dim) // Int64(num_tensors)
                         member_start_row = job_start_row - job_start_row % member_rows
-                    else: # VARYING_FIRST_DIM
+                    else:  # VARYING_FIRST_DIM
                         # Otherwise if VARYING_FIRST_DIM, we need to use find these tensor member metadata
                         # from mFirstDims & mOffsets
                         member_id = self._find_tensor_from_offsets(

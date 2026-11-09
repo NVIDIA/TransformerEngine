@@ -244,9 +244,7 @@ class MXFP8GroupQuantizeG2RKernel(MXFP8GroupQuantizeKernelBase):
             tile += Int32(gdx)
 
     @cute.jit
-    def _quantize_tile(
-        self, gX, gO_row, gS_row, gO_col, gS_col, coord, input_policy, cache_policy
-    ):
+    def _quantize_tile(self, gX, gO_row, gS_row, gO_col, gS_col, coord, input_policy, cache_policy):
         """Quantize the (TILE_ROWS, TILE_COLS) tile at `coord` of one member."""
         cfg = self.cfg
         TILER = (self.TILE_ROWS, self.TILE_COLS)
