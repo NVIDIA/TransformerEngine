@@ -431,13 +431,18 @@ if torch.cuda.device_count() > 1:
 
 @pytest.mark.parametrize("world_size", _world_sizes)
 @pytest.mark.parametrize("quantization", quantization_list)
+@pytest.mark.parametrize("use_cublasmp", (False, True), ids=("userbuffers", "cublasmp"))
 def test_fuser_ops_with_userbuffers(
     *,
     world_size: int,
     dtype: torch.dtype = torch.bfloat16,
     quantization: Optional[str],
+    use_cublasmp: bool,
 ) -> None:
     """Launch parallel job and run tests"""
+
+    if use_cublasmp and not tex.nvte_built_with_cublasmp():
+        pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
 
     # Parallel job launcher
     command = []
@@ -462,6 +467,8 @@ def test_fuser_ops_with_userbuffers(
     )
     if quantization is not None:
         command.extend(("--quantization", quantization))
+    if use_cublasmp:
+        command.append("--use-cublasmp")
 
     # Environment
     env = dict(os.environ)

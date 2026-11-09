@@ -35,6 +35,37 @@ from .quantize_mxfp8_common import (
 
 
 @cute.jit
+def _flush_scales_to_gmem(
+    sScale: cute.Tensor,
+    gS_tile: cute.Tensor,
+    cta_row: Int32,
+    cta_col: Int32,
+    M: Int32,
+    padded_cols: Int32,
+    CTA_Y: cutlass.Constexpr[int],
+    CTA_X: cutlass.Constexpr[int],
+):
+    """Flush each 4-row by 4-column scale block with a 16-byte store.
+
+    sScale and gS_tile must have byte strides (4, 1) within each aligned (4, 4) row-column block.
+    """
+    tidx, _, _ = cute.arch.thread_idx()
+    active_threads = CTA_X // 4
+    _, tv_flush = cute.make_layout_tv(
+        thr_layout=cute.make_layout((CTA_Y // 4, active_threads), stride=(active_threads, 1)),
+        val_layout=cute.make_layout((4, 4), stride=(4, 1)),
+    )
+    if tidx < (CTA_Y // 4) * active_threads:
+        thread_y = cta_row * CTA_Y + (tidx // active_threads) * 4
+        thread_x = cta_col * CTA_X + (tidx % active_threads) * 4
+        if thread_y < M and thread_x < padded_cols:
+            cute.autovec_copy(
+                cute.composition(sScale, tv_flush)[tidx, None],
+                cute.composition(gS_tile, tv_flush)[tidx, None],
+            )
+
+
+@cute.jit
 def quantize_mxfp8_gmem_tile_rowwise_2lane(
     gX_tiles: cute.Tensor,
     gA_tiles: Optional[cute.Tensor],
@@ -214,8 +245,8 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
 
     One CTA tile has TILE_ROWS = CTA_THREADS_Y and
     TILE_COLS = CTA_THREADS_X * _ELEMENTS_PER_THREAD. The CTA
-    processes NUM_TILES = 1 or 2 in the original input matrix. Both scale
-    formats use the same payload tiling; swizzled scale offsets are computed directly.
+    processes NUM_TILES = 1 or 2 horizontally. With staged swizzled scales,
+    tensor views group rows 32 apart to collect complete scale vectors.
     _L2_CACHED_CTA_PERCENT tunes the share of CTAs whose input loads use normal
     L2 retention: 0 streams all input and 100 caches all input normally.
     """
@@ -451,35 +482,49 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         grid_y = cutlass.min(grid_rows, self._MAX_GRID_Y)
         grid_z = cute.ceil_div(grid_rows, self._MAX_GRID_Y)
         launch_grid = [grid_cols, grid_y, grid_z]
+        kernel_args = (
+            mX,
+            mA,
+            mO,
+            mS,
+            first_streaming_cta,
+            num_elems,
+            CTA_THREADS_Y,
+            CTA_THREADS_X,
+            NUM_TILES,
+            L2_CACHED_CTA_PERCENT,
+        )
+        launch_args = {"grid": launch_grid, "block": [THREADS_PER_CTA], "stream": stream}
+        stash_scale_to_smem = False
+        if cutlass.const_expr(
+            self.cfg.WITH_GEMM_SWIZZLED_SCALES and CTA_THREADS_Y % 4 == 0 and not self.cfg.WITH_DACT
+        ):
+            # Staged scale vectors need complete 128-row bands.
+            stash_scale_to_smem = M % 128 == 0
+
         if grid > 0:
             if check_bounds:
-                self.kernel(
-                    mX,
-                    mA,
-                    mO,
-                    mS,
-                    first_streaming_cta,
-                    num_elems,
-                    CTA_THREADS_Y=CTA_THREADS_Y,
-                    CTA_THREADS_X=CTA_THREADS_X,
-                    NUM_TILES=NUM_TILES,
-                    L2_CACHED_CTA_PERCENT=L2_CACHED_CTA_PERCENT,
-                    CHECK_BOUNDS=True,
-                ).launch(grid=launch_grid, block=[THREADS_PER_CTA], stream=stream)
+                if stash_scale_to_smem:
+                    self._launch_kernel(kernel_args, launch_args, True, True)
+                else:
+                    self._launch_kernel(kernel_args, launch_args, True, False)
             else:
-                self.kernel(
-                    mX,
-                    mA,
-                    mO,
-                    mS,
-                    first_streaming_cta,
-                    num_elems,
-                    CTA_THREADS_Y=CTA_THREADS_Y,
-                    CTA_THREADS_X=CTA_THREADS_X,
-                    NUM_TILES=NUM_TILES,
-                    L2_CACHED_CTA_PERCENT=L2_CACHED_CTA_PERCENT,
-                    CHECK_BOUNDS=False,
-                ).launch(grid=launch_grid, block=[THREADS_PER_CTA], stream=stream)
+                if stash_scale_to_smem:
+                    self._launch_kernel(kernel_args, launch_args, False, True)
+                else:
+                    self._launch_kernel(kernel_args, launch_args, False, False)
+
+    @cute.jit
+    def _launch_kernel(
+        self,
+        kernel_args,
+        launch_args,
+        CHECK_BOUNDS: cutlass.Constexpr[bool],
+        STASH_SCALE_TO_SMEM: cutlass.Constexpr[bool],
+    ):
+        self.kernel(
+            *kernel_args, CHECK_BOUNDS=CHECK_BOUNDS, STASH_SCALE_TO_SMEM=STASH_SCALE_TO_SMEM
+        ).launch(**launch_args)
 
     @cute.kernel
     def kernel(
@@ -495,6 +540,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         NUM_TILES: cutlass.Constexpr[int],
         L2_CACHED_CTA_PERCENT: cutlass.Constexpr[int],
         CHECK_BOUNDS: cutlass.Constexpr[bool],
+        STASH_SCALE_TO_SMEM: cutlass.Constexpr[bool],
     ):
         """Run the kernel body. Like cast_rowwise.cuh, there is no noop handling: the
         dispatcher only selects this kernel when no cast_noop flag is passed."""
@@ -510,6 +556,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
             NUM_TILES=NUM_TILES,
             L2_CACHED_CTA_PERCENT=L2_CACHED_CTA_PERCENT,
             CHECK_BOUNDS=CHECK_BOUNDS,
+            STASH_SCALE_TO_SMEM=STASH_SCALE_TO_SMEM,
         )
 
     @cute.jit
@@ -526,6 +573,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         NUM_TILES: cutlass.Constexpr[int],
         L2_CACHED_CTA_PERCENT: cutlass.Constexpr[int],
         CHECK_BOUNDS: cutlass.Constexpr[bool],
+        STASH_SCALE_TO_SMEM: cutlass.Constexpr[bool],
     ):
         """Construct CTA tile views and run the specialized quantization."""
         # Dispatch checks 32-byte input alignment before selecting this kernel.
@@ -549,7 +597,19 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
             gS, _ = derive_swizzled_scale_layout(M, N, True, False, mS, None)
 
-        # CTA_TILER is the block that a CTA processes in total, which consists of NUM_TILES horizontal tiles
+        if cutlass.const_expr(STASH_SCALE_TO_SMEM):
+            # Apply the same permutation to input, output and scale so it becomes transparent and
+            # other code is unaware of this permutation pattern
+            # However, this this permutation, the scale bytes emitted by a CTA are all in this CTA's scale
+            # tile partition instead of scatter everywhere, so we can vectorize the flush to GMEM
+            # For example, with a 128x128 input:
+            #   gX & mO: (128,128):(128,1) -> ((4,32),128):((4096,128),1)
+            #   gS: ((32,4,1),(4,1)):((16,4,512),(1,512)) -> ((4,32), 4):((4, 16),1)
+            row_perm = cute.make_layout((4, 32, M // 128), stride=(32, 1, 128))
+            gX = cute.composition(gX, (row_perm, None))
+            mO = cute.composition(mO, (row_perm, None))
+            gS = cute.composition(gS, (row_perm, None))
+
         CTA_TILER = (CTA_ROWS, CTA_COLS)
         CTA_SCALE_TILER = (CTA_ROWS, CTA_COLS // 32)
         gX_cta = cute.local_tile(gX, CTA_TILER, cta_coord)
@@ -571,13 +631,23 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         # Divide CTA_TILER to multiple TILER shape TILES
         TILER = (TILE_ROWS, TILE_COLS)
         SCALE_TILER = (TILE_ROWS, TILE_COLS // 32)
-        # Mode 1's first index is 0 because CTA_ROWS == TILE_ROWS (there is only 1 tile on the row dimension).
+        # There is only one tile on the row dimension because CTA_ROWS == TILE_ROWS.
         gX_tiles = cute.local_tile(gX_cta, TILER, (0, None))
         gA_tiles = None
         if cutlass.const_expr(self.cfg.WITH_DACT):
             gA_tiles = cute.local_tile(cute.local_tile(mA, CTA_TILER, cta_coord), TILER, (0, None))
         gO_tiles = cute.local_tile(gO_cta, TILER, (0, None))
-        mS_tiles = cute.local_tile(gS_cta, SCALE_TILER, (0, None))
+
+        if cutlass.const_expr(STASH_SCALE_TO_SMEM):
+            # Preserve gS_cta's (4 rows, 4 columns):(4, 1) block ordering for the flush.
+            sScale_scratch = cutlass.memory.SmemAllocator().allocate_tensor(
+                mS.element_type, cute.make_layout_like(gS_cta), byte_alignment=16
+            )
+            # The tile quantizer writes scales to SMEM for the cooperative vectorized flush.
+            mS_tiles = cute.local_tile(sScale_scratch, SCALE_TILER, (0, None))
+        else:
+            # The tile quantizer writes scales directly to GMEM.
+            mS_tiles = cute.local_tile(gS_cta, SCALE_TILER, (0, None))
 
         # The last grid.z slice can overshoot the row tiles; those CTAs have no work.
         if cta_row * CTA_ROWS < M:
@@ -604,3 +674,16 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
                 cta_col=cta_coord[1],
                 num_elems=num_elems,
             )
+
+            if cutlass.const_expr(STASH_SCALE_TO_SMEM):
+                cute.arch.sync_threads()
+                _flush_scales_to_gmem(
+                    sScale_scratch,
+                    cute.make_tensor(gS_cta.iterator.align(16), gS_cta.layout),
+                    cta_row,
+                    bidx,
+                    M,
+                    N // 32,
+                    CTA_ROWS,
+                    CTA_COLS // 32,
+                )

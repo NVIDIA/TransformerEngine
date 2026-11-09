@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
+import functools
 import inspect
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -17,6 +18,8 @@ from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
+
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
@@ -222,6 +225,27 @@ else:
         except (ValueError, TypeError):
             fa_utils.fa3_supports_softcap = False
 
+
+def _fa4_with_none_window_sentinel(func: Callable) -> Callable:
+    """Translate TE's ``-1`` unbounded-window sentinel to FA4's ``None``.
+
+    Preserve other negative offsets, which can represent empty windows. Adapt the FA4 entry
+    points because shared FA2/FA3 callers still use ``-1``.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        window = kwargs.get("window_size")
+        if window is not None:
+            kwargs["window_size"] = tuple(None if bound == -1 else bound for bound in window)
+        for bound_name in ("window_size_left", "window_size_right"):
+            if kwargs.get(bound_name) == -1:
+                kwargs[bound_name] = None
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
 # Try to import Flash Attention v4
 try:
     fa_utils.fa4_version = PkgVersion(get_pkg_version("flash-attn-4"))
@@ -232,17 +256,12 @@ except PackageNotFoundError:
     _flash_attn_bwd_v4 = None
 else:
     try:
-        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
-
-        # FA4 4.0.0b24 requires CUTLASS DSL 4.6.2 or newer.
-        if fa_utils.fa4_version == PkgVersion("4.0.0b24") and cutlass_dsl_version < PkgVersion(
-            "4.6.2"
-        ):
+        if fa_utils.fa4_version < fa_utils.v4_version_required:
             raise ImportError(
-                "flash-attn-4 4.0.0b24 requires nvidia-cutlass-dsl>=4.6.2; "
-                f"found {cutlass_dsl_version}"
+                f"flash-attn-4>={fa_utils.v4_version_required} is required; "
+                f"found {fa_utils.fa4_version}"
             )
-
+        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
         from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
             flash_attn_func as _flash_attn_func_v4,
             flash_attn_varlen_func as _flash_attn_varlen_func_v4,
@@ -263,12 +282,19 @@ else:
     else:
         # Unlike versions 2 and 3, FlashAttention 4 registers no custom ops: it builds
         # its kernels through the CUTLASS DSL as it runs. Keep it an eager island.
-        flash_attn_func_v4 = no_torch_dynamo()(_flash_attn_func_v4)
-        flash_attn_varlen_func_v4 = no_torch_dynamo()(_flash_attn_varlen_func_v4)
-        _flash_attn_fwd_v4 = no_torch_dynamo()(_flash_attn_fwd_v4)
-        _flash_attn_bwd_v4 = no_torch_dynamo()(_flash_attn_bwd_v4)
+        flash_attn_func_v4 = no_torch_dynamo()(_fa4_with_none_window_sentinel(_flash_attn_func_v4))
+        flash_attn_varlen_func_v4 = no_torch_dynamo()(
+            _fa4_with_none_window_sentinel(_flash_attn_varlen_func_v4)
+        )
+        _flash_attn_fwd_v4 = no_torch_dynamo()(_fa4_with_none_window_sentinel(_flash_attn_fwd_v4))
+        _flash_attn_bwd_v4 = no_torch_dynamo()(_fa4_with_none_window_sentinel(_flash_attn_bwd_v4))
 
         fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
+        fa_utils.cutlass_dsl_version = cutlass_dsl_version
+        try:
+            fa_utils.quack_version = PkgVersion(get_pkg_version("quack-kernels"))
+        except PackageNotFoundError:
+            fa_utils.quack_version = None
         fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
@@ -639,10 +665,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             if fp8_recipe.float8_current_scaling():
                 S_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=S_quantizer.dtype, device="cuda"
+                    fp8_dtype=S_quantizer.dtype, device=te_device_type()
                 )
                 dP_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=dP_quantizer.dtype, device="cuda"
+                    fp8_dtype=dP_quantizer.dtype, device=te_device_type()
                 )
             # disable swizzle for MXFP8Quantizer
             for quantizer in [
@@ -774,7 +800,18 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # attention scores and attention mask
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
         attention_probs = self.scale_mask_softmax(
-            matmul_result, attention_mask, attn_mask_type, softmax_scale
+            matmul_result,
+            attention_mask,
+            attn_mask_type,
+            softmax_scale,
+            overwrite_output_grads=not any(
+                (
+                    self.attention_dropout._forward_hooks,
+                    self.attention_dropout._forward_pre_hooks,
+                    self.attention_dropout._backward_hooks,
+                    self.attention_dropout._backward_pre_hooks,
+                )
+            ),
         )
 
         # mask out the pad positions in softmax results, mostly for the rows (pad tokens from q)
@@ -1014,9 +1051,9 @@ class FlashAttention(torch.nn.Module):
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor)
             for x in [query_layer, key_layer, value_layer]
         ), "FlashAttention only supports FP16 and BF16 data types, or Float8Tensors."
-        assert (
-            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-        ), "FlashAttention currently only supports CUDA tensors."
+        assert all(
+            x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+        ), f"FlashAttention currently only supports {te_device_type()} tensors."
         assert (
             qkv_layout in QKVLayouts
         ), f"FlashAttention does not support qkv_layout = {qkv_layout}!"
@@ -2694,9 +2731,9 @@ class FusedAttention(torch.nn.Module):
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, QuantizedTensorStorage)
             for x in [query_layer, key_layer, value_layer]
         ), "FusedAttention only supports FP16 and BF16 data types, or QuantizedTensors."
-        assert (
-            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-        ), "FusedAttention only supports CUDA tensors."
+        assert all(
+            x.device.type == te_device_type() for x in (query_layer, key_layer, value_layer)
+        ), f"FusedAttention only supports {te_device_type()} tensors."
         assert (
             qkv_layout in QKVLayouts
         ), f"FusedAttention does not support qkv_layout = {qkv_layout}!"

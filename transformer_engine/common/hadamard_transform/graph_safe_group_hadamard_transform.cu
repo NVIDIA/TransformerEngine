@@ -14,6 +14,7 @@
 
 #include <cuda/barrier>
 
+#include "common/cast/nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "common/common.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
@@ -563,7 +564,7 @@ void nvte_group_hadamard_transform_amax_graph_safe(const NVTEGroupedTensor input
       static_cast<uint16_t>(random_sign_mask_t), false, stream);
 }
 
-// Grouped-tensor amax without doing hadamard transform
+// Grouped-tensor amax
 void nvte_group_amax_graph_safe(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                                 cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_amax_graph_safe);
@@ -576,5 +577,13 @@ void nvte_group_amax_graph_safe(const NVTEGroupedTensor input, NVTEGroupedTensor
     return;
   }
 
+  // Per-row amax
+  if (output_tensor->scaling_mode == NVTE_NVFP4_1D_SCALING && output_tensor->row_scaled_nvfp4) {
+    dispatch::nvfp4::group_row_amax_graph_safe(input_tensor, /*noop=*/nullptr, output_tensor,
+                                               stream);
+    return;
+  }
+
+  // Per-tensor amax
   group_hadamard_transform_amax_graph_safe(input_tensor, output_tensor, 0, 0, true, stream);
 }

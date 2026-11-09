@@ -11,6 +11,8 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
+
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import (
     Float8BlockwiseQTensorStorage,
@@ -232,8 +234,8 @@ class Float8BlockQuantizer(Quantizer):
         colwise_shape.extend(shape[:-1])
         return tuple(colwise_shape)
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather."""
         shape = inp.size()
         if len(shape) < 2:
             return False
@@ -441,7 +443,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 qt._rowwise_scale_inv,
                 qt._columnwise_scale_inv,
             ):
-                if t is not None and t.is_cuda:
+                if t is not None and t.device.type == te_device_type():
                     t.record_stream(stream)
             return None
 
@@ -538,7 +540,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
 
         """
         # Tensor device
-        new_device = tensor.device if tensor.is_cuda else self.device
+        new_device = tensor.device if tensor.device.type == te_device_type() else self.device
 
         def _set_from_tensor(dst: Float8BlockwiseQTensor, src: Float8BlockwiseQTensor):
             dst._rowwise_data = src._rowwise_data

@@ -188,7 +188,9 @@ def _quantize_rowwise_mxfp8(
     # and keep the elements in half precision instead of upcasting every one of them to f32.
     USE_HALF_PRECISION = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU)
 
-    amax_r = Float32(0.0)
+    # Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+    # so per-block amax will be NaN if all values in the block are NaN.
+    amax_r = Float32(float("nan"))
 
     # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
     # to avoid bank conflict.
@@ -346,8 +348,7 @@ def _quantize_rowwise_mxfp8(
 
     # For irregular shapes, skip the scale store if this thread's logical row / col-block lies past the input's actual extents.
     # TMA already zero-fills OOB input reads and drops OOB output writes; only the direct scale-byte gmem store needs an explicit guard.
-    # If the input shape is divisible by the tile size, then we won't access OOB regions because
-    # we never we only access tiles we actually need (num_tiles) which are never OOB
+    # If the input shape is divisible by the tile size * tile num, then we won't access OOB regions for sure
     if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = biased_exp_r
     else:
@@ -507,19 +508,24 @@ def _quantize_colwise_mxfp8(
         if cutlass.const_expr(CACHE_ACTIVATION):
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 sX_thread[i] = DTYPE(rX_thread_f32[i])
-        amax_c = Float32(0.0)
+        # Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+        # so per-block amax will be NaN if all values in the block are NaN.
+        amax_c = Float32(float("nan"))
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
             if cutlass.const_expr(FUSE_RELU):
                 amax_c = cute.arch.fmax(amax_c, rX_thread_f32[i])
             else:
                 amax_c = cute.arch.fmax(amax_c, fabs_f32(rX_thread_f32[i]))
+        if cutlass.const_expr(FUSE_RELU):
+            # For relu the max is at least 0
+            # We see relu(nan) = 0.0 here which is consistent with CUDA's relu implementation with fmaxf
+            amax_c = cute.arch.fmax(amax_c, Float32(0.0))
 
     # Irregular shapes: skip when this stage's row range or this thread's
     # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SCALING_SIZE so each stage
     # is exactly one scale-row; valid iff `tile_row_start < M`.
     biased_exp_c = cvt_f32_to_fp8e8m0fnu(amax_c * MAX_NORM_RCP)
-    # If the input shape is divisible by the tile size, then we won't access OOB regions because
-    # we never we only access tiles we actually need (num_tiles) which are never OOB
+    # If the input shape is divisible by the tile size * tile num, then we won't access OOB regions for sure
     if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         if cutlass.const_expr(SWIZZLE):
             mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
@@ -752,6 +758,11 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         else:
             self._NUM_TILES = 2  # Each CTA handles 2 tiles stacked vertically
             self._THREADS_PER_CTA = 64
+        # If _USE_STATIC_NUM_TILES, then each CTA will always process _NUM_TILES tiles without checking if those tiles
+        # are OOB (which will be zero padded by TMA). Hardcoded to true because benchmark shows this is always better
+        self._USE_STATIC_NUM_TILES = True
+        # A hint that is tuned based on the benchmark which helps when ACT/DACT is fused
+        self._MIN_BLOCKS_PER_MP = 1 if (cfg.WITH_ACT or cfg.WITH_DACT) else 0
         # Each thread handles a (1, MXFP8_BLOCK_SCALING_SIZE) chunk
         self._TILE_COLS = self._THREADS_PER_CTA
         self._TILE_ROWS = MXFP8_BLOCK_SCALING_SIZE
@@ -896,6 +907,7 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         ).launch(
             grid=grid,
             block=block,
+            min_blocks_per_mp=self._MIN_BLOCKS_PER_MP,
             stream=stream,
         )
 
@@ -1129,10 +1141,15 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         M = mX.shape[0]
         N = mX.shape[1]
 
-        num_tiles = cutlass.min(
-            self._NUM_TILES,
-            cute.ceil_div(M - bidy * self._TILE_ROWS * self._NUM_TILES, self._TILE_ROWS),
-        )
+        # With static num tiles, always process _NUM_TILES tiles like the CUDA kernel: TMA zero-fills
+        # OOB tiles, so the loop trip count is a compile-time constant.
+        if cutlass.const_expr(self._USE_STATIC_NUM_TILES):
+            num_tiles = self._NUM_TILES
+        else:
+            num_tiles = cutlass.min(
+                self._NUM_TILES,
+                cute.ceil_div(M - bidy * self._TILE_ROWS * self._NUM_TILES, self._TILE_ROWS),
+            )
 
         # Tile the TMA gmem view: ((TILE_Y, TILE_X), (M/TILE_Y, N/TILE_X)).
         gX_tiled = cute.zipped_divide(tma_src, (self._TILE_ROWS, self._TILE_COLS))
@@ -1232,10 +1249,12 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         for tile_idx in cutlass.range(num_tiles, unroll=1):
             mainloop_pipeline.consumer_wait(cons_state)
             # Only allow at most _NUM_STAGES-1 stages to be in-flight, because this iteration will reuse the ring buffer
-            # that is read _NUM_STAGES iterations ago so we must wait for whoever is reading that buffer to finish
-            if warp_idx == 0:
-                cute.arch.cp_async_bulk_wait_group(self._NUM_STAGES - 1, read=True)
-            cute.arch.sync_threads()
+            # that is read _NUM_STAGES iterations ago so we must wait for whoever is reading that buffer to finish.
+            # Note: no sO buffer is reused when _NUM_TILES <= _NUM_STAGES, so we can always skip waiting when this holds
+            if cutlass.const_expr(self._NUM_TILES > self._NUM_STAGES):
+                if warp_idx == 0:
+                    cute.arch.cp_async_bulk_wait_group(self._NUM_STAGES - 1, read=True)
+                cute.arch.sync_threads()
             # The current pipeline stage index, which is the tile index modulo the number of stages.
             # This is used to index into the shared memory ring buffers that are wrapped around the number of stages.
             stage_idx = cons_state.index
@@ -1372,9 +1391,9 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
             sAmax = storage.sAmax.get_tensor(cute.make_layout(self._NUM_WARPS))
             self._amax_epilogue(sAmax, mAmax, tidx, warp_idx, per_thread_amax)
 
-        # Wait for in-flight TMA stores so data is visible to the host
-        # before the kernel returns.
-        cute.arch.cp_async_bulk_wait_group(0, read=False)
+        # Wait only until in-flight TMA stores have read SMEM so the CTA retires (frees its SMEM) early;
+        # the grid's completion still guarantees the global writes are done.
+        cute.arch.cp_async_bulk_wait_group(0, read=True)
 
     @cute.jit
     def _dbias_reduction_rowwise_epilouge(
