@@ -42,7 +42,7 @@ struct GroupData {
       requantized, requant_scales;
   GroupedTensorWrapper input, output, dequant_output, requant_output;
 
-  explicit GroupData(int index)
+  explicit GroupData(int index, bool same_last_dim = false, bool same_first_dim = false)
       : rows(kGroups),
         cols(kGroups),
         offsets(kGroups + 1),
@@ -52,12 +52,16 @@ struct GroupData {
         dequant_output(kGroups, std::vector<size_t>{1, 1}),
         requant_output(kGroups, std::vector<size_t>{1, 1}, NVTE_MXFP8_1D_SCALING) {
     for (size_t i = 0; i < kGroups; ++i) {
-      rows[i] = kTile * (1 + (i + index) % 2);
-      cols[i] = kTile * (1 + (i + index) % 3);
+      rows[i] = kTile * (1 + (same_first_dim ? index % 2 : (i + index) % 2));
+      cols[i] = kTile * (1 + (same_last_dim ? index % 3 : (i + index) % 3));
       offsets[i + 1] = offsets[i] + rows[i] * cols[i];
     }
     elements = offsets.back();
-    const std::vector<size_t> shape{1, elements}, metadata_shape{kGroups};
+    const std::vector<size_t> shape =
+        same_last_dim
+            ? std::vector<size_t>{elements / cols.front(), static_cast<size_t>(cols.front())}
+            : std::vector<size_t>{1, elements};
+    const std::vector<size_t> metadata_shape{kGroups};
     input = GroupedTensorWrapper(kGroups, shape);
     output = GroupedTensorWrapper(kGroups, shape, NVTE_MXFP8_1D_SCALING);
     dequant_output = GroupedTensorWrapper(kGroups, shape);
@@ -84,10 +88,12 @@ struct GroupData {
     NVTE_CHECK_CUDA(cudaMemcpy(offsets_data.rowwise_dptr(), offsets.data(),
                                (kGroups + 1) * sizeof(int64_t), cudaMemcpyHostToDevice));
     for (auto *tensor : {&input, &output, &dequant_output, &requant_output}) {
-      tensor->set_first_dims(rows_data.rowwise_dptr(), DType::kInt64, metadata_shape)
-          .set_last_dims(cols_data.rowwise_dptr(), DType::kInt64, metadata_shape)
-          .set_tensor_offsets(offsets_data.rowwise_dptr(), DType::kInt64,
-                              std::vector<size_t>{kGroups + 1});
+      if (!same_first_dim)
+        tensor->set_first_dims(rows_data.rowwise_dptr(), DType::kInt64, metadata_shape);
+      if (!same_last_dim)
+        tensor->set_last_dims(cols_data.rowwise_dptr(), DType::kInt64, metadata_shape);
+      tensor->set_tensor_offsets(offsets_data.rowwise_dptr(), DType::kInt64,
+                                 std::vector<size_t>{kGroups + 1});
     }
     input.set_rowwise_data(input_data.rowwise_dptr(), DType::kFloat32,
                            std::vector<size_t>{elements});
@@ -106,8 +112,9 @@ struct GroupData {
   }
 };
 
-// 0..4: activation, 5..9: backward, 10: dequantization, 11: requantization. Every path used to
-// reference shared mutable device symbols when the last dimension varied.
+// 0..4: activation, 5..9: backward, 10: dequantization, 11..13: requantization
+// with varying-both, uniform, and varying-first shapes. Cover workspace arrays
+// and launch-local tensor maps with independent streams and graphs.
 class GroupedWorkspaceConcurrency : public ::testing::TestWithParam<std::tuple<int, bool>> {};
 
 TEST_P(GroupedWorkspaceConcurrency, ConcurrentStreamsMatchSerialResults) {
@@ -145,7 +152,7 @@ TEST_P(GroupedWorkspaceConcurrency, ConcurrentStreamsMatchSerialResults) {
     }
   };
   for (int i = 0; i < kStreams; ++i) {
-    data[i] = std::make_unique<GroupData>(i);
+    data[i] = std::make_unique<GroupData>(i, operation >= 12, operation == 12);
     ASSERT_EQ(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking), cudaSuccess);
     if (operation >= 10) {
       TensorWrapper quant_workspace;
@@ -160,16 +167,17 @@ TEST_P(GroupedWorkspaceConcurrency, ConcurrentStreamsMatchSerialResults) {
     }
     auto &workspace = workspaces[i];
     launch(i, workspace.data(), streams[i]);
+    if (operation >= 11) EXPECT_EQ(workspace.shape().data[0] == 1, operation >= 12);
     storage[i] = std::make_unique<Tensor>("workspace", workspace.shape(), workspace.dtype());
     workspace.set_rowwise_data(storage[i]->rowwise_dptr(), workspace.dtype(), workspace.shape());
   }
   auto result_data = [&](int i) {
     return operation == 10   ? data[i]->dequantized.rowwise_dptr()
-           : operation == 11 ? data[i]->requantized.rowwise_dptr()
+           : operation >= 11 ? data[i]->requantized.rowwise_dptr()
                              : data[i]->quantized.rowwise_dptr();
   };
   auto result_scales = [&](int i) {
-    return operation == 11 ? data[i]->requant_scales.rowwise_dptr()
+    return operation >= 11 ? data[i]->requant_scales.rowwise_dptr()
                            : data[i]->scales.rowwise_dptr();
   };
   for (int i = 0; i < kStreams; ++i) {
@@ -212,15 +220,26 @@ TEST_P(GroupedWorkspaceConcurrency, ConcurrentStreamsMatchSerialResults) {
 
 std::string workspace_concurrency_test_name(
     const ::testing::TestParamInfo<GroupedWorkspaceConcurrency::ParamType> &info) {
-  const std::array<const char *, 12> operations{"Gelu",   "Silu",   "Relu",       "Qgelu",
-                                                "Srelu",  "Dgelu",  "Dsilu",      "Drelu",
-                                                "Dqgelu", "Dsrelu", "Dequantize", "Requantize"};
+  const std::array<const char *, 14> operations{"Gelu",
+                                                "Silu",
+                                                "Relu",
+                                                "Qgelu",
+                                                "Srelu",
+                                                "Dgelu",
+                                                "Dsilu",
+                                                "Drelu",
+                                                "Dqgelu",
+                                                "Dsrelu",
+                                                "Dequantize",
+                                                "Requantize",
+                                                "RequantizeUniform",
+                                                "RequantizeVaryingFirst"};
   return std::string(operations[std::get<0>(info.param)]) +
          (std::get<1>(info.param) ? "Graph" : "Eager");
 }
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest, GroupedWorkspaceConcurrency,
-                         ::testing::Combine(::testing::Range(0, 12), ::testing::Bool()),
+                         ::testing::Combine(::testing::Range(0, 14), ::testing::Bool()),
                          workspace_concurrency_test_name);
 
 // Small buffers shared by query tests across formats. Device data is deliberately

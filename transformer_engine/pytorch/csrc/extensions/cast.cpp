@@ -1037,10 +1037,19 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
       dequantized_nvte.set_rowwise_data(dequantized.data_ptr(), DType::kBFloat16, grouped_shape);
     }
 
+    TensorWrapper workspace_nvte;
+    const NVTETensor dequantized_output = return_dequantized ? dequantized_nvte.data() : nullptr;
+    const auto stream = at::cuda::getCurrentCUDAStream();
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_group_requantize(input_nvte.data(), output_nvte.data(),
-                            return_dequantized ? dequantized_nvte.data() : nullptr, nullptr,
-                            at::cuda::getCurrentCUDAStream());
+      nvte_group_requantize_v2(input_nvte.data(), output_nvte.data(), dequantized_output,
+                               workspace_nvte.data(), nullptr, stream);
+    });
+    auto workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+    workspace_nvte.set_rowwise_data(workspace_torch.data_ptr(), workspace_nvte.dtype(),
+                                    workspace_nvte.shape());
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_group_requantize_v2(input_nvte.data(), output_nvte.data(), dequantized_output,
+                               workspace_nvte.data(), nullptr, stream);
     });
 
     grouped_x.attr("scale_inv") = swizzled_rowwise_scale_inv;

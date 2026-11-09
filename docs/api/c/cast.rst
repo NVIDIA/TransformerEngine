@@ -61,12 +61,16 @@ dimension uses launch-local descriptors and needs no descriptor arrays.
 MXFP8 requantization, including varying last dimensions. The original
 ``nvte_group_requantize`` supports constant last dimensions and rejects layouts
 requiring mutable descriptor arrays. Workspace queries validate the operation
-without launching either the CUDA or CuTeDSL backend.
+without launching either the CUDA or CuTeDSL backend. PyTorch fused grouped
+requantization uses this ``_v2`` entry point and allocates workspace through the
+framework, including during CUDA graph capture.
 
 Only MXFP8 layouts with varying last dimensions need mutable descriptor arrays.
 Constant last dimensions (uniform shapes or varying first dimensions) pass tensor
-maps by value as kernel parameters. Grouped DBias, including fused activation
-backward, requires a constant last dimension and retains its existing scratch
+maps by value as kernel parameters. These immutable descriptor copies belong to
+each kernel launch and are not shared mutable device storage. Concurrent launches
+therefore do not overwrite each other's descriptors. Grouped DBias, including
+fused activation backward, requires a constant last dimension and retains its existing scratch
 protocol. Its scratch tensor uses the existing backend-specific protocol.
 Other grouped formats do not use these mutable MXFP8 descriptor arrays.
 
