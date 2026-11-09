@@ -752,6 +752,45 @@ class TestQuantizedTensor:
         assert y_cpu.shape == ref_cpu.shape
         torch.testing.assert_close(y_cpu, ref_cpu, rtol=0, atol=0)
 
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_cpu_torch_ops(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (128, 128),
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        """Apply plain PyTorch ops to a CPU-resident QuantizedTensor.
+
+        Ops without a quantized implementation dequantize their arguments. For
+        a CPU tensor that dequantization may need to copy the buffers to CUDA,
+        which must not dispatch back through the quantized tensor.
+
+        """
+
+        # Construct a quantized tensor on CUDA and move it to CPU
+        _, x_cuda = make_reference_and_test_tensors(
+            shape=shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            requires_grad=False,
+        )
+        x_cpu = x_cuda.cpu()
+        ref_cpu = x_cuda.dequantize().to(device="cpu")
+
+        # Ops that are dispatched through the dequantizing fallback
+        torch.testing.assert_close(x_cpu + 0, ref_cpu, rtol=0, atol=0)
+        torch.testing.assert_close(x_cpu, ref_cpu, rtol=0, atol=0)
+        torch.testing.assert_close(
+            x_cpu.float(), x_cuda.dequantize(dtype=torch.float32).cpu(), rtol=0, atol=0
+        )
+
+        # Moving back to CUDA preserves the quantized tensor type
+        x_roundtrip = x_cpu.to(device="cuda")
+        assert isinstance(x_roundtrip, QuantizedTensor)
+        assert x_roundtrip.device.type == "cuda"
+        torch.testing.assert_close(x_roundtrip.dequantize(), x_cuda.dequantize(), rtol=0, atol=0)
+
     def test_mxfp8_fsdp_extract_keeps_partial_columnwise_scale_block(self) -> None:
         """FSDP extraction must retain the scale for a partial final 32-row block."""
         rows, cols = 48, 64
@@ -1014,6 +1053,28 @@ class TestQuantizedTensor:
         ), "Gradient did not flow back to the input through quantize -> dequantize"
 
 
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+class TestNVFP4Tensor:
+
+    def test_packing_requires_even_last_dimension(self) -> None:
+        """Reject odd packed dimensions while allowing partial columnwise blocks."""
+        quantizer = make_quantizer("nvfp4")
+
+        with pytest.raises(ValueError, match="even last dimension"):
+            quantizer.inner_tensor_specs((17, 32))
+        with pytest.raises(RuntimeError, match="even last dimension"):
+            quantizer.make_empty((17, 32), dtype=torch.bfloat16, device="cuda")
+        with pytest.raises(ValueError, match="even last dimension"):
+            quantizer.inner_tensor_specs((18, 31))
+        with pytest.raises(RuntimeError, match="divisible by 2"):
+            quantizer.make_empty((18, 31), dtype=torch.bfloat16, device="cuda")
+
+        specs = quantizer.inner_tensor_specs((18, 32))
+        assert specs["_columnwise_data"][0] == (32, 9)
+        empty = quantizer.make_empty((18, 32), dtype=torch.bfloat16, device="cuda")
+        assert empty._columnwise_data.shape == (32, 9)
+
+
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 class TestMXFP8Tensor:
 
@@ -1023,6 +1084,19 @@ class TestMXFP8Tensor:
         seed = 1234
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("shape", [(32, 16), (16, 16)])
+    def test_scale_shape_partial_block(self, shape: Tuple[int, int]) -> None:
+        """Partial rowwise and columnwise blocks each retain a scale."""
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=True)
+
+        assert quantizer.get_scale_shape(shape, columnwise=False) == (128, 4)
+        assert quantizer.get_scale_shape(shape, columnwise=True) == (4, 128)
+
+        empty = quantizer.make_empty(shape, dtype=torch.bfloat16, device="cuda")
+        assert empty._rowwise_scale_inv.shape == (128, 4)
+        assert empty._columnwise_scale_inv.shape == (4, 128)
 
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dtype", _dtypes)

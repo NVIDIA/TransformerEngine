@@ -46,7 +46,6 @@ from ..utils import (
     divide,
     init_method_constant,
     needs_quantized_gemm,
-    assert_dim_for_fp8_exec,
     nvtx_range_pop,
     nvtx_range_push,
     get_nvtx_range_context,
@@ -484,8 +483,6 @@ def _linear_forward_impl(
     inputmat = inp  # Input tensor to save for backward (maybe sharded)
     inputmat_total = None  # Input tensor to pass to GEMM (gathered)
     own_quantized_input = False
-    if fp8:
-        assert_dim_for_fp8_exec(inputmat, weight)
 
     if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
 
@@ -2659,7 +2656,7 @@ class Linear(TransformerEngineBaseModule):
 
             if use_compiled_op:
                 check_gemm_dims(
-                    inp.shape, weight_shape if weight_shape is not None else weight.shape, self.fp8
+                    inp.shape, weight_shape if weight_shape is not None else weight.shape
                 )
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
