@@ -666,7 +666,9 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
     """
 
     _NUM_STAGES = 2  # The pipeline depth is always 2
-    _quantize_smem_tile = staticmethod(quantize_mxfp8_smem_tile_general) # Function to quantize one SMEM tile
+    _quantize_smem_tile = staticmethod(
+        quantize_mxfp8_smem_tile_general
+    )  # Function to quantize one SMEM tile
 
     def __init__(
         self,
