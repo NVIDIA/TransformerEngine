@@ -36,7 +36,7 @@ Transformer Engine can be directly installed from `our PyPI <https://pypi.org/pr
 
     pip3 install --no-build-isolation transformer_engine[pytorch]
 
-To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
+To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions. To install the framework extensions with build isolation, see :ref:`build_isolation`.
 
 The core package from Transformer Engine (without any framework extensions) can be installed via:
 
@@ -121,5 +121,67 @@ To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
 .. code-block:: bash
 
   NVTE_BUILD_DEBUG=1 pip3 install --no-build-isolation .
+
+.. _build_isolation:
+
+pip - with build isolation
+--------------------------
+
+The commands above disable build isolation so that the framework extensions are compiled against the installed PyTorch or JAX. Transformer Engine can also be installed with build isolation, in which pip builds Transformer Engine in a separate environment and installs the build dependencies there. Since the framework extensions must be built against the same version of PyTorch or JAX that is used at runtime, pin the framework version in the build environment with a build constraints file. Build constraints require pip 25.3 or later.
+
+Execute the following command to create a build constraints file that matches the installed framework:
+
+.. code-block:: bash
+
+  # PyTorch
+  python3 -c "import torch; print(f'torch=={torch.__version__}')" > build-constraints.txt
+
+  # JAX
+  python3 -c "import jax, jaxlib; print(f'jax=={jax.__version__}'); print(f'jaxlib=={jaxlib.__version__}')" > build-constraints.txt
+
+If the framework was installed from a separate package index, e.g. the PyTorch index for a specific CUDA version, pass the same `--index-url` or `--extra-index-url` options to pip so that the build environment can find the same version. Framework builds that are not published to a package index, such as the ones in the NGC containers, cannot be used with build isolation. Use `--no-build-isolation` for these.
+
+Installation (from PyPI)
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+The core library is shipped as wheels and does not need to be built. Execute the following command to install the PyTorch extension with build isolation:
+
+.. code-block:: bash
+
+  pip3 install --build-constraint build-constraints.txt transformer_engine[pytorch]
+
+The JAX extension is installed in the same way:
+
+.. code-block:: bash
+
+  pip3 install --build-constraint build-constraints.txt transformer_engine[jax]
+
+With build isolation, the JAX extension is built against JAX with CUDA 12 support and depends on the core library compiled for CUDA 12. For JAX with CUDA 13 support, install the JAX extension with `--no-build-isolation`.
+
+Installation (from GitHub or source)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+With build isolation, frameworks installed in the current environment are not detected. To build Transformer Engine support for them, set the `framework` config setting to a comma-separated list (e.g. `framework=jax,pytorch`). If no frameworks are specified, only the framework-agnostic C++ API is built.
+
+.. code-block:: bash
+
+  cd TransformerEngine
+  pip3 install --build-constraint build-constraints.txt --config-settings framework=pytorch .
+
+The same options can be used to install from GitHub:
+
+.. code-block:: bash
+
+  pip3 install --build-constraint build-constraints.txt --config-settings framework=pytorch git+https://github.com/NVIDIA/TransformerEngine.git@stable
+
+The CUDA compiler and libraries for the build are installed into the build environment, matching the version of the installed CUDA Toolkit. If no CUDA Toolkit is installed, specify the CUDA version with the `cuda-version` config setting (e.g. `cuda-version=13.0`). To build with an installed CUDA Toolkit instead, set `CUDA_HOME` to its location.
+
+Optional dependencies, such as cuBLASMp and NVSHMEM, are enabled with config settings as well (e.g. `with-cublasmp=1`). In an isolated build, their Python packages are installed into the build environment. Each config setting has an equivalent environment variable, e.g. `NVTE_FRAMEWORK` for `framework` and `NVTE_CUDA_VERSION` for `cuda-version`. See :doc:`envvars` for the complete list.
+
+Other installers support build constraints as well. For example, with `uv`:
+
+.. code-block:: bash
+
+  uv pip install --build-constraints build-constraints.txt --config-setting framework=pytorch .
 
 .. include:: troubleshooting.rst
