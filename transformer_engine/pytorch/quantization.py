@@ -16,6 +16,8 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
+
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import (
     Recipe,
     DelayedScaling,
@@ -252,6 +254,23 @@ def check_recipe_support(recipe: Recipe) -> None:
         recipe_supported, unsupported_reason = check_fp8_support()
     elif isinstance(recipe, Float8BlockScaling):
         recipe_supported, unsupported_reason = check_fp8_block_scaling_support()
+        if recipe_supported and get_device_compute_capability() >= (10, 0):
+            # Blackwell and newer emulate FP8 block scaling with MXFP8, whose E8M0 scales can
+            # only represent powers of 2.
+            qparams = (
+                recipe.fp8_quant_fwd_inp,
+                recipe.fp8_quant_fwd_weight,
+                recipe.fp8_quant_bwd_grad,
+            )
+            if not all(q.power_2_scale for q in qparams):
+                recipe_supported = False
+                unsupported_reason = (
+                    "On Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8,"
+                    " which requires power-of-2 scaling factors, but the recipe disables"
+                    " power_2_scale. Use power_2_scale=True, or unset"
+                    " NVTE_FP8_BLOCK_SCALING_FP32_SCALES before importing Transformer Engine"
+                    " (the recipe defaults read it at import time)."
+                )
     elif isinstance(recipe, MXFP8BlockScaling):
         recipe_supported, unsupported_reason = check_mxfp8_support()
     if not recipe_supported:
@@ -463,7 +482,7 @@ class FP8GlobalStateManager:
         """Set the skip fp8 weight update tensor"""
         if cls.quantization_state.skip_fp8_weight_update_tensor is None:
             cls.quantization_state.skip_fp8_weight_update_tensor = torch.empty(
-                1, dtype=torch.float32, device="cuda"
+                1, dtype=torch.float32, device=te_device_type()
             )
         cls.quantization_state.skip_fp8_weight_update_tensor.fill_(skip)
 
@@ -1471,7 +1490,7 @@ class DelayedScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         self.scale = torch.ones(num_quantizers, dtype=torch.float32, device=device)
         self.amax_history = torch.zeros(
             recipe.amax_history_len,
@@ -1520,7 +1539,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         self.device = device
 
     def make_quantizers(self) -> list:
@@ -1563,7 +1582,7 @@ class MXFP8BlockScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
 
     def make_quantizers(self) -> list:
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
@@ -1621,7 +1640,7 @@ class Float8BlockScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         self.device = device
 
     def make_quantizers(self) -> list:
@@ -1704,7 +1723,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
 
     def make_quantizers(self) -> list:
         """Build one ``NVFP4Quantizer`` per slot, dispatched by tensor type.
@@ -1948,7 +1967,7 @@ class CustomRecipeState(RecipeState):
         self.num_quantizers = num_quantizers
         self.roles = roles
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         self.device = device
 
         # -- Stateful sub-state slots (initialized empty) --

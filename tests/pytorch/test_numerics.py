@@ -14,6 +14,7 @@ from torch.nn import Parameter
 
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
+    RecipeState,
 )
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 from transformer_engine.pytorch.utils import (
@@ -50,7 +51,6 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import DType
-import transformer_engine_torch as tex
 from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
@@ -1639,6 +1639,167 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
         }
         for te_output, torch_output in zip(te_outputs, torch_outputs):
             assert_allclose(te_output, torch_output, tolerance, rtol[dtype])
+
+
+def _tight_linear_dims(recipe_obj) -> Tuple[int, int, int, int, int, int]:
+    """Return tightest (M, N, K) for inference and training for a recipe.
+
+    Constraints:
+    - cuBLAS needs 16B-aligned leading dims: 16 elts for FP8, 32 for FP4.
+    - Linear(K, N) fprop has lda=ldb=K, ldc=N (no M alignment needed).
+    - Training adds wgrad/dgrad with lda/ldb/ldc spanning M, N, K -> all must be aligned.
+    - Float8BlockScaling swizzle requires data_rows (first dim) % 4.
+    - NVFP4 RHT requires input first dim % 16 (subsumed by 32-elt alignment for training).
+    """
+    if recipe_obj.delayed() or recipe_obj.float8_current_scaling():
+        return (1, 16, 16, 16, 16, 16)
+    if recipe_obj.mxfp8():
+        # MXFP8 needs each scaling dim >= 32-element block size; K for fprop,
+        # and M/N as well for wgrad/dgrad in training.
+        return (1, 16, 32, 32, 32, 32)
+    if recipe_obj.float8_block_scaling():
+        # 1D block-scaled FP8 GEMM (native Hopper path) requires batch dim %8.
+        return (8, 128, 128, 16, 128, 128)
+    if recipe_obj.nvfp4():
+        return (16, 32, 32, 32, 32, 32)
+    raise ValueError(f"Unknown recipe: {recipe_obj.__class__.__name__}")
+
+
+@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("inference", [True, False], ids=["inference", "training"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
+def test_linear_tight_dims(recipe, inference, dtype):
+    """Compare te.Linear at each recipe's tightest supported dimensions with PyTorch.
+
+    The reference uses quantize-dequantize versions of the input and weight to
+    model the operands consumed by the low-precision GEMM.
+    """
+    if recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(f"{dtype} not supported for this NVFP4 recipe")
+        if not inference and recipe.fp4_quant_bwd_grad.random_hadamard_transform:
+            # The reference baseline cannot express the Hadamard transform that
+            # TE's wgrad GEMM applies to grad_output and input; their product is
+            # grad^T · H^T · H · x which is only ≈ grad^T · x after quantization
+            # noise averages out.
+            pytest.skip("NVFP4 with RHT: backward comparison needs Hadamard-aware baseline")
+
+    # Seed deterministically so outputs don't depend on pytest parametrization order.
+    torch.manual_seed(0)
+
+    m_inf, n_inf, k_inf, m_tr, n_tr, k_tr = _tight_linear_dims(recipe)
+    M, N, K = (m_inf, n_inf, k_inf) if inference else (m_tr, n_tr, k_tr)
+
+    device = "cuda"
+
+    # For the fp32 path, the baseline must stay in full FP32 — the default TF32
+    # tensor cores would drop 13 mantissa bits and diverge far beyond the FP32
+    # tolerance we want to check.
+    prev_tf32_matmul = torch.backends.cuda.matmul.allow_tf32
+    prev_tf32_cudnn = torch.backends.cudnn.allow_tf32
+    if dtype == torch.float32:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    try:
+        te_linear = Linear(K, N, bias=False, params_dtype=dtype, device=device)
+        torch_linear = torch.nn.Linear(K, N, bias=False, device=device, dtype=dtype)
+
+        # Forward-path quantizers: [input, weight, output].
+        fwd_state = RecipeState.create(recipe, mode="forward", num_quantizers=3)
+        input_quantizer, weight_quantizer, _ = fwd_state.make_quantizers()
+
+        # Match the usages configured by Linear. In particular, a high-precision
+        # backward override does not need columnwise input/weight data.
+        use_columnwise = not inference and recipe.backward_override is None
+        input_quantizer.set_usage(rowwise=True, columnwise=use_columnwise)
+        weight_quantizer.set_usage(rowwise=True, columnwise=use_columnwise)
+
+        # TE quantizes W internally. Quantize W once for the reference to model
+        # the effective GEMM operand without quantizing TE's weight twice.
+        W = torch.randn(N, K, dtype=dtype, device=device)
+        with torch.no_grad():
+            te_linear.weight.copy_(W)
+            torch_linear.weight.copy_(weight_quantizer(W).dequantize())
+
+        # Quantize each TE operand exactly once. The reference sees the result of
+        # that quantization, while Linear performs the equivalent cast internally.
+        # Feeding x_qdq to Linear would quantize it a second time, which does not
+        # always produce exactly the same outputs (e.g. the 4 over 6 recipe).
+        x_raw = torch.randn(M, K, dtype=dtype, device=device)
+        x_qdq = input_quantizer(x_raw).dequantize()
+
+        requires_grad = not inference
+        x_te = x_raw.clone().detach().requires_grad_(requires_grad)
+        x_ref = x_qdq.clone().detach().requires_grad_(requires_grad)
+
+        if inference:
+            with autocast(enabled=True, recipe=recipe), torch.no_grad():
+                te_out = te_linear(x_te)
+        else:
+            with autocast(enabled=True, recipe=recipe):
+                te_out = te_linear(x_te)
+        ref_out = torch_linear(x_ref)
+        torch.cuda.synchronize()
+
+        # Tolerance sized for tensor-core accumulation differences between the
+        # FP8/FP4 path (TE) and the high-precision reference. Both sides
+        # multiply the same dequantized values, but the FP8 tensor-core tiles
+        # reduce in a different order than the bf16/fp32 tensor core. Empirical
+        # values measured across Hopper (H100) and Blackwell (B200):
+        #   - BF16 output: ~1 BF16 ULP per element (up to ~4 on cancelling sums).
+        #   - FP32 output w/ full FP32 accumulator: ~1e-3 absolute on Hopper
+        #     (fast-accumulator FP8 GEMM), ~1e-5 on Blackwell.
+        #   - FP32 output, Float8BlockScaling on Hopper: effectively BF16
+        #     precision — the native 1D block-scaled FP8 GEMM uses a
+        #     lower-precision block accumulator.
+        if recipe.nvfp4() and dtype == torch.bfloat16:
+            # FP4 Tensor Core reduction can differ by several BF16 ULPs on
+            # cancellation-heavy outputs even with identical dequantized inputs.
+            tols = dict(rtol=2e-2, atol=5e-2)
+        elif dtype == torch.bfloat16:
+            tols = dict(rtol=1.6e-2, atol=3e-2)
+        elif recipe.float8_block_scaling():
+            tols = dict(rtol=1.6e-2, atol=3e-2)
+        else:
+            tols = dict(rtol=1e-3, atol=5e-3)
+        torch.testing.assert_close(te_out, ref_out, **tols)
+
+        if not inference:
+            # Linear quantizes the raw gradient internally. Give the reference
+            # its quantize-dequantize equivalent rather than requantizing it.
+            bwd_state = RecipeState.create(recipe, mode="backward", num_quantizers=2)
+            grad_output_quantizer = bwd_state.make_quantizers()[0]
+            grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+            grad_raw = torch.randn_like(te_out)
+            grad_qdq = grad_output_quantizer(grad_raw).dequantize()
+
+            te_out.backward(grad_raw)
+            ref_out.backward(grad_qdq)
+            torch.cuda.synchronize()
+
+            if recipe.nvfp4():
+                # The NVFP4 wgrad path consumes independently quantized
+                # columnwise operands (and high-precision override deliberately
+                # uses the original operands). A plain PyTorch autograd graph
+                # over rowwise-dequantized operands is not an equivalent
+                # numerical reference. Checking just that we reached this point
+                # without getting a NOT_SUPPORTED error from cuBLAS during
+                # backward.
+                return
+            if recipe.backward_override == "high_precision":
+                # A high-precision override deliberately makes backward use the
+                # original (unquantized) fprop operands, so it is not the
+                # derivative of the quantized reference forward expression.
+                ref_x_grad = grad_raw @ W
+                ref_w_grad = grad_raw.T @ x_raw
+            else:
+                ref_x_grad = x_ref.grad
+                ref_w_grad = torch_linear.weight.grad
+            torch.testing.assert_close(x_te.grad, ref_x_grad, **tols)
+            torch.testing.assert_close(te_linear.weight.grad, ref_w_grad, **tols)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_tf32_matmul
+        torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
 
 
 @pytest.mark.parametrize("dtype", param_types)

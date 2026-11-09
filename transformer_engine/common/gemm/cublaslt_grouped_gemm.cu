@@ -632,6 +632,10 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     NVTE_CHECK(shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
     const size_t first_dim = shape[0];
     const size_t last_dim = shape[1];
+    const size_t leading_dim = storage_transposed ? first_dim : last_dim;
+    NVTE_CHECK((leading_dim * typeToNumBits(data.dtype)) % 128 == 0, "Grouped GEMM: ", name,
+               "_list tensor ", i, " leading dimension (", leading_dim,
+               ") must span a multiple of 16 bytes.");
     if (storage_transposed) {
       args.rows[i] = static_cast<int>(first_dim);
       args.cols[i] = static_cast<int>(last_dim);
@@ -1589,6 +1593,24 @@ inline void launch_grouped_gemm_setup(
   const size_t b_bits_per_elem = transformer_engine::typeToNumBits(B_sel.dtype);
   const size_t c_elem_size = transformer_engine::typeToSize(c_dtype);
   const size_t d_elem_size = transformer_engine::typeToSize(d_dtype);
+
+  // cuBLASLt grouped GEMM requires 16-byte aligned matrix dimensions and pointers.
+  // Check the uniform feature dimension before constructing per-group layouts and pointers.
+  auto check_uniform_last_dim_alignment = [](const TensorShapeInfo &meta,
+                                             transformer_engine::DType dtype, const char *operand) {
+    if (meta.last_dims != nullptr) return;
+    const size_t bits_per_elem = transformer_engine::typeToNumBits(dtype);
+    NVTE_CHECK((static_cast<size_t>(meta.uniform_last) * bits_per_elem) % 128 == 0,
+               "Grouped GEMM: ", operand, " uniform last dimension (", meta.uniform_last,
+               ") must span a multiple of 16 bytes.");
+  };
+  if (!a_is_discrete) {
+    check_uniform_last_dim_alignment(A_meta, A_sel.dtype, "A");
+  }
+  check_uniform_last_dim_alignment(B_meta, B_sel.dtype, "B");
+  if (!d_is_discrete) {
+    check_uniform_last_dim_alignment(D_meta, d_dtype, "D");
+  }
 
   const int threads_per_block = 256;
   const int num_blocks = (num_tensors + threads_per_block - 1) / threads_per_block;

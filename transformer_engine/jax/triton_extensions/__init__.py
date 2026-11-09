@@ -61,3 +61,4 @@ Usage:
 
 from .utils import *
 from .permutation import *
+from .mhc import *

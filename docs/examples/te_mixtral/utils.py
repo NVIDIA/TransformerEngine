@@ -148,76 +148,6 @@ def init_baseline_model(hyperparams: HyperParameters):
     return model
 
 
-def _enable_fused_mxfp8_grouped_mlp() -> None:
-    """Improvement 3: enable the fused ``ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8`` and
-    backward kernel in the installed TE without recompiling.
-
-    ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` must be set *before*
-    ``transformer_engine.pytorch.ops`` is imported — the fusion is registered
-    at TE module-import-time. ``run_finetune_ep.py`` sniffs ``--improvement 3``
-    and sets the env var before importing ``utils``.
-
-    We also (a) relax the SM-version check from ``!= 10`` to ``>= 10`` so
-    SM>=11 successors of B300 fire the kernel, and (b) wrap the cudnn-frontend
-    grouped-GEMM wrappers so the installed TE's ``c_dtype`` kwarg (dropped by
-    cudnn-frontend 1.23.0) is silently filtered out.
-    """
-    os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
-
-    import inspect
-    import cudnn  # type: ignore
-    from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as _fwd_mod
-    from transformer_engine.pytorch.ops.fused import backward_grouped_mlp as _bwd_mod
-    from transformer_engine.pytorch.utils import get_device_compute_capability
-
-    def _make_is_supported(kernel_method_names):
-        def _is_supported(cls) -> bool:
-            if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-                return False
-            if get_device_compute_capability()[0] < 10:
-                return False
-            try:
-                for method_name in kernel_method_names:
-                    getattr(cls, method_name)()
-            except ImportError:
-                return False
-            return True
-
-        return _is_supported
-
-    def _make_compat_kernel(real_callable):
-        accepted = set(inspect.signature(real_callable).parameters)
-
-        def _compat(**kwargs):
-            for k in list(kwargs):
-                if k not in accepted:
-                    kwargs.pop(k)
-            return real_callable(**kwargs)
-
-        return _compat
-
-    def _patch_kernel_method(cls, method_name, wrapper_name):
-        compat = _make_compat_kernel(getattr(cudnn, wrapper_name))
-
-        def _kernel_classmethod(_cls):
-            return compat
-
-        setattr(cls, method_name, classmethod(_kernel_classmethod))
-
-    fwd_cls = _fwd_mod.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8
-    bwd_cls = _bwd_mod.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8
-    fwd_cls.is_supported = classmethod(
-        _make_is_supported(("grouped_gemm_glu_kernel", "grouped_gemm_quant_kernel"))
-    )
-    bwd_cls.is_supported = classmethod(
-        _make_is_supported(("grouped_gemm_dglu_kernel", "grouped_gemm_quant_kernel"))
-    )
-    _patch_kernel_method(fwd_cls, "grouped_gemm_glu_kernel", "grouped_gemm_glu_wrapper_sm100")
-    _patch_kernel_method(fwd_cls, "grouped_gemm_quant_kernel", "grouped_gemm_quant_wrapper_sm100")
-    _patch_kernel_method(bwd_cls, "grouped_gemm_dglu_kernel", "grouped_gemm_dglu_wrapper_sm100")
-    _patch_kernel_method(bwd_cls, "grouped_gemm_quant_kernel", "grouped_gemm_quant_wrapper_sm100")
-
-
 def init_te_mixtral_model(hyperparams: HyperParameters):
     """Load Mixtral with TE-optimised MoE blocks."""
     ensure_model_is_downloaded(hyperparams)
@@ -227,7 +157,6 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
     if hyperparams.model_impl == "te_mixtral_mxfp8":
         if hyperparams.mixed_precision != "mxfp8":
             raise ValueError("model_impl='te_mixtral_mxfp8' requires mixed_precision='mxfp8'.")
-        _enable_fused_mxfp8_grouped_mlp()
         from te_mixtral_mxfp8 import TEMixtralMXFP8ForCausalLM as ForCausalLM
         from te_mixtral_mxfp8 import replace_params
     else:

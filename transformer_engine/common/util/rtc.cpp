@@ -153,7 +153,9 @@ int Kernel::occupancy_max_active_blocks_per_sm(int device_id, int block_size,
 
 KernelManager& KernelManager::instance() {
   NVTE_CHECK(is_enabled(), "NVRTC support is not enabled");
-  static KernelManager instance_;
+  // Never destroyed: ~Kernel unloads modules through the CUDA driver, and CUDA must not be used
+  // during program termination.
+  static KernelManager& instance_ = *new KernelManager;
   return instance_;
 }
 
