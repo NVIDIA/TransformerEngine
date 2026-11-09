@@ -13,6 +13,7 @@ import torch
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
+from .._common import maybe_autocast_dtype
 from ..basic import AddExtraInput, BasicLinear, Bias
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
@@ -92,10 +93,7 @@ class ForwardLinearBiasAdd(FusedOperation):
             backward_override = None
 
         # Get autocast dtype if needed
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
-        else:
-            dtype = linear_op.weight.dtype
+        dtype = maybe_autocast_dtype(default_dtype=linear_op.weight.dtype)
 
         # Linear forward
         output = basic_op_extra_inputs[self._op_idxs["add"]][0]

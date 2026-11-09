@@ -19,6 +19,7 @@ from typing import Any, Iterable, Optional, Tuple, Union
 import torch
 from torch.ops import aten
 
+from transformer_engine.pytorch.device import te_device_type
 from .storage.identity_tensor_storage import IdentityTensorStorage
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 
@@ -114,7 +115,7 @@ class IdentityQuantizer(Quantizer):
         pin_memory: bool = False,
     ) -> Union["IdentityTensor", IdentityTensorStorage]:
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         device = torch.device(device)
         data_dtype = self.dtype if self.dtype is not None else dtype
         data = torch.empty(tuple(shape), dtype=data_dtype, device=device, pin_memory=pin_memory)

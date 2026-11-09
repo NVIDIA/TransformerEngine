@@ -269,7 +269,9 @@ inline std::string grouped_gemm_skip_reason(const TestParams& params) {
       }
     }
     if (is_blackwell_plus && fp8_block) {
-      return "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), " + cc_suffix;
+      return "FP8 block scaling grouped GEMM is native only on Hopper (SM90); Blackwell+ emulates "
+             "it with MXFP8 in the framework binding, " +
+             cc_suffix;
     }
     if (params.recipe == InputRecipe::kNVFP4 && params.output_dtype == DType::kFloat16) {
       return "NVFP4 grouped GEMM does not support FP16 output.";

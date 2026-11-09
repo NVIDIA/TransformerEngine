@@ -43,7 +43,7 @@ class GroupedTensorStorage:
         + Both set: each tensor has unique shape (first_dims[i], last_dims[i])
 
     Data Layout:
-    - ALL data fields are stored as 1D flattened arrays (data, columnwise_data, scale_inv, etc.)
+    - Data buffers may have any contiguous shape; expert offsets count elements.
     - logical_shape provides the conceptual 2D interpretation
     - All data is stored on device in contiguous layout
 
@@ -88,8 +88,8 @@ class GroupedTensorStorage:
             num_tensors: Number of tensors in the group
             shapes: 2D shape of each tensor (len num_tensors)
             quantizer: Quantizer used for all tensors in the group
-            data: Row-wise data buffer (1D flattened)
-            columnwise_data: Column-wise data buffer (1D flattened)
+            data: Contiguous row-wise data buffer
+            columnwise_data: Contiguous column-wise data buffer
             scale_inv: Row-wise scale inverse buffer
             columnwise_scale_inv: Column-wise scale inverse buffer
             scale_inv_dtype: Data type for scale inverse buffers.
@@ -137,7 +137,7 @@ class GroupedTensorStorage:
             last_dims  # Device pointer to int64_t array of length num_tensors (or None)
         )
 
-        # Offsets for indexing into contiguous 1D layout (OPTIONAL - not needed if all_same_shape())
+        # Offsets for indexing into contiguous storage (OPTIONAL - not needed if all_same_shape())
         # tensor_offsets[i] = element offset to start of tensor i (cumulative sum of numel for tensors 0..i-1)
         # Usage: tensor_i_ptr = data.data_ptr() + tensor_offsets[i] * element_size
         # If None and all_same_shape(): offset[i] = i * M * N (where M, N are common dimensions)
@@ -147,7 +147,7 @@ class GroupedTensorStorage:
         instance.offsets = offsets  # Vector of integer offsets for each tensor.
 
         # Logical shape: conceptual 2D shape of the grouped data (REQUIRED)
-        # Represents how the 1D flattened data should be interpreted as 2D
+        # Represents how contiguous data should be interpreted as 2D
         # Always 2D with positive dimensions
         instance.logical_shape = shape
 
@@ -1050,6 +1050,23 @@ class GroupedTensorStorage:
         if self.offsets is None and self.tensor_offsets is not None:
             self.offsets = self.tensor_offsets.tolist()
 
+        # Flatten the buffer to 1D if it is not already 1D
+        def flattened_buffer(buffer: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+            if buffer is None:
+                return None
+            if not buffer.is_contiguous():
+                raise ValueError(
+                    "GroupedTensor buffers must be contiguous to split without copying"
+                )
+            return buffer if buffer.ndim == 1 else buffer.flatten()
+
+        rowwise_data_buffer = flattened_buffer(self.rowwise_data)
+        columnwise_data_buffer = flattened_buffer(self.columnwise_data)
+        scale_inv_buffer = flattened_buffer(self.scale_inv)
+        columnwise_scale_inv_buffer = flattened_buffer(self.columnwise_scale_inv)
+        amax_buffer = flattened_buffer(self.amax)
+        columnwise_amax_buffer = flattened_buffer(self.columnwise_amax)
+
         # Case 1: No quantization - return regular torch tensors
         if no_quantization:
             for i in range(self.num_tensors):
@@ -1063,10 +1080,12 @@ class GroupedTensorStorage:
                     end_offset = start_offset + numel
 
                     if self.has_data():
-                        tensor_data = self.rowwise_data[start_offset:end_offset].view(tensor_shape)
+                        tensor_data = rowwise_data_buffer[start_offset:end_offset].view(
+                            tensor_shape
+                        )
                         result.append(tensor_data)
                     elif self.has_columnwise_data():
-                        tensor_data = self.columnwise_data[start_offset:end_offset].view(
+                        tensor_data = columnwise_data_buffer[start_offset:end_offset].view(
                             tensor_shape
                         )
                         result.append(tensor_data)
@@ -1079,10 +1098,12 @@ class GroupedTensorStorage:
                     end_offset = start_offset + numel
 
                     if self.has_data():
-                        tensor_data = self.rowwise_data[start_offset:end_offset].view(tensor_shape)
+                        tensor_data = rowwise_data_buffer[start_offset:end_offset].view(
+                            tensor_shape
+                        )
                         result.append(tensor_data)
                     elif self.has_columnwise_data():
-                        tensor_data = self.columnwise_data[start_offset:end_offset].view(
+                        tensor_data = columnwise_data_buffer[start_offset:end_offset].view(
                             tensor_shape
                         )
                         result.append(tensor_data)
@@ -1157,7 +1178,7 @@ class GroupedTensorStorage:
                     rowwise_tensor_shape = quantizer.convert_shape_for_fp4(tensor_shape)
                 else:
                     rowwise_tensor_shape = tensor_shape
-                rowwise_data = self.rowwise_data[data_start:data_end].view(rowwise_tensor_shape)
+                rowwise_data = rowwise_data_buffer[data_start:data_end].view(rowwise_tensor_shape)
 
             if self.has_columnwise_data():
                 columnwise_tensor_shape = quantizer.get_columnwise_shape(tensor_shape)
@@ -1165,7 +1186,7 @@ class GroupedTensorStorage:
                     columnwise_tensor_shape = quantizer.convert_shape_for_fp4(
                         columnwise_tensor_shape
                     )
-                columnwise_data = self.columnwise_data[data_start:data_end].view(
+                columnwise_data = columnwise_data_buffer[data_start:data_end].view(
                     columnwise_tensor_shape
                 )
 
@@ -1182,7 +1203,7 @@ class GroupedTensorStorage:
 
                     # Calculate expected scale shape for MXFP8
                     scale_shape = quantizer.get_scale_shape(tensor_shape, False)
-                    rowwise_scale_inv = self.scale_inv[scale_start:scale_end].view(scale_shape)
+                    rowwise_scale_inv = scale_inv_buffer[scale_start:scale_end].view(scale_shape)
 
                 if (
                     self.columnwise_scale_inv is not None
@@ -1193,9 +1214,9 @@ class GroupedTensorStorage:
                     cscale_end = self.columnwise_scale_inv_offsets[i + 1]
 
                     cscale_shape = quantizer.get_scale_shape(tensor_shape, True)
-                    columnwise_scale_inv = self.columnwise_scale_inv[cscale_start:cscale_end].view(
-                        cscale_shape
-                    )
+                    columnwise_scale_inv = columnwise_scale_inv_buffer[
+                        cscale_start:cscale_end
+                    ].view(cscale_shape)
 
                 if quantizer.internal:
                     mxfp8_tensor_class = MXFP8TensorStorage
@@ -1219,9 +1240,9 @@ class GroupedTensorStorage:
                 # Scale inverse - one per tensor
                 scale_inv = None
                 if self.scale_inv is not None:
-                    scale_inv = self.scale_inv[i : i + 1]
+                    scale_inv = scale_inv_buffer[i : i + 1]
                 elif self.columnwise_scale_inv is not None:
-                    scale_inv = self.columnwise_scale_inv[i : i + 1]
+                    scale_inv = columnwise_scale_inv_buffer[i : i + 1]
 
                 if quantizer.internal:
                     float8_tensor_class = Float8TensorStorage
@@ -1252,7 +1273,7 @@ class GroupedTensorStorage:
 
                     # Get scale shape from quantizer
                     scale_shape = quantizer.get_scale_shape(tensor_shape, False)
-                    rowwise_scale_inv = self.scale_inv[scale_start:scale_end].view(scale_shape)
+                    rowwise_scale_inv = scale_inv_buffer[scale_start:scale_end].view(scale_shape)
 
                 if (
                     self.columnwise_scale_inv is not None
@@ -1264,9 +1285,9 @@ class GroupedTensorStorage:
 
                     # Get columnwise scale shape from quantizer
                     cscale_shape = quantizer.get_scale_shape(tensor_shape, True)
-                    columnwise_scale_inv = self.columnwise_scale_inv[cscale_start:cscale_end].view(
-                        cscale_shape
-                    )
+                    columnwise_scale_inv = columnwise_scale_inv_buffer[
+                        cscale_start:cscale_end
+                    ].view(cscale_shape)
 
                 # Compute is_2D_scaled and data_format from quantizer attributes
                 is_2D_scaled = quantizer.block_scaling_dim == 2
@@ -1304,7 +1325,7 @@ class GroupedTensorStorage:
 
                     # Get scale shape from quantizer
                     scale_shape = quantizer.get_scale_shape(tensor_shape, False)
-                    rowwise_scale_inv = self.scale_inv[scale_start:scale_end].view(scale_shape)
+                    rowwise_scale_inv = scale_inv_buffer[scale_start:scale_end].view(scale_shape)
 
                 if (
                     self.columnwise_scale_inv is not None
@@ -1316,20 +1337,20 @@ class GroupedTensorStorage:
 
                     # Get columnwise scale shape from quantizer
                     cscale_shape = quantizer.get_scale_shape(tensor_shape, True)
-                    columnwise_scale_inv = self.columnwise_scale_inv[cscale_start:cscale_end].view(
-                        cscale_shape
-                    )
+                    columnwise_scale_inv = columnwise_scale_inv_buffer[
+                        cscale_start:cscale_end
+                    ].view(cscale_shape)
 
                 if self.amax is not None:
                     if nvfp4_rowwise_amax_offsets is not None:
                         amax_start = nvfp4_rowwise_amax_offsets[i]
                         amax_end = nvfp4_rowwise_amax_offsets[i + 1]
-                        amax_rowwise = self.amax[amax_start:amax_end]
+                        amax_rowwise = amax_buffer[amax_start:amax_end]
                     else:
-                        amax_rowwise = self.amax[i : i + 1]
+                        amax_rowwise = amax_buffer[i : i + 1]
 
                 if self.columnwise_amax is not None:
-                    amax_columnwise = self.columnwise_amax[i : i + 1]
+                    amax_columnwise = columnwise_amax_buffer[i : i + 1]
 
                 if quantizer.internal:
                     nvfp4_tensor_class = NVFP4TensorStorage

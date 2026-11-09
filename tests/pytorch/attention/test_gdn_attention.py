@@ -7,6 +7,7 @@
 import importlib.util
 import math
 import os
+import sys
 from typing import Optional, Tuple
 
 import pytest
@@ -203,7 +204,7 @@ def _inputs(
 
 
 @requires_gdn
-@pytest.mark.parametrize("checkpoint_core_attention", [False, True], ids=["eager", "checkpoint"])
+@pytest.mark.parametrize("execution_mode", ["eager", "checkpoint", "compile"])
 @pytest.mark.parametrize(
     ("qk_dim", "v_dim"),
     [(64, 64), (128, 128), (64, 128)],
@@ -211,7 +212,7 @@ def _inputs(
 )
 @pytest.mark.parametrize("use_qk_l2norm_in_kernel", [False, True], ids=["no_l2norm", "l2norm"])
 def test_gdn_thd_forward_final_state_and_backward(
-    checkpoint_core_attention, qk_dim, v_dim, use_qk_l2norm_in_kernel
+    execution_mode, qk_dim, v_dim, use_qk_l2norm_in_kernel
 ):
     """THD GDN matches a PyTorch recurrence in forward and backward.
 
@@ -232,6 +233,9 @@ def test_gdn_thd_forward_final_state_and_backward(
         kv_channels=(qk_dim, v_dim),
         qkv_format="thd",
     )
+    if execution_mode == "compile":
+        torch._dynamo.reset()
+        attention = torch.compile(attention, fullgraph=True)
     output, final_state = attention(
         q,
         k,
@@ -241,7 +245,7 @@ def test_gdn_thd_forward_final_state_and_backward(
         beta=beta,
         initial_state=initial_state,
         output_final_state=True,
-        checkpoint_core_attention=checkpoint_core_attention,
+        checkpoint_core_attention=execution_mode == "checkpoint",
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     reference_inputs = {
@@ -293,7 +297,8 @@ def test_gdn_thd_forward_final_state_and_backward(
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
 @requires_gdn
-def test_gdn_dense_layout(qkv_format, dtype):
+@pytest.mark.parametrize("compile_model", [False, True], ids=["eager", "compile"])
+def test_gdn_dense_layout(qkv_format, dtype, compile_model):
     """Dense TE layouts and supported input dtypes match a PyTorch reference."""
     batch, sequence, heads, dim = 1, 128, 2, 64
     q, k, v, g, beta = _inputs(batch, sequence, heads, heads, dim, dim, dtype)
@@ -317,6 +322,9 @@ def test_gdn_dense_layout(qkv_format, dtype):
         kv_channels=dim,
         qkv_format=qkv_format,
     )
+    if compile_model:
+        torch._dynamo.reset()
+        attention = torch.compile(attention, fullgraph=True)
     output = attention(q, k, v, g=g, beta=beta, use_qk_l2norm_in_kernel=True)
     assert output.shape == expected.shape
     _assert_rms_close(output, expected, _FWD_TOL[dtype], "output")
@@ -476,3 +484,16 @@ def test_gdn_runs_te_forward_lifecycle(monkeypatch):
     output = attention(q, k, v, g=g, beta=beta)
     assert output.shape == (1, 128, 64)
     assert events == ["prepare", "end"]
+
+
+def test_gdn_defers_missing_runtime_error_to_first_run(monkeypatch):
+    """Constructing GDN without cuDNN frontend succeeds; running it reports the missing runtime."""
+    monkeypatch.setitem(sys.modules, "cudnn.linear_attention", None)
+    q, k, v, g, beta = _inputs(1, 128, 1, 1)
+    attention = GatedDeltaNetAttention(
+        num_attention_heads=1,
+        kv_channels=64,
+        qkv_format="bshd",
+    )
+    with pytest.raises(ImportError, match="requires a nvidia-cudnn-frontend"):
+        attention(q, k, v, g=g, beta=beta)
