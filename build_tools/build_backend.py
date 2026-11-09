@@ -8,13 +8,17 @@ from contextlib import contextmanager
 import os
 import re
 import subprocess
-from typing import Iterator, List, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import Iterator, List, NamedTuple, Optional, Tuple
 
-from setuptools import build_meta
-
+from build_tools.build_backend_utils import (
+    ConfigSettings,
+    config_value,
+    normalize_cuda_version,
+    requested_cuda_version,
+    setuptools_hooks,
+)
 from build_tools.utils import nvcc_path
 
-_SETUPTOOLS_BACKEND = build_meta.__legacy__
 _CUDA_BUILD_PACKAGES = {
     "12": [
         # Also contains nvvm and crt
@@ -70,57 +74,6 @@ _FEATURES = {
 }
 _PRIVATE_SETTINGS = ("cuda-version", "framework", *_FEATURES)
 
-ConfigValue = Union[str, List[str]]
-ConfigSettings = Optional[Mapping[str, ConfigValue]]
-
-
-def _setuptools_config_settings(config_settings: ConfigSettings) -> ConfigSettings:
-    """Remove settings that are private to this backend."""
-    if config_settings is None:
-        return None
-
-    settings = dict(config_settings)
-    for setting in _PRIVATE_SETTINGS:
-        settings.pop(setting, None)
-    return settings or None
-
-
-def _normalize_cuda_version(value: str) -> str:
-    """Validate and normalize a CUDA major/minor version."""
-    value = value.lower().removeprefix("cu")
-    if re.fullmatch(r"\d+\.\d+", value) is None:
-        raise ValueError(
-            f"Invalid CUDA version {value!r}; expected <major>.<minor>, for example 12.8"
-        )
-
-    major = value.split(".", maxsplit=1)[0]
-    if major not in _CUDA_BUILD_PACKAGES:
-        supported = ", ".join(sorted(_CUDA_BUILD_PACKAGES))
-        raise ValueError(f"Unsupported CUDA major version {major!r}; expected one of: {supported}")
-
-    return value
-
-
-def _config_cuda_version(config_settings: ConfigSettings) -> Optional[str]:
-    """Get the CUDA version from PEP 517 config settings."""
-    settings: Mapping[str, ConfigValue] = config_settings or {}
-    value = settings.get("cuda-version")
-    if value is None:
-        return None
-
-    if isinstance(value, list):
-        if not value:
-            raise ValueError("CUDA package version cannot be empty")
-        value = value[-1]
-
-    return _normalize_cuda_version(str(value))
-
-
-def _environment_cuda_version() -> Optional[str]:
-    """Get the CUDA version from the environment."""
-    value = os.getenv("NVTE_CUDA_VERSION")
-    return _normalize_cuda_version(value) if value is not None else None
-
 
 def _normalize_frameworks(value: str) -> List[str]:
     """Validate and normalize a framework selection."""
@@ -150,17 +103,8 @@ def _normalize_frameworks(value: str) -> List[str]:
 
 def _config_frameworks(config_settings: ConfigSettings) -> Optional[List[str]]:
     """Get the target frameworks from PEP 517 config settings."""
-    settings: Mapping[str, ConfigValue] = config_settings or {}
-    value = settings.get("framework")
-    if value is None:
-        return None
-
-    if isinstance(value, list):
-        if not value:
-            raise ValueError("Framework selection cannot be empty")
-        value = value[-1]
-
-    return _normalize_frameworks(str(value))
+    value = config_value(config_settings, "framework")
+    return _normalize_frameworks(value) if value is not None else None
 
 
 def _environment_frameworks() -> Optional[List[str]]:
@@ -177,15 +121,9 @@ def _requested_frameworks(config_settings: ConfigSettings) -> Optional[List[str]
 
 def _config_feature(config_settings: ConfigSettings, setting: str) -> Optional[bool]:
     """Get whether PEP 517 config settings enable or disable an optional feature."""
-    settings: Mapping[str, ConfigValue] = config_settings or {}
-    value = settings.get(setting)
+    value = config_value(config_settings, setting)
     if value is None:
         return None
-
-    if isinstance(value, list):
-        if not value:
-            raise ValueError(f"{setting} cannot be empty")
-        value = value[-1]
 
     if value not in ("0", "1"):
         raise ValueError(f"Invalid value {value!r} for {setting}; expected 0 or 1")
@@ -240,7 +178,7 @@ def _nvcc_cuda_version() -> Optional[str]:
         return None
 
     match = re.search(r"release\s+(\d+\.\d+)", result.stdout)
-    return _normalize_cuda_version(match.group(1)) if match is not None else None
+    return normalize_cuda_version(match.group(1)) if match is not None else None
 
 
 def _torch_cuda_version() -> Optional[str]:
@@ -250,7 +188,7 @@ def _torch_cuda_version() -> Optional[str]:
     except (ImportError, OSError):
         return None
     value = getattr(getattr(torch, "version", None), "cuda", None)
-    return _normalize_cuda_version(value) if value else None
+    return normalize_cuda_version(value) if value else None
 
 
 def _framework_cuda_version(config_settings: ConfigSettings) -> Optional[str]:
@@ -269,8 +207,7 @@ def _framework_cuda_version(config_settings: ConfigSettings) -> Optional[str]:
 def _cuda_version(config_settings: ConfigSettings) -> str:
     """Resolve the CUDA version in descending order of precedence."""
     cuda_version = (
-        _config_cuda_version(config_settings)
-        or _environment_cuda_version()
+        requested_cuda_version(config_settings)
         or _nvcc_cuda_version()
         or _framework_cuda_version(config_settings)
     )
@@ -332,96 +269,12 @@ def _build_requirements(config_settings: ConfigSettings) -> List[str]:
     )
 
 
-###################################################################################################
-# PEP 517 and PEP 660 defined functions
-###################################################################################################
-
-
-# Defined by PEP 517
-def get_requires_for_build_wheel(config_settings: ConfigSettings = None) -> List[str]:
-    """Get requirements for building a wheel."""
-    return _build_requirements(config_settings)
-
-
-# Defined by PEP 517
-def get_requires_for_build_sdist(config_settings: ConfigSettings = None) -> List[str]:
-    """Get requirements needed while evaluating setup.py for an sdist."""
-    # Build requirements are needed even for sdist because setup.py currently always depends
-    # on them. It could be refactored to only depend on them when building a wheel, but that
-    # would require a more invasive refactor.
-    return _build_requirements(config_settings)
-
-
-# Defined by PEP 517
-def build_wheel(
-    wheel_directory: str,
-    config_settings: ConfigSettings = None,
-    metadata_directory: Optional[str] = None,
-) -> str:
-    """Build a wheel with setuptools."""
-    with _build_environment(config_settings):
-        return _SETUPTOOLS_BACKEND.build_wheel(
-            wheel_directory,
-            _setuptools_config_settings(config_settings),
-            metadata_directory,
-        )
-
-
-# Defined by PEP 517
-def prepare_metadata_for_build_wheel(
-    metadata_directory: str,
-    config_settings: ConfigSettings = None,
-) -> str:
-    """Prepare wheel metadata with setuptools."""
-    with _build_environment(config_settings):
-        return _SETUPTOOLS_BACKEND.prepare_metadata_for_build_wheel(
-            metadata_directory,
-            _setuptools_config_settings(config_settings),
-        )
-
-
-# Defined by PEP 517
-def build_sdist(
-    sdist_directory: str,
-    config_settings: ConfigSettings = None,
-) -> str:
-    """Build an sdist with setuptools."""
-    with _build_environment(config_settings):
-        return _SETUPTOOLS_BACKEND.build_sdist(
-            sdist_directory,
-            _setuptools_config_settings(config_settings),
-        )
-
-
-if hasattr(_SETUPTOOLS_BACKEND, "build_editable"):
-
-    # Defined by PEP 660
-    def get_requires_for_build_editable(config_settings: ConfigSettings = None) -> List[str]:
-        """Get requirements for building an editable wheel."""
-        return _build_requirements(config_settings)
-
-    # Defined by PEP 660
-    def build_editable(
-        wheel_directory: str,
-        config_settings: ConfigSettings = None,
-        metadata_directory: Optional[str] = None,
-    ) -> str:
-        """Build an editable wheel with setuptools."""
-        with _build_environment(config_settings):
-            return _SETUPTOOLS_BACKEND.build_editable(
-                wheel_directory,
-                _setuptools_config_settings(config_settings),
-                metadata_directory,
-            )
-
-    # Defined by PEP 660
-    def prepare_metadata_for_build_editable(
-        metadata_directory: str,
-        config_settings: ConfigSettings = None,
-    ) -> str:
-        """Prepare editable-wheel metadata with setuptools."""
-        with _build_environment(config_settings):
-            return _SETUPTOOLS_BACKEND.prepare_metadata_for_build_editable(
-                metadata_directory,
-                _setuptools_config_settings(config_settings),
-            )
+# PEP 517 and PEP 660 hooks. setup.py always depends on the build requirements, so they are
+# also needed for sdists.
+globals().update(
+    setuptools_hooks(
+        requirements=_build_requirements,
+        private_settings=_PRIVATE_SETTINGS,
+        environment=_build_environment,
+    )
+)
