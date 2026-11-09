@@ -92,9 +92,8 @@ Each of the following options can also be set for an isolated PEP 517 build with
 In an isolated build, the Python package listed for an option is installed as a build
 requirement unless the option's installation directory variable is set. Without build
 isolation, the installation directory variable is used if set, and the package is used if
-installed. When Transformer Engine is built against a package, the built Transformer Engine
-package depends on it, and ``libtransformer_engine.so`` finds it at runtime in the same
-environment.
+installed. ``libtransformer_engine.so`` finds these packages at runtime when they are installed
+in the same environment.
 
 .. envvar:: NVTE_UB_WITH_MPI
 

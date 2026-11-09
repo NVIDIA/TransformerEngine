@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import setuptools
 from wheel.bdist_wheel import bdist_wheel
@@ -18,14 +18,10 @@ from wheel.bdist_wheel import bdist_wheel
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
-    MIN_CUDNN_VERSION,
     cublasmp_home_path,
     cuda_archs,
     cuda_home_path,
-    cuda_toolkit_from_python_packages,
-    cuda_version,
     cudnn_frontend_include_path,
-    cudnn_from_python_package,
     cusolvermp_home_path,
     get_bolt_build_flags,
     get_frameworks,
@@ -36,7 +32,6 @@ from build_tools.utils import (
     get_max_jobs_for_parallel_build,
     nvcc_path,
     nvshmem_home_path,
-    python_package_requirement,
 )
 
 frameworks = get_frameworks()
@@ -166,60 +161,7 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
             install_reqs.extend(install_requirements())
             test_reqs.extend(test_requirements())
 
-    install_reqs.extend(python_package_runtime_requirements())
-
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
-
-
-def python_package_runtime_requirements() -> List[str]:
-    """Runtime requirements on the Python packages that the core library is built against.
-
-    Libraries found through a *_HOME variable or on the system are not declared. Each
-    requirement stays within the major version of the package used for the build, so that it
-    is compatible with the exact versions that frameworks pin.
-    """
-    cuda_major = cuda_version()[0]
-    requirements: List[str] = []
-
-    def require_installed(package_name: str, minimum: Optional[str] = None) -> None:
-        try:
-            requirements.append(python_package_requirement(package_name, minimum))
-        except metadata.PackageNotFoundError:
-            pass
-
-    if cuda_toolkit_from_python_packages():
-        cuda_major_minor = ".".join(str(part) for part in cuda_version()[:2])
-        requirements.append(
-            f"cuda-toolkit[cudart,cublas,nvrtc,curand]>={cuda_major_minor},<{cuda_major + 1}"
-        )
-    if cudnn_from_python_package():
-        require_installed(f"nvidia-cudnn-cu{cuda_major}", minimum=MIN_CUDNN_VERSION)
-
-    with_cublasmp = bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0")))
-    with_cusolvermp = bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0")))
-    nccl_pip_root = _python_package_nccl_home()
-    if nccl_pip_root is not None:
-        if nccl_ep_enabled(archs):
-            try:
-                nccl_from_pip = _discover_nccl_home() == nccl_pip_root
-            except RuntimeError:
-                nccl_from_pip = False
-        else:
-            # CMake looks for NCCL in the Python package before system locations.
-            nccl_from_pip = with_cublasmp or with_cusolvermp
-        if nccl_from_pip:
-            require_installed(f"nvidia-nccl-cu{cuda_major}", "2.30" if with_cublasmp else "2")
-
-    if with_cublasmp and not os.getenv("CUBLASMP_HOME"):
-        require_installed(f"nvidia-cublasmp-cu{cuda_major}")
-    if with_cusolvermp and not os.getenv("CUSOLVERMP_HOME"):
-        require_installed(f"nvidia-cusolvermp-cu{cuda_major}")
-    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and not os.getenv("NVSHMEM_HOME"):
-        require_installed(f"nvidia-nvshmem-cu{cuda_major}")
-    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))) and not os.getenv("MPI_HOME"):
-        require_installed("openmpi")
-
-    return requirements
 
 
 def _discover_nccl_home() -> str:
@@ -237,11 +179,6 @@ def _discover_nccl_home() -> str:
             f"[NCCL EP] WARNING: NCCL_HOME='{env_home}' is set but "
             f"'{env_home}/include/nccl.h' was not found; falling back to system probes."
         )
-
-    # A build against CUDA Toolkit Python packages also depends on the nvidia-nccl
-    # wheel at runtime, which libtransformer_engine's RUNPATH prefers.
-    if cuda_toolkit_from_python_packages() and (pip_root := _python_package_nccl_home()):
-        return pip_root
 
     lib_names = ("libnccl.so", "libnccl.so.2")
     # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
@@ -273,30 +210,24 @@ def _discover_nccl_home() -> str:
         ):
             return str(p)
 
-    # Fall back to a pip-installed NCCL when no system NCCL is present.
-    if pip_root := _python_package_nccl_home():
-        return pip_root
-
-    raise RuntimeError(
-        "Could not locate NCCL core (nccl.h + libnccl.so). Set NCCL_HOME to the install prefix."
-    )
-
-
-def _python_package_nccl_home() -> Optional[str]:
-    """Return the NCCL installed from an nvidia-nccl-cu* wheel under nvidia/nccl, if any."""
+    # Fall back to a pip-installed NCCL (nvidia-nccl-cu* wheel) under nvidia/nccl
+    # in site-packages, used only when no system NCCL is present.
     try:
         import importlib.util
 
         spec = importlib.util.find_spec("nvidia.nccl")
+        if spec is not None and spec.submodule_search_locations:
+            pip_root = Path(next(iter(spec.submodule_search_locations)))
+            if (pip_root / "include" / "nccl.h").exists() and any(
+                (pip_root / sub / name).exists() for sub in lib_subdirs for name in lib_names
+            ):
+                return str(pip_root)
     except (ImportError, ValueError):
-        return None
-    if spec is None or not spec.submodule_search_locations:
-        return None
+        pass
 
-    pip_root = Path(next(iter(spec.submodule_search_locations)))
-    if (pip_root / "include" / "nccl.h").exists() and (pip_root / "lib" / "libnccl.so.2").exists():
-        return str(pip_root)
-    return None
+    raise RuntimeError(
+        "Could not locate NCCL core (nccl.h + libnccl.so). Set NCCL_HOME to the install prefix."
+    )
 
 
 def build_nccl_ep_submodule() -> str:
