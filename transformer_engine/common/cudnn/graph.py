@@ -46,12 +46,15 @@ def create_graph(cudnn, dtype, handle=None):
     )
 
 
-def check_graph_support(cudnn, graph, run_stage=None):
+def check_graph_support(cudnn, graph, run_stage=None, *, has_score_mod=False):
     """Validate and select supported plans, without compiling their kernels."""
     run = run_stage or (lambda _name, function: function())
     try:
         run("validate", graph.validate)
         run("build_operation_graph", graph.build_operation_graph)
+        if has_score_mod:
+            # Python SDPA engines can silently ignore score_mod; only cuDNN implements it.
+            run("deselect_engines", lambda: graph.deselect_engines(["sdpa_fwd", "sdpa_bwd"]))
         run(
             "create_execution_plans",
             lambda: graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]),
@@ -61,10 +64,16 @@ def check_graph_support(cudnn, graph, run_stage=None):
         raise UnsupportedGraph(f"cuDNN SDPA graph is not supported: {exc}") from exc
 
 
-def compile_graph(cudnn, graph, run_stage=None):
+def compile_graph(cudnn, graph, run_stage=None, *, has_score_mod=False):
     """Compile the selected plan and return its nonempty workspace size."""
     run = run_stage or (lambda _name, function: function())
     run("build_plans", lambda: graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE))
+    selected_engine = getattr(graph, "selected_engine", None) if has_score_mod else None
+    if selected_engine is not None:
+        raise RuntimeError(
+            f"cuDNN frontend {cudnn.__version__} selected {selected_engine} for a score_mod graph. "
+            "Only the cuDNN backend implements score_mod."
+        )
     return max(int(graph.get_workspace_size()), 1)
 
 

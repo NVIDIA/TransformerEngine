@@ -119,11 +119,11 @@ def deselect_frost_plans(graph):
     )
 
 
-def finalize_graph(cudnn, graph):
+def finalize_graph(cudnn, graph, *, has_score_mod=False):
     """Validate, select and compile a supported execution plan."""
-    check_graph_support(cudnn, graph)
+    check_graph_support(cudnn, graph, has_score_mod=has_score_mod)
     deselect_frost_plans(graph)
-    workspace_size = compile_graph(cudnn, graph)
+    workspace_size = compile_graph(cudnn, graph, has_score_mod=has_score_mod)
     return workspace_size, bytes(graph.serialize()), check_frontend_version(cudnn)
 
 

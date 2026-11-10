@@ -45,11 +45,11 @@ def _build_cudnn_pygraph(dtype, device):
     return create_graph(cudnn, dtype, _get_cudnn_current_stream_handle(cudnn, device))
 
 
-def _finalize_cudnn_graph(graph):
+def _finalize_cudnn_graph(graph, *, has_score_mod=False):
     """Check support, build an execution plan, and return workspace bytes."""
     cudnn = _import_cudnn_frontend()
-    check_graph_support(cudnn, graph)
-    return compile_graph(cudnn, graph)
+    check_graph_support(cudnn, graph, has_score_mod=has_score_mod)
+    return compile_graph(cudnn, graph, has_score_mod=has_score_mod)
 
 
 def _execute_cudnn_graph(graph, variant_pack, workspace_size, device):

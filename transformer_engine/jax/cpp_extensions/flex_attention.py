@@ -449,7 +449,9 @@ def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
         ),
         score_mod=_wrap_score_mod(config.score_mod, extra),
     )
-    workspace_size, data, frontend_version = _finalize_score_mod_graph(cudnn, graph)
+    workspace_size, data, frontend_version = _finalize_score_mod_graph(
+        cudnn, graph, has_score_mod=True
+    )
     return _serialized_score_mod_graph(
         serialized_graph=data,
         cudnn_frontend_version=frontend_version,
@@ -517,7 +519,9 @@ def _build_score_mod_bwd_graph(
         score_mod=_wrap_score_mod(config.score_mod, extra),
         score_mod_bprop=_wrap_score_mod(config.score_mod_bprop, bprop_extra),
     )
-    workspace_size, data, frontend_version = _finalize_score_mod_graph(cudnn, graph)
+    workspace_size, data, frontend_version = _finalize_score_mod_graph(
+        cudnn, graph, has_score_mod=True
+    )
     return _serialized_score_mod_graph(
         serialized_graph=data,
         cudnn_frontend_version=frontend_version,

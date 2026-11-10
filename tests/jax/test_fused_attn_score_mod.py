@@ -5,6 +5,7 @@
 
 from math import sqrt
 from types import FunctionType
+from unittest.mock import Mock, call
 
 import jax
 import jax.numpy as jnp
@@ -652,6 +653,34 @@ def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
     assert config.score_mod_scalars[0].name == "neg_inf"
     assert config.score_mod_scalars[0].dtype == "float32"
     assert len(config.score_mod_scalars[0].value) == np.dtype(np.float32).itemsize
+
+
+@pytest.mark.parametrize("selected_engine", (None, "sdpa_fwd", "sdpa_bwd"))
+def test_fused_attn_score_mod_backend_guard(monkeypatch, selected_engine):
+    """Score-mod graphs must use cuDNN while retaining JAX's serialization exclusions."""
+    cudnn = Mock(__version__="1.31.0")
+    graph = Mock(selected_engine=selected_engine)
+    graph.get_execution_plan_count.return_value = 2
+    graph.get_plan_name_at_index.side_effect = ["sdpa_fwd_frost", "cudnn_plan"]
+    graph.get_workspace_size.return_value = 0
+    graph.serialize.return_value = b"graph"
+    monkeypatch.setattr(tex_cudnn_graph, "check_frontend_version", lambda _cudnn: 13100)
+
+    if selected_engine is not None:
+        with pytest.raises(RuntimeError, match="Only the cuDNN backend implements score_mod"):
+            tex_attention._finalize_score_mod_graph(cudnn, graph, has_score_mod=True)
+        graph.serialize.assert_not_called()
+    else:
+        assert tex_attention._finalize_score_mod_graph(cudnn, graph, has_score_mod=True) == (
+            1,
+            b"graph",
+            13100,
+        )
+
+    assert graph.deselect_engines.call_args_list == [
+        call(["sdpa_fwd", "sdpa_bwd"]),
+        call(["sdpa_fwd_frost"]),
+    ]
 
 
 def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):

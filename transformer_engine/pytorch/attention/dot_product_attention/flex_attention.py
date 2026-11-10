@@ -271,7 +271,7 @@ def _build_cudnn_score_mod_fwd_graph(
         ),
         score_mod=_wrap_score_mod(score_mod, extra),
     )
-    workspace_size = _finalize_cudnn_graph(graph)
+    workspace_size = _finalize_cudnn_graph(graph, has_score_mod=True)
     return _CudnnScoreModFwdGraphEntry(
         graph=graph,
         q=built.tensors["q"],
@@ -367,7 +367,7 @@ def _build_cudnn_score_mod_bwd_graph(
         score_mod=_wrap_score_mod(score_mod, extra),
         score_mod_bprop=_wrap_score_mod(score_mod_bprop, bprop_extra),
     )
-    workspace_size = _finalize_cudnn_graph(graph)
+    workspace_size = _finalize_cudnn_graph(graph, has_score_mod=True)
     return _CudnnScoreModBwdGraphEntry(
         graph=graph,
         q=built.tensors["q"],

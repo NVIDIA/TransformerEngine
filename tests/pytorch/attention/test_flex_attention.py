@@ -6,7 +6,7 @@ import os
 import sys
 import pathlib
 from types import FunctionType
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 import torch
@@ -14,6 +14,7 @@ import torch
 from transformer_engine.pytorch import DotProductAttention, is_bf16_available
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 import transformer_engine.pytorch.attention.dot_product_attention.flex_attention as flex_attention
+from transformer_engine.pytorch.cpp_extensions import cudnn as cudnn_graph
 from transformer_engine.pytorch.utils import get_device_compute_capability
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -27,6 +28,38 @@ from utils import (  # pylint: disable=wrong-import-position
 param_types = [torch.float16]
 if torch.cuda.is_available() and is_bf16_available():
     param_types.append(torch.bfloat16)
+
+
+@pytest.mark.parametrize("has_score_mod", (False, True))
+@pytest.mark.parametrize("selected_engine", (None, "sdpa_fwd", "sdpa_bwd", "missing"))
+def test_cudnn_score_mod_backend_guard(monkeypatch, has_score_mod, selected_engine):
+    """Exclude Python engines before planning and reject them if they are still selected."""
+    cudnn = Mock(__version__="1.31.0")
+    graph = Mock(selected_engine=selected_engine)
+    if selected_engine == "missing":
+        del graph.selected_engine
+    graph.get_workspace_size.return_value = 0
+    monkeypatch.setattr(cudnn_graph, "_import_cudnn_frontend", lambda: cudnn)
+
+    if has_score_mod and selected_engine in ("sdpa_fwd", "sdpa_bwd"):
+        with pytest.raises(RuntimeError, match="Only the cuDNN backend implements score_mod"):
+            cudnn_graph._finalize_cudnn_graph(graph, has_score_mod=has_score_mod)
+        graph.get_workspace_size.assert_not_called()
+    else:
+        assert cudnn_graph._finalize_cudnn_graph(graph, has_score_mod=has_score_mod) == 1
+
+    if has_score_mod:
+        exclusion = call.deselect_engines(["sdpa_fwd", "sdpa_bwd"])
+        graph.deselect_engines.assert_called_once_with(["sdpa_fwd", "sdpa_bwd"])
+        assert (
+            graph.mock_calls.index(call.build_operation_graph())
+            < graph.mock_calls.index(exclusion)
+            < graph.mock_calls.index(
+                call.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
+            )
+        )
+    else:
+        graph.deselect_engines.assert_not_called()
 
 
 def _score_mod_causal(score_mod_graph, score_tensor, tensors):

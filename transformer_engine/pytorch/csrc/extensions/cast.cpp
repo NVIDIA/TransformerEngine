@@ -339,8 +339,12 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
     NVTE_CHECK(output.is_none(),
                "group_quantize: output reuse is not supported with row-scaled NVFP4.");
     if (first_dims.has_value()) {
-      NVTE_CHECK(first_dims->is_contiguous() && first_dims->scalar_type() == at::kLong,
-                 "group_quantize: first_dims must be a contiguous int64 tensor.");
+      NVTE_CHECK(first_dims->is_cuda() && first_dims->is_contiguous() &&
+                     first_dims->scalar_type() == at::kLong,
+                 "group_quantize: first_dims must be a contiguous int64 CUDA tensor.");
+      NVTE_CHECK(static_cast<size_t>(first_dims->numel()) == num_tensors,
+                 "group_quantize: first_dims has ", first_dims->numel(),
+                 " entries, but num_tensors is ", num_tensors, ".");
     } else {
       NVTE_CHECK(num_tensors > 0 && logical_first_dim % (num_tensors * 128) == 0,
                  "group_quantize: row-scaled NVFP4 with uniform shapes requires the first "
