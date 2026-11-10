@@ -1274,12 +1274,15 @@ def register_custom_op(
     arg_type: type,
     impl: Callable[[Any], Any],
     fake_impl: Callable[[Any], Any],
+    tags: Sequence[torch.Tag] = (),
 ) -> Optional[Callable[[Any], Any]]:
     """Register one custom op without autograd wiring.
 
     arg_type is a dataclass defining the input schema. Results may be nested
     tuples/lists of fresh tensors or None; fake_impl mirrors them with TensorSpec.
     The returned callable takes an args instance and preserves the result structure.
+    ``tags`` apply to both base and wrapper operators; mark RNG consumers with
+    ``torch.Tag.nondeterministic_seeded``.
     Returns None for unsupported registration APIs so callers can fall back to eager.
     Duplicate operator names raise ValueError.
     """
@@ -1295,6 +1298,7 @@ def register_custom_op(
             impl=impl,
             fake_impl=fake_impl,
             pack_result=pack_result,
+            tags=tags,
         )
     except (ImportError, AttributeError, RuntimeError, TypeError) as e:
         record_compile_disabled(

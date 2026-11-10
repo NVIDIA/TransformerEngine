@@ -60,6 +60,8 @@ from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
 )
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
+from transformer_engine.pytorch.dynamo.custom_op import register_custom_op
+from transformer_engine.pytorch.distributed import _CheckpointRNGGuard
 from transformer_engine.pytorch.dynamo.fake import fake_bgrad
 from transformer_engine.pytorch import (
     is_fp8_available,
@@ -2783,6 +2785,55 @@ def test_te_ops_pipeline(scenario, dtype, monkeypatch):
         with torch.no_grad():
             torch.testing.assert_close(compiled(x), x * ops[0].weight)
         _assert_custom_ops(graphs, "_affineop", backward=False)
+
+
+@pytest.mark.parametrize("seeded", [False, True])
+def test_custom_op_rng_tags(seeded, monkeypatch):
+    @dataclasses.dataclass
+    class Args:
+        inp: torch.Tensor
+
+    calls = []
+
+    def impl(args):
+        calls.append(True)
+        return torch.rand_like(args.inp)
+
+    name = f"test_checkpoint_rng_tags_{seeded}"
+    op = register_custom_op(
+        op_name=name,
+        arg_type=Args,
+        impl=impl,
+        fake_impl=lambda args: args.inp,
+        tags=(torch.Tag.nondeterministic_seeded,) if seeded else (),
+    )
+    assert op is not None
+    for suffix in ("", "_base"):
+        overload = getattr(torch.ops.transformer_engine_compile, name + suffix).default
+        assert (torch.Tag.nondeterministic_seeded in overload.tags) == seeded
+
+    args = Args(torch.ones(16))
+    op(args)
+    assert len(calls) == 1
+    with _CheckpointRNGGuard():
+        if seeded:
+            with pytest.raises(RuntimeError, match="philox_state"):
+                op(args)
+            assert len(calls) == 1
+        else:
+            op(args)
+            assert len(calls) == 2
+
+    if seeded:
+        monkeypatch.setattr(
+            "transformer_engine.pytorch.distributed._checkpoint_rng_available", lambda: False
+        )
+        value = torch.ones(16, device="cuda", requires_grad=True)
+        graph = torch.cuda.CUDAGraph()
+        with pytest.raises(RuntimeError, match="philox_state"):
+            with torch.cuda.graph(graph):
+                te.checkpoint(lambda x: op(Args(x)), value + 0, use_reentrant=True)
+        assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
