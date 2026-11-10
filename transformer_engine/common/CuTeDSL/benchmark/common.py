@@ -391,8 +391,14 @@ def parse_suite_arguments(parser, args):
     """Validates --mode/--shapes; sets the --runs/--warmup defaults."""
     if (args.mode == "manual") != (args.shapes is not None):
         parser.error("--shapes is required by, and only valid with, --mode manual")
-    args.runs = args.runs or (3 if args.mode == "debug" else 20)
-    args.warmup = args.warmup or (1 if args.mode == "debug" else 5)
+    if args.runs is None:
+        args.runs = 3 if args.mode == "debug" else 20
+    if args.warmup is None:
+        args.warmup = 1 if args.mode == "debug" else 5
+    if args.runs < 1:
+        parser.error(f"--runs must be at least 1, got {args.runs}")
+    if args.warmup < 0:
+        parser.error(f"--warmup must be at least 0, got {args.warmup}")
 
 
 def add_dtype_argument(parser, option="--input", what="input"):
