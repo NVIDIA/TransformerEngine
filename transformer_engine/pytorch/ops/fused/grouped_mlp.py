@@ -1117,7 +1117,7 @@ def fuse_grouped_mlp_ops(
             or recipe.row_scaled_weight
             or recipe.nvfp4_4over6 != "none"
         ):
-            # 4over6 doesn't used fused kernels
+            # Row-scaled NVFP4 and 4over6 don't use fused kernels
             return ops
         if recipe.fp8_format == RecipeFormat.UE5M3:
             # cuDNN has no SReLU support for UE5M3 for now
