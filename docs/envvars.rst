@@ -39,8 +39,8 @@ Build Configuration
 .. envvar:: NVTE_FRAMEWORK
 
    :Type: ``str``
-   :Default: Auto-detected
-   :Description: Comma-separated list of frameworks to build support for (``pytorch``, ``jax``, ``all``, or ``none``). If not specified, automatically detects installed frameworks.
+   :Default: Auto-detected without build isolation; ``none`` with build isolation
+   :Description: Comma-separated list of frameworks to build support for (``pytorch``, ``jax``, ``all``, or ``none``). Isolated PEP 517 builds cannot inspect frameworks in the caller's environment, so they only build the core library unless frameworks are selected through this variable or pip's ``--config-settings framework=<framework>`` option. The config setting takes precedence over this variable.
 
 .. envvar:: NVTE_USE_CCACHE
 
@@ -77,6 +77,12 @@ Build Configuration
    :Type: ``int`` (positive integer)
    :Default: ``10``
    :Description: Number of Philox4x32 rounds used by stochastic rounding kernels. Must be a positive integer.
+
+.. envvar:: NVTE_CUDA_VERSION
+
+   :Type: ``str``
+   :Default: Auto-detected based on system CUDA version
+   :Description: CUDA version to build for. Valid values: ``"12.*"``, ``"13.*"``. If not set, automatically determined based on the installed CUDA Toolkit version. Isolated builds fail if no CUDA Toolkit is found and neither this variable nor pip's ``--config-settings cuda-version=<major>.<minor>`` option is set.
 
 Optional Dependencies
 ^^^^^^^^^^^^^^^^^^^^^

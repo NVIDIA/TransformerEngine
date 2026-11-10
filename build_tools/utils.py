@@ -366,6 +366,10 @@ def nccl_lib_path() -> Optional[Path]:
     return None
 
 
+# Keep in sync with MIN_CUDNN_VERSION in transformer_engine/common/__init__.py.
+MIN_CUDNN_VERSION = "9.12"
+
+
 def _python_package_path(package_name: str, relative_path: str) -> Optional[Path]:
     """Return a path inside an installed Python package, or `None` if it does not exist."""
     try:
