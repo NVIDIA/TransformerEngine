@@ -176,7 +176,7 @@ def get_cfg_key(method, act_desc, in_dtype, fp8_dtype, q_layout):
     # trailing False is use_2d_quantization; JAX never requests 2D block scaling
     flags = (True, q_layout.has_colwise, False, False, with_dbias, with_dact, with_act, False)
     major, minor = device_compute_capability()
-    return (
+    key = (
         f"cutedsl_mxfp8_sm{major * 10 + minor}_"
         + DTYPE_TO_STR[in_dtype]
         + "_"
@@ -186,6 +186,15 @@ def get_cfg_key(method, act_desc, in_dtype, fp8_dtype, q_layout):
         + "_"
         + desc
     )
+    # Kernels that read a BF16 activation table carry its layout in the name.
+    if (
+        in_dtype == jnp.bfloat16
+        and desc in ("gelu", "silu", "dgelu", "dsilu")
+        and int(os.getenv("NVTE_ACTIVATION_TABLE") or 0)
+    ):
+        exact = desc == "dsilu" and int(os.getenv("NVTE_ACTIVATION_TABLE_EXACT_DSILU") or 0)
+        key += "_table_exact" if exact else "_table_default"
+    return key
 
 
 def extract_quantized_output(out, dbias):

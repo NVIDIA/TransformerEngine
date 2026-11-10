@@ -232,7 +232,7 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
     # The last False is for use_2d_quantization; these cases never request 2D block scaling
     flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act, False)
     major, minor = device_compute_capability()
-    return (
+    key = (
         f"cutedsl_mxfp8_sm{major * 10 + minor}_"
         + DTYPE_TO_STR[in_dtype]
         + "_"
@@ -242,6 +242,15 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
         + "_"
         + desc
     )
+    # Kernels that read a BF16 activation table carry its layout in the name.
+    if (
+        in_dtype == torch.bfloat16
+        and desc in ("gelu", "silu", "dgelu", "dsilu")
+        and int(os.getenv("NVTE_ACTIVATION_TABLE") or 0)
+    ):
+        exact = desc == "dsilu" and int(os.getenv("NVTE_ACTIVATION_TABLE_EXACT_DSILU") or 0)
+        key += "_table_exact" if exact else "_table_default"
+    return key
 
 
 def extract_quantized_output(out, rowwise, columnwise, swizzled):
