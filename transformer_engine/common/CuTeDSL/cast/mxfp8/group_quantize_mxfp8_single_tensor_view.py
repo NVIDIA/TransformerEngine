@@ -2,21 +2,14 @@
 #
 # See LICENSE for license information.
 
-"""Grouped MXFP8 quantization by a non-grouped kernel on a single-tensor view of the group.
+"""Grouped MXFP8 quantization by a non-grouped kernel on the stacked view of the group.
 
-When the group's data and scales are laid out exactly as one tensor's, a plain cast of the
-group is byte-for-byte a single-tensor cast, so the non-grouped kernels apply unchanged:
+SAME_BOTH_DIMS members start on 128-row boundaries and share the column count, so unless the
+colwise scales are GEMM-swizzled (their indices restart per member) a plain cast of the group
+is byte-for-byte a cast of the stacked (rows, cols) tensor.
 
-* "stacked": SAME_BOTH_DIMS / VARYING_FIRST_DIM members start on 128-row boundaries and share
-  the column count, so unless colwise scales are GEMM-swizzled (whose indices restart per
-  member) the group is the stacked (sum(rows), cols) tensor.
-* "flat": with packed (non-swizzled) rowwise scales only, scale i covers elements 32i..32i+31
-  of the flat payload whatever the member shapes, as long as every member's cols are a
-  multiple of 128 (which both grouped kernels require for VARYING_LAST_DIM /
-  VARYING_BOTH_DIMS). Any group is then a cast of a (total / 128, 128) tensor.
-
-The grouped kernels zero the scale padding and the non-grouped ones leave it untouched, so the
-views are only taken when there is none.
+Only SAME_BOTH_DIMS, whose members always fill the buffer: varying members may fill only part
+of it (CUDA graphs size it ahead of time), and a view would quantize the unused tail too.
 """
 
 from typing import Optional, Type
@@ -27,34 +20,30 @@ from cutlass import Boolean, Int32, Int64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from .quantize_mxfp8_common import MXFP8QuantizeConfig, MXFP8QuantizeKernelBase
-from .group_quantize_mxfp8_common import MXFP8GroupQuantizeConfig, MXFP8GroupQuantizeKernelBase
-
-STACKED = "stacked"
-FLAT = "flat"
+from .group_quantize_mxfp8_common import (
+    SAME_BOTH_DIMS,
+    MXFP8GroupQuantizeConfig,
+    MXFP8GroupQuantizeKernelBase,
+)
 
 
 class MXFP8GroupQuantizeSingleTensorViewKernel(MXFP8GroupQuantizeKernelBase):
-    """Run one non-grouped MXFP8 quantize kernel on the stacked or flat view of the group."""
+    """Run one non-grouped MXFP8 quantize kernel on the stacked view of the group."""
 
     def __init__(
         self, cfg: MXFP8GroupQuantizeConfig, kernel_cls: Type[MXFP8QuantizeKernelBase]
     ) -> None:
         assert self.supports(cfg, kernel_cls), f"{kernel_cls.__name__} cannot run {cfg}"
         self.cfg = cfg
-        self.VIEW = self.view(cfg)
         self.single_cfg = self.single_tensor_cfg(cfg)
         self.kernel = kernel_cls(self.single_cfg)
 
     @staticmethod
-    def view(cfg: MXFP8GroupQuantizeConfig) -> Optional[str]:
-        """The single-tensor view the group's plain cast has, if any."""
-        if cfg.WITH_DBIAS or cfg.WITH_ACT or cfg.WITH_DACT:
-            return None
-        if cfg.IS_SINGLE_TENSOR and not (cfg.COLWISE and cfg.WITH_GEMM_SWIZZLED_SCALES):
-            return STACKED
-        if cfg.ROWWISE and not cfg.COLWISE and not cfg.WITH_GEMM_SWIZZLED_SCALES:
-            return FLAT
-        return None
+    def has_view(cfg: MXFP8GroupQuantizeConfig) -> bool:
+        """Whether the group's cast is a cast of its stacked view."""
+        plain_cast = not (cfg.WITH_DBIAS or cfg.WITH_ACT or cfg.WITH_DACT)
+        swizzled_colwise = cfg.COLWISE and cfg.WITH_GEMM_SWIZZLED_SCALES
+        return plain_cast and cfg.SHAPE_REP == SAME_BOTH_DIMS and not swizzled_colwise
 
     @staticmethod
     def single_tensor_cfg(cfg: MXFP8GroupQuantizeConfig) -> MXFP8QuantizeConfig:
@@ -72,8 +61,7 @@ class MXFP8GroupQuantizeSingleTensorViewKernel(MXFP8GroupQuantizeKernelBase):
     # pylint: disable-next=arguments-differ
     @staticmethod
     def supports(cfg: MXFP8GroupQuantizeConfig, kernel_cls: Type[MXFP8QuantizeKernelBase]) -> bool:
-        view = MXFP8GroupQuantizeSingleTensorViewKernel.view(cfg)
-        return view is not None and kernel_cls.supports(
+        return MXFP8GroupQuantizeSingleTensorViewKernel.has_view(cfg) and kernel_cls.supports(
             MXFP8GroupQuantizeSingleTensorViewKernel.single_tensor_cfg(cfg)
         )
 
@@ -86,17 +74,13 @@ class MXFP8GroupQuantizeSingleTensorViewKernel(MXFP8GroupQuantizeKernelBase):
         mS_row: cute.Tensor,
         mS_col: cute.Tensor,
     ):
-        """(x, o_row, s_row, o_col, s_col) of the single-tensor view, in the non-grouped
-        kernels' argument order. They are compiled for Int32 extents; the scales arrive as flat
-        buffers and are viewed at the 2D shapes TE allocates for a single (M, N) tensor."""
-        if cutlass.const_expr(self.VIEW == STACKED):
-            # Restate the divisibility the Int32 casts drop -- M by the compiled sym, N by the
-            # eligibility check -- so the vectorized GMEM copies can prove their alignment.
-            M = cute.assume(Int32(mX.shape[0]), divby=128)
-            N = cute.assume(Int32(mX.shape[1]), divby=128)
-        else:
-            M = Int32(Int64(mX.shape[0]) * Int64(mX.shape[1]) // 128)
-            N = 128
+        """(x, o_row, s_row, o_col, s_col) of the stacked view, in the non-grouped kernels'
+        argument order. They are compiled for Int32 extents; the scales arrive as flat buffers
+        and are viewed at the 2D shapes TE allocates for a single (M, N) tensor."""
+        # Restate the divisibility the Int32 casts drop -- M by the compiled sym, N by the
+        # eligibility check -- so the vectorized GMEM copies can prove their alignment.
+        M = cute.assume(Int32(mX.shape[0]), divby=128)
+        N = cute.assume(Int32(mX.shape[1]), divby=128)
         data_layout = cute.make_layout((M, N), stride=(N, 1))
         x = cute.make_tensor(mX.iterator, data_layout)
         o_row = s_row = o_col = s_col = None
@@ -126,11 +110,9 @@ class MXFP8GroupQuantizeSingleTensorViewKernel(MXFP8GroupQuantizeKernelBase):
     ) -> Boolean:
         # The non-grouped kernels index with Int32, so groups of 2^31 or more elements cannot
         # be viewed as one tensor.
-        view_ok = Int64(mX.shape[0]) * Int64(mX.shape[1]) < Int64(2**31)
-        if cutlass.const_expr(self.VIEW == STACKED):
-            # No scale padding: rows are already 128-aligned, and N % 128 == 0 leaves no padded
-            # rowwise (N / 32 % 4) or colwise (N % 128) columns.
-            view_ok = view_ok and mX.shape[1] % 128 == 0
+        # No scale padding: rows are already 128-aligned, and N % 128 == 0 leaves no padded
+        # rowwise (N / 32 % 4) or colwise (N % 128) columns.
+        view_ok = Int64(mX.shape[0]) * Int64(mX.shape[1]) < Int64(2**31) and mX.shape[1] % 128 == 0
         x, o_row, s_row, o_col, s_col = self._views(mX, mO_row, mO_col, mS_row, mS_col)
         return view_ok and self.kernel.eligible_to_dispatch(
             self.single_cfg, x, o_row, s_row, o_col, s_col, mNoop, None

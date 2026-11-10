@@ -6,7 +6,7 @@
 
 Holds the grouped config, the constants the grouped kernels share, and
 MXFP8GroupQuantizeEntry, which picks the kernel for a config: the single-tensor entry
-(quantize_mxfp8_common.py) on a stacked or flat view of the group, the GMEM-to-RMEM grouped
+(quantize_mxfp8_common.py) on the stacked view of a SAME_BOTH_DIMS group, the GMEM-to-RMEM grouped
 kernel (group_quantize_mxfp8_g2r.py), or the generic grouped kernel
 (group_quantize_mxfp8_general.py). Also compiles and registers the TVM-FFI function the C++
 bridge (group_quantize_mxfp8_cutedsl.cuh) calls.
@@ -207,13 +207,12 @@ class MXFP8GroupQuantizeEntry:
     instantiated at compile time, and each call runs the first one, in this priority order,
     whose runtime check passes:
 
-    1. A non-grouped GMEM-to-RMEM kernel on a single-tensor view of the group
+    1. A non-grouped GMEM-to-RMEM kernel on the stacked view of a SAME_BOTH_DIMS group
        (MXFP8GroupQuantizeSingleTensorViewKernel; 2-lane rowwise, register bidimensional, then
-       1-lane rowwise), where the group's data and scales are laid out as one tensor's.
-    2. The grouped GMEM-to-RMEM kernel (MXFP8GroupQuantizeG2RKernel), which addresses each
-       member on its own: BF16 plain casts with no single-tensor view (GEMM-swizzled colwise
-       scales, colwise passes of VARYING_LAST_DIM / VARYING_BOTH_DIMS, ...) or whose
-       non-grouped kernels cannot take the call (colwise only).
+       1-lane rowwise). Varying members may leave the buffer's tail unused, which a view
+       would quantize too.
+    2. The grouped GMEM-to-RMEM kernel (MXFP8GroupQuantizeG2RKernel), which quantizes each
+       member on its own: the other BF16 plain casts.
     3. Otherwise the generic grouped kernel (MXFP8GroupQuantizeKernel), which handles every
        config: dbias, fused (d)activations, FP16/FP32 cases the views do not cover, a set
        cast-noop flag, 2^31+ elements, and shapes or alignments the others reject.
