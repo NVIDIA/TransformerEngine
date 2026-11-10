@@ -22,6 +22,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -178,7 +179,7 @@ def time_kernels(factories, runs, warmup, keep):
                 sets[0]()  # JIT compile; also materializes outputs allocated per call
                 torch.cuda.synchronize()
             except RuntimeError as e:
-                print(f"Skipped a config: {str(e).strip().splitlines()[0]}", flush=True)
+                warnings.warn(f"Skipped a config: {str(e).strip().splitlines()[0]}")
                 num_sets.append(None)
                 continue
             count = max(2, -(-L2_ROTATION * l2_cache_bytes() // nbytes) + 1)
@@ -232,9 +233,9 @@ def time_kernels(factories, runs, warmup, keep):
         fallbacks += not any(e.name.startswith(CUTEDSL_PREFIX) for e in kept)
         results.append((times, "+".join(names), count))
     if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND") == "1" and fallbacks:
-        print(
-            f"WARNING: {fallbacks} of {sum(c is not None for c in num_sets)} configs ran CUDA"
-            " kernels (no CuTeDSL kernel for them in this TE build); see the kernel column."
+        warnings.warn(
+            f"{fallbacks} of {sum(c is not None for c in num_sets)} configs ran CUDA kernels (no"
+            " CuTeDSL kernel for them in this TE build); see the kernel column."
         )
     return results
 
@@ -306,11 +307,10 @@ def warn_if_te_not_built_from_source_tree(impl):
             " through TE's dispatch (see the kernel column) use that TE, which runs CUDA where"
             " it has no CuTeDSL kernel"
         )
-    print(
-        f"WARNING: the TE library in use ({library}) is not built from the source tree of this"
-        f" benchmark ({SOURCE_TREE}): {what}. Build this tree, or set PYTHONPATH to a build"
-        " of it, to benchmark its own.",
-        flush=True,
+    warnings.warn(
+        f"The TE library in use ({library}) is not built from the source tree of this benchmark"
+        f" ({SOURCE_TREE}): {what}. Build this tree, or set PYTHONPATH to a build of it, to"
+        " benchmark its own."
     )
 
 
