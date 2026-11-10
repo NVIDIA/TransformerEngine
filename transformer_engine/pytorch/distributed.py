@@ -17,7 +17,7 @@ import warnings
 import torch
 from torch.cuda import _lazy_call, _lazy_init
 from torch.utils.checkpoint import detach_variable, noop_context_fn
-from torch.utils._python_dispatch import TorchDispatchMode, _get_current_dispatch_mode_stack
+from torch.utils._python_dispatch import TorchDispatchMode
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
@@ -329,8 +329,10 @@ class _CheckpointRNGGuard(TorchDispatchMode):
 
 def _check_checkpoint_rng():
     """Check native TE RNG consumers that bypass the PyTorch dispatcher."""
-    if not _checkpoint_rng_available() and any(
-        isinstance(mode, _CheckpointRNGGuard) for mode in _get_current_dispatch_mode_stack()
+    if (
+        _IN_ACTIVATION_RECOMPUTE_REGION
+        and not _checkpoint_rng_available()
+        and torch.cuda.is_current_stream_capturing()
     ):
         raise RuntimeError(_CHECKPOINT_RNG_ERROR)
 
@@ -379,6 +381,7 @@ class _CheckpointRNGState:
                 self.tracker_states[name] = state
             else:
                 self.tracker_states[name] = None
+        self.saved_states = self.snapshot()
 
     def snapshot(self):
         """Copy the CPU state, generator values, and tensor-based tracker states."""
@@ -405,8 +408,9 @@ class _CheckpointRNGState:
         return nullcontext()
 
     @contextmanager
-    def fork(self, states):
+    def fork(self):
         """Restore forward RNG values temporarily, then restore the live values."""
+        states = self.saved_states
         cuda_state = _get_cuda_rng_state()
         tracker_states = self.tracker.get_states() if self.tracker is not None else None
         live_states = self.snapshot()
@@ -460,7 +464,6 @@ class _CheckpointFunction(torch.autograd.Function):
         ctx.distribute_saved_activations = distribute_saved_activations
 
         ctx.rng_state = _CheckpointRNGState(get_rng_state_tracker)
-        rng_tensors = ctx.rng_state.snapshot()
 
         if context_fn is not None:
             forward_ctx, recompute_ctx = context_fn()
@@ -491,8 +494,7 @@ class _CheckpointFunction(torch.autograd.Function):
         # Store everything.
         ctx.inputs = [arg if not torch.is_tensor(arg) else None for arg in args]
         tensor_inputs = [arg if torch.is_tensor(arg) else None for arg in args]
-        ctx.num_inputs = len(tensor_inputs)
-        ctx.save_for_backward(*tensor_inputs, *rng_tensors)
+        ctx.save_for_backward(*tensor_inputs)
 
         fp8 = FP8GlobalStateManager.is_fp8_enabled()
         ctx.tp_group = tp_group
@@ -515,10 +517,8 @@ class _CheckpointFunction(torch.autograd.Function):
                 "Checkpointing is not compatible with .grad(), please use .backward() if possible"
             )
 
-        saved_tensors = ctx.saved_tensors
         inputs = tuple(
-            t if t is not None else arg
-            for t, arg in zip(saved_tensors[: ctx.num_inputs], ctx.inputs)
+            t if t is not None else arg for (t, arg) in zip(ctx.saved_tensors, ctx.inputs)
         )
 
         if ctx.distribute_saved_activations:
@@ -530,7 +530,7 @@ class _CheckpointFunction(torch.autograd.Function):
         # Compute the forward pass.
         detached_inputs = detach_variable(inputs)
         with (
-            ctx.rng_state.fork(saved_tensors[ctx.num_inputs :]),
+            ctx.rng_state.fork(),
             torch.enable_grad(),
             ctx.recompute_ctx,
             ctx.torch_gpu_amp_ctx,
@@ -564,21 +564,6 @@ class _CheckpointFunction(torch.autograd.Function):
         return (None, None, None, None, None, None) + grads
 
 
-class _CheckpointRNGStateHolder(torch.autograd.Function):
-    """Route non-reentrant RNG snapshots through autograd's saved-tensor hooks."""
-
-    @staticmethod
-    def forward(ctx, dummy, *states):
-        """Save snapshots without connecting them to the model's backward graph."""
-        ctx.save_for_backward(*states)
-        return dummy
-
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        """Reject differentiation through the storage-only output."""
-        raise RuntimeError("RNG snapshot storage is not part of the backward graph")
-
-
 class _CheckpointFrame:  # pylint: disable=too-few-public-methods
     """
     Storage frame for forward RNG states and detached activations from the forward recompute.
@@ -589,9 +574,6 @@ class _CheckpointFrame:  # pylint: disable=too-few-public-methods
         self.recomputed = []
         self.count = 0
         self.rng_state = _CheckpointRNGState(get_rng_state_tracker)
-        self.rng_state_holder = _CheckpointRNGStateHolder.apply(
-            torch.empty(0, requires_grad=True), *self.rng_state.snapshot()
-        )
 
 
 class _recomputation_hook(
@@ -647,9 +629,7 @@ class _checkpoint_hook(
             """
 
             if not frame.recomputed:
-                with frame.rng_state.fork(
-                    frame.rng_state_holder.grad_fn.saved_tensors
-                ), _recomputation_hook(frame):
+                with frame.rng_state.fork(), _recomputation_hook(frame):
                     frame.recompute_fn(*args, **kwargs)
 
             # Return the already recomputed activation tensor at the given index

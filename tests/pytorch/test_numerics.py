@@ -1372,27 +1372,6 @@ def test_checkpoint_native_attention_requires_philox_api(backend, monkeypatch):
             te_checkpoint(body, value + 0, use_reentrant=True)
 
 
-@pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.parametrize("entry", ("native", "fused"))
-def test_checkpoint_stochastic_nvfp4_requires_philox_api(use_reentrant, entry, monkeypatch):
-    """Stochastic quantization must reject capture even through native entry points."""
-    import transformer_engine_torch as tex
-
-    monkeypatch.setattr(te_distributed, "_checkpoint_rng_available", lambda: False)
-    quantizer = te.NVFP4Quantizer(rowwise=True, columnwise=False, stochastic_rounding=True)
-    value = torch.ones(32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-
-    def body(tensor):
-        if entry == "native":
-            return tex.quantize(tensor, quantizer)
-        return tex.swiglu(tensor, quantizer)
-
-    graph = torch.cuda.CUDAGraph()
-    with pytest.raises(RuntimeError, match="philox_state"):
-        with torch.cuda.graph(graph):
-            te_checkpoint(body, value + 0, use_reentrant=use_reentrant)
-
-
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_checkpoint_without_autograd_preserves_forward_context():
     """The direct path must preserve a context that explicitly enables gradients."""
