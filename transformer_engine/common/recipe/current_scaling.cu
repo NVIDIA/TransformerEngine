@@ -70,8 +70,8 @@ __launch_bounds__(amax_kernel_threads) __global__
   max = reduce_max<amax_kernel_threads / THREADS_PER_WARP>(max, warp_id);
   if (threadIdx.x == 0) {
     atomicMaxFloat(amax, max);
-    if (amax2 != nullptr) {
-      atomicMaxFloat(amax2, max);
+    if (columnwise_amax != nullptr) {
+      atomicMaxFloat(columnwise_amax, max);
     }
   }
 }
