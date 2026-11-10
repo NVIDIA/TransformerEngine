@@ -222,7 +222,13 @@ backend-selection overview.
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Enable or disable FusedAttention backend (cuDNN-based) for DotProductAttention. When set to ``0``, FusedAttention will not be used.
+   :Description: Enable or disable FusedAttention backend (cuDNN-based) for DotProductAttention. When set to ``0``, FusedAttention will not be used. Deprecated in favor of :envvar:`NVTE_CUDNN_ATTN`; it is still read, without a warning.
+
+.. envvar:: NVTE_CUDNN_ATTN
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Alias of :envvar:`NVTE_FUSED_ATTN`. The FusedAttention backend is cuDNN's flash-algorithm attention; issues with it can be reported to `cudnn-frontend <https://github.com/NVIDIA/cudnn-frontend/issues>`_. Setting either variable to ``0`` disables FusedAttention.
 
 .. envvar:: NVTE_UNFUSED_ATTN
 

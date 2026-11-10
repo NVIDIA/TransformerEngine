@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """The utilities for Transformer Engine"""
 import inspect
+import os
 import warnings
 from enum import Enum
 
@@ -53,4 +54,16 @@ def deprecate_wrapper(obj, msg):
 
     raise NotImplementedError(
         f"deprecate_cls_wrapper only support Class and Function, but got {type(obj)}."
+    )
+
+
+def cudnn_attention_enabled() -> int:
+    """Whether the cuDNN attention backend (FusedAttention) is enabled.
+
+    ``NVTE_CUDNN_ATTN`` is an alias of ``NVTE_FUSED_ATTN``. Both default to 1 and either one set
+    to 0 disables the backend, so a value a framework sets in one never conflicts with a value
+    the user sets in the other.
+    """
+    return int(
+        bool(int(os.getenv("NVTE_FUSED_ATTN", "1")) and int(os.getenv("NVTE_CUDNN_ATTN", "1")))
     )
