@@ -236,8 +236,13 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     // At the moment, only use-case for fused GEMM:
     // Delayed scaling quantizer with per-tensor scaling inputs
     bool is_per_tensor_scaling_input = IsFloat8Tensor(A.ptr()) || IsFloat8Tensor(B.ptr());
-    if (IsFloat8Quantizers(quantizer.ptr()) && is_per_tensor_scaling_input)
+    if (IsFloat8Quantizers(quantizer.ptr()) && is_per_tensor_scaling_input) {
+      NVTE_CHECK(
+          !convert_quantizer(quantizer)->columnwise_usage || nvte_is_non_tn_fp8_gemm_supported(),
+          "Fused FP8 GEMM cannot produce a separate columnwise output. "
+          "Set columnwise_usage=False or quantize the GEMM output separately.");
       unfused_quantization_needed = false;
+    }
   }
 
   // Output tensor
