@@ -1561,6 +1561,9 @@ def _moe_fwd_rule(
         if dispatch_checkpoint_name is not None:
             recv_tokens = checkpoint_name(recv_tokens, dispatch_checkpoint_name)
             recv_topk_weights = checkpoint_name(recv_topk_weights, dispatch_checkpoint_name)
+            # Backward needs routing state as well as the dispatched activations.
+            handle_mem = checkpoint_name(handle_mem, dispatch_checkpoint_name)
+            token_counts = checkpoint_name(token_counts, dispatch_checkpoint_name)
         recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))
         recv_topk_weights = jax.lax.with_sharding_constraint(
             recv_topk_weights, NamedSharding(mesh, ep2_spec)
@@ -2160,7 +2163,8 @@ def moe(
         ``None`` leaves the value unnamed.
     dispatch_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the EP dispatch outputs.
-        ``None`` leaves these values unnamed; the opaque prepare handle is never named.
+        Includes the opaque routing handle and expert token counts needed by backward.
+        ``None`` leaves these values unnamed.
     mesh_resource : Optional[MeshResource]
         Physical parallelism resources. ``None`` uses the active
         ``global_shard_guard`` context; an explicit resource takes precedence.
