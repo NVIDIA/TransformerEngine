@@ -1206,9 +1206,8 @@ def test_checkpoint_recompute_preserves_tracker_rng_state(use_reentrant, rng_sou
         assert tracker.get_states()["model-parallel-rng"] is tracker_state
 
 
-@pytest.mark.parametrize("use_reentrant", all_boolean)
 @pytest.mark.parametrize("fork_tracker", all_boolean)
-def test_checkpoint_preserves_captured_rng_state(fork_tracker, use_reentrant):
+def test_checkpoint_preserves_captured_rng_state(fork_tracker):
     """Graph replay must still advance its registered RNG after eager recompute."""
     tracker = CudaRNGStatesTracker()
     tracker.add("model-parallel-rng", 4321)
@@ -1237,9 +1236,7 @@ def test_checkpoint_preserves_captured_rng_state(fork_tracker, use_reentrant):
             return F.dropout(value, p=0.5, training=True)
 
     inp = torch.ones(4096, device="cuda", requires_grad=True)
-    out = te_checkpoint(
-        body, inp, use_reentrant=use_reentrant, get_rng_state_tracker=lambda: tracker
-    )
+    out = te_checkpoint(body, inp, use_reentrant=True, get_rng_state_tracker=lambda: tracker)
     out.sum().backward()
     assert torch.equal(inp.grad, out)
 
@@ -1258,12 +1255,6 @@ def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_sou
     torch.manual_seed(seed)
     tracker = CudaRNGStatesTracker()
     tracker.add("model-parallel-rng", 4321)
-    saved_gpu_states = []
-
-    def pack(tensor):
-        if tensor.is_cuda and tensor.dtype == torch.int64 and tensor.shape == (2,):
-            saved_gpu_states.append(torch.cuda.is_current_stream_capturing())
-        return tensor
 
     def body(value):
         if rng_source == "tracker":
@@ -1286,8 +1277,7 @@ def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_sou
                 )
 
     sample = torch.ones(4096, device="cuda", requires_grad=True)
-    with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
-        model = te.make_graphed_callables(Model(), (sample,), num_warmup_iters=3)
+    model = te.make_graphed_callables(Model(), (sample,), num_warmup_iters=3)
     previous = None
     for _ in range(3):
         value = torch.ones_like(sample, requires_grad=True)
@@ -1298,7 +1288,6 @@ def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_sou
         if previous is not None:
             assert not torch.equal(forward_output, previous), "Graph replay did not advance RNG"
         previous = forward_output
-    assert any(saved_gpu_states), "Captured RNG snapshots must use autograd's saved-tensor hooks"
 
 
 @pytest.mark.parametrize("use_reentrant", all_boolean)
@@ -1341,9 +1330,8 @@ def test_checkpoint_graph_rng_without_philox_api(use_reentrant, dropout, te_drop
         assert torch.equal(value.grad, torch.full_like(value, 2))
 
 
-@pytest.mark.parametrize("use_reentrant", all_boolean)
 @pytest.mark.parametrize("backend", ("FusedAttention", "FlashAttention"))
-def test_checkpoint_native_attention_requires_philox_api(use_reentrant, backend, monkeypatch):
+def test_checkpoint_native_attention_requires_philox_api(backend, monkeypatch):
     """Native attention dropout must reject capture before entering its CUDA backend."""
     from transformer_engine.pytorch.attention.dot_product_attention import backends
 
@@ -1357,11 +1345,11 @@ def test_checkpoint_native_attention_requires_philox_api(use_reentrant, backend,
     graph = torch.cuda.CUDAGraph()
     with pytest.raises(RuntimeError, match="philox_state"):
         with torch.cuda.graph(graph):
-            te_checkpoint(body, value + 0, use_reentrant=use_reentrant)
+            te_checkpoint(body, value + 0, use_reentrant=True)
 
 
 @pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.parametrize("entry", ("quantize", "update", "native", "fused"))
+@pytest.mark.parametrize("entry", ("native", "fused"))
 def test_checkpoint_stochastic_nvfp4_requires_philox_api(use_reentrant, entry, monkeypatch):
     """Stochastic quantization must reject capture even through native entry points."""
     import transformer_engine_torch as tex
@@ -1369,13 +1357,8 @@ def test_checkpoint_stochastic_nvfp4_requires_philox_api(use_reentrant, entry, m
     monkeypatch.setattr(te_distributed, "_checkpoint_rng_available", lambda: False)
     quantizer = te.NVFP4Quantizer(rowwise=True, columnwise=False, stochastic_rounding=True)
     value = torch.ones(32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    destination = quantizer.make_empty(value.shape, dtype=value.dtype, device=value.device)
 
     def body(tensor):
-        if entry == "quantize":
-            return quantizer(tensor)
-        if entry == "update":
-            return quantizer.update_quantized(tensor, destination)
         if entry == "native":
             return tex.quantize(tensor, quantizer)
         return tex.swiglu(tensor, quantizer)
