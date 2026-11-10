@@ -654,7 +654,6 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         tma_dst_out_col: Optional[cute.Tensor],
     ) -> None:
         cfg = self.cfg
-        FP8_DTYPE = cfg.FP8_DTYPE
         tidx, _, _ = cute.arch.thread_idx()
         bidx, bidy, _ = cute.arch.block_idx()
         gdx, _, _ = cute.arch.grid_dim()
