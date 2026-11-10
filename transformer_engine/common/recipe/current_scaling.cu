@@ -78,9 +78,9 @@ __launch_bounds__(amax_kernel_threads) __global__
 
 template <int nvec, typename InputType>
 void launch_amax_kernel(const InputType *input, float *amax, const size_t N, const float *noop_ptr,
-                        cudaStream_t stream, float *amax2 = nullptr) {
+                        cudaStream_t stream, float *columnwise_amax = nullptr) {
   // Zero out amax (and the optional second output) so we can update with atomic max
-  zero_amax_kernel<<<1, 1, 0, stream>>>(amax, amax2, noop_ptr);
+  zero_amax_kernel<<<1, 1, 0, stream>>>(amax, columnwise_amax, noop_ptr);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
   // Return immediately if tensor is empty
