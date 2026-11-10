@@ -843,13 +843,16 @@ class TestEP(_EpTestCase):
             tokens_p.grad.float(), torch.full_like(tokens_p, float(TOP_K)).float(), atol=0, rtol=0
         )
 
+    @_zero_copy_test_include
     def test_dispatch_nvfp4_capture(self):
         """NVFP4 dispatch captured in a CUDA graph with caller recv buffers: a replay with new
-        tokens decodes the new tokens into the caller buffer, bounded by the replay's counts."""
+        tokens decodes the new tokens into the caller buffer, bounded by the replay's counts.
+        Under zero-copy the caller buffers are symm-mem and the packed rows land in the buffer's
+        persistent symm-mem scratch, so capture allocates nothing from the symm-mem pool."""
         if EAGER:
             self.skipTest("capture requires non-eager static recv capacity")
         self._require_nvfp4_shapes()
-        recv_buf, rw_buf = self._caller_recv()
+        recv_buf, rw_buf = self._caller_recv_symm() if ZERO_COPY else self._caller_recv()
         buf = self._make_buffer(dispatch_fwd_quant_recipe=NVFP4BlockScaling())
         topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
         static_tokens = tokens.clone()
@@ -861,6 +864,7 @@ class TestEP(_EpTestCase):
             )
 
         graph = self._capture(step)
+        self._assert_nvfp4_scratch(buf)
         new_tokens = (tokens.float() * -3.0 + 0.125).to(torch.bfloat16)
         static_tokens.copy_(new_tokens)
         recv_buf.zero_()
@@ -870,6 +874,23 @@ class TestEP(_EpTestCase):
         ref_recv, ref_tc = self._nvfp4_dispatch_ref(new_tokens, topk_idx, w)
         self.assertEqual(int(buf.tokens_per_expert.sum().item()), int(ref_tc.sum().item()))
         self._assert_rows_match_per_expert(recv_buf, ref_recv, ref_tc)
+
+    def _caller_recv_symm(self):
+        """Persistent symm-mem recv token + weight buffers for a zero-copy capture."""
+        rc = self.cfg.recv_capacity_per_rank
+        return (
+            symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group),
+            symm_mem_alloc((rc,), torch.float32, self.ep_group),
+        )
+
+    def _assert_nvfp4_scratch(self, buf):
+        """Under zero-copy the BF16-decode path keeps its packed landing as a persistent
+        symm-mem scratch on the buffer; otherwise it allocates per call and keeps none."""
+        if ZERO_COPY:
+            self.assertIsNotNone(buf.nvfp4_packed_scratch)
+            self.assertTrue(is_symm_backed(buf.nvfp4_packed_scratch))
+        else:
+            self.assertIsNone(buf.nvfp4_packed_scratch)
 
     @_eager_test_include
     @_zero_copy_test_include
@@ -986,9 +1007,12 @@ class TestEP(_EpTestCase):
         ref = self._combine_bwd_bf16_ref(tokens, topk_idx, w, rc, decoded)
         self._assert_rows_match_per_expert(gbuf[:n], ref[:n], tc)
 
+    @_zero_copy_test_include
     def test_combine_bwd_nvfp4_capture(self):
         """NVFP4 combine fwd+bwd captured in a CUDA graph: each replay decodes the replay's grad
-        exactly into the caller grad_out, and draws fresh stochastic-rounding bits."""
+        exactly into the caller grad_out, and draws fresh stochastic-rounding bits. Under
+        zero-copy the combine input and grad_out are symm-mem and the packed rows land in the
+        buffer's persistent symm-mem scratch, so capture allocates nothing from the pool."""
         if EAGER:
             self.skipTest("capture requires non-eager static recv capacity")
         self._require_nvfp4_shapes()
@@ -997,8 +1021,14 @@ class TestEP(_EpTestCase):
         buf = self._make_buffer(combine_bwd_quant_recipe=NVFP4BlockScaling())
         _recv, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)  # fixes the routing
         torch.cuda.synchronize()
-        gbuf = torch.zeros(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
-        src = torch.zeros(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        if ZERO_COPY:
+            gbuf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
+            src = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
+            gbuf.zero_()
+            src.zero_()
+        else:
+            gbuf = torch.zeros(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+            src = torch.zeros(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
         src.requires_grad_(True)
         static_grad = self._combine_grad(buf.max_tokens_per_rank)
 
@@ -1008,6 +1038,7 @@ class TestEP(_EpTestCase):
 
         with self._RecordPack() as rec:
             graph = self._capture(step)
+            self._assert_nvfp4_scratch(buf)
             static_grad.copy_((static_grad.float() * -2.0 + 0.0625).to(torch.bfloat16))
             gbuf.zero_()
             graph.replay()

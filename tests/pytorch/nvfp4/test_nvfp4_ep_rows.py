@@ -403,6 +403,39 @@ def test_sr_pack_and_receive_cuda_graph_fresh_bits():
     assert not torch.equal(snaps[0][1], snaps[1][1]), "receive must draw fresh bits per replay"
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2 GPUs")
+def test_ops_run_on_input_device():
+    """The pack, decode and direct receive run on their input's device, with that device's RNG,
+    not on the current device: tensors on cuda:1 while cuda:0 is current give the same result
+    as with cuda:1 current, and only cuda:1's generator advances."""
+    hidden, sign_mask, seed = 512, 0x5A5A, 1234
+    dev = torch.device("cuda", 1)
+    gens = torch.cuda.default_generators
+
+    def run():
+        torch.cuda.manual_seed_all(seed)
+        offsets = [gens[0].get_offset(), gens[1].get_offset()]
+        packed = tex.ep_nvfp4_pack(x, False)
+        out = [packed, tex.ep_nvfp4_pack(x, True), tex.ep_nvfp4_unpack(packed, hidden, counts)]
+        out += tex.ep_nvfp4_direct_receive(packed, hidden, counts, sign_mask, False)
+        out += tex.ep_nvfp4_direct_receive(packed, hidden, counts, sign_mask, True)
+        torch.cuda.synchronize(dev)
+        advanced = [gens[0].get_offset() - offsets[0], gens[1].get_offset() - offsets[1]]
+        return out, advanced
+
+    with torch.cuda.device(dev):
+        x = _tokens(512, hidden, seed=3)
+        counts = torch.tensor([256, 256], dtype=torch.int64, device=dev)
+        ref, ref_advanced = run()
+    with torch.cuda.device(0):
+        got, advanced = run()
+    assert ref_advanced[0] == 0 and ref_advanced[1] > 0
+    assert advanced == ref_advanced, "stochastic calls must draw from the input device's RNG"
+    for g, r in zip(got, ref):
+        assert g.device == dev
+        assert torch.equal(g, r)
+
+
 def _grouped_mlp(group_size, hidden, recipe, weight_requires_grad):
     with te.quantized_model_init(enabled=True, recipe=recipe):
         fc1 = te.ops.GroupedLinear(

@@ -7,6 +7,7 @@
 // NVFP4 token rows for the EP dispatch and combine backward. Independent of NCCL EP.
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include <optional>
 #include <vector>
@@ -42,6 +43,8 @@ at::Tensor make_rng_state(size_t elts_per_thread) {
 
 at::Tensor ep_nvfp4_pack(const at::Tensor &tokens, bool stochastic) {
   NVTE_CHECK(tokens.is_cuda() && tokens.dim() == 2, "tokens must be a 2D CUDA tensor.");
+  // Launch, allocate and draw RNG state on the input's device, not the current one.
+  const at::cuda::CUDAGuard device_guard(tokens.device());
   const auto x = tokens.contiguous();
   auto packed = at::empty({x.size(0), nvfp4_row_bytes(x.size(1))}, x.options().dtype(at::kByte));
   std::optional<at::Tensor> rng_state;
@@ -63,6 +66,7 @@ at::Tensor ep_nvfp4_unpack(const at::Tensor &packed, int64_t hidden,
                            std::optional<at::Tensor> counts, std::optional<at::Tensor> out) {
   NVTE_CHECK(packed.is_cuda() && packed.dim() == 2 && packed.scalar_type() == at::kByte,
              "packed must be a 2D uint8 CUDA tensor.");
+  const at::cuda::CUDAGuard device_guard(packed.device());
   const auto p = packed.contiguous();
   if (!out) {
     out = at::empty({p.size(0), hidden}, p.options().dtype(at::kBFloat16));
@@ -90,6 +94,7 @@ std::vector<at::Tensor> ep_nvfp4_direct_receive(const at::Tensor &packed, int64_
   NVTE_CHECK(packed.is_cuda() && packed.dim() == 2 && packed.scalar_type() == at::kByte,
              "packed must be a 2D uint8 CUDA tensor.");
   NVTE_CHECK(counts.scalar_type() == at::kLong, "counts must be int64.");
+  const at::cuda::CUDAGuard device_guard(packed.device());
   const auto p = packed.contiguous();
   const auto c = counts.contiguous();
   const int64_t capacity = p.size(0);

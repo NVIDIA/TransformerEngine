@@ -331,6 +331,7 @@ class EpBuffer:
         "total_recv_tokens",
         "dispatch_fwd_quant_recipe",
         "combine_bwd_quant_recipe",
+        "nvfp4_packed_scratch",
     )
 
     def __init__(
@@ -372,6 +373,8 @@ class EpBuffer:
         self.zero_copy = bool(tex.ep_get_zero_copy())
         self.dispatch_fwd_quant_recipe = dispatch_fwd_quant_recipe
         self.combine_bwd_quant_recipe = combine_bwd_quant_recipe
+        # Zero-copy landing for NVFP4 rows that are decoded to BF16 (see _nvfp4_landing).
+        self.nvfp4_packed_scratch = None
 
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
@@ -679,11 +682,25 @@ def _nvfp4_gemm_recipe(buffer: "EpBuffer", rows: int, grad: bool):
     return recipe
 
 
-def _nvfp4_landing(buf, rows: int, row_bytes: int, device, zero_copy: bool) -> torch.Tensor:
+def _nvfp4_landing(
+    buf, rows: int, row_bytes: int, device, zero_copy: bool, buffer: Optional["EpBuffer"] = None
+) -> torch.Tensor:
     """Receive buffer for ``rows`` packed NVFP4 rows, as the BF16 view the EP ops copy. Carved from
-    a caller buffer when given (so a persistent or symm-mem buffer backs it), else allocated."""
+    a caller buffer when given (so a persistent or symm-mem buffer backs it). Otherwise, under
+    zero-copy with ``buffer`` given (the rows are decoded to BF16 right after the receive), a
+    persistent symm-mem scratch kept on ``buffer``: allocated on first use outside capture and
+    reused after, so a captured decode path allocates nothing from the symm-mem pool. Else
+    allocated."""
     if buf is None:
-        return _alloc_io((rows, row_bytes // 2), torch.bfloat16, device, zero_copy)
+        if not zero_copy or buffer is None:
+            return _alloc_io((rows, row_bytes // 2), torch.bfloat16, device, zero_copy)
+        need = rows * row_bytes
+        scratch = buffer.nvfp4_packed_scratch
+        if scratch is None or scratch.numel() < need:
+            capacity = max(rows, buffer.recv_capacity_per_rank or 0) * row_bytes
+            scratch = _alloc_io((capacity,), torch.uint8, device, zero_copy)
+            buffer.nvfp4_packed_scratch = scratch
+        return scratch[:need].view(torch.bfloat16).view(rows, row_bytes // 2)
     if not buf.is_contiguous():
         raise ValueError("NVFP4 receive buffer must be contiguous.")
     flat = buf.view(-1).view(torch.uint8)
@@ -922,7 +939,12 @@ def _ep_prepare_and_dispatch_nvfp4_fwd(
         gemm_recipe = _nvfp4_gemm_recipe(buffer, num_recv_tokens, grad=False)
         direct = gemm_recipe is not None
         recv_packed = _nvfp4_landing(
-            recv_tokens if direct else None, num_recv_tokens, row_bytes, device, buffer.zero_copy
+            recv_tokens if direct else None,
+            num_recv_tokens,
+            row_bytes,
+            device,
+            buffer.zero_copy,
+            buffer=None if direct else buffer,
         )
         if recv_topk_weights is None:
             recv_topk_weights = _alloc_io(
@@ -1084,6 +1106,9 @@ class _CombineState:
     # NVFP4 combine backward: the NVFP4 autocast recipe when the backward returns FC2's
     # grad_output as a GroupedTensor (decided in the forward, where autocast is visible).
     nvfp4_gemm_recipe: object = None
+    # NVFP4 combine backward: the EpBuffer whose persistent zero-copy scratch receives the packed
+    # rows when they are decoded to BF16 (see _nvfp4_landing).
+    nvfp4_buffer: object = None
 
 
 def _ep_combine_fwd(
@@ -1118,6 +1143,7 @@ def _ep_combine_fwd(
     )
     if _is_nvfp4_recipe(bwd_quant_recipe):
         state.nvfp4_gemm_recipe = _nvfp4_gemm_recipe(buffer, expert_out.shape[0], grad=True)
+        state.nvfp4_buffer = buffer
     return result, state
 
 
@@ -1195,6 +1221,7 @@ def _ep_combine_bwd_nvfp4(state: "_CombineState", g_result: torch.Tensor):
         packed.shape[-1],
         state.device,
         state.zero_copy,
+        buffer=None if gemm_recipe is not None else state.nvfp4_buffer,
     )
     if state.eager:
         tex.ep_combine_bwd(state.handle_mem, packed.view(torch.bfloat16), ge_packed, None, None)
@@ -1442,6 +1469,8 @@ def ep_dispatch(
     lands the packed rows in it. Eager mode sizes the recv outputs
     per step and forbids caller-supplied buffers. Under zero-copy, leaving them None allocates from
     the symm-mem pool, which is not CUDA-graph capturable; pass persistent buffers to capture a graph.
+    When NVFP4 recv is decoded to bfloat16 under zero-copy, the packed rows land in a persistent
+    symm-mem scratch on ``buffer``, allocated by the first call, so run one step before capture.
 
     Returns (recv_tokens, recv_topk_weights, tokens_per_expert); tokens_per_expert is non-diff. See
     ``buffer.total_recv_tokens`` for the per-step recv total.
@@ -1499,7 +1528,8 @@ def ep_combine(
     ``ep_dispatch``; the packed rows land in ``grad_out``), else a bfloat16 grad decoded into
     ``grad_out``. Eager mode sizes the grad target per step and forbids a caller-supplied buffer. Under zero-copy, leaving it None
     allocates from the symm-mem pool, which is not CUDA-graph capturable; pass a persistent buffer to
-    capture a graph. Result shape is (num_local_tokens, hidden_dim); num_local_tokens defaults to
+    capture a graph (the NVFP4 bfloat16 decode path also needs one step before capture, see
+    ``ep_dispatch``). Result shape is (num_local_tokens, hidden_dim); num_local_tokens defaults to
     buffer.max_tokens_per_rank.
     """
     _require_bf16("expert_out", expert_out)
