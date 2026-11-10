@@ -24,8 +24,9 @@ git checkout $TARGET_BRANCH
 git submodule update --init --recursive
 
 # Install deps. The core library wheel is built in an isolated environment, but the
-# metapackage, wheel repacking, and framework sdists still use this interpreter.
-/opt/python/cp310-cp310/bin/pip install pybind11[global] setuptools wheel
+# metapackage, wheel repacking, and framework sdists still use this interpreter. The JAX
+# sdist looks up the cuDNN frontend headers.
+/opt/python/cp310-cp310/bin/pip install pybind11[global] setuptools wheel 'nvidia-cudnn-frontend>=1.25.0'
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
