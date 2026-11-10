@@ -187,7 +187,7 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
       launch_amax_kernel<nvec>(reinterpret_cast<const IType *>(input.data.dptr), amax_ptr,
-                               input.data.numel(), noop_ptr, stream, amax2_ptr););  // NOLINT(*)
+                               input.data.numel(), noop_ptr, stream, columnwise_amax););  // NOLINT(*)
 }
 
 void group_compute_amax_impl(const NVTEGroupedTensor input_, NVTEGroupedTensor output_,
