@@ -257,6 +257,7 @@ def gated_quantize_colwise_split_tile(
     )
     sAct_t = cute.composition(sAct_tile, tv_layout)[tidx, None]
     sGate_t = cute.composition(sGate_tile, tv_layout)[tidx, None]
+    sYGrad_t = None
     if cutlass.const_expr(IS_BWD):
         sYGrad_t = cute.composition(sYGrad_tile, tv_layout)[tidx, None]
     if cutlass.const_expr(is_packed16(DTYPE)):
@@ -360,6 +361,7 @@ def gated_quantize_rowwise_tile(
 
     sAct_t = thread_row(sAct_tile)
     sGate_t = thread_row(sGate_tile)
+    sYGrad_t = None
     if cutlass.const_expr(IS_BWD):
         sYGrad_t = thread_row(sYGrad_tile)
     if cutlass.const_expr(is_packed16(DTYPE)):
