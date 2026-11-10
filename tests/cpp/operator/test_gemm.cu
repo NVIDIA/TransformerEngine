@@ -111,7 +111,7 @@ std::string gemm_test_name(const testing::TestParamInfo<GemmTestParams> &info) {
 /* Check D = alpha * op(A) * op(B) + beta * C
  *
  * If with_C is true, C and D are in different buffers. Otherwise, C
- * is NULL and beta is zero.
+ * is NULL and treated as zero.
  */
 void run_gemm_test(const GemmTestParams &params, bool with_C) {
   const auto [input_dtype, output_dtype] = std::get<0>(params);
@@ -148,7 +148,7 @@ void run_gemm_test(const GemmTestParams &params, bool with_C) {
 
   // Scaling factors are powers of two so the result is exact
   const float alpha = 2.f;
-  const float beta = with_C ? 0.5f : 0.f;
+  const float beta = 0.5f;
   float A_scale_inv = 1.f, B_scale_inv = 1.f, D_scale = 1.f;
   if (fp8_input) {
     A_scale_inv = 2.f;
@@ -170,7 +170,8 @@ void run_gemm_test(const GemmTestParams &params, bool with_C) {
 
   // Check output
   const auto D_ref = reference_gemm(A_values, transa, B_values, transb, C_values,
-                                    alpha * A_scale_inv * B_scale_inv, beta, m, n, k);
+                                    alpha * A_scale_inv * B_scale_inv, with_C ? beta : 0.f,
+                                    m, n, k);
   const auto D_ref_cast = cast_values(D_ref, output_dtype, D_scale);
   const auto [atol, rtol] = getTolerances(output_dtype);
   compareResults("D", D, D_ref_cast.data(), true, atol, rtol);
@@ -235,11 +236,6 @@ TEST(GemmTest, InvalidAccumulationInput) {
   EXPECT_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &beta,
                                    C_wrong_shape.data(), D.data(), workspace.data(), nullptr, 0),
                std::runtime_error);
-
-  // C is required if beta is non-zero
-  EXPECT_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &beta, nullptr,
-                                   D.data(), workspace.data(), nullptr, 0),
-               std::runtime_error);
 }
 
 /* GEMM with FP8 output and C that is incompatible with D */
@@ -257,12 +253,10 @@ TEST(GemmTest, InvalidAccumulationInputWithFP8Output) {
   const float zero = 0.f;
   const float beta = 1.f;
 
-  // FP8 output passed as C is not read if beta is zero
-  EXPECT_NO_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &zero, D.data(),
-                                      D.data(), workspace.data(), nullptr, 0));
-  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-
-  // FP8 output cannot be accumulated in-place
+  // FP8 output cannot be accumulated in-place, even if beta is zero
+  EXPECT_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &zero, D.data(),
+                                   D.data(), workspace.data(), nullptr, 0),
+               std::runtime_error);
   EXPECT_THROW(nvte_cublas_gemm_v2(true, false, &alpha, A.data(), B.data(), &beta, D.data(),
                                    D.data(), workspace.data(), nullptr, 0),
                std::runtime_error);

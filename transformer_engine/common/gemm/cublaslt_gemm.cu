@@ -452,6 +452,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *input
   const bool nvfp4_tensor_scaling =
       is_nvfp_scaling(inputA->scaling_mode) && is_nvfp_scaling(inputB->scaling_mode);
 
+  // Missing accumulation input is treated as zero
+  const float zero = 0.f;
+  if (inputC == nullptr) {
+    beta = alpha_beta_on_device ? GetScalarZero() : &zero;
+  }
+
   // Update scaling factors with NVFP4 tensor scales
   // TODO Fix bug where amax is ignored when alpha and beta are on device
   if (use_fp4 && nvfp4_tensor_scaling && !alpha_beta_on_device) {
@@ -533,7 +539,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *input
   }
 
   // Accumulation input, which cuBLAS reads with the same layout as D.
-  // If there is none, beta is zero and cuBLAS does not read C.
+  // If there is none, beta was set to zero and cuBLAS does not read C.
   void *C = nullptr;
   cudaDataType_t C_type = D_type;
   if (inputC != nullptr) {
@@ -1011,16 +1017,6 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
   if (config != nullptr) {
     config_ = *reinterpret_cast<MatmulConfig *>(config);
   }
-
-  // FP8 output cannot be accumulated in-place, so passing D as C means there is
-  // no accumulation input. This keeps calls written for the C == D API working.
-  if (C_tensor == D_tensor && is_fp8_dtype(D_tensor->data.dtype)) {
-    C_tensor = nullptr;
-  }
-
-  // Accumulation input is only optional if it is not read
-  NVTE_CHECK(C_tensor != nullptr || config_.alpha_beta_on_device || *beta == 0,
-             "GEMM requires accumulation input C if beta is non-zero (beta=", *beta, ").");
 
   // Configure GEMM epilogue
   const bool with_grad_epilogue = (config_.dbias_tensor != nullptr || config_.with_dgelu_epilogue);
