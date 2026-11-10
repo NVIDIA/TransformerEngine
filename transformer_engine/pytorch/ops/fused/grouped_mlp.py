@@ -433,17 +433,6 @@ def _group_quantize_with_amax_for_grouped_mlp(
     )
 
 
-def _fc2_x_amax_reuse_enabled() -> bool:
-    """Whether the backward reuses the forward NVFP4 amax of a recomputed fc2 input.
-
-    The grouped dSReLU kernel regenerates fc2_x bit-exactly from the saved pre-activation,
-    so the per-group amax computed in the forward is also the amax of the regenerated
-    tensor. Reusing it turns the backward re-quantization into a single cast kernel.
-    ``NVTE_FUSED_GROUPED_MLP_REUSE_FC2_X_AMAX=0`` disables the reuse.
-    """
-    return int(os.environ.get("NVTE_FUSED_GROUPED_MLP_REUSE_FC2_X_AMAX", "1")) > 0
-
-
 def _nvfp4_group_hadamard_amax(
     tensor: torch.Tensor,
     quantizer: Quantizer,
@@ -2049,10 +2038,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             and _grouped_gemm_dsrelu_backward_supported()
             and _nvidia_cudnn_frontend_supports_wgrad()
         )
-        # Forward (pre-RHT, post-RHT) amax of fc2_x, kept for its column-wise re-quantization
-        # in the backward when the regenerated tensor is bit-identical to this one.
+        # Forward (pre-RHT, post-RHT) amax of fc2_x. The dSReLU kernel regenerates fc2_x
+        # bit-exactly, so the backward reuses this amax and its column-wise
+        # re-quantization is a single cast kernel.
         fc2_x_amaxes_for_recompute = None
-        reuse_fc2_x_amax = recompute_srelu_fc2_x and _fc2_x_amax_reuse_enabled()
 
         # Unpack kernel outputs
         if use_nvfp4:
@@ -2068,7 +2057,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_in = fc1_kernel_out["d_tensor"]
                 fc2_in = fc2_in.view(in_shape[0], fc2_weight_shape[1]).contiguous()
                 fc2_x_amaxes = None
-                if reuse_fc2_x_amax:
+                if recompute_srelu_fc2_x:
                     fc2_x_amaxes = _nvfp4_group_hadamard_amax(
                         fc2_in,
                         fc2_input_quantizer,
@@ -2113,7 +2102,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     tensor_offsets=fc2_x_tensor_offsets,
                     use_dense_single_group=use_dense_single_group,
                 )
-                if reuse_fc2_x_amax:
+                if recompute_srelu_fc2_x:
                     fc2_x_amaxes_for_recompute = fc2_x_amaxes
             elif kernel_impl == "gemm_act_rht_quant":
                 # Unpack NVFP4 output
