@@ -2034,7 +2034,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Forward (pre-RHT, post-RHT) amax of fc2_x. The dSReLU kernel regenerates fc2_x
         # bit-exactly, so the backward reuses this amax and its column-wise
         # re-quantization is a single cast kernel.
-        fc2_x_amaxes_for_recompute = None
+        fc2_x_amaxes_for_recompute = (None, None)
 
         # Unpack kernel outputs
         if use_nvfp4:
@@ -2444,6 +2444,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 scales,
                 saved_grouped_fc2_x,
                 *fc2_weight_tensors,
+                *fc2_x_amaxes_for_recompute,
             )
 
             fc1_ctx.input_quantizers = [fc1_input_quantizer]
@@ -2467,7 +2468,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_ctx.input_requires_grad = input_requires_grad
             fc2_ctx.weight_requires_grad = weight_requires_grad
             fc2_ctx.recompute_input_from_dsrelu = recompute_fc2_x
-            fc2_ctx.fc2_x_amaxes_for_recompute = fc2_x_amaxes_for_recompute
 
         return fc2_out, [(), (), ()]
 
@@ -2516,7 +2516,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         #          fc2_x_tensor_offsets, fc2_out_tensor_offsets,
         #          grouped_fc1_x, *fc1_weights,
         #          activation_in, scales,
-        #          grouped_fc2_x, *fc2_weights]
+        #          grouped_fc2_x, *fc2_weights,
+        #          fc2_x_amax, fc2_x_post_rht_amax]
         saved_tensors = fc1_ctx.saved_tensors
         (
             split_sizes,
@@ -2555,6 +2556,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 saved_tensors[:num_groups],
                 saved_tensors[num_groups:],
             )
+        fc2_x_amax, fc2_x_post_rht_amax = saved_tensors[:2]
 
         # Group splits
         if int(split_sizes.numel()) != num_groups:
@@ -2955,9 +2957,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_input_quantizer = fc2_ctx.input_quantizers[0]
                 fc2_input_quantizer.set_usage(rowwise=False, columnwise=True)
                 fc2_input_quantizer.optimize_for_gemm = True
-                fc2_x_amaxes = fc2_ctx.fc2_x_amaxes_for_recompute
-                fc2_ctx.fc2_x_amaxes_for_recompute = None
-                if fc2_x_amaxes is not None:
+                if fc2_x_amax is not None:
                     # The regenerated fc2_x is bit-identical to the forward one, so its
                     # forward amax applies and the Hadamard amax pass is skipped.
                     grouped_fc2_x = _group_quantize_with_amax_for_grouped_mlp(
@@ -2965,7 +2965,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc2_input_quantizer,
                         num_groups,
                         split_sizes,
-                        *fc2_x_amaxes,
+                        fc2_x_amax,
+                        fc2_x_post_rht_amax,
                         tensor_offsets=fc2_x_tensor_offsets,
                         use_dense_single_group=use_dense_single_group,
                     )
