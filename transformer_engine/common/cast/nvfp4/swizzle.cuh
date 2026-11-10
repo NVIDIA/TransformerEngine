@@ -12,6 +12,7 @@
 #define TRANSFORMER_ENGINE_COMMON_CAST_NVFP4_SWIZZLE_CUH_
 
 #include <cstddef>
+#include <cstdint>
 
 namespace transformer_engine {
 namespace dispatch {
@@ -48,6 +49,31 @@ __device__ __forceinline__ size_t gemm_swizzled_scale_idx(size_t row_idx, size_t
   const size_t cbg_cnt = (col_length + kColsPerBaseBlockCol - 1) / kColsPerBaseBlockCol;
   // Row-major offset in the logical (rb_cnt, cbg_cnt, 32, 4, 4) shape.
   return ((rb * cbg_cnt + cbg) * kRowsPerBaseBlockCol + d3) * 16 + d4 * kColsPerBaseBlockCol + d5;
+}
+
+/*! \brief Store \p count consecutive compact scales of one row at their GEMM-swizzled offsets.
+ *
+ *  \p src holds the scales of compact columns \p col_idx .. \p col_idx + \p count - 1 of row
+ *  \p row_idx. In the swizzled layout the scales of columns 4c .. 4c+3 of a row are 4 contiguous bytes
+ *  at a 4-aligned offset, so whole groups of four are written with one aligned 32-bit store: the same
+ *  bytes at the same addresses as per-scale stores. Misaligned cases fall back to byte stores.
+ */
+template <typename ScaleT>
+__device__ __forceinline__ void store_gemm_swizzled_scales(ScaleT *dst, const ScaleT *src,
+                                                           size_t row_idx, size_t col_idx,
+                                                           size_t col_length, int count) {
+  static_assert(sizeof(ScaleT) == 1, "NVFP4 scales are 1 byte wide.");
+  int k = 0;
+  if (col_idx % 4 == 0 && reinterpret_cast<uintptr_t>(src) % 4 == 0 &&
+      reinterpret_cast<uintptr_t>(dst) % 4 == 0) {
+    for (; k + 4 <= count; k += 4) {
+      const size_t off = gemm_swizzled_scale_idx(row_idx, col_idx + k, col_length);
+      *reinterpret_cast<uint32_t *>(dst + off) = *reinterpret_cast<const uint32_t *>(src + k);
+    }
+  }
+  for (; k < count; ++k) {
+    dst[gemm_swizzled_scale_idx(row_idx, col_idx + k, col_length)] = src[k];
+  }
 }
 
 }  // namespace swizzle

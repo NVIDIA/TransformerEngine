@@ -208,23 +208,25 @@ def _make_swizzle_fusion_quantizer() -> NVFP4Quantizer:
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
-    "M, N, expected_swizzled",
+    "M, N, expected_swizzled, expected_swizzled_sm12x",
     [
         # Eligible: rows%64==0 AND cols%128==0 -> the fused RHT cast-fusion
         # kernel can bake the GEMM-swizzled SF in directly.
-        (64, 128, True),
-        (128, 256, True),
+        (64, 128, True, False),
+        (128, 256, True, True),
         # Ineligible (cols%128 != 0) -> the fused kernel is gated off, so
         # create_tensor reports swizzled=False (the fused kernel did not bake
         # it in). This is the case hit in production at irregular shapes like
         # (8192, 11328) where 11328%128==64.
-        (64, 144, False),
-        (128, 144, False),
+        (64, 144, False, False),
+        (128, 144, False, False),
         # Ineligible (rows%64 != 0) -> same gating.
-        (48, 128, False),
+        (48, 128, False, False),
     ],
 )
-def test_nvfp4_rht_swizzle_fusion_shape_gate(M: int, N: int, expected_swizzled: bool) -> None:
+def test_nvfp4_rht_swizzle_fusion_shape_gate(
+    M: int, N: int, expected_swizzled: bool, expected_swizzled_sm12x: bool
+) -> None:
     """The fused-kernel shape gate must reflect cast-fusion eligibility.
 
     Only ``row_cast_col_hadamard_transform_cast_fusion.cu`` can bake
@@ -243,6 +245,10 @@ def test_nvfp4_rht_swizzle_fusion_shape_gate(M: int, N: int, expected_swizzled: 
     ineligible shapes too and flips the flag back to True; see
     ``test_nvfp4_rht_swizzle_fusion_end_to_end_swizzled``.)
     """
+    # The SM12x 1D path needs full 128-row scale tiles; TMEM architectures
+    # retain their existing 64-row eligibility.
+    if torch.cuda.get_device_capability() in ((12, 0), (12, 1)):
+        expected_swizzled = expected_swizzled_sm12x
     quantizer = _make_swizzle_fusion_quantizer()
     out = quantizer.make_empty([M, N], dtype=torch.bfloat16)
     assert out._with_gemm_swizzled_scales is expected_swizzled, (
