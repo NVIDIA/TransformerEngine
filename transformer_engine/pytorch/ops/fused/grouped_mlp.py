@@ -2957,7 +2957,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_input_quantizer = fc2_ctx.input_quantizers[0]
                 fc2_input_quantizer.set_usage(rowwise=False, columnwise=True)
                 fc2_input_quantizer.optimize_for_gemm = True
-                fc2_x_amaxes = getattr(fc2_ctx, "fc2_x_amaxes_for_recompute", None)
+                fc2_x_amaxes = fc2_ctx.fc2_x_amaxes_for_recompute
                 fc2_ctx.fc2_x_amaxes_for_recompute = None
                 if fc2_x_amaxes is not None:
                     # The regenerated fc2_x is bit-identical to the forward one, so its
