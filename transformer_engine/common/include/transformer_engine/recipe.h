@@ -90,7 +90,7 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
  *
  *  The amax (maximum absolute value) of the input tensor is computed
  *  and written to the amax buffer of the output tensor, using the provided
- *  quantization configuration. For an NVFP4 output with distinct row-wise
+ *  quantization configuration. For a Tensor with distinct row-wise
  *  and column-wise amax buffers, the amax is written to both.
  *  One useful config is the noop tensor, which is needed by cuda graph.
  *
