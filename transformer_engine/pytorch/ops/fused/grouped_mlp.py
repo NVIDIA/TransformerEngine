@@ -1738,8 +1738,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_input_quantizer.rht_matrix_random_sign_mask_t != 0
                     and not _cudnn_frontend_supports_grouped_gemm_hadamard_sign_mask()
                 ):
-                    # Kernel would compute the post-RHT amax for the plain Hadamard
-                    # transform while the quantizer applies a randomized one
+                    # Kernel only supports plain Hadamard transform, not randomized one
                     pass
                 elif self._cudnn_act_func in ("swiglu", "situglu"):
                     kernel_impl = "gemm_act_rht_amax"
