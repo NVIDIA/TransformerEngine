@@ -39,28 +39,18 @@ std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-struct ScaleSwizzleBuffers {
-  std::vector<at::Tensor> scales;
-  std::vector<TensorWrapper> views;
-  std::vector<NVTETensor> sources, destinations;
-};
-
-struct CompactQuantizationOutputs {
-  std::vector<TensorWrapper> outputs;
-  ScaleSwizzleBuffers rowwise, columnwise;
-};
-
-CompactQuantizationOutputs prepare_compact_quantization_outputs(
-    const std::vector<TensorWrapper> &outputs, const std::vector<bool> &needs_swizzle) {
+std::vector<TensorWrapper> prepare_compact_quantization_outputs(
+    const std::vector<TensorWrapper> &outputs, const std::vector<bool> &needs_swizzle,
+    std::vector<at::Tensor> &scale_buffers) {
   NVTE_CHECK(outputs.size() == needs_swizzle.size(), "Mismatched quantization outputs");
-  CompactQuantizationOutputs compact;
+  std::vector<TensorWrapper> compact_outputs;
   if (std::none_of(needs_swizzle.begin(), needs_swizzle.end(), [](bool value) { return value; })) {
-    return compact;
+    return compact_outputs;
   }
-  compact.outputs.reserve(outputs.size());
+  compact_outputs.reserve(outputs.size());
   for (size_t i = 0; i < outputs.size(); ++i) {
     const auto &output = outputs[i];
-    auto &view = compact.outputs.emplace_back(output.scaling_mode());
+    auto &view = compact_outputs.emplace_back(output.scaling_mode());
     set_compact_tensor_data(view, output, /*rowwise=*/true,
                             output.get_rowwise_scale_inv().data_ptr);
     set_compact_tensor_data(view, output, /*rowwise=*/false,
@@ -72,7 +62,6 @@ CompactQuantizationOutputs prepare_compact_quantization_outputs(
     view.set_nvfp4_e4m3_max(output.get_nvfp4_e4m3_max());
   }
   for (bool rowwise : {true, false}) {
-    auto &swizzle = rowwise ? compact.rowwise : compact.columnwise;
     std::vector<std::vector<size_t>> shapes;
     std::vector<size_t> indices;
     for (size_t i = 0; i < outputs.size(); ++i) {
@@ -84,20 +73,33 @@ CompactQuantizationOutputs prepare_compact_quantization_outputs(
       }
     }
     if (indices.empty()) continue;
-    swizzle.scales = bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), at::kByte),
-                                   std::nullopt, std::vector<size_t>(shapes.size(), 16));
+    auto buffers = bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), at::kByte),
+                                 std::nullopt, std::vector<size_t>(shapes.size(), 16));
     for (size_t j = 0; j < indices.size(); ++j) {
       const size_t i = indices[j];
-      const auto &output = outputs[i];
-      void *scratch = swizzle.scales[j].data_ptr();
-      set_compact_tensor_data(compact.outputs[i], output, rowwise, scratch);
-      auto &view = swizzle.views.emplace_back(output.scaling_mode());
-      set_compact_tensor_data(view, output, rowwise, scratch);
-      swizzle.sources.push_back(view.data());
-      swizzle.destinations.push_back(output.data());
+      auto &scales = scale_buffers.emplace_back(std::move(buffers[j]));
+      set_compact_tensor_data(compact_outputs[i], outputs[i], rowwise, scales.data_ptr());
     }
   }
-  return compact;
+  return compact_outputs;
+}
+
+std::vector<TensorWrapper> prepare_scale_swizzle_views(
+    const std::vector<TensorWrapper> &compact_outputs, const std::vector<TensorWrapper> &outputs,
+    const std::vector<bool> &needs_swizzle, bool rowwise, std::vector<NVTETensor> &sources,
+    std::vector<NVTETensor> &destinations) {
+  std::vector<TensorWrapper> views;
+  if (compact_outputs.empty()) return views;
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const auto scales = rowwise ? compact_outputs[i].get_rowwise_scale_inv()
+                                : compact_outputs[i].get_columnwise_scale_inv();
+    if (!needs_swizzle[i] || scales.data_ptr == nullptr) continue;
+    auto &view = views.emplace_back(compact_outputs[i].scaling_mode());
+    set_compact_tensor_data(view, compact_outputs[i], rowwise, scales.data_ptr);
+    sources.push_back(view.data());
+    destinations.push_back(outputs[i].data());
+  }
+  return views;
 }
 
 void allreduce_nvfp4_amax_tensors(NVFP4Quantizer *nvfp4_quantizer_cpp,
@@ -1172,18 +1174,22 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
         needs_swizzle[i] = !quantizer.emits_gemm_swizzled_scales(get_tensor_shape(input_list[i]));
       }
     }
-    auto compact = prepare_compact_quantization_outputs(output_list, needs_swizzle);
-    auto &kernel_outputs = compact.outputs.empty() ? output_list : compact.outputs;
+    std::vector<at::Tensor> scale_buffers;
+    auto compact_outputs =
+        prepare_compact_quantization_outputs(output_list, needs_swizzle, scale_buffers);
+    auto &kernel_outputs = compact_outputs.empty() ? output_list : compact_outputs;
     // Quantize kernels individually, then swizzle NVFP4 scales together.
     for (size_t i = 0; i < num_tensors; ++i) {
       quantizer_cpp_list[i]->quantize(input_list[i], kernel_outputs[i]);
     }
-    for (auto *swizzle : {&compact.rowwise, &compact.columnwise}) {
-      if (swizzle->sources.empty()) continue;
+    for (bool rowwise : {true, false}) {
+      std::vector<NVTETensor> sources, destinations;
+      auto scale_views = prepare_scale_swizzle_views(compact_outputs, output_list, needs_swizzle,
+                                                     rowwise, sources, destinations);
+      if (sources.empty()) continue;
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_multi_tensor_swizzle_scaling_factors(
-            swizzle->sources.data(), swizzle->destinations.data(), swizzle->sources.size(),
-            at::cuda::getCurrentCUDAStream());
+        nvte_multi_tensor_swizzle_scaling_factors(sources.data(), destinations.data(),
+                                                  sources.size(), at::cuda::getCurrentCUDAStream());
       });
     }
   }
@@ -2128,8 +2134,10 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
     needs_swizzle[i] = outputs[i].get_with_gemm_swizzled_scales() && !emits_gemm_swizzled_scales &&
                        input_list[i].numel() != 0;
   }
-  auto compact = prepare_compact_quantization_outputs(outputs, needs_swizzle);
-  auto &output_list = compact.outputs.empty() ? outputs : compact.outputs;
+  std::vector<at::Tensor> scale_buffers;
+  auto compact_outputs =
+      prepare_compact_quantization_outputs(outputs, needs_swizzle, scale_buffers);
+  auto &output_list = compact_outputs.empty() ? outputs : compact_outputs;
 
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
@@ -2154,12 +2162,14 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                        stream);
     }
   });
-  for (auto *swizzle : {&compact.rowwise, &compact.columnwise}) {
-    if (swizzle->sources.empty()) continue;
+  for (bool rowwise : {true, false}) {
+    std::vector<NVTETensor> sources, destinations;
+    auto scale_views = prepare_scale_swizzle_views(compact_outputs, outputs, needs_swizzle, rowwise,
+                                                   sources, destinations);
+    if (sources.empty()) continue;
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_multi_tensor_swizzle_scaling_factors(
-          swizzle->sources.data(), swizzle->destinations.data(), swizzle->sources.size(),
-          at::cuda::getCurrentCUDAStream());
+      nvte_multi_tensor_swizzle_scaling_factors(sources.data(), destinations.data(), sources.size(),
+                                                at::cuda::getCurrentCUDAStream());
     });
   }
 }
