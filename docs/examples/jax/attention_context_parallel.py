@@ -346,11 +346,11 @@ def run_single_gpu_bench():
         result = grad_fn((q, k, v), sequence_descriptor, dout)
     jax.block_until_ready(result)
 
-    start = time.time()
+    start = time.perf_counter()
     for _ in range(timing_iters):
         result = grad_fn((q, k, v), sequence_descriptor, dout)
     jax.block_until_ready(result)
-    mean_ms = (time.time() - start) * 1000 / timing_iters
+    mean_ms = (time.perf_counter() - start) * 1000 / timing_iters
     print(f"Mean time: {mean_ms} ms")
     return mean_ms
 
@@ -374,7 +374,7 @@ def run_context_parallel_bench(
             )
         jax.block_until_ready(result)
 
-        start = time.time()
+        start = time.perf_counter()
         for _ in range(timing_iters):
             result = grad_fn(
                 sharded["qkv"],
@@ -382,7 +382,7 @@ def run_context_parallel_bench(
                 sharded["dout"],
             )
         jax.block_until_ready(result)
-        end = time.time()
+        end = time.perf_counter()
 
     mean_ms = (end - start) * 1000 / timing_iters
     print(f"Mean time: {mean_ms} ms")
