@@ -443,7 +443,7 @@ def extract_group_quantized_output(out, rowwise, columnwise):
     """Extract the bytes to compare between backends.
 
     Unlike the single-tensor kernels, both grouped backends zero the scale padding, so the
-    whole data and scale buffers are compared. 
+    whole data and scale buffers are compared.
     Note: we mask the data to fold -0.0 (0x80) into +0.0, because the CuTeDSL implementation
     differs from the CUDA implementation in some cases, but both should be correct.
     """
