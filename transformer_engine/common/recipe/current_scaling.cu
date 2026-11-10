@@ -177,8 +177,7 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
   // Compute amax
   float *amax_ptr = reinterpret_cast<float *>(
       (output.amax.dptr != nullptr) ? output.amax.dptr : output.columnwise_amax.dptr);
-  // NVFP4 outputs with a distinct column-wise amax get the same value written there as well,
-  // which replaces a separate device-to-device copy by the caller.
+  // Tensor with a distinct column-wise amax get the same value written there as well
   float *columnwise_amax = nullptr;
   if (output.scaling_mode == NVTE_NVFP4_1D_SCALING && output.columnwise_amax.dptr != nullptr &&
       output.columnwise_amax.dptr != amax_ptr) {
