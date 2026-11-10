@@ -114,6 +114,13 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         # Prefer to reduce dbias in the colwise pass if quantized in columnwise, else in the rowwise pass.
         self.DBIAS_IN_COLWISE = cfg.WITH_DBIAS and cfg.COLWISE
         self.DBIAS_IN_ROWWISE = cfg.WITH_DBIAS and not cfg.COLWISE
+        # Rowwise dbias reduces through SMEM. Reuse the input tiles for it when they are large
+        # enough (FP32 input), as the CUDA kernel does, and cap registers at 128, so it runs 4
+        # CTAs per SM like the CUDA kernel instead of 3.
+        dbias_bytes = self.THREADS_Y * self.THREADS_X * (MXFP8_BLOCK_SCALING_SIZE + 1) * 4
+        input_bytes = self.TILE_ROWS * self.TILE_COLS * self.PIPELINE_DEPTH * cfg.DTYPE.width // 8
+        self.ALIAS_DBIAS = self.DBIAS_IN_ROWWISE and dbias_bytes <= input_bytes
+        self.MIN_BLOCKS_PER_MP = 4 if self.ALIAS_DBIAS else 0
 
     @cute.jit
     def _find_tensor_from_offsets(
@@ -326,6 +333,9 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         ).launch(
             grid=grid,
             block=[self.THREADS_PER_CTA, 1, 1],
+            min_blocks_per_mp=self.MIN_BLOCKS_PER_MP,
+            # Left unset, the carveout chosen with min_blocks_per_mp fits one CTA fewer
+            preferred_smem_carveout=100 if self.MIN_BLOCKS_PER_MP else None,
             stream=stream,
         )
 
@@ -566,16 +576,26 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
 
         sDbias = None
         if cutlass.const_expr(self.DBIAS_IN_ROWWISE):
-            # Padded like the CUDA kernel's partial_dbias_rowwise to avoid bank conflicts.
+            # (THREADS_Y, TILE_COLS) partial sums. Like the CUDA kernel's partial_dbias_rowwise,
+            # every 32-column group is padded by one float so the groups fall in different banks.
             DBIAS_BUFF_WIDTH = self.THREADS_X * (MXFP8_BLOCK_SCALING_SIZE + 1)
-
-            @cute.struct
-            class DbiasStorage:
-                sDbias: cute.struct.MemRange[Float32, self.THREADS_Y * DBIAS_BUFF_WIDTH]
-
-            sDbias = smem.allocate(DbiasStorage).sDbias.get_tensor(
-                cute.make_layout((self.THREADS_Y, self.TILE_COLS), stride=(DBIAS_BUFF_WIDTH, 1))
+            dbias_layout = cute.make_layout(
+                (self.THREADS_Y, (MXFP8_BLOCK_SCALING_SIZE, self.THREADS_X)),
+                stride=(DBIAS_BUFF_WIDTH, (1, MXFP8_BLOCK_SCALING_SIZE + 1)),
             )
+            if cutlass.const_expr(self.ALIAS_DBIAS):
+                # Every load of a dbias job is consumed before the reduction (one tile column
+                # per job), so the input tiles are free then; the reduction ends with a sync
+                # before the next job loads into them again.
+                assert self.NUM_TILES_X == 1, "dbias reduction would overlap in-flight loads"
+                sDbias = cute.make_tensor(cute.recast_ptr(sX.iterator, dtype=Float32), dbias_layout)
+            else:
+
+                @cute.struct
+                class DbiasStorage:
+                    sDbias: cute.struct.MemRange[Float32, self.THREADS_Y * DBIAS_BUFF_WIDTH]
+
+                sDbias = smem.allocate(DbiasStorage).sDbias.get_tensor(dbias_layout)
 
         return storage.mbar.data_ptr(), sX, sO_row, sO_col, sActInput, sDbias
 
