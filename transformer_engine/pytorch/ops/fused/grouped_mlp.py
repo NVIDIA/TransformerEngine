@@ -443,18 +443,14 @@ def _nvfp4_group_hadamard_amax(
 ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
     """Per-group (pre-RHT, post-RHT) NVFP4 amax of ``tensor`` without quantizing it.
 
-    Returns ``None`` when the extension lacks the kernel binding or the grouped metadata
-    is incomplete; callers then quantize with amax computed on the fly.
+    Returns ``None`` when the grouped metadata is incomplete; callers then quantize with
+    amax computed on the fly.
     """
-    amax_fn = getattr(tex, "nvfp4_group_hadamard_amax", None)
-    if (
-        amax_fn is None
-        or not isinstance(quantizer, NVFP4Quantizer)
-        or split_sizes is None
-        or tensor_offsets is None
-    ):
+    if not isinstance(quantizer, NVFP4Quantizer) or split_sizes is None or tensor_offsets is None:
         return None
-    return amax_fn(tensor, quantizer, num_groups, split_sizes, tensor_offsets=tensor_offsets)
+    return tex.nvfp4_group_hadamard_amax(
+        tensor, quantizer, num_groups, split_sizes, tensor_offsets=tensor_offsets
+    )
 
 
 def _weight_quantizers(op: GroupedLinear, num_groups: int) -> list[Quantizer]:
