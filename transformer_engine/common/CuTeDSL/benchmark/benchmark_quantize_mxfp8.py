@@ -39,10 +39,6 @@ ACTIVATIONS = ("gelu", "relu", "silu", "qgelu", "srelu")
 CONFIG = ["M", "N", "direction", "fusion", "scaling", "swizzle", "input"]
 
 
-def _round_up(x, y):
-    return (x + y - 1) // y * y
-
-
 def _te_launcher(tex, activation):
     """Returns setup(x, act_input, direction, fusion, scaling, swizzle) -> launch(), running
     TE's quantize, which dispatches to whichever backend `tex` was imported with."""
@@ -124,13 +120,9 @@ def _cutedsl_launcher(activation):
         empty = functools.partial(torch.empty, device="cuda")
         fp8, e8m0 = torch.float8_e4m3fn, torch.float8_e8m0fnu
         o_row = empty((m, n), dtype=fp8) if rowwise else None
-        s_row = (
-            empty((_round_up(m, 128), _round_up(-(-n // 32), 4)), dtype=e8m0) if rowwise else None
-        )
+        s_row = empty(common.mxfp8_scale_shape((m, n), False), dtype=e8m0) if rowwise else None
         o_col = empty((m, n), dtype=fp8) if colwise else None
-        s_col = (
-            empty((_round_up(-(-m // 32), 4), _round_up(n, 128)), dtype=e8m0) if colwise else None
-        )
+        s_col = empty(common.mxfp8_scale_shape((m, n), True), dtype=e8m0) if colwise else None
         act_input = act_input if "dact" in fusion else None
         # One partial-sum row per CTA; a CTA covers at least one 32-row MXFP8 block.
         workspace = empty((-(-m // 32), n), dtype=torch.float32) if "bias" in fusion else None

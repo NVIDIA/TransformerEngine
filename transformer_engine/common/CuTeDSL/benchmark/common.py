@@ -13,6 +13,7 @@ installed TE's CUDA kernels, --regenerate from earlier results, and csv/raw/png/
 import argparse
 import contextlib
 import datetime
+import functools
 import json
 import os
 import re
@@ -259,6 +260,20 @@ def mxfp8_bytes(numel, input_dtype, direction, num_inputs=1):
     """Bytes an MXFP8 quantize moves: the input(s), plus fp8 data and e8m0 scales out per
     direction (dbias partial sums and scale padding not counted)."""
     return num_inputs * numel * INPUTS[input_dtype][2] + mxfp8_data_bytes(numel, direction)
+
+
+@functools.lru_cache(maxsize=None)
+def _mxfp8_quantizer():
+    # pylint: disable=import-outside-toplevel
+    from transformer_engine.pytorch import MXFP8Quantizer  # loads TE's libraries first
+    import transformer_engine_torch as tex
+
+    return MXFP8Quantizer(tex.DType.kFloat8E4M3)
+
+
+def mxfp8_scale_shape(shape, columnwise):
+    """Shape of an MXFP8 tensor's scales, padded as TE allocates them."""
+    return _mxfp8_quantizer().get_scale_shape(shape, columnwise)
 
 
 def mxfp8_data_bytes(numel, direction):

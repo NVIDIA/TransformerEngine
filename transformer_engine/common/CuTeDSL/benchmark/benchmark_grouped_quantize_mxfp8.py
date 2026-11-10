@@ -25,6 +25,7 @@ examples:
 
 import functools
 import itertools
+import math
 import random
 import sys
 
@@ -79,10 +80,6 @@ def members(m, n, experts, layout):
     return [(c * ROW_BLOCK, v) for c, v in zip(blocks, lasts)]
 
 
-def _round_up(x, y):
-    return (x + y - 1) // y * y
-
-
 def valid_group(m, experts, layout):
     """Whether M rows split into `experts` members of this layout: equal-row layouts need M/G
     rows per member, a multiple of 128."""
@@ -95,7 +92,11 @@ def capacity(m, n, experts, layout):
     if layout in ("same", "varying_first"):
         return m, n
     if layout == "varying_last":
-        return m // experts, max(_round_up(n * experts, ROW_BLOCK), experts * ROW_BLOCK)
+        # pylint: disable-next=import-outside-toplevel
+        from transformer_engine.pytorch.utils import round_up_to_nearest_multiple
+
+        cols = round_up_to_nearest_multiple(n * experts, ROW_BLOCK)
+        return m // experts, max(cols, experts * ROW_BLOCK)
     return 1, m * n
 
 
@@ -204,8 +205,8 @@ def _cutedsl_launcher():
         if layout == "varying_both":
             row_scales = col_scales = rows * cols // 32
         else:
-            row_scales = _round_up(rows, 128) * _round_up(-(-cols // 32), 4)
-            col_scales = _round_up(-(-rows // 32), 4) * _round_up(cols, 128)
+            row_scales = math.prod(common.mxfp8_scale_shape(shape, False))
+            col_scales = math.prod(common.mxfp8_scale_shape(shape, True))
         s_row = empty(row_scales, dtype=e8m0) if rowwise else None
         s_col = empty(col_scales, dtype=e8m0) if colwise else None
         # As the C++ bridge does: a missing direction's scale slot takes the other's buffer.
