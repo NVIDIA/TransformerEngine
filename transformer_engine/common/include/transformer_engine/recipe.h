@@ -76,8 +76,8 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
 /*! \brief Compute an FP8 tensor's amax.
  *
  *  The amax (maximum absolute value) of the input tensor is computed
- *  and written to the amax buffer of the output tensor. For an NVFP4
- *  output with distinct row-wise and column-wise amax buffers, the
+ *  and written to the amax buffer of the output tensor. For a Tensor
+ *  with distinct row-wise and column-wise amax buffers, the
  *  amax is written to both.
  *
  *  \param[in]     input            Input tensor. Must be unquantized.
