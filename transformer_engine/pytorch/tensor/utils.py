@@ -1628,6 +1628,7 @@ def swizzle_scales_and_pack_ptrs_for_discrete_weights(
     forward) are not cached, and a cache miss during CUDA graph capture keeps the swizzle in
     the graph without caching it.
     """
+    device = torch.device(device)
     datas, scales = _discrete_weight_operands(weights, columnwise)
     fn = tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights
     if not (

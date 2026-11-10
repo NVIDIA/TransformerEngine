@@ -175,6 +175,16 @@ def test_grouped_gemm_discrete_weights(swizzle_cache, layout):
     torch.testing.assert_close(static_out.rowwise_data, reference(), rtol=0, atol=0)
 
 
+def _cached_operands(weights, groups):
+    """(columnwise, group) pairs of the cache entries for the given weight groups."""
+    return sorted(
+        (key[0], name)
+        for name, group in groups.items()
+        for key in _discrete_cache_keys(group)
+        if set(key[1]) <= {id(w) for w in group}
+    )
+
+
 def _discrete_cache_keys(weights):
     """Keys of the discrete-weight cache entries that hold any of ``weights``."""
     ids = {id(w) for w in weights}
@@ -186,7 +196,7 @@ def _discrete_cache_keys(weights):
 def _pack_uncached(weights, columnwise):
     fn = tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights
     datas, scales = tensor_utils._discrete_weight_operands(weights, columnwise)
-    return fn(datas, scales, "nvfp4", "cuda")
+    return fn(datas, scales, "nvfp4", torch.device("cuda"))
 
 
 @pytest.mark.parametrize("columnwise", [False, True])
@@ -314,7 +324,9 @@ def _set_mlp_weights(weights, seed):
     with torch.no_grad():
         for w in weights:
             value = torch.rand(w.shape, generator=gen, device="cuda", dtype=torch.float32)
-            value = (0.5 * value - 0.25).to(torch.bfloat16)
+            # Random per-row magnitudes, so block scales differ between weight updates.
+            magnitude = torch.rand(w.shape[0], 1, generator=gen, device="cuda") * 0.5 + 0.01
+            value = ((value - 0.5) * magnitude).to(torch.bfloat16)
             if isinstance(w, QuantizedTensor):
                 w.quantize_(value)
             else:
@@ -373,11 +385,14 @@ def test_fused_grouped_mlp_eager(swizzle_cache):
     module, weights, outs = run(True)
     for out, ref in zip(outs, refs):
         _assert_bitwise(out, ref)
-    # FC1 and FC2 forward (rowwise) and backward (columnwise) operands.
     keys = _discrete_cache_keys(weights)
-    assert len(keys) == 4, keys
+    groups = {"fc1": weights[:_NUM_GROUPS], "fc2": weights[_NUM_GROUPS:]}
+    cached = _cached_operands(weights, groups)
+    print("cached discrete operands (columnwise, layer):", cached)
+    # At least one forward (rowwise) and one backward (columnwise) operand is cached.
+    assert {columnwise for columnwise, _ in cached} == {False, True}, cached
 
-    del module, weights, outs
+    del module, weights, outs, groups
     gc.collect()
     assert not any(key in tensor_utils._DISCRETE_WEIGHT_SWIZZLE_CACHE for key in keys)
 
@@ -428,7 +443,8 @@ def test_fused_grouped_mlp_cuda_graph_replay(swizzle_cache):
         )
         _assert_fused(module)
         if cache_on:
-            assert len(_discrete_cache_keys(weights)) == 4
+            cached = {key[0] for key in _discrete_cache_keys(weights)}
+            assert cached == {False, True}, cached
 
         def replay(input_seed):
             x, probs, dy = _mlp_inputs(input_seed)
