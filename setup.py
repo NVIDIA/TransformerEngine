@@ -342,10 +342,21 @@ def build_nccl_ep_submodule() -> str:
                 cwd=str(nccl_root),
                 env=env,
             )
+        make_variables = []
+        nccl_lib_dir = Path(nccl_home) / "lib"
+        if not (nccl_lib_dir / "libnccl.so").exists() and (nccl_lib_dir / "libnccl.so.2").exists():
+            # The NCCL EP Makefile links with -lnccl, but the nvidia-nccl-cu* packages only
+            # provide libnccl.so.2.
+            nccl_link_dir = build_dir / "nccl-lib"
+            nccl_link_dir.mkdir(parents=True, exist_ok=True)
+            nccl_link = nccl_link_dir / "libnccl.so"
+            nccl_link.unlink(missing_ok=True)
+            nccl_link.symlink_to(nccl_lib_dir / "libnccl.so.2")
+            make_variables.append(f"NCCL_LIBDIR={nccl_link_dir}")
         print(f"[NCCL EP] Building static and shared libraries (gencode='{gencode}')")
         make_jobs = f"-j{nproc}" if nproc else "-j"
         subprocess.check_call(
-            ["make", make_jobs, "-C", "nccl_ep", "lib"],
+            ["make", make_jobs, "-C", "nccl_ep", *make_variables, "lib"],
             cwd=str(nccl_root),
             env=env,
         )
