@@ -220,7 +220,7 @@ backend-selection overview.
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Enable or disable FusedAttention backend (cuDNN-based) for DotProductAttention. When set to ``0``, FusedAttention will not be used.
+   :Description: Enable or disable FusedAttention backend (cuDNN-based) for DotProductAttention. When set to ``0``, FusedAttention will not be used. Deprecated in favor of :envvar:`NVTE_CUDNN_ATTN`; it is still read, without a warning.
 
 .. envvar:: NVTE_CUDNN_ATTN
 
