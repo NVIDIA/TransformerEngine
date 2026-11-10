@@ -80,7 +80,6 @@ struct MXFP8DequantConfig {
 // Signature mirrors mxfp8::dequantize. Returns false to fall back to the CUDA kernel.
 inline bool mxfp8_dequantize_cutedsl(const Tensor &input, Tensor *output, cudaStream_t stream) {
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
-    maybe_warn_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
     return false;
   }
   // Pass every data copy present; the Python side chooses which direction to dequantize.
@@ -102,7 +101,7 @@ inline bool mxfp8_dequantize_cutedsl(const Tensor &input, Tensor *output, cudaSt
   NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
 
   if (input.flat_last_dim() % 16 != 0) {
-    maybe_warn_cutedsl_not_chosen("the last dimension of input is not a multiple of 16.");
+    report_cutedsl_not_chosen("the last dimension of input is not a multiple of 16.");
     return false;
   }
   const bool misaligned = !is_aligned_ptr(output->data.dptr, 16) ||
@@ -111,7 +110,7 @@ inline bool mxfp8_dequantize_cutedsl(const Tensor &input, Tensor *output, cudaSt
                           (colwise && (!is_aligned_ptr(input.columnwise_data.dptr, 16) ||
                                        !is_aligned_ptr(input.columnwise_scale_inv.dptr, 4)));
   if (misaligned) {
-    maybe_warn_cutedsl_not_chosen("the input, output or scale pointer is misaligned.");
+    report_cutedsl_not_chosen("the input, output or scale pointer is misaligned.");
     return false;
   }
 
