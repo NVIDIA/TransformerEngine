@@ -8,7 +8,6 @@ import functools
 import operator
 from enum import Enum
 from math import sqrt
-import os
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple, Union
 import warnings
 

@@ -226,7 +226,7 @@ backend-selection overview.
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Alias of :envvar:`NVTE_FUSED_ATTN`. The FusedAttention backend is cuDNN's flash-algorithm attention; issues with it can be reported to `cudnn-frontend <https://github.com/NVIDIA/cudnn-frontend/issues>`_. Setting both variables to different values is an error.
+   :Description: Alias of :envvar:`NVTE_FUSED_ATTN`. The FusedAttention backend is cuDNN's flash-algorithm attention; issues with it can be reported to `cudnn-frontend <https://github.com/NVIDIA/cudnn-frontend/issues>`_. Setting either variable to ``0`` disables FusedAttention.
 
 .. envvar:: NVTE_UNFUSED_ATTN
 

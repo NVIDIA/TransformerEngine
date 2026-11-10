@@ -60,16 +60,10 @@ def deprecate_wrapper(obj, msg):
 def cudnn_attention_enabled() -> int:
     """Whether the cuDNN attention backend (FusedAttention) is enabled.
 
-    ``NVTE_CUDNN_ATTN`` is an alias of ``NVTE_FUSED_ATTN``; setting both to different values
-    is an error.
+    ``NVTE_CUDNN_ATTN`` is an alias of ``NVTE_FUSED_ATTN``. Both default to 1 and either one set
+    to 0 disables the backend, so a value a framework sets in one never conflicts with a value
+    the user sets in the other.
     """
-    cudnn_attn = os.getenv("NVTE_CUDNN_ATTN")
-    fused_attn = os.getenv("NVTE_FUSED_ATTN")
-    if cudnn_attn is not None and fused_attn is not None and int(cudnn_attn) != int(fused_attn):
-        raise ValueError(
-            f"NVTE_CUDNN_ATTN={cudnn_attn} conflicts with NVTE_FUSED_ATTN={fused_attn}; both"
-            " control the cuDNN attention backend. Set only one of them."
-        )
-    if cudnn_attn is not None:
-        return int(cudnn_attn)
-    return int(fused_attn if fused_attn is not None else "1")
+    return int(
+        bool(int(os.getenv("NVTE_FUSED_ATTN", "1")) and int(os.getenv("NVTE_CUDNN_ATTN", "1")))
+    )
