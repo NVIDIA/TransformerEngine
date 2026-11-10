@@ -110,6 +110,19 @@ def _restore_wgrad_written(snapshot):
         param._fsdp_wgrad_written = written
 
 
+def _wgrad_written_flags(params):
+    return tuple(getattr(p, "_fsdp_wgrad_written", None) for p in params)
+
+
+def _newly_wgrad_written(params, before):
+    """Params whose ``_fsdp_wgrad_written`` a capture set. Replay runs no Python, so it must set
+    them again, or a later eager wgrad into the same ``main_grad`` would overwrite the replayed one.
+    """
+    return tuple(
+        p for p, was in zip(params, before) if not was and getattr(p, "_fsdp_wgrad_written", None)
+    )
+
+
 @contextlib.contextmanager
 def _graph_context_wrapper(*args, **kwargs):
     """Wrapper around `torch.cuda.graph`.
@@ -550,6 +563,8 @@ def _make_graphed_callables(
     visited_te_modules = {}
     need_bwd_dw_graph = {}
     per_callable_static_wgrads = [()] * len(flatten_sample_args)
+    per_callable_wgrad_written = [()] * len(flatten_sample_args)
+    per_callable_dw_wgrad_written = [()] * len(flatten_sample_args)
 
     def _capture_backward_dw(func_idx, bwd_dw_graph):
         """Capture deferred contributions without retaining ordinary-allocator grad targets."""
@@ -559,12 +574,15 @@ def _make_graphed_callables(
             if hasattr(module, "need_backward_dw") and module.need_backward_dw()
         )
         params = tuple(dict.fromkeys(param for module in modules for param in module.parameters()))
+        written_before = _wgrad_written_flags(params)
         # Warmup grads belong to the ordinary allocator. Capture fresh results
         # in the graph pool so zero_grad() cannot free an accumulation target.
         with _none_grad_context_wrapper(params), _graph_context_wrapper(bwd_dw_graph, pool=mempool):
             for module in modules:
                 module.backward_dw()
-            return tuple((param, param.grad) for param in params if param.grad is not None)
+            static_wgrads = tuple((param, param.grad) for param in params if param.grad is not None)
+        per_callable_dw_wgrad_written[func_idx] = _newly_wgrad_written(params, written_before)
+        return static_wgrads
 
     def _run_warmup_forward(func_idx, func, callable_idx):
         """Run forward for one callable during warmup; returns flattened outputs."""
@@ -884,6 +902,8 @@ def _make_graphed_callables(
                         )
 
                         inputs = tuple(i for i in static_input_surface if i.requires_grad)
+                        params = per_callable_module_params[per_callable_bwd_idx]
+                        written_before = _wgrad_written_flags(params)
                         with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
                             bwd_graph, pool=mempool
                         ):
@@ -895,6 +915,9 @@ def _make_graphed_callables(
                                 retain_graph=retain_graph_in_backward,
                             )
                             grad_inputs = tuple(input.grad for input in inputs)
+                        per_callable_wgrad_written[per_callable_bwd_idx] = _newly_wgrad_written(
+                            params, written_before
+                        )
 
                         _run_capture_time_hooks(
                             capture_time_hooks,
@@ -1021,6 +1044,8 @@ def _make_graphed_callables(
                 )
 
                 inputs = tuple(i for i in static_input_surface if i.requires_grad)
+                params = per_callable_module_params[bwd_idx]
+                written_before = _wgrad_written_flags(params)
                 with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
                     bwd_graph, pool=mempool
                 ):
@@ -1030,6 +1055,7 @@ def _make_graphed_callables(
                         retain_graph=retain_graph_in_backward,
                     )
                     grad_inputs = tuple(input.grad for input in inputs)
+                per_callable_wgrad_written[bwd_idx] = _newly_wgrad_written(params, written_before)
 
                 _run_capture_time_hooks(
                     capture_time_hooks,
@@ -1085,6 +1111,7 @@ def _make_graphed_callables(
         static_grad_outputs,
         static_grad_inputs,
         returned_param_grad_clone_slots,
+        replay_wgrad_written,
     ):
         is_reset = False
 
@@ -1164,6 +1191,8 @@ def _make_graphed_callables(
                         torch.cuda.current_stream().wait_stream(ctx.cuda_graph_stream)
                 else:
                     bwd_graph.replay()
+                for param in replay_wgrad_written:
+                    param._fsdp_wgrad_written = True
 
                 # Update FP8 scale factors if needed
                 if ctx.is_first_module:
@@ -1243,7 +1272,7 @@ def _make_graphed_callables(
         def release_static_state():
             """Release per-callable state captured by replay closures."""
             nonlocal fwd_graph, bwd_graph, is_reset
-            nonlocal module_params
+            nonlocal module_params, replay_wgrad_written
             nonlocal static_input_surface, static_outputs
             nonlocal static_grad_outputs, static_grad_inputs
 
@@ -1253,6 +1282,7 @@ def _make_graphed_callables(
             fwd_graph = None
             bwd_graph = None
             module_params = ()
+            replay_wgrad_written = ()
             static_input_surface = ()
             static_outputs = ()
             static_grad_outputs = ()
@@ -1272,12 +1302,15 @@ def _make_graphed_callables(
         need_bwd_dw = need_bwd_dw_graph.get(graph_idx, False)
         te_modules = visited_te_modules.get(graph_idx, set())
         static_wgrads = per_callable_static_wgrads[graph_idx]
+        dw_wgrad_written = per_callable_dw_wgrad_written[graph_idx]
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
             helpers.ensure_not_reset()
             if need_bwd_dw:
                 bwd_dw_graph.replay()
+                for param in dw_wgrad_written:
+                    param._fsdp_wgrad_written = True
 
                 # Python assignments made during capture are not replayed. Give
                 # callers owned grads and accumulate tied/microbatch contributions
@@ -1299,6 +1332,7 @@ def _make_graphed_callables(
         # Attach reset as an attribute to the graphed callable.
         def reset():
             nonlocal fwd_graph, bwd_graph, bwd_dw_graph, te_modules, static_wgrads
+            nonlocal dw_wgrad_written
 
             for graph in (fwd_graph, bwd_graph, bwd_dw_graph):
                 if graph is not None:
@@ -1309,6 +1343,7 @@ def _make_graphed_callables(
             bwd_dw_graph = None
             te_modules = ()
             static_wgrads = ()
+            dw_wgrad_written = ()
             helpers.release_static_state()
 
         return backward_dw, reset
@@ -1328,6 +1363,7 @@ def _make_graphed_callables(
             per_callable_static_grad_outputs[i],
             per_callable_static_grad_inputs[i],
             per_callable_returned_param_grad_clone_slots[i],
+            per_callable_wgrad_written[i],
         )
 
         func = graph_callables[i]
@@ -1562,6 +1598,10 @@ def make_graphed_callables(
                    weight's ``main_grad`` before each backward clears its
                    ``_fsdp_wgrad_written`` flag in ``"backward_pre_hooks"``, so the
                    captured fused wgrad overwrites ``main_grad`` instead of accumulating.
+                   Backward replays set the flag again for the weights whose flag their
+                   capture set, so a later eager wgrad into the same ``main_grad``
+                   accumulates. A graphed wgrad that follows an eager one in the same
+                   backward still does what it did at capture.
 
     Quantization parameters
     -----------------------
