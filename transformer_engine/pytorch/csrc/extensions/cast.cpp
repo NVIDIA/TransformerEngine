@@ -1103,87 +1103,86 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
                                 nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
     });
   } else {
-    std::vector<bool> needs_swizzle(num_tensors);
+    std::vector<std::optional<TensorWrapper>> compact_outputs(num_tensors);
     for (size_t i = 0; i < num_tensors; ++i) {
       if (input_list[i].numel() != 0 && output_list[i].get_with_gemm_swizzled_scales() &&
           quantizer_cpp_list[i]->get_scaling_mode() == NVTE_NVFP4_1D_SCALING) {
         const auto &quantizer = static_cast<const NVFP4Quantizer &>(*quantizer_cpp_list[i]);
-        needs_swizzle[i] = !quantizer.emits_gemm_swizzled_scales(get_tensor_shape(input_list[i]));
+        if (!quantizer.emits_gemm_swizzled_scales(get_tensor_shape(input_list[i]))) {
+          auto &compact = compact_outputs[i].emplace(NVTE_NVFP4_1D_SCALING);
+          compact.set_row_scaled_nvfp4(output_list[i].get_row_scaled_nvfp4());
+          compact.set_nvfp4_e4m3_max(output_list[i].get_nvfp4_e4m3_max());
+        }
       }
     }
-    std::vector<TensorWrapper> compact_outputs;
-    std::vector<at::Tensor> compact_scales[2];
-    std::vector<TensorWrapper> scale_inputs[2], scale_outputs[2];
-    std::vector<NVTETensor> sources[2], destinations[2];
-    if (std::any_of(needs_swizzle.begin(), needs_swizzle.end(), [](bool value) { return value; })) {
-      compact_outputs.reserve(num_tensors);
+    std::vector<at::Tensor> rowwise_scales, columnwise_scales;
+    std::vector<TensorWrapper> rowwise_scale_views, columnwise_scale_views;
+    std::vector<NVTETensor> rowwise_sources, rowwise_destinations;
+    std::vector<NVTETensor> columnwise_sources, columnwise_destinations;
+    for (bool rowwise : {true, false}) {
+      auto &buffers = rowwise ? rowwise_scales : columnwise_scales;
+      auto &views = rowwise ? rowwise_scale_views : columnwise_scale_views;
+      auto &sources = rowwise ? rowwise_sources : columnwise_sources;
+      auto &destinations = rowwise ? rowwise_destinations : columnwise_destinations;
+      std::vector<std::vector<size_t>> shapes;
+      std::vector<size_t> indices;
       for (size_t i = 0; i < num_tensors; ++i) {
-        const auto &output = output_list[i];
-        compact_outputs.emplace_back(output.scaling_mode());
-        auto &compact = compact_outputs.back();
-        for (int j = kNVTERowwiseData; j <= kNVTEColumnwiseAmax; ++j) {
-          const auto param = static_cast<NVTETensorParam>(j);
-          const auto value = output.get_parameter(param);
-          compact.set_parameter(param, value.data_ptr, static_cast<DType>(value.dtype),
-                                value.shape);
+        const auto scales = rowwise ? output_list[i].get_rowwise_scale_inv()
+                                    : output_list[i].get_columnwise_scale_inv();
+        if (compact_outputs[i].has_value() && scales.data_ptr != nullptr) {
+          shapes.emplace_back(scales.shape.data, scales.shape.data + scales.shape.ndim);
+          indices.push_back(i);
         }
-        compact.set_with_gemm_swizzled_scales(output.get_with_gemm_swizzled_scales() &&
-                                              !needs_swizzle[i]);
-        compact.set_row_scaled_nvfp4(output.get_row_scaled_nvfp4());
-        compact.set_nvfp4_e4m3_max(output.get_nvfp4_e4m3_max());
       }
-      for (bool rowwise : {true, false}) {
-        const auto data_param = rowwise ? kNVTERowwiseData : kNVTEColumnwiseData;
-        const auto scale_param = rowwise ? kNVTERowwiseScaleInv : kNVTEColumnwiseScaleInv;
-        std::vector<std::vector<size_t>> shapes;
-        std::vector<size_t> indices;
-        for (size_t i = 0; i < num_tensors; ++i) {
-          const auto scales = output_list[i].get_parameter(scale_param);
-          if (needs_swizzle[i] && scales.data_ptr != nullptr) {
-            shapes.emplace_back(scales.shape.data, scales.shape.data + scales.shape.ndim);
-            indices.push_back(i);
-          }
+      if (indices.empty()) continue;
+      buffers = bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), at::kByte),
+                              std::nullopt, std::vector<size_t>(shapes.size(), 16));
+      for (size_t j = 0; j < indices.size(); ++j) {
+        const size_t i = indices[j];
+        const auto &output = output_list[i];
+        const auto &quantizer = static_cast<const NVFP4Quantizer &>(*quantizer_cpp_list[i]);
+        auto &compact = *compact_outputs[i];
+        void *scratch = buffers[j].data_ptr();
+        auto &scale_view = views.emplace_back(NVTE_NVFP4_1D_SCALING);
+        if (rowwise) {
+          const auto data = output.get_rowwise_data();
+          const auto scales = output.get_rowwise_scale_inv();
+          const auto amax = output.get_amax();
+          compact.set_rowwise_data(data.data_ptr, quantizer.dtype, data.shape)
+              .set_rowwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape)
+              .set_amax(amax.data_ptr, DType::kFloat32, amax.shape);
+          scale_view.set_rowwise_data(nullptr, quantizer.dtype, data.shape)
+              .set_rowwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape);
+        } else {
+          const auto data = output.get_columnwise_data();
+          const auto scales = output.get_columnwise_scale_inv();
+          const auto amax = output.get_columnwise_amax();
+          compact.set_columnwise_data(data.data_ptr, quantizer.dtype, data.shape)
+              .set_columnwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape)
+              .set_columnwise_amax(amax.data_ptr, DType::kFloat32, amax.shape);
+          scale_view.set_columnwise_data(nullptr, quantizer.dtype, data.shape)
+              .set_columnwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape);
         }
-        if (indices.empty()) continue;
-        auto &buffers = compact_scales[!rowwise];
-        buffers = bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), at::kByte),
-                                std::nullopt, std::vector<size_t>(shapes.size(), 16));
-        for (size_t j = 0; j < indices.size(); ++j) {
-          const size_t i = indices[j];
-          const auto &output = output_list[i];
-          const auto data = output.get_parameter(data_param);
-          const auto scales = output.get_parameter(scale_param);
-          void *scratch = buffers[j].data_ptr();
-          compact_outputs[i].set_parameter(scale_param, scratch, static_cast<DType>(scales.dtype),
-                                           scales.shape);
-
-          scale_inputs[!rowwise].emplace_back(output.scaling_mode());
-          scale_outputs[!rowwise].emplace_back(output.scaling_mode());
-          auto &source = scale_inputs[!rowwise].back();
-          auto &destination = scale_outputs[!rowwise].back();
-          source.set_parameter(data_param, nullptr, static_cast<DType>(data.dtype), data.shape);
-          destination.set_parameter(data_param, nullptr, static_cast<DType>(data.dtype),
-                                    data.shape);
-          source.set_parameter(scale_param, scratch, static_cast<DType>(scales.dtype),
-                               scales.shape);
-          destination.set_parameter(scale_param, scales.data_ptr, static_cast<DType>(scales.dtype),
-                                    scales.shape);
-          destination.set_with_gemm_swizzled_scales(true);
-          sources[!rowwise].push_back(source.data());
-          destinations[!rowwise].push_back(destination.data());
-        }
+        sources.push_back(scale_view.data());
+        destinations.push_back(output.data());
       }
     }
     // Quantize kernels individually, then swizzle NVFP4 scales together.
     for (size_t i = 0; i < num_tensors; ++i) {
-      auto &output = compact_outputs.empty() ? output_list[i] : compact_outputs[i];
+      auto &output = compact_outputs[i] ? *compact_outputs[i] : output_list[i];
       quantizer_cpp_list[i]->quantize(input_list[i], output);
     }
-    for (bool rowwise : {true, false}) {
-      if (sources[!rowwise].empty()) continue;
+    if (!rowwise_sources.empty()) {
       NVTE_SCOPED_GIL_RELEASE({
         nvte_multi_tensor_swizzle_scaling_factors(
-            sources[!rowwise].data(), destinations[!rowwise].data(), sources[!rowwise].size(),
+            rowwise_sources.data(), rowwise_destinations.data(), rowwise_sources.size(),
+            at::cuda::getCurrentCUDAStream());
+      });
+    }
+    if (!columnwise_sources.empty()) {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_multi_tensor_swizzle_scaling_factors(
+            columnwise_sources.data(), columnwise_destinations.data(), columnwise_sources.size(),
             at::cuda::getCurrentCUDAStream());
       });
     }
@@ -2130,62 +2129,79 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                        input_list[i].numel() != 0;
   }
   std::vector<TensorWrapper> compact_outputs;
-  std::vector<at::Tensor> compact_scales[2];
-  std::vector<TensorWrapper> scale_inputs[2], scale_outputs[2];
-  std::vector<NVTETensor> sources[2], destinations[2];
+  std::vector<at::Tensor> rowwise_scales, columnwise_scales;
+  std::vector<TensorWrapper> rowwise_scale_views, columnwise_scale_views;
+  std::vector<NVTETensor> rowwise_sources, rowwise_destinations;
+  std::vector<NVTETensor> columnwise_sources, columnwise_destinations;
   if (std::any_of(needs_swizzle.begin(), needs_swizzle.end(), [](bool value) { return value; })) {
     compact_outputs.reserve(num_tensors);
     for (size_t i = 0; i < num_tensors; ++i) {
       const auto &output = outputs[i];
-      compact_outputs.emplace_back(output.scaling_mode());
-      auto &compact = compact_outputs.back();
-      for (int j = kNVTERowwiseData; j <= kNVTEColumnwiseAmax; ++j) {
-        const auto param = static_cast<NVTETensorParam>(j);
-        const auto value = output.get_parameter(param);
-        compact.set_parameter(param, value.data_ptr, static_cast<DType>(value.dtype), value.shape);
-      }
+      const auto row_data = output.get_rowwise_data();
+      const auto column_data = output.get_columnwise_data();
+      const auto row_scales = output.get_rowwise_scale_inv();
+      const auto column_scales = output.get_columnwise_scale_inv();
+      const auto row_amax = output.get_amax();
+      const auto column_amax = output.get_columnwise_amax();
+      auto &compact = compact_outputs.emplace_back(NVTE_NVFP4_1D_SCALING);
+      compact.set_rowwise_data(row_data.data_ptr, quantizer.dtype, row_data.shape)
+          .set_columnwise_data(column_data.data_ptr, quantizer.dtype, column_data.shape)
+          .set_rowwise_scale_inv(row_scales.data_ptr, quantizer.scale_dtype, row_scales.shape)
+          .set_columnwise_scale_inv(column_scales.data_ptr, quantizer.scale_dtype,
+                                    column_scales.shape)
+          .set_amax(row_amax.data_ptr, DType::kFloat32, row_amax.shape)
+          .set_columnwise_amax(column_amax.data_ptr, DType::kFloat32, column_amax.shape);
       compact.set_with_gemm_swizzled_scales(output.get_with_gemm_swizzled_scales() &&
                                             !needs_swizzle[i]);
       compact.set_row_scaled_nvfp4(output.get_row_scaled_nvfp4());
       compact.set_nvfp4_e4m3_max(output.get_nvfp4_e4m3_max());
     }
     for (bool rowwise : {true, false}) {
-      const auto data_param = rowwise ? kNVTERowwiseData : kNVTEColumnwiseData;
-      const auto scale_param = rowwise ? kNVTERowwiseScaleInv : kNVTEColumnwiseScaleInv;
+      auto &buffers = rowwise ? rowwise_scales : columnwise_scales;
+      auto &views = rowwise ? rowwise_scale_views : columnwise_scale_views;
+      auto &sources = rowwise ? rowwise_sources : columnwise_sources;
+      auto &destinations = rowwise ? rowwise_destinations : columnwise_destinations;
       std::vector<std::vector<size_t>> shapes;
       std::vector<size_t> indices;
       for (size_t i = 0; i < num_tensors; ++i) {
-        const auto scales = outputs[i].get_parameter(scale_param);
+        const auto scales =
+            rowwise ? outputs[i].get_rowwise_scale_inv() : outputs[i].get_columnwise_scale_inv();
         if (needs_swizzle[i] && scales.data_ptr != nullptr) {
           shapes.emplace_back(scales.shape.data, scales.shape.data + scales.shape.ndim);
           indices.push_back(i);
         }
       }
       if (indices.empty()) continue;
-      auto &buffers = compact_scales[!rowwise];
       buffers = bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), at::kByte),
                               std::nullopt, std::vector<size_t>(shapes.size(), 16));
       for (size_t j = 0; j < indices.size(); ++j) {
         const size_t i = indices[j];
         const auto &output = outputs[i];
-        const auto data = output.get_parameter(data_param);
-        const auto scales = output.get_parameter(scale_param);
+        const auto &quantizer = *quantizers[i];
+        auto &compact = compact_outputs[i];
         void *scratch = buffers[j].data_ptr();
-        compact_outputs[i].set_parameter(scale_param, scratch, static_cast<DType>(scales.dtype),
-                                         scales.shape);
-
-        scale_inputs[!rowwise].emplace_back(output.scaling_mode());
-        scale_outputs[!rowwise].emplace_back(output.scaling_mode());
-        auto &source = scale_inputs[!rowwise].back();
-        auto &destination = scale_outputs[!rowwise].back();
-        source.set_parameter(data_param, nullptr, static_cast<DType>(data.dtype), data.shape);
-        destination.set_parameter(data_param, nullptr, static_cast<DType>(data.dtype), data.shape);
-        source.set_parameter(scale_param, scratch, static_cast<DType>(scales.dtype), scales.shape);
-        destination.set_parameter(scale_param, scales.data_ptr, static_cast<DType>(scales.dtype),
-                                  scales.shape);
-        destination.set_with_gemm_swizzled_scales(true);
-        sources[!rowwise].push_back(source.data());
-        destinations[!rowwise].push_back(destination.data());
+        auto &scale_view = views.emplace_back(NVTE_NVFP4_1D_SCALING);
+        if (rowwise) {
+          const auto data = output.get_rowwise_data();
+          const auto scales = output.get_rowwise_scale_inv();
+          const auto amax = output.get_amax();
+          compact.set_rowwise_data(data.data_ptr, quantizer.dtype, data.shape)
+              .set_rowwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape)
+              .set_amax(amax.data_ptr, DType::kFloat32, amax.shape);
+          scale_view.set_rowwise_data(nullptr, quantizer.dtype, data.shape)
+              .set_rowwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape);
+        } else {
+          const auto data = output.get_columnwise_data();
+          const auto scales = output.get_columnwise_scale_inv();
+          const auto amax = output.get_columnwise_amax();
+          compact.set_columnwise_data(data.data_ptr, quantizer.dtype, data.shape)
+              .set_columnwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape)
+              .set_columnwise_amax(amax.data_ptr, DType::kFloat32, amax.shape);
+          scale_view.set_columnwise_data(nullptr, quantizer.dtype, data.shape)
+              .set_columnwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape);
+        }
+        sources.push_back(scale_view.data());
+        destinations.push_back(output.data());
       }
     }
   }
@@ -2214,11 +2230,17 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                        stream);
     }
   });
-  for (bool rowwise : {true, false}) {
-    if (sources[!rowwise].empty()) continue;
+  if (!rowwise_sources.empty()) {
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_tensor_swizzle_scaling_factors(rowwise_sources.data(), rowwise_destinations.data(),
+                                                rowwise_sources.size(),
+                                                at::cuda::getCurrentCUDAStream());
+    });
+  }
+  if (!columnwise_sources.empty()) {
     NVTE_SCOPED_GIL_RELEASE({
       nvte_multi_tensor_swizzle_scaling_factors(
-          sources[!rowwise].data(), destinations[!rowwise].data(), sources[!rowwise].size(),
+          columnwise_sources.data(), columnwise_destinations.data(), columnwise_sources.size(),
           at::cuda::getCurrentCUDAStream());
     });
   }

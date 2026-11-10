@@ -151,8 +151,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   TensorWrapper intermediate_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  at::Tensor compact_scales[2];
-  std::vector<TensorWrapper> scale_inputs, scale_outputs;
+  at::Tensor rowwise_scales, columnwise_scales;
+  std::vector<TensorWrapper> scale_inputs;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
@@ -161,35 +161,28 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      intermediate_out_nvte = TensorWrapper(out_nvte.scaling_mode());
-      for (int i = kNVTERowwiseData; i <= kNVTEColumnwiseAmax; ++i) {
-        const auto param = static_cast<NVTETensorParam>(i);
-        const auto value = out_nvte.get_parameter(param);
-        intermediate_out_nvte.set_parameter(param, value.data_ptr, static_cast<DType>(value.dtype),
-                                            value.shape);
+      intermediate_out_nvte = TensorWrapper(NVTE_MXFP8_1D_SCALING);
+      if (out_nvte.get_rowwise_scale_inv().data_ptr != nullptr) {
+        const auto data = out_nvte.get_rowwise_data();
+        const auto scales = out_nvte.get_rowwise_scale_inv();
+        rowwise_scales = allocateSpace(scales.shape, DType::kByte, false);
+        intermediate_out_nvte.set_rowwise_data(data.data_ptr, quantizer_cpp->dtype, data.shape)
+            .set_rowwise_scale_inv(rowwise_scales.data_ptr(), DType::kFloat8E8M0, scales.shape);
+        auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
+        scale_view.set_rowwise_data(nullptr, quantizer_cpp->dtype, data.shape)
+            .set_rowwise_scale_inv(rowwise_scales.data_ptr(), DType::kFloat8E8M0, scales.shape);
       }
-      for (bool rowwise : {true, false}) {
-        const auto data_param = rowwise ? kNVTERowwiseData : kNVTEColumnwiseData;
-        const auto scale_param = rowwise ? kNVTERowwiseScaleInv : kNVTEColumnwiseScaleInv;
-        const auto data = out_nvte.get_parameter(data_param);
-        const auto scales = out_nvte.get_parameter(scale_param);
-        if (scales.data_ptr == nullptr) continue;
-        auto &scratch = compact_scales[!rowwise];
-        scratch = allocateSpace(scales.shape, DType::kByte, false);
-        intermediate_out_nvte.set_parameter(scale_param, scratch.data_ptr(),
-                                            static_cast<DType>(scales.dtype), scales.shape);
-
-        scale_inputs.emplace_back(out_nvte.scaling_mode());
-        scale_outputs.emplace_back(out_nvte.scaling_mode());
-        auto &source = scale_inputs.back();
-        auto &destination = scale_outputs.back();
-        source.set_parameter(data_param, nullptr, static_cast<DType>(data.dtype), data.shape);
-        destination.set_parameter(data_param, nullptr, static_cast<DType>(data.dtype), data.shape);
-        source.set_parameter(scale_param, scratch.data_ptr(), static_cast<DType>(scales.dtype),
-                             scales.shape);
-        destination.set_parameter(scale_param, scales.data_ptr, static_cast<DType>(scales.dtype),
-                                  scales.shape);
-        destination.set_with_gemm_swizzled_scales(true);
+      if (out_nvte.get_columnwise_scale_inv().data_ptr != nullptr) {
+        const auto data = out_nvte.get_columnwise_data();
+        const auto scales = out_nvte.get_columnwise_scale_inv();
+        columnwise_scales = allocateSpace(scales.shape, DType::kByte, false);
+        intermediate_out_nvte.set_columnwise_data(data.data_ptr, quantizer_cpp->dtype, data.shape)
+            .set_columnwise_scale_inv(columnwise_scales.data_ptr(), DType::kFloat8E8M0,
+                                      scales.shape);
+        auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
+        scale_view.set_columnwise_data(nullptr, quantizer_cpp->dtype, data.shape)
+            .set_columnwise_scale_inv(columnwise_scales.data_ptr(), DType::kFloat8E8M0,
+                                      scales.shape);
       }
       kernel_out_nvte = &intermediate_out_nvte;
     } break;
@@ -239,9 +232,9 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       quantizer_cpp->quantize(intermediate_out_nvte, out_nvte);
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      for (size_t i = 0; i < scale_inputs.size(); ++i) {
+      for (auto &scale_view : scale_inputs) {
         NVTE_SCOPED_GIL_RELEASE({
-          nvte_swizzle_scaling_factors(scale_inputs[i].data(), scale_outputs[i].data(),
+          nvte_swizzle_scaling_factors(scale_view.data(), out_nvte.data(),
                                        at::cuda::getCurrentCUDAStream());
         });
       }
@@ -435,8 +428,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   TensorWrapper intermediate_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  at::Tensor compact_scales[2];
-  std::vector<TensorWrapper> scale_inputs, scale_outputs;
+  at::Tensor rowwise_scales, columnwise_scales;
+  std::vector<TensorWrapper> scale_inputs;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
@@ -445,35 +438,28 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      intermediate_out_nvte = TensorWrapper(out_nvte.scaling_mode());
-      for (int i = kNVTERowwiseData; i <= kNVTEColumnwiseAmax; ++i) {
-        const auto param = static_cast<NVTETensorParam>(i);
-        const auto value = out_nvte.get_parameter(param);
-        intermediate_out_nvte.set_parameter(param, value.data_ptr, static_cast<DType>(value.dtype),
-                                            value.shape);
+      intermediate_out_nvte = TensorWrapper(NVTE_MXFP8_1D_SCALING);
+      if (out_nvte.get_rowwise_scale_inv().data_ptr != nullptr) {
+        const auto data = out_nvte.get_rowwise_data();
+        const auto scales = out_nvte.get_rowwise_scale_inv();
+        rowwise_scales = allocateSpace(scales.shape, DType::kByte, false);
+        intermediate_out_nvte.set_rowwise_data(data.data_ptr, quantizer_cpp->dtype, data.shape)
+            .set_rowwise_scale_inv(rowwise_scales.data_ptr(), DType::kFloat8E8M0, scales.shape);
+        auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
+        scale_view.set_rowwise_data(nullptr, quantizer_cpp->dtype, data.shape)
+            .set_rowwise_scale_inv(rowwise_scales.data_ptr(), DType::kFloat8E8M0, scales.shape);
       }
-      for (bool rowwise : {true, false}) {
-        const auto data_param = rowwise ? kNVTERowwiseData : kNVTEColumnwiseData;
-        const auto scale_param = rowwise ? kNVTERowwiseScaleInv : kNVTEColumnwiseScaleInv;
-        const auto data = out_nvte.get_parameter(data_param);
-        const auto scales = out_nvte.get_parameter(scale_param);
-        if (scales.data_ptr == nullptr) continue;
-        auto &scratch = compact_scales[!rowwise];
-        scratch = allocateSpace(scales.shape, DType::kByte, false);
-        intermediate_out_nvte.set_parameter(scale_param, scratch.data_ptr(),
-                                            static_cast<DType>(scales.dtype), scales.shape);
-
-        scale_inputs.emplace_back(out_nvte.scaling_mode());
-        scale_outputs.emplace_back(out_nvte.scaling_mode());
-        auto &source = scale_inputs.back();
-        auto &destination = scale_outputs.back();
-        source.set_parameter(data_param, nullptr, static_cast<DType>(data.dtype), data.shape);
-        destination.set_parameter(data_param, nullptr, static_cast<DType>(data.dtype), data.shape);
-        source.set_parameter(scale_param, scratch.data_ptr(), static_cast<DType>(scales.dtype),
-                             scales.shape);
-        destination.set_parameter(scale_param, scales.data_ptr, static_cast<DType>(scales.dtype),
-                                  scales.shape);
-        destination.set_with_gemm_swizzled_scales(true);
+      if (out_nvte.get_columnwise_scale_inv().data_ptr != nullptr) {
+        const auto data = out_nvte.get_columnwise_data();
+        const auto scales = out_nvte.get_columnwise_scale_inv();
+        columnwise_scales = allocateSpace(scales.shape, DType::kByte, false);
+        intermediate_out_nvte.set_columnwise_data(data.data_ptr, quantizer_cpp->dtype, data.shape)
+            .set_columnwise_scale_inv(columnwise_scales.data_ptr(), DType::kFloat8E8M0,
+                                      scales.shape);
+        auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
+        scale_view.set_columnwise_data(nullptr, quantizer_cpp->dtype, data.shape)
+            .set_columnwise_scale_inv(columnwise_scales.data_ptr(), DType::kFloat8E8M0,
+                                      scales.shape);
       }
       kernel_out_nvte = &intermediate_out_nvte;
     } break;
@@ -521,9 +507,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       quantizer_cpp->quantize(intermediate_out_nvte, out_nvte);
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      for (size_t i = 0; i < scale_inputs.size(); ++i) {
+      for (auto &scale_view : scale_inputs) {
         NVTE_SCOPED_GIL_RELEASE({
-          nvte_swizzle_scaling_factors(scale_inputs[i].data(), scale_outputs[i].data(),
+          nvte_swizzle_scaling_factors(scale_view.data(), out_nvte.data(),
                                        at::cuda::getCurrentCUDAStream());
         });
       }
