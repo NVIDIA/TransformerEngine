@@ -6,6 +6,7 @@
 
 from typing import Optional, Union, List
 import os
+import weakref
 import torch
 
 import transformer_engine_torch as tex
@@ -1454,7 +1455,6 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
     """
     if not isinstance(model_weights, list):
         model_weights = [model_weights]
-    _PARAM_GATHER_GENERATION[0] += 1
 
     # Collect NVFP4 tensors for batched processing
     nvfp4_tensors = []
@@ -1491,9 +1491,6 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
 
 _NVFP4_WEIGHT_SWIZZLE_CACHE = os.getenv("NVTE_NVFP4_WEIGHT_SWIZZLE_CACHE", "0") == "1"
 
-# Bumped on every post-all-gather call, i.e. whenever quantized weights may have changed.
-_PARAM_GATHER_GENERATION = [0]
-
 
 def nvfp4_weight_swizzle_cache_enabled() -> bool:
     """Whether GEMMs reuse GEMM-swizzled scales of all-gathered NVFP4 weights.
@@ -1503,11 +1500,6 @@ def nvfp4_weight_swizzle_cache_enabled() -> bool:
     cache is in use.
     """
     return _NVFP4_WEIGHT_SWIZZLE_CACHE
-
-
-def param_gather_generation() -> int:
-    """Host-side counter of quantized-weight refreshes, for caches keyed on weight contents."""
-    return _PARAM_GATHER_GENERATION[0]
 
 
 def _nvfp4_storage_like(
@@ -1569,6 +1561,142 @@ def refresh_nvfp4_weight_gemm_swizzle_cache(nvfp4_tensors: List[NVFP4Tensor]) ->
         t._gsw_view = _nvfp4_storage_like(
             t, row, col, True, quantizer=t._quantizer, fake_dtype=t.dtype
         )
+    _refresh_discrete_weight_swizzle_cache(nvfp4_tensors)
+
+
+class _DiscreteWeightSwizzleEntry:
+    """Swizzled scales and packed pointers of a list of discrete NVFP4 weights.
+
+    Holds the weights only through weak references; the entry is dropped as soon as any of
+    them is freed, which releases its GPU buffers.
+    """
+
+    __slots__ = ("weights", "columnwise", "fmt", "data_ptrs", "scale_ptrs", "result", "finalizers")
+
+    def __init__(self, weights, columnwise, fmt, datas, scales, result):
+        self.weights = [weakref.ref(w) for w in weights]
+        self.columnwise = columnwise
+        self.fmt = fmt
+        self.data_ptrs = tuple(t.data_ptr() for t in datas)
+        self.scale_ptrs = tuple(t.data_ptr() for t in scales)
+        self.result = result
+        self.finalizers = []
+
+    def matches(self, weights, datas, scales) -> bool:
+        """Whether the entry still describes ``weights`` and their current buffers."""
+        return (
+            len(weights) == len(self.weights)
+            and all(ref() is w for ref, w in zip(self.weights, weights))
+            and tuple(t.data_ptr() for t in datas) == self.data_ptrs
+            and tuple(t.data_ptr() for t in scales) == self.scale_ptrs
+        )
+
+
+# (columnwise, ids of the weights) -> _DiscreteWeightSwizzleEntry. Entries are removed by
+# finalizers on their weights, so the cache never outlives the weights it describes.
+_DISCRETE_WEIGHT_SWIZZLE_CACHE: dict = {}
+
+
+def _drop_discrete_weight_swizzle_entry(key) -> None:
+    entry = _DISCRETE_WEIGHT_SWIZZLE_CACHE.pop(key, None)
+    if entry is not None:
+        for finalizer in entry.finalizers:
+            finalizer.detach()
+
+
+def _discrete_weight_operands(weights, columnwise: bool):
+    if columnwise:
+        return [w._columnwise_data for w in weights], [w._columnwise_scale_inv for w in weights]
+    return [w._rowwise_data for w in weights], [w._rowwise_scale_inv for w in weights]
+
+
+def swizzle_scales_and_pack_ptrs_for_discrete_weights(
+    weights: List[NVFP4TensorStorage],
+    fmt: str,
+    device: torch.device,
+    *,
+    columnwise: bool,
+):
+    """``swizzle_scales_and_pack_ptrs_for_discrete_weights`` of the weights' row- or
+    column-wise data, cached for NVFP4 primary weights.
+
+    With ``NVTE_NVFP4_WEIGHT_SWIZZLE_CACHE=1``, NVFP4 weights refreshed by
+    ``post_all_gather_processing`` reuse one set of swizzled scales and packed pointers for
+    every microbatch. ``post_all_gather_processing`` rewrites the cached scales in place, so
+    a CUDA graph that captured a cache hit replays with the current weights. Weights that never
+    went through ``post_all_gather_processing`` (e.g. weights quantized from BF16 in every
+    forward) are not cached, and a cache miss during CUDA graph capture keeps the swizzle in
+    the graph without caching it.
+    """
+    datas, scales = _discrete_weight_operands(weights, columnwise)
+    fn = tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights
+    if not (
+        nvfp4_weight_swizzle_cache_enabled()
+        and fmt == "nvfp4"
+        and len(weights) > 0
+        and all(isinstance(w, NVFP4Tensor) and getattr(w, "_gsw_gathered", False) for w in weights)
+    ):
+        return fn(datas, scales, fmt, device)
+    key = (columnwise, tuple(id(w) for w in weights))
+    entry = _DISCRETE_WEIGHT_SWIZZLE_CACHE.get(key)
+    if entry is not None and entry.matches(weights, datas, scales):
+        return entry.result
+    result = fn(datas, scales, fmt, device)
+    if torch.cuda.is_current_stream_capturing():
+        return result
+    _drop_discrete_weight_swizzle_entry(key)
+    entry = _DiscreteWeightSwizzleEntry(weights, columnwise, fmt, datas, scales, result)
+    for w in weights:
+        entry.finalizers.append(weakref.finalize(w, _drop_discrete_weight_swizzle_entry, key))
+        keys = getattr(w, "_gsw_discrete_keys", None)
+        if keys is None:
+            keys = set()
+            w._gsw_discrete_keys = keys
+        keys.add(key)
+    _DISCRETE_WEIGHT_SWIZZLE_CACHE[key] = entry
+    return result
+
+
+def _refresh_discrete_weight_swizzle_cache(nvfp4_tensors: List[NVFP4Tensor]) -> None:
+    """Rewrite in place the cached swizzled scales of freshly gathered discrete weights.
+
+    Only the slots of weights in ``nvfp4_tensors`` are rewritten, so an entry whose weights are
+    gathered in several calls (e.g. different buckets) is kept consistent. The data and scale
+    buffers of the weights are unchanged, so the packed pointer arrays stay valid.
+    """
+    gathered = {id(t) for t in nvfp4_tensors}
+    keys = set()
+    for t in nvfp4_tensors:
+        t._gsw_gathered = True
+        t_keys = getattr(t, "_gsw_discrete_keys", None)
+        if t_keys:
+            t_keys.intersection_update(_DISCRETE_WEIGHT_SWIZZLE_CACHE.keys())
+            keys.update(t_keys)
+    fn = tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights
+    for key in keys:
+        entry = _DISCRETE_WEIGHT_SWIZZLE_CACHE.get(key)
+        if entry is None:
+            continue
+        weights = [ref() for ref in entry.weights]
+        if any(w is None for w in weights):
+            _drop_discrete_weight_swizzle_entry(key)
+            continue
+        datas, scales = _discrete_weight_operands(weights, entry.columnwise)
+        if not entry.matches(weights, datas, scales):
+            # Buffers were reallocated: the next use rebuilds the entry.
+            _drop_discrete_weight_swizzle_entry(key)
+            continue
+        slots = [i for i, w in enumerate(weights) if id(w) in gathered]
+        cached = entry.result[2]
+        if len(slots) == len(weights):
+            cached.copy_(fn(datas, scales, entry.fmt, cached.device)[2])
+            continue
+        _, _, fresh = fn(
+            [datas[i] for i in slots], [scales[i] for i in slots], entry.fmt, cached.device
+        )
+        stride = fresh.numel() // len(slots)
+        for j, i in enumerate(slots):
+            cached[i * stride : (i + 1) * stride].copy_(fresh[j * stride : (j + 1) * stride])
 
 
 def _nvfp4_2d_multi_tensor_transpose(nvfp4_tensors: List[NVFP4Tensor]):
