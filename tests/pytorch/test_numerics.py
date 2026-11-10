@@ -1247,10 +1247,11 @@ def test_checkpoint_preserves_captured_rng_state(fork_tracker):
 
 @pytest.mark.parametrize("use_reentrant", all_boolean)
 @pytest.mark.parametrize("rng_source", ("default", "tracker", "mixed", "shared", "no_tracker"))
+@pytest.mark.parametrize("capture_mode", ("graphed", "manual"))
 @pytest.mark.skipif(
     not hasattr(torch.Generator, "philox_state"), reason="Captured RNG requires PyTorch 2.14+"
 )
-def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_source):
+def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_source, capture_mode):
     """Each captured recompute must reproduce its corresponding forward masks."""
     torch.manual_seed(seed)
     tracker = CudaRNGStatesTracker()
@@ -1269,6 +1270,7 @@ def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_sou
     class Model(torch.nn.Module):
         def forward(self, value):
             with tracker.fork() if rng_source == "shared" else nullcontext():
+                torch.rand(8, device=value.device)
                 return te_checkpoint(
                     body,
                     value,
@@ -1277,14 +1279,36 @@ def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_sou
                 )
 
     sample = torch.ones(4096, device="cuda", requires_grad=True)
-    model = te.make_graphed_callables(Model(), (sample,), num_warmup_iters=3)
+    if capture_mode == "manual":
+        model = Model()
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                sample.grad = None
+                model(sample).sum().backward()
+        torch.cuda.current_stream().wait_stream(stream)
+        sample.grad = None
+        graph = torch.cuda.CUDAGraph()
+        graph.register_generator_state(tracker.get_states()["model-parallel-rng"])
+        with torch.cuda.graph(graph):
+            output = model(sample)
+            output.sum().backward()
+    else:
+        model = te.make_graphed_callables(Model(), (sample,), num_warmup_iters=3)
     previous = None
     for _ in range(3):
-        value = torch.ones_like(sample, requires_grad=True)
-        output = model(value)
+        if capture_mode == "manual":
+            sample.grad.zero_()
+            graph.replay()
+            grad = sample.grad
+        else:
+            value = torch.ones_like(sample, requires_grad=True)
+            output = model(value)
+            output.sum().backward()
+            grad = value.grad
         forward_output = output.detach().clone()
-        output.sum().backward()
-        assert torch.equal(value.grad, forward_output), "Recompute used a different dropout mask"
+        assert torch.equal(grad, forward_output), "Recompute used a different dropout mask"
         if previous is not None:
             assert not torch.equal(forward_output, previous), "Graph replay did not advance RNG"
         previous = forward_output

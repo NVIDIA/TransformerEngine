@@ -336,20 +336,18 @@ def _check_checkpoint_rng():
 
 
 def _checkpoint_rng_state(generator):
-    """Snapshot RNG values on their current device."""
+    """Snapshot RNG values and the capture's CPU counter separately."""
     with torch.cuda.device(generator.device):
         if not torch.cuda.is_current_stream_capturing():
-            return generator.get_state()
+            return generator.get_state(), None
         if not _checkpoint_rng_available():
             # Empty sentinel: the guard rejects RNG use without Philox state access.
-            return torch.empty(0, device=generator.device, dtype=torch.int64)
-        seed, offset, intragraph = generator.philox_state(0)
-        state = torch.cat((seed, offset))
-        state[1].add_(intragraph.item())
-        return state
+            return torch.empty(0, device=generator.device, dtype=torch.int64), None
+        seed, offset, _ = generator.philox_state(0)
+        return torch.cat((seed, offset)), generator.get_state()
 
 
-def _restore_checkpoint_rng_state(generator, state):
+def _restore_checkpoint_rng_state(generator, state, capture_state):
     """Restore a snapshot without moving captured state to the CPU."""
     with torch.cuda.device(generator.device):
         capturing = torch.cuda.is_current_stream_capturing()
@@ -361,9 +359,10 @@ def _restore_checkpoint_rng_state(generator, state):
         if not capturing:
             generator.set_state(state)
         elif state.numel():
-            seed, offset, intragraph = generator.philox_state(0)
+            generator.set_state(capture_state)
+            seed, offset, _ = generator.philox_state(0)
             seed.copy_(state[:1])
-            offset.copy_(state[1:] - intragraph.item())
+            offset.copy_(state[1:])
 
 
 class _CheckpointRNGState:
@@ -383,7 +382,10 @@ class _CheckpointRNGState:
 
     def snapshot(self):
         """Copy the CPU state, generator values, and tensor-based tracker states."""
-        states = [torch.get_rng_state(), *(_checkpoint_rng_state(g) for g in self.generators)]
+        states = [
+            torch.get_rng_state(),
+            *(state for g in self.generators for state in _checkpoint_rng_state(g)),
+        ]
         if self.tracker is not None:
             tracker_states = self.tracker.get_states()
             states.extend(
@@ -393,8 +395,8 @@ class _CheckpointRNGState:
 
     def _restore(self, states):
         torch.set_rng_state(states[0])
-        for generator, state in zip(self.generators, states[1:]):
-            _restore_checkpoint_rng_state(generator, state)
+        for index, generator in enumerate(self.generators):
+            _restore_checkpoint_rng_state(generator, *states[1 + 2 * index : 3 + 2 * index])
 
     def guard(self):
         """Keep deterministic capture available on older PyTorch builds."""
@@ -407,10 +409,7 @@ class _CheckpointRNGState:
         """Restore forward RNG values temporarily, then restore the live values."""
         cuda_state = _get_cuda_rng_state()
         tracker_states = self.tracker.get_states() if self.tracker is not None else None
-        live_states = [
-            torch.get_rng_state(),
-            *(_checkpoint_rng_state(g) for g in self.generators),
-        ]
+        live_states = self.snapshot()
         try:
             self._restore(states)
             _set_cuda_rng_state(self.cuda_state)
@@ -418,7 +417,7 @@ class _CheckpointRNGState:
                 tensor_states = dict(
                     zip(
                         (name for name, state in self.tracker_states.items() if state is None),
-                        states[1 + len(self.generators) :],
+                        states[1 + 2 * len(self.generators) :],
                     )
                 )
                 self.tracker.set_states(
