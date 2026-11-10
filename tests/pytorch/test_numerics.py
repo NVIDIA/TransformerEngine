@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Parameter
+import transformer_engine.pytorch as te
 
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
@@ -1352,6 +1353,32 @@ def test_checkpoint_native_attention_requires_philox_api(use_reentrant, backend,
 
     def body(query):
         return attention(query, query, query)
+
+    graph = torch.cuda.CUDAGraph()
+    with pytest.raises(RuntimeError, match="philox_state"):
+        with torch.cuda.graph(graph):
+            te_checkpoint(body, value + 0, use_reentrant=use_reentrant)
+
+
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+@pytest.mark.parametrize("entry", ("quantize", "update", "native", "fused"))
+def test_checkpoint_stochastic_nvfp4_requires_philox_api(use_reentrant, entry, monkeypatch):
+    """Stochastic quantization must reject capture even through native entry points."""
+    import transformer_engine_torch as tex
+
+    monkeypatch.setattr(te_distributed, "_checkpoint_rng_available", lambda: False)
+    quantizer = te.NVFP4Quantizer(rowwise=True, columnwise=False, stochastic_rounding=True)
+    value = torch.ones(32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    destination = quantizer.make_empty(value.shape, dtype=value.dtype, device=value.device)
+
+    def body(tensor):
+        if entry == "quantize":
+            return quantizer(tensor)
+        if entry == "update":
+            return quantizer.update_quantized(tensor, destination)
+        if entry == "native":
+            return tex.quantize(tensor, quantizer)
+        return tex.swiglu(tensor, quantizer)
 
     graph = torch.cuda.CUDAGraph()
     with pytest.raises(RuntimeError, match="philox_state"):

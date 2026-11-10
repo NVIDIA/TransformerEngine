@@ -206,6 +206,22 @@ class NVFP4Quantizer(Quantizer):
         state["amax_reduction_group"] = None
         return state
 
+    @property
+    def stochastic_rounding(self) -> bool:
+        """Whether native quantization may use stochastic rounding in this context."""
+        enabled = self.__dict__["stochastic_rounding"]
+        if enabled:
+            # Native and fused quantizers read this flag without calling quantize_impl.
+            from ..distributed import _check_checkpoint_rng
+
+            _check_checkpoint_rng()
+        return enabled
+
+    @stochastic_rounding.setter
+    def stochastic_rounding(self, enabled: bool) -> None:
+        # Preserve the field name in serialized quantizers.
+        self.__dict__["stochastic_rounding"] = enabled
+
     def _rebuild_derived_state(self) -> None:
         """Build the derived ``rht_matrix`` (also used after value-key reconstruction).
 
