@@ -549,12 +549,9 @@ def _in_place_checkouts(repo):
     """Yields checkout(sha), which checks out a revision in the working tree, and checks out
     the original branch again on exit. Refuses to run with uncommitted changes, which would
     otherwise leak into every revision."""
-    # Ignored: submodules (checkout leaves them alone) and the benchmark's own files (the runs
-    # use a copy made before any checkout); neither is part of the benchmarked code.
-    status = ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all", "--"]
-    status.append(".")
-    if HERE.is_relative_to(repo):
-        status.append(f":!{HERE.relative_to(repo)}")
+    # Submodules are ignored (checkout leaves them alone). Edits to tracked benchmark files count
+    # too: the runs use a copy of them, but git refuses to check out a revision over them.
+    status = ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"]
     dirty = git(repo, *status).stdout.rstrip()
     if dirty:
         sys.exit(f"--compare checks out revisions in place; commit or stash these first:\n{dirty}")
