@@ -2190,6 +2190,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             and is mutually exclusive with masks, bias, ALiBi, sink attention, dropout, FP8,
             context parallelism, THD format, KV caching, and return_max_logit. The callback
             signature is ``score_mod(graph, score, tensors) -> score``.
+            For stateful callbacks, provide ``score_mod_graph_cache_key`` on the callable
+            or bound-method owner to enable graph caching. The key must describe the graph
+            structure and change when that structure changes; it must not contain tensors.
+            Pass runtime data through ``score_mod_tensors`` and ``score_mod_bprop_tensors``.
         score_mod_bprop: Optional[Callable], default = None
             Optional cuDNN frontend callback for the backward pass of score_mod. The callback
             signature is ``score_mod_bprop(graph, dP, tensors) -> dP``.

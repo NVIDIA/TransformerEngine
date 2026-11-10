@@ -628,6 +628,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     score_mod: Optional[Callable], default = None
         Experimental cuDNN frontend score modification callback. When set, fused attention is
         required and the same score_mod limitations as :func:`fused_attn` apply.
+        For stateful callbacks, provide ``score_mod_graph_cache_key`` on the callable
+        or bound-method owner to enable graph caching. The key must describe the graph
+        structure and change when that structure changes; it must not contain tensors.
+        Pass runtime data through ``score_mod_tensors`` and ``score_mod_bprop_tensors``.
     score_mod_bprop: Optional[Callable], default = None
         Optional score modification backward callback.
     score_mod_tensors: Optional[Mapping[str, Any]], default = None
@@ -642,7 +646,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Use cuDNN FP8 attention with current tensor scaling. Inputs, outputs and input
         gradients remain FP16/BF16. Fused attention is required, and this option is
         independent of the GEMM quantization recipe. Set to ``"mxfp8"`` for
-        block-scaled MXFP8 attention on SM100 or later.
+        block-scaled MXFP8 attention.
 
     Optimization parameters
     -----------------------
