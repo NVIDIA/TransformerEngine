@@ -17,7 +17,6 @@ import weakref
 import pytest
 import torch
 
-import transformer_engine_torch as tex
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import QuantizedTensor
 from transformer_engine.pytorch.cpp_extensions import gemm as gemm_mod
@@ -28,6 +27,9 @@ from transformer_engine.pytorch.tensor import utils as tensor_utils
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.utils import get_device_compute_capability
+
+# Import after transformer_engine.pytorch, which loads the core library it links against.
+import transformer_engine_torch as tex  # pylint: disable=wrong-import-order
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
@@ -411,15 +413,15 @@ def test_fused_grouped_mlp_cuda_graph_replay(swizzle_cache):
         static_x.requires_grad_(True)
         static_probs = torch.zeros(tokens, device="cuda", dtype=torch.bfloat16)
         static_probs.requires_grad_(True)
-        splits1 = torch.tensor(_SPLITS, dtype=torch.int, device="cuda")
-        splits2 = splits1.clone()
+        # FC1 and FC2 must see the same split tensor for the ops to fuse.
+        splits = torch.tensor(_SPLITS, dtype=torch.int, device="cuda")
         with torch.no_grad():
             x, probs, _ = _mlp_inputs(seed=3)
             static_x.copy_(x)
             static_probs.copy_(probs)
         graphed = te.make_graphed_callables(
             module,
-            (static_x, splits1, static_probs, splits2),
+            (static_x, splits, static_probs, splits),
             num_warmup_iters=3,
             enabled=True,
             recipe=_mlp_recipe(),
@@ -438,7 +440,7 @@ def test_fused_grouped_mlp_cuda_graph_replay(swizzle_cache):
             for w in weights:
                 w.grad = None
             with te.autocast(enabled=True, recipe=_mlp_recipe()):
-                y = graphed(static_x, splits1, static_probs, splits2)
+                y = graphed(static_x, splits, static_probs, splits)
             y.backward(dy)
             torch.cuda.synchronize()
             return [y.detach().clone(), static_x.grad.clone(), static_probs.grad.clone()] + [
