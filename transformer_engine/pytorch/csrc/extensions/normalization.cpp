@@ -11,6 +11,26 @@
 
 namespace transformer_engine::pytorch {
 
+namespace {
+
+TensorWrapper prepare_compact_norm_output(const TensorWrapper &output,
+                                          std::vector<at::Tensor> &scale_buffers,
+                                          std::vector<TensorWrapper> &scale_inputs) {
+  TensorWrapper compact_output(NVTE_MXFP8_1D_SCALING);
+  for (bool rowwise : {true, false}) {
+    const auto scales =
+        rowwise ? output.get_rowwise_scale_inv() : output.get_columnwise_scale_inv();
+    if (scales.data_ptr == nullptr) continue;
+    auto &buffer = scale_buffers.emplace_back(allocateSpace(scales.shape, DType::kByte, false));
+    set_compact_tensor_data(compact_output, output, rowwise, buffer.data_ptr());
+    auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
+    set_compact_tensor_data(scale_view, output, rowwise, buffer.data_ptr());
+  }
+  return compact_output;
+}
+
+}  // namespace
+
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
                                       const at::Tensor &gamma, const int sm_margin,
@@ -151,7 +171,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   TensorWrapper intermediate_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  at::Tensor rowwise_scales, columnwise_scales;
+  std::vector<at::Tensor> scale_buffers;
   std::vector<TensorWrapper> scale_inputs;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
@@ -161,23 +181,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      intermediate_out_nvte = TensorWrapper(NVTE_MXFP8_1D_SCALING);
-      if (out_nvte.get_rowwise_scale_inv().data_ptr != nullptr) {
-        rowwise_scales = allocateSpace(out_nvte.get_rowwise_scale_inv().shape, DType::kByte, false);
-        set_compact_tensor_data(intermediate_out_nvte, out_nvte, /*rowwise=*/true,
-                                rowwise_scales.data_ptr());
-        auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
-        set_compact_tensor_data(scale_view, out_nvte, /*rowwise=*/true, rowwise_scales.data_ptr());
-      }
-      if (out_nvte.get_columnwise_scale_inv().data_ptr != nullptr) {
-        columnwise_scales =
-            allocateSpace(out_nvte.get_columnwise_scale_inv().shape, DType::kByte, false);
-        set_compact_tensor_data(intermediate_out_nvte, out_nvte, /*rowwise=*/false,
-                                columnwise_scales.data_ptr());
-        auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
-        set_compact_tensor_data(scale_view, out_nvte, /*rowwise=*/false,
-                                columnwise_scales.data_ptr());
-      }
+      intermediate_out_nvte = prepare_compact_norm_output(out_nvte, scale_buffers, scale_inputs);
       kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
@@ -422,7 +426,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   TensorWrapper intermediate_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  at::Tensor rowwise_scales, columnwise_scales;
+  std::vector<at::Tensor> scale_buffers;
   std::vector<TensorWrapper> scale_inputs;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
@@ -432,23 +436,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      intermediate_out_nvte = TensorWrapper(NVTE_MXFP8_1D_SCALING);
-      if (out_nvte.get_rowwise_scale_inv().data_ptr != nullptr) {
-        rowwise_scales = allocateSpace(out_nvte.get_rowwise_scale_inv().shape, DType::kByte, false);
-        set_compact_tensor_data(intermediate_out_nvte, out_nvte, /*rowwise=*/true,
-                                rowwise_scales.data_ptr());
-        auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
-        set_compact_tensor_data(scale_view, out_nvte, /*rowwise=*/true, rowwise_scales.data_ptr());
-      }
-      if (out_nvte.get_columnwise_scale_inv().data_ptr != nullptr) {
-        columnwise_scales =
-            allocateSpace(out_nvte.get_columnwise_scale_inv().shape, DType::kByte, false);
-        set_compact_tensor_data(intermediate_out_nvte, out_nvte, /*rowwise=*/false,
-                                columnwise_scales.data_ptr());
-        auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
-        set_compact_tensor_data(scale_view, out_nvte, /*rowwise=*/false,
-                                columnwise_scales.data_ptr());
-      }
+      intermediate_out_nvte = prepare_compact_norm_output(out_nvte, scale_buffers, scale_inputs);
       kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
