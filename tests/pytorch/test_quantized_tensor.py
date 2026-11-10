@@ -26,6 +26,7 @@ from transformer_engine.pytorch import (
     QuantizedTensor,
 )
 
+from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.quantized_tensor import prepare_for_saving, restore_from_saved
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
@@ -218,6 +219,24 @@ class TestFloat8Tensor:
         assert list(tensor.size()) == dims, "Incorrect dims"
         assert tensor.dtype == dtype, "Incorrect nominal dtype"
         assert tensor.is_cuda, "Incorrect device"
+
+    def test_gemm_output_without_quantizer(self):
+        quantizer = Float8Quantizer(
+            torch.ones(1, device="cuda"),
+            torch.zeros(1, device="cuda"),
+            te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+        )
+        weight = torch.randint(-4, 5, (64, 128), device="cuda").float() / 16
+        inp = torch.randint(-4, 5, (32, 128), device="cuda").float() / 16
+        out = quantizer(torch.zeros((32, 64), device="cuda"))
+        data_ptr = out._data.data_ptr()
+        result, *_ = general_gemm(quantizer(weight), quantizer(inp), out=out)
+        expected = quantizer(inp @ weight.T)
+        assert result is out
+        assert result._data.data_ptr() == data_ptr
+        torch.testing.assert_close(result.dequantize(), expected.dequantize(), atol=0, rtol=0)
 
     def _test_quantize_dequantize(
         self,

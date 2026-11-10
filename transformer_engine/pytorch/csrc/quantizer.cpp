@@ -322,12 +322,7 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
 
 std::pair<TensorWrapper, py::object> NoneQuantizer::convert_and_update_tensor(
     py::object tensor) const {
-  auto tensor_pyt = tensor.cast<at::Tensor>();
-  TensorWrapper out_cpp;
-  out_cpp.set_rowwise_data(tensor_pyt.data_ptr(),
-                           GetTransformerEngineDType(tensor_pyt.scalar_type()),
-                           getTensorShape(tensor_pyt));
-  set_quantization_params(&out_cpp);
+  auto out_cpp = makeTransformerEngineTensor(tensor, py::none());
   return {std::move(out_cpp), std::move(tensor)};
 }
 
