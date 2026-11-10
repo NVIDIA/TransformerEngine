@@ -161,66 +161,31 @@ def time_kernels(factories, runs, warmup, keep):
         torch.cuda.synchronize()
     marker_names = [e.name for e in _cuda_kernels(prof)]
 
-    # Per config: [setup, warmups] M run M run ... M run M | next config's setup.
-    num_sets = []
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        for nbytes, factory in factories:
-            outputs = []  # each set keeps its last output alive, so new ones get fresh memory
-
-            def keep_output(launch, slot):
-                def run():
-                    outputs[slot] = launch()
-
-                return run
-
-            outputs.append(None)
-            try:
-                sets = [keep_output(factory(), 0)]
-                sets[0]()  # JIT compile; also materializes outputs allocated per call
-                torch.cuda.synchronize()
-            except RuntimeError as e:
-                warnings.warn(f"Skipped a config: {str(e).strip().splitlines()[0]}")
-                num_sets.append(None)
-                continue
-            count = max(2, -(-L2_ROTATION * l2_cache_bytes() // nbytes) + 1)
-            for slot in range(1, count):
-                outputs.append(None)
-                sets.append(keep_output(factory(), slot))
-            num_sets.append(count)
-            # Every set touched before timing; timed launches continue the same rotation, so
-            # each set always comes back after the other count - 1.
-            start = -(-max(warmup, count) // count) * count
-            for k in range(start):
-                sets[k % count]()
-            for k in range(runs):
-                marker()
-                sets[k % count]()
-            marker()
-            del sets, outputs
-        torch.cuda.synchronize()
-
-    segments, current, i = [], [], 0
-    kernels = _cuda_kernels(prof)
-    while i < len(kernels):
-        if [e.name for e in kernels[i : i + len(marker_names)]] == marker_names:
-            segments.append(current)
-            current, i = [], i + len(marker_names)
-        else:
-            current.append(kernels[i])
-            i += 1
-    expected = sum(runs + 1 for count in num_sets if count)
-    if len(segments) != expected:
-        raise RuntimeError(
-            f"Expected {expected} launch markers in the trace, found {len(segments)}"
-        )
-    results, first, fallbacks = [], 0, 0
-    for count in num_sets:
+    # Each config is profiled in a session of its own, parsed before the next one starts: one
+    # session for a whole sweep piles up events, and the profiler drops some near the end.
+    results, fallbacks = [], 0
+    for nbytes, factory in factories:
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            count = _launch_config(nbytes, factory, runs, warmup, marker)
         if count is None:
             results.append(None)
             continue
+        # [setup, warmups] M run M run ... M run M
+        segments, current, i = [], [], 0
+        kernels = _cuda_kernels(prof)
+        while i < len(kernels):
+            if [e.name for e in kernels[i : i + len(marker_names)]] == marker_names:
+                segments.append(current)
+                current, i = [], i + len(marker_names)
+            else:
+                current.append(kernels[i])
+                i += 1
+        if len(segments) != runs + 1:
+            raise RuntimeError(
+                f"Expected {runs + 1} launch markers in the trace, found {len(segments)}"
+            )
         times, names = [], []
-        first += runs + 1
-        for seg in segments[first - runs : first]:
+        for seg in segments[1:]:
             kept = [e for e in seg if keep(base_name(e.name))]
             if not kept:
                 seen = sorted({short_name(base_name(e.name)) for e in seg})
@@ -234,10 +199,49 @@ def time_kernels(factories, runs, warmup, keep):
         results.append((times, "+".join(names), count))
     if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND") == "1" and fallbacks:
         warnings.warn(
-            f"{fallbacks} of {sum(c is not None for c in num_sets)} configs ran CUDA kernels (no"
+            f"{fallbacks} of {sum(r is not None for r in results)} configs ran CUDA kernels (no"
             " CuTeDSL kernel for them in this TE build); see the kernel column."
         )
     return results
+
+
+def _launch_config(nbytes, factory, runs, warmup, marker):
+    """Runs one config's launches for time_kernels: setup and warm-ups, then `runs` timed
+    launches each preceded by marker() and a final marker(). Returns the number of buffer sets,
+    or None if TE rejects the config."""
+    import torch  # pylint: disable=import-outside-toplevel
+
+    outputs = []  # each set keeps its last output alive, so new ones get fresh memory
+
+    def keep_output(launch, slot):
+        def run():
+            outputs[slot] = launch()
+
+        return run
+
+    outputs.append(None)
+    try:
+        sets = [keep_output(factory(), 0)]
+        sets[0]()  # JIT compile; also materializes outputs allocated per call
+        torch.cuda.synchronize()
+    except RuntimeError as e:
+        warnings.warn(f"Skipped a config: {str(e).strip().splitlines()[0]}")
+        return None
+    count = max(2, -(-L2_ROTATION * l2_cache_bytes() // nbytes) + 1)
+    for slot in range(1, count):
+        outputs.append(None)
+        sets.append(keep_output(factory(), slot))
+    # Every set touched before timing; timed launches continue the same rotation, so each set
+    # always comes back after the other count - 1.
+    start = -(-max(warmup, count) // count) * count
+    for k in range(start):
+        sets[k % count]()
+    for k in range(runs):
+        marker()
+        sets[k % count]()
+    marker()
+    torch.cuda.synchronize()
+    return count
 
 
 def result_row(times, kernel):
