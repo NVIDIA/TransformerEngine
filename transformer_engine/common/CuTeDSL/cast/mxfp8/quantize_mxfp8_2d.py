@@ -27,6 +27,7 @@ from cutlass import cute
 from cutlass import Float32, Int32, Int64, Uint16, Uint32, Uint8
 
 from transformer_engine.common.CuTeDSL.utils import (
+    device_compute_capability,
     is_packed16,
     abs_max_x2_bf16,
     abs_max_x2_f16,
@@ -102,16 +103,23 @@ def quantize_colwise_mxfp8_2d(
         amax_c = fabs_f32(to_f32(amax_value))
     else:
         to_f32 = None
-        amax_c = Float32(0.0)
-        for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
+        in_c[0] = Float32(sX_thread[0])
+        amax_c = fabs_f32(in_c[0])
+        for i in cutlass.range_constexpr(1, MXFP8_BLOCK_SCALING_SIZE):
             in_c[i] = Float32(sX_thread[i])
             amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
 
     # Reduce the amaxes of the 32 threads in this warp to get the block amax, and let the leader thread
-    # of each warp write it to SMEM.
-    # Since amax_c is non-negative, casting it to u32, reducing it with umax, and casting it back to f32
-    # is equivalent to reducing it with fmax.
-    block_amax = cute.arch.warp_redux_sync(amax_c.bitcast(Uint32), kind="umax").bitcast(Float32)
+    # of each warp write it to SMEM. 
+    # Use f32 redux if it is available (blackwell family); otherwise use butterfly shuffle for reduction
+    if cutlass.const_expr(device_compute_capability() in ((10, 0), (10, 3))):
+        block_amax = cute.arch.warp_redux_sync(amax_c, kind="fmax")
+    else:
+        block_amax = amax_c
+        for k in cutlass.range_constexpr(THREADS_PER_WARP.bit_length() - 1):
+            block_amax = cute.arch.fmax(
+                block_amax, cute.arch.shuffle_sync_bfly(block_amax, offset=1 << k)
+            )
     if tidx % THREADS_PER_WARP == 0:
         sBlockAmax[tidx // THREADS_PER_WARP] = block_amax
 
@@ -250,10 +258,10 @@ def quantize_rowwise_mxfp8_2d(
                 fabs_f32(x2_lo_to_f32(amax_2x)), fabs_f32(x2_hi_to_f32(amax_2x))
             )
         else:
-            amax_r = Float32(0.0)
-            for w in cutlass.range_constexpr(WAVES):
-                for i in cutlass.range_constexpr(PACK_SIZE):
-                    amax_r = cute.arch.fmax(amax_r, fabs_f32(in_r[w][i]))
+            vals = [in_r[w][i] for w in range(WAVES) for i in range(PACK_SIZE)]
+            amax_r = fabs_f32(vals[0])
+            for j in cutlass.range_constexpr(1, len(vals)):
+                amax_r = cute.arch.fmax(amax_r, fabs_f32(vals[j]))
 
         # Use butterfly shuffles to reduce the 32 threads' local amax in this warp to get 2 block amax
         # for the left half and the right half of the warp (each warp with shape (16, 1))
