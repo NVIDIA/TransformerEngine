@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import setuptools
 from wheel.bdist_wheel import bdist_wheel
@@ -18,17 +18,22 @@ from wheel.bdist_wheel import bdist_wheel
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
+    cublasmp_home_path,
     cuda_archs,
     cuda_home_path,
-    cuda_version,
+    cuda_toolkit_from_python_packages,
     cudnn_frontend_include_path,
+    cudnn_python_package_path,
+    cusolvermp_home_path,
     get_bolt_build_flags,
     get_frameworks,
     remove_dups,
     min_python_version_str,
+    mpi_home_path,
     nccl_ep_enabled,
     get_max_jobs_for_parallel_build,
     nvcc_path,
+    nvshmem_home_path,
 )
 
 frameworks = get_frameworks()
@@ -66,6 +71,12 @@ def setup_common_extension() -> CMakeExtension:
         f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
     ]
 
+    # Isolated builds install Python packages outside the interpreter's site-packages, so
+    # CMake's Python_SITEARCH hint cannot find the nvidia-cudnn-cu* package there.
+    if not (os.getenv("CUDNN_PATH") or os.getenv("CUDNN_INCLUDE_PATH")):
+        if (cudnn_path := cudnn_python_package_path()) is not None:
+            cmake_flags.append(f"-DCUDNN_PATH={cudnn_path}")
+
     with_cutedsl = bool(int(os.getenv("NVTE_WITH_CUTEDSL", "0")))
     if with_cutedsl:
         tvm_ffi_include_dir = metadata.distribution("apache-tvm-ffi").locate_file("tvm_ffi/include")
@@ -75,31 +86,38 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
 
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+        mpi_home = mpi_home_path()
+        assert mpi_home is not None, (
+            "MPI_HOME must be set, or the openmpi Python package installed, when compiling with"
+            " NVTE_UB_WITH_MPI=1"
+        )
         cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+        cmake_flags.append(f"-DMPI_HOME={mpi_home}")
 
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
-        assert (
-            os.getenv("NVSHMEM_HOME") is not None
-        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+        nvshmem_home = nvshmem_home_path()
+        assert nvshmem_home is not None, (
+            "NVSHMEM_HOME must be set, or the nvidia-nvshmem-cu* Python package installed, when"
+            " compiling with NVTE_ENABLE_NVSHMEM=1"
+        )
         cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+        cmake_flags.append(f"-DNVSHMEM_HOME={nvshmem_home}")
 
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
+        cublasmp_dir = cublasmp_home_path()
+        assert cublasmp_dir is not None, (
+            "CUBLASMP_HOME must be set, or the nvidia-cublasmp-cu* Python package installed, when"
+            " compiling with NVTE_WITH_CUBLASMP=1"
+        )
         cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
-        cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
-            f"nvidia-cublasmp-cu{cuda_version()[0]}"
-        ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
         cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
 
     if bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0"))):
         cmake_flags.append("-DNVTE_WITH_CUSOLVERMP=ON")
-        cusolvermp_dir = os.getenv("CUSOLVERMP_HOME", "/usr")
-        cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
+        cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_home_path()}")
 
     # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
     # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
@@ -170,15 +188,21 @@ def _discover_nccl_home() -> str:
             f"'{env_home}/include/nccl.h' was not found; falling back to system probes."
         )
 
+    # With a CUDA Toolkit from Python packages, the NCCL loaded at runtime is most likely the
+    # nvidia-nccl wheel, which libtransformer_engine's RUNPATH prefers when it is installed.
+    if cuda_toolkit_from_python_packages() and (pip_root := _python_package_nccl_home()):
+        return pip_root
+
     lib_names = ("libnccl.so", "libnccl.so.2")
     # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
     lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
 
     # Prefer the NCCL the dynamic loader will actually resolve at runtime so the
-    # EP build links against the same libnccl that gets loaded. libtransformer_engine
-    # carries no NCCL RUNPATH, so the loader uses ldconfig/system paths; building
-    # against a different NCCL (e.g. a pip wheel) causes ABI mismatches. ldconfig is
-    # the ground truth for runtime resolution, so consult it before well-known prefixes.
+    # EP build links against the same libnccl that gets loaded. Unless an nvidia-nccl
+    # wheel is installed next to it, which libtransformer_engine's RUNPATH prefers,
+    # the loader uses ldconfig/system paths; building against a different NCCL causes
+    # ABI mismatches. ldconfig is the ground truth for runtime resolution, so consult
+    # it before well-known prefixes.
     try:
         out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode()
         for line in out.splitlines():
@@ -199,24 +223,30 @@ def _discover_nccl_home() -> str:
         ):
             return str(p)
 
-    # Fall back to a pip-installed NCCL (nvidia-nccl-cu* wheel) under nvidia/nccl
-    # in site-packages, used only when no system NCCL is present.
-    try:
-        import importlib.util
-
-        spec = importlib.util.find_spec("nvidia.nccl")
-        if spec is not None and spec.submodule_search_locations:
-            pip_root = Path(next(iter(spec.submodule_search_locations)))
-            if (pip_root / "include" / "nccl.h").exists() and any(
-                (pip_root / sub / name).exists() for sub in lib_subdirs for name in lib_names
-            ):
-                return str(pip_root)
-    except (ImportError, ValueError):
-        pass
+    # Fall back to a pip-installed NCCL when no system NCCL is present.
+    if pip_root := _python_package_nccl_home():
+        return pip_root
 
     raise RuntimeError(
         "Could not locate NCCL core (nccl.h + libnccl.so). Set NCCL_HOME to the install prefix."
     )
+
+
+def _python_package_nccl_home() -> Optional[str]:
+    """Return the NCCL installed from an nvidia-nccl-cu* wheel under nvidia/nccl, if any."""
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("nvidia.nccl")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+
+    pip_root = Path(next(iter(spec.submodule_search_locations)))
+    if (pip_root / "include" / "nccl.h").exists() and (pip_root / "lib" / "libnccl.so.2").exists():
+        return str(pip_root)
+    return None
 
 
 def build_nccl_ep_submodule() -> str:
@@ -312,10 +342,21 @@ def build_nccl_ep_submodule() -> str:
                 cwd=str(nccl_root),
                 env=env,
             )
+        make_variables = []
+        nccl_lib_dir = Path(nccl_home) / "lib"
+        if not (nccl_lib_dir / "libnccl.so").exists() and (nccl_lib_dir / "libnccl.so.2").exists():
+            # The NCCL EP Makefile links with -lnccl, but the nvidia-nccl-cu* packages only
+            # provide libnccl.so.2.
+            nccl_link_dir = build_dir / "nccl-lib"
+            nccl_link_dir.mkdir(parents=True, exist_ok=True)
+            nccl_link = nccl_link_dir / "libnccl.so"
+            nccl_link.unlink(missing_ok=True)
+            nccl_link.symlink_to(nccl_lib_dir / "libnccl.so.2")
+            make_variables.append(f"NCCL_LIBDIR={nccl_link_dir}")
         print(f"[NCCL EP] Building static and shared libraries (gencode='{gencode}')")
         make_jobs = f"-j{nproc}" if nproc else "-j"
         subprocess.check_call(
-            ["make", make_jobs, "-C", "nccl_ep", "lib"],
+            ["make", make_jobs, "-C", "nccl_ep", *make_variables, "lib"],
             cwd=str(nccl_root),
             env=env,
         )

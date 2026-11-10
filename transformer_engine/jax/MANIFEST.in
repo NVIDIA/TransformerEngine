@@ -1,3 +1,4 @@
+include _build_backend.py
 recursive-include build_tools *.*
 recursive-include common_headers *.*
 recursive-include csrc *.*
