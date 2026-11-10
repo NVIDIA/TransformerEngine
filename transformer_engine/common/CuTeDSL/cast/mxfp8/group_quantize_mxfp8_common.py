@@ -244,7 +244,7 @@ class MXFP8GroupQuantizeEntry:
             )
             if MXFP8GroupQuantizeSingleTensorViewKernel.supports(cfg, kernel_cls)
         ]
-        # TODO(kainingz): G2S beats G2R on 8192x2048 G=16 varying_first rowwise (1.00x vs 0.87x CUDA)
+        # TODO(kainingz): G2S beats G2R on 8192x2048 G=16 varying_first rowwise (1.00x vs 0.87x)
         if MXFP8GroupQuantizeG2RKernel.supports(cfg):
             self.kernels.append(MXFP8GroupQuantizeG2RKernel(cfg, sm_count))
         # Handles every config and call; runs when no candidate above is eligible.
