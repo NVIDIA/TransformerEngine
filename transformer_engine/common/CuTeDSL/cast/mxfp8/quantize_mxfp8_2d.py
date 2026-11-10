@@ -110,7 +110,7 @@ def quantize_colwise_mxfp8_2d(
             amax_c = cute.arch.fmax(amax_c, fabs_f32(in_c[i]))
 
     # Reduce the amaxes of the 32 threads in this warp to get the block amax, and let the leader thread
-    # of each warp write it to SMEM. 
+    # of each warp write it to SMEM.
     # Use f32 redux if it is available (blackwell family); otherwise use butterfly shuffle for reduction
     if cutlass.const_expr(device_compute_capability() in ((10, 0), (10, 3))):
         block_amax = cute.arch.warp_redux_sync(amax_c, kind="fmax")
