@@ -182,6 +182,7 @@ class MXFP8GroupQuantizeG2RKernel(MXFP8GroupQuantizeKernelBase):
         last_logical_dim: Int64,
         num_tensors: Int32,
     ):
+        """Quantize the tiles of group member blockIdx.y, grid-striding over blockIdx.x."""
         cfg = self.cfg
         bidx, member_id, _ = cute.arch.block_idx()
         gdx, _, _ = cute.arch.grid_dim()
