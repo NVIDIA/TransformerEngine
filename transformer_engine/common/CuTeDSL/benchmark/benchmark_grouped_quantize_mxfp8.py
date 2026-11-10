@@ -9,11 +9,12 @@ A group is G members (experts) in a buffer of M rows of hidden size N; --layout 
 member shapes vary. As with CUDA graphs, where the buffer is sized ahead of time and the member
 sizes are only known on device, varying members fill a random 50-100% of the buffer and the
 kernels skip the rest. Member sizes are random but seeded from the shape, so every run and
-both sides of --compare see the same group. Both implementations run through TE's dispatch
-(common.te_backend): --impl CUDA forces its CUDA kernels; --impl CuTeDSL turns the CuTeDSL
-backend on, which runs a CuTeDSL kernel where TE has one and CUDA otherwise; the kernel column
-says which ran. Each side's time includes its TMA-descriptor update kernel, if it launches one.
-Writes a CSV.
+both sides of --compare see the same group. CuTeDSL kernels come from this source tree (no
+rebuild needed); CUDA kernels come from the installed TE (set PYTHONPATH=<repo> to use your own
+build). The CUDA time includes its separate TMA-descriptor update kernel, which CuTeDSL does
+inside its kernel. A config the source tree's CuTeDSL kernels do not implement (e.g. 2D scaling)
+runs through TE's dispatch instead: CUDA unless the TE build has a CuTeDSL kernel for it; the
+kernel column says which ran. Writes a CSV.
 
 examples:
   python benchmark_grouped_quantize_mxfp8.py
@@ -39,7 +40,7 @@ DEBUG_N = [2048, 4096]
 DEBUG_M = [4096, 16384]
 DEBUG_EXPERTS = [4]
 FUSIONS = ("none", "dbias")  # grouped quantization has no PyTorch binding for (d)activations
-# --layout name -> TE's ShapeRepresentation of the group
+# --layout name -> shape representation of the CuTeDSL config (ShapeRepresentation in C++)
 LAYOUTS = {
     "same": "sbd",  # every member M/G x N, filling the buffer
     "varying_first": "vfd",  # members m_i x N, sum m_i <= M: uneven tokens per expert
@@ -139,8 +140,94 @@ def _te_launcher(tex):
     return setup
 
 
-# A descriptor update is part of the quantize work; the offsets computation and the dbias
-# reduction run outside both implementations' kernels.
+def _cutedsl_launcher():
+    """Returns setup(x, group, layout, direction, fusion, scaling, swizzle) -> launch(), calling
+    the compiled CuTeDSL grouped kernel directly on buffers laid out as TE's grouped output.
+    Configs this source tree's CuTeDSL kernels do not support go through TE's dispatch instead,
+    which runs CUDA unless the TE build has a CuTeDSL kernel."""
+    # pylint: disable=import-outside-toplevel
+    import torch
+
+    common.cuda_backend(True)
+    from transformer_engine.common.CuTeDSL import get_mxfp8_group_quantization_function
+
+    # Resolve the defining module instead of naming it, in case it gets renamed.
+    gq = sys.modules[get_mxfp8_group_quantization_function.__module__]
+    print(f"CuTeDSL kernels from {gq.__file__}")
+
+    @functools.lru_cache(maxsize=None)
+    def compiled(dtype, layout, direction, fusion, scaling, swizzle):
+        rowwise, colwise = common.DIRECTIONS[direction]
+        flags = {"use_2d_quantization": True} if scaling == "2d" else {}
+        try:
+            cfg = gq.MXFP8GroupQuantizeConfig(
+                dtype,
+                "Float8E4M3",
+                rowwise,
+                colwise,
+                LAYOUTS[layout],
+                with_gemm_swizzled_scales=swizzle == "on",
+                with_dbias=fusion == "dbias",
+                **flags,
+            )
+        except (TypeError, ValueError):  # not implemented in this revision
+            return None
+        fn = gq.compile_cutedsl_function_from_cfg(cfg)
+        return getattr(fn, "__tvm_ffi_object__", lambda: None)() or fn
+
+    @functools.lru_cache(maxsize=None)
+    def te_setup():
+        return _te_launcher(common.te_backend("CuTeDSL"))
+
+    def setup(x, group, layout, direction, fusion, scaling, swizzle):
+        dtype = next(v[1] for v in common.INPUTS.values() if getattr(torch, v[0]) == x.dtype)
+        fn = compiled(dtype, layout, direction, fusion, scaling, swizzle)
+        if fn is None:
+            return te_setup()(x, group, layout, direction, fusion, scaling, swizzle)
+        # Allocated here rather than by a TE grouped quantize call, so setting up a buffer set
+        # runs no kernel. Sizes and offsets are those of TE's GroupedTensor
+        # (MXFP8Quantizer::create_grouped_tensor): scales sized for the whole buffer, element
+        # offsets of the members' data.
+        rowwise, colwise = common.DIRECTIONS[direction]
+        shape = tuple(x.shape)
+        empty = functools.partial(torch.empty, device="cuda")
+        fp8, e8m0 = torch.float8_e4m3fn, torch.float8_e8m0fnu
+        o_row = empty(shape, dtype=fp8) if rowwise else None
+        o_col = empty(shape, dtype=fp8) if colwise else None
+        rows, cols = shape
+        if layout == "varying_both":
+            row_scales = col_scales = rows * cols // 32
+        else:
+            row_scales = _round_up(rows, 128) * _round_up(-(-cols // 32), 4)
+            col_scales = _round_up(-(-rows // 32), 4) * _round_up(cols, 128)
+        s_row = empty(row_scales, dtype=e8m0) if rowwise else None
+        s_col = empty(col_scales, dtype=e8m0) if colwise else None
+        # As the C++ bridge does: a missing direction's scale slot takes the other's buffer.
+        s_row, s_col = (s_row if rowwise else s_col), (s_col if colwise else s_row)
+        first, last = _dims_tensors(group, layout)
+        ends = list(itertools.accumulate((m * n for m, n in group), initial=0))
+        offsets = None if layout == "same" else torch.tensor(ends, dtype=torch.int64, device="cuda")
+        single = layout in SINGLE_TENSOR_LAYOUTS
+        # Scratch the kernel builds its per-member TMA descriptors in.
+        tensormaps = (
+            None
+            if single
+            else torch.zeros(gq.TENSOR_MAP_STORAGE_INT64_COUNT, dtype=torch.int64, device="cuda")
+        )
+        workspace = (
+            torch.empty((-(-shape[0] // ROW_BLOCK), shape[1]), dtype=torch.float32, device="cuda")
+            if fusion == "dbias"
+            else None
+        )
+        stream = torch.cuda.current_stream().cuda_stream
+        args = (x, o_row, o_col, s_row, s_col, offsets, first, last, tensormaps, len(group))
+        return lambda: fn(*args, None, None, workspace, stream)
+
+    return setup
+
+
+# The descriptor update is part of the CUDA path's quantize work (CuTeDSL does it in-kernel);
+# the offsets computation and the dbias reduction run outside both kernels.
 KEEP = common.te_kernels("^group_quantize", "^update_tma_descriptors$")
 
 
@@ -150,7 +237,10 @@ def run(args, impl):
     import pandas as pd
     import torch
 
-    setup = _te_launcher(common.te_backend(impl))
+    if impl == "CUDA":
+        setup = _te_launcher(common.te_backend("CUDA"))
+    else:
+        setup = _cutedsl_launcher()
 
     def factory(m, n, g, lay, d, f, sc, sw, inp, grp):
         dtype = getattr(torch, common.INPUTS[inp][0])

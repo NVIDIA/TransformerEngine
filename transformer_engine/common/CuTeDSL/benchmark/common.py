@@ -55,14 +55,12 @@ Comparing CUDA (old) vs CuTeDSL (new) {what} kernels:
           library: {library}
           source:  {git} (the library may be built from an older commit, see
                    the +<sha> in the version)
-  new = TE imported from this source tree ({repo}) at {new}, CuTeDSL backend on: TE's
-        dispatch JIT-compiles this tree's CuTeDSL kernels, and runs its CUDA kernel for a
-        config it has no CuTeDSL kernel for (see the kernel column). The dispatch is the TE
-        library this tree imports: its own in-place build, else the installed TE (warned).
+  new = the CuTeDSL kernels of {new} in this source tree ({repo}), JIT-compiled from
+        source. This is NOT the CuTeDSL code of the installed TE. Kernels called through TE's
+        dispatch use the TE library built in this tree, which runs its CUDA kernel for a
+        config it has no CuTeDSL kernel for (see the kernel column).
 """
 # `-P` keeps the cwd off sys.path, so this resolves TE exactly like the CUDA worker does.
-# Set by main() for a CuTeDSL run: the source tree TE must be imported from.
-SOURCE_TREE = None
 INSTALLED_TE_PROBE = """\
 import transformer_engine as te
 from transformer_engine.common import _get_shared_object_file
@@ -275,45 +273,13 @@ def te_backend(impl):
     if impl == "CUDA":
         print(f"CUDA kernels from {disable_cutedsl_dispatch()}")
     else:
-        core = check_te_from_source_tree(tex)
+        from transformer_engine.common import _get_shared_object_file
+
         print(
             "TE dispatch with the CuTeDSL backend on (CUDA where it has no CuTeDSL kernel),"
-            f" from {core}"
+            f" from {_get_shared_object_file('core')}"
         )
     return tex
-
-
-def check_te_from_source_tree(tex):
-    """TE's dispatch JIT-compiles the CuTeDSL kernels of the TE Python package it was imported
-    from, so a CuTeDSL run must import TE from SOURCE_TREE (the tree, or the revision --compare
-    checked out). Exits if it did not; warns if TE's C++ libraries do not come from the tree
-    either (no in-place build, so the installed TE's are found): the kernels are then the
-    tree's, but the dispatch deciding which of them run is the installed TE's. Returns the
-    core library's path."""
-    # pylint: disable=import-outside-toplevel
-    import transformer_engine
-    from transformer_engine.common import _get_shared_object_file
-
-    core = Path(_get_shared_object_file("core")).resolve()
-    if SOURCE_TREE is None:
-        return core
-    package = Path(transformer_engine.__file__).resolve().parent
-    if not package.is_relative_to(SOURCE_TREE):
-        sys.exit(
-            f"transformer_engine was imported from {package}, not from the benchmarked source"
-            f" tree {SOURCE_TREE}, so this run would time that TE's CuTeDSL kernels instead"
-        )
-    outside = [p for p in (core, Path(tex.__file__).resolve()) if not p.is_relative_to(SOURCE_TREE)]
-    if outside:
-        print(
-            "WARNING: TE's C++ libraries are not built from the benchmarked source tree"
-            f" {SOURCE_TREE}: {', '.join(map(str, outside))}. The CuTeDSL kernels are the tree's,"
-            " but the dispatch choosing them is that TE's: C++ changes in the tree are not"
-            " measured, and a kernel that TE has no C++ bridge for runs CUDA. Build the tree in"
-            " place (pip install -e . --no-build-isolation) to measure it as a whole.",
-            flush=True,
-        )
-    return core
 
 
 def disable_cutedsl_dispatch():
@@ -584,14 +550,7 @@ def _compare(bench, script, repo, args, worker_args):
         if old == "CUDA":
             what = bench.title.removesuffix(" benchmark")
             explanation = CUDA_EXPLANATION.format(what=what, repo=repo, new=new, **installed_te())
-        else:
-            explanation = (
-                "Both revisions run on the TE C++ library the tree imports, which is not rebuilt"
-                " per revision: only their Python (the CuTeDSL kernels) differs, not their"
-                " dispatch or bridges. To measure C++ changes, rebuild per revision and compare"
-                " single runs with --regenerate --compare.\n"
-            )
-        print(explanation, flush=True)
+            print(explanation, flush=True)
         for label, rev in (("old", old), ("new", new)):
             if rev == "CUDA":
                 # Before any checkout: the installed TE may be this very source tree.
@@ -1007,8 +966,6 @@ def main(bench, script, doc):
             labels = {args.impl: args.impl}
             # The CUDA kernels must come from the installed TE, so leave sys.path alone for them.
             if args.impl == "CuTeDSL":
-                global SOURCE_TREE  # pylint: disable=global-statement
-                SOURCE_TREE = repo
                 sys.path.insert(0, str(repo))
             df = bench.run(args, args.impl)
             df.insert(0, "impl", args.impl)
