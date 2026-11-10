@@ -34,8 +34,8 @@ __launch_bounds__(1) __global__
 
 template <int nvec, bool aligned, typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
-    void amax_kernel(const InputType *input, float *amax, float *amax2, const size_t N,
-                     const size_t num_aligned_elements, const float *noop_ptr) {
+    void amax_kernel(const InputType *input, float *amax, float *columnwise_amax, const size_t N,
+const size_t num_aligned_elements, const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
   }
