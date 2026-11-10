@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import setuptools
 from wheel.bdist_wheel import bdist_wheel
@@ -21,6 +21,7 @@ from build_tools.utils import (
     cublasmp_home_path,
     cuda_archs,
     cuda_home_path,
+    cuda_toolkit_from_python_packages,
     cudnn_frontend_include_path,
     cusolvermp_home_path,
     get_bolt_build_flags,
@@ -180,6 +181,11 @@ def _discover_nccl_home() -> str:
             f"'{env_home}/include/nccl.h' was not found; falling back to system probes."
         )
 
+    # With a CUDA Toolkit from Python packages, the NCCL loaded at runtime is most likely the
+    # nvidia-nccl wheel, which libtransformer_engine's RUNPATH prefers when it is installed.
+    if cuda_toolkit_from_python_packages() and (pip_root := _python_package_nccl_home()):
+        return pip_root
+
     lib_names = ("libnccl.so", "libnccl.so.2")
     # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
     lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
@@ -210,24 +216,30 @@ def _discover_nccl_home() -> str:
         ):
             return str(p)
 
-    # Fall back to a pip-installed NCCL (nvidia-nccl-cu* wheel) under nvidia/nccl
-    # in site-packages, used only when no system NCCL is present.
-    try:
-        import importlib.util
-
-        spec = importlib.util.find_spec("nvidia.nccl")
-        if spec is not None and spec.submodule_search_locations:
-            pip_root = Path(next(iter(spec.submodule_search_locations)))
-            if (pip_root / "include" / "nccl.h").exists() and any(
-                (pip_root / sub / name).exists() for sub in lib_subdirs for name in lib_names
-            ):
-                return str(pip_root)
-    except (ImportError, ValueError):
-        pass
+    # Fall back to a pip-installed NCCL when no system NCCL is present.
+    if pip_root := _python_package_nccl_home():
+        return pip_root
 
     raise RuntimeError(
         "Could not locate NCCL core (nccl.h + libnccl.so). Set NCCL_HOME to the install prefix."
     )
+
+
+def _python_package_nccl_home() -> Optional[str]:
+    """Return the NCCL installed from an nvidia-nccl-cu* wheel under nvidia/nccl, if any."""
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("nvidia.nccl")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+
+    pip_root = Path(next(iter(spec.submodule_search_locations)))
+    if (pip_root / "include" / "nccl.h").exists() and (pip_root / "lib" / "libnccl.so.2").exists():
+        return str(pip_root)
+    return None
 
 
 def build_nccl_ep_submodule() -> str:

@@ -451,26 +451,33 @@ def cuda_toolkit_include_path() -> Optional[Path]:
     return None
 
 
+def _nvidia_package_roots() -> List[Path]:
+    """Return the directories of the `nvidia` namespace package for NVIDIA Python packages."""
+    try:
+        import nvidia
+    except ModuleNotFoundError:
+        return []
+    return [Path(path).resolve() for path in nvidia.__path__]
+
+
+def cuda_toolkit_from_python_packages() -> bool:
+    """Whether the CUDA Toolkit used for the build is installed from Python packages."""
+    cuda_home = cuda_home_path()
+    return cuda_home is not None and any(
+        cuda_home.is_relative_to(root) for root in _nvidia_package_roots()
+    )
+
+
 @functools.lru_cache(maxsize=None)
 def get_cuda_include_dirs() -> List[Path]:
     """Returns the CUDA header directories."""
 
     force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
-    try:
-        import nvidia
-    except ModuleNotFoundError:
-        nvidia_roots = []
-    else:
-        nvidia_roots = [Path(path).resolve() for path in nvidia.__path__]
-
-    cuda_home = cuda_home_path()
-    cuda_home_from_wheel = cuda_home is not None and any(
-        cuda_home.is_relative_to(root) for root in nvidia_roots
-    )
+    nvidia_roots = _nvidia_package_roots()
 
     # A system toolkit contains all necessary headers under one include
     # directory. NVIDIA wheels split them across namespace packages.
-    if not force_wheels and not cuda_home_from_wheel:
+    if not force_wheels and not cuda_toolkit_from_python_packages():
         if (include_path := cuda_toolkit_include_path()) is not None:
             return [include_path]
 
