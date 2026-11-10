@@ -838,6 +838,34 @@ endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
 message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 
+# Find optional dependencies that are installed from Python packages into the
+# same environment as the installed library.
+set(NVTE_SITE_PACKAGES_RPATH "" CACHE STRING
+    "Python site-packages directory relative to the installed library, e.g. \$ORIGIN/..")
+if (NVTE_SITE_PACKAGES_RPATH)
+  set(nvte_python_package_rpath)
+  if (NVTE_WITH_CUBLASMP)
+    list(APPEND nvte_python_package_rpath
+         "${NVTE_SITE_PACKAGES_RPATH}/nvidia/cublasmp/cu${CUDAToolkit_VERSION_MAJOR}/lib")
+  endif()
+  if (NVTE_WITH_CUSOLVERMP)
+    list(APPEND nvte_python_package_rpath
+         "${NVTE_SITE_PACKAGES_RPATH}/nvidia/cu${CUDAToolkit_VERSION_MAJOR}/lib")
+  endif()
+  if (NVTE_WITH_NCCL_EP OR NVTE_WITH_CUBLASMP OR NVTE_WITH_CUSOLVERMP)
+    list(APPEND nvte_python_package_rpath "${NVTE_SITE_PACKAGES_RPATH}/nvidia/nccl/lib")
+  endif()
+  if (NVTE_ENABLE_NVSHMEM)
+    list(APPEND nvte_python_package_rpath "${NVTE_SITE_PACKAGES_RPATH}/nvidia/nvshmem/lib")
+  endif()
+  if (NVTE_UB_WITH_MPI)
+    # The openmpi package installs into <prefix>/lib, two levels above site-packages.
+    list(APPEND nvte_python_package_rpath "${NVTE_SITE_PACKAGES_RPATH}/../..")
+  endif()
+  set_target_properties(transformer_engine PROPERTIES
+                        INSTALL_RPATH "${nvte_python_package_rpath}")
+endif()
+
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
 if(NVTE_WITH_NCCL_EP)
