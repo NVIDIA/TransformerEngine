@@ -470,3 +470,61 @@ def test_stochastic_rounding_picks_an_adjacent_fp4_value(
 
     check_adjacent(q, s, x)
     check_adjacent(q_t, s_t, x.t().contiguous())
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("use_2D", [False, True], ids=str)
+def test_stochastic_rounding_cuda_graph(x_dtype: torch.dtype, use_2D: bool) -> None:
+    """Stochastic rounding captured in a CUDA graph reads the Philox seed and offset when the graph
+    is replayed. Two quantizes in one graph must match two eager calls from the same generator
+    state, which checks each call's offset within the graph, and the next replay must draw anew.
+    The seed has its top bit set, so it must reach the kernel intact both by value (eager) and
+    through a pointer (replay). Without the CuTeDSL backend, as in CI, every case runs a CUDA
+    kernel: BF16 1D, BF16 2D and FP32 input each take a different one."""
+    rng_seed = 2**63 + seed
+    shape = (256, 1024)
+    torch.manual_seed(seed)
+    x = torch.randn(shape, dtype=x_dtype, device="cuda")
+    quantizer = NVFP4Quantizer(
+        rowwise=True,
+        columnwise=True,
+        stochastic_rounding=True,
+        with_2d_quantization=use_2D,
+    )
+    outs = [quantizer.make_empty(shape, dtype=x_dtype, device="cuda") for _ in range(2)]
+
+    def quantize_all() -> None:
+        for out in outs:
+            out.quantize_(x)
+
+    def data() -> List[dict]:
+        return [
+            {"rowwise": out._rowwise_data.clone(), "columnwise": out._columnwise_data.clone()}
+            for out in outs
+        ]
+
+    # Warm up outside capture, so one-time setup does not land in the captured graph.
+    warmup_stream = torch.cuda.Stream()
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        torch.cuda.manual_seed(rng_seed)
+        quantize_all()
+        eager = data()
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        quantize_all()
+    torch.cuda.manual_seed(rng_seed)
+    graph.replay()
+    replay = data()
+    graph.replay()
+    replay_again = data()
+
+    for i, expected in enumerate(eager):
+        for name, value in expected.items():
+            assert torch.equal(replay[i][name], value), f"call {i}: {name} data: replay differs"
+    for name in ("rowwise", "columnwise"):
+        assert not torch.equal(eager[1][name], eager[0][name]), f"{name}: calls share draws"
+        assert not torch.equal(replay_again[0][name], replay[0][name]), f"{name}: replays repeat"

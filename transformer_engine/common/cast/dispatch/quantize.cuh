@@ -11,6 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_DISPATCH_QUANTIZE_CUH_
 #define TRANSFORMER_ENGINE_DISPATCH_QUANTIZE_CUH_
 
+#include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <optional>
@@ -38,6 +39,24 @@
 
 namespace transformer_engine {
 namespace dispatch {
+
+// Fill the RNG state tensor from the Philox state, if one is given, for a stochastic rounding
+// kernel that reads it.
+inline void unpack_philox_state(const QuantizationConfig &quant_config, cudaStream_t stream) {
+  if (!quant_config.stochastic_rounding || !quant_config.philox_state.has_value()) {
+    return;
+  }
+  NVTE_CHECK(quant_config.rng_state != nullptr,
+             "A Philox state needs an RNG state tensor to be unpacked into.");
+  const Tensor &rng_state = *convertNVTETensorCheck(quant_config.rng_state);
+  NVTE_CHECK(rng_state.dtype() == DType::kInt64 && rng_state.data.shape == Shape{2},
+             "RNG state should contain 2 64-bit values.");
+  const NVTEPhiloxState &philox_state = *quant_config.philox_state;
+  nvte_extract_seed_and_offset(static_cast<int64_t *>(rng_state.data.dptr), philox_state.captured,
+                               philox_state.seed_ptr, philox_state.seed_val,
+                               philox_state.offset_ptr, philox_state.offset_val,
+                               philox_state.offset_intragraph, stream);
+}
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
@@ -175,6 +194,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                   *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
 #endif
           if (!quantized_with_cutedsl) {
+            unpack_philox_state(quant_config_cpp, stream);
             nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
                 *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
           }
@@ -186,6 +206,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                   *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
 #endif
           if (!quantized_with_cutedsl) {
+            unpack_philox_state(quant_config_cpp, stream);
             nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
                 *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
           }
@@ -193,6 +214,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       } else {
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
+        unpack_philox_state(quant_config_cpp, stream);
         quantize_transpose_vector_blockwise_fp4(
             /*input=*/input_tensor->data, /*global_amax=*/global_amax,
             /*scale_inv=*/output_tensor->scale_inv,

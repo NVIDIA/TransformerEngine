@@ -392,6 +392,22 @@ void nvte_tensor_pack_destroy(NVTETensorPack *pack);
 /*! \brief Configuration for tensor quantization. */
 typedef void *NVTEQuantizationConfig;
 
+/*! \struct NVTEPhiloxState
+ *  \brief Philox RNG seed and offset, in the form nvte_extract_seed_and_offset takes them.
+ *
+ *  If captured is zero, the seed is seed_val and the offset is offset_val. Otherwise both are
+ *  read on the device when the work runs, as when a CUDA graph is replayed: the seed is
+ *  *seed_ptr and the offset is *offset_ptr + offset_intragraph.
+ */
+typedef struct NVTEPhiloxState {
+  int captured;               /*!< Whether the state was taken during CUDA graph capture */
+  int64_t *seed_ptr;          /*!< Device pointer to the seed, if captured */
+  uint64_t seed_val;          /*!< Seed, if not captured */
+  int64_t *offset_ptr;        /*!< Device pointer to the base offset, if captured */
+  uint64_t offset_val;        /*!< Offset, if not captured */
+  uint32_t offset_intragraph; /*!< Offset added to *offset_ptr, if captured */
+} NVTEPhiloxState;
+
 /*! \enum NVTEQuantizationConfigAttribute
  * \brief Type of option for tensor quantization.
  */
@@ -436,6 +452,14 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
   /*! Whether to use 2D block scaling for MXFP8 */
   kNVTEQuantizationConfigMXFP82DQuantization = 10,
+  /*! Philox state (NVTEPhiloxState) to take the stochastic rounding seed and offset from.
+   *
+   *  NVFP4 quantization through nvte_quantize_v2 or nvte_multi_tensor_quantize reads it in place
+   *  of the RNG state tensor's contents, and fills that tensor from it only for a kernel that
+   *  reads the tensor, so the RNG state tensor must still be set. Other functions read only the
+   *  RNG state tensor.
+   */
+  kNVTEQuantizationConfigPhiloxState = 11,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1496,6 +1520,12 @@ class QuantizationConfigWrapper {
   void set_rng_state(NVTETensor rng_state) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigRNGState, &rng_state,
                                            sizeof(NVTETensor));
+  }
+
+  /*! \brief Set the Philox state to take the stochastic rounding seed and offset from */
+  void set_philox_state(const NVTEPhiloxState &philox_state) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigPhiloxState,
+                                           &philox_state, sizeof(NVTEPhiloxState));
   }
 
   /*! \brief Set whether to use 2D block scaling for NVFP4 */

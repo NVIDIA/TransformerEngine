@@ -32,6 +32,7 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -648,6 +649,7 @@ struct QuantizationConfig {
   NVTENVFP44Over6Mode nvfp4_4over6_mode = kNVTENVFP44Over6Disabled;
   bool nvfp4_4over6_err_use_fast_math = false;
   bool mxfp8_2d_quantization = false;
+  std::optional<NVTEPhiloxState> philox_state;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -660,7 +662,8 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // use_fast_math
       sizeof(uint8_t),                       // nvfp4_4over6_mode
       sizeof(uint8_t),                       // nvfp4_4over6_err_use_fast_math
-      sizeof(uint8_t)                        // mxfp8_2d_quantization
+      sizeof(uint8_t),                       // mxfp8_2d_quantization
+      sizeof(NVTEPhiloxState)                // philox_state
   };
 };
 

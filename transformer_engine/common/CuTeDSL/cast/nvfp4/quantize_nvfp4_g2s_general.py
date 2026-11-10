@@ -46,6 +46,7 @@ from .quantize_nvfp4_common import (
     CUTEDSL_DEBUG_LOGGING,
     NVFP4_BLOCK_SCALING_SIZE,
     noop_flag_is_set,
+    philox_seed_and_offset,
     NVFP4QuantizeKernelBase,
 )
 
@@ -119,7 +120,10 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
         mAmaxRow: cute.Tensor,  # (M,) f32 per-row amax if ROW_SCALED_NVFP4, else (1,) global amax
         mAmaxCol: Optional[cute.Tensor],  # (1,) f32 global amax of the transposed output
         mNoop: cute.Pointer,  # f32 cast-noop flag; may be null, checked on device
-        mRngState: Optional[cute.Tensor],  # (2,) i64 Philox {seed, offset}
+        mRngSeed: cute.Pointer,  # i64 Philox seed; may be null (philox_seed_and_offset)
+        mRngOffset: cute.Pointer,  # i64 Philox base offset; may be null
+        rng_seed_val: Int64,  # Philox seed if mRngSeed is null
+        rng_offset_val: Int64,  # Philox offset, added to *mRngOffset if that is not null
         stream: CUstream,
     ):
         """AOT-compiled host entrypoint. `quantize_transpose_nvfp4_cutedsl.cuh` passes these
@@ -192,7 +196,10 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
             mAmaxRow,
             mAmaxCol,
             mNoop,
-            mRngState,
+            mRngSeed,
+            mRngOffset,
+            rng_seed_val,
+            rng_offset_val,
             tma_atom_in,
             tma_view_in,
             tma_atom_row,
@@ -210,7 +217,10 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
         mAmaxRow: cute.Tensor,
         mAmaxCol: Optional[cute.Tensor],
         mNoop: cute.Pointer,
-        mRngState: Optional[cute.Tensor],
+        mRngSeed: cute.Pointer,
+        mRngOffset: cute.Pointer,
+        rng_seed_val: Int64,
+        rng_offset_val: Int64,
         tma_atom_in: cute.CopyAtom,
         tma_view_in: cute.Tensor,
         tma_atom_row: cute.CopyAtom,
@@ -226,7 +236,10 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
                 mS_col,
                 mAmaxRow,
                 mAmaxCol,
-                mRngState,
+                mRngSeed,
+                mRngOffset,
+                rng_seed_val,
+                rng_offset_val,
                 tma_atom_in,
                 tma_view_in,
                 tma_atom_row,
@@ -243,7 +256,10 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
         mS_col: Optional[cute.Tensor],
         mAmaxRow: cute.Tensor,
         mAmaxCol: Optional[cute.Tensor],
-        mRngState: Optional[cute.Tensor],
+        mRngSeed: cute.Pointer,
+        mRngOffset: cute.Pointer,
+        rng_seed_val: Int64,
+        rng_offset_val: Int64,
         tma_atom_in: cute.CopyAtom,
         tma_view_in: cute.Tensor,
         tma_atom_row: cute.CopyAtom,
@@ -399,10 +415,13 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
                 + Int64(bidx) * self.THREADS
                 + Int64(bidy) * Int64(grid_dim_x) * self.THREADS
             )
+            rng_seed, rng_offset = philox_seed_and_offset(
+                mRngSeed, mRngOffset, rng_seed_val, rng_offset_val
+            )
             rng = PhiloxRng(
-                seed=Uint64(mRngState[0].ir_value()),
+                seed=rng_seed,
                 subsequence=Uint64(rng_sequence.ir_value()),
-                offset=Uint64(mRngState[1].ir_value()),
+                offset=rng_offset,
             )
 
         # Main loop over tiles/stages in chunk

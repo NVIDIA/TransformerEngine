@@ -311,6 +311,66 @@ def test_stochastic_rounding(direction):
         assert abs(up_fraction - 0.75) < 0.02, f"{name}: rounded up {up_fraction:.4f}, not 0.75"
 
 
+@pytest.mark.skipif(
+    device_compute_capability()[0] != 10, reason="CuTeDSL stochastic rounding needs SM 10.x"
+)
+@pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
+def test_stochastic_rounding_cuda_graph(direction):
+    """Stochastic rounding captured in a CUDA graph reads the Philox seed and offset when the graph
+    is replayed. Two quantizes in one graph must match two eager calls from the same generator
+    state, which checks each call's offset within the graph, and the next replay must draw anew.
+    The seed has its top bit set, so it must reach the kernel intact both by value (eager) and
+    through a pointer (replay)."""
+    rowwise, columnwise = direction
+    shape = (256, 1024)
+    seed = 2**63 + SEED
+    x = generate_input(shape)
+    quantizer = make_quantizer(rowwise, columnwise, stochastic_rounding=True)
+    outs = [quantizer.make_empty(shape, dtype=x.dtype, device="cuda") for _ in range(2)]
+
+    def quantize_all():
+        for out in outs:
+            out.quantize_(x)
+
+    def outputs():
+        return [extract_quantized_output(out, shape, rowwise, columnwise) for out in outs]
+
+    set_cutedsl_backend(True)
+    try:
+        # Warm up outside capture, so the kernel is compiled before the graph is captured.
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            torch.cuda.manual_seed(seed + 1)
+            quantize_all()
+            other_seed = outputs()
+            torch.cuda.manual_seed(seed)
+            quantize_all()
+            eager = outputs()
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            quantize_all()
+        torch.cuda.manual_seed(seed)
+        graph.replay()
+        replay = outputs()
+        graph.replay()
+        replay_again = outputs()
+    finally:
+        set_cutedsl_backend(False)
+    key = get_cfg_key(True, False, False, columnwise)
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, key
+
+    for i, expected in enumerate(eager):
+        for name, value in expected.items():
+            assert torch.equal(replay[i][name], value), f"call {i}: {name}: replay differs"
+    for name in ["rowwise data", "columnwise data"] if columnwise else ["rowwise data"]:
+        assert not torch.equal(eager[1][name], eager[0][name]), f"{name}: calls share draws"
+        assert not torch.equal(other_seed[0][name], eager[0][name]), f"{name}: seed is not used"
+        assert not torch.equal(replay_again[0][name], replay[0][name]), f"{name}: replays repeat"
+
+
 def _philox4x32(key, counter, rounds):
     """Plain Philox4x32 (curanddx's philox4x32_native_state)."""
     mask = 0xFFFFFFFF

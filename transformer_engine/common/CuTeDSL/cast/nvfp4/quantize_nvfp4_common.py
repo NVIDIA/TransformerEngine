@@ -12,7 +12,7 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import BFloat16, Boolean, Float4E2M1FN, Float8E4M3FN, Float32, Int64
+from cutlass import BFloat16, Boolean, Float4E2M1FN, Float8E4M3FN, Float32, Int64, Uint64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
@@ -54,6 +54,26 @@ def noop_flag_is_set(mNoop: cute.Pointer) -> Boolean:
     if mNoop.toint() != Int64(0):
         flag_is_set = cute.make_tensor(mNoop, cute.make_layout((1,)))[0] == Float32(1.0)
     return flag_is_set
+
+
+@cute.jit
+def philox_seed_and_offset(
+    mRngSeed: cute.Pointer, mRngOffset: cute.Pointer, rng_seed_val: Int64, rng_offset_val: Int64
+):
+    """The Philox seed and offset of stochastic rounding, as (Uint64, Uint64).
+
+    The seed is *mRngSeed, or rng_seed_val if mRngSeed is null, and the offset is rng_offset_val
+    plus *mRngOffset if mRngOffset is not null. A captured CUDA graph passes the pointers, so each
+    replay reads the values current when it runs. As in noop_flag_is_set, each address is checked
+    before it is dereferenced.
+    """
+    seed = rng_seed_val
+    if mRngSeed.toint() != Int64(0):
+        seed = cute.make_tensor(mRngSeed, cute.make_layout((1,)))[0]
+    offset = rng_offset_val
+    if mRngOffset.toint() != Int64(0):
+        offset = offset + cute.make_tensor(mRngOffset, cute.make_layout((1,)))[0]
+    return Uint64(seed), Uint64(offset)
 
 
 class NVFP4QuantizeConfig:
@@ -117,7 +137,10 @@ class NVFP4QuantizeKernelBase(abc.ABC):
         mAmaxRow: cute.Tensor,
         mAmaxCol: Optional[cute.Tensor],
         mNoop: cute.Pointer,
-        mRngState: Optional[cute.Tensor],
+        mRngSeed: cute.Pointer,
+        mRngOffset: cute.Pointer,
+        rng_seed_val: Int64,
+        rng_offset_val: Int64,
         stream: CUstream,
     ):
         """
@@ -162,10 +185,27 @@ class NVFP4QuantizeEntry(NVFP4QuantizeKernelBase):
         mAmaxRow: cute.Tensor,
         mAmaxCol: Optional[cute.Tensor],
         mNoop: cute.Pointer,
-        mRngState: Optional[cute.Tensor],
+        mRngSeed: cute.Pointer,
+        mRngOffset: cute.Pointer,
+        rng_seed_val: Int64,
+        rng_offset_val: Int64,
         stream: CUstream,
     ):
-        args = (mX, mO_row, mS_row, mO_col, mS_col, mAmaxRow, mAmaxCol, mNoop, mRngState, stream)
+        args = (
+            mX,
+            mO_row,
+            mS_row,
+            mO_col,
+            mS_col,
+            mAmaxRow,
+            mAmaxCol,
+            mNoop,
+            mRngSeed,
+            mRngOffset,
+            rng_seed_val,
+            rng_offset_val,
+            stream,
+        )
         dispatched_to_specialized = False
         for kernel in self.specialized_kernels:
             if not dispatched_to_specialized:
@@ -255,10 +295,11 @@ def compile_cutedsl_function_from_cfg(cfg):
     # is only a compile-time placeholder for the pointer the dispatcher passes at launch.
     noop_fake = cute.runtime.nullptr(Float32, mem_space=cute.AddressSpace.gmem, assumed_align=4)
 
-    # mRngState: Philox {seed, offset}; present (and consumed) only for stochastic rounding.
-    rng_state_fake = (
-        _gmem(Int64, (2,), stride_order=(0,), align=8) if cfg.USE_STOCHASTIC_ROUNDING else None
-    )
+    # mRngSeed / mRngOffset / rng_seed_val / rng_offset_val: the Philox {seed, offset} of stochastic
+    # rounding (philox_seed_and_offset), unused otherwise. Like mNoop, the pointers may be null at
+    # launch, and the seed and offset are then the values themselves.
+    rng_seed_fake = cute.runtime.nullptr(Int64, mem_space=cute.AddressSpace.gmem, assumed_align=8)
+    rng_offset_fake = cute.runtime.nullptr(Int64, mem_space=cute.AddressSpace.gmem, assumed_align=8)
 
     compiled = cute.compile(
         kernel_obj,
@@ -270,7 +311,10 @@ def compile_cutedsl_function_from_cfg(cfg):
         amax_row_fake,  # mAmaxRow
         amax_col_fake,  # mAmaxCol
         noop_fake,  # mNoop
-        rng_state_fake,  # mRngState
+        rng_seed_fake,  # mRngSeed
+        rng_offset_fake,  # mRngOffset
+        Int64(0),  # rng_seed_val
+        Int64(0),  # rng_offset_val
         cute.runtime.make_fake_stream(),  # stream
         options="--enable-tvm-ffi",
     )

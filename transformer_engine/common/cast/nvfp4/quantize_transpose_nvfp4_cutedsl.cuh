@@ -88,8 +88,8 @@ inline bool nvfp4_quantize_transpose_cutedsl(const NVFP4QuantConfig &config, con
     return false;
   }
 
-  // Data tensors auto-flatten to 2D (DLTensorWrapper's default); the amaxes and the RNG state are
-  // rank-1 in the compiled ABI.
+  // Data tensors auto-flatten to 2D (DLTensorWrapper's default); the amaxes are rank-1 in the
+  // compiled ABI.
   const int32_t device_index = transformer_engine::cuda::current_device();
   DLTensorWrapper mX(input.data, true, device_index);
   DLTensorWrapper mO_row(output->data, true, device_index);
@@ -108,22 +108,40 @@ inline bool nvfp4_quantize_transpose_cutedsl(const NVFP4QuantConfig &config, con
     mAmaxCol = DLTensorWrapper(output->columnwise_amax, false, device_index);
   }
 
-  // Optional Philox RNG state ({seed, offset}); required (and only used) for SR.
-  DLTensorWrapper mRngState;
+  // Philox {seed, offset}, used only for SR. The kernel takes the seed as
+  // seed_ptr ? *seed_ptr : seed_val and the offset as (offset_ptr ? *offset_ptr : 0) + offset_val,
+  // so a captured CUDA graph reads them when it is replayed.
+  void *rng_seed_ptr = nullptr;
+  void *rng_offset_ptr = nullptr;
+  int64_t rng_seed_val = 0;
+  int64_t rng_offset_val = 0;
   if (config.use_stochastic_rounding) {
-    const NVTETensor rng_state_tensor =
-        (quant_config != nullptr) ? quant_config->rng_state : nullptr;
-    NVTE_CHECK(rng_state_tensor != nullptr,
-               "Stochastic rounding requires an RNG state tensor to be provided.");
-    Tensor &rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
-    mRngState = DLTensorWrapper(rng_state_te_tensor.data, false, device_index);
+    if (quant_config->philox_state.has_value()) {
+      const NVTEPhiloxState &philox_state = *quant_config->philox_state;
+      if (philox_state.captured) {
+        rng_seed_ptr = philox_state.seed_ptr;
+        rng_offset_ptr = philox_state.offset_ptr;
+        rng_offset_val = static_cast<int64_t>(philox_state.offset_intragraph);
+      } else {
+        rng_seed_val = static_cast<int64_t>(philox_state.seed_val);
+        rng_offset_val = static_cast<int64_t>(philox_state.offset_val);
+      }
+    } else {
+      NVTE_CHECK(quant_config->rng_state != nullptr,
+                 "Stochastic rounding requires an RNG state tensor to be provided.");
+      auto *rng_state =
+          static_cast<int64_t *>(convertNVTETensor(quant_config->rng_state)->data.dptr);
+      rng_seed_ptr = rng_state;
+      rng_offset_ptr = rng_state + 1;
+    }
   }
 
   // noop passed as ptr because the null-check must be done at runtime on device
   void *noop_ptr = (noop != nullptr) ? noop->data.dptr : nullptr;
-  // noop and stream are tvm-ffi opaque "handles"; pass them as void*.
+  // noop, the RNG pointers and stream are tvm-ffi opaque "handles"; pass them as void*.
   (*nvfp4_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmaxRow, &mAmaxCol, noop_ptr,
-                          &mRngState, static_cast<void *>(stream));
+                          rng_seed_ptr, rng_offset_ptr, rng_seed_val, rng_offset_val,
+                          static_cast<void *>(stream));
   return true;
 }
 #endif  // FP4_TYPE_SUPPORTED

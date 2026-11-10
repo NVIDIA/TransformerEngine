@@ -39,6 +39,7 @@ from .quantize_nvfp4_common import (
     NVFP4_BLOCK_SCALING_SIZE,
     device_sm_count,
     noop_flag_is_set,
+    philox_seed_and_offset,
     NVFP4QuantizeConfig,
     NVFP4QuantizeKernelBase,
 )
@@ -114,7 +115,10 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
         mAmaxRow: cute.Tensor,
         mAmaxCol: Optional[cute.Tensor],  # Unused, kept for API compatibility
         mNoop: cute.Pointer,
-        mRngState: Optional[cute.Tensor],
+        mRngSeed: cute.Pointer,
+        mRngOffset: cute.Pointer,
+        rng_seed_val: Int64,
+        rng_offset_val: Int64,
         stream: CUstream,
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
@@ -123,7 +127,17 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
             )
         M, N = mX.shape
         grid_x = cute.ceil_div(N // NVFP4_BLOCK_SCALING_SIZE, self._BLOCKS_PER_CTA)
-        args = (mX, mO_row, mS_row, mAmaxRow, mNoop, mRngState)
+        args = (
+            mX,
+            mO_row,
+            mS_row,
+            mAmaxRow,
+            mNoop,
+            mRngSeed,
+            mRngOffset,
+            rng_seed_val,
+            rng_offset_val,
+        )
         if cutlass.const_expr(self.cfg.USE_STOCHASTIC_ROUNDING):
             # Under SR the Philox chain, not DRAM, sets the pace, so the per-CTA prologue (amax
             # load, divides, coefficient table, barrier) is a real fraction of each CTA. Doubling
@@ -161,7 +175,10 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
         mS_row: cute.Tensor,
         mAmaxRow: cute.Tensor,
         mNoop: cute.Pointer,
-        mRngState: Optional[cute.Tensor],
+        mRngSeed: cute.Pointer,
+        mRngOffset: cute.Pointer,
+        rng_seed_val: Int64,
+        rng_offset_val: Int64,
         ROWS: cutlass.Constexpr,
     ):
         """Device entry for the rowwise-only register kernel."""
@@ -187,8 +204,9 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
         rng_seed = Uint64(0)
         rng_offset = Uint64(0)
         if cutlass.const_expr(STOCHASTIC):
-            rng_seed = Uint64(mRngState[0])
-            rng_offset = Uint64(mRngState[1])
+            rng_seed, rng_offset = philox_seed_and_offset(
+                mRngSeed, mRngOffset, rng_seed_val, rng_offset_val
+            )
 
         j0 = bidx * self._BLOCKS_PER_CTA + tidx
         j = j0

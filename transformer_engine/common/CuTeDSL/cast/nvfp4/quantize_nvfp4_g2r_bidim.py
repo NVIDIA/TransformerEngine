@@ -54,6 +54,7 @@ from .quantize_nvfp4_common import (
     NVFP4_BLOCK_SCALING_SIZE,
     device_sm_count,
     noop_flag_is_set,
+    philox_seed_and_offset,
     NVFP4QuantizeConfig,
     NVFP4QuantizeKernelBase,
 )
@@ -146,7 +147,10 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
         mAmaxRow: cute.Tensor,
         mAmaxCol: Optional[cute.Tensor],
         mNoop: cute.Pointer,
-        mRngState: Optional[cute.Tensor],
+        mRngSeed: cute.Pointer,
+        mRngOffset: cute.Pointer,
+        rng_seed_val: Int64,
+        rng_offset_val: Int64,
         stream: CUstream,
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
@@ -155,7 +159,20 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
                 f" {self.cfg}\n"
             )
         M, K = mX.shape
-        args = (mX, mO_row, mS_row, mO_col, mS_col, mAmaxRow, mAmaxCol, mNoop, mRngState)
+        args = (
+            mX,
+            mO_row,
+            mS_row,
+            mO_col,
+            mS_col,
+            mAmaxRow,
+            mAmaxCol,
+            mNoop,
+            mRngSeed,
+            mRngOffset,
+            rng_seed_val,
+            rng_offset_val,
+        )
         # The strip remap needs every column of a GROUP-CTA strip to exist.
         if K % (self._GROUP_CTAS * self._TILE_K) == 0:
             self._launch(args, M, K, stream, self._GROUP_CTAS)
@@ -208,7 +225,10 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
         mAmaxRow: cute.Tensor,
         mAmaxCol: cute.Tensor,
         mNoop: cute.Pointer,
-        mRngState: Optional[cute.Tensor],
+        mRngSeed: cute.Pointer,
+        mRngOffset: cute.Pointer,
+        rng_seed_val: Int64,
+        rng_offset_val: Int64,
         num_slabs: Int32,
         GROUP: cutlass.Constexpr,
     ):
@@ -253,8 +273,9 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
         rng_seed = Uint64(0)
         rng_offset = Uint64(0)
         if cutlass.const_expr(STOCHASTIC):
-            rng_seed = Uint64(mRngState[0])
-            rng_offset = Uint64(mRngState[1])
+            rng_seed, rng_offset = philox_seed_and_offset(
+                mRngSeed, mRngOffset, rng_seed_val, rng_offset_val
+            )
 
         c0 = bidx * TILE_K
         r00 = bidy * (num_slabs * SLAB_M)

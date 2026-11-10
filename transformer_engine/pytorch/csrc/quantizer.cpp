@@ -2707,7 +2707,14 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     // Generate RNG state for rowwise quantization
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
     rng_state = torch::empty({2}, opts);
-    philox_unpack(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
+    if (this->with_rht) {
+      philox_unpack(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
+    } else {
+      // nvte_quantize_v2 unpacks the state into rng_state only for a kernel that reads it there.
+      quant_config.set_philox_state({philox_args.captured_, philox_args.seed_.ptr,
+                                     philox_args.seed_.val, philox_args.offset_.ptr,
+                                     philox_args.offset_.val, philox_args.offset_intragraph_});
+    }
     te_rng_state = makeTransformerEngineTensor(rng_state);
     quant_config.set_rng_state(te_rng_state.data());
 

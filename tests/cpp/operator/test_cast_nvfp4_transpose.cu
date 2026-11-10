@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -23,9 +24,13 @@
 
 #include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
+#include <transformer_engine/fused_attn.h>
 #include <transformer_engine/hadamard_transform.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
+
+// The CuTeDSL backend's runtime switch, which the library exports for tests.
+extern "C" void nvte_set_cutedsl_backend(int enabled);
 
 using namespace transformer_engine;
 using namespace test;
@@ -1356,6 +1361,141 @@ std::vector<std::vector<size_t>> row_scaled_transpose_dims = {
     {2048, 256},
 };
 
+// Switches the CuTeDSL backend off for its lifetime and back to NVTE_ENABLE_CUTEDSL_BACKEND's
+// setting on any exit.
+struct CuTeDSLBackendOff {
+    CuTeDSLBackendOff() { nvte_set_cutedsl_backend(0); }
+    ~CuTeDSLBackendOff() {
+        const char* enabled = std::getenv("NVTE_ENABLE_CUTEDSL_BACKEND");
+        nvte_set_cutedsl_backend(enabled != nullptr && enabled[0] != '\0' && enabled[0] != '0');
+    }
+};
+
+// A stochastic-rounding quantization given its Philox state through
+// kNVTEQuantizationConfigPhiloxState must give the bytes of one given an RNG state tensor that
+// nvte_extract_seed_and_offset filled from the same state: by value, or read from device memory
+// with an intragraph offset, as under CUDA graph capture.
+template <typename InputType>
+void performTestPhiloxState(const std::vector<size_t>& shape, const bool use_2d_quantization,
+                            const bool columnwise, const bool captured, const bool cutedsl_off) {
+    DType itype = TypeInfo<InputType>::dtype;
+    DType otype = DType::kFloat4E2M1;
+
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+    const std::array<size_t, 4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16);
+    const std::array<size_t, 4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
+
+    Tensor input("input", shape, itype);
+    fillCase<fp32>(&input, InputsFillCase::uniform);
+
+    // Golden amax chosen so the 2nd-stage scaling mantissa is zero (avoids rounding noise).
+    const float golden_amax = 448.0f * 6.0f * 8.0f;
+    Tensor output_ref("output_ref", shape, otype, /*rowwise=*/true, columnwise,
+                      NVTE_NVFP4_1D_SCALING);
+    Tensor output("output", shape, otype, /*rowwise=*/true, columnwise, NVTE_NVFP4_1D_SCALING);
+    Tensor output_zero("output_zero", shape, otype, /*rowwise=*/true, columnwise,
+                       NVTE_NVFP4_1D_SCALING);
+    for (Tensor* t : {&output_ref, &output, &output_zero}) {
+        t->cpu_rowwise_amax_ptr<float>()[0] = golden_amax;
+        if (columnwise) {
+            t->cpu_columnwise_amax_ptr<float>()[0] = golden_amax;
+        }
+        t->from_cpu();
+    }
+
+    Tensor seed("seed", std::vector<size_t>{1}, DType::kInt64);
+    Tensor offset("offset", std::vector<size_t>{1}, DType::kInt64);
+    seed.rowwise_cpu_dptr<int64_t>()[0] = 123;
+    offset.rowwise_cpu_dptr<int64_t>()[0] = 4096;
+    seed.from_cpu();
+    offset.from_cpu();
+    NVTEPhiloxState philox_state{};
+    philox_state.captured = captured;
+    if (captured) {
+        philox_state.seed_ptr = static_cast<int64_t*>(seed.rowwise_dptr());
+        philox_state.offset_ptr = static_cast<int64_t*>(offset.rowwise_dptr());
+        philox_state.offset_intragraph = 64;
+    } else {
+        philox_state.seed_val = 321;
+        philox_state.offset_val = 8192;
+    }
+
+    // Reference: the RNG state tensor filled from the Philox state.
+    Tensor rng_state_ref("rng_state_ref", std::vector<size_t>{2}, DType::kInt64);
+    nvte_extract_seed_and_offset(static_cast<int64_t*>(rng_state_ref.rowwise_dptr()),
+                                 philox_state.captured, philox_state.seed_ptr,
+                                 philox_state.seed_val, philox_state.offset_ptr,
+                                 philox_state.offset_val, philox_state.offset_intragraph, 0);
+    QuantizationConfigWrapper ref_config;
+    ref_config.set_stochastic_rounding(true);
+    ref_config.set_nvfp4_2d_quantization(use_2d_quantization);
+    ref_config.set_rng_state(rng_state_ref.data());
+
+    // System under test: the Philox state, with an RNG state tensor left at zero, which only a
+    // kernel that reads the tensor may read, after it is filled from the Philox state.
+    Tensor rng_state("rng_state", std::vector<size_t>{2}, DType::kInt64);
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_stochastic_rounding(true);
+    quant_config.set_nvfp4_2d_quantization(use_2d_quantization);
+    quant_config.set_rng_state(rng_state.data());
+    quant_config.set_philox_state(philox_state);
+
+    // Negative control: without the Philox state, a zero RNG state tensor must draw other bits, so
+    // the byte comparison cannot pass on a quantization that ignores the seed.
+    Tensor rng_state_zero("rng_state_zero", std::vector<size_t>{2}, DType::kInt64);
+    QuantizationConfigWrapper zero_config;
+    zero_config.set_stochastic_rounding(true);
+    zero_config.set_nvfp4_2d_quantization(use_2d_quantization);
+    zero_config.set_rng_state(rng_state_zero.data());
+
+    {
+        std::unique_ptr<CuTeDSLBackendOff> cuda_backend;
+        if (cutedsl_off) {
+            cuda_backend = std::make_unique<CuTeDSLBackendOff>();
+        }
+        nvte_quantize_v2(input.data(), output_ref.data(), ref_config, 0);
+        nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
+        nvte_quantize_v2(input.data(), output_zero.data(), zero_config, 0);
+    }
+
+    cudaDeviceSynchronize();
+    auto err = cudaGetLastError();
+    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    output_ref.to_cpu();
+    output.to_cpu();
+    output_zero.to_cpu();
+
+    const auto* ref_bytes =
+        reinterpret_cast<const uint8_t*>(output_ref.rowwise_cpu_dptr<fp4e2m1>());
+    const auto* zero_bytes =
+        reinterpret_cast<const uint8_t*>(output_zero.rowwise_cpu_dptr<fp4e2m1>());
+    EXPECT_FALSE(std::equal(ref_bytes, ref_bytes + rows * cols / 2, zero_bytes))
+        << "Stochastic rounding gave the same data for the zero RNG state";
+
+    size_t scale_mismatches = 0;
+    compare_nvfp4_tensors("philox_state_data", output.rowwise_cpu_dptr<fp4e2m1>(),
+                          output_ref.rowwise_cpu_dptr<fp4e2m1>(), static_cast<int>(rows),
+                          static_cast<int>(cols), /*atol=*/0.0, /*rtol=*/0.0);
+    compare_scaling_factors<fp8e4m3>("philox_state_scales",
+                                     output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     output_ref.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     scale_dims[0], scale_dims[1], scale_dims[3],
+                                     scale_mismatches);
+    if (columnwise) {
+        compare_nvfp4_tensors("philox_state_data_t", output.columnwise_cpu_dptr<fp4e2m1>(),
+                              output_ref.columnwise_cpu_dptr<fp4e2m1>(), static_cast<int>(cols),
+                              static_cast<int>(rows), /*atol=*/0.0, /*rtol=*/0.0);
+        compare_scaling_factors<fp8e4m3>("philox_state_scales_t",
+                                         output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                         output_ref.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                         scale_dims_t[0], scale_dims_t[1], scale_dims_t[3],
+                                         scale_mismatches);
+    }
+    ASSERT_EQ(scale_mismatches, 0u);
+}
+
 }  // namespace
 
 class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
@@ -1702,3 +1842,42 @@ TEST(CastNVFP4RHTTest, RejectsSwizzledScalesOnSM12x) {
                   std::string::npos);
     }
 }
+
+class CastNVFP4PhiloxStateTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<transformer_engine::DType, bool, bool, bool, bool>> {};
+
+TEST_P(CastNVFP4PhiloxStateTestSuite, MatchesExtractedRNGState) {
+    // The NVFP4 quantize kernels require Blackwell.
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    const DType input_type = std::get<0>(GetParam());
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
+        performTestPhiloxState<InputType>({512, 1024}, std::get<1>(GetParam()),
+                                          std::get<2>(GetParam()), std::get<3>(GetParam()),
+                                          std::get<4>(GetParam()));
+    );
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    CastNVFP4PhiloxStateTestSuite,
+    // BF16 1D takes the CuTeDSL kernel when the backend is on (SM 10.x), else the tuned 1D kernel;
+    // BF16 2D the optimized 2D kernel; FP32 the vector-blockwise one. All but the CuTeDSL kernel
+    // read the RNG state tensor.
+    ::testing::Combine(
+        ::testing::Values(DType::kBFloat16, DType::kFloat32),
+        ::testing::Values(false, true),   // use_2d_quantization
+        ::testing::Values(false, true),   // columnwise
+        ::testing::Values(false, true),   // captured
+        ::testing::Values(false, true)),  // CuTeDSL backend switched off
+    [](const testing::TestParamInfo<CastNVFP4PhiloxStateTestSuite::ParamType>& info) {
+        std::string name = test::typeName(std::get<0>(info.param));
+        name += std::get<1>(info.param) ? "X2D" : "X1D";
+        name += std::get<2>(info.param) ? "XBothDirections" : "XRowwise";
+        name += std::get<3>(info.param) ? "XCaptured" : "XByValue";
+        name += std::get<4>(info.param) ? "XCuTeDSLOff" : "XBackendAsSet";
+        return name;
+    });
