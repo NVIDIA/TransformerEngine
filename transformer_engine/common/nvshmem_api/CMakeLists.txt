@@ -24,6 +24,8 @@ target_link_directories(nvshmemapi PUBLIC ${NVSHMEM_HOME}/lib)
 target_link_libraries(nvshmemapi PUBLIC -static-libstdc++ nvshmem_device ${NVSHMEM_HOST_LIB} CUDA::nvml CUDA::cublas CUDA::cuda_driver)
 target_include_directories(nvshmemapi PRIVATE
                            ${NVSHMEM_HOME}/include/
+                           ${CUDNN_INCLUDE_DIR}
+                           ${NCCL_INCLUDE_DIR}
                            ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_include_directories(nvshmemapi PUBLIC
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
