@@ -297,10 +297,10 @@ def _wrap_single_quantized_as_grouped(
         dtype=tensor.dtype,
         quantizer=quantizer,
         num_tensors=1,
-        data=rowwise_data.reshape(-1) if rowwise_data is not None else None,
-        columnwise_data=columnwise_data.reshape(-1) if columnwise_data is not None else None,
-        scale_inv=rowwise_scale.reshape(-1) if rowwise_scale is not None else None,
-        columnwise_scale_inv=columnwise_scale.reshape(-1) if columnwise_scale is not None else None,
+        data=rowwise_data,
+        columnwise_data=columnwise_data,
+        scale_inv=rowwise_scale,
+        columnwise_scale_inv=columnwise_scale,
         amax=amax,
         columnwise_amax=columnwise_amax,
         first_dims=split_sizes,
@@ -1979,10 +1979,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     dtype=dtype,
                     num_tensors=num_groups,
                     quantizer=fc2_input_quantizer,
-                    data=fc2_in_row_data.reshape(-1),
-                    columnwise_data=fc2_in_col_data.reshape(-1),
-                    scale_inv=fc2_in_row_scale.reshape(-1),
-                    columnwise_scale_inv=fc2_in_col_scale.reshape(-1),
+                    data=fc2_in_row_data,
+                    columnwise_data=fc2_in_col_data,
+                    scale_inv=fc2_in_row_scale,
+                    columnwise_scale_inv=fc2_in_col_scale,
                     first_dims=split_sizes,
                     tensor_offsets=fc2_x_tensor_offsets,
                     with_gemm_swizzled_scales=True,
@@ -2005,10 +2005,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 dtype=dtype,
                 num_tensors=num_groups,
                 quantizer=fc2_input_quantizer,
-                data=fc2_in_row_data.reshape(-1),
-                columnwise_data=fc2_in_col_data.reshape(-1),
-                scale_inv=fc2_in_row_scale.reshape(-1),
-                columnwise_scale_inv=fc2_in_col_scale.reshape(-1),
+                data=fc2_in_row_data,
+                columnwise_data=fc2_in_col_data,
+                scale_inv=fc2_in_row_scale,
+                columnwise_scale_inv=fc2_in_col_scale,
                 first_dims=split_sizes,
                 tensor_offsets=fc2_x_tensor_offsets,
                 with_gemm_swizzled_scales=True,
@@ -2052,7 +2052,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     dtype=dtype,
                     num_tensors=num_groups,
                     quantizer=None,
-                    data=fc2_out_buf.view(-1),
+                    data=fc2_out_buf,
                     first_dims=split_sizes,
                     tensor_offsets=fc2_out_tensor_offsets,
                 )
@@ -2813,8 +2813,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0])
                 # View scale in their actual swizzled shape
                 fc1_dy_col_scale = fc1_dy_col_scale.permute(5, 2, 4, 0, 1, 3)
-            fc1_dy_row_scale = fc1_dy_row_scale.view(-1)
-            fc1_dy_col_scale = fc1_dy_col_scale.view(-1)
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
         if grad_scales is not None:
             grad_scales = grad_scales.view(-1)
@@ -2859,9 +2857,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     num_tensors=num_groups,
                     quantizer=fc2_ctx.input_quantizers[0],
                     data=None,
-                    columnwise_data=fc2_x_col_data.reshape(-1),
+                    columnwise_data=fc2_x_col_data,
                     scale_inv=None,
-                    columnwise_scale_inv=fc2_x_col_scale.reshape(-1),
+                    columnwise_scale_inv=fc2_x_col_scale,
                     first_dims=split_sizes,
                     tensor_offsets=fc2_x_tensor_offsets,
                     with_gemm_swizzled_scales=True,
@@ -3012,7 +3010,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     dtype=dtype,
                     num_tensors=num_groups,
                     quantizer=None,
-                    data=grad_input.view(-1),
+                    data=grad_input,
                     first_dims=split_sizes,
                     tensor_offsets=fc1_x_tensor_offsets,
                 )
