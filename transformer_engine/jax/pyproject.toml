@@ -3,9 +3,9 @@
 # See LICENSE for license information.
 
 [build-system]
-requires = ["setuptools>=61.0", "pybind11[global]", "pip", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0"]
+requires = ["setuptools>=61.0", "pybind11[global]", "pip", "nvidia-cudnn-frontend>=1.25.0"]
 
-# JAX with CUDA support is added in `_build_backend.py`. Select CUDA with
+# JAX with CUDA support and Flax are added in `_build_backend.py`. Select CUDA with
 # --config-settings cuda-version=<version> or NVTE_CUDA_VERSION (default: CUDA 12).
 build-backend = "_build_backend"
 backend-path = ["."]

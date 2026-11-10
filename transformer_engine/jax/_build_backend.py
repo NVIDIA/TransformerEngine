@@ -26,13 +26,15 @@ _DEFAULT_CUDA_MAJOR_VERSION = "12"
 
 
 def _build_requirements(config_settings: ConfigSettings) -> List[str]:
-    """Get JAX with support for the requested CUDA version."""
+    """Get JAX with support for the requested CUDA version, and Flax."""
     # setup.py detects the CUDA version of the installed JAX to select the core library.
     cuda_version = requested_cuda_version(config_settings)
     cuda_major = (
         cuda_version.split(".", maxsplit=1)[0] if cuda_version else _DEFAULT_CUDA_MAJOR_VERSION
     )
-    return [f"jax[cuda{cuda_major}]"]
+    # Flax depends on JAX, so it must not be a static requirement: pip skips a dynamic
+    # requirement whose package is already installed, even if the requirement adds extras.
+    return [f"jax[cuda{cuda_major}]", "flax>=0.7.1"]
 
 
 # PEP 517 and PEP 660 hooks
