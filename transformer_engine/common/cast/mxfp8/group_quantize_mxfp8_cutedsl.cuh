@@ -180,13 +180,13 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
 
   // Match the symbolic divisibility checks in group_quantize_mxfp8_common.py.
   if (config.shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS && first_logical_dim % 128 != 0) {
-    maybe_warn_cutedsl_not_chosen(
+    report_cutedsl_not_chosen(
         "the first logical dimension is not divisible by 128 for a non-varying both dimensions "
         "tensor.");
     return false;
   }
   if (last_logical_dim % 16 != 0) {
-    maybe_warn_cutedsl_not_chosen("the last logical dimension is not divisible by 16.");
+    report_cutedsl_not_chosen("the last logical dimension is not divisible by 16.");
     return false;
   }
 
@@ -315,17 +315,17 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
                                   Tensor *workspace_tensor, const QuantizationConfig *quant_config,
                                   cudaStream_t stream) {
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
-    maybe_warn_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
+    report_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
     return false;
   }
   // TODO(kainingz): port 2D quantization to CuTeDSL
   if (quant_config != nullptr && quant_config->mxfp8_2d_quantization) {
-    maybe_warn_cutedsl_not_chosen("2D quantization is not supported.");
+    report_cutedsl_not_chosen("2D quantization is not supported.");
     return false;
   }
   constexpr Activation activation = activation_func_to_enum<ParamOP, OP>();
   if constexpr (activation == Activation::kUnsupported) {
-    maybe_warn_cutedsl_not_chosen("the fused activation is not supported.");
+    report_cutedsl_not_chosen("the fused activation is not supported.");
     return false;
   } else {
     // Mirrors the shape-representation selection in mxfp8::group_quantize.
@@ -346,8 +346,8 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
     // Keep the same group-size limit as the CUDA implementation.
     const size_t num_tensors = input_tensor->num_tensors;
     if (num_tensors == 0 || num_tensors > kMaxGroupTensors) {
-      maybe_warn_cutedsl_not_chosen("the group size ", num_tensors, " is not between 1 and ",
-                                    kMaxGroupTensors, ".");
+      report_cutedsl_not_chosen("the group size ", num_tensors, " is not between 1 and ",
+                                kMaxGroupTensors, ".");
       return false;
     }
 
@@ -357,18 +357,18 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
       // 128-row chunk. mxfp8::group_quantize raises for a non-integral row count.
       const size_t first_logical_dim = input_tensor->logical_shape.data[0];
       if (first_logical_dim % num_tensors != 0 || (first_logical_dim / num_tensors) % 128 != 0) {
-        maybe_warn_cutedsl_not_chosen("the rows of each group member are not a multiple of 128.");
+        report_cutedsl_not_chosen("the rows of each group member are not a multiple of 128.");
         return false;
       }
     } else if (!output_tensor->tensor_offsets.has_data()) {
       // The varying representations read per-member offsets, as the CUDA kernel does.
-      maybe_warn_cutedsl_not_chosen("the grouped tensor has no tensor offsets.");
+      report_cutedsl_not_chosen("the grouped tensor has no tensor offsets.");
       return false;
     }
 
     if (IS_DBIAS && !is_single_tensor) {
       // mxfp8::group_quantize raises a proper error for this.
-      maybe_warn_cutedsl_not_chosen("dbias is only supported for a common last dimension.");
+      report_cutedsl_not_chosen("dbias is only supported for a common last dimension.");
       return false;
     }
 
@@ -378,7 +378,7 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
 
     // Some Sanity checks
     if (!rowwise && !colwise) {
-      maybe_warn_cutedsl_not_chosen("the grouped tensor has neither rowwise nor columnwise data.");
+      report_cutedsl_not_chosen("the grouped tensor has neither rowwise nor columnwise data.");
       return false;
     }
     checkCuDriverContext(stream);
