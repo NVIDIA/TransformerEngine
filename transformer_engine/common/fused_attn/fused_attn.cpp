@@ -69,6 +69,8 @@ std::string to_string(NVTE_QKV_Layout layout) {
       return "NVTE_Paged_KV_THD_BSHD_BSHD";
     case NVTE_Paged_KV_THD_SBHD_SBHD:
       return "NVTE_Paged_KV_THD_SBHD_SBHD";
+    case NVTE_BHSD_BHSD_BHSD:
+      return "NVTE_BHSD_BHSD_BHSD";
     default:
       return "UNKNOWN_QKV_LAYOUT(" + std::to_string(static_cast<int>(layout)) + ")";
   }
@@ -90,6 +92,8 @@ std::string to_string(NVTE_QKV_Format format) {
       return "NVTE_THD_2BSHD";
     case NVTE_THD_2SBHD:
       return "NVTE_THD_2SBHD";
+    case NVTE_BHSD:
+      return "NVTE_BHSD";
     default:
       return "UNKNOWN_QKV_FORMAT(" + std::to_string(static_cast<int>(format)) + ")";
   }
@@ -319,7 +323,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
     }
     if (cfg.is_training && cfg.check_for_backward_support && cfg.uses_ragged_stats &&
         cfg.softmax_type == NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX &&
-        cudnn_runtime_version < 92600) {
+        cudnn_runtime_version < 92600 && cfg.head_dim_v != 64 && cfg.head_dim_v != 128 &&
+        cfg.head_dim_v != 256) {
       return reject(
           message,
           "Known cuDNN < 9.26.0 issue with THD learnable softmax backward. Please upgrade cuDNN.");

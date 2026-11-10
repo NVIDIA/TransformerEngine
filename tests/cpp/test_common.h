@@ -67,6 +67,9 @@ using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 using fp8e8m0 = uint8_t;
+#if CUDA_VERSION >= 13040
+using fp8ue5m3 = __nv_fp8_ue5m3;
+#endif
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
 using fp4e2m1x2 = __nv_fp4x2_e2m1;
@@ -91,7 +94,12 @@ struct BitsNumber {
 template <typename T>
 struct TypeInfo {
 #if FP4_TYPE_SUPPORTED
-    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0, fp4e2m1>;
+    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3,
+                             fp8e5m2, fp8e8m0, fp4e2m1
+#if CUDA_VERSION >= 13040
+                             , fp8ue5m3
+#endif
+                             >;
 #else
     using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0>;
 #endif
@@ -151,15 +159,18 @@ class Tensor {
          const NVTEShape &shape, const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING);
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
+         const std::optional<DType> scale_dtype = std::nullopt);
 
   Tensor(const std::string& name,
          const std::vector<size_t> &shape,
          const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
-    Tensor(name, nvte_make_shape(shape.data(), shape.size()), type, rowwise, columnwise, mode) {}
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
+         const std::optional<DType> scale_type = std::nullopt) :
+    Tensor(name, nvte_make_shape(shape.data(), shape.size()), type, rowwise, columnwise, mode,
+           scale_type) {}
 
   Tensor() = default;
 
@@ -635,6 +646,16 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
 #define SWITCH_FP4_TYPE_HANDLE(type, ...) // do nothing
 #endif
 
+#if CUDA_VERSION >= 13040
+#define SWITCH_UE5M3_TYPE_HANDLE(type, ...)     \
+  case DType::kFloat8UE5M3: {                   \
+    using type = fp8ue5m3;                      \
+    { __VA_ARGS__ }                             \
+  } break;
+#else
+#define SWITCH_UE5M3_TYPE_HANDLE(type, ...) // do nothing
+#endif
+
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
     switch (dtype) { \
         using namespace transformer_engine; \
@@ -693,7 +714,8 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
             } \
         break; \
         SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__) \
-        default: \
+        SWITCH_UE5M3_TYPE_HANDLE(type, __VA_ARGS__) \
+        default:                                            \
             printf("dtype: %d\n", static_cast<int>(dtype)); \
             NVTE_ERROR("Invalid type."); \
     }

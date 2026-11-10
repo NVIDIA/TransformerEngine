@@ -362,6 +362,7 @@ void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, s
  *  Quantizes elements in [start_offset, start_offset + len) of the flattened tensor
  *  using precomputed per-tile scales. Each 16x16 tile uses its own scale factor.
  *  Used in distributed settings where each rank casts its owned shard.
+ *  Uses E4M3 scale dtype. Use nvte_nvfp4_2d_partial_cast_v2 to specify another scale type.
  *
  *  \param[in]     inp             Input tensor (partial shard, high-precision).
  *  \param[out]    out             Output NVFP4 packed tensor (2 values per byte).
@@ -380,12 +381,35 @@ void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTE
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
                                 size_t block_len, cudaStream_t stream);
 
-/*! \brief Expand tile-level scales to row-level scales and convert to FP8 E4M3, used in partial cast.
+/*! \brief Cast a partial shard of a tensor to NVFP4 using 2D tile-based quantization.
+ *
+ *  This variant allows the NVFP4 scale storage type to be specified explicitly.
+ *
+ *  \param[in]     inp             Input tensor (partial shard, high-precision).
+ *  \param[out]    out             Output NVFP4 packed tensor (2 values per byte).
+ *  \param[in]     scale           Per-tile scale factors [tile_rows, tile_cols], float32.
+ *  \param[in]     global_scale    Global scale factor [1], float32.
+ *  \param[in]     h               Number of rows in the full 2D tensor.
+ *  \param[in]     w               Number of columns in the full 2D tensor.
+ *  \param[in]     scale_stride_h  Stride for scale in tile-row dimension.
+ *  \param[in]     scale_stride_w  Stride for scale in tile-col dimension.
+ *  \param[in]     start_offset    Starting element offset in the flattened tensor.
+ *  \param[in]     block_len       Tile dimension (must be 16 for NVFP4 2D).
+ *  \param[in]     scale_dtype     NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
+void nvte_nvfp4_2d_partial_cast_v2(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
+                                   const NVTETensor global_scale, size_t h, size_t w,
+                                   size_t scale_stride_h, size_t scale_stride_w,
+                                   size_t start_offset, size_t block_len, NVTEDType scale_dtype,
+                                   cudaStream_t stream);
+
+/*! \brief Expand tile-level scales to row-level scales and convert to E4M3 scale type.
  *
  * Each tile row's scale is repeated block_len times in the output.
  *
  *  \param[in]     input       Input tensor with tile scales [tile_rows, tile_cols], float32.
- *  \param[out]    output      Output tensor with expanded scales [rows_padded, tile_cols], uint8 (E4M3).
+ *  \param[out]    output      Output tensor with expanded scales [rows_padded, tile_cols], uint8.
  *  \param[in]     tile_rows   Number of tile rows.
  *  \param[in]     tile_cols   Number of tile columns.
  *  \param[in]     rows_padded Padded row count in output.
@@ -396,10 +420,25 @@ void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, s
                                     size_t tile_cols, size_t rows_padded, size_t block_len,
                                     cudaStream_t stream);
 
-/*! \brief Compute per-block decode scale from block amax and global amax.
+/*! \brief Expand tile-level scales to row-level scales and convert to the selected FP8 scale type.
+ *
+ *  \param[in]     input       Input tensor with tile scales [tile_rows, tile_cols], float32.
+ *  \param[out]    output      Output tensor with expanded scales [rows_padded, tile_cols], uint8.
+ *  \param[in]     tile_rows   Number of tile rows.
+ *  \param[in]     tile_cols   Number of tile columns.
+ *  \param[in]     rows_padded Padded row count in output.
+ *  \param[in]     block_len   Block length (typically 16 for NVFP4).
+ *  \param[in]     scale_dtype NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream      CUDA stream.
+ */
+void nvte_nvfp4_expand_scale_to_fp8_v2(const NVTETensor input, NVTETensor output, size_t tile_rows,
+                                       size_t tile_cols, size_t rows_padded, size_t block_len,
+                                       NVTEDType scale_dtype, cudaStream_t stream);
+
+/*! \brief Compute per-block E4M3 decode scale from block amax and global amax.
  *
  * Computes:
- *   global_scale = (fp8_max * fp4_max) / global_amax = 2688 / global_amax
+ *   global_scale = (scale_max * fp4_max) / global_amax
  *   per_block_decode_scale = block_amax / fp4_max * global_scale
  *
  * This matches the CUDA device function compute_decoding_scaling_factor() in core_nvfp4.cuh.
@@ -412,19 +451,33 @@ void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, s
 void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor scale,
                                         const NVTETensor global_amax, cudaStream_t stream);
 
-/*! \brief Fused kernel for NVFP4 scale computation.
+/*! \brief Compute per-block decode scale from block amax and global amax.
+ *
+ * This variant allows the NVFP4 scale storage type to be specified explicitly.
+ *
+ *  \param[in]     block_amax   Input block amax tensor [tile_rows, tile_cols], float32.
+ *  \param[out]    scale        Output scale tensor [tile_rows, tile_cols], float32.
+ *  \param[in]     global_amax  Global amax tensor (single element), float32. Avoids D2H transfer.
+ *  \param[in]     scale_dtype  NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream       CUDA stream.
+ */
+void nvte_nvfp4_compute_per_block_scale_v2(const NVTETensor block_amax, NVTETensor scale,
+                                           const NVTETensor global_amax, NVTEDType scale_dtype,
+                                           cudaStream_t stream);
+
+/*! \brief Fused kernel for NVFP4 E4M3 scale computation.
  *
  *  Fuses three operations into one kernel:
  *  1. Compute per-block decode scales from block amax and global amax
  *  2. Copy global amax to target tensor
- *  3. Expand tile-level scales to row-level and convert to FP8 E4M3
+ *  3. Expand tile-level scales to row-level and convert to E4M3 scale type
  *
  *  Saves 2 kernel launches per parameter.
  *
  *  \param[in]     block_amax      Input block amax tensor [tile_rows, tile_cols], float32.
  *  \param[in]     global_amax     Global amax tensor [1], float32.
  *  \param[out]    per_block_scale Output per-block scale [tile_rows, tile_cols], float32 (for partial_cast).
- *  \param[out]    target_scale    Output scale tensor [rows_padded, tile_cols], uint8 (E4M3).
+ *  \param[out]    target_scale    Output scale tensor [rows_padded, tile_cols], uint8.
  *  \param[out]    target_amax     Output amax tensor [1], float32 (copy of global_amax).
  *  \param[in]     tile_rows       Number of tile rows.
  *  \param[in]     tile_cols       Number of tile columns.
@@ -437,9 +490,31 @@ void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global
                             NVTETensor target_amax, size_t tile_rows, size_t tile_cols,
                             size_t rows_padded, size_t block_len, cudaStream_t stream);
 
+/*! \brief Fused kernel for NVFP4 scale computation.
+ *
+ *  This variant allows the NVFP4 scale storage type to be specified explicitly.
+ *
+ *  \param[in]     block_amax      Input block amax tensor [tile_rows, tile_cols], float32.
+ *  \param[in]     global_amax     Global amax tensor [1], float32.
+ *  \param[out]    per_block_scale Output per-block scale [tile_rows, tile_cols], float32 (for partial_cast).
+ *  \param[out]    target_scale    Output scale tensor [rows_padded, tile_cols], uint8.
+ *  \param[out]    target_amax     Output amax tensor [1], float32 (copy of global_amax).
+ *  \param[in]     tile_rows       Number of tile rows.
+ *  \param[in]     tile_cols       Number of tile columns.
+ *  \param[in]     rows_padded     Total padded rows in output.
+ *  \param[in]     block_len       Block length (16 for NVFP4).
+ *  \param[in]     scale_dtype     NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream          CUDA stream.
+ */
+void nvte_nvfp4_fused_scale_v2(const NVTETensor block_amax, const NVTETensor global_amax,
+                               NVTETensor per_block_scale, NVTETensor target_scale,
+                               NVTETensor target_amax, size_t tile_rows, size_t tile_cols,
+                               size_t rows_padded, size_t block_len, NVTEDType scale_dtype,
+                               cudaStream_t stream);
+
 /*! \brief Compute global encode scale from global amax.
  *
- * Computes: global_scale = (fp8_max * fp4_max) / global_amax = 2688 / global_amax
+ * Computes: global_scale = (scale_max * fp4_max) / global_amax, using E4M3 scale_max.
  * If global_amax <= 0, returns 1.0.
  *
  *  \param[in]     global_amax   Input global amax tensor [num_params], float32.
@@ -448,6 +523,18 @@ void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global
  */
 void nvte_nvfp4_compute_global_scale(const NVTETensor global_amax, NVTETensor global_scale,
                                      cudaStream_t stream);
+
+/*! \brief Compute global encode scale from global amax.
+ *
+ * This variant allows the NVFP4 scale storage type to be specified explicitly.
+ *
+ *  \param[in]     global_amax   Input global amax tensor [num_params], float32.
+ *  \param[out]    global_scale  Output global scale tensor [num_params], float32.
+ *  \param[in]     scale_dtype   NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream        CUDA stream.
+ */
+void nvte_nvfp4_compute_global_scale_v2(const NVTETensor global_amax, NVTETensor global_scale,
+                                        NVTEDType scale_dtype, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

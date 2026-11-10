@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 
+from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 from torch.fx.experimental.symbolic_shapes import guard_scalar
@@ -2794,6 +2795,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "cp_size_a2a": cp_size_a2a,
                 "deterministic": self.deterministic,
                 "is_training": self.training,
+                "device": query_layer.device,
+                "requires_backward": torch.is_grad_enabled()
+                and any(t.requires_grad for t in (query_layer, key_layer, value_layer)),
                 "fp8": self.fp8,
                 "fp8_meta": self.fp8_meta,
                 "inference_params": inference_params,
@@ -2910,6 +2914,29 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
 
             if use_flash_attention:
+                # DSL 4.6.2 reverted bulk-copy lane election; Quack PR #181 restores it.
+                quack_version = FlashAttentionUtils.quack_version
+                cutlass_version = FlashAttentionUtils.cutlass_dsl_version
+                affected_dependencies = (
+                    quack_version is not None
+                    and PkgVersion("0.6.0") <= quack_version < PkgVersion("0.6.4")
+                    and cutlass_version is not None
+                    and cutlass_version >= PkgVersion("4.6.2")
+                )
+                if (
+                    flash_attention_backend is not None
+                    and flash_attention_backend.major == 4
+                    and attention_params.requires_backward
+                    and affected_dependencies
+                    and dpa_utils.get_device_compute_capability(query_layer.device) == (9, 0)
+                ):
+                    raise RuntimeError(
+                        f"FA4 {flash_attention_backend} backward on Hopper (SM90) can hang with "
+                        f"quack-kernels {quack_version} and CUTLASS DSL "
+                        f"{cutlass_version}. Upgrade to a compatible "
+                        "Quack release containing the fix in 0.6.4: "
+                        "https://github.com/Dao-AILab/quack/pull/181"
+                    )
                 orig_qk_dim = None
                 orig_v_dim = None
                 if (

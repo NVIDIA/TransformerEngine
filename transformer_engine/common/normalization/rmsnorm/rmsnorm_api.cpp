@@ -27,20 +27,17 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       !is_mxfp8_scaling(z->scaling_mode)) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
-  if (is_mxfp8_scaling(z->scaling_mode)) {
-    NVTE_CHECK(!z->with_gemm_swizzled_scales,
-               "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
-  }
+  NVTE_CHECK(!x.data.shape.empty(), "x must have at least one dimension.");
+  const auto [rows, cols] = x.flat_2d_dims();
 
-  NVTE_CHECK(x.data.shape.size() == 2, "x must be 2D tensor.");
-
-  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1], "Gamma must have the same hidden size.");
+  NVTE_CHECK(gamma.data.shape == Shape{cols}, "Gamma has invalid shape (expected ", Shape{cols},
+             ", got ", gamma.data.shape, ").");
   NVTE_CHECK(epsilon >= 0.f, "Epsilon must be non-negative.");
 
   NVTE_CHECK(z->data.shape == x.data.shape, "Output tensor must have the same shape as x.");
 
-  NVTE_CHECK(rsigma->data.shape == Shape{x.data.shape[0]},
-             "RSigma must be 1D tensor with shape (x.shape[0],).");
+  NVTE_CHECK(rsigma->data.shape == Shape{rows}, "RSigma has invalid shape (expected ", Shape{rows},
+             ", got ", rsigma->data.shape, ").");
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
   if (workspace->data.numel() != 0) {
@@ -49,6 +46,26 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
     CheckOutputTensor(*z, "z");
     CheckOutputTensor(*rsigma, "rsigma");
+  }
+
+  // MXFP8 output: Transformer Engine's fused kernel, which alone writes GEMM-swizzled scales,
+  // unless cuDNN is requested or the kernel does not support the tensors.
+  if (is_mxfp8_scaling(z->scaling_mode)) {
+    const bool te_supported = is_supported_by_te_rmsnorm_fwd_mxfp8(x, gamma, *z);
+    if (z->with_gemm_swizzled_scales || (!use_cudnn_norm_fwd() && te_supported)) {
+      NVTE_CHECK(te_supported,
+                 "RMSNorm forward with GEMM-swizzled MXFP8 scales requires FP32, BF16 or FP16 "
+                 "input and weight, and rows and columns that are multiples of 128.");
+      if (workspace->data.numel() == 0) {
+        // The fused kernel needs no workspace, but a zero size denotes a workspace query.
+        workspace->data.shape = {1};
+        workspace->data.dtype = DType::kByte;
+        return;
+      }
+      rmsnorm_fwd_mxfp8(x, gamma, epsilon, z, rsigma, multiprocessorCount, zero_centered_gamma,
+                        stream);
+      return;
+    }
   }
 
   NVTE_Norm_Backend norm_backend;
@@ -78,8 +95,8 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       gamma.data.dtype,  // wtype
       x.data.dtype,      // itype
       z->data.dtype,     // otype
-      x.data.shape[0],   // batch_size
-      x.data.shape[1],   // hidden_size
+      rows,              // batch_size
+      cols,              // hidden_size
       multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training,
       gamma_in_weight_dtype);
 
@@ -118,10 +135,14 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
   NVTE_CHECK(dz.data.dtype == gamma.data.dtype);
   NVTE_CHECK(rsigma.data.dtype == DType::kFloat32);
 
-  NVTE_CHECK(x.data.shape.size() == 2);
+  NVTE_CHECK(!x.data.shape.empty(), "x must have at least one dimension.");
+  const auto [rows, cols] = x.flat_2d_dims();
   NVTE_CHECK(dz.data.shape == x.data.shape);
+  NVTE_CHECK(rsigma.data.shape == Shape{rows}, "RSigma has invalid shape (expected ", Shape{rows},
+             ", got ", rsigma.data.shape, ").");
 
-  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
+  NVTE_CHECK(gamma.data.shape == Shape{cols}, "Gamma has invalid shape (expected ", Shape{cols},
+             ", got ", gamma.data.shape, ").");
 
   NVTE_CHECK(dx->data.shape == x.data.shape);
   NVTE_CHECK(dx->data.dtype == x.data.dtype);
@@ -155,8 +176,8 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
       gamma.data.dtype,  // wtype
       x.data.dtype,      // itype
       gamma.data.dtype,  // otype
-      x.data.shape[0],   // batch_size
-      x.data.shape[1],   // hidden_size
+      rows,              // batch_size
+      cols,              // hidden_size
       multiprocessorCount, zero_centered_gamma, is_aligned, NVTE_DELAYED_TENSOR_SCALING, true,
       gamma_in_weight_dtype);
 
@@ -183,11 +204,15 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
   NVTE_CHECK(add.data.dtype == gamma.data.dtype);
   NVTE_CHECK(rsigma.data.dtype == DType::kFloat32);
 
-  NVTE_CHECK(x.data.shape.size() == 2);
+  NVTE_CHECK(!x.data.shape.empty(), "x must have at least one dimension.");
+  const auto [rows, cols] = x.flat_2d_dims();
   NVTE_CHECK(dz.data.shape == x.data.shape);
+  NVTE_CHECK(rsigma.data.shape == Shape{rows}, "RSigma has invalid shape (expected ", Shape{rows},
+             ", got ", rsigma.data.shape, ").");
   NVTE_CHECK(add.data.shape == x.data.shape);
 
-  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
+  NVTE_CHECK(gamma.data.shape == Shape{cols}, "Gamma has invalid shape (expected ", Shape{cols},
+             ", got ", gamma.data.shape, ").");
 
   NVTE_CHECK(dx->data.shape == x.data.shape);
   NVTE_CHECK(dx->data.dtype == x.data.dtype);
@@ -226,8 +251,8 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
       gamma.data.dtype,  // wtype
       x.data.dtype,      // itype
       gamma.data.dtype,  // otype
-      x.data.shape[0],   // batch_size
-      x.data.shape[1],   // hidden_size
+      rows,              // batch_size
+      cols,              // hidden_size
       multiprocessorCount, zero_centered_gamma, is_aligned, NVTE_DELAYED_TENSOR_SCALING, true,
       gamma_in_weight_dtype);
 

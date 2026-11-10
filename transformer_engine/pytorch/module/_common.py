@@ -12,9 +12,18 @@ import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
+from ..distributed import in_fp8_activation_recompute_phase
 from ..export import is_in_onnx_export_mode
+from ..quantization import FP8GlobalStateManager
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
+
+
+def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:
+    """Reduce all token dimensions, preserving the final feature dimension."""
+    if tensor.ndim == 1:
+        return tensor.clone()
+    return tensor.sum(dim=tuple(range(tensor.ndim - 1)))
 
 
 def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
@@ -320,3 +329,17 @@ class WeightGradStore:
         assert self.enabled is True, "delay_wgrad_compute is not enabled"
         rank = torch.distributed.get_rank()
         assert self.context.empty(), f"Queue is not empty. rank {rank}"
+
+
+def check_fp8_reduce_and_update(restore_first_module: bool = False) -> bool:
+    """Whether this module's backward should reduce and update the FP8 scaling factors.
+
+    Consumes the "first FP8 module" flag, restored when the forward is a
+    recomputation so the flag survives for the real forward's owner.
+    """
+    qstate = FP8GlobalStateManager.quantization_state
+    first_fp8_module = qstate.is_first_fp8_module
+    result = FP8GlobalStateManager.is_first_fp8_module()
+    if restore_first_module or in_fp8_activation_recompute_phase():
+        qstate.is_first_fp8_module = first_fp8_module
+    return result

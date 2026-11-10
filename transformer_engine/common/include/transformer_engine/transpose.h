@@ -33,8 +33,11 @@ void nvte_cast_transpose(const NVTETensor input, NVTETensor output, cudaStream_t
 
 /*! \brief Transpose the input.
  *
- *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[out]    transposed_output   Result of the transpose. Shape: [H, N].
+ *  Leading input dimensions are flattened for the transpose. The output
+ *  may retain them after its first dimension: [..., H] -> [H, ...].
+ *
+ *  \param[in]     input               Input tensor of shape [..., H].
+ *  \param[out]    transposed_output   Result of the transpose. Shape: [H, ...].
  *  \param[in]     stream              CUDA stream used for the operation.
  */
 void nvte_transpose(const NVTETensor input, NVTETensor transposed_output, cudaStream_t stream);

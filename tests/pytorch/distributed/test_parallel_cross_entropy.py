@@ -29,6 +29,7 @@ def _run_tensor_parallel(rank, world_size, init_file, label_smoothing):
         init_method=f"file://{init_file}",
         rank=rank,
         world_size=world_size,
+        device_id=device,
     )
     try:
         generator = torch.Generator().manual_seed(2025)
@@ -88,6 +89,70 @@ def _run_tensor_parallel(rank, world_size, init_file, label_smoothing):
         dist.destroy_process_group()
 
 
+def _run_tensor_parallel_argmax(rank, world_size, init_file, label_smoothing):
+    """Two-rank worker: the argmax over vocabulary shards, with and without multiple blocks."""
+
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+        device_id=device,
+    )
+    try:
+        generator = torch.Generator().manual_seed(2026)
+        for shape in ((2, 3, 22), (1, 4, 80000)):
+            vocab = shape[-1]
+            local_vocab = vocab // world_size
+            target = torch.randint(0, vocab, shape[:-1], generator=generator).to(device)
+            target[0, 2] = -100
+            values = torch.randn(shape, generator=generator).to(device)
+            peak = 8.0
+            values[0, 0, [3, local_vocab + 4]] = peak  # equal maxima on both ranks
+            values[0, 1, [local_vocab + 2, vocab - 2]] = peak  # equal maxima on rank 1
+            values[0, 2, vocab - 1] = peak  # the maximum on the last rank only
+            if shape[0] > 1:
+                # NaN counts as the maximum, as in torch.argmax: the first NaN wins.
+                values[1, 0, [5, local_vocab + 1]] = float("nan")  # NaN on both ranks
+                values[1, 1, 2] = peak
+                values[1, 1, local_vocab + 3] = float("nan")  # NaN after a larger rank-0 maximum
+            values[-1, -1] = 0.5  # a constant row
+            vocab_start = rank * local_vocab
+            for dtype in (torch.float32, torch.bfloat16):
+                global_values = values.to(dtype)
+                expected_argmax = torch.argmax(global_values, dim=-1)
+                local_values = global_values[..., vocab_start : vocab_start + local_vocab]
+                for reduce_loss in (False, True):
+                    for overwrite_input in (False, True):
+                        results = []
+                        for return_argmax in (False, True):
+                            local_logits = local_values.clone().requires_grad_()
+                            out = parallel_cross_entropy(
+                                local_logits,
+                                target,
+                                label_smoothing=label_smoothing,
+                                reduce_loss=reduce_loss,
+                                dist_process_group=dist.group.WORLD,
+                                overwrite_input=overwrite_input,
+                                return_argmax=return_argmax,
+                            )
+                            loss, argmax = out if return_argmax else (out, None)
+                            loss.backward(torch.full_like(loss, 0.37))
+                            results.append((loss, local_logits.grad, argmax))
+                        (loss, grad, _), (argmax_loss, argmax_grad, argmax) = results
+                        torch.testing.assert_close(argmax, expected_argmax, rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            argmax_loss, loss, rtol=0, atol=0, equal_nan=True
+                        )
+                        torch.testing.assert_close(
+                            argmax_grad, grad, rtol=0, atol=0, equal_nan=True
+                        )
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
 def test_parallel_cross_entropy_tensor_parallel(label_smoothing):
     """Validate tensor-parallel loss and gradients on two ranks."""
@@ -99,6 +164,23 @@ def test_parallel_cross_entropy_tensor_parallel(label_smoothing):
         init_file = os.path.join(temp_dir, "distributed_init")
         mp.spawn(
             _run_tensor_parallel,
+            args=(world_size, init_file, label_smoothing),
+            nprocs=world_size,
+            join=True,
+        )
+
+
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
+def test_parallel_cross_entropy_tensor_parallel_argmax(label_smoothing):
+    """Validate the global argmax and the unchanged loss and gradients on two ranks."""
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("tensor-parallel cross entropy test requires two CUDA devices")
+    world_size = 2
+    with tempfile.TemporaryDirectory() as temp_dir:
+        init_file = os.path.join(temp_dir, "distributed_init")
+        mp.spawn(
+            _run_tensor_parallel_argmax,
             args=(world_size, init_file, label_smoothing),
             nprocs=world_size,
             join=True,

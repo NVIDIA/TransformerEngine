@@ -108,6 +108,12 @@ Optional Dependencies
    :Default: ``OFF``
    :Description: Compile activation kernels (GELU, ReLU, SwiGLU) with the ``--use_fast_math`` CUDA compiler flag for improved performance at the cost of some precision.
 
+.. envvar:: NVTE_BUILD_LEGACY_STATIC_NVFP4
+
+   :Type: CMake option
+   :Default: ``OFF``
+   :Description: Additionally compile the legacy static NVFP4 4over6 quantization kernel. Enable this option to provide a static fallback when runtime compilation is disabled with :envvar:`NVTE_DISABLE_NVRTC`. Enabling it increases build time because the NVFP4 4over6 template specializations are instantiated at build time.
+
 CUDA Configuration
 ^^^^^^^^^^^^^^^^^^
 
@@ -160,6 +166,15 @@ General
    :Description: Size in MiB of the internal ``NVTEGroupedTensor`` handle pool. Increase
                  this value if an application legitimately creates more grouped tensor
                  handles than the default pool can hold.
+
+.. envvar:: NVTE_CUTEDSL_FUSED_GROUPED_MLP
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: **Deprecated** (use ``split_alignment=256`` when constructing
+                 :class:`transformer_engine.pytorch.ops.GroupedLinear` instead).
+                 When set to ``1``, overrides the operation's declared split alignment
+                 to 256, enabling grouped MLP fusion when its other requirements are met.
 
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -334,7 +349,13 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. Fused softmax and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX`` or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
+   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. NVFP4 4over6 quantization, fused softmax, and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_NVFP4``, ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX``, or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
+
+.. envvar:: NVTE_MXFP8_PER_TILE_SWIZZLE
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Swizzle MXFP8 scaling factors for GEMM with kernels that give each 128-row tile of scaling factors (row-wise) or each 128-column by 32-row block (column-wise) its own thread block, instead of batching 32 tiles in one block. This lowers the latency of swizzling the scaling factors of tensors with few tiles, such as activations.
 
 .. envvar:: NVTE_USE_CUTLASS_GROUPED_GEMM
 
@@ -549,6 +570,12 @@ JAX-Specific Variables
    :Type: ``str``
    :Default: None
    :Description: Test level for JAX unit tests (``"L0"``, ``"L1"``, ``"L2"``). Used internally by the test suite.
+
+.. envvar:: NVTE_EP_FUSED_PREPARE_DISPATCH
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use the fused prepare + dispatch path for expert parallelism (NCCL EP count mode) instead of separate prepare and dispatch calls. Supported only when EP stays within a single NVLink domain, and the received row order within an expert block may differ from the unfused path. In JAX the value is latched on first use.
 
 JAX Triton Extensions
 ^^^^^^^^^^^^^^^^^^^^^

@@ -15,6 +15,7 @@ add_executable(test_operator
                test_cast_mxfp8_grouped.cu
                test_cast_mxfp8_grouped_scaled_swiglu.cu
                test_cast_nvfp4_transpose.cu
+               test_row_scaled_nvfp4_grouped_amax.cu
                test_cast_float8blockwise.cu
                test_cast_float8blockwise_grouped.cu
                test_dequantize_mxfp8.cu
@@ -32,6 +33,7 @@ add_executable(test_operator
                test_scaled_activation.cu
                test_normalization.cu
                test_normalization_mxfp8.cu
+               test_fused_moe_aux_loss.cpp
                test_memset.cu
                test_splits_to_offsets.cu
                test_multi_cast_transpose.cu

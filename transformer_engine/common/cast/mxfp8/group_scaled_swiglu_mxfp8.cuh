@@ -344,11 +344,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
         ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
                                                          IN_buff_readable_parity[buff_in]);
         IN_buff_readable_parity[buff_in] ^= 1;
-        // Wait until the store groups still holding an output slice have drained. Only
-        // the leading thread commits those groups, so the wait is a no-op on the other
-        // threads and the barrier is what stops them from overwriting a slice the TMA
-        // unit has not finished reading.
-        ptx::cp_async_bulk_wait_group_read<OUT_BUFFS_NUM - 1>();
+        // Only the issuing thread can wait for the TMA read of the output slice.
+        // Hand its completion off to all cooperative writers before reusing the slice.
+        if (leading_thread) {
+          ptx::cp_async_bulk_wait_group_read<OUT_BUFFS_NUM - 1>();
+        }
         __syncthreads();
 
         const size_t buff = buff_in;
@@ -378,6 +378,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
       advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
                           total_work_blocks, work_blocks_X);
     }
+
+    // The last stage has no following iteration to wait for its TMA store.
+    if (leading_thread) {
+      ptx::cp_async_bulk_wait_group();
+    }
+    __syncthreads();
 
     destroy_barriers<BUFFS_NUM>(IN_buff_readable_mbar, leading_thread);
   }  // if constexpr (is_single_tensor)

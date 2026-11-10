@@ -4,7 +4,6 @@
 
 """Tests for GroupedTensor class"""
 
-import os
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
@@ -303,6 +302,76 @@ class TestGroupedTensor:
         seed = 1234
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
+
+    def test_autograd_identity_view_preserves_grouped_storage_and_gradient(self) -> None:
+        """Autograd's identity view keeps grouped metadata and passes back a dense gradient."""
+
+        class Identity(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, tensor):
+                return tensor
+
+            @staticmethod
+            def backward(ctx, grad):
+                return grad
+
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        source = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            first_dims=first_dims,
+            tensor_offsets=tensor_offsets,
+            requires_grad=True,
+        )
+
+        view = Identity.apply(source)
+        assert isinstance(view, GroupedTensor)
+        assert view is not source
+        assert view._base is source
+        assert view.rowwise_data is source.rowwise_data
+        assert view.first_dims is first_dims
+        assert view.tensor_offsets is tensor_offsets
+
+        expected = torch.arange(1, 13, dtype=torch.float32, device="cuda").reshape(3, 4)
+        (grad,) = torch.autograd.grad(view, source, grad_outputs=expected)
+        assert type(grad) is torch.Tensor
+        torch.testing.assert_close(grad, expected)
+
+    def test_record_stream_tracks_grouped_buffers(self, monkeypatch) -> None:
+        """record_stream should reach every allocation owned by the wrapper."""
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        last_dims = torch.tensor([4, 4], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        grouped_tensor = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            columnwise_data=torch.randn(12, device="cuda"),
+            scale_inv=torch.ones(2, device="cuda"),
+            columnwise_scale_inv=torch.ones(2, device="cuda"),
+            amax=torch.zeros(2, device="cuda"),
+            columnwise_amax=torch.zeros(2, device="cuda"),
+            scale=torch.ones(2, device="cuda"),
+            first_dims=first_dims,
+            last_dims=last_dims,
+            tensor_offsets=tensor_offsets,
+        )
+        buffers = grouped_tensor.get_data_tensors()
+        recorded = []
+        original_record_stream = torch.Tensor.record_stream
+
+        def record_stream(tensor, stream):
+            recorded.append(tensor)
+            return original_record_stream(tensor, stream)
+
+        monkeypatch.setattr(torch.Tensor, "record_stream", record_stream)
+        grouped_tensor.record_stream(torch.cuda.Stream())
+
+        assert all(any(record is buffer for record in recorded) for buffer in buffers)
 
     def test_basic_construction_all_same_shape(self) -> None:
         """Test GroupedTensor construction with all tensors having same shape"""
@@ -629,11 +698,15 @@ class TestGroupedTensor:
         "shape_case",
         ["varying_first", "varying_last", "varying_both"],
     )
+    @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
+    @pytest.mark.parametrize("optimize_for_gemm", [False, True])
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_quantize_grouped_mxfp8(self, shape_case: str, output_dbias: bool) -> None:
+    def test_quantize_grouped_mxfp8(
+        self, shape_case: str, usage: str, optimize_for_gemm: bool, output_dbias: bool
+    ) -> None:
         """Test grouped MXFP8 quantization against per-tensor quantization for
-        varying first/last/both dimensions."""
+        varying first/last/both dimensions and compact or GEMM-swizzled scales."""
         if output_dbias and shape_case != "varying_first":
             pytest.skip("bgrad_group_quantize requires constant last dimension")
 
@@ -688,7 +761,10 @@ class TestGroupedTensor:
         )
 
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-        quantizer.set_usage(rowwise=True, columnwise=False)
+        rowwise = usage in ("rowwise", "both")
+        columnwise = usage in ("columnwise", "both")
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        quantizer.optimize_for_gemm = optimize_for_gemm
 
         if output_dbias:
             grouped_output, dbias = tex.bgrad_group_quantize(
@@ -700,19 +776,23 @@ class TestGroupedTensor:
             )
 
         # Reference: quantize each tensor independently and concatenate the
-        # rowwise data / scale_inv buffers in tensor order.
-        expected_data = []
-        expected_scale_inv = []
-        for tensor in input_tensors:
-            qtensor = quantizer(tensor)
-            expected_data.append(qtensor._rowwise_data.reshape(-1))
-            expected_scale_inv.append(qtensor._rowwise_scale_inv.reshape(-1))
-
-        expected_data = torch.cat(expected_data)
-        expected_scale_inv = torch.cat(expected_scale_inv)
-
-        assert torch.equal(grouped_output.rowwise_data, expected_data)
-        assert torch.equal(grouped_output.scale_inv, expected_scale_inv)
+        # data / scale_inv buffers in tensor order. Both dimensions of every member
+        # are multiples of 128, so swizzled scales need no padding between members.
+        expected_tensors = [quantizer(tensor) for tensor in input_tensors]
+        if rowwise:
+            expected_data = torch.cat([t._rowwise_data.reshape(-1) for t in expected_tensors])
+            expected_scales = torch.cat(
+                [t._rowwise_scale_inv.reshape(-1) for t in expected_tensors]
+            )
+            assert torch.equal(grouped_output.rowwise_data, expected_data)
+            assert torch.equal(grouped_output.scale_inv, expected_scales)
+        if columnwise:
+            expected_data = torch.cat([t._columnwise_data.reshape(-1) for t in expected_tensors])
+            expected_scales = torch.cat(
+                [t._columnwise_scale_inv.reshape(-1) for t in expected_tensors]
+            )
+            assert torch.equal(grouped_output.columnwise_data, expected_data)
+            assert torch.equal(grouped_output.columnwise_scale_inv, expected_scales)
 
         if output_dbias:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
@@ -1944,8 +2024,6 @@ class TestGroupedTensor:
         in_features = 64
         out_features = 32
         dtype = torch.float32
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         src = te.GroupedLinear(
             num_gemms=num_gemms,
             in_features=in_features,
@@ -1996,8 +2074,6 @@ class TestGroupedTensor:
 
     def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         num_gemms = 3
         in_features = 64
         out_features = 32

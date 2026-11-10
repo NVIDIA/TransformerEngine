@@ -166,6 +166,14 @@ class Linear(FusedOperation):
         elif name == "bias" and self._bias_idx is not None:
             self.basic_ops[self._bias_idx].bias = param
 
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+
+        # Basic ops may replace their params
+        self.register_parameter("weight", self.basic_ops[self._linear_idx].weight)
+        if self._bias_idx is not None:
+            self.register_parameter("bias", self.basic_ops[self._bias_idx].bias)
+
     def state_dict(self, *, prefix: str = "", **kwargs) -> dict[str, Any]:
         """Save state"""
         state_dict = super().state_dict(prefix=prefix, **kwargs)

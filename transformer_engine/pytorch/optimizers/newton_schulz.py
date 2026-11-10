@@ -178,14 +178,12 @@ def _get_nccl_comm_ptr(group: dist.ProcessGroup) -> int:
     if backend != "nccl":
         raise RuntimeError(f"Newton-Schulz requires NCCL backend, got '{backend}'")
 
-    # ProcessGroupNCCL creates communicators lazily. This device-specific
-    # collective ensures that the communicator returned by _comm_ptr() exists
-    # and is ready on every group rank before cuSolverMp borrows it.
+    # The NCCL backend creates communicators lazily; this collective materializes
+    # the borrowed communicator on every rank first.
     dist.barrier(group=group, device_ids=[torch.cuda.current_device()])
-    nccl_backend = group._get_backend(torch.device("cuda"))
-    comm_ptr = nccl_backend._comm_ptr()
+    comm_ptr = tex.get_nccl_comm_ptr(group)
     if not isinstance(comm_ptr, int) or comm_ptr == 0:
-        raise RuntimeError("ProcessGroupNCCL returned an invalid communicator pointer")
+        raise RuntimeError("NCCL backend returned an invalid communicator pointer")
     return comm_ptr
 
 
