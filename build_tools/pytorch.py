@@ -17,6 +17,7 @@ from .utils import (
     debug_build_enabled,
     get_bolt_build_flags,
     nccl_ep_enabled,
+    nvshmem_home_path,
     setup_mpi_flags,
 )
 from typing import List
@@ -109,10 +110,11 @@ def setup_pytorch_extension(
     library_dirs = []
     libraries = []
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
-        assert (
-            os.getenv("NVSHMEM_HOME") is not None
-        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
-        nvshmem_home = Path(os.getenv("NVSHMEM_HOME"))
+        nvshmem_home = nvshmem_home_path()
+        assert nvshmem_home is not None, (
+            "NVSHMEM_HOME must be set, or the nvidia-nvshmem-cu* Python package installed, when"
+            " compiling with NVTE_ENABLE_NVSHMEM=1"
+        )
         include_dirs.append(nvshmem_home / "include")
         library_dirs.append(nvshmem_home / "lib")
         if (nvshmem_home / "lib" / "libnvshmem_host.so").is_file():

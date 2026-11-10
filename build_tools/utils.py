@@ -366,6 +366,57 @@ def nccl_lib_path() -> Optional[Path]:
     return None
 
 
+def _python_package_path(package_name: str, relative_path: str) -> Optional[Path]:
+    """Return a path inside an installed Python package, or `None` if it does not exist."""
+    try:
+        package_distribution = distribution(package_name)
+    except PackageNotFoundError:
+        return None
+
+    path = Path(package_distribution.locate_file(relative_path))
+    return path if path.exists() else None
+
+
+def cublasmp_home_path() -> Optional[Path]:
+    """Return the cuBLASMp installation root.
+
+    Prefers CUBLASMP_HOME, then the nvidia-cublasmp-cu* Python package.
+    Returns `None` if cuBLASMp is not found."""
+    if cublasmp_home := os.getenv("CUBLASMP_HOME"):
+        return Path(cublasmp_home)
+
+    cuda_major = cuda_version()[0]
+    return _python_package_path(
+        f"nvidia-cublasmp-cu{cuda_major}", f"nvidia/cublasmp/cu{cuda_major}"
+    )
+
+
+def cusolvermp_home_path() -> Path:
+    """Return the cuSOLVERMp installation root.
+
+    Prefers CUSOLVERMP_HOME, then the nvidia-cusolvermp-cu* Python package,
+    then `/usr`."""
+    if cusolvermp_home := os.getenv("CUSOLVERMP_HOME"):
+        return Path(cusolvermp_home)
+
+    cuda_major = cuda_version()[0]
+    package_path = _python_package_path(
+        f"nvidia-cusolvermp-cu{cuda_major}", f"nvidia/cu{cuda_major}"
+    )
+    return package_path if package_path is not None else Path("/usr")
+
+
+def nvshmem_home_path() -> Optional[Path]:
+    """Return the NVSHMEM installation root.
+
+    Prefers NVSHMEM_HOME, then the nvidia-nvshmem-cu* Python package.
+    Returns `None` if NVSHMEM is not found."""
+    if nvshmem_home := os.getenv("NVSHMEM_HOME"):
+        return Path(nvshmem_home)
+
+    return _python_package_path(f"nvidia-nvshmem-cu{cuda_version()[0]}", "nvidia/nvshmem")
+
+
 def mpi_home_path() -> Optional[Path]:
     """Return the MPI installation root.
 
