@@ -79,7 +79,7 @@ __launch_bounds__(amax_kernel_threads) __global__
 template <int nvec, typename InputType>
 void launch_amax_kernel(const InputType *input, float *amax, const size_t N, const float *noop_ptr,
                         cudaStream_t stream, float *columnwise_amax = nullptr) {
-  // Zero out amax (and the optional second output) so we can update with atomic max
+  // Zero out amax (and the optional columnwise_amax) so we can update with atomic max
   zero_amax_kernel<<<1, 1, 0, stream>>>(amax, columnwise_amax, noop_ptr);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
@@ -102,17 +102,17 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, con
   switch (align) {
     case Alignment::SAME_ALIGNED:
       amax_kernel<nvec, true, InputType><<<num_blocks, threads, 0, stream>>>(
-          input, amax, amax2, N, num_aligned_elements, noop_ptr);
+          input, amax, columnwise_amax, N, num_aligned_elements, noop_ptr);
       break;
     case Alignment::SAME_UNALIGNED:
       amax_kernel<nvec, false, InputType><<<num_blocks, threads, 0, stream>>>(
-          input, amax, amax2, N, num_aligned_elements, noop_ptr);
+          input, amax, columnwise_amax, N, num_aligned_elements, noop_ptr);
       break;
     case Alignment::DIFFERENT: {
       // This case is a logic error, since there is only one pointer (input)
       // in the alignment check. Still safe to process without vectorization.
       amax_kernel<1, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, amax2, N, N, noop_ptr);
+          <<<num_blocks, threads, 0, stream>>>(input, amax, columnwise_amax, N, N, noop_ptr);
       break;
     }
   }
