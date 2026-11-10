@@ -63,7 +63,7 @@ def test_single_gpu_benchmark(monkeypatch):
     import attention
 
     # The benchmark synchronizes on the native baseline, which has the same memory problem
-    # as the comparison above. Benchmark the same smaller prefix; the tutorial script itself
+    # as test_bshd_gqa_swa_matches_baseline. Benchmark the same smaller prefix; the tutorial script itself
     # still runs at the full sequence length.
     seq = 1024
     monkeypatch.setattr(attention, "qkv", tuple(t[:, :seq] for t in attention.qkv))
