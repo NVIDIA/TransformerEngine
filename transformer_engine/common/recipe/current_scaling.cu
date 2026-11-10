@@ -179,10 +179,10 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
       (output.amax.dptr != nullptr) ? output.amax.dptr : output.columnwise_amax.dptr);
   // NVFP4 outputs with a distinct column-wise amax get the same value written there as well,
   // which replaces a separate device-to-device copy by the caller.
-  float *amax2_ptr = nullptr;
+  float *columnwise_amax = nullptr;
   if (output.scaling_mode == NVTE_NVFP4_1D_SCALING && output.columnwise_amax.dptr != nullptr &&
       output.columnwise_amax.dptr != amax_ptr) {
-    amax2_ptr = reinterpret_cast<float *>(output.columnwise_amax.dptr);
+    columnwise_amax = reinterpret_cast<float *>(output.columnwise_amax.dptr);
   }
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
