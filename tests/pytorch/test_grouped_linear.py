@@ -1396,6 +1396,49 @@ def test_grouped_gemm_grouped_tensor_unaligned_out_with_bias(accumulate, use_bia
     torch.testing.assert_close(buffer[1:], aligned_buffer, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("out_kind", ["discrete", "grouped"])
+def test_grouped_gemm_grouped_tensor_unaligned_out_with_beta(out_kind) -> None:
+    """An explicit beta scales the old values of a misaligned output, as for an aligned one."""
+    if not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
+        pytest.skip("Grouped GEMM is not supported on this device or cuBLASLt version.")
+
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    n, k = 256, 128
+    m_sizes = [64, 32, 96]
+    z = len(m_sizes)
+    grouped_A = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)  # input
+    grouped_B = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # grad_output
+    _pack_grouped_tensor(
+        grouped_A, [torch.randn(ms, k, dtype=dtype, device=device) for ms in m_sizes]
+    )
+    _pack_grouped_tensor(
+        grouped_B, [torch.randn(ms, n, dtype=dtype, device=device) for ms in m_sizes]
+    )
+    # Hopper takes one beta for all groups; Blackwell takes one per group.
+    num_beta = z if torch.cuda.get_device_capability() >= (10, 0) else 1
+    beta = torch.full((num_beta,), 0.5, dtype=torch.float32, device=device)
+
+    buffer = torch.randn(1 + z * n * k, dtype=torch.float32, device=device)
+    aligned = buffer[1:].clone()
+    outs = []
+    for data in (buffer[1:], aligned):
+        if out_kind == "discrete":
+            outs.append(list(data.view(z, n, k).unbind(0)))
+        else:
+            outs.append(
+                GroupedTensor.make_grouped_tensor_from_rowwise_data(
+                    num_tensors=z, tensor_shape=(n, k), rowwise_data=data, dtype=torch.float32
+                )
+            )
+
+    for out in outs:
+        general_grouped_gemm_for_grouped_tensor(grouped_A, grouped_B, out, layout="NT", beta=beta)
+
+    torch.testing.assert_close(buffer[1:], aligned, rtol=0, atol=0)
+
+
 def test_grouped_gemm_grouped_tensor_unaligned_input() -> None:
     """An input that is not 16-byte aligned raises an error instead of faulting on the device."""
     if not is_module_grouped_tensor_path_supported(None, torch.bfloat16):

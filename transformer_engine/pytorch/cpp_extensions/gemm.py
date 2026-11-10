@@ -1289,8 +1289,11 @@ def general_grouped_gemm_for_grouped_tensor(
         # be a view into a larger buffer that is not, e.g. a Megatron-LM main_grad in an
         # unpadded gradient buffer. Run the same GEMM on an aligned copy of the output and copy
         # the result back, so accumulation and bias are applied exactly as on the direct path.
+        # The GEMM reads the output as C when it accumulates or is given a beta.
+        reads_out = accumulate or beta is not None
+
         def stage(t: torch.Tensor) -> torch.Tensor:
-            if accumulate:
+            if reads_out:
                 return t.clone(memory_format=torch.contiguous_format)
             return torch.empty_like(t, memory_format=torch.contiguous_format)
 
