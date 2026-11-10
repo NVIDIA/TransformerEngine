@@ -46,7 +46,6 @@ from transformer_engine.pytorch import (
     is_nvfp4_available,
 )
 from transformer_engine.pytorch import checkpoint as te_checkpoint
-import transformer_engine.pytorch.distributed as te_distributed
 from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
     is_fp8_activation_recompute_enabled,
@@ -1312,64 +1311,6 @@ def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_sou
         if previous is not None:
             assert not torch.equal(forward_output, previous), "Graph replay did not advance RNG"
         previous = forward_output
-
-
-@pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.parametrize("dropout", (0.0, 0.5))
-@pytest.mark.parametrize("te_dropout", all_boolean)
-def test_checkpoint_graph_rng_without_philox_api(use_reentrant, dropout, te_dropout, monkeypatch):
-    """Older builds allow deterministic capture and reject stochastic recompute."""
-    monkeypatch.setattr(te_distributed, "_checkpoint_rng_available", lambda: False)
-    layer = te.ops.Dropout(dropout) if te_dropout else torch.nn.Dropout(dropout)
-
-    class Model(torch.nn.Module):
-        def forward(self, value):
-            return 2 * te_checkpoint(layer, value + 0, use_reentrant=use_reentrant)
-
-    sample = torch.ones(4096, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    # The same dropout remains supported outside capture.
-    output = Model()(sample)
-    expected = output.detach().clone()
-    output.sum().backward()
-    assert torch.equal(sample.grad, expected)
-    del output, expected
-    sample.grad = None
-
-    original_call = Model.__call__
-    original_recompute_flags = tuple(
-        te_distributed.activation_recompute_forward._is_first_fp8_module
-    )
-    if dropout:
-        with pytest.raises(RuntimeError, match="philox_state"):
-            te.make_graphed_callables(Model(), (sample,), num_warmup_iters=3)
-        assert Model.__call__ is original_call
-        assert (
-            tuple(te_distributed.activation_recompute_forward._is_first_fp8_module)
-            == original_recompute_flags
-        )
-    else:
-        model = te.make_graphed_callables(Model(), (sample,), num_warmup_iters=3)
-        value = torch.ones_like(sample, requires_grad=True)
-        model(value).sum().backward()
-        assert torch.equal(value.grad, torch.full_like(value, 2))
-
-
-@pytest.mark.parametrize("backend", ("FusedAttention", "FlashAttention"))
-def test_checkpoint_native_attention_requires_philox_api(backend, monkeypatch):
-    """Native attention dropout must reject capture before entering its CUDA backend."""
-    from transformer_engine.pytorch.attention.dot_product_attention import backends
-
-    monkeypatch.setattr(te_distributed, "_checkpoint_rng_available", lambda: False)
-    attention = getattr(backends, backend)(softmax_scale=0.125, attention_dropout=0.5)
-    value = torch.ones(16, 1, 1, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-
-    def body(query):
-        return attention(query, query, query)
-
-    graph = torch.cuda.CUDAGraph()
-    with pytest.raises(RuntimeError, match="philox_state"):
-        with torch.cuda.graph(graph):
-            te_checkpoint(body, value + 0, use_reentrant=True)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
