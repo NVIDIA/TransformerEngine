@@ -5,7 +5,10 @@
 """Kernel-only benchmark of the MXFP8 quantize kernels (CUPTI kernel timing, cold L2).
 
 CuTeDSL kernels come from this source tree (no rebuild needed); CUDA kernels come from the
-installed TE (set PYTHONPATH=<repo> to use your own build). Writes a CSV.
+installed TE (set PYTHONPATH=<repo> to use your own build). A config the source tree's CuTeDSL
+kernels do not implement (e.g. 2D scaling before it lands) runs through TE's dispatch instead:
+CUDA unless the TE build has a CuTeDSL kernel for it; the kernel column says which ran.
+Writes a CSV.
 
 examples:
   python benchmark_quantize_mxfp8.py
@@ -13,6 +16,7 @@ examples:
   python benchmark_quantize_mxfp8.py --compare                          # main vs HEAD
   python benchmark_quantize_mxfp8.py --compare --old CUDA --mode manual --shapes "4096x7168"
   python benchmark_quantize_mxfp8.py --fusion "none;dact;dactbias" --format html
+  python benchmark_quantize_mxfp8.py --scaling both --mode debug --format raw
 """
 
 import functools
@@ -32,85 +36,25 @@ DEFAULT_SHAPES = list(itertools.product(DEFAULT_M, DEFAULT_N))
 DEBUG_SHAPES = list(itertools.product([1024, 4096], [2880, 4096]))
 FUSIONS = ("none", "act", "dact", "dbias", "dactbias")
 ACTIVATIONS = ("gelu", "relu", "silu", "qgelu", "srelu")
-CONFIG = ["M", "N", "direction", "fusion", "swizzle", "input"]
+CONFIG = ["M", "N", "direction", "fusion", "scaling", "swizzle", "input"]
 
 
 def _round_up(x, y):
     return (x + y - 1) // y * y
 
 
-def _cutedsl_launcher(activation):
-    """Returns setup(x, act_input, direction, fusion, swizzle) -> launch(), calling the compiled
-    CuTeDSL kernel directly."""
-    # pylint: disable=import-outside-toplevel
-    import torch
+def _te_launcher(tex, activation):
+    """Returns setup(x, act_input, direction, fusion, scaling, swizzle) -> launch(), running
+    TE's quantize, which dispatches to whichever backend `tex` was imported with."""
+    from transformer_engine.pytorch import MXFP8Quantizer  # pylint: disable=import-outside-toplevel
 
-    common.cuda_backend(True)  # not needed for the direct call, keeps TE's dispatch consistent
-    from transformer_engine.common.CuTeDSL import get_mxfp8_quantization_function
-
-    # Resolve the defining module instead of naming it: it was renamed between revisions.
-    qc = sys.modules[get_mxfp8_quantization_function.__module__]
-    print(f"CuTeDSL kernels from {qc.__file__}")
-
-    @functools.lru_cache(maxsize=None)
-    def compiled(dtype, direction, fusion, swizzle):
-        rowwise, colwise = common.DIRECTIONS[direction]
-        with_dact = "dact" in fusion
-        cfg = qc.MXFP8QuantizeConfig(
-            dtype,
-            "Float8E4M3",
-            rowwise,
-            colwise,
-            with_gemm_swizzled_scales=swizzle == "on",
-            with_amax=False,
-            with_dbias="bias" in fusion,
-            with_dact=with_dact,
-            with_act=fusion == "act",
-            activation={"act": activation}.get(fusion, f"d{activation}" if with_dact else "none"),
-        )
-        fn = qc.compile_cutedsl_function_from_cfg(cfg)
-        return getattr(fn, "__tvm_ffi_object__", lambda: None)() or fn
-
-    def setup(x, act_input, direction, fusion, swizzle):
-        m, n = x.shape
-        rowwise, colwise = common.DIRECTIONS[direction]
-        empty = functools.partial(torch.empty, device="cuda")
-        fp8, e8m0 = torch.float8_e4m3fn, torch.float8_e8m0fnu
-        o_row = empty((m, n), dtype=fp8) if rowwise else None
-        s_row = (
-            empty((_round_up(m, 128), _round_up(-(-n // 32), 4)), dtype=e8m0) if rowwise else None
-        )
-        o_col = empty((m, n), dtype=fp8) if colwise else None
-        s_col = (
-            empty((_round_up(-(-m // 32), 4), _round_up(n, 128)), dtype=e8m0) if colwise else None
-        )
-        act_input = act_input if "dact" in fusion else None
-        # One partial-sum row per CTA; a CTA covers at least one 32-row MXFP8 block.
-        workspace = empty((-(-m // 32), n), dtype=torch.float32) if "bias" in fusion else None
-        dtype = next(v[1] for v in common.INPUTS.values() if getattr(torch, v[0]) == x.dtype)
-        fn = compiled(dtype, direction, fusion, swizzle)
-        stream = torch.cuda.current_stream().cuda_stream
-        outs = (o_row, s_row, o_col, s_col)
-        return lambda: fn(x, *outs, None, None, act_input, workspace, stream)
-
-    return setup
-
-
-def _cuda_launcher(activation):
-    """Returns setup(x, act_input, direction, fusion, swizzle) -> launch(), running the
-    installed TE's CUDA kernel."""
-    # pylint: disable=import-outside-toplevel
-    common.cuda_backend(False)
-    import transformer_engine.pytorch  # pylint: disable=unused-import
-    import transformer_engine_torch as tex
-    from transformer_engine.pytorch import MXFP8Quantizer
-
-    print(f"CUDA kernels from {common.disable_cutedsl_dispatch()}")
-
-    def setup(x, act_input, direction, fusion, swizzle):
+    def setup(x, act_input, direction, fusion, scaling, swizzle):
         rowwise, colwise = common.DIRECTIONS[direction]
         quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=colwise
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=rowwise,
+            columnwise=colwise,
+            with_2d_quantization=scaling == "2d",
         )
         quantizer.optimize_for_gemm = swizzle == "on"
         if fusion == "none":
@@ -126,44 +70,124 @@ def _cuda_launcher(activation):
     return setup
 
 
+def _cutedsl_launcher(activation):
+    """Returns setup(x, act_input, direction, fusion, scaling, swizzle) -> launch(), calling the
+    compiled CuTeDSL kernel directly. Configs this source tree's CuTeDSL kernels do not support
+    go through TE's dispatch instead, which runs CUDA unless the TE build has a CuTeDSL kernel."""
+    # pylint: disable=import-outside-toplevel
+    import torch
+
+    common.cuda_backend(True)
+    from transformer_engine.common.CuTeDSL import get_mxfp8_quantization_function
+
+    # Resolve the defining module instead of naming it: it was renamed between revisions.
+    qc = sys.modules[get_mxfp8_quantization_function.__module__]
+    print(f"CuTeDSL kernels from {qc.__file__}")
+
+    @functools.lru_cache(maxsize=None)
+    def compiled(dtype, direction, fusion, scaling, swizzle):
+        rowwise, colwise = common.DIRECTIONS[direction]
+        with_dact = "dact" in fusion
+        flags = {"use_2d_quantization": True} if scaling == "2d" else {}
+        try:
+            cfg = qc.MXFP8QuantizeConfig(
+                dtype,
+                "Float8E4M3",
+                rowwise,
+                colwise,
+                with_gemm_swizzled_scales=swizzle == "on",
+                with_amax=False,
+                with_dbias="bias" in fusion,
+                with_dact=with_dact,
+                with_act=fusion == "act",
+                activation={"act": activation}.get(
+                    fusion, f"d{activation}" if with_dact else "none"
+                ),
+                **flags,
+            )
+        except (TypeError, ValueError):  # not implemented in this revision
+            return None
+        fn = qc.compile_cutedsl_function_from_cfg(cfg)
+        return getattr(fn, "__tvm_ffi_object__", lambda: None)() or fn
+
+    @functools.lru_cache(maxsize=None)
+    def te_setup():
+        return _te_launcher(common.te_backend("CuTeDSL"), activation)
+
+    def setup(x, act_input, direction, fusion, scaling, swizzle):
+        dtype = next(v[1] for v in common.INPUTS.values() if getattr(torch, v[0]) == x.dtype)
+        fn = compiled(dtype, direction, fusion, scaling, swizzle)
+        if fn is None:
+            return te_setup()(x, act_input, direction, fusion, scaling, swizzle)
+        m, n = x.shape
+        rowwise, colwise = common.DIRECTIONS[direction]
+        empty = functools.partial(torch.empty, device="cuda")
+        fp8, e8m0 = torch.float8_e4m3fn, torch.float8_e8m0fnu
+        o_row = empty((m, n), dtype=fp8) if rowwise else None
+        s_row = (
+            empty((_round_up(m, 128), _round_up(-(-n // 32), 4)), dtype=e8m0) if rowwise else None
+        )
+        o_col = empty((m, n), dtype=fp8) if colwise else None
+        s_col = (
+            empty((_round_up(-(-m // 32), 4), _round_up(n, 128)), dtype=e8m0) if colwise else None
+        )
+        act_input = act_input if "dact" in fusion else None
+        # One partial-sum row per CTA; a CTA covers at least one 32-row MXFP8 block.
+        workspace = empty((-(-m // 32), n), dtype=torch.float32) if "bias" in fusion else None
+        stream = torch.cuda.current_stream().cuda_stream
+        outs = (o_row, s_row, o_col, s_col)
+        return lambda: fn(x, *outs, None, None, act_input, workspace, stream)
+
+    return setup
+
+
 def run(args, impl):
-    """Times the `impl` quantize kernel for every shape, direction, fusion, swizzle and input."""
+    """Times the `impl` quantize kernel for every config."""
     # pylint: disable=import-outside-toplevel
     import pandas as pd
     import torch
 
     activation = args.activation or "gelu"
-    setup = (_cuda_launcher if impl == "CUDA" else _cutedsl_launcher)(activation)
-    # Helper kernels such as scale-padding zeroing or the dbias reduction are not timed.
-    prefix = "quantize" if impl == "CUDA" else "kernel_cutlass"
+    if impl == "CUDA":
+        setup = _te_launcher(common.te_backend("CUDA"), activation)
+    else:
+        setup = _cutedsl_launcher(activation)
 
-    def make_inputs(m, n, input_dtype, fusion):
-        """The input (or incoming gradient) and, for dact, the forward activation input."""
+    def factory(m, n, input_dtype, direction, fusion, scaling, swizzle):
         dtype = getattr(torch, common.INPUTS[input_dtype][0])
+        x = torch.randn((m, n), dtype=dtype, device="cuda")
+        # The forward activation input, for dact only.
         act_input = torch.randn((m, n), dtype=dtype, device="cuda") if "dact" in fusion else None
-        return torch.randn((m, n), dtype=dtype, device="cuda"), act_input
+        return setup(x, act_input, direction, fusion, scaling, swizzle)
 
     configs = [
-        (m, n, d, f, sw, inp)
+        (m, n, d, f, sc, sw, inp)
         for (m, n) in args.shape_list
         for inp in args.inputs
         for d in args.direction
         for f in args.fusions
+        for sc in args.scalings
         for sw in args.swizzles
+        if sc == "1d" or f == "none"  # TE only fuses 2D scaling into a plain cast
     ]
+    if not configs:
+        sys.exit("No config to run: 2D scaling only applies to --fusion none")
     factories = (
         (
             common.mxfp8_bytes(m * n, inp, d, 2 if "dact" in f else 1),
-            functools.partial(
-                lambda *c: setup(*make_inputs(*c[:3], c[4]), *c[3:]), m, n, inp, d, f, sw
-            ),
+            functools.partial(factory, m, n, inp, d, f, sc, sw),
         )
-        for m, n, d, f, sw, inp in configs
+        for m, n, d, f, sc, sw, inp in configs
     )
-    timed = common.time_kernels(factories, args.runs, args.warmup, lambda k: k.startswith(prefix))
+    # Helper kernels such as scale-padding zeroing or the dbias reduction are not timed.
+    timed = common.time_kernels(factories, args.runs, args.warmup, common.te_kernels("^quantize"))
     rows = []
-    for (m, n, d, f, sw, inp), (times, kernel, _) in zip(configs, timed):
-        row = {"M": m, "N": n, "direction": d, "fusion": f, "swizzle": sw, "input": inp}
+    for config, result in zip(configs, timed):
+        if result is None:
+            continue
+        times, kernel, _ = result
+        m, n, d, f, _, _, inp = config
+        row = dict(zip(["M", "N", "direction", "fusion", "scaling", "swizzle", "input"], config))
         row.update(common.result_row(times, kernel))
         num_inputs = 2 if "dact" in f else 1
         row["GB/s"] = common.mxfp8_bytes(m * n, inp, d, num_inputs) / (row["time_us"] * 1e3)
@@ -214,6 +238,7 @@ def describe(args):
         f"shapes:     {shapes}",
         f"directions: {', '.join(args.direction)}",
         f"fusions:    {', '.join(args.fusions)}",
+        f"scaling:    {', '.join(args.scalings)}",
         f"swizzle:    {', '.join(args.swizzles)}",
         f"input:      {', '.join(args.inputs)}",
     ]
@@ -228,6 +253,7 @@ BENCHMARK = common.Benchmark(
     selectors={
         "input": "Input",
         "fusion": "Fusion",
+        "scaling": "Scaling",
         "direction": "Direction",
         "swizzle": "Swizzled Scale",
     },

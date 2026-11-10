@@ -12,7 +12,9 @@ kernels skip the rest. Member sizes are random but seeded from the shape, so eve
 both sides of --compare see the same group. CuTeDSL kernels come from this source tree (no
 rebuild needed); CUDA kernels come from the installed TE (set PYTHONPATH=<repo> to use your own
 build). The CUDA time includes its separate TMA-descriptor update kernel, which CuTeDSL does
-inside its kernel. Writes a CSV.
+inside its kernel. A config the source tree's CuTeDSL kernels do not implement (e.g. 2D scaling)
+runs through TE's dispatch instead: CUDA unless the TE build has a CuTeDSL kernel for it; the
+kernel column says which ran. Writes a CSV.
 
 examples:
   python benchmark_grouped_quantize_mxfp8.py
@@ -48,7 +50,7 @@ LAYOUTS = {
 SINGLE_TENSOR_LAYOUTS = ("same", "varying_first")  # dbias needs a common last dim
 ROW_BLOCK = 128  # every member's first dim (and varying last dims) must be a multiple of it
 FILL = (0.5, 1.0)  # range of the buffer fraction varying members fill
-CONFIG = ["M", "N", "experts", "layout", "direction", "fusion", "swizzle", "input"]
+CONFIG = ["M", "N", "experts", "layout", "direction", "fusion", "scaling", "swizzle", "input"]
 
 
 def _split(budget, costs, rng):
@@ -81,6 +83,12 @@ def _round_up(x, y):
     return (x + y - 1) // y * y
 
 
+def valid_group(m, experts, layout):
+    """Whether M rows split into `experts` members of this layout: equal-row layouts need M/G
+    rows per member, a multiple of 128."""
+    return layout not in ("same", "varying_last") or m % (experts * ROW_BLOCK) == 0
+
+
 def capacity(m, n, experts, layout):
     """The buffer's 2D shape, the logical shape the grouped kernels take (as in
     tests/pytorch/mxfp8 group_dims()); the members may fill only part of it."""
@@ -103,57 +111,44 @@ def _dims_tensors(group, layout):
     return first, last
 
 
-def _te():
-    """TE's PyTorch extension, with its quantize calls on the CUDA kernels."""
-    # pylint: disable=import-outside-toplevel
-    common.cuda_backend(False)
-    import transformer_engine.pytorch  # pylint: disable=unused-import
-    import transformer_engine_torch as tex
-
-    core = common.disable_cutedsl_dispatch()
-    return tex, core
-
-
-def _quantizer(tex, direction, swizzle):
+def _quantizer(tex, direction, swizzle, scaling="1d"):
     from transformer_engine.pytorch import MXFP8Quantizer  # pylint: disable=import-outside-toplevel
 
     rowwise, colwise = common.DIRECTIONS[direction]
-    quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=colwise)
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=rowwise,
+        columnwise=colwise,
+        with_2d_quantization=scaling == "2d",
+    )
     quantizer.optimize_for_gemm = swizzle == "on"
     return quantizer
 
 
-def _te_group_quantize(tex, x, quantizer, group, layout, fusion):
-    """Returns launch() running TE's grouped quantize, plus the grouped output it writes."""
-    first, last = _dims_tensors(group, layout)
-    if fusion == "dbias":
-        out, _ = tex.bgrad_group_quantize(x, quantizer, len(group), first, last)
-        return lambda: tex.bgrad_group_quantize(x, quantizer, len(group), first, last), out
-    # TE only reuses an output (output=) for uniform groups, so every launch allocates one.
-    out = tex.group_quantize(x, quantizer, len(group), first, last)
-    return lambda: tex.group_quantize(x, quantizer, len(group), first, last), out
+def _te_launcher(tex):
+    """Returns setup(x, group, layout, direction, fusion, scaling, swizzle) -> launch(), running
+    TE's grouped quantize, which dispatches to whichever backend `tex` was imported with."""
 
-
-def _cuda_launcher():
-    """Returns setup(x, group, layout, direction, fusion, swizzle) -> launch(), running the
-    installed TE's CUDA grouped kernel."""
-    tex, core = _te()
-    print(f"CUDA kernels from {core}")
-
-    def setup(x, group, layout, direction, fusion, swizzle):
-        quantizer = _quantizer(tex, direction, swizzle)
-        return _te_group_quantize(tex, x, quantizer, group, layout, fusion)[0]
+    def setup(x, group, layout, direction, fusion, scaling, swizzle):
+        quantizer = _quantizer(tex, direction, swizzle, scaling)
+        first, last = _dims_tensors(group, layout)
+        if fusion == "dbias":
+            return lambda: tex.bgrad_group_quantize(x, quantizer, len(group), first, last)
+        # TE only reuses an output (output=) for uniform groups, so every launch allocates one.
+        return lambda: tex.group_quantize(x, quantizer, len(group), first, last)
 
     return setup
 
 
 def _cutedsl_launcher():
-    """Returns setup(x, group, layout, direction, fusion, swizzle) -> launch(), calling the
-    compiled CuTeDSL grouped kernel directly on buffers laid out as TE's grouped output."""
+    """Returns setup(x, group, layout, direction, fusion, scaling, swizzle) -> launch(), calling
+    the compiled CuTeDSL grouped kernel directly on buffers laid out as TE's grouped output.
+    Configs this source tree's CuTeDSL kernels do not support go through TE's dispatch instead,
+    which runs CUDA unless the TE build has a CuTeDSL kernel."""
     # pylint: disable=import-outside-toplevel
     import torch
 
-    common.cuda_backend(True)  # not needed for the direct call, keeps TE's dispatch consistent
+    common.cuda_backend(True)
     from transformer_engine.common.CuTeDSL import get_mxfp8_group_quantization_function
 
     # Resolve the defining module instead of naming it, in case it gets renamed.
@@ -161,21 +156,34 @@ def _cutedsl_launcher():
     print(f"CuTeDSL kernels from {gq.__file__}")
 
     @functools.lru_cache(maxsize=None)
-    def compiled(dtype, layout, direction, fusion, swizzle):
+    def compiled(dtype, layout, direction, fusion, scaling, swizzle):
         rowwise, colwise = common.DIRECTIONS[direction]
-        cfg = gq.MXFP8GroupQuantizeConfig(
-            dtype,
-            "Float8E4M3",
-            rowwise,
-            colwise,
-            LAYOUTS[layout],
-            with_gemm_swizzled_scales=swizzle == "on",
-            with_dbias=fusion == "dbias",
-        )
+        flags = {"use_2d_quantization": True} if scaling == "2d" else {}
+        try:
+            cfg = gq.MXFP8GroupQuantizeConfig(
+                dtype,
+                "Float8E4M3",
+                rowwise,
+                colwise,
+                LAYOUTS[layout],
+                with_gemm_swizzled_scales=swizzle == "on",
+                with_dbias=fusion == "dbias",
+                **flags,
+            )
+        except (TypeError, ValueError):  # not implemented in this revision
+            return None
         fn = gq.compile_cutedsl_function_from_cfg(cfg)
         return getattr(fn, "__tvm_ffi_object__", lambda: None)() or fn
 
-    def setup(x, group, layout, direction, fusion, swizzle):
+    @functools.lru_cache(maxsize=None)
+    def te_setup():
+        return _te_launcher(common.te_backend("CuTeDSL"))
+
+    def setup(x, group, layout, direction, fusion, scaling, swizzle):
+        dtype = next(v[1] for v in common.INPUTS.values() if getattr(torch, v[0]) == x.dtype)
+        fn = compiled(dtype, layout, direction, fusion, scaling, swizzle)
+        if fn is None:
+            return te_setup()(x, group, layout, direction, fusion, scaling, swizzle)
         # Allocated here rather than by a TE grouped quantize call, so setting up a buffer set
         # runs no kernel. Sizes and offsets are those of TE's GroupedTensor
         # (MXFP8Quantizer::create_grouped_tensor): scales sized for the whole buffer, element
@@ -211,8 +219,6 @@ def _cutedsl_launcher():
             if fusion == "dbias"
             else None
         )
-        dtype = next(v[1] for v in common.INPUTS.values() if getattr(torch, v[0]) == x.dtype)
-        fn = compiled(dtype, layout, direction, fusion, swizzle)
         stream = torch.cuda.current_stream().cuda_stream
         args = (x, o_row, o_col, s_row, s_col, offsets, first, last, tensormaps, len(group))
         return lambda: fn(*args, None, None, workspace, stream)
@@ -220,10 +226,9 @@ def _cutedsl_launcher():
     return setup
 
 
-def _cuda_kernel(name):
-    # The descriptor update is part of the CUDA path's quantize work (CuTeDSL does it in-kernel);
-    # the offsets computation and the dbias reduction run outside both kernels.
-    return name.startswith("group_quantize") or name == "update_tma_descriptors"
+# The descriptor update is part of the CUDA path's quantize work (CuTeDSL does it in-kernel);
+# the offsets computation and the dbias reduction run outside both kernels.
+KEEP = common.te_kernels("^group_quantize", "^update_tma_descriptors$")
 
 
 def run(args, impl):
@@ -232,53 +237,49 @@ def run(args, impl):
     import pandas as pd
     import torch
 
-    setup = (_cuda_launcher if impl == "CUDA" else _cutedsl_launcher)()
-    keep = _cuda_kernel if impl == "CUDA" else (lambda k: k.startswith("kernel_cutlass"))
+    if impl == "CUDA":
+        setup = _te_launcher(common.te_backend("CUDA"))
+    else:
+        setup = _cutedsl_launcher()
 
-    def make_input(shape, input_dtype):
-        return torch.randn(
-            shape, dtype=getattr(torch, common.INPUTS[input_dtype][0]), device="cuda"
+    def factory(m, n, g, lay, d, f, sc, sw, inp, grp):
+        dtype = getattr(torch, common.INPUTS[inp][0])
+        x = torch.randn(capacity(m, n, g, lay), dtype=dtype, device="cuda")
+        return setup(x, grp, lay, d, f, sc, sw)
+
+    configs = [
+        (m, n, g, lay, d, f, sc, sw, inp, grp)
+        for (m, n), g, lay, inp, d, f, sc, sw in itertools.product(
+            args.shape_list,
+            args.experts_list,
+            args.layouts,
+            args.inputs,
+            args.direction,
+            args.fusions,
+            args.scalings,
+            args.swizzles,
         )
-
-    configs = []
-    for (m, n), g, lay, inp, d, f, sw in itertools.product(
-        args.shape_list,
-        args.experts_list,
-        args.layouts,
-        args.inputs,
-        args.direction,
-        args.fusions,
-        args.swizzles,
-    ):
-        if f == "dbias" and lay not in SINGLE_TENSOR_LAYOUTS:
-            continue
-        if lay in ("same", "varying_last") and m % (g * ROW_BLOCK):
-            continue  # needs M/G rows per member, a multiple of 128
-        configs.append((m, n, g, lay, d, f, sw, inp, members(m, n, g, lay)))
+        if valid_group(m, g, lay)
+        and (f != "dbias" or lay in SINGLE_TENSOR_LAYOUTS)
+        and (sc == "1d" or f == "none")  # TE only fuses 2D scaling into a plain cast
+        for grp in [members(m, n, g, lay)]
+    ]
     if not configs:
-        sys.exit("No config to run: check --shapes/--experts/--layout/--fusion")
+        sys.exit("No config to run: check --shapes/--experts/--layout/--fusion/--scaling")
     factories = (
         (
-            common.mxfp8_bytes(sum(a * b for a, b in grp), inp, d),
-            functools.partial(
-                lambda shape, grp, lay, d, f, sw, inp: setup(
-                    make_input(shape, inp), grp, lay, d, f, sw
-                ),
-                capacity(m, n, g, lay),
-                grp,
-                lay,
-                d,
-                f,
-                sw,
-                inp,
-            ),
+            common.mxfp8_bytes(sum(a * b for a, b in c[-1]), c[-2], c[4]),
+            functools.partial(factory, *c),
         )
-        for m, n, g, lay, d, f, sw, inp, grp in configs
+        for c in configs
     )
-    timed = common.time_kernels(factories, args.runs, args.warmup, keep)
+    timed = common.time_kernels(factories, args.runs, args.warmup, KEEP)
     rows = []
-    for (m, n, g, lay, d, f, sw, inp, grp), (times, kernel, _) in zip(configs, timed):
-        row = dict(zip(CONFIG, (m, n, g, lay, d, f, sw, inp)))
+    for (m, n, g, lay, d, f, sc, sw, inp, grp), result in zip(configs, timed):
+        if result is None:
+            continue
+        times, kernel, _ = result
+        row = dict(zip(CONFIG, (m, n, g, lay, d, f, sc, sw, inp)))
         row.update(common.result_row(times, kernel))
         numel = sum(a * b for a, b in grp)
         row["GB/s"] = common.mxfp8_bytes(numel, inp, d) / (row["time_us"] * 1e3)
@@ -287,9 +288,8 @@ def run(args, impl):
     return pd.DataFrame(rows, columns=CONFIG + common.RESULT_COLUMNS + ["members"])
 
 
-def add_arguments(parser):
-    """The grouped options."""
-    common.add_quantize_arguments(parser, FUSIONS)
+def add_group_arguments(parser, layouts=tuple(LAYOUTS), default_layouts="same;varying_first"):
+    """--shapes, --experts and --layout, shared by the grouped benchmarks."""
     parser.add_argument(
         "--shapes",
         metavar='"MxN;..."',
@@ -304,19 +304,18 @@ def add_arguments(parser):
     )
     parser.add_argument(
         "--layout",
-        default="same;varying_first",
+        default=default_layouts,
         metavar="all|L;L;...",
         help=(
-            f"all, or a ;-separated subset of {';'.join(LAYOUTS)}: whether the members' rows"
-            " and/or columns vary (default: same;varying_first)"
+            f"all, or a ;-separated subset of {';'.join(layouts)}: whether the members' rows"
+            f" and/or columns vary (default: {default_layouts})"
         ),
     )
 
 
-def parse_arguments(parser, args):
-    """Validates the grouped options."""
-    common.parse_quantize_arguments(parser, args, FUSIONS)
-    args.layouts = common.parse_list(parser, args.layout, list(LAYOUTS), "--layout")
+def parse_group_arguments(parser, args, layouts=tuple(LAYOUTS), default_n=None, debug_n=None):
+    """Validates add_group_arguments' options; sets args.layouts/experts_list/shape_list."""
+    args.layouts = common.parse_list(parser, args.layout, list(layouts), "--layout")
     debug = args.mode == "debug"
     if args.experts:
         args.experts_list = common.parse_ints(parser, args.experts, "--experts")
@@ -326,18 +325,18 @@ def parse_arguments(parser, args):
         if args.mode == "manual":
             args.shape_list = common.parse_shapes(args.shapes)
             if any(m % ROW_BLOCK for m, _ in args.shape_list):
-                parser.error(f"--shapes: M must be a multiple of {ROW_BLOCK} for grouped quantize")
+                parser.error(f"--shapes: M must be a multiple of {ROW_BLOCK} for grouped kernels")
         else:
-            ms, ns = (DEBUG_M, DEBUG_N) if debug else (DEFAULT_M, DEFAULT_N)
+            ms = DEBUG_M if debug else DEFAULT_M
+            ns = (debug_n or DEBUG_N) if debug else (default_n or DEFAULT_N)
             args.shape_list = list(itertools.product(ms, ns))
     except ValueError as e:
         parser.error(str(e))
 
 
-def worker_arguments(args):
-    """The grouped options for a compare worker."""
-    worker = common.quantize_worker_arguments(args)
-    return worker + [
+def group_worker_arguments(args):
+    """--experts and --layout for a compare worker."""
+    return [
         "--experts",
         ";".join(map(str, args.experts_list)),
         "--layout",
@@ -345,8 +344,8 @@ def worker_arguments(args):
     ]
 
 
-def describe(args):
-    """config.txt lines for the benchmarked suite."""
+def describe_group(args):
+    """config.txt lines for add_group_arguments' options."""
     if args.mode == "manual":
         shapes = "manual: " + "; ".join(f"{m}x{n}" for m, n in args.shape_list)
     else:
@@ -355,11 +354,35 @@ def describe(args):
         shapes = f"{args.mode} suite, M = {', '.join(map(str, ms))} x N = {', '.join(map(str, ns))}"
     return [
         f"mode:       {args.mode}",
-        f"shapes:     {shapes}",
+        f"shapes:     {shapes} (M x N is the buffer; members fill part of it)",
         f"experts:    {', '.join(map(str, args.experts_list))}",
         f"layouts:    {', '.join(args.layouts)} (member shapes are in results.csv)",
+    ]
+
+
+def add_arguments(parser):
+    """The grouped quantize options."""
+    common.add_quantize_arguments(parser, FUSIONS)
+    add_group_arguments(parser)
+
+
+def parse_arguments(parser, args):
+    """Validates the grouped quantize options."""
+    common.parse_quantize_arguments(parser, args, FUSIONS)
+    parse_group_arguments(parser, args)
+
+
+def worker_arguments(args):
+    """The grouped quantize options for a compare worker."""
+    return common.quantize_worker_arguments(args) + group_worker_arguments(args)
+
+
+def describe(args):
+    """config.txt lines for the benchmarked suite."""
+    return describe_group(args) + [
         f"directions: {', '.join(args.direction)}",
         f"fusions:    {', '.join(args.fusions)}",
+        f"scaling:    {', '.join(args.scalings)}",
         f"swizzle:    {', '.join(args.swizzles)}",
         f"input:      {', '.join(args.inputs)}",
     ]
@@ -379,6 +402,7 @@ BENCHMARK = common.Benchmark(
         "layout": "Layout",
         "experts": "Experts",
         "fusion": "Fusion",
+        "scaling": "Scaling",
         "direction": "Direction",
         "swizzle": "Swizzled Scale",
     },

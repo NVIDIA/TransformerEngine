@@ -33,6 +33,7 @@ IMPLS = {"cutedsl": "CuTeDSL", "cuda": "CUDA"}
 MXFP8_BLOCK = 32
 DIRECTIONS = {"rowwise": (True, False), "colwise": (False, True), "both": (True, True)}
 SWIZZLES = ("off", "on")  # scales in the GEMM-ready swizzled layout
+SCALINGS = ("1d", "2d")  # MXFP8 1x32 blocks, or 32x32 blocks shared by both directions
 # --input name -> (torch dtype name, CuTeDSL dtype name, bytes per element)
 INPUTS = {
     "bf16": ("bfloat16", "BFloat16", 2),
@@ -44,6 +45,7 @@ INPUTS = {
 L2_ROTATION = 3
 # Columns every results table ends with; a benchmark's own config columns come first.
 RESULT_COLUMNS = ["time_us", "min_us", "rel_std_pct", "GB/s", "kernel"]
+CUTEDSL_PREFIX = "kernel_cutlass"
 CUDA_EXPLANATION = """\
 Comparing CUDA (old) vs CuTeDSL (new) {what} kernels:
   old = the CUDA kernels compiled into the currently INSTALLED TE, i.e. whatever
@@ -54,7 +56,9 @@ Comparing CUDA (old) vs CuTeDSL (new) {what} kernels:
           source:  {git} (the library may be built from an older commit, see
                    the +<sha> in the version)
   new = the CuTeDSL kernels of {new} in this source tree ({repo}), JIT-compiled from
-        source. This is NOT the CuTeDSL code of the installed TE.
+        source. This is NOT the CuTeDSL code of the installed TE. Kernels called through TE's
+        dispatch use the TE library built in this tree, which runs its CUDA kernel for a
+        config it has no CuTeDSL kernel for (see the kernel column).
 """
 # `-P` keeps the cwd off sys.path, so this resolves TE exactly like the CUDA worker does.
 INSTALLED_TE_PROBE = """\
@@ -106,8 +110,16 @@ def base_name(kernel):
 
 def short_name(base):
     """CuTeDSL kernel symbols encode the module path and arguments; keep only the class."""
-    match = re.search(r"(MXFP8\w*?Quantize\w*?Kernel)", base)
+    match = re.search(r"(MXFP8\w*?Kernel)", base)
     return match.group(1) if match else base
+
+
+def te_kernels(*cuda_patterns):
+    """keep() for time_kernels when TE dispatches the op: any CuTeDSL kernel, or a CUDA kernel
+    whose base name matches one of `cuda_patterns` (regexes), so helper kernels such as offset
+    computations or memsets are not timed."""
+    pattern = re.compile("|".join(cuda_patterns))
+    return lambda name: name.startswith(CUTEDSL_PREFIX) or bool(pattern.search(name))
 
 
 def _cuda_kernels(prof):
@@ -128,7 +140,8 @@ def time_kernels(factories, runs, warmup, keep):
     back, so each pays (amortized) for writing back the dirty outputs earlier launches left in
     L2, as in a real pipeline. A launch may run
     several kernels: the ones whose base name `keep` accepts are summed, the rest ignored.
-    Returns, per config, (list of per-run microseconds, kernel names, number of sets).
+    Returns, per config, (list of per-run microseconds, kernel names, number of sets); or None
+    for a config TE rejects (a RuntimeError from its first launch, e.g. an unsupported layout).
     """
     # pylint: disable=import-outside-toplevel
     import torch
@@ -156,9 +169,14 @@ def time_kernels(factories, runs, warmup, keep):
                 return run
 
             outputs.append(None)
-            sets = [keep_output(factory(), 0)]
-            sets[0]()  # JIT compile; also materializes outputs allocated per call
-            torch.cuda.synchronize()
+            try:
+                sets = [keep_output(factory(), 0)]
+                sets[0]()  # JIT compile; also materializes outputs allocated per call
+                torch.cuda.synchronize()
+            except RuntimeError as e:
+                print(f"Skipped a config: {str(e).strip().splitlines()[0]}", flush=True)
+                num_sets.append(None)
+                continue
             count = max(2, -(-L2_ROTATION * l2_cache_bytes() // nbytes) + 1)
             for slot in range(1, count):
                 outputs.append(None)
@@ -185,15 +203,19 @@ def time_kernels(factories, runs, warmup, keep):
         else:
             current.append(kernels[i])
             i += 1
-    expected = len(num_sets) * (runs + 1)
+    expected = sum(runs + 1 for count in num_sets if count)
     if len(segments) != expected:
         raise RuntimeError(
             f"Expected {expected} launch markers in the trace, found {len(segments)}"
         )
-    results = []
-    for c, count in enumerate(num_sets):
+    results, first, fallbacks = [], 0, 0
+    for count in num_sets:
+        if count is None:
+            results.append(None)
+            continue
         times, names = [], []
-        for seg in segments[c * (runs + 1) + 1 : (c + 1) * (runs + 1)]:
+        first += runs + 1
+        for seg in segments[first - runs : first]:
             kept = [e for e in seg if keep(base_name(e.name))]
             if not kept:
                 seen = sorted({short_name(base_name(e.name)) for e in seg})
@@ -203,7 +225,13 @@ def time_kernels(factories, runs, warmup, keep):
                 )
             times.append(sum(e.device_time_total for e in kept))
             names = list(dict.fromkeys(short_name(base_name(e.name)) for e in kept))
+        fallbacks += not any(e.name.startswith(CUTEDSL_PREFIX) for e in kept)
         results.append((times, "+".join(names), count))
+    if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND") == "1" and fallbacks:
+        print(
+            f"WARNING: {fallbacks} of {sum(c is not None for c in num_sets)} configs ran CUDA"
+            " kernels (no CuTeDSL kernel for them in this TE build); see the kernel column."
+        )
     return results
 
 
@@ -221,13 +249,37 @@ def result_row(times, kernel):
 def mxfp8_bytes(numel, input_dtype, direction, num_inputs=1):
     """Bytes an MXFP8 quantize moves: the input(s), plus fp8 data and e8m0 scales out per
     direction (dbias partial sums and scale padding not counted)."""
-    num_outputs = sum(DIRECTIONS[direction])
-    return num_inputs * numel * INPUTS[input_dtype][2] + num_outputs * (numel + numel // 32)
+    return num_inputs * numel * INPUTS[input_dtype][2] + mxfp8_data_bytes(numel, direction)
+
+
+def mxfp8_data_bytes(numel, direction):
+    """Bytes of `numel` MXFP8 elements per direction: fp8 data plus one e8m0 scale per 32."""
+    return sum(DIRECTIONS[direction]) * (numel + numel // MXFP8_BLOCK)
 
 
 def cuda_backend(enable):
     """Sets NVTE_ENABLE_CUTEDSL_BACKEND for TE's own dispatch; call before importing TE."""
     os.environ["NVTE_ENABLE_CUTEDSL_BACKEND"] = "1" if enable else "0"
+
+
+def te_backend(impl):
+    """Imports TE with its dispatch set to `impl` ("CuTeDSL": CuTeDSL kernels where TE has them,
+    CUDA otherwise; "CUDA": CUDA only). Returns tex, TE's PyTorch extension."""
+    # pylint: disable=import-outside-toplevel
+    cuda_backend(impl == "CuTeDSL")
+    import transformer_engine.pytorch  # pylint: disable=unused-import
+    import transformer_engine_torch as tex
+
+    if impl == "CUDA":
+        print(f"CUDA kernels from {disable_cutedsl_dispatch()}")
+    else:
+        from transformer_engine.common import _get_shared_object_file
+
+        print(
+            "TE dispatch with the CuTeDSL backend on (CUDA where it has no CuTeDSL kernel),"
+            f" from {_get_shared_object_file('core')}"
+        )
+    return tex
 
 
 def disable_cutedsl_dispatch():
@@ -285,8 +337,8 @@ def parse_shapes(text, block=MXFP8_BLOCK):
     return shapes
 
 
-def add_quantize_arguments(parser, fusions):
-    """Options shared by the MXFP8 quantize benchmarks."""
+def add_suite_arguments(parser):
+    """--mode, which every benchmark takes."""
     parser.add_argument(
         "--mode",
         type=str.lower,
@@ -297,6 +349,40 @@ def add_quantize_arguments(parser, fusions):
             " shapes and few runs, to check the output quickly (default: default)"
         ),
     )
+
+
+def parse_suite_arguments(parser, args):
+    """Validates --mode/--shapes; sets the --runs/--warmup defaults."""
+    if (args.mode == "manual") != (args.shapes is not None):
+        parser.error("--shapes is required by, and only valid with, --mode manual")
+    args.runs = args.runs or (3 if args.mode == "debug" else 20)
+    args.warmup = args.warmup or (1 if args.mode == "debug" else 5)
+
+
+def add_dtype_argument(parser, option="--input", what="input"):
+    """A ;-separated list of high-precision dtypes."""
+    parser.add_argument(
+        option,
+        default="bf16",
+        metavar="DTYPE;...",
+        help=f"{what} dtypes, a ;-separated subset of {';'.join(INPUTS)} (default: bf16)",
+    )
+
+
+def add_swizzle_argument(parser):
+    """--swizzle off|on|both."""
+    parser.add_argument(
+        "--swizzle",
+        type=str.lower,
+        choices=["off", "on", "both"],
+        default="off",
+        help="scales in the GEMM-ready swizzled layout (default: off)",
+    )
+
+
+def add_quantize_arguments(parser, fusions):
+    """Options shared by the MXFP8 quantize benchmarks."""
+    add_suite_arguments(parser)
     parser.add_argument(
         "--direction", nargs="+", default=list(DIRECTIONS), choices=list(DIRECTIONS)
     )
@@ -307,36 +393,36 @@ def add_quantize_arguments(parser, fusions):
         help=f"all, or a ;-separated subset of {';'.join(fusions)} (default: none)",
     )
     parser.add_argument(
-        "--swizzle",
+        "--scaling",
         type=str.lower,
-        choices=["off", "on", "both"],
-        default="off",
-        help="scales in the GEMM-ready swizzled layout (default: off)",
+        choices=[*SCALINGS, "both"],
+        default="1d",
+        help="1d: 1x32 scale blocks; 2d: 32x32 blocks, plain cast only (default: 1d)",
     )
-    parser.add_argument(
-        "--input",
-        default="bf16",
-        metavar="DTYPE;...",
-        help=f"input dtypes, a ;-separated subset of {';'.join(INPUTS)} (default: bf16)",
-    )
+    add_swizzle_argument(parser)
+    add_dtype_argument(parser)
 
 
 def parse_quantize_arguments(parser, args, fusions):
     """Validates add_quantize_arguments' options; sets args.fusions/swizzles/inputs."""
-    if (args.mode == "manual") != (args.shapes is not None):
-        parser.error("--shapes is required by, and only valid with, --mode manual")
-    args.runs = args.runs or (3 if args.mode == "debug" else 20)
-    args.warmup = args.warmup or (1 if args.mode == "debug" else 5)
+    parse_suite_arguments(parser, args)
     args.fusions = parse_list(parser, args.fusion, fusions, "--fusion")
     args.swizzles = list(SWIZZLES) if args.swizzle == "both" else [args.swizzle]
+    args.scalings = list(SCALINGS) if args.scaling == "both" else [args.scaling]
     args.inputs = parse_list(parser, args.input, list(INPUTS), "--input")
+
+
+def suite_worker_arguments(args):
+    """--mode and --shapes for a compare worker."""
+    return ["--mode", args.mode, *(["--shapes", args.shapes] if args.shapes else [])]
 
 
 def quantize_worker_arguments(args):
     """add_quantize_arguments' options for a compare worker."""
-    worker = ["--mode", args.mode, *(["--shapes", args.shapes] if args.shapes else [])]
+    worker = suite_worker_arguments(args)
     worker += ["--direction", *args.direction, "--fusion", ";".join(args.fusions)]
-    worker += ["--swizzle", args.swizzle, "--input", ";".join(args.inputs)]
+    worker += ["--scaling", args.scaling, "--swizzle", args.swizzle]
+    worker += ["--input", ";".join(args.inputs)]
     return worker
 
 
@@ -345,6 +431,8 @@ def quantize_heading(values, activation):
     fusion = values.get("fusion", "none")
     parts = [values.get("input", "bf16"), f"{fusion}({activation})" if "act" in fusion else fusion]
     parts.append(values["direction"])
+    if values.get("scaling") == "2d":
+        parts.append("2D scaling")
     if values.get("swizzle") == "on":
         parts.append("swizzled scale")
     return " · ".join(parts)
@@ -381,16 +469,18 @@ def installed_te():
 def _workers(script, repo, worker_args):
     """Yields run(label, impl) -> DataFrame, which runs the benchmark in a subprocess.
 
-    The subprocesses run a copy of the script and this module, so every run uses the same
-    benchmark code, and it survives checking out a revision that does not contain them.
+    The subprocesses run a copy of this folder's scripts (some import each other), so every
+    run uses the same benchmark code, and it survives checking out a revision that does not
+    contain them.
     """
     # pylint: disable=import-outside-toplevel
     import pandas as pd
 
     tmpdir = Path(tempfile.mkdtemp(prefix="bench_quantize_"))
     copy = tmpdir / Path(script).name
+    for source in HERE.glob("*.py"):
+        shutil.copy(source, tmpdir)
     shutil.copy(script, copy)
-    shutil.copy(__file__, tmpdir)
 
     def run(label, impl):
         csv = tmpdir / f"{label}.csv"
@@ -491,10 +581,12 @@ def _load_results(folder):
     for key, value in re.findall(r"^(\w+):\s+(.*)$", text, re.M):
         fields.setdefault(key, value)  # the top-level entry, not an embedded source config
     df = pd.read_csv(folder / "results.csv")
-    if "swizzle" not in df.columns:  # written before --swizzle existed
+    if "swizzle" not in df.columns and "fusion" in df.columns:  # written before --swizzle
         df.insert(df.columns.get_loc("fusion") + 1, "swizzle", "off")
-    if "input" not in df.columns:  # written before --input existed
+    if "input" not in df.columns and "fusion" in df.columns:  # written before --input existed
         df.insert(df.columns.get_loc("swizzle") + 1, "input", "bf16")
+    if "scaling" not in df.columns and "fusion" in df.columns:  # written before --scaling
+        df.insert(df.columns.get_loc("fusion") + 1, "scaling", "1d")
     return df, fields, text
 
 
