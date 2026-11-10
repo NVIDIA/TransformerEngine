@@ -163,26 +163,20 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
       intermediate_out_nvte = TensorWrapper(NVTE_MXFP8_1D_SCALING);
       if (out_nvte.get_rowwise_scale_inv().data_ptr != nullptr) {
-        const auto data = out_nvte.get_rowwise_data();
-        const auto scales = out_nvte.get_rowwise_scale_inv();
-        rowwise_scales = allocateSpace(scales.shape, DType::kByte, false);
-        intermediate_out_nvte.set_rowwise_data(data.data_ptr, quantizer_cpp->dtype, data.shape)
-            .set_rowwise_scale_inv(rowwise_scales.data_ptr(), DType::kFloat8E8M0, scales.shape);
+        rowwise_scales = allocateSpace(out_nvte.get_rowwise_scale_inv().shape, DType::kByte, false);
+        set_compact_tensor_data(intermediate_out_nvte, out_nvte, /*rowwise=*/true,
+                                rowwise_scales.data_ptr());
         auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
-        scale_view.set_rowwise_data(nullptr, quantizer_cpp->dtype, data.shape)
-            .set_rowwise_scale_inv(rowwise_scales.data_ptr(), DType::kFloat8E8M0, scales.shape);
+        set_compact_tensor_data(scale_view, out_nvte, /*rowwise=*/true, rowwise_scales.data_ptr());
       }
       if (out_nvte.get_columnwise_scale_inv().data_ptr != nullptr) {
-        const auto data = out_nvte.get_columnwise_data();
-        const auto scales = out_nvte.get_columnwise_scale_inv();
-        columnwise_scales = allocateSpace(scales.shape, DType::kByte, false);
-        intermediate_out_nvte.set_columnwise_data(data.data_ptr, quantizer_cpp->dtype, data.shape)
-            .set_columnwise_scale_inv(columnwise_scales.data_ptr(), DType::kFloat8E8M0,
-                                      scales.shape);
+        columnwise_scales =
+            allocateSpace(out_nvte.get_columnwise_scale_inv().shape, DType::kByte, false);
+        set_compact_tensor_data(intermediate_out_nvte, out_nvte, /*rowwise=*/false,
+                                columnwise_scales.data_ptr());
         auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
-        scale_view.set_columnwise_data(nullptr, quantizer_cpp->dtype, data.shape)
-            .set_columnwise_scale_inv(columnwise_scales.data_ptr(), DType::kFloat8E8M0,
-                                      scales.shape);
+        set_compact_tensor_data(scale_view, out_nvte, /*rowwise=*/false,
+                                columnwise_scales.data_ptr());
       }
       kernel_out_nvte = &intermediate_out_nvte;
     } break;
@@ -440,26 +434,20 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
       intermediate_out_nvte = TensorWrapper(NVTE_MXFP8_1D_SCALING);
       if (out_nvte.get_rowwise_scale_inv().data_ptr != nullptr) {
-        const auto data = out_nvte.get_rowwise_data();
-        const auto scales = out_nvte.get_rowwise_scale_inv();
-        rowwise_scales = allocateSpace(scales.shape, DType::kByte, false);
-        intermediate_out_nvte.set_rowwise_data(data.data_ptr, quantizer_cpp->dtype, data.shape)
-            .set_rowwise_scale_inv(rowwise_scales.data_ptr(), DType::kFloat8E8M0, scales.shape);
+        rowwise_scales = allocateSpace(out_nvte.get_rowwise_scale_inv().shape, DType::kByte, false);
+        set_compact_tensor_data(intermediate_out_nvte, out_nvte, /*rowwise=*/true,
+                                rowwise_scales.data_ptr());
         auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
-        scale_view.set_rowwise_data(nullptr, quantizer_cpp->dtype, data.shape)
-            .set_rowwise_scale_inv(rowwise_scales.data_ptr(), DType::kFloat8E8M0, scales.shape);
+        set_compact_tensor_data(scale_view, out_nvte, /*rowwise=*/true, rowwise_scales.data_ptr());
       }
       if (out_nvte.get_columnwise_scale_inv().data_ptr != nullptr) {
-        const auto data = out_nvte.get_columnwise_data();
-        const auto scales = out_nvte.get_columnwise_scale_inv();
-        columnwise_scales = allocateSpace(scales.shape, DType::kByte, false);
-        intermediate_out_nvte.set_columnwise_data(data.data_ptr, quantizer_cpp->dtype, data.shape)
-            .set_columnwise_scale_inv(columnwise_scales.data_ptr(), DType::kFloat8E8M0,
-                                      scales.shape);
+        columnwise_scales =
+            allocateSpace(out_nvte.get_columnwise_scale_inv().shape, DType::kByte, false);
+        set_compact_tensor_data(intermediate_out_nvte, out_nvte, /*rowwise=*/false,
+                                columnwise_scales.data_ptr());
         auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
-        scale_view.set_columnwise_data(nullptr, quantizer_cpp->dtype, data.shape)
-            .set_columnwise_scale_inv(columnwise_scales.data_ptr(), DType::kFloat8E8M0,
-                                      scales.shape);
+        set_compact_tensor_data(scale_view, out_nvte, /*rowwise=*/false,
+                                columnwise_scales.data_ptr());
       }
       kernel_out_nvte = &intermediate_out_nvte;
     } break;

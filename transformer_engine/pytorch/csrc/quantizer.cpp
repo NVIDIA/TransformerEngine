@@ -2580,28 +2580,16 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       !emits_gemm_swizzled_scales(convertShape(input.shape()))) {
     compact_out.emplace(NVTE_NVFP4_1D_SCALING);
     if (out.get_rowwise_scale_inv().data_ptr != nullptr) {
-      const auto data = out.get_rowwise_data();
-      const auto scales = out.get_rowwise_scale_inv();
-      rowwise_scales = allocateSpace(scales.shape, DType::kByte, false);
-      const auto amax = out.get_amax();
-      compact_out->set_rowwise_data(data.data_ptr, this->dtype, data.shape)
-          .set_rowwise_scale_inv(rowwise_scales.data_ptr(), this->scale_dtype, scales.shape)
-          .set_amax(amax.data_ptr, DType::kFloat32, amax.shape);
+      rowwise_scales = allocateSpace(out.get_rowwise_scale_inv().shape, DType::kByte, false);
+      set_compact_tensor_data(*compact_out, out, /*rowwise=*/true, rowwise_scales.data_ptr());
       auto& scale_view = scale_inputs.emplace_back(NVTE_NVFP4_1D_SCALING);
-      scale_view.set_rowwise_data(nullptr, this->dtype, data.shape)
-          .set_rowwise_scale_inv(rowwise_scales.data_ptr(), this->scale_dtype, scales.shape);
+      set_compact_tensor_data(scale_view, out, /*rowwise=*/true, rowwise_scales.data_ptr());
     }
     if (out.get_columnwise_scale_inv().data_ptr != nullptr) {
-      const auto data = out.get_columnwise_data();
-      const auto scales = out.get_columnwise_scale_inv();
-      columnwise_scales = allocateSpace(scales.shape, DType::kByte, false);
-      const auto amax = out.get_columnwise_amax();
-      compact_out->set_columnwise_data(data.data_ptr, this->dtype, data.shape)
-          .set_columnwise_scale_inv(columnwise_scales.data_ptr(), this->scale_dtype, scales.shape)
-          .set_columnwise_amax(amax.data_ptr, DType::kFloat32, amax.shape);
+      columnwise_scales = allocateSpace(out.get_columnwise_scale_inv().shape, DType::kByte, false);
+      set_compact_tensor_data(*compact_out, out, /*rowwise=*/false, columnwise_scales.data_ptr());
       auto& scale_view = scale_inputs.emplace_back(NVTE_NVFP4_1D_SCALING);
-      scale_view.set_columnwise_data(nullptr, this->dtype, data.shape)
-          .set_columnwise_scale_inv(columnwise_scales.data_ptr(), this->scale_dtype, scales.shape);
+      set_compact_tensor_data(scale_view, out, /*rowwise=*/false, columnwise_scales.data_ptr());
     }
     compact_out->set_row_scaled_nvfp4(out.get_row_scaled_nvfp4());
     compact_out->set_nvfp4_e4m3_max(out.get_nvfp4_e4m3_max());

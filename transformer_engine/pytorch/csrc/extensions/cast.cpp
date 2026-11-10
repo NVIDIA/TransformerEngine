@@ -1140,29 +1140,11 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
       for (size_t j = 0; j < indices.size(); ++j) {
         const size_t i = indices[j];
         const auto &output = output_list[i];
-        const auto &quantizer = static_cast<const NVFP4Quantizer &>(*quantizer_cpp_list[i]);
         auto &compact = *compact_outputs[i];
         void *scratch = buffers[j].data_ptr();
+        set_compact_tensor_data(compact, output, rowwise, scratch);
         auto &scale_view = views.emplace_back(NVTE_NVFP4_1D_SCALING);
-        if (rowwise) {
-          const auto data = output.get_rowwise_data();
-          const auto scales = output.get_rowwise_scale_inv();
-          const auto amax = output.get_amax();
-          compact.set_rowwise_data(data.data_ptr, quantizer.dtype, data.shape)
-              .set_rowwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape)
-              .set_amax(amax.data_ptr, DType::kFloat32, amax.shape);
-          scale_view.set_rowwise_data(nullptr, quantizer.dtype, data.shape)
-              .set_rowwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape);
-        } else {
-          const auto data = output.get_columnwise_data();
-          const auto scales = output.get_columnwise_scale_inv();
-          const auto amax = output.get_columnwise_amax();
-          compact.set_columnwise_data(data.data_ptr, quantizer.dtype, data.shape)
-              .set_columnwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape)
-              .set_columnwise_amax(amax.data_ptr, DType::kFloat32, amax.shape);
-          scale_view.set_columnwise_data(nullptr, quantizer.dtype, data.shape)
-              .set_columnwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape);
-        }
+        set_compact_tensor_data(scale_view, output, rowwise, scratch);
         sources.push_back(scale_view.data());
         destinations.push_back(output.data());
       }
@@ -2137,20 +2119,11 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
     compact_outputs.reserve(num_tensors);
     for (size_t i = 0; i < num_tensors; ++i) {
       const auto &output = outputs[i];
-      const auto row_data = output.get_rowwise_data();
-      const auto column_data = output.get_columnwise_data();
-      const auto row_scales = output.get_rowwise_scale_inv();
-      const auto column_scales = output.get_columnwise_scale_inv();
-      const auto row_amax = output.get_amax();
-      const auto column_amax = output.get_columnwise_amax();
       auto &compact = compact_outputs.emplace_back(NVTE_NVFP4_1D_SCALING);
-      compact.set_rowwise_data(row_data.data_ptr, quantizer.dtype, row_data.shape)
-          .set_columnwise_data(column_data.data_ptr, quantizer.dtype, column_data.shape)
-          .set_rowwise_scale_inv(row_scales.data_ptr, quantizer.scale_dtype, row_scales.shape)
-          .set_columnwise_scale_inv(column_scales.data_ptr, quantizer.scale_dtype,
-                                    column_scales.shape)
-          .set_amax(row_amax.data_ptr, DType::kFloat32, row_amax.shape)
-          .set_columnwise_amax(column_amax.data_ptr, DType::kFloat32, column_amax.shape);
+      set_compact_tensor_data(compact, output, /*rowwise=*/true,
+                              output.get_rowwise_scale_inv().data_ptr);
+      set_compact_tensor_data(compact, output, /*rowwise=*/false,
+                              output.get_columnwise_scale_inv().data_ptr);
       compact.set_with_gemm_swizzled_scales(output.get_with_gemm_swizzled_scales() &&
                                             !needs_swizzle[i]);
       compact.set_row_scaled_nvfp4(output.get_row_scaled_nvfp4());
@@ -2177,29 +2150,11 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
       for (size_t j = 0; j < indices.size(); ++j) {
         const size_t i = indices[j];
         const auto &output = outputs[i];
-        const auto &quantizer = *quantizers[i];
         auto &compact = compact_outputs[i];
         void *scratch = buffers[j].data_ptr();
+        set_compact_tensor_data(compact, output, rowwise, scratch);
         auto &scale_view = views.emplace_back(NVTE_NVFP4_1D_SCALING);
-        if (rowwise) {
-          const auto data = output.get_rowwise_data();
-          const auto scales = output.get_rowwise_scale_inv();
-          const auto amax = output.get_amax();
-          compact.set_rowwise_data(data.data_ptr, quantizer.dtype, data.shape)
-              .set_rowwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape)
-              .set_amax(amax.data_ptr, DType::kFloat32, amax.shape);
-          scale_view.set_rowwise_data(nullptr, quantizer.dtype, data.shape)
-              .set_rowwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape);
-        } else {
-          const auto data = output.get_columnwise_data();
-          const auto scales = output.get_columnwise_scale_inv();
-          const auto amax = output.get_columnwise_amax();
-          compact.set_columnwise_data(data.data_ptr, quantizer.dtype, data.shape)
-              .set_columnwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape)
-              .set_columnwise_amax(amax.data_ptr, DType::kFloat32, amax.shape);
-          scale_view.set_columnwise_data(nullptr, quantizer.dtype, data.shape)
-              .set_columnwise_scale_inv(scratch, quantizer.scale_dtype, scales.shape);
-        }
+        set_compact_tensor_data(scale_view, output, rowwise, scratch);
         sources.push_back(scale_view.data());
         destinations.push_back(output.data());
       }
