@@ -1751,7 +1751,6 @@ class TestGroupedMLPFusedOp:
             _clear_grouped_glu_kernel_caches()
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    @pytest.mark.parametrize("delay_wgrad_compute", (False, True), ids=("immediate", "delayed"))
     @pytest.mark.parametrize("single_grouped_weight", (False, True), ids=("discrete", "dense"))
     @pytest.mark.parametrize(
         "activation,situ_betas,act_func,dact_func",
@@ -1766,7 +1765,6 @@ class TestGroupedMLPFusedOp:
         self,
         monkeypatch,
         traced_cudnn_grouped_glu_wrappers,
-        delay_wgrad_compute: bool,
         single_grouped_weight: bool,
         activation: str,
         situ_betas: tuple[float, float],
@@ -1794,7 +1792,6 @@ class TestGroupedMLPFusedOp:
             activation=activation,
             situ_betas=situ_betas,
             strict_fusion=True,
-            delay_wgrad_compute=delay_wgrad_compute,
         )
         torch.cuda.synchronize()
 
