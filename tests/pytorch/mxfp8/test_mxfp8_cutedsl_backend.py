@@ -443,14 +443,18 @@ def extract_group_quantized_output(out, rowwise, columnwise):
     """Extract the bytes to compare between backends.
 
     Unlike the single-tensor kernels, both grouped backends zero the scale padding, so the
-    whole data and scale buffers are compared.
+    whole data and scale buffers are compared. 
+    Note: we mask the data to fold -0.0 (0x80) into +0.0, because the CuTeDSL implementation
+    differs from the CUDA implementation in some cases, but both should be correct.
     """
     parts = {}
     if rowwise:
-        parts["rowwise data"] = out.rowwise_data.view(torch.uint8).clone()
+        d = out.rowwise_data.view(torch.uint8)
+        parts["rowwise data"] = d.masked_fill(d == 0x80, 0)
         parts["rowwise scales"] = out.scale_inv.view(torch.uint8).clone()
     if columnwise:
-        parts["colwise data"] = out.columnwise_data.view(torch.uint8).clone()
+        d = out.columnwise_data.view(torch.uint8)
+        parts["colwise data"] = d.masked_fill(d == 0x80, 0)
         parts["colwise scales"] = out.columnwise_scale_inv.view(torch.uint8).clone()
     return parts
 
