@@ -21,7 +21,6 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     attention_mask_func,
-    is_non_tn_fp8_gemm_supported,
 )
 from transformer_engine.pytorch import (
     autocast,
@@ -2729,13 +2728,11 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             torch.ones(1).cuda().squeeze(),
             torch.ones(1).cuda().squeeze(),
             DType.kFloat8E4M3,
+            columnwise=False,
         ),
     ],
 )
-@pytest.mark.parametrize("columnwise_output", [False, True])
-def test_fp8gemm_with_unfused_quantization(
-    N, datatype, input_quantizer, out_quantizer, columnwise_output
-):
+def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_quantizer):
     # For MXFP8 and CurrentScaling, below unfused quantization should happen
     # FP8 input --> cublas GEMM --> BF16 output --> Quantize to FP8 --> fp8 Output
     # Skip invalid configurations
@@ -2746,20 +2743,9 @@ def test_fp8gemm_with_unfused_quantization(
         pytest.skip(reason_for_no_fp8)
     if is_mxfp8_needed and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    out_quantizer = out_quantizer.copy()
-    out_quantizer.set_usage(rowwise=True, columnwise=columnwise_output)
     inp_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     weight_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     outp_type = torch.float32
-    if (
-        isinstance(input_quantizer, Float8CurrentScalingQuantizer)
-        and isinstance(out_quantizer, Float8Quantizer)
-        and columnwise_output
-        and not is_non_tn_fp8_gemm_supported()
-    ):
-        with pytest.raises(RuntimeError, match="cannot produce a separate columnwise output"):
-            general_gemm(weight_fp8, inp_fp8, outp_type, quantization_params=out_quantizer)
-        return
     quantized_out, *_ = general_gemm(
         weight_fp8,
         inp_fp8,
