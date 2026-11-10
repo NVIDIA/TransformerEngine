@@ -325,7 +325,7 @@ def parse_group_arguments(parser, args, layouts=tuple(LAYOUTS), default_n=None, 
     args.layouts = common.parse_list(parser, args.layout, list(layouts), "--layout")
     debug = args.mode == "debug"
     if args.experts:
-        args.experts_list = common.parse_ints(parser, args.experts, "--experts")
+        args.experts_list = common.parse_ints(parser, args.experts, "--experts", minimum=1)
     else:
         args.experts_list = DEBUG_EXPERTS if debug else DEFAULT_EXPERTS
     try:

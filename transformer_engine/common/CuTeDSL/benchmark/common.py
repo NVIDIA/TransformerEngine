@@ -348,14 +348,16 @@ def parse_list(parser, text, choices, option):
     return values
 
 
-def parse_ints(parser, text, option):
-    """`8;16` -> [8, 16]."""
+def parse_ints(parser, text, option, minimum=None):
+    """`8;16` -> [8, 16], each at least `minimum` if given."""
     try:
         values = [int(v) for v in text.split(";") if v.strip()]
     except ValueError:
         values = []
     if not values:
         parser.error(f"{option} takes a ;-separated list of integers, got {text!r}")
+    if minimum is not None and min(values) < minimum:
+        parser.error(f"{option} values must be at least {minimum}, got {text!r}")
     return values
 
 
