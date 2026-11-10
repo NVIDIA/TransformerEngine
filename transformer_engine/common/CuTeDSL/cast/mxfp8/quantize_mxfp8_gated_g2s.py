@@ -1179,10 +1179,18 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
 
 
 class MXFP8GatedQuantizeEntry:
-    """Dispatch to the gated kernel variant without scale bounds checks when the shape tiles
-    exactly, and to the bounds-checked one otherwise."""
+    """Dispatch to the register-resident gated kernel where it applies; otherwise to the gated
+    kernel variant without scale bounds checks when the shape tiles exactly, and to the
+    bounds-checked one otherwise."""
 
     def __init__(self, cfg: MXFP8GatedQuantizeConfig):
+        # The register kernel's module imports this one.
+        # pylint: disable-next=import-outside-toplevel
+        from .quantize_mxfp8_gated_g2r_bidim import MXFP8GatedQuantizeG2RKernel
+
+        self.g2r_kernel = (
+            MXFP8GatedQuantizeG2RKernel(cfg) if MXFP8GatedQuantizeG2RKernel.supports(cfg) else None
+        )
         self.kernel = MXFP8GatedQuantizeG2SKernel(cfg)
         self.kernel_skip_scale_bounds = MXFP8GatedQuantizeG2SKernel(cfg, SKIP_SCALE_BOUNDS=True)
 
@@ -1203,38 +1211,33 @@ class MXFP8GatedQuantizeEntry:
         stream: CUstream,
     ):
         """Dispatch to the appropriate kernel based on the shape divisibility to skip unnecessary scale bounds checks."""
-        M = mGatedInput.shape[0]
-        N = mGatedInput.shape[1] // 2
-        k = self.kernel
-        # Each CTA always processes _NUM_TILES tiles, including OOB ones, so M must divide them all
-        shape_is_divisible = M % (k._TILE_ROWS * k._NUM_TILES) == 0 and N % k._TILE_COLS == 0
-        if shape_is_divisible:
-            self.kernel_skip_scale_bounds(
-                mGatedInput,
-                mYGrad,
-                mO_row,
-                mS_row,
-                mO_col,
-                mS_col,
-                limit,
-                alpha,
-                glu_linear_offset,
-                beta1,
-                beta2,
-                stream,
-            )
-        else:
-            self.kernel(
-                mGatedInput,
-                mYGrad,
-                mO_row,
-                mS_row,
-                mO_col,
-                mS_col,
-                limit,
-                alpha,
-                glu_linear_offset,
-                beta1,
-                beta2,
-                stream,
-            )
+        args = (
+            mGatedInput,
+            mYGrad,
+            mO_row,
+            mS_row,
+            mO_col,
+            mS_col,
+            limit,
+            alpha,
+            glu_linear_offset,
+            beta1,
+            beta2,
+            stream,
+        )
+        dispatched = False
+        if cutlass.const_expr(self.g2r_kernel is not None):
+            if self.g2r_kernel.eligible_to_dispatch(mGatedInput, mS_col):
+                dispatched = True
+                self.g2r_kernel(*args)
+        if not dispatched:
+            M = mGatedInput.shape[0]
+            N = mGatedInput.shape[1] // 2
+            k = self.kernel
+            # Each CTA always processes _NUM_TILES tiles, including OOB ones, so M must divide them
+            # all
+            shape_is_divisible = M % (k._TILE_ROWS * k._NUM_TILES) == 0 and N % k._TILE_COLS == 0
+            if shape_is_divisible:
+                self.kernel_skip_scale_bounds(*args)
+            else:
+                self.kernel(*args)
