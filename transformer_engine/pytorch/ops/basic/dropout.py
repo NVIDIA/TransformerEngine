@@ -10,6 +10,7 @@ from typing import Optional
 import torch
 import transformer_engine_torch as tex
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...distributed import _check_checkpoint_rng
 from ...tensor import Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .._common import maybe_autocast_dtype, maybe_dequantize
@@ -40,9 +41,12 @@ class Dropout(BasicOperation):
         # Output dtype
         dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
 
+        if self.training and self.dropout_probability > 0:
+            _check_checkpoint_rng()
+
         # Choose implementation
         impl = None
-        if not self.training:
+        if not self.training or self.dropout_probability == 0:
             impl = "evaluation"
         elif input_.numel() % 16 == 0 and dtype in (torch.float16, torch.bfloat16):
             impl = "fused"

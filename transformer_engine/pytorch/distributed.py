@@ -17,6 +17,7 @@ import warnings
 import torch
 from torch.cuda import _lazy_call, _lazy_init
 from torch.utils.checkpoint import detach_variable, noop_context_fn
+from torch.utils._python_dispatch import TorchDispatchMode, _get_current_dispatch_mode_stack
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
@@ -231,6 +232,8 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
 
     def __enter__(self):
         global _IN_ACTIVATION_RECOMPUTE_REGION, _ACTIVATION_RECOMPUTE_PHASE
+        self.previous_state = (_IN_ACTIVATION_RECOMPUTE_REGION, _ACTIVATION_RECOMPUTE_PHASE)
+        self.saved_state_count = len(activation_recompute_forward._is_first_fp8_module)
         # Track the checkpoint region independently of the FP8 state at entry.
         # A checkpointed callable may open its own FP8 autocast context (for
         # example, to select precision per layer). Delayed-scaling modules in
@@ -247,8 +250,9 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
 
     def __exit__(self, *exc_details):
         global _IN_ACTIVATION_RECOMPUTE_REGION, _ACTIVATION_RECOMPUTE_PHASE
-        _IN_ACTIVATION_RECOMPUTE_REGION = False
-        _ACTIVATION_RECOMPUTE_PHASE = False
+        if exc_details[0] is not None and self.activation_recompute and not self.recompute_phase:
+            del activation_recompute_forward._is_first_fp8_module[self.saved_state_count :]
+        _IN_ACTIVATION_RECOMPUTE_REGION, _ACTIVATION_RECOMPUTE_PHASE = self.previous_state
 
 
 def is_fp8_activation_recompute_enabled() -> bool:
@@ -302,6 +306,65 @@ def _get_active_autocast_contexts():
     return gpu_autocast_ctx, cpu_autocast_ctx
 
 
+def _checkpoint_rng_available():
+    """Whether captured Philox values are exposed by this PyTorch build."""
+    return hasattr(torch.Generator, "philox_state")
+
+
+_CHECKPOINT_RNG_ERROR = (
+    "Checkpointing dropout or other random operations during CUDA graph capture requires "
+    "torch.Generator.philox_state (available in PyTorch 2.14+). "
+    "Upgrade PyTorch, disable dropout, or disable CUDA graph capture."
+)
+
+
+class _CheckpointRNGGuard(TorchDispatchMode):
+    """Reject captured RNG use when its state cannot be preserved."""
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if torch.Tag.nondeterministic_seeded in func.tags:
+            raise RuntimeError(_CHECKPOINT_RNG_ERROR)
+        return func(*args, **(kwargs or {}))
+
+
+def _check_checkpoint_rng():
+    """Check native TE RNG consumers that bypass the PyTorch dispatcher."""
+    if not _checkpoint_rng_available() and any(
+        isinstance(mode, _CheckpointRNGGuard) for mode in _get_current_dispatch_mode_stack()
+    ):
+        raise RuntimeError(_CHECKPOINT_RNG_ERROR)
+
+
+def _checkpoint_rng_state(generator):
+    """Snapshot RNG values on their current device."""
+    with torch.cuda.device(generator.device):
+        if not torch.cuda.is_current_stream_capturing():
+            return generator.get_state()
+        if not _checkpoint_rng_available():
+            return torch.empty(0, device=generator.device, dtype=torch.int64)
+        seed, offset, intragraph = generator.philox_state(0)
+        state = torch.cat((seed, offset))
+        state[1].add_(intragraph.item())
+        return state
+
+
+def _restore_checkpoint_rng_state(generator, state):
+    """Restore a snapshot without moving captured state to the CPU."""
+    with torch.cuda.device(generator.device):
+        capturing = torch.cuda.is_current_stream_capturing()
+        if state.is_cuda != capturing:
+            raise RuntimeError(
+                "Checkpoint forward and recompute must both use eager execution or both be"
+                " captured."
+            )
+        if not capturing:
+            generator.set_state(state)
+        elif state.numel():
+            seed, offset, intragraph = generator.philox_state(0)
+            seed.copy_(state[:1])
+            offset.copy_(state[1:] - intragraph.item())
+
+
 class _CheckpointRNGState:
     """Save RNG values separately from live generator handles."""
 
@@ -319,7 +382,7 @@ class _CheckpointRNGState:
 
     def snapshot(self):
         """Copy the CPU state, generator values, and tensor-based tracker states."""
-        states = [torch.get_rng_state(), *(tex.checkpoint_rng_state(g) for g in self.generators)]
+        states = [torch.get_rng_state(), *(_checkpoint_rng_state(g) for g in self.generators)]
         if self.tracker is not None:
             tracker_states = self.tracker.get_states()
             states.extend(
@@ -330,7 +393,13 @@ class _CheckpointRNGState:
     def _restore(self, states):
         torch.set_rng_state(states[0])
         for generator, state in zip(self.generators, states[1:]):
-            tex.restore_checkpoint_rng_state(generator, state)
+            _restore_checkpoint_rng_state(generator, state)
+
+    def guard(self):
+        """Keep deterministic capture available on older PyTorch builds."""
+        if torch.cuda.is_current_stream_capturing() and not _checkpoint_rng_available():
+            return _CheckpointRNGGuard()
+        return nullcontext()
 
     @contextmanager
     def fork(self, states):
@@ -339,7 +408,7 @@ class _CheckpointRNGState:
         tracker_states = self.tracker.get_states() if self.tracker is not None else None
         live_states = [
             torch.get_rng_state(),
-            *(tex.checkpoint_rng_state(g) for g in self.generators),
+            *(_checkpoint_rng_state(g) for g in self.generators),
         ]
         try:
             self._restore(states)
@@ -357,7 +426,8 @@ class _CheckpointRNGState:
                         for name, state in self.tracker_states.items()
                     }
                 )
-            yield
+            with self.guard():
+                yield
         finally:
             self._restore(live_states)
             _set_cuda_rng_state(cuda_state)
@@ -406,7 +476,7 @@ class _CheckpointFunction(torch.autograd.Function):
             if any(ctx.needs_input_grad)
             else nullcontext()
         )
-        with torch.no_grad(), forward_ctx, activation_recompute_ctx:
+        with torch.no_grad(), forward_ctx, activation_recompute_ctx, ctx.rng_state.guard():
             outputs = run_function(*args, **kwargs)
 
         # Divide hidden states across model parallel group and only keep
@@ -671,6 +741,10 @@ def checkpoint(
         `use_reentrant=False` does not support early stopping, and will execute the entire forward
         pass for the checkpointed module when recomputing activations in the backward pass.
 
+    .. note::
+        Captured dropout and other random operations require ``torch.Generator.philox_state``
+        (PyTorch 2.14+). Older builds support deterministic capture and eager checkpointing.
+
     Parameters
     ----------
     function : Callable
@@ -723,7 +797,9 @@ def checkpoint(
     context_fn = kwargs.pop("context_fn", noop_context_fn)
     determinism_check = kwargs.pop("determinism_check", "default")
     debug = kwargs.pop("debug", False)
-    if not has_te_modules(function):
+    if not has_te_modules(function) and (
+        not torch.cuda.is_initialized() or not torch.cuda.is_current_stream_capturing()
+    ):
         return torch.utils.checkpoint.checkpoint(
             function,
             *args,
@@ -808,7 +884,12 @@ def checkpoint(
         recompute_fn,
         get_rng_state_tracker,
     )
-    with _checkpoint_hook(new_frame, args, kwargs), te_forward_ctx, user_forward_ctx:
+    with (
+        _checkpoint_hook(new_frame, args, kwargs),
+        te_forward_ctx,
+        user_forward_ctx,
+        new_frame.rng_state.guard(),
+    ):
         out = function(*args, **kwargs)
 
     return out
