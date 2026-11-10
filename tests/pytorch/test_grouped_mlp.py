@@ -10,7 +10,6 @@ import functools
 import os
 import math
 import random
-import sys
 import types
 from typing import Optional
 from unittest.mock import Mock
@@ -26,9 +25,6 @@ from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch.ops._common import is_quantized_tensor
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     GroupedMLP_CuTeGEMMGLU,
-    _cudnn_frontend_supports_grouped_gemm_situglu,
-    _cudnn_frontend_supports_grouped_gemm_srelu,
-    _cudnn_frontend_version_at_least,
     _cudnn_frontend_version_supported,
     is_glu_activation,
 )
@@ -148,43 +144,9 @@ def _reset_rng_states_per_test():
     yield
 
 
-@pytest.mark.parametrize(
-    "unsupported_wrapper",
-    (
-        "grouped_gemm_glu_wrapper_sm100",
-        "grouped_gemm_dglu_wrapper_sm100",
-        "grouped_gemm_glu_hadamard_wrapper_sm100",
-    ),
-)
-def test_cudnn_frontend_situglu_feature_detection(monkeypatch, unsupported_wrapper: str) -> None:
-    """Require SiTU-GLU support from every cuDNN wrapper used by grouped MLP."""
-
-    def _with_situglu(*, situ_beta1=4.0, situ_beta2=25.0):
-        del situ_beta1, situ_beta2
-
-    def _without_situglu():
-        return None
-
-    fake_cudnn = types.ModuleType("cudnn")
-    fake_cudnn.grouped_gemm_glu_wrapper_sm100 = _with_situglu
-    fake_cudnn.grouped_gemm_dglu_wrapper_sm100 = _with_situglu
-    fake_cudnn.grouped_gemm_glu_hadamard_wrapper_sm100 = _with_situglu
-    monkeypatch.setitem(sys.modules, "cudnn", fake_cudnn)
-    try:
-        _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
-        assert _cudnn_frontend_supports_grouped_gemm_situglu()
-
-        setattr(fake_cudnn, unsupported_wrapper, _without_situglu)
-        _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
-        assert not _cudnn_frontend_supports_grouped_gemm_situglu()
-    finally:
-        _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
-
-
 def _clear_grouped_glu_kernel_caches() -> None:
     """Clear cached cuDNN wrapper lookups after tests monkeypatch them."""
     fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
-    _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
     fused_cls.is_supported.cache_clear()
     fused_cls.grouped_gemm_activation_kernel.cache_clear()
     fused_cls.grouped_gemm_act_hadamard_kernel.cache_clear()
@@ -1597,34 +1559,19 @@ class TestGroupedMLPFusedOp:
                 fc2.backward_dw()
 
         # Check for expected fusions
-        if activation == "scaled_swiglu":
+        if activation in (
+            "scaled_swiglu",
+            "scaled_clamped_qgeglu",
+            "scaled_clamped_qgeglu_custom",
+            "scaled_srelu",
+            "scaled_tanh_srelu",
+        ):
             cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_version_supported() and (
                 device_is_blackwell or device_is_rubin
             )
-        elif activation in ("scaled_clamped_qgeglu", "scaled_clamped_qgeglu_custom"):
-            cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_version_supported()
-            if device_is_blackwell:
-                pass
-            elif device_is_rubin:
-                if not _cudnn_frontend_version_at_least("1.30.0"):
-                    cudnn_frontend_supports_grouped_mlp = False
-            else:
-                cudnn_frontend_supports_grouped_mlp = False
         elif activation == "scaled_situglu":
             cudnn_frontend_supports_grouped_mlp = (
-                grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_situglu()
-                and device_is_blackwell
-            )
-        elif activation == "scaled_srelu":
-            cudnn_frontend_supports_grouped_mlp = (
-                _cudnn_frontend_supports_grouped_gemm_srelu()
-                and (device_is_blackwell or device_is_rubin)
-            )
-        elif activation == "scaled_tanh_srelu":
-            cudnn_frontend_supports_grouped_mlp = (
-                _cudnn_frontend_supports_grouped_gemm_srelu()
-                and grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh()
-                and (device_is_blackwell or device_is_rubin)
+                _cudnn_frontend_version_supported() and device_is_blackwell
             )
         else:
             raise ValueError(f"Unexpected grouped MLP activation ({activation})")
@@ -1761,7 +1708,7 @@ class TestGroupedMLPFusedOp:
     def test_grouped_mlp_situglu_mxfp8_fallback(
         self, monkeypatch, situ_betas: tuple[float, float]
     ) -> None:
-        """A cuDNN frontend without SiTU support executes the native activation."""
+        """A cuDNN frontend below the minimum version executes the native activation."""
         native_calls = []
         original_native_fwd = tex.scaled_situglu
         original_native_bwd = tex.scaled_dsituglu
@@ -1778,7 +1725,7 @@ class TestGroupedMLPFusedOp:
         monkeypatch.setattr(tex, "scaled_dsituglu", traced_native_bwd)
         monkeypatch.setattr(
             grouped_mlp_module,
-            "_cudnn_frontend_supports_grouped_gemm_situglu",
+            "_cudnn_frontend_version_supported",
             lambda: False,
         )
         # The unfused GroupedLinear bias-gradient path uses an atomic Triton
@@ -1804,6 +1751,7 @@ class TestGroupedMLPFusedOp:
             _clear_grouped_glu_kernel_caches()
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.parametrize("delay_wgrad_compute", (False, True), ids=("immediate", "delayed"))
     @pytest.mark.parametrize("single_grouped_weight", (False, True), ids=("discrete", "dense"))
     @pytest.mark.parametrize(
         "activation,situ_betas,act_func,dact_func",
@@ -1818,6 +1766,7 @@ class TestGroupedMLPFusedOp:
         self,
         monkeypatch,
         traced_cudnn_grouped_glu_wrappers,
+        delay_wgrad_compute: bool,
         single_grouped_weight: bool,
         activation: str,
         situ_betas: tuple[float, float],
@@ -1825,8 +1774,8 @@ class TestGroupedMLPFusedOp:
         dact_func: str,
     ) -> None:
         """Real cuDNN MXFP8 GLU wrappers execute with TE's generated argument dtypes."""
-        if not _cudnn_frontend_supports_grouped_gemm_situglu():
-            pytest.skip("Installed cuDNN frontend lacks grouped SiTU-GLU")
+        if not _cudnn_frontend_version_supported():
+            pytest.skip("Requires cuDNN frontend >= 1.31.0")
         if not device_is_blackwell:
             pytest.skip("cuDNN frontend only supports SiTU-GLU on Blackwell")
         fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
@@ -1845,6 +1794,7 @@ class TestGroupedMLPFusedOp:
             activation=activation,
             situ_betas=situ_betas,
             strict_fusion=True,
+            delay_wgrad_compute=delay_wgrad_compute,
         )
         torch.cuda.synchronize()
 
@@ -1891,8 +1841,8 @@ class TestGroupedMLPFusedOp:
         situ_betas: tuple[float, float],
     ) -> None:
         """NVFP4 SiTU uses cuDNN's fused GLU-Hadamard forward when available."""
-        if not _cudnn_frontend_supports_grouped_gemm_situglu():
-            pytest.skip("Installed cuDNN frontend lacks grouped SiTU-GLU")
+        if not _cudnn_frontend_version_supported():
+            pytest.skip("Requires cuDNN frontend >= 1.31.0")
         if not device_is_blackwell:
             pytest.skip("cuDNN frontend only supports SiTU-GLU on Blackwell")
         assert te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported()
@@ -2213,14 +2163,6 @@ class TestGroupedMLPFusedOp:
         runtime_offsets_supported: bool,
     ) -> None:
         """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear."""
-        if (
-            enable_fusion
-            and runtime_offsets_supported
-            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets(
-                te.ops.ScaledSwiGLU
-            )
-        ):
-            pytest.skip("Requires cuDNN frontend >= 1.27.0")
         monkeypatch.setattr(
             grouped_mlp_module,
             "_cudnn_frontend_supports_single_group_runtime_offsets",
@@ -2482,14 +2424,6 @@ class TestGroupedMLPFusedOp:
 
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
-        if activation == "scaled_clamped_qgeglu":
-            if device_is_blackwell:
-                pass
-            elif device_is_rubin:
-                if not _cudnn_frontend_version_at_least("1.30.0"):
-                    pytest.skip("Rubin kernel requires cuDNN Frontend 1.30.0+ for QGEGLU support")
-            else:
-                pytest.skip("cuDNN Frontend does not support QGEGLU on this device")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -2815,11 +2749,6 @@ class TestGroupedMLPFusedOp:
         """Recomputing the activation in the backward matches saving it in the forward."""
         if not te.ops.fused.GroupedMLP_CuTeGEMMUnary.is_supported():
             pytest.skip("Fused grouped MLP is not supported on this system")
-        if (
-            activation == "scaled_tanh_srelu"
-            and not grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh()
-        ):
-            pytest.skip("Installed cuDNN frontend lacks tanh_clamp_scale")
         if bias and quantization == "nvfp4_rht":
             pytest.skip("NVFP4 SReLU grouped MLP coverage is limited to no-bias")
 
@@ -3138,14 +3067,6 @@ class TestGroupedMLPFusedOp:
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
-        if activation == "scaled_clamped_qgeglu":
-            if device_is_blackwell:
-                pass
-            elif device_is_rubin:
-                if not _cudnn_frontend_version_at_least("1.30.0"):
-                    pytest.skip("Rubin kernel requires cuDNN Frontend 1.30.0+ for QGEGLU support")
-            else:
-                pytest.skip("cuDNN Frontend does not support QGEGLU on this device")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
