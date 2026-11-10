@@ -924,11 +924,6 @@ class CudaRNGStatesTracker:
         Get rng states. Copy the dictionary so we have direct pointers
         to the states, not just a pointer to the dictionary.
 
-        .. note::
-            Graph-safe RNG states are live ``torch.Generator`` handles rather
-            than snapshots. They advance in place as random numbers are drawn;
-            call ``Generator.get_state()`` to save the current seed and offset
-            outside CUDA graph capture.
         """
         states = {}
         for name in self.states_:
