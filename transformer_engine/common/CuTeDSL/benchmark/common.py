@@ -821,16 +821,19 @@ def render_html(charts, out_dir, meta):
 
 
 def _gpu():
-    """Name and driver of the GPU the benchmark runs on (first visible device)."""
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip()
-    query = ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"]
-    if visible.isdigit():
-        query += ["-i", visible]
+    """Name and driver of the GPU the benchmark runs on: CUDA device 0, as the runs see it."""
+    import torch  # pylint: disable=import-outside-toplevel
+
     try:
-        out = subprocess.run(query, check=True, capture_output=True, text=True).stdout
-        name, driver = out.splitlines()[0].split(", ")
-    except (OSError, subprocess.CalledProcessError, IndexError, ValueError):
+        name = torch.cuda.get_device_name(0)
+    except (RuntimeError, AssertionError):
         return "unknown"
+    # The driver is the same for every GPU, so any nvidia-smi line has it.
+    query = ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"]
+    try:
+        driver = subprocess.run(query, check=True, capture_output=True, text=True).stdout.split()[0]
+    except (OSError, subprocess.CalledProcessError, IndexError):
+        return name
     return f"{name} (driver {driver})"
 
 
