@@ -87,24 +87,44 @@ Build Configuration
 Optional Dependencies
 ^^^^^^^^^^^^^^^^^^^^^
 
+Each of the following options can also be set for an isolated PEP 517 build with pip's
+``--config-settings <setting>=<0 or 1>`` option, which takes precedence over the variable.
+In an isolated build, the Python package listed for an option is installed as a build
+requirement unless the option's installation directory variable is set. Without build
+isolation, the installation directory variable is used if set, and the package is used if
+installed. ``libtransformer_engine.so`` finds these packages at runtime when they are installed
+in the same environment.
+
 .. envvar:: NVTE_UB_WITH_MPI
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable MPI support for userbuffers. When set to ``1``, requires ``MPI_HOME`` to be set to the MPI installation directory.
+   :Description: Enable MPI support for userbuffers. Requires the MPI installation directory in ``MPI_HOME`` or the ``openmpi`` Python package. Config setting: ``ub-with-mpi``.
 
 .. envvar:: NVTE_ENABLE_NVSHMEM
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable NVSHMEM support. When set to ``1``, requires ``NVSHMEM_HOME`` to be set to the NVSHMEM installation directory.
+   :Description: Enable NVSHMEM support. Requires the NVSHMEM installation directory in ``NVSHMEM_HOME`` or the ``nvidia-nvshmem-cu<CUDA major version>`` Python package. Config setting: ``enable-nvshmem``.
+
+.. envvar:: NVTE_WITH_CUBLASMP
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use cuBLASMp for tensor-parallel GEMMs. Requires cuBLASMp 0.8.1 or newer, from the installation directory in ``CUBLASMP_HOME`` or the ``nvidia-cublasmp-cu<CUDA major version>`` Python package, and NCCL 2.30 or newer. Config setting: ``with-cublasmp``.
+
+.. envvar:: NVTE_WITH_CUSOLVERMP
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use cuSOLVERMp for distributed Newton-Schulz. Requires cuSOLVERMp from the installation directory in ``CUSOLVERMP_HOME``, the ``nvidia-cusolvermp-cu<CUDA major version>`` Python package, or ``/usr``, in that order. Config setting: ``with-cusolvermp``.
 
 .. envvar:: NVTE_WITH_CUTEDSL
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: Enable CuTeDSL support when building ``libtransformer_engine.so``. When set to ``1``, requires
-                 CPython Stable ABIs from Python 3.10 and above, and ``apache-tvm-ffi`` installed.
+                 CPython Stable ABIs from Python 3.10 and above, and ``apache-tvm-ffi`` installed. Config setting: ``with-cutedsl``.
                  Note: when linking ``libtransformer_engine.so`` built with ``NVTE_WITH_CUTEDSL=1`` to a standalone C++ executable,
                  you must provide the definition of these CPython symbols. See ``tests/cpp/CMakeLists.txt`` for an example.
 
