@@ -149,7 +149,13 @@ def _cutedsl_launcher():
     import torch
 
     common.cuda_backend(True)
-    from transformer_engine.common.CuTeDSL import get_mxfp8_group_quantization_function
+    try:
+        # Not in source trees from before the grouped CuTeDSL kernels.
+        # pylint: disable-next=no-name-in-module
+        from transformer_engine.common.CuTeDSL import get_mxfp8_group_quantization_function
+    except ImportError:
+        print("No grouped CuTeDSL kernels in this source tree; every config runs TE's dispatch")
+        return _te_launcher(common.te_backend("CuTeDSL"))
 
     # Resolve the defining module instead of naming it, in case it gets renamed.
     gq = sys.modules[get_mxfp8_group_quantization_function.__module__]

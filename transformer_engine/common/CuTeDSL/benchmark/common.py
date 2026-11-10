@@ -56,10 +56,13 @@ Comparing CUDA (old) vs CuTeDSL (new) {what} kernels:
           source:  {git} (the library may be built from an older commit, see
                    the +<sha> in the version)
   new = the CuTeDSL kernels of {new} in this source tree ({repo}), JIT-compiled from
-        source. This is NOT the CuTeDSL code of the installed TE. Kernels called through TE's
-        dispatch use the TE library built in this tree, which runs its CUDA kernel for a
-        config it has no CuTeDSL kernel for (see the kernel column).
+        source. This is NOT the CuTeDSL code of the installed TE. Configs run through TE's
+        dispatch instead use the TE library this tree imports (its own build, else the
+        installed TE), which runs its CUDA kernel where it has no CuTeDSL kernel (see the
+        kernel column).
 """
+# Set by main(): the source tree holding these scripts, whose CuTeDSL kernels are benchmarked.
+SOURCE_TREE = None
 # `-P` keeps the cwd off sys.path, so this resolves TE exactly like the CUDA worker does.
 INSTALLED_TE_PROBE = """\
 import transformer_engine as te
@@ -279,7 +282,35 @@ def te_backend(impl):
             "TE dispatch with the CuTeDSL backend on (CUDA where it has no CuTeDSL kernel),"
             f" from {_get_shared_object_file('core')}"
         )
+    warn_if_te_not_built_from_source_tree(impl)
     return tex
+
+
+def warn_if_te_not_built_from_source_tree(impl):
+    """Warns when the TE library in use is not built from SOURCE_TREE, e.g. a TE installed
+    with a package manager. No rebuild is needed to benchmark the tree's CuTeDSL kernels, which
+    are called directly; but the CUDA kernels, and TE's dispatch of configs run through it,
+    are then that TE's rather than the tree's."""
+    # pylint: disable=import-outside-toplevel
+    from transformer_engine.common import _get_shared_object_file
+
+    library = Path(_get_shared_object_file("core")).resolve()
+    if SOURCE_TREE is None or library.is_relative_to(SOURCE_TREE):
+        return
+    if impl == "CUDA":
+        what = "the CUDA kernels are that TE's, so changes this tree makes to them are not measured"
+    else:
+        what = (
+            "only the CuTeDSL kernels a benchmark calls directly are this tree's; configs run"
+            " through TE's dispatch (see the kernel column) use that TE, which runs CUDA where"
+            " it has no CuTeDSL kernel"
+        )
+    print(
+        f"WARNING: the TE library in use ({library}) is not built from the source tree of this"
+        f" benchmark ({SOURCE_TREE}): {what}. Build this tree, or set PYTHONPATH to a build"
+        " of it, to benchmark its own.",
+        flush=True,
+    )
 
 
 def disable_cutedsl_dispatch():
@@ -940,6 +971,8 @@ def main(bench, script, doc):
         parser.error("--format raw writes nothing, so --output_path is not used")
 
     repo = (args.repo_root or HERE.parents[3]).resolve()
+    global SOURCE_TREE  # pylint: disable=global-statement
+    SOURCE_TREE = repo
     out_dir = None
     if args.format != "raw" and not args.worker_csv:
         base = args.output_path or HERE / ".generated"
