@@ -24,6 +24,7 @@
 #include "../fp8/group_quantize_fp8.cuh"
 #include "../fp8/quantize_fp8.cuh"
 #include "../fp8_blockwise/group_quantize_fp8_blockwise.cuh"
+#include "../mxfp4/quantize_mxfp4.cuh"
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/group_scaled_swiglu_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
@@ -92,6 +93,13 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
+      if (is_fp4_dtype(output_tensor->dtype())) {
+        NVTE_CHECK(!IS_ACT, "Fused activation is not supported for MXFP4 quantization.");
+        NVTE_CHECK(!quant_config_cpp.mxfp8_2d_quantization,
+                   "2D quantization is not supported for MXFP4.");
+        mxfp4::quantize(*input_tensor, noop_tensor, output_tensor, stream);
+        break;
+      }
       const Tensor *dummy_input_tensor = nullptr;
       Tensor *dummy_dbias_tensor = nullptr;
       Tensor *dummy_workspace_tensor = nullptr;

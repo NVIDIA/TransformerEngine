@@ -18,12 +18,14 @@ from .storage.float8_tensor_storage import Float8TensorStorage
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage
+from .storage.mxfp4_tensor_storage import MXFP4TensorStorage
 from .storage.grouped_tensor_storage import GroupedTensorStorage
 from .storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from .nvfp4_tensor import NVFP4Tensor, NVFP4Quantizer
+from .mxfp4_tensor import MXFP4Tensor, MXFP4Quantizer
 from .grouped_tensor import GroupedTensor
 from .hybrid_tensor import HybridQuantizedTensor, HybridQuantizer
 from .identity_tensor import IdentityTensor, IdentityQuantizer
@@ -37,6 +39,7 @@ __all__ = [
     "MXFP8Quantizer",
     "Float8BlockQuantizer",
     "NVFP4Quantizer",
+    "MXFP4Quantizer",
     "HybridQuantizer",
     "IdentityQuantizer",
     "QuantizedTensorStorage",
@@ -44,6 +47,7 @@ __all__ = [
     "MXFP8TensorStorage",
     "Float8BlockwiseQTensorStorage",
     "NVFP4TensorStorage",
+    "MXFP4TensorStorage",
     "GroupedTensorStorage",
     "HybridQuantizedTensorStorage",
     "IdentityTensorStorage",
@@ -53,6 +57,7 @@ __all__ = [
     "MXFP8Tensor",
     "Float8BlockwiseQTensor",
     "NVFP4Tensor",
+    "MXFP4Tensor",
     "GroupedTensor",
     "HybridQuantizedTensor",
     "prepare_for_saving",
@@ -105,6 +110,8 @@ def get_all_tensor_types():
         Float8BlockwiseQTensorStorage,
         NVFP4Tensor,
         NVFP4TensorStorage,
+        MXFP4Tensor,
+        MXFP4TensorStorage,
         GroupedTensor,
         GroupedTensorStorage,
         HybridQuantizedTensor,

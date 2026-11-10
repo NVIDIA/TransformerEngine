@@ -175,6 +175,21 @@ void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_i
                  "(expected Float32 or Byte, got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
+  } else if (is_fp4_dtype(type) && is_mxfp_scaling(t.scaling_mode)) {
+    if (t.has_data()) {
+      NVTE_CHECK(t.scale_inv.has_data(), "MXFP4 scaling factor input ", name,
+                 "_scale_inverse must be allocated");
+      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E8M0, "MXFP4 scaling factor input ", name,
+                 "_scale_inverse has invalid dtype (expected Float8E8M0, got ",
+                 to_string(t.scale_inv.dtype), ")");
+    }
+    if (t.has_columnwise_data()) {
+      NVTE_CHECK(t.columnwise_scale_inv.has_data(), "MXFP4 scaling factor input ", name,
+                 "_columnwise_scale_inverse must be allocated");
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E8M0, "MXFP4 scaling factor input ",
+                 name, "_columnwise_scale_inverse has invalid dtype (expected Float8E8M0, got ",
+                 to_string(t.columnwise_scale_inv.dtype), ")");
+    }
   } else if (is_fp4_dtype(type)) {
     // TODO(ksivaman): Fix this to check for amaxes and other details.
     // For now only needed for swizzle.
@@ -238,6 +253,21 @@ void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty)
                  "FP8 scaling factor output ", name,
                  "_columnwise_scale_inverse has invalid dtype "
                  "(expected Float32 or Float8E8M0, got ",
+                 to_string(t.columnwise_scale_inv.dtype), ")");
+    }
+  } else if (is_fp4_dtype(type) && is_mxfp_scaling(t.scaling_mode)) {
+    if (t.has_data()) {
+      NVTE_CHECK(t.scale_inv.has_data(), "MXFP4 scaling factor output ", name,
+                 "_scale_inverse must be allocated");
+      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E8M0, "MXFP4 scaling factor output ", name,
+                 "_scale_inverse has invalid dtype (expected Float8E8M0, got ",
+                 to_string(t.scale_inv.dtype), ")");
+    }
+    if (t.has_columnwise_data()) {
+      NVTE_CHECK(t.columnwise_scale_inv.has_data(), "MXFP4 scaling factor output ", name,
+                 "_columnwise_scale_inverse must be allocated");
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E8M0, "MXFP4 scaling factor output ",
+                 name, "_columnwise_scale_inverse has invalid dtype (expected Float8E8M0, got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
   } else if (is_fp4_dtype(type)) {

@@ -31,6 +31,7 @@ from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTen
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
+from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
@@ -129,6 +130,7 @@ _NATIVE_GEMM_INPUT_STORAGES = (
     MXFP8TensorStorage,
     Float8BlockwiseQTensorStorage,
     NVFP4TensorStorage,
+    MXFP4TensorStorage,
 )
 
 
@@ -1101,6 +1103,8 @@ def general_grouped_gemm(
         isinstance(t, NVFP4TensorStorage) and t._scale_dtype == DType.kFloat8UE5M3
         for t in itertools.chain(A, B)
     ):
+        use_general_gemm_impl = True
+    elif any(isinstance(t, MXFP4TensorStorage) for t in A):
         use_general_gemm_impl = True
 
     # Repeatedly call general_gemm if needed

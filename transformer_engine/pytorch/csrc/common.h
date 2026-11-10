@@ -446,6 +446,38 @@ class NVFP4Quantizer : public Quantizer {
                                         cudaStream_t stream);
 };
 
+/*! @brief Quantizer for FP4 E2M1 data with MX (E8M0, block-32) scaling.
+ *
+ *  Uses the MXFP8 scaling mode and scale layouts. Both directions store
+ *  packed [..., K/2] data in the logical (untransposed) orientation.
+ */
+class MXFP4Quantizer : public Quantizer {
+ public:
+  explicit MXFP4Quantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP8_1D_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override {}
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const override;
+
+  std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
+      size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
+      py::object quantizer, const std::optional<at::Tensor>& first_dims,
+      const std::optional<at::Tensor>& last_dims,
+      const std::optional<at::Tensor>& precomputed_tensor_offsets, size_t logical_first_dim,
+      size_t logical_last_dim) const override;
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+
+  std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+};
+
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
 std::vector<size_t> getTensorShape(const at::Tensor& t);
