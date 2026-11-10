@@ -294,7 +294,8 @@ def add_group_arguments(parser, layouts=tuple(LAYOUTS), default_layouts="same;va
         "--shapes",
         metavar='"MxN;..."',
         help=(
-            "buffer rows M (a multiple of 128) x hidden size N (a multiple of 32), for --mode manual"
+            "buffer rows M (a multiple of 128) x hidden size N (a multiple of 32), for --mode"
+            " manual"
         ),
     )
     parser.add_argument(
