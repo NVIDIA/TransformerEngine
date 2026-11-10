@@ -63,7 +63,8 @@ Comparing CUDA (old) vs CuTeDSL (new) {what} kernels:
 """
 # Set by main(): the source tree holding these scripts, whose CuTeDSL kernels are benchmarked.
 SOURCE_TREE = None
-# `-P` keeps the cwd off sys.path, so this resolves TE exactly like the CUDA worker does.
+# Run from an empty directory (not -P, which needs Python 3.11) so nothing in the cwd shadows TE:
+# it resolves TE exactly like the CUDA worker does.
 INSTALLED_TE_PROBE = """\
 import transformer_engine as te
 from transformer_engine.common import _get_shared_object_file
@@ -481,9 +482,14 @@ def git(repo, *args, check=True):
 
 def installed_te():
     """Where the installed TE, and so the CUDA kernels, come from."""
-    probe = subprocess.run(
-        [sys.executable, "-P", "-c", INSTALLED_TE_PROBE], check=True, capture_output=True, text=True
-    )
+    with tempfile.TemporaryDirectory() as empty:
+        probe = subprocess.run(
+            [sys.executable, "-c", INSTALLED_TE_PROBE],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=empty,
+        )
     init, version, library = probe.stdout.strip().splitlines()[-3:]
     package = Path(init).parent
     sha = git(package, "rev-parse", "--short", "HEAD", check=False)
