@@ -81,18 +81,21 @@ def set_all_rng_states(states: List) -> None:
 
 
 def graph_safe_rng_available() -> bool:
-    """Returns whether cuda graph safe RNG state manipulation is supported."""
-    return (
-        hasattr(torch.cuda.CUDAGraph, "register_generator_state")
-        and hasattr(torch.Generator, "graphsafe_set_state")
-        and hasattr(torch.Generator, "graphsafe_get_state")
-        and hasattr(torch.Generator, "clone_state")
+    """Returns whether cuda graph safe RNG state manipulation is supported.
+
+    Deprecated: always True, since all supported PyTorch versions provide the graph-safe RNG APIs.
+    """
+    warnings.warn(
+        "graph_safe_rng_available() is deprecated and always returns True.",
+        DeprecationWarning,
+        stacklevel=2,
     )
+    return True
 
 
 def is_graph_safe_rng_state(state: Union[torch.Tensor, torch.Generator]) -> bool:
     """Returns whether the rng state is a graph safe version."""
-    return graph_safe_rng_available() and isinstance(state, torch.Generator)
+    return isinstance(state, torch.Generator)
 
 
 def _get_cuda_rng_state(
@@ -111,7 +114,7 @@ def _get_cuda_rng_state(
     if idx is None:
         idx = torch.cuda.current_device()
     default_generator = torch.cuda.default_generators[idx]
-    if graph_safe_rng_available() and graph_safe:
+    if graph_safe:
         if clone:
             # Reference to the cloned generator state
             return default_generator.clone_state()
@@ -139,7 +142,7 @@ def _set_cuda_rng_state(
         if idx is None:
             idx = torch.cuda.current_device()
         default_generator = torch.cuda.default_generators[idx]
-        if graph_safe_rng_available() and graph_safe:
+        if graph_safe:
             default_generator.graphsafe_set_state(new_state)
             return
         default_generator.set_state(new_state)
@@ -883,22 +886,11 @@ class CudaRNGStatesTracker:
         if name in self.states_:
             raise RuntimeError(f"cuda rng state {name} already exists")
 
-        if graph_safe_rng_available():
-            new_state = _get_cuda_rng_state(clone=True)
-            new_state.manual_seed(seed)
-            self.states_[name] = new_state
-            # Update global states.
-            set_all_rng_states(self.states_)
-        else:
-            # Get the current rng state.
-            orig_rng_state = _get_cuda_rng_state()
-            # Set the new state and store it.
-            torch.cuda.manual_seed(seed)
-            self.states_[name] = _get_cuda_rng_state(clone=True)
-            # Reset rng state to what it was.
-            _set_cuda_rng_state(orig_rng_state)
-            # Update global states.
-            set_all_rng_states(self.states_)
+        new_state = _get_cuda_rng_state(clone=True)
+        new_state.manual_seed(seed)
+        self.states_[name] = new_state
+        # Update global states.
+        set_all_rng_states(self.states_)
 
     @contextmanager
     def fork(self, name: str = "model-parallel-rng"):
@@ -922,10 +914,9 @@ class CudaRNGStatesTracker:
         try:
             yield
         finally:
-            # this is redundant with graph-safe API
-            if not graph_safe_rng_available():
-                self.states_[name] = _get_cuda_rng_state()
-            # And set the state to the original state we started with.
+            # The default generator shared its state with `self.states_[name]`,
+            # so that state already reflects any RNG consumed in this region.
+            # Set the state to the original state we started with.
             _set_cuda_rng_state(orig_cuda_rng_state)
 
 
