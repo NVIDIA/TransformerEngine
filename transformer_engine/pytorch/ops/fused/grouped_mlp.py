@@ -1506,14 +1506,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if unit_activation_scale and num_groups != 1:
             unit_activation_scale = False
 
-        # The hadamard kernel is the GLU one; it applies the SReLU soft clamp only in
-        # cuDNN frontends whose wrapper accepts tanh_clamp_scale. Without that,
-        # ScaledTanhSReLU keeps the plain SReLU kernel and a separate RHT amax pass --
-        # a performance limitation, not a correctness one.
-        activation_is_srelu = isinstance(activation_op, ScaledSReLU) or (
-            isinstance(activation_op, ScaledTanhSReLU)
-            and _cudnn_frontend_supports_grouped_gemm_srelu_tanh_hadamard()
-        )
         supports_single_group_runtime_offsets = (
             _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op))
         )
@@ -1742,7 +1734,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     pass
                 elif self._cudnn_act_func in ("swiglu", "situglu"):
                     kernel_impl = "gemm_act_rht_amax"
-                elif activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
+                elif (
+                    isinstance(activation_op, ScaledSReLU)
+                    and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard()
+                ):
+                    kernel_impl = "gemm_act_rht_amax"
+                elif (
+                    isinstance(activation_op, ScaledTanhSReLU)
+                    and _cudnn_frontend_supports_grouped_gemm_srelu_tanh_hadamard()
+                ):
                     kernel_impl = "gemm_act_rht_amax"
 
         # Pack data tensors
@@ -1876,7 +1876,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["rht_colwise_dtype"] = torch.float4_e2m1fn_x2
 
         # Kernel arguments based on activation
-        if activation_is_srelu:
+        if isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU)):
             if kernel_impl in ("gemm_act_rht_amax", "gemm_act_rht_quant"):
                 fc1_activation_kwargs["act_func"] = "srelu"
         elif self._cudnn_act_func is not None:
