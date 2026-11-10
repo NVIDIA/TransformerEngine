@@ -50,6 +50,41 @@ from .quantize_mxfp8_common import (
 
 
 @cute.jit
+def _bf16_nan_magnitudes_to_zero(pair: Uint32) -> Uint32:
+    """A packed pair of BF16 block amaxes with each NaN half replaced by +0.
+
+    With a gated activation fused, a block of only NaNs gets amax 0 and so scale 0, as in CUDA's
+    gated kernels (0-seeded fmaxf); CUDA's generic and cast kernels, like the other requests here,
+    give it the NaN scale (cast_bidim.cuh's kNaNReciprocal).
+    """
+    magnitudes = pair & Uint32(0x7FFF7FFF)
+    lo = magnitudes & Uint32(0xFFFF)
+    hi = magnitudes >> Uint32(16)
+    if lo > Uint32(0x7F80):
+        lo = Uint32(0)
+    if hi > Uint32(0x7F80):
+        hi = Uint32(0)
+    return lo | (hi << Uint32(16))
+
+
+@cute.jit
+def _bf16_mx_scale_reciprocal_fused(
+    magnitude: Uint32, MAX_EXPONENT: cutlass.Constexpr[int]
+) -> Uint32:
+    """bf16_mx_scale_reciprocal with a gated activation: a NaN block amax gives the reciprocal of
+    amax 0 (see _bf16_nan_magnitudes_to_zero). Same instructions, so it costs nothing extra."""
+    rounded = (magnitude + Uint32(31)) & Uint32(0x7F80)
+    if rounded < Uint32(MAX_EXPONENT << 7):  # pylint: disable=consider-using-max-builtin
+        rounded = Uint32(MAX_EXPONENT << 7)
+    reciprocal = Uint32((254 + MAX_EXPONENT) << 7) - rounded
+    if magnitude >= Uint32(0x7F80):
+        reciprocal = Uint32(0x0040)
+        if magnitude != Uint32(0x7F80):
+            reciprocal = Uint32(254 << 7)
+    return reciprocal
+
+
+@cute.jit
 def _quantize_rowwise(
     rX: cute.Tensor,
     gO_row_thread: cute.Tensor,
@@ -68,8 +103,10 @@ def _quantize_rowwise(
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     EDGE: cutlass.Constexpr[bool] = False,
     rows_left: Int32 = 0,
+    GATED: cutlass.Constexpr[bool] = False,
 ):
-    """With EDGE, only the thread's first rows_left rows are stored."""
+    """With EDGE, only the thread's first rows_left rows are stored. GATED: a gated activation is
+    fused (see _bf16_nan_magnitudes_to_zero)."""
     tidx, _, _ = cute.arch.thread_idx()
     MAX_EXPONENT = 8 if FP8_DTYPE is cutlass.Float8E4M3FN else 15
 
@@ -91,7 +128,12 @@ def _quantize_rowwise(
     is_writer_thread = tidx % THREADS_X_PER_MX_BLOCK == 0
     for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
         rX_row_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
-        reciprocal = bf16_mx_scale_reciprocal(extract_mx_block_amax(rX_row_i32), MAX_EXPONENT)
+        if cutlass.const_expr(GATED):
+            reciprocal = _bf16_mx_scale_reciprocal_fused(
+                extract_mx_block_amax(rX_row_i32), MAX_EXPONENT
+            )
+        else:
+            reciprocal = bf16_mx_scale_reciprocal(extract_mx_block_amax(rX_row_i32), MAX_EXPONENT)
         reciprocal_pair = reciprocal | (reciprocal << Uint32(16))
         for pack_idx in cutlass.range_constexpr(
             cute.size(rO_row_u32)
@@ -202,8 +244,11 @@ def _reduce_partial_colwise_amaxes(
     ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    GATED: cutlass.Constexpr[bool] = False,
 ) -> cute.Tensor:
     """
+    GATED: a gated activation is fused (see _bf16_nan_magnitudes_to_zero).
+
     sAmaxs_col_scratch: the SMEM buffer of layout (ELEMENTS_X_PER_THREAD, (CTA_THREADS_Y, CTA_THREADS_X))
         that contains each threads' own columnwise amax of its ELEMENTS_X_PER_THREAD columns
 
@@ -278,6 +323,8 @@ def _reduce_partial_colwise_amaxes(
             for scratch_row_idx in cutlass.range_constexpr(1, CTA_THREADS_Y):
                 amaxX2 = abs_max_x2_bf16(amaxX2, sAmaxs_col_frag_i32_rows[scratch_row_idx])
 
+            if cutlass.const_expr(GATED):
+                amaxX2 = Int32(_bf16_nan_magnitudes_to_zero(Uint32(amaxX2)))
             # Obtain the columnwise scale reciprocal for this column pair
             sS_col_i32[tidx, pair_idx] = bf16_mx_scale_reciprocal_pair(amaxX2, MAX_EXPONENT)
     cute.arch.sync_threads()
@@ -404,8 +451,10 @@ def _quantize_colwise(
     EDGE: cutlass.Constexpr[bool] = False,
     rows_left: Int32 = 0,
     cols_ok: Boolean = True,
+    GATED: cutlass.Constexpr[bool] = False,
 ):
-    """Reduce columnwise amaxes across the CTA, write the columnwise scales, and quantize rX with them."""
+    """Reduce columnwise amaxes across the CTA, write the columnwise scales, and quantize rX with them.
+    GATED: a gated activation is fused (see _bf16_nan_magnitudes_to_zero)."""
     tidx, _, _ = cute.arch.thread_idx()
 
     sAmaxs_col_scratch = _gather_partial_colwise_amaxes(
@@ -424,6 +473,7 @@ def _quantize_colwise(
         ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
         DTYPE=DTYPE,
         FP8_DTYPE=FP8_DTYPE,
+        GATED=GATED,
     )
 
     # Copy the reduced columnwise scale reciprocals to RMEM.
@@ -621,6 +671,246 @@ def _quantize_colwise_f32_scaled(
             )
 
 
+def thread_tile_layout(
+    CTA_THREADS_Y: int, CTA_THREADS_X: int, ELEMENTS_Y_PER_THREAD: int, ELEMENTS_X_PER_THREAD: int
+):
+    """The (thread, value) layout of a register-resident (CTA_THREADS_Y * ELEMENTS_Y_PER_THREAD,
+    CTA_THREADS_X * ELEMENTS_X_PER_THREAD) tile: each warp owns ELEMENTS_Y_PER_THREAD consecutive
+    rows, and each lane ELEMENTS_X_PER_THREAD adjacent columns."""
+    thread_layout = cute.make_layout((CTA_THREADS_Y, CTA_THREADS_X), stride=(CTA_THREADS_X, 1))
+    _, tv_layout = cute.make_layout_tv(
+        thr_layout=thread_layout,
+        val_layout=cute.make_layout(
+            (ELEMENTS_Y_PER_THREAD, ELEMENTS_X_PER_THREAD), stride=(ELEMENTS_X_PER_THREAD, 1)
+        ),
+    )
+    return tv_layout
+
+
+@cute.jit
+def thread_tile_bounds(
+    tile_shape: cute.Shape,
+    tv_layout: cute.Layout,
+    rows_valid: Int32,
+    cols_valid: Int32,
+):
+    """(rows_left, cols_ok) of the calling thread in a tile that ends at rows_valid rows and
+    cols_valid columns: its rows from rows_left on are past the tensor, and all of them when its
+    columns are (a thread's columns lie all inside or all past the tensor)."""
+    tidx, _, _ = cute.arch.thread_idx()
+    thread_origin = cute.composition(cute.make_identity_tensor(tile_shape), tv_layout)[tidx, None][
+        ((0, 0),)
+    ]
+    cols_ok = thread_origin[1] < cols_valid
+    rows_left = rows_valid - thread_origin[0]
+    if not cols_ok:
+        rows_left = Int32(0)
+    return rows_left, cols_ok
+
+
+@cute.jit
+def load_thread_rows(
+    gT_thread: cute.Tensor,
+    rT: cute.Tensor,
+    load_atom: cute.CopyAtom,
+    cache_policy: Int64,
+    ELEMENTS_Y_PER_THREAD: cutlass.Constexpr[int],
+    ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
+    EDGE: cutlass.Constexpr[bool] = False,
+    rows_left: Int32 = 0,
+):
+    """Copy all rows a thread sweeps into its (ELEMENTS_X_PER_THREAD, ELEMENTS_Y_PER_THREAD)
+    register fragment. With EDGE, rows from rows_left on load as zeros."""
+    for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
+        if cutlass.const_expr(EDGE):
+            # Predicated loads rather than branches, so the rows' loads still issue together.
+            rT[None, row_idx].fill(0)
+            row_pred = cute.make_rmem_tensor(
+                cute.make_layout((ELEMENTS_X_PER_THREAD, (1,)), stride=(0, (0,))), Boolean
+            )
+            row_pred[0] = row_idx < rows_left
+            cute.copy(
+                load_atom,
+                gT_thread[(None, row_idx),],
+                rT[None, row_idx],
+                pred=row_pred,
+                cache_policy=cache_policy,
+            )
+        else:
+            cute.copy(
+                load_atom, gT_thread[(None, row_idx),], rT[None, row_idx], cache_policy=cache_policy
+            )
+
+
+@cute.jit
+def quantize_mxfp8_rmem_tile_bidimensional(
+    rX: cute.Tensor,
+    gO_row_tile: Optional[cute.Tensor],
+    gS_row_tile: Optional[cute.Tensor],
+    gO_col_tile: Optional[cute.Tensor],
+    gS_col_tile: Optional[cute.Tensor],
+    ROWWISE: cutlass.Constexpr[bool],
+    COLWISE: cutlass.Constexpr[bool],
+    GATED: cutlass.Constexpr[bool],
+    EDGE: cutlass.Constexpr[bool],
+    rows_left: Int32,
+    cols_ok: Boolean,
+    DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    MAX_NORM_RCP: cutlass.Constexpr[float],
+    WITH_GEMM_SWIZZLED_SCALES: cutlass.Constexpr[bool],
+    CTA_THREADS_Y: cutlass.Constexpr[int],
+    CTA_THREADS_X: cutlass.Constexpr[int],
+    ELEMENTS_Y_PER_THREAD: cutlass.Constexpr[int],
+    ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
+    cache_policy: Int64,
+):
+    """Quantize a register-resident 32-row tile, the CTA's rX fragments (see thread_tile_layout),
+    to the (TILE_ROWS, TILE_COLS) output tiles of the directions enabled by ROWWISE / COLWISE.
+    GATED: the values come from a gated activation (see _bf16_nan_magnitudes_to_zero). With EDGE,
+    rows_left and cols_ok come from thread_tile_bounds."""
+    TILE_ROWS = CTA_THREADS_Y * ELEMENTS_Y_PER_THREAD
+    THREADS_X_PER_MX_BLOCK = MXFP8_BLOCK_SCALING_SIZE // ELEMENTS_X_PER_THREAD
+    THREADS_Y_PER_MX_BLOCK = MXFP8_BLOCK_SCALING_SIZE // ELEMENTS_Y_PER_THREAD
+    SCALE_DTYPE = cutlass.Float8E8M0FNU
+    tidx, _, _ = cute.arch.thread_idx()
+    tv_layout = thread_tile_layout(
+        CTA_THREADS_Y, CTA_THREADS_X, ELEMENTS_Y_PER_THREAD, ELEMENTS_X_PER_THREAD
+    )
+    store_atom = cute.make_copy_atom(
+        cute.nvgpu.CopyR2GOp(),
+        FP8_DTYPE,
+        num_bits_per_copy=ELEMENTS_X_PER_THREAD * FP8_DTYPE.width,
+    )
+    scale_and_pack = mul_bf16x2x2_cvt_bf16x4_to_fp8x4(FP8_DTYPE)
+
+    if cutlass.const_expr(ROWWISE):
+        gO_row_thread = cute.composition(gO_row_tile, tv_layout)[tidx, None]
+
+        # Group CTA threads by THREADS_X_PER_MX_BLOCK since they share the same rowwise scale for a MXFP8 block.
+        # And assign stride 0 to that submode
+        tv_row_scale = cute.make_layout(
+            (
+                (THREADS_X_PER_MX_BLOCK, (CTA_THREADS_X // THREADS_X_PER_MX_BLOCK, CTA_THREADS_Y)),
+                ELEMENTS_Y_PER_THREAD,
+            ),
+            stride=(
+                (0, (TILE_ROWS, ELEMENTS_Y_PER_THREAD)),
+                1,
+            ),
+        )
+        gS_row_thread = cute.composition(gS_row_tile, tv_row_scale)[tidx, None]
+
+        row_scale_atom = cute.make_copy_atom(
+            cute.nvgpu.CopyR2GOp(), SCALE_DTYPE, num_bits_per_copy=8
+        )
+
+        if cutlass.const_expr(DTYPE is not cutlass.BFloat16):
+            _quantize_rowwise_f32_scaled(
+                rX,
+                gO_row_thread,
+                gS_row_thread,
+                output_store_atom=store_atom,
+                row_scale_store_atom=row_scale_atom,
+                cache_policy=cache_policy,
+                THREADS_X_PER_MX_BLOCK=THREADS_X_PER_MX_BLOCK,
+                ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
+                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+                SCALE_DTYPE=SCALE_DTYPE,
+                FP8_DTYPE=FP8_DTYPE,
+                MAX_NORM_RCP=MAX_NORM_RCP,
+                EDGE=EDGE,
+                rows_left=rows_left,
+            )
+        else:
+            _quantize_rowwise(
+                rX,
+                gO_row_thread,
+                gS_row_thread,
+                output_store_atom=store_atom,
+                row_scale_store_atom=row_scale_atom,
+                cache_policy=cache_policy,
+                scale_and_pack=scale_and_pack,
+                THREADS_X_PER_MX_BLOCK=THREADS_X_PER_MX_BLOCK,
+                ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
+                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+                SCALE_DTYPE=SCALE_DTYPE,
+                FP8_DTYPE=FP8_DTYPE,
+                EDGE=EDGE,
+                rows_left=rows_left,
+                GATED=GATED,
+            )
+
+    if cutlass.const_expr(COLWISE):
+        gO_col_thread = cute.composition(gO_col_tile, tv_layout)[tidx, None]
+
+        # Group CTA threads by THREADS_Y_PER_MX_BLOCK since they share the same columnwise scale for a MXFP8 block.
+        # And assign stride 0 to that submode
+        tv_col_scale = cute.make_layout(
+            (
+                (CTA_THREADS_X, (THREADS_Y_PER_MX_BLOCK, CTA_THREADS_Y // THREADS_Y_PER_MX_BLOCK)),
+                ELEMENTS_X_PER_THREAD,
+            ),
+            stride=(
+                (ELEMENTS_X_PER_THREAD, (0, 1)),
+                1,
+            ),
+        )
+        # If CTA_THREADS_Y // THREADS_Y_PER_MX_BLOCK == 1, this will help compiler derive alignment
+        # Otherwise coalesce will not do anything which is still fine
+        tv_col_scale = cute.coalesce(tv_col_scale, target_profile=(1, 1))
+        gS_col_thread = cute.composition(gS_col_tile, tv_col_scale)[tidx, None]
+
+        # GEMM-swizzled colwise scales are not contiguous (adjacent columns land 16 bytes apart),
+        # so they are stored a byte at a time, as the general kernel does.
+        col_scale_atom = cute.make_copy_atom(
+            cute.nvgpu.CopyR2GOp(),
+            SCALE_DTYPE,
+            num_bits_per_copy=8 if WITH_GEMM_SWIZZLED_SCALES else ELEMENTS_X_PER_THREAD * 8,
+        )
+
+        if cutlass.const_expr(DTYPE is not cutlass.BFloat16):
+            _quantize_colwise_f32_scaled(
+                rX,
+                gO_col_thread,
+                gS_col_thread,
+                output_store_atom=store_atom,
+                col_scale_store_atom=col_scale_atom,
+                cache_policy=cache_policy,
+                CTA_THREADS_Y=CTA_THREADS_Y,
+                CTA_THREADS_X=CTA_THREADS_X,
+                ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
+                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+                SCALE_DTYPE=SCALE_DTYPE,
+                FP8_DTYPE=FP8_DTYPE,
+                MAX_NORM_RCP=MAX_NORM_RCP,
+                EDGE=EDGE,
+                rows_left=rows_left,
+                cols_ok=cols_ok,
+            )
+        else:
+            _quantize_colwise(
+                rX,
+                gO_col_thread,
+                gS_col_thread,
+                output_store_atom=store_atom,
+                col_scale_store_atom=col_scale_atom,
+                cache_policy=cache_policy,
+                scale_and_pack=scale_and_pack,
+                CTA_THREADS_Y=CTA_THREADS_Y,
+                CTA_THREADS_X=CTA_THREADS_X,
+                ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
+                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+                SCALE_DTYPE=SCALE_DTYPE,
+                DTYPE=DTYPE,
+                FP8_DTYPE=FP8_DTYPE,
+                EDGE=EDGE,
+                rows_left=rows_left,
+                cols_ok=cols_ok,
+                GATED=GATED,
+            )
+
+
 @cute.jit
 def quantize_mxfp8_gmem_tile_bidimensional(
     gX_tile: cute.Tensor,
@@ -659,23 +949,10 @@ def quantize_mxfp8_gmem_tile_bidimensional(
     Load the tile once, then reuse its registers for each enabled quantization pass.
     The tensors of a disabled direction are unused and may be None.
     """
-    # Shape of the tile
-    TILE_ROWS = CTA_THREADS_Y * ELEMENTS_Y_PER_THREAD
-
-    # How many threads cooperate to process a single MXFP8 block (32 elements) for both quantized directions
-    THREADS_X_PER_MX_BLOCK = MXFP8_BLOCK_SCALING_SIZE // ELEMENTS_X_PER_THREAD
-    THREADS_Y_PER_MX_BLOCK = MXFP8_BLOCK_SCALING_SIZE // ELEMENTS_Y_PER_THREAD
-
-    SCALE_DTYPE = cutlass.Float8E8M0FNU
-
     tidx, _, _ = cute.arch.thread_idx()
 
-    thread_layout = cute.make_layout((CTA_THREADS_Y, CTA_THREADS_X), stride=(CTA_THREADS_X, 1))
-    _, tv_layout = cute.make_layout_tv(
-        thr_layout=thread_layout,
-        val_layout=cute.make_layout(
-            (ELEMENTS_Y_PER_THREAD, ELEMENTS_X_PER_THREAD), stride=(ELEMENTS_X_PER_THREAD, 1)
-        ),
+    tv_layout = thread_tile_layout(
+        CTA_THREADS_Y, CTA_THREADS_X, ELEMENTS_Y_PER_THREAD, ELEMENTS_X_PER_THREAD
     )
 
     gX_thread = cute.composition(gX_tile, tv_layout)[tidx, None]
@@ -694,14 +971,6 @@ def quantize_mxfp8_gmem_tile_bidimensional(
         # invariant=True here will drop the cache policy
         invariant=False,
     )
-    store_atom = cute.make_copy_atom(
-        cute.nvgpu.CopyR2GOp(),
-        FP8_DTYPE,
-        num_bits_per_copy=ELEMENTS_X_PER_THREAD * FP8_DTYPE.width,
-    )
-
-    scale_and_pack = mul_bf16x2x2_cvt_bf16x4_to_fp8x4(FP8_DTYPE)
-
     # With EDGE the tile ends at rows_valid rows and cols_valid columns: the thread's rows from
     # rows_left on are past the tensor, and all of them when its columns are (a thread's columns
     # lie all inside or all past the tensor, as N % 16 == 0). They load as zeros, which leave
@@ -709,34 +978,19 @@ def quantize_mxfp8_gmem_tile_bidimensional(
     rows_left = Int32(ELEMENTS_Y_PER_THREAD)
     cols_ok = Boolean(True)
     if cutlass.const_expr(EDGE):
-        thread_origin = cute.composition(cute.make_identity_tensor(gX_tile.shape), tv_layout)[
-            tidx, None
-        ][((0, 0),)]
-        cols_ok = thread_origin[1] < cols_valid
-        rows_left = rows_valid - thread_origin[0]
-        if not cols_ok:
-            rows_left = Int32(0)
+        rows_left, cols_ok = thread_tile_bounds(gX_tile.shape, tv_layout, rows_valid, cols_valid)
 
     # Copy all rows a thread sweeps into the RMEM fragment at once
-    for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
-        if cutlass.const_expr(EDGE):
-            # Predicated loads rather than branches, so the rows' loads still issue together.
-            rX[None, row_idx].fill(0)
-            row_pred = cute.make_rmem_tensor(
-                cute.make_layout((ELEMENTS_X_PER_THREAD, (1,)), stride=(0, (0,))), Boolean
-            )
-            row_pred[0] = row_idx < rows_left
-            cute.copy(
-                load_atom,
-                gX_thread[(None, row_idx),],
-                rX[None, row_idx],
-                pred=row_pred,
-                cache_policy=cache_policy,
-            )
-        else:
-            cute.copy(
-                load_atom, gX_thread[(None, row_idx),], rX[None, row_idx], cache_policy=cache_policy
-            )
+    load_thread_rows(
+        gX_thread,
+        rX,
+        load_atom,
+        cache_policy,
+        ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
+        ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+        EDGE=EDGE,
+        rows_left=rows_left,
+    )
 
     if cutlass.const_expr(WITH_ACT or WITH_DACT):
         rA = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD, ELEMENTS_Y_PER_THREAD), DTYPE)
@@ -752,27 +1006,16 @@ def quantize_mxfp8_gmem_tile_bidimensional(
             )
             # Activation tile has the same layout as the input tile so we can reuse the tv layout
             gA_thread = cute.composition(gA_tile, tv_layout)[tidx, None]
-            for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
-                if cutlass.const_expr(EDGE):
-                    rA[None, row_idx].fill(0)
-                    act_row_pred = cute.make_rmem_tensor(
-                        cute.make_layout((ELEMENTS_X_PER_THREAD, (1,)), stride=(0, (0,))), Boolean
-                    )
-                    act_row_pred[0] = row_idx < rows_left
-                    cute.copy(
-                        act_load_atom,
-                        gA_thread[(None, row_idx),],
-                        rA[None, row_idx],
-                        pred=act_row_pred,
-                        cache_policy=cache_policy,
-                    )
-                else:
-                    cute.copy(
-                        act_load_atom,
-                        gA_thread[(None, row_idx),],
-                        rA[None, row_idx],
-                        cache_policy=cache_policy,
-                    )
+            load_thread_rows(
+                gA_thread,
+                rA,
+                act_load_atom,
+                cache_policy,
+                ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
+                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+                EDGE=EDGE,
+                rows_left=rows_left,
+            )
         # With dbias, the FP32 products are staged for the column sums (see _kernel_main).
         if cutlass.const_expr(sDbias is not None):
             sDbias_thread = cute.composition(sDbias, tv_layout)[tidx, None]
@@ -866,129 +1109,28 @@ def quantize_mxfp8_gmem_tile_bidimensional(
             fabs_f32(x2_lo_to_f32_bf16(pair_amax)), fabs_f32(x2_hi_to_f32_bf16(pair_amax))
         )
 
-    if cutlass.const_expr(ROWWISE):
-        gO_row_thread = cute.composition(gO_row_tile, tv_layout)[tidx, None]
-
-        # Group CTA threads by THREADS_X_PER_MX_BLOCK since they share the same rowwise scale for a MXFP8 block.
-        # And assign stride 0 to that submode
-        tv_row_scale = cute.make_layout(
-            (
-                (THREADS_X_PER_MX_BLOCK, (CTA_THREADS_X // THREADS_X_PER_MX_BLOCK, CTA_THREADS_Y)),
-                ELEMENTS_Y_PER_THREAD,
-            ),
-            stride=(
-                (0, (TILE_ROWS, ELEMENTS_Y_PER_THREAD)),
-                1,
-            ),
-        )
-        gS_row_thread = cute.composition(gS_row_tile, tv_row_scale)[tidx, None]
-
-        row_scale_atom = cute.make_copy_atom(
-            cute.nvgpu.CopyR2GOp(), SCALE_DTYPE, num_bits_per_copy=8
-        )
-
-        if cutlass.const_expr(DTYPE is not cutlass.BFloat16):
-            _quantize_rowwise_f32_scaled(
-                rX,
-                gO_row_thread,
-                gS_row_thread,
-                output_store_atom=store_atom,
-                row_scale_store_atom=row_scale_atom,
-                cache_policy=cache_policy,
-                THREADS_X_PER_MX_BLOCK=THREADS_X_PER_MX_BLOCK,
-                ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
-                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
-                SCALE_DTYPE=SCALE_DTYPE,
-                FP8_DTYPE=FP8_DTYPE,
-                MAX_NORM_RCP=MAX_NORM_RCP,
-                EDGE=EDGE,
-                rows_left=rows_left,
-            )
-        else:
-            _quantize_rowwise(
-                rX,
-                gO_row_thread,
-                gS_row_thread,
-                output_store_atom=store_atom,
-                row_scale_store_atom=row_scale_atom,
-                cache_policy=cache_policy,
-                scale_and_pack=scale_and_pack,
-                THREADS_X_PER_MX_BLOCK=THREADS_X_PER_MX_BLOCK,
-                ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
-                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
-                SCALE_DTYPE=SCALE_DTYPE,
-                FP8_DTYPE=FP8_DTYPE,
-                EDGE=EDGE,
-                rows_left=rows_left,
-            )
-
-    if cutlass.const_expr(COLWISE):
-        gO_col_thread = cute.composition(gO_col_tile, tv_layout)[tidx, None]
-
-        # Group CTA threads by THREADS_Y_PER_MX_BLOCK since they share the same columnwise scale for a MXFP8 block.
-        # And assign stride 0 to that submode
-        tv_col_scale = cute.make_layout(
-            (
-                (CTA_THREADS_X, (THREADS_Y_PER_MX_BLOCK, CTA_THREADS_Y // THREADS_Y_PER_MX_BLOCK)),
-                ELEMENTS_X_PER_THREAD,
-            ),
-            stride=(
-                (ELEMENTS_X_PER_THREAD, (0, 1)),
-                1,
-            ),
-        )
-        # If CTA_THREADS_Y // THREADS_Y_PER_MX_BLOCK == 1, this will help compiler derive alignment
-        # Otherwise coalesce will not do anything which is still fine
-        tv_col_scale = cute.coalesce(tv_col_scale, target_profile=(1, 1))
-        gS_col_thread = cute.composition(gS_col_tile, tv_col_scale)[tidx, None]
-
-        # GEMM-swizzled colwise scales are not contiguous (adjacent columns land 16 bytes apart),
-        # so they are stored a byte at a time, as the general kernel does.
-        col_scale_atom = cute.make_copy_atom(
-            cute.nvgpu.CopyR2GOp(),
-            SCALE_DTYPE,
-            num_bits_per_copy=8 if WITH_GEMM_SWIZZLED_SCALES else ELEMENTS_X_PER_THREAD * 8,
-        )
-
-        if cutlass.const_expr(DTYPE is not cutlass.BFloat16):
-            _quantize_colwise_f32_scaled(
-                rX,
-                gO_col_thread,
-                gS_col_thread,
-                output_store_atom=store_atom,
-                col_scale_store_atom=col_scale_atom,
-                cache_policy=cache_policy,
-                CTA_THREADS_Y=CTA_THREADS_Y,
-                CTA_THREADS_X=CTA_THREADS_X,
-                ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
-                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
-                SCALE_DTYPE=SCALE_DTYPE,
-                FP8_DTYPE=FP8_DTYPE,
-                MAX_NORM_RCP=MAX_NORM_RCP,
-                EDGE=EDGE,
-                rows_left=rows_left,
-                cols_ok=cols_ok,
-            )
-        else:
-            _quantize_colwise(
-                rX,
-                gO_col_thread,
-                gS_col_thread,
-                output_store_atom=store_atom,
-                col_scale_store_atom=col_scale_atom,
-                cache_policy=cache_policy,
-                scale_and_pack=scale_and_pack,
-                CTA_THREADS_Y=CTA_THREADS_Y,
-                CTA_THREADS_X=CTA_THREADS_X,
-                ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
-                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
-                SCALE_DTYPE=SCALE_DTYPE,
-                DTYPE=DTYPE,
-                FP8_DTYPE=FP8_DTYPE,
-                EDGE=EDGE,
-                rows_left=rows_left,
-                cols_ok=cols_ok,
-            )
+    quantize_mxfp8_rmem_tile_bidimensional(
+        rX,
+        gO_row_tile,
+        gS_row_tile,
+        gO_col_tile,
+        gS_col_tile,
+        ROWWISE=ROWWISE,
+        COLWISE=COLWISE,
+        GATED=False,
+        EDGE=EDGE,
+        rows_left=rows_left,
+        cols_ok=cols_ok,
+        DTYPE=DTYPE,
+        FP8_DTYPE=FP8_DTYPE,
+        MAX_NORM_RCP=MAX_NORM_RCP,
+        WITH_GEMM_SWIZZLED_SCALES=WITH_GEMM_SWIZZLED_SCALES,
+        CTA_THREADS_Y=CTA_THREADS_Y,
+        CTA_THREADS_X=CTA_THREADS_X,
+        ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
+        ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+        cache_policy=cache_policy,
+    )
 
     return thread_amax
 

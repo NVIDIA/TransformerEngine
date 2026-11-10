@@ -457,10 +457,6 @@ class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
 
     def compile(self):
         """Return the compiled CuTeDSL function object for this config."""
-        # The kernel module imports this one
-        # pylint: disable-next=import-outside-toplevel
-        from .quantize_mxfp8_gated_g2s import MXFP8GatedQuantizeG2SKernel
-
         sym_M = cute.sym_int32()
         # The C++ dispatcher requires N % 32 == 0, like the CUDA kernel.
         sym_N = cute.sym_int32(divisibility=32)
@@ -476,7 +472,7 @@ class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
         params = [Float32(0.0) if clamped else None] * 3  # limit, alpha, glu_linear_offset
         params += [Float32(0.0) if situ else None] * 2  # beta1, beta2
         return cute.compile(
-            MXFP8GatedQuantizeG2SKernel(self),
+            MXFP8GatedQuantizeEntry(self),
             _fake_gmem_tensor(self.DTYPE, (sym_M, sym_2N), 16),  # mGatedInput
             _fake_gmem_tensor(self.DTYPE, (sym_M, sym_N), 16) if self.IS_BWD else None,  # mYGrad
             # mO_row, mS_row
@@ -497,6 +493,62 @@ class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
             cute.runtime.make_fake_stream(),
             options="--enable-tvm-ffi",
         )
+
+
+class MXFP8GatedQuantizeEntry:
+    """Select the gated MXFP8 kernel: the register-resident one where it applies, otherwise the
+    shared-memory port of gated_mxfp8.cuh."""
+
+    def __init__(self, cfg: MXFP8GatedQuantizeConfig):
+        # The kernel modules import this one.
+        # pylint: disable=import-outside-toplevel
+        from .quantize_mxfp8_gated_g2s import MXFP8GatedQuantizeG2SKernel
+        from .quantize_mxfp8_gated_g2r_bidim import MXFP8GatedQuantizeG2RKernel
+
+        # pylint: enable=import-outside-toplevel
+        self.cfg = cfg
+        self.g2s_kernel = MXFP8GatedQuantizeG2SKernel(cfg)
+        self.g2r_kernel = (
+            MXFP8GatedQuantizeG2RKernel(cfg) if MXFP8GatedQuantizeG2RKernel.supports(cfg) else None
+        )
+
+    @cute.jit
+    def __call__(
+        self,
+        mGatedInput: cute.Tensor,
+        mGrad: Optional[cute.Tensor],
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        limit: Optional[Float32],
+        alpha: Optional[Float32],
+        glu_linear_offset: Optional[Float32],
+        beta1: Optional[Float32],
+        beta2: Optional[Float32],
+        stream: CUstream,
+    ):
+        args = (
+            mGatedInput,
+            mGrad,
+            mO_row,
+            mS_row,
+            mO_col,
+            mS_col,
+            limit,
+            alpha,
+            glu_linear_offset,
+            beta1,
+            beta2,
+            stream,
+        )
+        if cutlass.const_expr(self.g2r_kernel is not None):
+            if self.g2r_kernel.eligible_to_dispatch(mGatedInput, mS_col):
+                self.g2r_kernel(*args)
+            else:
+                self.g2s_kernel(*args)
+        else:
+            self.g2s_kernel(*args)
 
 
 class MXFP8QuantizeKernelBase(abc.ABC):
