@@ -2022,11 +2022,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         ):
             grouped_fc2_weight._with_gemm_swizzled_scales = False
 
-        # Decide up front whether the backward rebuilds fc2_x from the dSReLU kernel
-        # (which applies the tanh clamp when regenerating fc2_x). When it does, the
-        # forward only needs row-wise fc2_x for the fc2 GEMM; the column-wise copy
-        # for wgrad is produced in the backward from the recomputed tensor.
-        recompute_srelu_fc2_x = (
+        # Decide up front whether the backward rebuilds fc2_x from the activation
+        # backward kernel. If so, no need to compute column-wise data in forward.
+        recompute_fc2_x = (
             isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU))
             and bool(getattr(activation_op, "activation_recompute_in_mlp", False))
             and weight_requires_grad
@@ -2042,7 +2040,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if use_nvfp4:
             fc2_input_quantizer.set_usage(
                 rowwise=True,
-                columnwise=weight_requires_grad and not recompute_srelu_fc2_x,
+                columnwise=weight_requires_grad and not recompute_fc2_x,
             )
             fc2_input_quantizer.optimize_for_gemm = True
             if kernel_impl == "gemm_act":
@@ -2052,7 +2050,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_in = fc1_kernel_out["d_tensor"]
                 fc2_in = fc2_in.view(in_shape[0], fc2_weight_shape[1]).contiguous()
                 fc2_x_amaxes = None
-                if recompute_srelu_fc2_x:
+                if recompute_fc2_x:
                     fc2_x_amaxes = _nvfp4_group_hadamard_amax(
                         fc2_in,
                         fc2_input_quantizer,
@@ -2097,7 +2095,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     tensor_offsets=fc2_x_tensor_offsets,
                     use_dense_single_group=use_dense_single_group,
                 )
-                if recompute_srelu_fc2_x:
+                if recompute_fc2_x:
                     fc2_x_amaxes_for_recompute = fc2_x_amaxes
             elif kernel_impl == "gemm_act_rht_quant":
                 # Unpack NVFP4 output
@@ -2400,10 +2398,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if requires_grad:
             saved_fc1_x = grouped_fc1_x
             cpu_offloading = is_cpu_offload_enabled()
-            # recompute_srelu_fc2_x was decided before the fc2 input quantization above.
+            # recompute_fc2_x was decided before the fc2 input quantization above.
             # A recomputed fc2_x is row-wise only and is not saved, so only mark what
             # actually goes to save_for_backward.
-            saved_grouped_fc2_x = None if recompute_srelu_fc2_x else grouped_fc2_x
+            saved_grouped_fc2_x = None if recompute_fc2_x else grouped_fc2_x
             mark_grouped_tensor(saved_fc1_x, activation_in, scales, saved_grouped_fc2_x)
 
             # wgrad only needs column-wise data, so clear row-wise data
@@ -2468,7 +2466,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_ctx.dtype = dtype
             fc2_ctx.input_requires_grad = input_requires_grad
             fc2_ctx.weight_requires_grad = weight_requires_grad
-            fc2_ctx.recompute_input_from_dsrelu = recompute_srelu_fc2_x
+            fc2_ctx.recompute_input_from_dsrelu = recompute_fc2_x
             fc2_ctx.fc2_x_amaxes_for_recompute = fc2_x_amaxes_for_recompute
 
         return fc2_out, [(), (), ()]
