@@ -2,13 +2,13 @@
 #
 # See LICENSE for license information.
 
-"""PEP 517 backend with CUDA-version- and framework-specific build requirements."""
+"""PEP 517 backend with CUDA-version-, framework-, and feature-specific build requirements."""
 
 from contextlib import contextmanager
 import os
 import re
 import subprocess
-from typing import Iterator, List, Optional
+from typing import Iterator, List, NamedTuple, Optional, Tuple
 
 from build_tools.build_backend_utils import (
     ConfigSettings,
@@ -28,7 +28,35 @@ _FRAMEWORK_BUILD_PACKAGES = {
 }
 _SUPPORTED_FRAMEWORKS = tuple(_FRAMEWORK_BUILD_PACKAGES)
 
-_PRIVATE_SETTINGS = ("cuda-version", "framework")
+
+class _Feature(NamedTuple):
+    """Optional feature that can be enabled with an environment variable or config setting."""
+
+    environment_variable: str
+    # Selects an existing installation instead of installing the requirements.
+    home_variable: Optional[str]
+    # Formatted with the CUDA major version.
+    requirements: Tuple[str, ...]
+
+
+# Keyed by config setting, e.g. --config-settings with-cublasmp=1.
+_FEATURES = {
+    "with-cublasmp": _Feature(
+        "NVTE_WITH_CUBLASMP",
+        "CUBLASMP_HOME",
+        # cuBLASMp's overlap algorithms require NCCL 2.30.
+        ("nvidia-cublasmp-cu{cuda_major}>=0.8.1", "nvidia-nccl-cu{cuda_major}>=2.30"),
+    ),
+    "with-cusolvermp": _Feature(
+        "NVTE_WITH_CUSOLVERMP", "CUSOLVERMP_HOME", ("nvidia-cusolvermp-cu{cuda_major}",)
+    ),
+    "enable-nvshmem": _Feature(
+        "NVTE_ENABLE_NVSHMEM", "NVSHMEM_HOME", ("nvidia-nvshmem-cu{cuda_major}",)
+    ),
+    "ub-with-mpi": _Feature("NVTE_UB_WITH_MPI", "MPI_HOME", ("openmpi",)),
+    "with-cutedsl": _Feature("NVTE_WITH_CUTEDSL", None, ("apache-tvm-ffi>=0.1.12",)),
+}
+_PRIVATE_SETTINGS = ("cuda-version", "framework", *_FEATURES)
 
 
 def _normalize_frameworks(value: str) -> List[str]:
@@ -75,13 +103,36 @@ def _requested_frameworks(config_settings: ConfigSettings) -> Optional[List[str]
     return configured if configured is not None else _environment_frameworks()
 
 
+def _config_feature(config_settings: ConfigSettings, setting: str) -> Optional[bool]:
+    """Get whether PEP 517 config settings enable or disable an optional feature."""
+    value = config_value(config_settings, setting)
+    if value is None:
+        return None
+
+    if value not in ("0", "1"):
+        raise ValueError(f"Invalid value {value!r} for {setting}; expected 0 or 1")
+    return value == "1"
+
+
+def _feature_enabled(config_settings: ConfigSettings, setting: str) -> bool:
+    """Resolve whether an optional feature is enabled, preferring config settings."""
+    configured = _config_feature(config_settings, setting)
+    if configured is not None:
+        return configured
+    return bool(int(os.getenv(_FEATURES[setting].environment_variable, "0")))
+
+
 @contextmanager
 def _build_environment(config_settings: ConfigSettings) -> Iterator[None]:
-    """Apply a config-setting framework selection while running setuptools."""
+    """Apply config-setting framework and feature selections while running setuptools."""
     overrides = {}
     frameworks = _config_frameworks(config_settings)
     if frameworks is not None:
         overrides["NVTE_FRAMEWORK"] = ",".join(frameworks) if frameworks else "none"
+    for setting, feature in _FEATURES.items():
+        enabled = _config_feature(config_settings, setting)
+        if enabled is not None:
+            overrides[feature.environment_variable] = "1" if enabled else "0"
 
     previous = {name: os.environ.get(name) for name in overrides}
     os.environ.update(overrides)
@@ -185,10 +236,25 @@ def _framework_build_requirements(config_settings: ConfigSettings) -> List[str]:
     ]
 
 
+def _feature_build_requirements(config_settings: ConfigSettings) -> List[str]:
+    """Get build requirements for the enabled optional features."""
+    cuda_major = _cuda_version(config_settings).split(".", maxsplit=1)[0]
+    return [
+        requirement.format(cuda_major=cuda_major)
+        for setting, feature in _FEATURES.items()
+        if _feature_enabled(config_settings, setting)
+        and not (feature.home_variable and os.getenv(feature.home_variable))
+        for requirement in feature.requirements
+    ]
+
+
 def _build_requirements(config_settings: ConfigSettings) -> List[str]:
-    """Get CUDA and framework build requirements."""
-    return _cuda_build_requirements(config_settings) + _framework_build_requirements(
-        config_settings
+    """Get CUDA, framework, and optional feature build requirements."""
+    framework_requirements = _framework_build_requirements(config_settings)
+    return (
+        _cuda_build_requirements(config_settings)
+        + framework_requirements
+        + _feature_build_requirements(config_settings)
     )
 
 
