@@ -52,7 +52,7 @@ def assert_warmed_up(module: torch.nn.Module) -> None:
     )
 
 
-# Imported last because onnx_extensions imports from this module.
+# Re-export the ONNX symbolic functions and translation table.
 # pylint: disable=unused-import,wrong-import-position
 from .onnx_extensions import (
     torch_onnx_gemm_inf_op,
