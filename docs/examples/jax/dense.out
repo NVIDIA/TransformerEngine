@@ -6,16 +6,16 @@ Variable collections: ['params']
 {'params': {'Dense_0': {'kernel': ((8192, 32768), dtype('float32'))}}}
 
 bf16 baseline:
-Mean time: 18.056 ms
+Mean time: 18.265029820613563 ms
 
 TE MXFP8BlockScaling:
-Mean time: 11.260 ms
+Mean time: 10.855670000892133 ms
 # SINGLE_GPU_OUTPUT_END
 
 # MULTI_GPU_OUTPUT_START
 bf16 DP=2/TP=2:
-Mean time: 5.516 ms
+Mean time: 5.609957461711019 ms
 
 TE MXFP8BlockScaling DP=2/TP=2:
-Mean time: 3.712 ms
+Mean time: 3.6635108408518136 ms
 # MULTI_GPU_OUTPUT_END

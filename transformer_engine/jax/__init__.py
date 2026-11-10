@@ -32,12 +32,6 @@ import jax
 
 from transformer_engine.common import load_framework_extension
 
-if os.getenv("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0":
-    warnings.warn(
-        "TE/JAX is not yet compatible with CuTeDSL due to XLA, TE/JAX, and Python GC conflicts. "
-        "We are working on a fix; in the meantime NVTE_ENABLE_CUTEDSL_BACKEND is forced off."
-    )
-os.environ["NVTE_ENABLE_CUTEDSL_BACKEND"] = "0"
 
 load_framework_extension("jax")
 

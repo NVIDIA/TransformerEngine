@@ -197,12 +197,15 @@ def extract_quantized_output(out, dbias):
 
     ScaledTensor1x carries scale_inv already trimmed to the unpadded shape (see its
     __post_init__), so there is no uninitialized scale padding to exclude.
+    FP8 -0.0 (0x80) is folded into +0.0: both backends round to zero there and may differ only
+    in its sign, which training does not depend on.
     """
     tensors = [out] if isinstance(out, ScaledTensor1x) else [out.rowwise_tensor, out.colwise_tensor]
     parts = {}
     for t in tensors:
         name = "colwise" if t.is_colwise else "rowwise"
-        parts[f"{name} data"] = np.asarray(t.data.view(jnp.uint8))
+        data = np.asarray(t.data.view(jnp.uint8))
+        parts[f"{name} data"] = np.where(data == 0x80, 0, data).astype(np.uint8)
         parts[f"{name} scales"] = np.asarray(t.scale_inv.view(jnp.uint8))
     return parts, None if dbias is None else np.asarray(dbias)
 
@@ -283,3 +286,33 @@ def test_dtypes(method, act_type, act_desc, fp8_dtype, in_dtype):
         in_dtype,
         fp8_dtype,
     )
+
+
+# Cover the specialized kernels' shapes
+# Note that JAX only emits linear scales and passes no noop tensor
+SPECIALIZED_CASES = {
+    # G2RRowwise2Lane: its four launch tiers (by output size).
+    "g2r_rowwise2lane_tier0": ((1024, 4096), QuantizeLayout.ROWWISE, jnp.bfloat16),
+    "g2r_rowwise2lane_tier1": ((4064, 4480), QuantizeLayout.ROWWISE, jnp.bfloat16),
+    "g2r_rowwise2lane_tier2": ((8192, 8192), QuantizeLayout.ROWWISE, jnp.bfloat16),
+    "g2r_rowwise2lane_tier3": ((16384, 8192), QuantizeLayout.ROWWISE, jnp.bfloat16),
+    # G2RRowwise1Lane
+    "g2r_rowwise1lane_fp16": ((1024, 4096), QuantizeLayout.ROWWISE, jnp.float16),
+    # RegisterBidimensional: static N == 2048 / 4096, the wide tile with and without the
+    # deep cluster, and the narrow tile (N % 512 != 0).
+    "g2r_bidim_n2048": ((256, 2048), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    "g2r_bidim_n4096": ((256, 4096), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    "g2r_bidim_wide": ((256, 6144), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    "g2r_bidim_wide_cluster": ((4096, 16384), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    "g2r_bidim_narrow": ((160, 2304), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    # SpecializedBidimensional (g2s): fp16, or bf16 with N % 256 != 0.
+    "g2s_bidim_fp16": ((256, 1024), QuantizeLayout.ROWWISE_COLWISE, jnp.float16),
+    "g2s_bidim_bf16_n384": ((256, 384), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+}
+
+
+@pytest.mark.parametrize(
+    "shape,q_layout,in_dtype", SPECIALIZED_CASES.values(), ids=SPECIALIZED_CASES.keys()
+)
+def test_specialized_kernels(shape, q_layout, in_dtype):
+    run_test_case("CAST_ONLY", *NO_ACT, shape, q_layout, in_dtype, jnp.float8_e4m3fn)
