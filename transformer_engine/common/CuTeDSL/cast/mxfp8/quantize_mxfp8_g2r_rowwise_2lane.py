@@ -28,8 +28,8 @@ from transformer_engine.common.CuTeDSL.utils_fp8 import (
 from .quantize_mxfp8_common import (
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
-    SUPPORTED_ACTIVATIONS,
-    SUPPORTED_DACTIVATIONS,
+    activation_op,
+    dactivation_op,
     derive_swizzled_scale_layout,
 )
 
@@ -73,6 +73,7 @@ def quantize_mxfp8_gmem_tile_rowwise_2lane(
     mS_tiles: cute.Tensor,
     N: Int32,
     ACTIVATION: cutlass.Constexpr[Optional[str]],
+    ACTIVATION_TABLE: cutlass.Constexpr[str],
     WITH_ACT: cutlass.Constexpr[bool],
     WITH_DACT: cutlass.Constexpr[bool],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
@@ -183,11 +184,11 @@ def quantize_mxfp8_gmem_tile_rowwise_2lane(
                 lo = x2_lo_to_f32_bf16(rX_i32[i])
                 hi = x2_hi_to_f32_bf16(rX_i32[i])
                 if cutlass.const_expr(WITH_DACT):
-                    dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+                    dop = dactivation_op(ACTIVATION, ACTIVATION_TABLE)
                     lo = lo * dop(x2_lo_to_f32_bf16(rA_i32[i]))
                     hi = hi * dop(x2_hi_to_f32_bf16(rA_i32[i]))
                 else:
-                    op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+                    op = activation_op(ACTIVATION, ACTIVATION_TABLE)
                     lo = op(lo)
                     hi = op(hi)
                 rX_i32[i] = cvt_f32x2_to_bf16x2(lo, hi)
@@ -314,6 +315,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         mNoop: cute.Pointer,  # Unused: the dispatcher routes noop calls to the general kernel
         mDActInput: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
+        mActTable: cute.Pointer,  # activation table; null without one
         stream: CUstream,
     ):
         M, N = mX.shape
@@ -658,6 +660,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
                 mS_tiles,
                 N,
                 ACTIVATION=self.cfg.ACTIVATION,
+                ACTIVATION_TABLE=self.cfg.ACTIVATION_TABLE,
                 WITH_ACT=self.cfg.WITH_ACT,
                 WITH_DACT=self.cfg.WITH_DACT,
                 DTYPE=self.cfg.DTYPE,
