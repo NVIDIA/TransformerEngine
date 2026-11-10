@@ -341,6 +341,7 @@ def _checkpoint_rng_state(generator):
         if not torch.cuda.is_current_stream_capturing():
             return generator.get_state()
         if not _checkpoint_rng_available():
+            # Empty sentinel: the guard rejects RNG use without Philox state access.
             return torch.empty(0, device=generator.device, dtype=torch.int64)
         seed, offset, intragraph = generator.philox_state(0)
         state = torch.cat((seed, offset))
