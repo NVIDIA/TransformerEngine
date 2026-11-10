@@ -32,6 +32,8 @@ from transformer_engine.common.CuTeDSL.activations import (
     dact_dgelu,
     act_sigmoid,
     dact_dsigmoid,
+    derivative_table_spec,
+    forward_table_spec,
 )
 
 CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
@@ -68,6 +70,26 @@ SUPPORTED_DACTIVATIONS = {
     "dqgelu": dact_dqgelu,
     "dsrelu": dact_dsrelu,
 }
+
+# Activations with a BF16 lookup table (see util/activation_table.cuh), and the table layouts
+# the C++ dispatcher passes: "none", "default", or "exact" (the exact dSiLU table).
+ACTIVATIONS_WITH_TABLE = ("gelu", "silu", "dgelu", "dsilu")
+ACTIVATION_TABLE_LAYOUTS = ("none", "default", "exact")
+
+
+def activation_op(activation: str, activation_table: str):
+    """The forward activation a kernel computes: with a table, what the table holds."""
+    op = SUPPORTED_ACTIVATIONS[activation]
+    return op if activation_table == "none" else forward_table_spec(op)
+
+
+def dactivation_op(activation: str, activation_table: str):
+    """The activation derivative a kernel computes: with a table, what the table holds."""
+    dop = SUPPORTED_DACTIVATIONS[activation]
+    if activation_table == "none":
+        return dop
+    return derivative_table_spec(dop, activation, activation_table)
+
 
 GATED_ACTIVATIONS = {
     "geglu": (act_gelu, dact_dgelu),
@@ -151,6 +173,7 @@ class MXFP8QuantizeConfig:
         with_act: bool = False,
         use_2d_quantization: bool = False,
         activation: Optional[str] = None,
+        activation_table: str = "none",
     ):
         if use_2d_quantization:
             raise ValueError("2D block scaling is not implemented by the CuTeDSL MXFP8 kernels")
@@ -201,6 +224,22 @@ class MXFP8QuantizeConfig:
                     )
         self.WITH_DACT = with_dact
         self.WITH_ACT = with_act
+        # With a table, BF16 activations follow the table specification: the register-resident
+        # kernel reads the table, the others compute what it holds.
+        if activation_table not in ACTIVATION_TABLE_LAYOUTS:
+            raise ValueError(
+                f"unknown activation table {activation_table!r}; expected one of"
+                f" {ACTIVATION_TABLE_LAYOUTS}"
+            )
+        if activation_table != "none" and (
+            dtype != "BFloat16"
+            or self.ACTIVATION not in ACTIVATIONS_WITH_TABLE
+            or (activation_table == "exact" and self.ACTIVATION != "dsilu")
+        ):
+            raise ValueError(
+                f"no {activation_table!r} activation table for {self.ACTIVATION!r} with {dtype}"
+            )
+        self.ACTIVATION_TABLE = activation_table
         # dbias is the column reduction of the (post-act/dact) element. With colwise
         # output each thread owns a full column (trivial reduction); rowwise-only
         # uses a cross-thread smem reduction over THREADS_Y. Both mirror the CUDA
@@ -216,7 +255,8 @@ class MXFP8QuantizeConfig:
             f"rowwise={self.ROWWISE}, colwise={self.COLWISE}, "
             f"swizzled={self.WITH_GEMM_SWIZZLED_SCALES}, with_amax={self.WITH_AMAX}, "
             f"with_dbias={self.WITH_DBIAS}, with_dact={self.WITH_DACT}, "
-            f"with_act={self.WITH_ACT}, activation={self.ACTIVATION})"
+            f"with_act={self.WITH_ACT}, activation={self.ACTIVATION}, "
+            f"activation_table={self.ACTIVATION_TABLE})"
         )
 
     __repr__ = __str__
@@ -323,6 +363,11 @@ class MXFP8QuantizeConfig:
             if self.WITH_DACT
             else None
         )
+        # Like the noop flag, the activation table is an always-present pointer, null without a
+        # table.
+        act_table_fake = cute.runtime.nullptr(
+            cutlass.Uint8, mem_space=cute.AddressSpace.gmem, assumed_align=16
+        )
         workspace_fake = (
             cute.runtime.make_fake_compact_tensor(
                 Float32,
@@ -346,6 +391,7 @@ class MXFP8QuantizeConfig:
             noop_fake,  # mNoop (pointer to the cast_noop flag, may be null at launch)
             act_input_fake,  # mDActInput (activation input, dact only)
             workspace_fake,  # mWorkspace(backward slot, unused)
+            act_table_fake,  # mActTable (activation table, may be null at launch)
             cute.runtime.make_fake_stream(),  # stream (compiled as an explicit tvm-ffi
             # "handle" arg; C++ passes the CUDA stream
             # as void*)
@@ -487,6 +533,7 @@ class MXFP8QuantizeKernelBase(abc.ABC):
         mNoop: cute.Pointer,
         mDActInput: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
+        mActTable: cute.Pointer,  # activation table; null without one
         stream: CUstream,
     ):
         """
@@ -558,6 +605,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         mNoop: cute.Pointer,
         mDActInput: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
+        mActTable: cute.Pointer,  # activation table; null without one
         stream: CUstream,
     ):
         dispatched_to_specialized = False
@@ -577,6 +625,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                         mNoop,
                         mDActInput,
                         mWorkspace,
+                        mActTable,
                         stream,
                     )
         # If not using a specialized kernel, fall back to the general kernel
@@ -608,6 +657,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                     mNoop,
                     mDActInput,
                     mWorkspace,
+                    mActTable,
                     stream,
                 )
             else:
@@ -625,6 +675,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                         mNoop,
                         mDActInput,
                         mWorkspace,
+                        mActTable,
                         stream,
                     )
                 else:
@@ -640,6 +691,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                         mNoop,
                         mDActInput,
                         mWorkspace,
+                        mActTable,
                         stream,
                     )
 
@@ -703,6 +755,7 @@ def get_mxfp8_quantization_function(
     with_act: bool,
     use_2d_quantization: bool,
     activation: str,
+    activation_table: str,
 ) -> bool:
     """Compile and register the MXFP8 quantize kernel for this config under `fn_name`."""
     try:
@@ -718,6 +771,7 @@ def get_mxfp8_quantization_function(
             with_act=with_act,
             use_2d_quantization=use_2d_quantization,
             activation=activation,
+            activation_table=activation_table,
         )
     except ValueError as e:
         # The exception message states exactly why the config is unsupported
