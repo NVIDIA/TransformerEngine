@@ -33,3 +33,8 @@ cmake -GNinja -Bbuild .
 cmake --build build
 export OMP_NUM_THREADS=$((NUM_PHYSICAL_CORES / NUM_PARALLEL_JOBS))
 ctest --test-dir build -j$NUM_PARALLEL_JOBS --output-on-failure --output-junit $XML_LOG_DIR/ctest_cppunittest.xml
+
+# The dSiLU table layout is read once per process, so its tests run again with the exact layout.
+export NVTE_ACTIVATION_TABLE_EXACT_DSILU=1
+build/util/test_util --gtest_filter='ActivationTableTest.*' --gtest_output=xml:$XML_LOG_DIR/gtest_cppunittest_cutedsl_off_exact_dsilu_table.xml
+build/operator/test_operator --gtest_filter='*CastMXFP8ActExact*DSiLU*XTable*' --gtest_output=xml:$XML_LOG_DIR/gtest_cppunittest_cutedsl_off_exact_dsilu_cast.xml

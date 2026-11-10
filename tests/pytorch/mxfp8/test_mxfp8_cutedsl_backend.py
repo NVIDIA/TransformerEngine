@@ -57,6 +57,9 @@ MATRIX_SIZES = [
     # M is 32- but not 64-divisible, so the last CTA's block hangs past M and num_tiles
     # clamps it. Covers the clamp that makes TILE_ROWS (not TILE_ROWS*NUM_TILES) the bound.
     (96, 128),
+    # Whole 32x256 tiles but an odd row-tile count: the register-resident kernel's last 64-row
+    # dbias chunk has a single tile.
+    (96, 2048),
 ]
 # (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
 ROW, COL, BOTH = (1, 32), (32, 1), (32, 32)
@@ -236,7 +239,7 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled, us
     # with_amax is hardcoded to False for now because currently MXFP8 quantizers never allocate an amax
     flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act, use_2d_quant)
     major, minor = device_compute_capability()
-    return (
+    key = (
         f"cutedsl_mxfp8_sm{major * 10 + minor}_"
         + DTYPE_TO_STR[in_dtype]
         + "_"
@@ -246,6 +249,15 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled, us
         + "_"
         + desc
     )
+    # Kernels that read a BF16 activation table carry its layout in the name.
+    if (
+        in_dtype == torch.bfloat16
+        and desc in ("gelu", "silu", "dgelu", "dsilu")
+        and int(os.getenv("NVTE_ACTIVATION_TABLE") or 0)
+    ):
+        exact = desc == "dsilu" and int(os.getenv("NVTE_ACTIVATION_TABLE_EXACT_DSILU") or 0)
+        key += "_table_exact" if exact else "_table_default"
+    return key
 
 
 def extract_quantized_output(out, rowwise, columnwise, swizzled):
