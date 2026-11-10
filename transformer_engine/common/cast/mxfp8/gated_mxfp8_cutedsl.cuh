@@ -101,12 +101,12 @@ template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
 bool mxfp8_quantize_gated_cutedsl(const Tensor &gated_input, const Tensor &grad, Tensor *output,
                                   const ParamOP &p, cudaStream_t stream) {
   if (!TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
-    maybe_warn_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
+    report_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
     return false;
   }
   constexpr GatedActivation activation = gated_activation_func_to_enum<ParamOP, ActOP, DActOP>();
   if constexpr (activation == GatedActivation::kUnsupported) {
-    maybe_warn_cutedsl_not_chosen("the gated activation is not supported.");
+    report_cutedsl_not_chosen("the gated activation is not supported.");
     return false;
   } else {
     const size_t rows = gated_input.flat_first_dim();
@@ -121,7 +121,7 @@ bool mxfp8_quantize_gated_cutedsl(const Tensor &gated_input, const Tensor &grad,
     // The kernel offsets the gate half's swizzled scales by a fixed amount, which only matches
     // the swizzled layout when the half spans whole 128-column scale tiles.
     if (IS_BWD && config.swizzled && cols % 128 != 0) {
-      maybe_warn_cutedsl_not_chosen(
+      report_cutedsl_not_chosen(
           "backward gated activations with GEMM-swizzled scales need the last dimension of the "
           "output halves to be divisible by 128.");
       return false;
@@ -135,7 +135,7 @@ bool mxfp8_quantize_gated_cutedsl(const Tensor &gated_input, const Tensor &grad,
       aligned = aligned && is_aligned_ptr(grad.data.dptr, TMA_GMEM_ALIGNMENT);
     }
     if (!aligned) {
-      maybe_warn_cutedsl_not_chosen("an input or output is not 16-byte aligned.");
+      report_cutedsl_not_chosen("an input or output is not 16-byte aligned.");
       return false;
     }
 
