@@ -245,11 +245,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   if (D.is_none()) {
     std::tie(D_tensor, D) = createOutputTensor(D_shape, output_dtype, quantizer);
   } else {
-    if (unfused_quantization_needed) {
-      std::tie(D_tensor, D) = convert_quantizer(quantizer)->convert_and_update_tensor(D);
-    } else {
-      D_tensor = makeTransformerEngineTensor(D, quantizer);
-    }
+    std::tie(D_tensor, D) = convert_quantizer(quantizer)->convert_and_update_tensor(D);
     NVTE_CHECK(detail::checkGemmShape(D_shape, D_tensor.shape()),
                "GEMM output has invalid dims (expected ", std::to_string(D_shape), ", got ",
                std::to_string(D_tensor.shape()), ")");
