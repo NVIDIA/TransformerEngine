@@ -23,6 +23,7 @@ from build_tools.utils import (
     cuda_home_path,
     cuda_toolkit_from_python_packages,
     cudnn_frontend_include_path,
+    cudnn_python_package_path,
     cusolvermp_home_path,
     get_bolt_build_flags,
     get_frameworks,
@@ -69,6 +70,12 @@ def setup_common_extension() -> CMakeExtension:
         "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
         f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
     ]
+
+    # Isolated builds install Python packages outside the interpreter's site-packages, so
+    # CMake's Python_SITEARCH hint cannot find the nvidia-cudnn-cu* package there.
+    if not (os.getenv("CUDNN_PATH") or os.getenv("CUDNN_INCLUDE_PATH")):
+        if (cudnn_path := cudnn_python_package_path()) is not None:
+            cmake_flags.append(f"-DCUDNN_PATH={cudnn_path}")
 
     with_cutedsl = bool(int(os.getenv("NVTE_WITH_CUTEDSL", "0")))
     if with_cutedsl:

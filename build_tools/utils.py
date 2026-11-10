@@ -381,6 +381,11 @@ def _python_package_path(package_name: str, relative_path: str) -> Optional[Path
     return path if path.exists() else None
 
 
+def cudnn_python_package_path() -> Optional[Path]:
+    """Return the cuDNN directory of the nvidia-cudnn-cu* Python package, if it is installed."""
+    return _python_package_path(f"nvidia-cudnn-cu{cuda_version()[0]}", "nvidia/cudnn")
+
+
 def cublasmp_home_path() -> Optional[Path]:
     """Return the cuBLASMp installation root.
 
