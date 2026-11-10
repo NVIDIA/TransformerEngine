@@ -1319,21 +1319,81 @@ def test_grouped_gemm_grouped_tensor_unaligned_out(out_kind, out_dtype, accumula
     out_ref = [torch.matmul(B[i].transpose(0, 1).float(), A[i].float()) for i in range(z)]
     if accumulate:
         out_ref = [wgrads[i].float() + o for i, o in enumerate(out_ref)]
+    aligned = wgrads.clone()
     if out_kind == "discrete":
         out = list(wgrads.unbind(0))
+        aligned_out = list(aligned.unbind(0))
     else:
         out = GroupedTensor.make_grouped_tensor_from_rowwise_data(
             num_tensors=z, tensor_shape=(n, k), rowwise_data=buffer[1:], dtype=out_dtype
         )
+        aligned_out = GroupedTensor.make_grouped_tensor_from_rowwise_data(
+            num_tensors=z, tensor_shape=(n, k), rowwise_data=aligned.view(-1), dtype=out_dtype
+        )
 
-    general_grouped_gemm_for_grouped_tensor(
-        grouped_A, grouped_B, out, layout="NT", accumulate=accumulate
-    )
+    for o in (out, aligned_out):
+        general_grouped_gemm_for_grouped_tensor(
+            grouped_A, grouped_B, o, layout="NT", accumulate=accumulate
+        )
 
+    # Same result as an aligned output, and close to an FP32 reference
+    torch.testing.assert_close(wgrads, aligned, rtol=0, atol=0)
     tols = dtype_tols(out_dtype) if out_dtype != torch.float32 else dict(rtol=1e-4, atol=1e-3)
     for i in range(z):
         torch.testing.assert_close(wgrads[i], out_ref[i].to(out_dtype), **tols)
     torch.testing.assert_close(buffer[0], head, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize("use_bias_scale", [False, True])
+def test_grouped_gemm_grouped_tensor_unaligned_out_with_bias(accumulate, use_bias_scale) -> None:
+    """A grouped output that is not 16-byte aligned gets the same accumulation and bias as an
+    aligned one."""
+    if not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
+        pytest.skip("Grouped GEMM is not supported on this device or cuBLASLt version.")
+
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    n, k = 256, 128
+    m_sizes = [64, 32, 96]
+    z, m = len(m_sizes), sum(m_sizes)
+    grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)  # weight
+    grouped_B = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)  # input
+    _pack_grouped_tensor(
+        grouped_A, [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
+    )
+    _pack_grouped_tensor(
+        grouped_B, [torch.randn(ms, k, dtype=dtype, device=device) for ms in m_sizes]
+    )
+    grouped_bias = _make_grouped_tensor_uniform(z, 1, n, device, dtype)
+    _pack_grouped_tensor(
+        grouped_bias, [torch.randn(1, n, dtype=dtype, device=device) for _ in range(z)]
+    )
+    bias_scale = torch.randn(m, device=device, dtype=torch.float32) if use_bias_scale else None
+
+    # Output rows in one buffer, starting one element past a 16-byte boundary
+    buffer = torch.randn(1 + m * n, dtype=dtype, device=device)
+    aligned_buffer = buffer[1:].clone()
+    outs = []
+    for data in (buffer[1:], aligned_buffer):
+        out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
+        out.rowwise_data = data
+        outs.append(out)
+    assert outs[0].rowwise_data.data_ptr() % 16 != 0
+
+    for out in outs:
+        general_grouped_gemm_for_grouped_tensor(
+            grouped_A,
+            grouped_B,
+            out,
+            layout="TN",
+            accumulate=accumulate,
+            bias=grouped_bias,
+            bias_scale=bias_scale,
+        )
+
+    torch.testing.assert_close(buffer[1:], aligned_buffer, rtol=0, atol=0)
 
 
 def test_grouped_gemm_grouped_tensor_unaligned_input() -> None:

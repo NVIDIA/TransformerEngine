@@ -1287,35 +1287,33 @@ def general_grouped_gemm_for_grouped_tensor(
     if _is_unaligned_grouped_gemm_out(out):
         # cuBLASLt grouped GEMM requires 16-byte aligned output pointers. A wgrad output can
         # be a view into a larger buffer that is not, e.g. a Megatron-LM main_grad in an
-        # unpadded gradient buffer. Compute into aligned buffers and copy or add the result.
-        if beta is not None:
-            raise ValueError("Grouped GEMM with an explicit beta requires 16-byte aligned outputs.")
-        # Accumulate in FP32, as the GEMM epilogue does, so the sum is rounded once.
-        staged_dtype = torch.float32 if accumulate and bias is None else None
+        # unpadded gradient buffer. Run the same GEMM on an aligned copy of the output and copy
+        # the result back, so accumulation and bias are applied exactly as on the direct path.
+        def stage(t: torch.Tensor) -> torch.Tensor:
+            if accumulate:
+                return t.clone(memory_format=torch.contiguous_format)
+            return torch.empty_like(t, memory_format=torch.contiguous_format)
+
         if is_discrete_out:
-            staged = [
-                torch.empty_like(t, dtype=staged_dtype, memory_format=torch.contiguous_format)
-                for t in out
-            ]
+            staged = [stage(t) for t in out]
             targets, results = out, staged
         else:
             staged = out.copy()
-            staged.rowwise_data = torch.empty_like(out.rowwise_data, dtype=staged_dtype)
+            staged.rowwise_data = stage(out.rowwise_data)
             targets, results = [out.rowwise_data], [staged.rowwise_data]
         general_grouped_gemm_for_grouped_tensor(
             A,
             B,
             staged,
             layout=layout,
+            accumulate=accumulate,
             use_split_accumulator=use_split_accumulator,
             bias=bias,
             bias_scale=bias_scale,
             alpha=alpha,
+            beta=beta,
         )
-        if accumulate:
-            torch._foreach_add_(targets, results)
-        else:
-            torch._foreach_copy_(targets, results)
+        torch._foreach_copy_(targets, results)
         return out
 
     num_tensors = B.num_tensors
