@@ -60,10 +60,11 @@ def dequantize_mxfp8_smem_tile(
         assert TILE_COLS % ELEMS_PER_THREAD == 0
         THR_ROWS = TILE_ROWS
         THR_COLS = TILE_COLS // ELEMS_PER_THREAD
-        thr_layout = cute.make_layout((THR_ROWS, THR_COLS))
+        # Row-major threads: a warp reads contiguous 16 B chunks along a row (no bank conflicts)
+        thr_layout = cute.make_layout((THR_ROWS, THR_COLS), stride=(THR_COLS, 1))
         val_layout = cute.make_layout((1, ELEMS_PER_THREAD), stride=(0, 1))
-        scale_y = tidx % THR_ROWS
-        scale_x = tidx // THR_ROWS
+        scale_y = tidx // THR_COLS
+        scale_x = tidx % THR_COLS
         # Every `FRAGS_SHARING_SAME_SCALE` threads along x direction share the same scale
         scale_e8m0 = gS[scale_y, scale_x // FRAGS_SHARING_SAME_SCALE]
     else:
