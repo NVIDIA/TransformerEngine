@@ -520,6 +520,12 @@ __global__ void extract_seed_and_offset(int64_t *rng_state_ptr, bool captured, i
   }
 }
 
+__global__ void restore_seed_and_offset(const int64_t *rng_state_ptr, int64_t *seed_ptr,
+                                        int64_t *offset_ptr, uint32_t offset_intragraph) {
+  *seed_ptr = rng_state_ptr[0];
+  *offset_ptr = static_cast<int64_t>(static_cast<uint64_t>(rng_state_ptr[1]) - offset_intragraph);
+}
+
 }  // namespace fused_attn
 }  // namespace transformer_engine
 
@@ -531,5 +537,14 @@ void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t 
 
   fused_attn::extract_seed_and_offset<<<1, 1, 0, stream>>>(
       rng_state_ptr, captured, seed_ptr, seed_val, offset_ptr, offset_val, offset_intragraph);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void nvte_restore_seed_and_offset(const int64_t *rng_state_ptr, int64_t *seed_ptr,
+                                  int64_t *offset_ptr, uint32_t offset_intragraph,
+                                  cudaStream_t stream) {
+  NVTE_API_CALL(nvte_restore_seed_and_offset);
+  transformer_engine::fused_attn::restore_seed_and_offset<<<1, 1, 0, stream>>>(
+      rng_state_ptr, seed_ptr, offset_ptr, offset_intragraph);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }

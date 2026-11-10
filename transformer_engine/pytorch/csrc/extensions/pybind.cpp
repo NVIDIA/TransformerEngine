@@ -196,6 +196,11 @@ void bind_quantize_with_amax_extensions(py::module_ &m) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
 
+  m.def("checkpoint_rng_state", &transformer_engine::pytorch::checkpoint_rng_state,
+        py::arg("generator"));
+  m.def("restore_checkpoint_rng_state", &transformer_engine::pytorch::restore_checkpoint_rng_state,
+        py::arg("generator"), py::arg("state"));
+
   // Register __eq__/__ne__ on the pybind ``DType`` enum so it compares by integer.
   py::object dtype_class = m.attr("DType");
   dtype_class.attr("__eq__") = py::cpp_function(

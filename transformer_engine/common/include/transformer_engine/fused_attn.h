@@ -693,6 +693,18 @@ void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t 
                                   uint64_t seed_val, int64_t *offset_ptr, uint64_t offset_val,
                                   uint32_t offset_intragraph, cudaStream_t stream);
 
+/*! \brief Restore a captured RNG's seed and effective offset from a device snapshot.
+ *
+ * \param[in] rng_state_ptr Device array containing the seed and effective Philox offset.
+ * \param[out] seed_ptr Captured generator's seed.
+ * \param[out] offset_ptr Captured generator's base offset.
+ * \param[in] offset_intragraph Current intragraph offset, subtracted from the saved offset.
+ * \param[in] stream CUDA stream used for this operation.
+ */
+void nvte_restore_seed_and_offset(const int64_t *rng_state_ptr, int64_t *seed_ptr,
+                                  int64_t *offset_ptr, uint32_t offset_intragraph,
+                                  cudaStream_t stream);
+
 /*!  \brief Copy keys and values into the KV cache.
  *
  * \warning   This API is **experimental** and subject to change.

@@ -6,6 +6,8 @@
 
 #include "common.h"
 
+#include <c10/cuda/CUDAGuard.h>
+
 #include "c10/util/ArrayRef.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
@@ -362,6 +364,42 @@ at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_pe
   std::lock_guard<std::mutex> lock(gen->mutex_);
   philox_args = gen->philox_cuda_state(elts_per_thread);
   return philox_args;
+}
+
+at::Tensor checkpoint_rng_state(const at::Generator& generator) {
+  auto* gen = at::check_generator<at::CUDAGeneratorImpl>(generator);
+  const c10::cuda::CUDAGuard device_guard(generator.device());
+  if (at::cuda::currentStreamCaptureStatus() == at::cuda::CaptureStatus::None) {
+    std::lock_guard<std::mutex> lock(gen->mutex_);
+    return generator.get_state();
+  }
+  auto state = at::empty({2}, at::TensorOptions().dtype(at::kLong).device(generator.device()));
+  philox_unpack(init_philox_state(gen, 0), state.data_ptr<int64_t>());
+  return state;
+}
+
+void restore_checkpoint_rng_state(const at::Generator& generator, const at::Tensor& state) {
+  auto* gen = at::check_generator<at::CUDAGeneratorImpl>(generator);
+  const c10::cuda::CUDAGuard device_guard(generator.device());
+  const bool capturing = at::cuda::currentStreamCaptureStatus() != at::cuda::CaptureStatus::None;
+  TORCH_CHECK(
+      state.is_cuda() == capturing,
+      "Checkpoint forward and recompute must both use eager execution or both be captured.");
+  if (!capturing) {
+    std::lock_guard<std::mutex> lock(gen->mutex_);
+    auto mutable_generator = generator;
+    mutable_generator.set_state(state);
+    return;
+  }
+  TORCH_CHECK(state.device() == generator.device() && state.scalar_type() == at::kLong &&
+                  state.numel() == 2 && state.is_contiguous(),
+              "Expected a contiguous int64 CUDA RNG snapshot with two elements.");
+  auto philox = init_philox_state(gen, 0);
+  // Recompute has its own intragraph position; preserve the saved effective offset.
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_restore_seed_and_offset(state.data_ptr<int64_t>(), philox.seed_.ptr, philox.offset_.ptr,
+                                 philox.offset_intragraph_, at::cuda::getCurrentCUDAStream());
+  });
 }
 
 }  // namespace transformer_engine::pytorch
