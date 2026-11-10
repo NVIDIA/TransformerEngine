@@ -59,7 +59,8 @@ def run(args, impl):
     if not configs:
         sys.exit("No config to run: check --shapes/--experts/--layout")
     factories = ((nbytes(c[4], c[5], c[6]), functools.partial(factory, *c)) for c in configs)
-    keep = common.te_kernels("^group_dequantize")
+    # As in the grouped quantize benchmark, a descriptor update is part of the dequantize work.
+    keep = common.te_kernels("^group_dequantize", "^update_tma_descriptors$")
     timed = common.time_kernels(factories, args.runs, args.warmup, keep)
     rows = []
     for config, result in zip(configs, timed):
