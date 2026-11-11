@@ -125,7 +125,7 @@ def _site(spec):
     return "fp8" if spec.options.fp8 else "f16", "bwd" if spec.options.backward else "fwd"
 
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=None)
 def _supported_graph(spec, capabilities, frontend_version, backend_version):
     # Versions and target architecture are part of the plan identity, even when
     # two targets happen to accept identical logical tensor descriptors.
@@ -184,7 +184,7 @@ def get_graph(direction, avals, config):
     return _build_graph(*_request(direction, avals, config))
 
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=None)
 def _build_graph(direction, shapes, config, capabilities, nondeterministic, fp8_backward):
     description = _describe_graph(
         direction, shapes, config, capabilities, nondeterministic, fp8_backward
