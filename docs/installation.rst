@@ -15,6 +15,7 @@ Prerequisites
 2. `CUDA 12.1+ (12.8+ for Blackwell support) <https://developer.nvidia.com/cuda-downloads>`__
 3. |driver link|_ supporting CUDA 12.1 or later.
 4. `cuDNN 9.12 <https://developer.nvidia.com/cudnn>`__ or later.
+5. `cuDNN Frontend 1.31.0 <https://pypi.org/project/nvidia-cudnn-frontend/>`__ or later.
 
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set
