@@ -163,7 +163,9 @@ def dcp_round_trip(mesh, asynchronous, flatten):
             exp_avg_sq_dtype=torch.bfloat16,
             state_dict_cpu_offload=True,
         )
-        advance(restored, restored_optimizer, 0)
+        # Start with different moments and step count so a skipped load is observable.
+        advance(restored, restored_optimizer, 1)
+        advance(restored, restored_optimizer, 2)
         restored.load_state_dict(model.state_dict())
         loaded = {
             "optimizer": get_optimizer_state_dict(restored, restored_optimizer, options=options)
