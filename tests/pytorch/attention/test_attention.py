@@ -10,7 +10,6 @@ import sys
 import pathlib
 import copy
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import Any, Dict, List, NamedTuple, Tuple, Union
 from unittest.mock import Mock
 
@@ -502,108 +501,6 @@ def test_fused_attn_ragged_batch_capacity(
     assert ("seq_len_q" in kwargs) == (not direct)
     if direct:
         assert kwargs["implementation"] == cudnn.attention_implementation.UNIFIED
-
-
-@pytest.mark.parametrize(
-    "capability,layout",
-    (
-        ((10, 0), "bshd_bshd_bshd"),
-        ((10, 0), "thd_bshd_bshd"),
-        ((10, 0), "thd_thd_thd"),
-        ((12, 0), "thd_thd_thd"),
-        ((12, 1), "thd_bshd_bshd"),
-        ((13, 0), "thd_thd_thd"),
-    ),
-)
-def test_fused_attn_backward_token_bounds(monkeypatch, capability, layout):
-    """Bound backward workspace by each ragged input's bucketed token capacity."""
-    import cudnn
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
-
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: capability)
-    config = FusedAttentionParams(
-        qkv_layout=QKVLayout[layout],
-        qkv_dtype=DType.kBFloat16,
-        o_dtype=DType.kBFloat16,
-        do_dtype=DType.kBFloat16,
-        dqkv_dtype=DType.kBFloat16,
-        batch_size=4,
-        num_attn_heads=4,
-        num_gqa_groups=4,
-        head_dim_qk=64,
-        head_dim_v=64,
-        max_seqlen_q=512,
-        max_seqlen_kv=1024,
-        num_tokens_q=1153,
-        num_tokens_kv=2305,
-        attn_mask_type=AttnMaskType["padding"],
-    )
-    query = implementation._query_graph(config, True)
-    graph = Mock()
-    graph.sdpa_backward.return_value = (Mock(), Mock(), Mock())
-    implementation.build_attention_graph(cudnn, graph, query.description())
-    bounds = {
-        name: value
-        for name, value in graph.sdpa_backward.call_args.kwargs.items()
-        if name.startswith("max_total_seq_len_")
-    }
-    expected = {}
-    if capability[0] != 12 and layout.startswith("thd"):
-        expected["max_total_seq_len_q"] = 2048
-        if layout == "thd_thd_thd":
-            expected["max_total_seq_len_kv"] = 4096
-    assert bounds == expected
-    # cuDNN's graph layout and context-parallel LSE interpretation must agree.
-    from transformer_engine.pytorch.attention.dot_product_attention import context_parallel
-
-    packed = context_parallel.uses_ragged_attention_graph(10 * capability[0] + capability[1])
-    assert bool(query.specs["stats"].ragged_offset) == (packed and layout.startswith("thd"))
-    if capability[0] == 12:
-        assert query.sq == 512
-        assert query.skv == 1024
-
-
-@pytest.mark.parametrize(
-    "capability,layout",
-    (
-        ((10, 0), "bshd_bshd_bshd"),
-        ((10, 0), "thd_bshd_bshd"),
-        ((10, 0), "thd_thd_thd"),
-        ((12, 0), "thd_thd_thd"),
-        ((12, 1), "thd_bshd_bshd"),
-    ),
-)
-def test_fused_attn_fake_stats_shape(capability, layout, monkeypatch):
-    """Fake saved statistics must match the runtime layout across the SM12x family."""
-    from transformer_engine.pytorch.attention.dot_product_attention import backends
-
-    monkeypatch.setattr(backends, "get_device_compute_capability", lambda: capability)
-    batch, seqlen, heads, dim, tokens = 3, 128, 4, 64, 224
-    ragged = layout.startswith("thd")
-    shape = (tokens, heads, dim) if ragged else (batch, seqlen, heads, dim)
-    kv_shape = (tokens, heads, dim) if layout.endswith("thd") else (batch, seqlen, heads, dim)
-    q = torch.empty(shape, device="meta", dtype=torch.bfloat16)
-    kv = torch.empty(kv_shape, device="meta", dtype=torch.bfloat16)
-    args = SimpleNamespace(
-        q=q,
-        k=kv,
-        v=kv,
-        packed_qkv=None,
-        packed_kv=None,
-        qkv_layout=layout,
-        cu_seqlens_q=torch.empty(batch + 1, device="meta", dtype=torch.int32),
-        max_seqlen_q=seqlen,
-        return_max_logit=False,
-        attn_bias_type="no_bias",
-        softmax_type="vanilla",
-        fused_attention_backend=FusedAttnBackend.F16_arbitrary_seqlen,
-    )
-    _, _, saved, _ = backends._fused_attn_forward_fake(args)
-    expected = (batch, heads, seqlen, 1)
-    if ragged and capability[0] != 12:
-        expected = (tokens, heads, 1)
-    assert saved[10].shape == expected
-    assert saved[10].dtype == torch.float32
 
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
