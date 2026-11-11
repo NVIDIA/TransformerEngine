@@ -32,8 +32,6 @@ class Indexer(torch.nn.Module):
         eps,
         device,
         params_dtype,
-        *,
-        fused,
     ):
         super().__init__()
         self.compressor = Compressor(
@@ -44,15 +42,12 @@ class Indexer(torch.nn.Module):
             eps,
             device,
             params_dtype,
-            fused=fused,
-            weight_width=n_heads if fused else 0,
+            weight_width=n_heads,
         )
         kw = {"bias": False, "device": device, "params_dtype": params_dtype}
         self.q_proj = Linear(q_lora_rank, n_heads * head_dim, **kw)
-        if not fused:
-            self.weights_proj = Linear(hidden_size, n_heads, **kw)
         self.head_dim, self.n_heads = head_dim, n_heads
-        self.top_k, self.ratio, self.fused = top_k, ratio, fused
+        self.top_k, self.ratio = top_k, ratio
 
     def forward(
         self,
@@ -99,11 +94,9 @@ class Indexer(torch.nn.Module):
         """
         n_comp = max_seqlen // self.ratio
         comp_shape = (total_comp,) if hidden_states.ndim == 2 else (hidden_states.shape[0], n_comp)
-        index_compressed = self.compressor(hidden_states, cu, cu_comp, total_comp=total_comp)
-        if self.fused:
-            index_compressed, weights = index_compressed
-        else:
-            weights = self.weights_proj(hidden_states)
+        index_compressed, weights = self.compressor(
+            hidden_states, cu, cu_comp, total_comp=total_comp
+        )
         # The singleton axis is the shared index-key head, not a tunable head count.
         key = (
             apply_rotary(

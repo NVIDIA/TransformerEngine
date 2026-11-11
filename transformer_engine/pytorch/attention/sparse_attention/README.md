@@ -182,5 +182,4 @@ Shared-input projections in `DSv4Attention` are fused: `q_a_kv_proj.weight`
 stores query-down then local-KV rows; `compressor.fused_proj.weight` stores
 KV then gate rows; the CSA `indexer.compressor.fused_proj.weight` additionally
 stores head-weight rows last. These default checkpoint keys and shapes are
-preserved. `Compressor` and `Indexer` retain their independent projection
-options. Separate-weight model imports must concatenate those rows explicitly.
+preserved. Separate-weight model imports must concatenate those rows explicitly.

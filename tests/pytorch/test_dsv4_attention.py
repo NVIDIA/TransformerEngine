@@ -113,8 +113,6 @@ def test_dsa_sparse_attention(variant, head_dim):
 
 
 def test_dsa_rejects_unsupported_metadata():
-    with pytest.raises(ValueError, match="weight_width requires fused=True"):
-        Compressor(8, 4, 2, False, 1e-6, "cpu", torch.float32, weight_width=1)
     with pytest.raises(ValueError, match="positive"):
         dsa_cudnn.sparse_attention(
             torch.empty(1, 64, 512),
@@ -315,7 +313,7 @@ def test_dsa_compressor_clears_unused_capacity(monkeypatch):
     """Unused cuDNN output must not contaminate normalization weight gradients."""
     layer = Compressor.__new__(Compressor)
     torch.nn.Module.__init__(layer)
-    layer.kv_proj = layer.gate_proj = torch.nn.Identity()
+    layer.fused_proj = torch.nn.Identity()
     layer.kv_norm = torch.nn.RMSNorm(4)
     layer.position_bias = torch.nn.Parameter(torch.zeros(4, 4))
     layer.projected, layer.ratio, layer.overlap, layer.weight_width = 4, 4, False, 0
@@ -326,7 +324,7 @@ def test_dsa_compressor_clears_unused_capacity(monkeypatch):
     )
     cu = torch.tensor([0, 3, 8], dtype=torch.int32)
     cu_comp = torch.tensor([0, 0, 1], dtype=torch.int32)
-    output = layer(torch.empty(8, 4), cu, cu_comp, total_comp=2)
+    output = layer(torch.empty(8, 8), cu, cu_comp, total_comp=2)
     output.sum().backward()
     assert torch.isfinite(output).all()
     assert torch.isfinite(layer.kv_norm.weight.grad).all()
@@ -357,7 +355,7 @@ def test_dsa_indexer_backward(index_heads):
         pytest.skip("cuDNN dense indexer training APIs are unavailable")
     torch.manual_seed(43)
     seq, ratio, window = 256, 4, 32
-    layer = Indexer(32, 16, 128, index_heads, 8, ratio, 1e-6, "cuda", torch.bfloat16, fused=True)
+    layer = Indexer(32, 16, 128, index_heads, 8, ratio, 1e-6, "cuda", torch.bfloat16)
     x = torch.randn(1, seq, 32, device="cuda", dtype=torch.bfloat16)
     q_residual = torch.randn(1, seq, 16, device="cuda", dtype=torch.bfloat16)
     cu = torch.tensor([0, seq], device=x.device, dtype=torch.int32)

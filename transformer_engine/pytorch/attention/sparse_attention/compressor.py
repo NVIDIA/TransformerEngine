@@ -35,7 +35,7 @@ class Compressor(torch.nn.Module):
 
     Accept batch-major ``[B,S,D]`` or packed ``[T,D]`` hidden states with
     token/compressed prefixes. Return ``[total_comp,width]`` rows before RoPE,
-    plus projected head weights when ``weight_width`` is nonzero in fused mode.
+    plus projected head weights when ``weight_width`` is nonzero.
     """
 
     def __init__(
@@ -48,21 +48,14 @@ class Compressor(torch.nn.Module):
         device,
         params_dtype,
         *,
-        fused=False,
         weight_width=0,
     ):
         super().__init__()
-        if weight_width and not fused:
-            raise ValueError("weight_width requires fused=True.")
         projected = width * (2 if overlap else 1)
         kw = {"bias": False, "device": device, "params_dtype": params_dtype}
-        if fused:
-            # Fuse the KV, gate, and optional index-weight projections of hidden states.
-            # Keep one contiguous weight for the shared projection call.
-            self.fused_proj = Linear(hidden_size, 2 * projected + weight_width, **kw)
-        else:
-            self.kv_proj = Linear(hidden_size, projected, **kw)
-            self.gate_proj = Linear(hidden_size, projected, **kw)
+        # Fuse the KV, gate, and optional index-weight projections of hidden states.
+        # Keep one contiguous weight for the shared projection call.
+        self.fused_proj = Linear(hidden_size, 2 * projected + weight_width, **kw)
         self.position_bias = torch.nn.Parameter(
             torch.zeros(ratio, projected, device=device, dtype=params_dtype)
         )
@@ -91,17 +84,14 @@ class Compressor(torch.nn.Module):
             also return head weights with shape ``hidden_states.shape[:-1] +
             (weight_width,)``. Only rows below the final compressed prefix are valid.
         """
-        if hasattr(self, "fused_proj"):
-            projected = self.fused_proj(hidden_states)
-            widths = (
-                (self.projected, self.projected, self.weight_width)
-                if self.weight_width
-                else (self.projected, self.projected)
-            )
-            parts = projected.split(widths, dim=-1)
-            kv, gate = parts[:2]
-        else:
-            kv, gate = self.kv_proj(hidden_states), self.gate_proj(hidden_states)
+        projected = self.fused_proj(hidden_states)
+        widths = (
+            (self.projected, self.projected, self.weight_width)
+            if self.weight_width
+            else (self.projected, self.projected)
+        )
+        parts = projected.split(widths, dim=-1)
+        kv, gate = parts[:2]
         compressed_kv = compress(
             kv.reshape(-1, self.projected).contiguous(),
             gate.reshape(-1, self.projected).contiguous(),

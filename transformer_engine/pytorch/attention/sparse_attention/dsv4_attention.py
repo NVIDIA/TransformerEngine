@@ -131,7 +131,6 @@ class DSv4Attention(torch.nn.Module):
             rms_norm_eps,
             device,
             params_dtype,
-            fused=True,
         )
         if is_csa:
             self.indexer = Indexer(
@@ -144,7 +143,6 @@ class DSv4Attention(torch.nn.Module):
                 rms_norm_eps,
                 device,
                 params_dtype,
-                fused=True,
             )
         # HF/Megatron use one independent block per output group. A normal TE
         # Linear forward mixes groups, so use its weight in the block multiply.
