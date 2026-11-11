@@ -3611,7 +3611,8 @@ def test_slot_memory_distinguishes_reused_allocation_after_checkpoint_discard() 
         reset_graphs(graphed)
 
 
-def test_slot_memory_preserves_versions_of_mutated_saved_storage() -> None:
+@pytest.mark.parametrize("offload_mode", ["none", "sync", "async"])
+def test_slot_memory_preserves_versions_of_mutated_saved_storage(offload_mode) -> None:
     """Distinct mutation versions of one StorageImpl need independent saved snapshots."""
 
     class SavedSquare(torch.autograd.Function):
@@ -3625,12 +3626,29 @@ def test_slot_memory_preserves_versions_of_mutated_saved_storage() -> None:
             (activation,) = ctx.saved_tensors
             return 2 * activation * grad_output
 
+    streams = (
+        dict(d2h_stream=torch.cuda.Stream(), h2d_stream=torch.cuda.Stream())
+        if offload_mode == "async"
+        else {}
+    )
+
     class Module(torch.nn.Module):
         def forward(self, inp):
-            activation = inp + 1
-            left = SavedSquare.apply(activation)
-            activation.add_(2)
-            return left + SavedSquare.apply(activation)
+            context = (
+                te_graph._graph_memory_offload_context(lambda tensor: tensor.is_cuda, **streams)
+                if offload_mode != "none"
+                else contextlib.nullcontext()
+            )
+            with context:
+                activation = inp + 1
+                if offload_mode == "async":
+                    stream = streams["d2h_stream"]
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        torch.cuda._sleep(2_000_000)
+                left = SavedSquare.apply(activation)
+                activation.add_(2)
+                return left + SavedSquare.apply(activation)
 
     module = Module().cuda()
     graphed = make_graphed_callables(

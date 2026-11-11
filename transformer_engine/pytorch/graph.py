@@ -2349,13 +2349,25 @@ def _make_graphed_callables(
                     raise RuntimeError("CUDA graph offload scope changed after warmup.")
                 target = per_callable_offload_targets[func_idx][current_saved_idx]
                 stream = context.d2h_stream
+                source = tensor
+                current_stream = torch.cuda.current_stream()
+                if stream is not None and stream != current_stream:
+                    # Later compute may mutate the original before async D2H reads it.
+                    # Snapshot the addressed span on compute, including overlapping views.
+                    with torch.no_grad():
+                        source = torch.empty(
+                            spec[7] // tensor.element_size(),
+                            dtype=tensor.dtype,
+                            device=tensor.device,
+                        )
+                        _copy_tensor_storage_span(source, tensor, spec[7])
                 if stream is not None:
-                    stream.wait_stream(torch.cuda.current_stream())
+                    stream.wait_stream(current_stream)
                     offload_streams[stream.cuda_stream] = stream
                 with torch.no_grad(), torch.cuda.stream(stream):
-                    _copy_tensor_storage_span(target, tensor, spec[7], non_blocking=True)
+                    _copy_tensor_storage_span(target, source, spec[7], non_blocking=True)
                 if stream is not None:
-                    tensor.record_stream(stream)
+                    source.record_stream(stream)
                 reload_streams[spec[8]] = context.h2d_stream
                 return current_saved_idx
             if spec[0] != "native":
