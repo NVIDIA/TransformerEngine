@@ -46,8 +46,6 @@ class IdentityQuantizer(Quantizer):
         high-precision buffer serves both directions).
     """
 
-    supports_output_dtype = True
-
     def __init__(
         self,
         *,
@@ -84,13 +82,28 @@ class IdentityQuantizer(Quantizer):
             return out.to(dtype)
         return out
 
+    def with_output_dtype(self, dtype):
+        """Bind a held dtype without changing this quantizer's default."""
+        quantizer = self.copy()
+        quantizer.dtype = dtype
+        return quantizer
+
+    def is_compatible_output(self, out: QuantizedTensorStorage, *, dtype=None) -> bool:
+        """An explicit request must match the destination's held dtype."""
+        return dtype is None or out._dtype == dtype
+
+    def _quantize_impl_with_dtype(self, tensor, *, dtype=None):
+        """Forward a held-dtype request to the quantization implementation."""
+        return self.quantize_impl(tensor, dtype=dtype)
+
     def quantize_impl(self, tensor: torch.Tensor, *, dtype=None) -> QuantizedTensorStorage:
+        quantizer = self if dtype is None else self.with_output_dtype(dtype)
         data = self._maybe_cast(tensor, dtype=dtype)
         if self.internal:
             return IdentityTensorStorage(
                 hp_data=data,
                 fake_dtype=data.dtype,
-                quantizer=self,
+                quantizer=quantizer,
             )
         # requires_grad=False: this is the quantized "data" tensor. Autograd
         # connectivity is provided by ``_QuantizeFunc`` in ``Quantizer.quantize``
@@ -99,7 +112,7 @@ class IdentityQuantizer(Quantizer):
             data.shape,
             data.dtype,
             hp_data=data,
-            quantizer=self,
+            quantizer=quantizer,
             requires_grad=False,
             device=data.device,
         )

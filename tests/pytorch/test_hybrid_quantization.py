@@ -210,9 +210,9 @@ class _CountingIdentityQuantizer(IdentityQuantizer):
         quantizer.optimize_for_gemm = self.optimize_for_gemm
         return quantizer
 
-    def quantize_impl(self, tensor):
+    def quantize_impl(self, tensor, *, dtype=None):
         self.counter["calls"] += 1
-        return super().quantize_impl(tensor)
+        return super().quantize_impl(tensor, dtype=dtype)
 
 
 class _CountingUnsafeIdentityQuantizer(_CountingIdentityQuantizer):
@@ -248,6 +248,32 @@ class _CountingPythonQuantizer(Quantizer):
         )
         fallback.internal = self.internal
         return fallback.quantize_impl(tensor)
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("requested_dtype", [torch.float16, torch.bfloat16])
+def test_legacy_custom_quantizer_ignores_output_dtype(internal, requested_dtype):
+    """Compute-dtype requests must not change the legacy quantize_impl signature."""
+    from transformer_engine.pytorch.module.base import quantize_weight
+
+    calls = []
+    quantizer = _CountingPythonQuantizer(calls)
+    quantizer.internal = internal
+    x = torch.randn(32, 64, device="cuda", dtype=torch.float32, requires_grad=True)
+    out = quantizer.quantize(x, dtype=requested_dtype)
+    assert out._dtype == x.dtype
+    torch.testing.assert_close(out.dequantize(), x, rtol=0, atol=0)
+    if not internal:
+        out.sum().backward()
+        torch.testing.assert_close(x.grad, torch.ones_like(x), rtol=0, atol=0)
+
+    workspace, cache = quantize_weight(
+        tensor=x.detach(), quantizer=quantizer, workspace_dtype=requested_dtype, cache=True
+    )
+    assert workspace is cache
+    assert workspace._dtype == x.dtype
+    torch.testing.assert_close(workspace.dequantize(), x, rtol=0, atol=0)
+    assert len(calls) == 2
 
 
 @requires_mxfp8_and_nvfp4
@@ -7889,7 +7915,6 @@ def test_hybrid_native_dtype_override_preserves_encoding(internal, source_dtype,
     )
     q.internal = internal
     requested_dtype = torch.float32 if source_dtype == torch.bfloat16 else torch.bfloat16
-    assert not row.supports_output_dtype
     assert row.with_output_dtype(requested_dtype) is row
     expected_row = row.quantize(x)
     direct_override = row.quantize(x, dtype=requested_dtype)

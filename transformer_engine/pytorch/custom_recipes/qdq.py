@@ -46,7 +46,6 @@ class QDQQuantizer(Quantizer):
 
     # Unknown to native fused quantization producers; outputs use native HP GEMM.
     custom = True
-    supports_output_dtype = True
 
     def __init__(self, *, dtype=None, backend="auto", rowwise=True, columnwise=True):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
@@ -70,12 +69,27 @@ class QDQQuantizer(Quantizer):
         """Write QDQ into output; a noop flag equal to one preserves output."""
         raise NotImplementedError
 
+    def with_output_dtype(self, dtype):
+        """Bind a decoded dtype without changing the quantization input."""
+        quantizer = self.copy()
+        quantizer.dtype = dtype
+        return quantizer
+
+    def is_compatible_output(self, out, *, dtype=None):
+        """An explicit request must match the decoded destination's dtype."""
+        return dtype is None or out._dtype == dtype
+
+    def _quantize_impl_with_dtype(self, tensor, *, dtype=None):
+        """Forward a decoded-dtype request to the quantization implementation."""
+        return self.quantize_impl(tensor, dtype=dtype)
+
     def quantize_impl(self, tensor, *, dtype=None):
+        quantizer = self if dtype is None else self.with_output_dtype(dtype)
         dtype = dtype or self.dtype or tensor.dtype
         if self.selected_backend(tensor, dtype) == "reference":
             data = self._reference(tensor, dtype)
-            return self._wrap(data)
-        result = self._wrap(torch.empty(tensor.shape, dtype=dtype, device=tensor.device))
+            return quantizer._wrap(data)
+        result = quantizer._wrap(torch.empty(tensor.shape, dtype=dtype, device=tensor.device))
         self._compute(tensor, result._hp_data, backend="fused")
         return result
 

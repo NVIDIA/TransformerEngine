@@ -82,8 +82,6 @@ class HybridQuantizer(Quantizer):
     columnwise_quantizer: Quantizer
     columnwise_source: Literal["original", "rowwise_dequantized"]
 
-    supports_output_dtype = True
-
     def __init__(
         self,
         *,
@@ -160,19 +158,18 @@ class HybridQuantizer(Quantizer):
         return quantizer
 
     def with_output_dtype(self, dtype):
-        """Bind a compute dtype only on children that opt into that contract."""
+        """Let each child resolve a compute-dtype request on its own copy."""
         quantizer = self.copy()
         for name in ("rowwise_quantizer", "columnwise_quantizer"):
             child = getattr(quantizer, name)
-            if child.supports_output_dtype:
-                setattr(quantizer, name, child.with_output_dtype(dtype))
+            setattr(quantizer, name, child.with_output_dtype(dtype))
         return quantizer
 
     def is_compatible_output(self, out: QuantizedTensorStorage, *, dtype=None) -> bool:
         """Validate the parent and each allocated child's output-dtype contract."""
         if not isinstance(out, HybridQuantizedTensorStorage):
             return False
-        if not super().is_compatible_output(out, dtype=dtype):
+        if dtype is not None and out._dtype != dtype:
             return False
         return all(
             storage is None or quantizer.is_compatible_output(storage, dtype=dtype)
@@ -240,9 +237,13 @@ class HybridQuantizer(Quantizer):
                 else rowwise_storage._columnwise_storage
             )
         columnwise_dtype = tensor.dtype
-        if rowwise_storage is not None and rowwise_storage._get_quantizer().supports_output_dtype:
+        if isinstance(rowwise_storage, IdentityTensorStorage):
             columnwise_dtype = torch.promote_types(tensor.dtype, rowwise_storage._dtype)
         return rowwise_result.dequantize(dtype=columnwise_dtype)
+
+    def _quantize_impl_with_dtype(self, tensor, *, dtype=None):
+        """Forward a compute-dtype request to the quantization implementation."""
+        return self.quantize_impl(tensor, dtype=dtype)
 
     def quantize_impl(self, tensor: torch.Tensor, *, dtype=None) -> QuantizedTensor:
         # A result owns the child configuration needed to reconstruct an absent

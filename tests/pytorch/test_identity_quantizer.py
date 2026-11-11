@@ -894,20 +894,25 @@ class TestIdentityQuantizerUnit:
         assert dst.copy_(identity_src) is dst
         torch.testing.assert_close(dst.dequantize(), identity_src_data, rtol=0.0, atol=0.0)
 
-    def test_fsdp_pre_post_all_gather_roundtrip(self):
+    @pytest.mark.parametrize("configured_dtype", [None, torch.float16])
+    @pytest.mark.parametrize("requested_dtype", [None, torch.bfloat16, torch.float32])
+    def test_fsdp_pre_post_all_gather_roundtrip(self, configured_dtype, requested_dtype):
         x = torch.randn(4, 8, device="cuda", dtype=torch.bfloat16)
-        t = IdentityQuantizer()(x)
+        quantizer = IdentityQuantizer(dtype=configured_dtype)
+        t = quantizer.quantize(x, dtype=requested_dtype)
+        expected = x.to(requested_dtype or configured_dtype or x.dtype)
+        assert quantizer.dtype == configured_dtype
         sharded_tensors, metadata = t.fsdp_pre_all_gather(
             mesh=None, orig_size=t.shape, contiguous_orig_stride=None, module=None, mp_policy=None
         )
         gathered, outputs = t.fsdp_post_all_gather(sharded_tensors, metadata, t.dtype, out=None)
         assert isinstance(gathered, IdentityTensor)
         assert outputs is sharded_tensors
-        torch.testing.assert_close(gathered.dequantize(), x, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(gathered.dequantize(), expected, rtol=0.0, atol=0.0)
 
         reuse, _ = t.fsdp_post_all_gather(sharded_tensors, metadata, t.dtype, out=gathered)
         assert reuse is gathered
-        torch.testing.assert_close(reuse.dequantize(), x, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(reuse.dequantize(), expected, rtol=0.0, atol=0.0)
 
     def test_torch_weights_only_load_preserves_identity_tensor(self):
         x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)

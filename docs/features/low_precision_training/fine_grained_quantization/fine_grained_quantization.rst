@@ -291,20 +291,21 @@ holds the value reconstructed from MXFP8, not the original input — see
 Output dtype and workspace updates
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Output-dtype handling is opt-in through ``Quantizer.supports_output_dtype``,
-which defaults to ``False``. Identity and Hybrid opt in; native quantizers
-continue to ignore output-dtype requests, even inside a custom recipe.
+``Quantizer.quantize(x, dtype=...)`` preserves the ``quantize_impl(x)`` interface
+for native and existing custom quantizers, ignoring output-dtype requests.
+Identity, Hybrid, and QDQ quantizers use dtype-aware dispatch to
+handle these requests.
 
 ``IdentityQuantizer.quantize(x, dtype=...)`` selects the held output dtype
 without changing the quantizer's default or adding an autograd edge to its
 stored data. ``HybridQuantizer`` passes a compute-dtype request to its children;
-children that support output-dtype binding retain it for later reconstruction.
+high-precision children retain it for later reconstruction.
 Native quantizers keep their existing behavior, including ignoring this
 argument. Their encodings and default dequantization metadata are unchanged.
 
 Hybrid's ``rowwise_dequantized`` source uses the source tensor's dtype for
 native children, preserving existing native compositions, including internal
-storage. For children that support output-dtype handling, it uses
+storage. For Identity and QDQ storage, it uses
 ``torch.promote_types`` on the source and stored dtypes to avoid narrowing
 decoded forward values. This is the input dtype of the columnwise quantizer,
 not necessarily the backward GEMM dtype. Widening a value already rounded into
