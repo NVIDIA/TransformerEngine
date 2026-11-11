@@ -664,6 +664,13 @@ def _regenerate_inputs(bench, args):
             commit = fields.get("commit", "unknown").split()[0]
             label = f"{role}: {series} @ {commit} ({Path(folder).resolve().name})"
             runs[role] = (df.assign(revision=role), fields, text, label)
+        # The activation is no results column, so act / dact configs would join across them.
+        activations = [runs[role][1].get("activation") for role in ("old", "new")]
+        if None not in activations and activations[0] != activations[1]:
+            sys.exit(
+                f"--old {args.old} and --new {args.new} used different activations"
+                f" ({activations[0]} vs {activations[1]}); compare runs of the same activation"
+            )
         df = with_delta([runs["old"][0], runs["new"][0]], bench.config, _columns(bench))
         labels = {role: run[3] for role, run in runs.items()}
         fields = runs["old"][1]
