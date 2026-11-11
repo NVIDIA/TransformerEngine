@@ -40,7 +40,7 @@ from transformer_engine.pytorch.constants import (
     DType,
     MXFP8_BLOCK_SCALING_SIZE,
 )
-from transformer_engine.common.cudnn.mxfp8 import (
+from transformer_engine.common.cudnn.mxfp8_utils import (
     quantization_layouts as mxfp8_quantization_layouts,
     scale_reordering as mxfp8_scale_reordering,
     shape_error as mxfp8_shape_error,

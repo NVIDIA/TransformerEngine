@@ -33,7 +33,7 @@ from transformer_engine.common.cudnn.graph import (
     bucket,
     uses_ragged_attention_graph,
 )
-from transformer_engine.common.cudnn.mxfp8 import support_error as mxfp8_support_error
+from transformer_engine.common.cudnn.mxfp8_utils import support_error as mxfp8_support_error
 
 from .cudnn import (
     _import_cudnn_frontend,

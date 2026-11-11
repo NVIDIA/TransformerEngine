@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from transformer_engine.common.cudnn import mxfp8
+from transformer_engine.common.cudnn import mxfp8_utils as mxfp8
 from transformer_engine.common.cudnn.graph import mxfp8_scale_spec
 from transformer_engine.jax.attention import (
     AttnBiasType,

@@ -12,7 +12,7 @@ from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 from jax.custom_batching import sequential_vmap
 
-from transformer_engine.common.cudnn.mxfp8 import quantization_layouts, scale_reordering
+from transformer_engine.common.cudnn.mxfp8_utils import quantization_layouts, scale_reordering
 from ..quantize import QuantizerFactory, QuantizeLayout, ScalingMode, ScaledTensor2x
 from ..quantize.tensor import ScaledTensorFactory
 from .quantization import quantize

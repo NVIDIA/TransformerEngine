@@ -29,7 +29,7 @@ from transformer_engine.common.cudnn.graph import (
     uses_ragged_attention_graph,
     mxfp8_scale_spec,
 )
-from transformer_engine.common.cudnn import mxfp8 as mxfp8_rules
+from transformer_engine.common.cudnn import mxfp8_utils as mxfp8_rules
 
 from .cudnn_graph import (
     import_cudnn,

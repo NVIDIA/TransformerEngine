@@ -14,7 +14,7 @@ class AttentionOptions:
     """Normalized attributes that affect graph construction and support."""
 
     backward: bool = False
-    fp8: bool = False
+    fp8: bool = False  # Effective precision for this pass, resolved by the frontend.
     mxfp8: bool = False
     attn_scale: str | float = "attn_scale"
     bottom_right: bool = False
@@ -151,20 +151,17 @@ def build_attention_graph(cudnn, graph, spec, *, score_mod=None, score_mod_bprop
 
     q, k, v = (tensor(name) for name in ("q", "k", "v"))
     if not options.fp8:
-        if options.backward:
+        if not options.backward:
+            outputs = graph.sdpa(q, k, v, **kwargs)
+            names = ("o", "stats")
+        else:
             outputs = graph.sdpa_backward(
                 q, k, v, tensor("o"), tensor("do"), tensor("stats"), **kwargs
             )
             names = ("dq", "dk", "dv")
-        else:
-            outputs = graph.sdpa(q, k, v, **kwargs)
-            names = ("o", "stats")
-    elif not options.backward:
-        scales = [tensor(name) for name in ("descale_q", "descale_k", "descale_v")]
-        if options.mxfp8:
-            outputs = graph.sdpa_mxfp8(q, k, v, *scales, **kwargs)
-            names = ("o", "stats", "amax_o")
-        else:
+    elif not options.mxfp8:
+        if not options.backward:
+            scales = [tensor(name) for name in ("descale_q", "descale_k", "descale_v")]
             outputs = graph.sdpa_fp8(
                 q,
                 k,
@@ -174,61 +171,66 @@ def build_attention_graph(cudnn, graph, spec, *, score_mod=None, score_mod_bprop
                 **kwargs
             )
             names = ("o", "stats", "amax_s", "amax_o")
-    elif options.mxfp8:
-        outputs = graph.sdpa_mxfp8_backward(
-            q,
-            tensor("q_t"),
-            k,
-            tensor("k_t"),
-            v,
-            tensor("o"),
-            tensor("do_f16"),
-            tensor("do"),
-            tensor("do_t"),
-            tensor("stats"),
-            *(
-                tensor(name)
-                for name in (
-                    "descale_q",
-                    "descale_q_t",
-                    "descale_k",
-                    "descale_k_t",
-                    "descale_v",
-                    "descale_do",
-                    "descale_do_t",
-                )
-            ),
-            **kwargs
-        )
-        names = ("dq", "dk", "dv", "amax_dq", "amax_dk", "amax_dv")
+        else:
+            outputs = graph.sdpa_fp8_backward(
+                q,
+                k,
+                v,
+                tensor("o"),
+                tensor("do"),
+                tensor("stats"),
+                *(
+                    tensor(name)
+                    for name in (
+                        "descale_q",
+                        "descale_k",
+                        "descale_v",
+                        "descale_o",
+                        "descale_do",
+                        "descale_s",
+                        "descale_dp",
+                        "scale_s",
+                        "scale_dq",
+                        "scale_dk",
+                        "scale_dv",
+                        "scale_dp",
+                    )
+                ),
+                **kwargs
+            )
+            names = ("dq", "dk", "dv", "amax_dq", "amax_dk", "amax_dv", "amax_dp")
     else:
-        outputs = graph.sdpa_fp8_backward(
-            q,
-            k,
-            v,
-            tensor("o"),
-            tensor("do"),
-            tensor("stats"),
-            *(
-                tensor(name)
-                for name in (
-                    "descale_q",
-                    "descale_k",
-                    "descale_v",
-                    "descale_o",
-                    "descale_do",
-                    "descale_s",
-                    "descale_dp",
-                    "scale_s",
-                    "scale_dq",
-                    "scale_dk",
-                    "scale_dv",
-                    "scale_dp",
-                )
-            ),
-            **kwargs
-        )
-        names = ("dq", "dk", "dv", "amax_dq", "amax_dk", "amax_dv", "amax_dp")
+        if not options.backward:
+            scales = [tensor(name) for name in ("descale_q", "descale_k", "descale_v")]
+            outputs = graph.sdpa_mxfp8(q, k, v, *scales, **kwargs)
+            names = ("o", "stats", "amax_o")
+        else:
+            outputs = graph.sdpa_mxfp8_backward(
+                q,
+                tensor("q_t"),
+                k,
+                tensor("k_t"),
+                v,
+                tensor("o"),
+                tensor("do_f16"),
+                tensor("do"),
+                tensor("do_t"),
+                tensor("stats"),
+                *(
+                    tensor(name)
+                    for name in (
+                        "descale_q",
+                        "descale_q_t",
+                        "descale_k",
+                        "descale_k_t",
+                        "descale_v",
+                        "descale_do",
+                        "descale_do_t",
+                    )
+                ),
+                **kwargs
+            )
+            names = ("dq", "dk", "dv", "amax_dq", "amax_dk", "amax_dv")
 
     for name, desc in zip(names, outputs):
         if name not in specs:
