@@ -137,3 +137,10 @@ CSA's `return_indexer_context=True` returns `(output, context)` for a
 single-sequence, caller-owned indexer loss. Without that objective, the
 indexer is not trained by the attention output alone. Pre-attention
 normalization, residuals, and loss calculation remain model-owned.
+
+Shared-input projections in `DSv4Attention` are fused: `q_a_kv_proj.weight`
+stores query-down then local-KV rows; `compressor.fused_proj.weight` stores
+KV then gate rows; the CSA `indexer.compressor.fused_proj.weight` additionally
+stores head-weight rows last. These default checkpoint keys and shapes are
+preserved. `Compressor` and `Indexer` retain their independent projection
+options. Separate-weight model imports must concatenate those rows explicitly.

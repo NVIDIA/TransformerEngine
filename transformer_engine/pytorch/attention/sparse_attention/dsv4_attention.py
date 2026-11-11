@@ -53,13 +53,8 @@ class DSv4Attention(torch.nn.Module):
     """DSv4 CSA/HCA attention in ``sbhd``, ``bshd``, or packed ``thd`` format.
 
     Composes TE projections/norms, Compressor, Indexer, and RoPE with cuDNN
-    sparse attention. Supports full-sequence BF16 forward/backward on SM100 only,
-    with 64 heads of width 512 and CSA index heads of width 128. Shared-input
-    projections are fused by default. Each sequence starts at position zero.
-    CSA and HCA include sliding-window attention; standalone sliding-window-only
-    layers are unsupported. Cache/decode, physical inter-sequence padding,
-    TP/SP/CP, and FP8 are unsupported. The model owns the indexer auxiliary loss;
-    discrete top-k selection does not train the indexer from attention output alone.
+    sparse attention. See the sparse_attention README for support and training
+    requirements. Shared-input projections are fused.
     """
 
     def __init__(
@@ -83,7 +78,6 @@ class DSv4Attention(torch.nn.Module):
         device: str = "cuda",
         params_dtype: torch.dtype = torch.float32,
         qkv_format: str = "sbhd",
-        _fuse_projections: bool = True,
     ):
         super().__init__()
         # Keep the current kernel geometry explicit without exposing untested sizes.
@@ -118,17 +112,13 @@ class DSv4Attention(torch.nn.Module):
             )
 
         kw = {"bias": False, "device": device, "params_dtype": params_dtype}
-        if _fuse_projections:
-            # Query-down and local-KV projections read the same hidden states.
-            # Keep slices explicit below while one contiguous weight feeds the GEMM.
-            self.q_a_kv_proj = Linear(
-                hidden_size,
-                q_lora_rank + head_dim,
-                **kw,
-            )
-        else:
-            self.q_a_proj = Linear(hidden_size, q_lora_rank, **kw)
-            self.kv_proj = Linear(hidden_size, head_dim, **kw)
+        # Query-down and local-KV projections read the same hidden states.
+        # Keep slices explicit below while one contiguous weight feeds the GEMM.
+        self.q_a_kv_proj = Linear(
+            hidden_size,
+            q_lora_rank + head_dim,
+            **kw,
+        )
         # LayerNormLinear would normalize before projection; DSv4 normalizes after it.
         self.q_a_norm = RMSNorm(q_lora_rank, eps=rms_norm_eps, device=device, dtype=params_dtype)
         self.q_b_proj = Linear(q_lora_rank, self.num_heads * head_dim, **kw)
@@ -141,7 +131,7 @@ class DSv4Attention(torch.nn.Module):
             rms_norm_eps,
             device,
             params_dtype,
-            fused=_fuse_projections,
+            fused=True,
         )
         if is_csa:
             self.indexer = Indexer(
@@ -154,7 +144,7 @@ class DSv4Attention(torch.nn.Module):
                 rms_norm_eps,
                 device,
                 params_dtype,
-                fused=_fuse_projections,
+                fused=True,
             )
         # HF/Megatron use one independent block per output group. A normal TE
         # Linear forward mixes groups, so use its weight in the block multiply.
@@ -175,7 +165,6 @@ class DSv4Attention(torch.nn.Module):
             )
         )
         self.hidden_size, self.q_lora_rank = hidden_size, q_lora_rank
-        self.fused_projections = _fuse_projections
         self.head_dim, self.rope_head_dim = head_dim, rope_head_dim
         self.rope_theta = rope_theta if rope is None else None
         self.rms_norm_eps = rms_norm_eps
@@ -241,13 +230,9 @@ class DSv4Attention(torch.nn.Module):
 
         token_rope, compressed_rope = self.rope(seq, hidden_states.device)
 
-        if self.fused_projections:
-            q_a, local_kv_projected = self.q_a_kv_proj(hidden_states).split(
-                (self.q_lora_rank, self.head_dim), dim=-1
-            )
-        else:
-            q_a = self.q_a_proj(hidden_states)
-            local_kv_projected = self.kv_proj(hidden_states)
+        q_a, local_kv_projected = self.q_a_kv_proj(hidden_states).split(
+            (self.q_lora_rank, self.head_dim), dim=-1
+        )
         q_residual = self.q_a_norm(q_a)
         q = self.q_b_proj(q_residual).reshape(*token_shape, self.num_heads, self.head_dim)
         # Query-up norm is unweighted; TE RMSNorm would add a learned scale.
