@@ -2875,7 +2875,7 @@ def test_slot_memory_reuses_variant_major_branches(
         reset_graphs(graphed)
 
 
-@pytest.mark.parametrize("conflict", ("saved", "output"))
+@pytest.mark.parametrize("conflict", ("cross_slot", "same_slot_branch"))
 def test_slot_memory_debug_rejects_live_branch_reuse(conflict, monkeypatch) -> None:
     """An invalid branch forward must fail before corrupting the first branch's backward."""
     monkeypatch.setenv("NVTE_CUDA_GRAPH_SLOT_DEBUG", "1")
@@ -2886,10 +2886,9 @@ def test_slot_memory_debug_rejects_live_branch_reuse(conflict, monkeypatch) -> N
 
     module = Module().cuda()
     samples = tuple((torch.ones(32, device="cuda", requires_grad=True),) for _ in range(2))
-    slots = (
-        _slot(0, 0, 0),
-        _slot(0 if conflict == "saved" else 1, 1, 1 if conflict == "saved" else 0),
-    )
+    # Both cases share saved arena 0: across two slots, or between two branches of one slot
+    # (which must also share their saved arena, so the saved-arena guard rejects it first).
+    slots = (_slot(0, 0, 0), _slot(0, 1, 1 if conflict == "cross_slot" else 0))
     graphed = make_graphed_callables(
         (module,) * 2,
         samples,
@@ -3826,6 +3825,23 @@ def test_slot_memory_rejects_delayed_wgrad_order() -> None:
             _num_layers_per_chunk=[1],
             _reuse_graph_input_output_buffers=True,
             _graph_memory_slots=(_slot(0, 0, 1),),
+        )
+
+
+@pytest.mark.parametrize("arena", ("saved", "grad"))
+def test_slot_memory_rejects_branches_with_different_arenas(arena) -> None:
+    """Branches of one slot share output and gradient storage only through shared arenas."""
+    module = torch.nn.Linear(8, 8, device="cuda")
+    samples = tuple((torch.randn(4, 8, device="cuda", requires_grad=True),) for _ in range(2))
+    branch = _slot(1, 1, 0) if arena == "saved" else _slot(0, 1, 0, user_grad=1)
+    with pytest.raises(ValueError, match="same saved and gradient arenas"):
+        make_graphed_callables(
+            (module,) * 2,
+            samples,
+            _order=_variant_major_order([1, -1], 2),
+            _num_layers_per_chunk=[1, 1],
+            _reuse_graph_input_output_buffers=True,
+            _graph_memory_slots=(_slot(0, 0, 0), branch),
         )
 
 
