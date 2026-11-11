@@ -25,13 +25,19 @@ For CP size ``P`` and group rank ``r``:
 
 * **THD:** rank ``r`` owns ``[r*T//P:(r+1)*T//P]`` of the global packed token
   buffer. Pass the same global ``int32`` cumulative document lengths as
-  ``global_cu_seqlens`` on every rank. This metadata can be on CPU or CUDA;
+  ``cu_seqlens`` on every rank. This metadata can be on CPU or CUDA;
   local fragment boundaries are derived automatically.
 * **BSHD/SBHD:** rank ``r`` owns ``[r*S//P:(r+1)*S//P]`` of every batch row.
   Here ``B`` is batch size and ``S`` is each row's full sequence length.
   When ``S`` is divisible by ``P``, TE can infer ``S`` from the local length.
   Otherwise, pass global document offsets ``[0,S,2*S,...,B*S]``. Rank slices
   still follow the formula above; arbitrary rank splits are not supported.
+
+``cu_seqlens`` always describes the complete logical documents, before CP
+partitioning. Without CP, those boundaries describe the supplied input directly.
+Dense inputs can omit the metadata; if supplied without CP, it must describe
+the full rows as ``[0,S,2*S,...,B*S]``. TE keeps the derived local cumulative
+lengths private.
 
 Q, K, V, ``g`` and ``beta`` must follow the same ownership. TE does not
 redistribute inputs or interpret SDPA's dual-chunk layout. A local conversion
@@ -69,7 +75,7 @@ share memory. The initial collective can still broadcast unused summary slots.
     global_cu = torch.tensor([0, 8, 12, 24], dtype=torch.int32)
     output = attn(
         q_local, k_local, v_local, g=g_local, beta=beta_local,
-        global_cu_seqlens=global_cu,
+        cu_seqlens=global_cu,
     )
 
 Recurrent states and gradients

@@ -325,7 +325,14 @@ def test_gdn_dense_layout(qkv_format, dtype, compile_model):
     if compile_model:
         torch._dynamo.reset()
         attention = torch.compile(attention, fullgraph=True)
-    output = attention(q, k, v, g=g, beta=beta, use_qk_l2norm_in_kernel=True)
+    # Exercise explicit full-document metadata in eager and compiled dense calls;
+    # the other dtype retains the shape-inferred path.
+    cu_seqlens = (
+        torch.arange(batch + 1, device=q.device, dtype=torch.int32) * sequence
+        if dtype == torch.bfloat16
+        else None
+    )
+    output = attention(q, k, v, g=g, beta=beta, cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True)
     assert output.shape == expected.shape
     _assert_rms_close(output, expected, _FWD_TOL[dtype], "output")
 

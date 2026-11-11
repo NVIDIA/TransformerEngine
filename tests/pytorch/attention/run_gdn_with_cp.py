@@ -144,7 +144,11 @@ def _case(
         tp_group=tp_group,
     )
     kwargs = dict(
-        global_cu_seqlens=global_cu if layout == "thd" or dense_global else None,
+        cu_seqlens=(
+            (global_cu.cpu() if size == 1 else global_cu)
+            if layout == "thd" or dense_global
+            else None
+        ),
         initial_state=state,
         output_final_state=final,
         checkpoint_core_attention=checkpoint,
@@ -192,13 +196,10 @@ def _invalid_metadata(group):
     module = GatedDeltaNetAttention(2, 64, qkv_format="thd", cp_group=group)
     invalid = (
         {},
-        {"global_cu_seqlens": torch.tensor([0, 4 * size], dtype=torch.int64)},
-        {"global_cu_seqlens": torch.tensor([0, 4 * size, 2 * size], dtype=torch.int32)},
-        {"global_cu_seqlens": torch.tensor([0, 5 * size], dtype=torch.int32)},
-        {
-            "global_cu_seqlens": torch.tensor([0, 4 * size], dtype=torch.int32),
-            "cu_seqlens": torch.tensor([0, 3], dtype=torch.int32, device=device),
-        },
+        {"cu_seqlens": torch.tensor([0, 4 * size], dtype=torch.int64)},
+        {"cu_seqlens": torch.tensor([0, 4 * size, 2 * size], dtype=torch.int32)},
+        {"cu_seqlens": torch.tensor([0, 5 * size], dtype=torch.int32)},
+        {"cu_seqlens": torch.tensor([0, 4], dtype=torch.int32, device=device)},
     )
     for kwargs in invalid:
         with pytest.raises(ValueError):
@@ -223,23 +224,28 @@ def _inference_and_deferred_group(group):
     q, k, v, g, beta = (t.requires_grad_() for t in (q, k, v, g, beta))
     for context in (torch.no_grad, torch.inference_mode):
         with context():
-            global_cu = torch.tensor([0, 17, 35], device=device, dtype=torch.int32)
-            expected, expected_states = reference(
-                q, k, v, g, beta, cu_seqlens=global_cu, output_final_state=True
-            )
-            lo, hi = rank * 35 // size, (rank + 1) * 35 // size
-            output, states = module(
-                q[lo:hi],
-                k[lo:hi],
-                v[lo:hi],
-                g[lo:hi],
-                beta[lo:hi],
-                global_cu_seqlens=global_cu,
-                output_final_state=True,
-            )
-            assert not output.requires_grad and not states.requires_grad
-            _assert_rms_close(output, expected[lo:hi], _FWD_TOL[q.dtype], "inference output")
-            _assert_rms_close(states, expected_states, _STATE_TOL[q.dtype], "inference states")
+            # CP accepts host metadata; inference tensors intentionally bypass
+            # the partition cache because they have no mutation counter.
+            metadata_device = "cpu" if context is torch.no_grad else device
+            global_cu = torch.tensor([0, 17, 35], device=metadata_device, dtype=torch.int32)
+            for boundary in (17, 19):
+                global_cu[1] = boundary
+                expected, expected_states = reference(
+                    q, k, v, g, beta, cu_seqlens=global_cu.to(device), output_final_state=True
+                )
+                lo, hi = rank * 35 // size, (rank + 1) * 35 // size
+                output, states = module(
+                    q[lo:hi],
+                    k[lo:hi],
+                    v[lo:hi],
+                    g[lo:hi],
+                    beta[lo:hi],
+                    cu_seqlens=global_cu,
+                    output_final_state=True,
+                )
+                assert not output.requires_grad and not states.requires_grad
+                _assert_rms_close(output, expected[lo:hi], _FWD_TOL[q.dtype], "inference output")
+                _assert_rms_close(states, expected_states, _STATE_TOL[q.dtype], "inference states")
     dist.barrier(group=group)
 
 
@@ -273,9 +279,9 @@ def _state_chaining(group):
     local_seed = seed.detach().requires_grad_(True)
     module = GatedDeltaNetAttention(heads, dim, qkv_format="thd", cp_group=group)
     local_first, state = module(
-        *inputs[:5], global_cu_seqlens=cu, initial_state=local_seed, output_final_state=True
+        *inputs[:5], cu_seqlens=cu, initial_state=local_seed, output_final_state=True
     )
-    local_second = module(*inputs[5:], global_cu_seqlens=cu, initial_state=state)
+    local_second = module(*inputs[5:], cu_seqlens=cu, initial_state=state)
     loss = (local_first * grad_first[lo:hi]).sum() * 0.3
     loss = loss + (local_second * grad_second[lo:hi]).sum()
     for retain in (True, False):
@@ -337,7 +343,14 @@ def main():
         )
         cases += 1
         for layout, dtype in (("bshd", torch.bfloat16), ("sbhd", torch.float16)):
-            _case(group, [size * 65] * 2, dtype=dtype, layout=layout, norm=True)
+            _case(
+                group,
+                [size * 65] * 2,
+                dtype=dtype,
+                layout=layout,
+                norm=True,
+                dense_global=layout == "bshd",
+            )
             cases += 1
         for layout in ("bshd", "sbhd"):
             _case(group, [size * 17 + 3] * 2, layout=layout, dense_global=True)
@@ -391,8 +404,10 @@ def main():
         # A size-one group follows the ordinary local path, even while WORLD
         # contains several ranks. Every process creates groups in the same order.
         singletons = [dist.new_group([r]) for r in range(size)]
-        _case(singletons[dist.get_rank(group)], [17, 13])
-        cases += 1
+        singleton = singletons[dist.get_rank(group)]
+        _case(singleton, [17, 13])
+        _case(singleton, [17, 17], layout="bshd", dense_global=True)
+        cases += 2
         if size == 4:
             cp_groups = [dist.new_group(ranks) for ranks in ([0, 1], [2, 3])]
             tp_groups = [dist.new_group(ranks) for ranks in ([0, 2], [1, 3])]

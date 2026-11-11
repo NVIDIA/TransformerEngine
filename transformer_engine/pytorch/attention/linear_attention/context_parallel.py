@@ -19,7 +19,7 @@ from transformer_engine.common.linear_attention import (
     LinearAttentionCPPartition,
     build_linear_attention_partition,
 )
-from .base import _to_thd, _validate_cu_seqlens
+from .base import _to_thd
 
 
 @dataclass
@@ -276,43 +276,33 @@ def context_parallel_attention(
     group,
     qkv_format,
     cu_seqlens,
-    global_cu_seqlens,
     output_final_state,
     **kernel_kwargs,
 ):
-    """Validate local inputs, cache a partition, and restore the public output layout."""
+    """Derive local fragment boundaries from full-document metadata and run CP."""
     adapter._validate_inputs(q, k, v, gates, initial_state, qkv_format)
     size, rank = dist.get_world_size(group), dist.get_rank(group)
     tensors = tuple(_to_thd(t, qkv_format).contiguous() for t in (q, k, v, *gates.values()))
     dense = qkv_format != "thd"
     batch, length = None, None
     if dense:
-        if cu_seqlens is not None:
-            raise ValueError("Dense linear-attention CP does not accept local cu_seqlens.")
         batch, length = q.shape[:2] if qkv_format == "bshd" else (q.shape[1], q.shape[0])
-    elif not isinstance(global_cu_seqlens, torch.Tensor):
-        raise ValueError(
-            "Linear-attention CP with THD requires global_cu_seqlens for all documents."
-        )
+    elif cu_seqlens is None:
+        raise ValueError("Linear-attention CP with THD requires cu_seqlens for all documents.")
     if cu_seqlens is not None:
-        _validate_cu_seqlens(cu_seqlens, device=q.device, name="cu_seqlens")
-    if global_cu_seqlens is not None:
-        if not isinstance(global_cu_seqlens, torch.Tensor):
-            raise TypeError("global_cu_seqlens must be a torch.Tensor.")
-        if global_cu_seqlens.dtype != torch.int32 or global_cu_seqlens.dim() != 1:
-            raise ValueError("global_cu_seqlens must be a one-dimensional int32 tensor.")
-        metadata = (global_cu_seqlens, cu_seqlens)
-        cacheable = all(t is None or not torch.is_inference(t) for t in metadata)
+        if not isinstance(cu_seqlens, torch.Tensor):
+            raise TypeError("cu_seqlens must be a torch.Tensor.")
+        if cu_seqlens.dtype != torch.int32 or cu_seqlens.dim() != 1:
+            raise ValueError("cu_seqlens must be a one-dimensional int32 tensor.")
+        cacheable = not torch.is_inference(cu_seqlens)
         key = (
             qkv_format,
             tuple(q.shape[:2]),
-            id(global_cu_seqlens),
-            global_cu_seqlens._version if cacheable else None,
+            id(cu_seqlens),
+            cu_seqlens._version if cacheable else None,
             q.device,
             size,
             rank,
-            id(cu_seqlens),
-            None if cu_seqlens is None or not cacheable else cu_seqlens._version,
         )
     else:
         key, cacheable = (qkv_format, batch, length, q.device, size, rank), True
@@ -323,19 +313,16 @@ def context_parallel_attention(
         cache = None
     if cache is None or cache[0] != key:
         documents = (
-            tuple(global_cu_seqlens.tolist())
-            if global_cu_seqlens is not None
+            tuple(cu_seqlens.tolist())
+            if cu_seqlens is not None
             else tuple(i * length * size for i in range(batch + 1))
         )
         if dense and len(documents) != batch + 1:
-            raise ValueError("Dense global_cu_seqlens must describe the full batch.")
+            raise ValueError("Dense cu_seqlens must describe the full batch.")
         host = build_linear_attention_partition(documents, size, rank, dense=dense)
         plan = _device_partition(host, q.device)
-        if cu_seqlens is not None:
-            if tuple(cu_seqlens.tolist()) != host.local_cu_seqlens:
-                raise ValueError("Local cu_seqlens does not match the contiguous CP fragments.")
-        # Hold tensor references to prevent object-ID reuse from invalidating the cache.
-        adapter._cp_partition_cache = (key, plan, global_cu_seqlens, cu_seqlens)
+        # Hold the metadata tensor to prevent object-ID reuse in the cache key.
+        adapter._cp_partition_cache = (key, plan, cu_seqlens)
     else:
         plan = cache[1]
     if tensors[0].shape[0] != plan.host.local_cu_seqlens[-1]:

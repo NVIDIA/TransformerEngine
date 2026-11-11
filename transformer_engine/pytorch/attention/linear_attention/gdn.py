@@ -20,6 +20,7 @@ from .base import (
     AlignedTimelineKernelAdapter,
     LinearAttentionBase,
     _needs_eager_linear_attention,
+    _validate_cu_seqlens,
 )
 
 
@@ -56,6 +57,20 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
                 "GDN g and beta must both have shape "
                 f"{expected_gate_shape}; got {tuple(g.shape)} and {tuple(beta.shape)}."
             )
+
+    def _resolve_cu_seqlens(self, query_layer, qkv_format, cu_seqlens):
+        """Accept full-document metadata for dense inputs as well as packed inputs."""
+        if qkv_format == "thd" or cu_seqlens is None:
+            return super()._resolve_cu_seqlens(query_layer, qkv_format, cu_seqlens)
+        _validate_cu_seqlens(cu_seqlens, device=query_layer.device, name="cu_seqlens")
+        batch, length = (
+            query_layer.shape[:2]
+            if qkv_format == "bshd"
+            else (query_layer.shape[1], query_layer.shape[0])
+        )
+        if cu_seqlens.numel() != batch + 1:
+            raise ValueError("Dense cu_seqlens must have shape [batch_size + 1].")
+        return cu_seqlens, length
 
     def _call_op(
         self,
@@ -210,7 +225,6 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
         cp_group: Optional[dist.ProcessGroup] = None,
-        global_cu_seqlens: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Run GDN and return a TE-layout output, optionally with the final state."""
         if cp_group is not None and dist.get_world_size(cp_group) > 1:
@@ -226,29 +240,25 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
                 group=cp_group,
                 qkv_format=qkv_format,
                 cu_seqlens=cu_seqlens,
-                global_cu_seqlens=global_cu_seqlens,
                 output_final_state=output_final_state,
                 use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             )
-        if global_cu_seqlens is not None:
-            if cp_group is None:
-                raise ValueError("global_cu_seqlens requires CP.")
-            if not isinstance(global_cu_seqlens, torch.Tensor):
-                raise TypeError("global_cu_seqlens must be a torch.Tensor.")
-            if global_cu_seqlens.dtype != torch.int32 or global_cu_seqlens.dim() != 1:
-                raise ValueError("global_cu_seqlens must be a one-dimensional int32 tensor.")
+        if cp_group is not None and cu_seqlens is not None:
+            if not isinstance(cu_seqlens, torch.Tensor):
+                raise TypeError("cu_seqlens must be a torch.Tensor.")
+            if cu_seqlens.dtype != torch.int32 or cu_seqlens.dim() != 1:
+                raise ValueError("cu_seqlens must be a one-dimensional int32 tensor.")
             if qkv_format == "thd":
-                if cu_seqlens is not None and cu_seqlens.tolist() != global_cu_seqlens.tolist():
-                    raise ValueError("Local cu_seqlens must match the size-one global input.")
-                cu_seqlens = global_cu_seqlens.to(query_layer.device)
+                cu_seqlens = cu_seqlens.to(query_layer.device)
             elif qkv_format in {"bshd", "sbhd"}:
                 batch, length = (
                     query_layer.shape[:2]
                     if qkv_format == "bshd"
                     else (query_layer.shape[1], query_layer.shape[0])
                 )
-                if global_cu_seqlens.tolist() != [i * length for i in range(batch + 1)]:
-                    raise ValueError("Dense global_cu_seqlens does not match the size-one input.")
+                if cu_seqlens.tolist() != [i * length for i in range(batch + 1)]:
+                    raise ValueError("Dense cu_seqlens does not match the size-one CP input.")
+                cu_seqlens = None
         return self._run(
             query_layer,
             key_layer,
@@ -358,7 +368,6 @@ class GatedDeltaNetAttention(LinearAttentionBase):
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
-        global_cu_seqlens: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Apply Gated DeltaNet linear attention.
 
@@ -376,13 +385,13 @@ class GatedDeltaNetAttention(LinearAttentionBase):
         qkv_format : Optional[str], default = `None`
             Overrides the module's configured `qkv_format` for this call.
         cu_seqlens : Optional[torch.Tensor], default = `None`
-            Cumulative sequence lengths for packed (`thd`) inputs, of shape
-            `[batch_size + 1]` and dtype `torch.int32` without CP. With THD CP,
-            TE intersects the global documents with this rank's token interval
-            and derives cumulative lengths for the resulting local fragments.
-            Documents with no tokens on this rank are omitted. With THD CP,
-            this argument is optional; if supplied, its values must equal
-            those derived offsets.
+            Cumulative document lengths, of shape `[batch_size + 1]` and dtype
+            `torch.int32`. Required for THD. With CP, describe the complete
+            documents across the CP group, identically on all ranks; TE derives
+            the local fragment boundaries. For BSHD/SBHD CP, this metadata is
+            optional for equal slices and required for uneven slices; see Notes.
+            Without CP, dense metadata is optional and must describe the
+            full rows as `[0, S, 2*S, ..., B*S]`.
         checkpoint_core_attention : bool, default = `False`
             If true, forward activations for this module are recomputed
             during the backward pass instead of saved.
@@ -394,22 +403,20 @@ class GatedDeltaNetAttention(LinearAttentionBase):
             If true, also return the final recurrent state.
         use_qk_l2norm_in_kernel : bool, default = `False`
             If true, L2-normalize Q and K inside the kernel before the recurrence.
-        global_cu_seqlens : Optional[torch.Tensor], default = `None`
-            Global cumulative document lengths, dtype `torch.int32`, identical
-            on all ranks. Required for THD CP: rank ``r`` supplies tokens
-            ``[r*T//P:(r+1)*T//P]`` from each packed input, where ``T`` is the
-            final global offset and ``P`` is CP size. No CP divisibility constraint
-            applies; pack tokens without gaps.
-            For BSHD/SBHD CP, use ``[0, S, 2*S, ..., B*S]``, where ``B`` is
-            batch size and ``S`` is the full sequence length of each batch row.
-            These are document boundaries, not rank boundaries. Each rank must
-            supply ``[r*S//P:(r+1)*S//P]`` of every row. This metadata is required
-            when ``S`` is not divisible by ``P``; otherwise TE can infer
-            ``S = local_sequence_length * P``. Arbitrary rank splits are not
-            supported.
 
         Notes
         -----
+        With THD CP, rank ``r`` supplies tokens ``[r*T//P:(r+1)*T//P]`` from
+        the global packed buffer, where ``T = cu_seqlens[-1]`` and ``P`` is CP
+        size. Document lengths need not be divisible by CP size; pack tokens
+        without gaps.
+
+        For BSHD/SBHD CP, rank ``r`` supplies ``[r*S//P:(r+1)*S//P]`` of every
+        batch row. Here ``S`` is the full sequence length and ``B`` is batch size.
+        Supply ``cu_seqlens=[0, S, 2*S, ..., B*S]`` when ``S`` is not divisible
+        by ``P``; otherwise TE can infer ``S = local_sequence_length * P``.
+        Arbitrary rank splits are not supported.
+
         With CP, ``initial_state`` describes all global documents and must have
         identical values on all ranks. Each document's initial-state gradient is
         returned on its first owning rank, with zeros elsewhere; sum these
@@ -438,7 +445,6 @@ class GatedDeltaNetAttention(LinearAttentionBase):
             "output_final_state": output_final_state,
             "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
             "cp_group": self.cp_group,
-            "global_cu_seqlens": global_cu_seqlens,
         }
         with self.prepare_forward_ctx(query_layer, allow_non_contiguous=True) as query_layer:
             return self._dispatch_attention(
