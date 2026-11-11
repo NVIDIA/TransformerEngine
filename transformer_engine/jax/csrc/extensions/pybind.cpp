@@ -244,11 +244,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("CLAMPED_SWIGLU", NVTE_Activation_Type::CLAMPED_SWIGLU)
       .export_values();
 
-  pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
-      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)
-      .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
-      .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
-
   pybind11::enum_<NVTE_Norm_Type>(m, "NVTE_Norm_Type", pybind11::module_local())
       .value("LayerNorm", NVTE_Norm_Type::LayerNorm)
       .value("RMSNorm", NVTE_Norm_Type::RMSNorm)

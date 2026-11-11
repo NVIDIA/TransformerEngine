@@ -21,11 +21,11 @@ from jax import nn as jax_nn
 from jax import random as jax_random
 from jax import lax, vmap
 from jax.ad_checkpoint import checkpoint_name
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..attention import (
+    FusedAttnBackend,
     AttnBiasType,
     AttnMaskType,
     AttnSoftmaxType,
@@ -873,7 +873,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             fp8=self.fp8,
         )
         fused_attn_backend, _ = fused_attn_helper.get_fused_attn_backend()
-        has_fused_attn_kernel = fused_attn_backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
+        has_fused_attn_kernel = fused_attn_backend != FusedAttnBackend.No_Backend
         if attn_bias_type == AttnBiasType.ALIBI and (
             not enable_fused_attn or not has_fused_attn_kernel
         ):

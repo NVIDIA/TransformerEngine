@@ -26,6 +26,7 @@ from jax.typing import ArrayLike, DTypeLike
 from transformer_engine.jax import autocast
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
+    FusedAttnBackend,
     AttnBiasType,
     AttnMaskType,
     AttnSoftmaxType,
@@ -42,7 +43,6 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine_jax import (
-    NVTE_Fused_Attn_Backend,
     get_cudnn_version,
     get_device_compute_capability,
 )
@@ -412,19 +412,19 @@ def test_fused_attn_backend_message():
     backend, message = replace(
         baseline, attn_bias_type=AttnBiasType.PRE_SCALE_BIAS
     ).get_fused_attn_backend()
-    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert backend == FusedAttnBackend.No_Backend
     assert message == "Fused attention does not support pre-scale bias."
 
     # No error message if supported; otherwise skip the test
     backend, message = baseline.get_fused_attn_backend()
-    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+    if backend == FusedAttnBackend.No_Backend:
         pytest.skip(f"FusedAttention does not support the baseline config: {message}")
     assert message == ""
 
     # All TE rules have cleared; now gets rejected by cuDNN's support check
     # cuDNN's error message might change across cuDNN versions, so only verify the presence of the string
     backend, message = replace(baseline, head_dim_qk=1024, head_dim_v=1024).get_fused_attn_backend()
-    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert backend == FusedAttnBackend.No_Backend
     assert message != ""
 
 
@@ -468,7 +468,7 @@ def test_fused_attn_support_query_defers_compilation(setup_error, monkeypatch):
             helper.get_fused_attn_backend()
     else:
         backend, message = helper.get_fused_attn_backend()
-        if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        if backend == FusedAttnBackend.No_Backend:
             pytest.skip(f"Baseline attention is unsupported: {message}")
 
 
@@ -1021,7 +1021,7 @@ class FusedAttnRunner:
             bias_seqlen_kv=bias_seqlen_kv,
             max_segments_per_seq=self._get_max_segments_per_sequence(),
         ).get_fused_attn_backend()
-        if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+        if self.backend != FusedAttnBackend.F16_arbitrary_seqlen:
             pytest.skip(message)
 
         if (
@@ -2472,7 +2472,7 @@ def _require_cudnn_attention(q, k, v, **overrides):
         attn_scale=0.125,
     )
     backend, reason = replace(helper, **overrides).get_fused_attn_backend()
-    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+    if backend == FusedAttnBackend.No_Backend:
         pytest.skip(reason)
 
 

@@ -18,11 +18,9 @@ from jax.interpreters import mlir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
-from transformer_engine_jax import (
-    NVTE_Fused_Attn_Backend,
-)
 from transformer_engine.common.cudnn.graph import uses_ragged_attention_graph
 from transformer_engine.jax.attention import (
+    FusedAttnBackend,
     AttnBiasType,
     AttnMaskType,
     AttnSoftmaxType,
@@ -181,7 +179,7 @@ class FusedAttnHelper:
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
         backend, _ = self.get_fused_attn_backend()
-        return backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
+        return backend != FusedAttnBackend.No_Backend
 
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend.
@@ -197,7 +195,7 @@ class FusedAttnHelper:
             raise ValueError('fp8 must be False, True, or "mxfp8".')
         if self.q_dtype != self.kv_dtype:
             raise ValueError("Q and KV must have the same data type.")
-        backend = NVTE_Fused_Attn_Backend.NVTE_No_Backend
+        backend = FusedAttnBackend.No_Backend
         message = ""
         if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
             message = "Fused attention does not support pre-scale bias."
@@ -251,9 +249,7 @@ class FusedAttnHelper:
                 if self.is_training:
                     cudnn_attention.check_attention_support("bwd", avals, config)
                 backend = (
-                    NVTE_Fused_Attn_Backend.NVTE_FP8
-                    if self.fp8
-                    else NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                    FusedAttnBackend.FP8 if self.fp8 else FusedAttnBackend.F16_arbitrary_seqlen
                 )
             except ValueError as exc:
                 message = str(exc)
@@ -261,14 +257,14 @@ class FusedAttnHelper:
         AttentionLogging.setup_logging()
         logger = AttentionLogging.logger
         logger.debug("Running fused attention backend selection with config=%s", self)
-        if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        if backend == FusedAttnBackend.No_Backend:
             logger.info("No fused attention backend available; falling back to unfused attention.")
             logger.debug(
                 "Reason fused attention was rejected: %s",
                 message or "(no diagnostic message available)",
             )
         else:
-            logger.info("Selected fused attention backend: %s", backend)
+            logger.info("Selected fused attention backend: %s", backend.name)
             if message:
                 logger.debug("Fused attention backend diagnostic message: %s", message)
         return backend, message
@@ -494,8 +490,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         ).get_fused_attn_backend()
 
         if backend in (
-            NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-            NVTE_Fused_Attn_Backend.NVTE_FP8,
+            FusedAttnBackend.F16_arbitrary_seqlen,
+            FusedAttnBackend.FP8,
         ):
             if config.qkv_layout.is_thd():
                 softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)

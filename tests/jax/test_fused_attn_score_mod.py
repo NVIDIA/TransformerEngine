@@ -15,6 +15,7 @@ import pytest
 import transformer_engine.jax.cpp_extensions.flex_attention as tex_attention
 import transformer_engine.jax.cpp_extensions.cudnn_graph as tex_cudnn_graph
 from transformer_engine.jax.attention import (
+    FusedAttnBackend,
     AttnBiasType,
     AttnMaskType,
     AttnSoftmaxType,
@@ -22,7 +23,7 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_config
 from transformer_engine.jax.flax import transformer as flax_transformer
-from transformer_engine_jax import get_device_compute_capability, NVTE_Fused_Attn_Backend
+from transformer_engine_jax import get_device_compute_capability
 from test_fused_attn import FusedAttnRunner, SeqDescFormat
 
 _CONFIG_TEST_HEAD_DIM = 128
@@ -406,9 +407,9 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
 
         def get_fused_attn_backend(self):
             if kernel_available:
-                return NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen, ""
+                return FusedAttnBackend.F16_arbitrary_seqlen, ""
             return (
-                NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+                FusedAttnBackend.No_Backend,
                 "fake FusedAttnHelper: no fused attention backend available for this configuration",
             )
 

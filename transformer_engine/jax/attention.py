@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 """JAX multi-head attention modules"""
 from __future__ import annotations
-from enum import Enum
+from enum import Enum, IntEnum
 from functools import partial
 import math
 from typing import Any, Callable, Mapping, Optional, Tuple, Union
@@ -20,6 +20,14 @@ from transformer_engine_jax import NVTE_QKV_Format
 from transformer_engine_jax import NVTE_Softmax_Type
 
 from . import cpp_extensions as tex
+
+
+class FusedAttnBackend(IntEnum):
+    """Fused attention support results, with values matching the common C API."""
+
+    No_Backend = -1
+    F16_arbitrary_seqlen = 1
+    FP8 = 2
 
 
 class AttnBiasType(Enum):
