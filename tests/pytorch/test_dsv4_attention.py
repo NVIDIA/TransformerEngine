@@ -498,3 +498,73 @@ def test_dsv4_attention_thd_forward_backward(variant, ratio, lengths):
         assert torch.isfinite(packed_grad).all() and torch.isfinite(reference_grad).all()
         error = (packed_grad.float() - reference_grad.float()).norm()
         assert error / reference_grad.float().norm().clamp_min(1e-8) < 0.03
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.parametrize("inverse", [False, True])
+@pytest.mark.parametrize("cp_rank", [0, 1])
+def test_common_rope_layout_inverse_packed(interleaved, inverse, cp_rank):
+    """Independent pair equations cover shared lookup, both layouts and transpose."""
+    if not torch.cuda.is_available():
+        pytest.skip("Triton RoPE requires CUDA")
+    kernels = dsa_rope._triton_rope_module()
+    if kernels is None:
+        pytest.skip("Triton DSL is unavailable")
+    import triton
+
+    torch.manual_seed(53)
+    # CP2 local lengths are 4 and 6, plus one padded row. Each rank owns
+    # the first/last chunks prescribed by the zig-zag CP mapping.
+    positions = (
+        [0, 1, 6, 7, 0, 1, 2, 9, 10, 11, 0] if cp_rank == 0 else [2, 3, 4, 5, 3, 4, 5, 6, 7, 8, 0]
+    )
+    cu = torch.tensor([0, 8, 20], device="cuda", dtype=torch.int32)
+    x = torch.randn(11, 3, 80, device="cuda", dtype=torch.bfloat16)
+    # Noncontiguous rows ensure callers preserve the explicit table strides.
+    cos = torch.randn(12, 128, device="cuda")[:, ::2]
+    sin = torch.randn(12, 128, device="cuda")[:, ::2]
+    reference_input = x.detach().requires_grad_()
+    tail = reference_input[..., 16:].float()
+    c, s = cos[positions, None], sin[positions, None]
+    if inverse:
+        s = -s
+    left = tail[..., 0::2] * c[..., :32] - tail[..., 1::2] * s[..., :32]
+    right = tail[..., 1::2] * c[..., 32:] + tail[..., 0::2] * s[..., 32:]
+    rotated = (
+        torch.stack((left, right), -1).flatten(-2) if interleaved else torch.cat((left, right), -1)
+    )
+    reference = torch.cat((reference_input[..., :16], rotated.to(x.dtype)), -1)
+    gradient = torch.randn_like(x)
+    expected_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
+    candidate, actual_grad = x.clone(), gradient.clone()
+    grid = lambda meta: (11, triton.cdiv(3, meta["BLOCK_H"]))
+    # The tables have strided columns; materialize those columns while retaining
+    # a larger row stride, which is the kernel's supported table contract.
+    cos = torch.stack((cos, cos), 1)[:, 0, :]
+    sin = torch.stack((sin, sin), 1)[:, 0, :]
+    for kernel, tensor in (
+        (kernels._autotuned_mla_rope_fwd_inplace_kernel, candidate),
+        (kernels._autotuned_mla_rope_bwd_inplace_kernel, actual_grad),
+    ):
+        kernel[grid](
+            tensor,
+            cos,
+            sin,
+            16,
+            64,
+            3,
+            1,
+            2,
+            cu,
+            None,
+            tensor.stride(0),
+            tensor.stride(1),
+            cos.stride(0),
+            sin.stride(0),
+            cp_rank,
+            2,
+            INVERSE=inverse,
+            REMOVE_INTERLEAVING=interleaved,
+        )
+    torch.testing.assert_close(candidate, reference, atol=0.03125, rtol=0.002)
+    torch.testing.assert_close(actual_grad, expected_grad, atol=0.03125, rtol=0.002)

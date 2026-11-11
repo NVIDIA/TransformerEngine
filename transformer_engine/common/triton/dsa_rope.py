@@ -2,11 +2,11 @@
 #
 # See LICENSE for license information.
 
-"""DSA RoPE kernels copied from NVIDIA/Megatron-LM.
+"""Shared DSA and MLA RoPE kernels from NVIDIA/Megatron-LM.
 
-Source: megatron/core/fusions/fused_mla_yarn_rope_apply.py at
-c4129afff4867ca89b1fb7b4b911128424cdfbe8. Kernel bodies and autotuning are
-retained; TE owns tensor preparation and autograd.
+Query kernels: megatron/core/fusions/fused_mla_yarn_rope_apply.py at
+c4129afff4867ca89b1fb7b4b911128424cdfbe8. Separate MLA KV kernels were moved
+from TE's mla_rope_utils.py; framework adapters own tensor preparation/autograd.
 """
 
 import triton
@@ -71,7 +71,7 @@ def _mla_rope_fwd_inplace_kernel(
 ):
     """
     Forward pass: apply RoPE inplace to the trailing emb_dim elements.
-    Reads from interleaved layout, writes back to interleaved layout.
+    Reads interleaved input; writes interleaved or split halves per REMOVE_INTERLEAVING.
 
     Input:
         Q: [seq_len, batch_size, head_num, nope_dim + emb_dim]
@@ -174,7 +174,7 @@ def _mla_rope_bwd_inplace_kernel(
 ):
     """
     Backward pass: inverse RoPE inplace on the trailing emb_dim elements.
-    Reads from interleaved layout, writes to interleaved layout.
+    Reads interleaved or split halves per REMOVE_INTERLEAVING; writes interleaved gradients.
 
     Input:
         DO: [seq_len, batch_size, head_num, nope_dim + emb_dim]
@@ -251,3 +251,171 @@ _autotuned_mla_rope_bwd_inplace_kernel = triton.autotune(
     key=["emb_dim", "head_num"],
     restore_value=["DO"],
 )(_mla_rope_bwd_inplace_kernel)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_H": 1}),
+        triton.Config({"BLOCK_H": 2}),
+        triton.Config({"BLOCK_H": 4}),
+        triton.Config({"BLOCK_H": 8}),
+        triton.Config({"BLOCK_H": 16}),
+        triton.Config({"BLOCK_H": 32}),
+        triton.Config({"BLOCK_H": 64}),
+        triton.Config({"BLOCK_H": 128}),
+    ],
+    key=["emb_dim", "k_dim", "v_dim", "head_num"],
+)
+@triton.jit
+def rotary_fwd_kv_kernel(
+    KV,
+    K_POS_EMB,
+    O_KEY,
+    O_VALUE,
+    COS,
+    SIN,
+    emb_dim: tl.constexpr,
+    k_dim: tl.constexpr,
+    v_dim: tl.constexpr,
+    head_num: tl.constexpr,
+    batch_size,
+    seq_num,
+    cu_seqlens_kv,
+    stride_kv_seq,
+    stride_kv_nheads,
+    stride_emb_seq,
+    stride_k_seq,
+    stride_k_nheads,
+    stride_v_seq,
+    stride_v_nheads,
+    cp_rank,
+    cp_size,
+    BLOCK_H: tl.constexpr,
+):
+    """Rotate positional keys and assemble separate MLA key/value tensors."""
+    pid_m = tl.program_id(axis=0)
+    pid_head = tl.program_id(axis=1)
+    if cu_seqlens_kv is None:
+        token_idx = pid_m // batch_size
+    else:
+        token_idx = _get_thd_token_idx(cu_seqlens_kv, pid_m, seq_num, cp_rank, cp_size)
+    cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+    sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+    cos_right = tl.load(COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
+    sin_right = tl.load(SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
+    head_offsets = pid_head * BLOCK_H + tl.arange(0, BLOCK_H)
+    KV_ptr = KV + pid_m * stride_kv_seq
+    kv_off = head_offsets[:, None] * stride_kv_nheads
+    mask = head_offsets[:, None] < head_num
+    k_in_off = kv_off + tl.arange(0, k_dim)[None, :]
+    v_in_off = kv_off + k_dim + tl.arange(0, v_dim)[None, :]
+    k = tl.load(KV_ptr + k_in_off, mask=mask)
+    v = tl.load(KV_ptr + v_in_off, mask=mask)
+    K_ptr = O_KEY + pid_m * stride_k_seq + pid_head * BLOCK_H * stride_k_nheads
+    V_ptr = O_VALUE + pid_m * stride_v_seq + pid_head * BLOCK_H * stride_v_nheads
+    k_out_off = tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads + tl.arange(0, k_dim)[None, :]
+    v_out_off = tl.arange(0, BLOCK_H)[:, None] * stride_v_nheads + tl.arange(0, v_dim)[None, :]
+    tl.store(K_ptr + k_out_off, k, mask=mask)
+    tl.store(V_ptr + v_out_off, v, mask=mask)
+    EMB = K_POS_EMB + pid_m * stride_emb_seq
+    x_1 = tl.load(EMB + tl.arange(0, emb_dim // 2) * 2)
+    x_2 = tl.load(EMB + tl.arange(0, emb_dim // 2) * 2 + 1)
+    x_left = x_1 * cos_left - x_2 * sin_left
+    x_right = x_2 * cos_right + x_1 * sin_right
+    x_left = x_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+    x_right = x_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+    x_left_off = (
+        tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads
+        + k_dim
+        + tl.arange(0, emb_dim // 2)[None, :]
+    )
+    x_right_off = x_left_off + emb_dim // 2
+    tl.store(K_ptr + x_left_off, x_left, mask=mask)
+    tl.store(K_ptr + x_right_off, x_right, mask=mask)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_H": 1}),
+        triton.Config({"BLOCK_H": 2}),
+        triton.Config({"BLOCK_H": 4}),
+        triton.Config({"BLOCK_H": 8}),
+        triton.Config({"BLOCK_H": 16}),
+        triton.Config({"BLOCK_H": 32}),
+        triton.Config({"BLOCK_H": 64}),
+        triton.Config({"BLOCK_H": 128}),
+    ],
+    key=["emb_dim", "k_dim", "v_dim", "head_num"],
+)
+@triton.jit
+def rotary_bwd_kv_kernel(
+    dK,
+    dV,
+    dKV,
+    dEMB,
+    COS,
+    SIN,
+    emb_dim: tl.constexpr,
+    k_dim: tl.constexpr,
+    v_dim: tl.constexpr,
+    head_num: tl.constexpr,
+    batch_size,
+    seq_num,
+    cu_seqlens_kv,
+    stride_dk_seq,
+    stride_dk_nheads,
+    stride_dv_seq,
+    stride_dv_nheads,
+    stride_dkv_seq,
+    stride_dkv_nheads,
+    stride_demb_seq,
+    cp_rank,
+    cp_size,
+    BLOCK_H: tl.constexpr,
+):
+    """Propagate MLA K/V gradients and reduce shared positional-key gradients."""
+    pid_m = tl.program_id(axis=0)
+    pid_head = tl.program_id(axis=1)
+    if cu_seqlens_kv is None:
+        token_idx = pid_m // batch_size
+    else:
+        token_idx = _get_thd_token_idx(cu_seqlens_kv, pid_m, seq_num, cp_rank, cp_size)
+    head_offsets = pid_head * BLOCK_H + tl.arange(0, BLOCK_H)
+    dKV_ptr = dKV + pid_m * stride_dkv_seq
+    dkv_off = head_offsets[:, None] * stride_dkv_nheads
+    mask = head_offsets[:, None] < head_num
+    dk_out_off = dkv_off + tl.arange(0, k_dim)[None, :]
+    dv_out_off = dkv_off + k_dim + tl.arange(0, v_dim)[None, :]
+    dK_ptr = dK + pid_m * stride_dk_seq + pid_head * BLOCK_H * stride_dk_nheads
+    dV_ptr = dV + pid_m * stride_dv_seq + pid_head * BLOCK_H * stride_dv_nheads
+    dk_in_off = tl.arange(0, BLOCK_H)[:, None] * stride_dk_nheads + tl.arange(0, k_dim)[None, :]
+    dv_in_off = tl.arange(0, BLOCK_H)[:, None] * stride_dv_nheads + tl.arange(0, v_dim)[None, :]
+    dk = tl.load(dK_ptr + dk_in_off, mask=mask)
+    dv = tl.load(dV_ptr + dv_in_off, mask=mask)
+    tl.store(dKV_ptr + dk_out_off, dk, mask=mask)
+    tl.store(dKV_ptr + dv_out_off, dv, mask=mask)
+    if pid_head == 0:
+        x_left_accum = tl.zeros((BLOCK_H, emb_dim // 2), dtype=tl.float32)
+        x_right_accum = tl.zeros((BLOCK_H, emb_dim // 2), dtype=tl.float32)
+        for i in tl.static_range(triton.cdiv(head_num, BLOCK_H)):
+            head_offsets_i = i * BLOCK_H + tl.arange(0, BLOCK_H)
+            dK_ptr_i = dK + pid_m * stride_dk_seq
+            x_off = head_offsets_i[:, None] * stride_dk_nheads + k_dim
+            mask_i = head_offsets_i[:, None] < head_num
+            x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
+            x_right_off = x_left_off + emb_dim // 2
+            x_left_accum += tl.load(dK_ptr_i + x_left_off, mask=mask_i)
+            x_right_accum += tl.load(dK_ptr_i + x_right_off, mask=mask_i)
+        x_left_accum = tl.sum(x_left_accum, axis=0)
+        x_right_accum = tl.sum(x_right_accum, axis=0)
+        x_left_accum = x_left_accum.to(dEMB.dtype.element_ty)
+        x_right_accum = x_right_accum.to(dEMB.dtype.element_ty)
+        cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+        sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+        cos_right = tl.load(COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
+        sin_right = tl.load(SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
+        x_1 = x_left_accum * cos_left + x_right_accum * sin_right
+        x_2 = -x_left_accum * sin_left + x_right_accum * cos_right
+        dEMB_ptr = dEMB + pid_m * stride_demb_seq
+        tl.store(dEMB_ptr + tl.arange(0, emb_dim // 2) * 2, x_1)
+        tl.store(dEMB_ptr + tl.arange(0, emb_dim // 2) * 2 + 1, x_2)

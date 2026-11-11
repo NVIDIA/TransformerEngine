@@ -289,10 +289,15 @@ def test_fused_mla_q_uproj_autograd() -> None:
         1,
         None,
         None,
+        None,
         dq3.stride(0),
         dq3.stride(1),
+        cos_flat.stride(0),
+        sin_flat.stride(0),
         0,
         1,
+        INVERSE=False,
+        REMOVE_INTERLEAVING=False,
     )
     dq2d = dq3.reshape(tokens, PROJ_DIM).contiguous()
     gy_quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
@@ -462,3 +467,36 @@ def test_inputs_on_non_current_device():
     _assert_identical(value, ref_value, "value")
     with pytest.raises(RuntimeError, match="same device"):
         fused_mla_kv_rope_mxfp8(kv, k_rope.to("cuda:0"), cos, sin, HEAD_DIM_V)
+
+
+@pytest.mark.skipif(not HAVE_TRITON, reason="MLA RoPE requires Triton")
+def test_mla_rope_kv_equations_backward():
+    """Separate MLA K/V assembly and positional-gradient reduction survive reuse."""
+    if not torch.cuda.is_available():
+        pytest.skip("MLA RoPE requires CUDA")
+    torch.manual_seed(59)
+    kv = torch.randn(7, 2, 3, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    positional = torch.randn(7, 2, 1, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    cos, sin = build_rope_tables(7, emb_dim=64, device=kv.device)
+    key, value = apply_mla_rope_kv(
+        kv,
+        positional,
+        cos_table=cos,
+        sin_table=sin,
+        head_dim_nope=16,
+        head_dim_v=16,
+    )
+    ref_kv = kv.detach().requires_grad_()
+    ref_pos = positional.detach().requires_grad_()
+    c, s = cos[:, None, None], sin[:, None, None]
+    left = ref_pos[..., 0::2].float() * c[..., :32] - ref_pos[..., 1::2].float() * s[..., :32]
+    right = ref_pos[..., 1::2].float() * c[..., 32:] + ref_pos[..., 0::2].float() * s[..., 32:]
+    ref_key = torch.cat(
+        (ref_kv[..., :16], torch.cat((left, right), -1).to(kv.dtype).expand(-1, -1, 3, -1)), -1
+    )
+    ref_value = ref_kv[..., 16:]
+    gradients = (torch.randn_like(key), torch.randn_like(value))
+    actual_grads = torch.autograd.grad((key, value), (kv, positional), gradients)
+    ref_grads = torch.autograd.grad((ref_key, ref_value), (ref_kv, ref_pos), gradients)
+    for actual, expected in zip((key, value, *actual_grads), (ref_key, ref_value, *ref_grads)):
+        torch.testing.assert_close(actual, expected, atol=0.03125, rtol=0.02)

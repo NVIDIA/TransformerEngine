@@ -17,7 +17,12 @@ import torch
 
 try:
     import triton
-    import triton.language as tl
+    from transformer_engine.common.triton.dsa_rope import (
+        _autotuned_mla_rope_fwd_inplace_kernel as rotary_fwd_q_kernel,
+        _autotuned_mla_rope_bwd_inplace_kernel as rotary_bwd_q_kernel,
+        rotary_fwd_kv_kernel,
+        rotary_bwd_kv_kernel,
+    )
 
     HAVE_TRITON = True
 except ImportError:
@@ -46,317 +51,6 @@ def build_rope_tables(
 
 if HAVE_TRITON:
 
-    # Not used for non-packed batches; kept for THD compatibility.
-    @triton.jit
-    def _get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
-        token_idx = -1
-        this_seq_len = 0
-        seq_idx = 0
-        last_cum_seqlen = tl.load(cu_seqlens) // cp_size
-        while seq_idx < seq_num:
-            cur_cum_seqlen = tl.load(cu_seqlens + seq_idx + 1) // cp_size
-            if token_idx == -1 and cur_cum_seqlen > pid_m:
-                token_idx = pid_m - last_cum_seqlen
-                this_seq_len = cur_cum_seqlen - last_cum_seqlen
-            last_cum_seqlen = cur_cum_seqlen
-            seq_idx += 1
-        if cp_size > 1:
-            if token_idx < this_seq_len // 2:
-                token_idx = token_idx + cp_rank * this_seq_len // 2
-            else:
-                token_idx = (token_idx - this_seq_len // 2) + (
-                    2 * cp_size - cp_rank - 1
-                ) * this_seq_len // 2
-        return token_idx
-
-    @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_H": 1}),
-            triton.Config({"BLOCK_H": 2}),
-            triton.Config({"BLOCK_H": 4}),
-            triton.Config({"BLOCK_H": 8}),
-            triton.Config({"BLOCK_H": 16}),
-            triton.Config({"BLOCK_H": 32}),
-            triton.Config({"BLOCK_H": 64}),
-            triton.Config({"BLOCK_H": 128}),
-        ],
-        key=["emb_dim", "head_num"],
-        restore_value=["Q"],
-    )
-    @triton.jit
-    def rotary_fwd_q_kernel(
-        Q,
-        COS,
-        SIN,
-        qk_head_dim,
-        emb_dim: tl.constexpr,
-        head_num: tl.constexpr,
-        batch_size,
-        seq_num,
-        cu_seqlens_q,
-        stride_x_seq,
-        stride_x_nheads,
-        cp_rank,
-        cp_size,
-        BLOCK_H: tl.constexpr,
-    ):
-        pid_m = tl.program_id(axis=0)
-        pid_head = tl.program_id(axis=1)
-        if cu_seqlens_q is None:
-            token_idx = pid_m // batch_size
-        else:
-            token_idx = _get_thd_token_idx(cu_seqlens_q, pid_m, seq_num, cp_rank, cp_size)
-        cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-        sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-        cos_right = tl.load(COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
-        sin_right = tl.load(SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
-        cos_left = cos_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        sin_left = sin_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        cos_right = cos_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        sin_right = sin_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        head_offsets = pid_head * BLOCK_H + tl.arange(0, BLOCK_H)
-        Q = Q + pid_m * stride_x_seq
-        x_off = head_offsets[:, None] * stride_x_nheads + qk_head_dim
-        mask = head_offsets[:, None] < head_num
-        x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
-        x_2_off = x_1_off + 1
-        x_1 = tl.load(Q + x_1_off, mask=mask)
-        x_2 = tl.load(Q + x_2_off, mask=mask)
-        x_left = x_1 * cos_left - x_2 * sin_left
-        x_right = x_2 * cos_right + x_1 * sin_right
-        x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
-        x_right_off = x_left_off + emb_dim // 2
-        tl.store(Q + x_left_off, x_left, mask=mask)
-        tl.store(Q + x_right_off, x_right, mask=mask)
-
-    @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_H": 1}),
-            triton.Config({"BLOCK_H": 2}),
-            triton.Config({"BLOCK_H": 4}),
-            triton.Config({"BLOCK_H": 8}),
-            triton.Config({"BLOCK_H": 16}),
-            triton.Config({"BLOCK_H": 32}),
-            triton.Config({"BLOCK_H": 64}),
-            triton.Config({"BLOCK_H": 128}),
-        ],
-        key=["emb_dim", "head_num"],
-        restore_value=["DO"],
-    )
-    @triton.jit
-    def rotary_bwd_q_kernel(
-        DO,
-        COS,
-        SIN,
-        qk_head_dim,
-        emb_dim: tl.constexpr,
-        head_num: tl.constexpr,
-        batch_size,
-        seq_num,
-        cu_seqlens_q,
-        stride_x_seq,
-        stride_x_nheads,
-        cp_rank,
-        cp_size,
-        BLOCK_H: tl.constexpr,
-    ):
-        pid_m = tl.program_id(axis=0)
-        pid_head = tl.program_id(axis=1)
-        if cu_seqlens_q is None:
-            token_idx = pid_m // batch_size
-        else:
-            token_idx = _get_thd_token_idx(cu_seqlens_q, pid_m, seq_num, cp_rank, cp_size)
-        cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-        sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-        cos_right = tl.load(COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
-        sin_right = tl.load(SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
-        cos_left = cos_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        sin_left = sin_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        cos_right = cos_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        sin_right = sin_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        head_offsets = pid_head * BLOCK_H + tl.arange(0, BLOCK_H)
-        DO = DO + pid_m * stride_x_seq
-        x_off = head_offsets[:, None] * stride_x_nheads + qk_head_dim
-        mask = head_offsets[:, None] < head_num
-        x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
-        x_right_off = x_left_off + emb_dim // 2
-        x_left = tl.load(DO + x_left_off, mask=mask)
-        x_right = tl.load(DO + x_right_off, mask=mask)
-        x_1 = x_left * cos_left + x_right * sin_right
-        x_2 = -x_left * sin_left + x_right * cos_right
-        x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
-        x_2_off = x_1_off + 1
-        tl.store(DO + x_1_off, x_1, mask=mask)
-        tl.store(DO + x_2_off, x_2, mask=mask)
-
-    @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_H": 1}),
-            triton.Config({"BLOCK_H": 2}),
-            triton.Config({"BLOCK_H": 4}),
-            triton.Config({"BLOCK_H": 8}),
-            triton.Config({"BLOCK_H": 16}),
-            triton.Config({"BLOCK_H": 32}),
-            triton.Config({"BLOCK_H": 64}),
-            triton.Config({"BLOCK_H": 128}),
-        ],
-        key=["emb_dim", "k_dim", "v_dim", "head_num"],
-    )
-    @triton.jit
-    def rotary_fwd_kv_kernel(
-        KV,
-        K_POS_EMB,
-        O_KEY,
-        O_VALUE,
-        COS,
-        SIN,
-        emb_dim: tl.constexpr,
-        k_dim: tl.constexpr,
-        v_dim: tl.constexpr,
-        head_num: tl.constexpr,
-        batch_size,
-        seq_num,
-        cu_seqlens_kv,
-        stride_kv_seq,
-        stride_kv_nheads,
-        stride_emb_seq,
-        stride_k_seq,
-        stride_k_nheads,
-        stride_v_seq,
-        stride_v_nheads,
-        cp_rank,
-        cp_size,
-        BLOCK_H: tl.constexpr,
-    ):
-        pid_m = tl.program_id(axis=0)
-        pid_head = tl.program_id(axis=1)
-        if cu_seqlens_kv is None:
-            token_idx = pid_m // batch_size
-        else:
-            token_idx = _get_thd_token_idx(cu_seqlens_kv, pid_m, seq_num, cp_rank, cp_size)
-        cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-        sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-        cos_right = tl.load(COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
-        sin_right = tl.load(SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
-        head_offsets = pid_head * BLOCK_H + tl.arange(0, BLOCK_H)
-        KV_ptr = KV + pid_m * stride_kv_seq
-        kv_off = head_offsets[:, None] * stride_kv_nheads
-        mask = head_offsets[:, None] < head_num
-        k_in_off = kv_off + tl.arange(0, k_dim)[None, :]
-        v_in_off = kv_off + k_dim + tl.arange(0, v_dim)[None, :]
-        k = tl.load(KV_ptr + k_in_off, mask=mask)
-        v = tl.load(KV_ptr + v_in_off, mask=mask)
-        K_ptr = O_KEY + pid_m * stride_k_seq + pid_head * BLOCK_H * stride_k_nheads
-        V_ptr = O_VALUE + pid_m * stride_v_seq + pid_head * BLOCK_H * stride_v_nheads
-        k_out_off = tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads + tl.arange(0, k_dim)[None, :]
-        v_out_off = tl.arange(0, BLOCK_H)[:, None] * stride_v_nheads + tl.arange(0, v_dim)[None, :]
-        tl.store(K_ptr + k_out_off, k, mask=mask)
-        tl.store(V_ptr + v_out_off, v, mask=mask)
-        EMB = K_POS_EMB + pid_m * stride_emb_seq
-        x_1 = tl.load(EMB + tl.arange(0, emb_dim // 2) * 2)
-        x_2 = tl.load(EMB + tl.arange(0, emb_dim // 2) * 2 + 1)
-        x_left = x_1 * cos_left - x_2 * sin_left
-        x_right = x_2 * cos_right + x_1 * sin_right
-        x_left = x_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        x_right = x_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
-        x_left_off = (
-            tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads
-            + k_dim
-            + tl.arange(0, emb_dim // 2)[None, :]
-        )
-        x_right_off = x_left_off + emb_dim // 2
-        tl.store(K_ptr + x_left_off, x_left, mask=mask)
-        tl.store(K_ptr + x_right_off, x_right, mask=mask)
-
-    @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_H": 1}),
-            triton.Config({"BLOCK_H": 2}),
-            triton.Config({"BLOCK_H": 4}),
-            triton.Config({"BLOCK_H": 8}),
-            triton.Config({"BLOCK_H": 16}),
-            triton.Config({"BLOCK_H": 32}),
-            triton.Config({"BLOCK_H": 64}),
-            triton.Config({"BLOCK_H": 128}),
-        ],
-        key=["emb_dim", "k_dim", "v_dim", "head_num"],
-    )
-    @triton.jit
-    def rotary_bwd_kv_kernel(
-        dK,
-        dV,
-        dKV,
-        dEMB,
-        COS,
-        SIN,
-        emb_dim: tl.constexpr,
-        k_dim: tl.constexpr,
-        v_dim: tl.constexpr,
-        head_num: tl.constexpr,
-        batch_size,
-        seq_num,
-        cu_seqlens_kv,
-        stride_dk_seq,
-        stride_dk_nheads,
-        stride_dv_seq,
-        stride_dv_nheads,
-        stride_dkv_seq,
-        stride_dkv_nheads,
-        stride_demb_seq,
-        cp_rank,
-        cp_size,
-        BLOCK_H: tl.constexpr,
-    ):
-        pid_m = tl.program_id(axis=0)
-        pid_head = tl.program_id(axis=1)
-        if cu_seqlens_kv is None:
-            token_idx = pid_m // batch_size
-        else:
-            token_idx = _get_thd_token_idx(cu_seqlens_kv, pid_m, seq_num, cp_rank, cp_size)
-        head_offsets = pid_head * BLOCK_H + tl.arange(0, BLOCK_H)
-        dKV_ptr = dKV + pid_m * stride_dkv_seq
-        dkv_off = head_offsets[:, None] * stride_dkv_nheads
-        mask = head_offsets[:, None] < head_num
-        dk_out_off = dkv_off + tl.arange(0, k_dim)[None, :]
-        dv_out_off = dkv_off + k_dim + tl.arange(0, v_dim)[None, :]
-        dK_ptr = dK + pid_m * stride_dk_seq + pid_head * BLOCK_H * stride_dk_nheads
-        dV_ptr = dV + pid_m * stride_dv_seq + pid_head * BLOCK_H * stride_dv_nheads
-        dk_in_off = tl.arange(0, BLOCK_H)[:, None] * stride_dk_nheads + tl.arange(0, k_dim)[None, :]
-        dv_in_off = tl.arange(0, BLOCK_H)[:, None] * stride_dv_nheads + tl.arange(0, v_dim)[None, :]
-        dk = tl.load(dK_ptr + dk_in_off, mask=mask)
-        dv = tl.load(dV_ptr + dv_in_off, mask=mask)
-        tl.store(dKV_ptr + dk_out_off, dk, mask=mask)
-        tl.store(dKV_ptr + dv_out_off, dv, mask=mask)
-        if pid_head == 0:
-            x_left_accum = tl.zeros((BLOCK_H, emb_dim // 2), dtype=tl.float32)
-            x_right_accum = tl.zeros((BLOCK_H, emb_dim // 2), dtype=tl.float32)
-            for i in tl.static_range(triton.cdiv(head_num, BLOCK_H)):
-                head_offsets_i = i * BLOCK_H + tl.arange(0, BLOCK_H)
-                dK_ptr_i = dK + pid_m * stride_dk_seq
-                x_off = head_offsets_i[:, None] * stride_dk_nheads + k_dim
-                mask_i = head_offsets_i[:, None] < head_num
-                x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
-                x_right_off = x_left_off + emb_dim // 2
-                x_left_accum += tl.load(dK_ptr_i + x_left_off, mask=mask_i)
-                x_right_accum += tl.load(dK_ptr_i + x_right_off, mask=mask_i)
-            x_left_accum = tl.sum(x_left_accum, axis=0)
-            x_right_accum = tl.sum(x_right_accum, axis=0)
-            x_left_accum = x_left_accum.to(dEMB.dtype.element_ty)
-            x_right_accum = x_right_accum.to(dEMB.dtype.element_ty)
-            cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-            sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
-            cos_right = tl.load(
-                COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2)
-            )
-            sin_right = tl.load(
-                SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2)
-            )
-            x_1 = x_left_accum * cos_left + x_right_accum * sin_right
-            x_2 = -x_left_accum * sin_left + x_right_accum * cos_right
-            dEMB_ptr = dEMB + pid_m * stride_demb_seq
-            tl.store(dEMB_ptr + tl.arange(0, emb_dim // 2) * 2, x_1)
-            tl.store(dEMB_ptr + tl.arange(0, emb_dim // 2) * 2 + 1, x_2)
-
     def _flattened_token_stride(tensor: torch.Tensor) -> int:
         if tensor.dim() == 4:
             return tensor.stride(1)
@@ -379,10 +73,15 @@ if HAVE_TRITON:
                 b,
                 None,
                 None,
+                None,
                 _flattened_token_stride(q),
                 q.stride(2),
+                cos.stride(0),
+                sin.stride(0),
                 0,
                 1,
+                INVERSE=False,
+                REMOVE_INTERLEAVING=False,
             )
 
             ctx.save_for_backward(cos, sin)
@@ -410,10 +109,15 @@ if HAVE_TRITON:
                 b,
                 None,
                 None,
+                None,
                 _flattened_token_stride(dq),
                 dq.stride(2),
+                cos.stride(0),
+                sin.stride(0),
                 0,
                 1,
+                INVERSE=False,
+                REMOVE_INTERLEAVING=False,
             )
             return dq, None, None, None, None
 
