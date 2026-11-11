@@ -600,7 +600,7 @@ def _query_graph(config, backward):
         )
         b, h, sq, skv = dim
         stride = (h * sq * skv, sq * skv, skv, 1)
-        spec("bias", dim, stride, types[DType.cast(config.qkv_dtype)])
+        spec("bias", dim, config.bias_stride or stride, types[DType.cast(config.qkv_dtype)])
         if backward and (b, h, sq) != (1, 1, 1):
             spec("dbias", dim, stride, types[DType.cast(config.qkv_dtype)], output=True)
     if attn.params["softmax_type"] != "vanilla":
@@ -1108,7 +1108,8 @@ def fused_attn_bwd(
             attn.matrix(name, t, fmt, h, s, cu, output=True)
         dbias = torch.empty(0, device=attn.device, dtype=p["fake_dtype"])
         if p["attn_bias"] is not None:
-            dbias = torch.empty_like(p["attn_bias"])
+            # cuDNN requires row-major dBias even when the bias input is a strided view.
+            dbias = torch.empty_like(p["attn_bias"], memory_format=torch.contiguous_format)
             if p["attn_bias"].shape[-2] != 1 or p["attn_bias"].shape[:2] != (1, 1):
                 attn.add("dbias", dbias, output=True)
         dsoftmax = torch.empty(0, device=attn.device, dtype=torch.float32)

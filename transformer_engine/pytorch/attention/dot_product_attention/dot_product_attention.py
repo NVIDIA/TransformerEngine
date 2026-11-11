@@ -2802,6 +2802,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ),
                 "core_attention_bias_type": core_attention_bias_type,
                 "core_attention_bias_shape": core_attention_bias_shape,
+                "core_attention_bias_stride": (
+                    tuple(core_attention_bias.stride())
+                    if core_attention_bias_type != "no_bias" and core_attention_bias is not None
+                    else None
+                ),
                 "core_attention_bias_requires_grad": (
                     core_attention_bias.requires_grad
                     if core_attention_bias_type != "no_bias" and core_attention_bias is not None

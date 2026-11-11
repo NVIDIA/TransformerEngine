@@ -263,6 +263,8 @@ class AttentionParams:
         Attention bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}.
     core_attention_bias_shape : Optional[Tuple[int, int, int, int]], default = None
         Attention bias shape, (b, h, sq, skv).
+    core_attention_bias_stride : Optional[Tuple[int, int, int, int]], default = None
+        Attention bias strides. None describes contiguous storage.
     core_attention_bias_requires_grad : bool, default = True
         Whether attention bias requires gradient.
     pad_between_seqs : bool, default = False
@@ -356,6 +358,7 @@ class AttentionParams:
     has_score_mod_bprop: bool = False
     device: Optional[torch.device] = None
     requires_backward: bool = True
+    core_attention_bias_stride: Optional[Tuple[int, int, int, int]] = None
 
     def __eq__(self, other):
         """
@@ -440,6 +443,7 @@ class FusedAttentionParams:
 
     # None preserves the training-mode default for direct support queries.
     requires_backward: Optional[bool] = None
+    bias_stride: Optional[Tuple[int, int, int, int]] = None
 
 
 class _NoOpLogger:
@@ -1700,6 +1704,12 @@ def get_attention_backend(
             "bias_num_heads": bias_num_heads,
             "bias_seqlen_q": bias_seqlen_q,
             "bias_seqlen_kv": bias_seqlen_kv,
+            # CP steps materialize contiguous bias slices; ALiBi conversion does too.
+            "bias_stride": (
+                attention_params.core_attention_bias_stride
+                if not context_parallel and fu_core_attention_bias_type == core_attention_bias_type
+                else None
+            ),
         }
         # Context-parallel per-step configs
         if context_parallel:

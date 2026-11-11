@@ -368,7 +368,7 @@ def test_cudnn_attention_handle_streams():
 @pytest.mark.parametrize("backward", (False, True))
 @pytest.mark.parametrize("dropout", (0.0, 0.125))
 def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
-    """Packed storage and runtime scalar values must preserve support-query graph identity."""
+    """Packed storage, optional outputs, and scalars preserve query/runtime graph identity."""
     from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
 
     batch, seqlen, heads, dim = 2, 128, 4, 64
@@ -392,7 +392,9 @@ def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
         max_seqlen_kv=seqlen,
         attn_mask_type="padding" if fmt == "thd" else "no_mask",
         attn_bias_type="no_bias",
-        softmax_type="vanilla",
+        softmax_type="learnable",
+        softmax_offset=torch.zeros(1, heads, 1, 1, device="cuda", dtype=torch.float32),
+        return_max_logit=not backward,
         dropout=dropout,
         rng_state=torch.zeros(2, device="cuda", dtype=torch.int64),
         attn_scale=0.125,
@@ -412,6 +414,8 @@ def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
         num_tokens_q=batch * seqlen if fmt == "thd" else 0,
         num_tokens_kv=batch * seqlen if fmt == "thd" else 0,
         attn_mask_type=AttnMaskType[params["attn_mask_type"]],
+        softmax_type=SoftmaxType["learnable"],
+        return_max_logit=not backward,
         dropout=dropout,
     )
     query = implementation._query_graph(config, backward)
@@ -421,11 +425,14 @@ def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
     runtime.matrix("o", out, fmt, heads, runtime.sq, cu, output=not backward)
     stats_shape = (batch * seqlen, heads, 1) if runtime.ragged_stats else (batch, heads, seqlen, 1)
     runtime.stats("stats", torch.empty(stats_shape, device="cuda"), output=not backward)
+    if not backward:
+        runtime.stats("max", torch.empty(stats_shape, device="cuda"), output=True)
     if backward:
         runtime.matrix("do", torch.empty_like(out), fmt, heads, runtime.sq, cu)
         grads = torch.empty(packed_shape, device="cuda", dtype=torch.bfloat16).unbind(axis)
         for name, grad in zip(("dq", "dk", "dv"), grads):
             runtime.matrix(name, grad, fmt, heads, runtime.sq, cu, output=True)
+        runtime.add("dsink", torch.empty_like(params["softmax_offset"]), output=True)
     assert query.description() == runtime.description()
 
     if fmt == "thd" and not query.use_cu_seqlens:
@@ -433,6 +440,89 @@ def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
         assert other_query.description() == query.description()
     runtime.scalar("attn_scale", torch.tensor([0.25]), by_value=True)
     assert query.description() == runtime.description()
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("qkv_format", ("bshd", "sbhd"))
+@pytest.mark.parametrize("bias_layout", ("contiguous", "gapped", "permuted"))
+def test_fused_attn_bias_graph_cache(dtype, qkv_format, bias_layout, monkeypatch):
+    """Bias layouts reuse queried plans and preserve forward/backward numerics."""
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
+    monkeypatch.setattr(implementation, "_plans", {})
+    compile_graph = Mock(wraps=implementation.compile_graph)
+    monkeypatch.setattr(implementation, "compile_graph", compile_graph)
+    original_entry = implementation._AttentionGraph.entry
+    queried = {}
+    executed = []
+
+    def entry(attn):
+        description = attn.description()
+        runtime = "q" in attn.params
+        if runtime:
+            assert description in queried, "Execution changed the queried tensor descriptors"
+        result = original_entry(attn)
+        if runtime:
+            assert result is queried[description]
+            executed.append(attn.backward)
+        else:
+            queried[description] = result
+        return result
+
+    monkeypatch.setattr(implementation._AttentionGraph, "entry", entry)
+    _attention_backends["backend_selection_requires_update"] = True
+    batch, seqlen, heads, dim = 2, 128, 4, 64
+    block = DotProductAttention(
+        heads, dim, qkv_format=qkv_format, attn_mask_type="no_mask", layer_number=1
+    ).to(dtype=dtype, device="cuda")
+    rtol, atol = (2e-2, 1e-2) if dtype == torch.bfloat16 else (3e-3, 2e-3)
+    for _ in range(2):
+        qkv = [torch.randn(batch, seqlen, heads, dim, dtype=dtype, device="cuda") for _ in range(3)]
+        if bias_layout == "gapped":
+            bias = torch.randn(1, heads, 2 * seqlen, seqlen, dtype=dtype, device="cuda")
+            bias = bias[..., ::2, :]
+        elif bias_layout == "permuted":
+            bias = torch.randn(1, seqlen, heads, seqlen, dtype=dtype, device="cuda")
+            bias = bias.transpose(1, 2)
+        else:
+            bias = torch.randn(1, heads, seqlen, seqlen, dtype=dtype, device="cuda")
+        bias.requires_grad_()
+        inputs = [
+            (x if qkv_format == "bshd" else x.transpose(0, 1).contiguous()).requires_grad_()
+            for x in qkv
+        ]
+        refs = [x.float().detach().requires_grad_() for x in qkv]
+        ref_bias = bias.detach().float().requires_grad_()
+        qr, kr, vr = [x.transpose(1, 2) for x in refs]
+        scores = qr @ kr.transpose(-1, -2) / dim**0.5 + ref_bias
+        reference = (scores.softmax(-1) @ vr).transpose(1, 2)
+        grad = torch.randn_like(reference, dtype=dtype)
+        reference.backward(grad.float())
+
+        output = block(
+            *inputs,
+            attn_mask_type="no_mask",
+            core_attention_bias_type="post_scale_bias",
+            core_attention_bias=bias,
+        )
+        output_grad = grad if qkv_format == "bshd" else grad.transpose(0, 1).contiguous()
+        output.backward(output_grad.reshape(output.shape))
+        output = output.reshape(*inputs[0].shape)
+        if qkv_format == "sbhd":
+            output = output.transpose(0, 1)
+        torch.testing.assert_close(output.float(), reference, rtol=rtol, atol=atol)
+        for actual, ref in zip(inputs, refs):
+            actual_grad = actual.grad if qkv_format == "bshd" else actual.grad.transpose(0, 1)
+            torch.testing.assert_close(actual_grad.float(), ref.grad, rtol=rtol, atol=atol)
+        # dBias subtracts dO.O using low-precision saved O, amplifying pointwise cancellation.
+        error = torch.linalg.vector_norm(bias.grad.float() - ref_bias.grad)
+        assert error <= torch.finfo(dtype).eps * torch.linalg.vector_norm(ref_bias.grad)
+        assert len(implementation._plans) == 2
+        assert compile_graph.call_count == 2
+    assert executed == [False, True, False, True]
 
 
 @pytest.mark.parametrize(
