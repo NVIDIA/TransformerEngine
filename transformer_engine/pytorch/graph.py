@@ -6,6 +6,7 @@
 
 from collections.abc import Iterable
 import contextlib
+from contextvars import ContextVar
 import gc
 import os
 import warnings
@@ -38,6 +39,24 @@ __all__ = ["make_graphed_callables"]
 
 _IS_GRAPH_CAPTURING = False
 _IS_GRAPH_SLOT_MEMORY_CAPTURING = False
+_SLOT_OFFLOAD_CONTEXT = ContextVar("te_graph_slot_offload_context", default=None)
+
+
+class _SlotOffloadContext(NamedTuple):
+    checker: Callable[[torch.Tensor], bool]
+    d2h_stream: Optional[torch.cuda.Stream]
+    h2d_stream: Optional[torch.cuda.Stream]
+
+
+@contextlib.contextmanager
+def _graph_memory_offload_context(checker, *, d2h_stream=None, h2d_stream=None):
+    """Let slot hooks offload selected saves without installing a competing hook pair."""
+    token = _SLOT_OFFLOAD_CONTEXT.set(_SlotOffloadContext(checker, d2h_stream, h2d_stream))
+    try:
+        yield
+    finally:
+        _SLOT_OFFLOAD_CONTEXT.reset(token)
+
 
 _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
@@ -267,8 +286,8 @@ def _slot_output_plan(outputs: Sequence[Any], func: Callable) -> List[Optional[T
 
 
 def _storage_view(storage, offset: int, spec: Tuple[Any, ...]) -> torch.Tensor:
-    """Materialize a typed tensor view at a byte offset in a CUDA storage."""
-    target = torch.empty((0,), dtype=spec[4], device=spec[5])
+    """Materialize a typed tensor view at a byte offset in an arena storage."""
+    target = torch.empty((0,), dtype=spec[4], device=storage.device)
     if offset % target.element_size():
         raise RuntimeError("CUDA graph arena view has an unaligned byte offset.")
     return target.set_(
@@ -285,7 +304,13 @@ def _arena_view(arena: torch.Tensor, offset: int, spec: Tuple[Any, ...]) -> torc
     return _storage_view(arena.untyped_storage(), offset, spec)
 
 
-def _copy_tensor_storage_span(target: torch.Tensor, source: torch.Tensor, size_bytes: int) -> None:
+def _copy_tensor_storage_span(
+    target: torch.Tensor,
+    source: torch.Tensor,
+    size_bytes: int,
+    *,
+    non_blocking: bool = False,
+) -> None:
     """Copy a saved tensor's addressed storage, including internally overlapping views."""
     if size_bytes == 0:
         return
@@ -301,7 +326,20 @@ def _copy_tensor_storage_span(target: torch.Tensor, source: torch.Tensor, size_b
     target_span = torch.empty((0,), dtype=target.dtype, device=target.device).set_(
         target.untyped_storage(), target.storage_offset(), (elements,), (1,)
     )
-    target_span.copy_(source_span)
+    target_span.copy_(source_span, non_blocking=non_blocking)
+
+
+class _CopyOverlappingOutput(torch.autograd.Function):
+    """Preserve an overlapping public view while forwarding its logical gradient."""
+
+    @staticmethod
+    def forward(ctx, source: torch.Tensor, target: torch.Tensor, size_bytes: int):
+        _copy_tensor_storage_span(target, source, size_bytes)
+        return target
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return grad_output, None, None
 
 
 def set_capture_start(*, use_slot_memory: bool = False) -> None:
@@ -957,6 +995,7 @@ def _make_graphed_callables(
             for module in modules:
                 module.backward_dw()
             return tuple((param, param.grad) for param in params if param.grad is not None)
+
     per_callable_fused_wgrad_params = {}
     if use_slot_memory:
         num_graph_inputs = len(flatten_sample_args)
@@ -1165,6 +1204,13 @@ def _make_graphed_callables(
                 bool(storage_ptrs.intersection(per_callable_external_storage_ptrs[func_idx]))
                 and not snapshot_user_input
             )
+            offload_context = _SLOT_OFFLOAD_CONTEXT.get()
+            is_offloaded = (
+                not is_external
+                and signature[-1] > 0
+                and offload_context is not None
+                and offload_context.checker(tensor)
+            )
             if not is_external and tensor.__class__ is not torch.Tensor:
                 raise RuntimeError(
                     "CUDA graph saved-tensor arenas do not yet support tensor "
@@ -1182,7 +1228,7 @@ def _make_graphed_callables(
                 storage_offset_bytes = tensor.storage_offset() * tensor.element_size()
             observed_saved_tensor_plan.append(
                 (
-                    "external" if is_external else "native",
+                    "external" if is_external else "offload" if is_offloaded else "native",
                     storage_identity if is_external else None,
                     *signature,
                     storage_group,
@@ -1356,6 +1402,20 @@ def _make_graphed_callables(
                                 record_saved_tensor, lambda x: x
                             ):
                                 outputs, _ = _tree_flatten(func(*args, **kwargs))
+                            # Keep aliases together if any saved view must stay on GPU.
+                            retained_groups = {
+                                spec[8]
+                                for spec in observed_saved_tensor_plan
+                                if spec[0] != "offload"
+                            }
+                            observed_saved_tensor_plan[:] = [
+                                (
+                                    ("native", *spec[1:])
+                                    if spec[0] == "offload" and spec[8] in retained_groups
+                                    else spec
+                                )
+                                for spec in observed_saved_tensor_plan
+                            ]
                             observed_output_plan = _slot_output_plan(outputs, func)
                             observed_boundary_aliases = observe_saved_tensor_boundary_aliases(
                                 func_idx,
@@ -1772,11 +1832,11 @@ def _make_graphed_callables(
                         f"CUDA graph {kind} family {family} has incompatible storage modes "
                         f"at position {tensor_idx}: {sorted(modes)}."
                     )
-                layout_keys = {(spec[0], spec[4], spec[5], spec[6]) for spec in specs}
-                if layout_keys != {(kind, specs[0][4], specs[0][5], specs[0][6])}:
+                layout_keys = {(spec[0], *spec[2:8]) for spec in specs}
+                if len(layout_keys) != 1:
                     raise RuntimeError(
-                        f"CUDA graph {kind} family {family} has incompatible dtype, device, "
-                        f"or autograd state at position {tensor_idx}."
+                        f"CUDA graph {kind} family {family} has incompatible shape, stride, "
+                        f"dtype, device, or autograd state at position {tensor_idx}."
                     )
 
         return [[None] * len(plan) for plan in per_callable_plans]
@@ -1836,7 +1896,10 @@ def _make_graphed_callables(
                     f"at position {tensor_idx}."
                 )
             if target is not output:
-                target.copy_(output)
+                if torch._debug_has_internal_overlap(target):
+                    target = _CopyOverlappingOutput.apply(output, target, spec[7])
+                else:
+                    target.copy_(output)
             copied_outputs.append(target)
         return copied_outputs
 
@@ -1869,7 +1932,10 @@ def _make_graphed_callables(
                 if target is not None:
                     if target is not grad_input:
                         with torch.no_grad():
-                            target.copy_(grad_input)
+                            if torch._debug_has_internal_overlap(target):
+                                _copy_tensor_storage_span(target, grad_input, spec[7])
+                            else:
+                                target.copy_(grad_input)
                     grad_input = target
             copied_grad_inputs.append(grad_input)
         return tuple(copied_grad_inputs)
@@ -2175,6 +2241,45 @@ def _make_graphed_callables(
                 )
             )
 
+    slot_offload_arenas = {}
+    per_callable_offload_targets = None
+    per_callable_offload_storages = None
+    if use_slot_memory:
+        offload_plans = [
+            [spec if spec[0] == "offload" else None for spec in plan]
+            for plan in per_callable_saved_tensor_plans
+        ]
+        offload_sizes = {}
+        for func_idx, plan in enumerate(offload_plans):
+            _, size = slot_tensor_targets(plan)
+            arena_id = saved_tensor_arena_ids[func_idx]
+            offload_sizes[arena_id] = max(offload_sizes.get(arena_id, 0), size)
+        slot_offload_arenas = {
+            arena_id: torch.empty(size, dtype=torch.uint8, pin_memory=True)
+            for arena_id, size in offload_sizes.items()
+            if size
+        }
+        per_callable_offload_targets = []
+        per_callable_offload_storages = []
+        for func_idx, plan in enumerate(offload_plans):
+            arena = slot_offload_arenas.get(saved_tensor_arena_ids[func_idx])
+            targets, _ = slot_tensor_targets(plan, arena)
+            per_callable_offload_targets.append(targets)
+            groups = {}
+            for target, spec in zip(targets, plan):
+                if spec is not None:
+                    start = target.storage_offset() * target.element_size()
+                    groups.setdefault(spec[8], []).append(
+                        (start, start + spec[7], spec[4].itemsize)
+                    )
+            spans = {}
+            for group, records in groups.items():
+                alignment = max(itemsize for _, _, itemsize in records)
+                start = min(start for start, _, _ in records) // alignment * alignment
+                end = max(end for _, end, _ in records)
+                spans[group] = arena[start:end]
+            per_callable_offload_storages.append(spans)
+
     slot_user_grad_arenas = {}
     if use_slot_memory:
         slot_sizes = {}
@@ -2206,6 +2311,9 @@ def _make_graphed_callables(
 
         plan = per_callable_saved_tensor_plans[func_idx]
         saved_idx = 0
+        reloaded_storages = {}
+        offload_streams = {}
+        reload_streams = {}
         if alias_targets is not None and len(alias_targets) != len(plan):
             raise RuntimeError(
                 f"CUDA graph input {func_idx} changed its canonical saved-target count."
@@ -2235,6 +2343,21 @@ def _make_graphed_callables(
                         f"CUDA graph input {func_idx} changed an external saved tensor."
                     )
                 return tensor
+            if spec[0] == "offload":
+                context = _SLOT_OFFLOAD_CONTEXT.get()
+                if context is None:
+                    raise RuntimeError("CUDA graph offload scope changed after warmup.")
+                target = per_callable_offload_targets[func_idx][current_saved_idx]
+                stream = context.d2h_stream
+                if stream is not None:
+                    stream.wait_stream(torch.cuda.current_stream())
+                    offload_streams[stream.cuda_stream] = stream
+                with torch.no_grad(), torch.cuda.stream(stream):
+                    _copy_tensor_storage_span(target, tensor, spec[7], non_blocking=True)
+                if stream is not None:
+                    tensor.record_stream(stream)
+                reload_streams[spec[8]] = context.h2d_stream
+                return current_saved_idx
             if spec[0] != "native":
                 raise RuntimeError(
                     f"CUDA graph input {func_idx} has unsupported saved-tensor mode {spec[0]}."
@@ -2267,8 +2390,37 @@ def _make_graphed_callables(
                 tensor = target
             return tensor
 
-        with torch.autograd.graph.saved_tensors_hooks(pack_saved_tensor, lambda x: x):
-            yield
+        @torch.compiler.disable
+        def unpack_saved_tensor(saved):
+            if not isinstance(saved, int):
+                return saved
+            spec = plan[saved]
+            group = spec[8]
+            host_storage = per_callable_offload_storages[func_idx][group]
+            if group not in reloaded_storages:
+                stream = reload_streams[group]
+                current_stream = torch.cuda.current_stream()
+                if stream is not None:
+                    stream.wait_stream(current_stream)
+                with torch.cuda.stream(stream):
+                    storage = host_storage.to(spec[5], non_blocking=True)
+                if stream is not None:
+                    current_stream.wait_stream(stream)
+                    storage.record_stream(current_stream)
+                reloaded_storages[group] = storage
+            host_view = per_callable_offload_targets[func_idx][saved]
+            offset = (
+                host_view.storage_offset() * host_view.element_size()
+                - host_storage.storage_offset()
+            )
+            return _arena_view(reloaded_storages[group], offset, spec)
+
+        try:
+            with torch.autograd.graph.saved_tensors_hooks(pack_saved_tensor, unpack_saved_tensor):
+                yield
+        finally:
+            for stream in offload_streams.values():
+                torch.cuda.current_stream().wait_stream(stream)
         if saved_idx != len(plan):
             raise RuntimeError(
                 f"CUDA graph input {func_idx} saved {saved_idx} forward tensors during "
@@ -3060,6 +3212,7 @@ def _make_graphed_callables(
         if slot_allocator_pool is not None:
             setattr(ret[-1], "_te_cuda_graph_allocator_pool", slot_allocator_pool)
             setattr(ret[-1], "_te_cuda_graph_saved_arenas", slot_saved_arenas)
+            setattr(ret[-1], "_te_cuda_graph_offload_arenas", slot_offload_arenas)
             setattr(ret[-1], "_te_cuda_graph_user_grad_arenas", slot_user_grad_arenas)
 
     if just_one_callable:
@@ -3206,6 +3359,10 @@ def make_graphed_callables(
         protected between a forward replay and its backward replay. A tensor that backward reads
         from a plain ``ctx`` attribute may be overwritten by another variant's replay, so delayed
         weight-gradient ``_order`` entries are rejected.
+        Captured offload scopes may use the private ``_graph_memory_offload_context(checker)``
+        instead of nesting another saved-tensor hook. Selected saves use pinned CPU arenas with
+        the same saved-arena IDs; forward and backward graphs capture their D2H and H2D copies.
+        The caller owns the offload policy. Reconstructed saved views retain their aliases.
         Requires the first positional sample argument of every graph input to be a plain CUDA
         tensor. Plain
         CUDA user inputs are snapshotted into the slot arenas whenever forward saves them for

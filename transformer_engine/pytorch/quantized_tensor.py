@@ -345,13 +345,16 @@ def prepare_for_saving(
             and isinstance(tensor, (QuantizedTensorStorage, GroupedTensorStorage))
             and not getattr(tensor, "is_distributed_weight", False)
         ):
-            # Slot-memory capture must place graph-internal saved tensors in its explicit
-            # arena. Save a detached wrapper's physical tensors so the standard arena path
-            # can place them, then rebuild the wrapper for TE backward. A DistributedWeight
-            # is restored by reference below and keeps its identity.
+            # Slot arenas and legacy offload hooks must save physical buffers, not copy
+            # a wrapper by its nominal dtype (which would dequantize it). Detach first
+            # because prepare_for_saving clears the wrapper's buffer references. A
+            # DistributedWeight is restored by reference below and keeps its identity.
+            from .cpu_offload import NVTE_CPU_OFFLOAD_V1, is_cpu_offload_enabled
             from .graph import _is_graph_slot_memory_capturing
 
-            decompose_wrapper = _is_graph_slot_memory_capturing()
+            decompose_wrapper = _is_graph_slot_memory_capturing() or (
+                NVTE_CPU_OFFLOAD_V1 and is_cpu_offload_enabled()
+            )
 
         if decompose_wrapper:
             t, t_obj = tensor.detach().prepare_for_saving()

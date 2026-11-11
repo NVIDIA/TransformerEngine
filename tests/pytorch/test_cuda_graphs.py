@@ -59,6 +59,119 @@ def test_slot_memory_arena_view_uses_typed_storage_offset():
     assert view.data_ptr() == backing.data_ptr() + 5 * backing.element_size()
 
 
+@pytest.mark.parametrize("async_offload", [False, True])
+def test_slot_memory_offloaded_saves_survive_mixed_branches_and_slot_wrap(async_offload):
+    streams = (
+        dict(d2h_stream=torch.cuda.Stream(), h2d_stream=torch.cuda.Stream())
+        if async_offload
+        else {}
+    )
+
+    class Module(torch.nn.Module):
+        def __init__(self, copies):
+            super().__init__()
+            self.copies = copies
+
+        def forward(self, inp):
+            with te_graph._graph_memory_offload_context(lambda tensor: tensor.is_cuda, **streams):
+                expanded = torch.cat([inp.sin()] * self.copies)
+                return expanded.square().view(self.copies, -1).sum(dim=0)
+
+    modules = (Module(1).cuda(), Module(3).cuda())
+    elements = 4096
+    samples = tuple((torch.ones(elements, device="cuda", requires_grad=True),) for _ in range(4))
+    graphs = make_graphed_callables(
+        modules,
+        samples,
+        num_warmup_iters=2,
+        _order=[1, 1, -1, -1, 2, 2, -2, -2],
+        _num_layers_per_chunk=[1, 1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(
+            _slot(slot, branch, slot, warmup=branch) for branch in range(2) for slot in range(2)
+        ),
+    )
+    try:
+        host_arenas = graphs[0]._te_cuda_graph_offload_arenas
+        assert len(host_arenas) == 2
+        assert all(arena.is_pinned() for arena in host_arenas.values())
+        assert all(graph._te_cuda_graph_offload_arenas is host_arenas for graph in graphs)
+        # Only public outputs remain in GPU saved arenas, not the offloaded activations.
+        assert (
+            sum(t.numel() for t in graphs[0]._te_cuda_graph_saved_arenas.values())
+            == 2 * elements * 4
+        )
+        pending = []
+        for microbatch, branch in enumerate((1, 0, 0, 1, 1, 0)):
+            if len(pending) == 2:
+                inp, output, copies = pending.pop(0)
+                output.sum().backward()
+                torch.testing.assert_close(inp.grad, 2 * copies * inp.sin() * inp.cos())
+            slot = microbatch % 2
+            inp = torch.randn(elements, device="cuda", requires_grad=True)
+            output = graphs[branch * 2 + slot](inp)
+            pending.append((inp, output, modules[branch].copies))
+        for inp, output, copies in pending:
+            output.sum().backward()
+            torch.testing.assert_close(inp.grad, 2 * copies * inp.sin() * inp.cos())
+    finally:
+        reset_graphs(graphs)
+
+
+@pytest.mark.parametrize("mixed_policy", [False, True])
+def test_slot_memory_offload_preserves_saved_view_aliases(mixed_policy):
+    class Product(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, inp):
+            values = inp.sin()
+            left, right = values[:-1], values[1:]
+            right._do_not_offload = mixed_policy
+            ctx.save_for_backward(inp, left, right)
+            return left * right
+
+        @staticmethod
+        def backward(ctx, grad):
+            inp, left, right = ctx.saved_tensors
+            assert left.untyped_storage()._cdata == right.untyped_storage()._cdata
+            assert right.storage_offset() == left.storage_offset() + 1
+            result = torch.zeros_like(inp)
+            result[:-1].add_(grad * right * inp[:-1].cos())
+            result[1:].add_(grad * left * inp[1:].cos())
+            return result
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            with te_graph._graph_memory_offload_context(
+                lambda tensor: tensor.is_cuda and not getattr(tensor, "_do_not_offload", False)
+            ):
+                return Product.apply(inp)
+
+    module = Module().cuda()
+    graphs = make_graphed_callables(
+        (module,),
+        ((torch.ones(4096, device="cuda", requires_grad=True),),),
+        _order=[1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(_slot(0, 0, 0),),
+    )
+    try:
+        assert sum(arena.numel() for arena in graphs[0]._te_cuda_graph_offload_arenas.values()) == (
+            4096 * 4 * (1 if mixed_policy else 2)
+        )
+        for _ in range(3):
+            inp = torch.randn(4096, device="cuda", requires_grad=True)
+            reference = inp.detach().clone().requires_grad_()
+            expected = reference.sin()[:-1] * reference.sin()[1:]
+            expected.sum().backward()
+            actual = graphs[0](inp)
+            actual.sum().backward()
+            torch.testing.assert_close(actual, expected)
+            torch.testing.assert_close(inp.grad, reference.grad)
+    finally:
+        reset_graphs(graphs)
+
+
 def nvfp4_vanilla():
     nvfp4_recipe = recipe.NVFP4BlockScaling()
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
@@ -3620,6 +3733,67 @@ def test_slot_memory_preserves_strided_public_outputs() -> None:
             torch.testing.assert_close(inp.grad, torch.full_like(inp, 2.0))
     finally:
         reset_graphs(graphed)
+
+
+def test_slot_memory_preserves_expanded_public_outputs() -> None:
+    """Copy an output's addressed storage without writing into a zero-stride view."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return (inp * 2.0)[:1].expand(8)
+
+    module = Module().cuda()
+    graphed = make_graphed_callables(
+        (module,),
+        ((torch.randn(4, device="cuda", requires_grad=True),),),
+        _order=[1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(_slot(0, 0, 0),),
+    )
+    try:
+        for _ in range(3):
+            inp = torch.randn(4, device="cuda", requires_grad=True)
+            output = graphed[0](inp)
+            assert output.shape == (8,)
+            assert output.stride() == (0,)
+            torch.testing.assert_close(output, (inp.detach() * 2.0)[:1].expand(8))
+            output.sum().backward()
+            torch.testing.assert_close(inp.grad, torch.tensor([16.0, 0.0, 0.0, 0.0], device="cuda"))
+    finally:
+        reset_graphs(graphed)
+
+
+@pytest.mark.parametrize("different_layout", ("shape", "stride"))
+def test_slot_memory_rejects_incompatible_branch_output_layouts(different_layout) -> None:
+    """Mutually exclusive branches must expose the same output shape and strides."""
+
+    class Module(torch.nn.Module):
+        def __init__(self, layout):
+            super().__init__()
+            self.layout = layout
+
+        def forward(self, inp):
+            output = inp * 2.0
+            if self.layout == "shape":
+                return output[:2]
+            if self.layout == "stride":
+                return output.t()
+            return output
+
+    modules = (Module("same").cuda(), Module(different_layout).cuda())
+    samples = tuple((torch.randn(4, 4, device="cuda", requires_grad=True),) for _ in modules)
+    with pytest.raises(RuntimeError, match="incompatible shape, stride"):
+        make_graphed_callables(
+            modules,
+            samples,
+            _order=_variant_major_order([1, -1], len(modules)),
+            _num_layers_per_chunk=[1] * len(modules),
+            _reuse_graph_input_output_buffers=True,
+            _graph_memory_slots=tuple(
+                _slot(0, variant, 1, warmup=variant) for variant in range(len(modules))
+            ),
+        )
 
 
 def test_slot_memory_rejects_delayed_wgrad_order() -> None:

@@ -1689,9 +1689,12 @@ class FusedAttnBwdArgs:
             self.aux_softmax_offset,
             self.packed_qkv,
             self.packed_kv,
+            s_scale,
         ) = restore_from_func_ctx(
             ctx
         )  # pylint: disable=unbalanced-tuple-unpacking
+        if s_scale is not None:
+            self.S_quantizer.scale = s_scale
 
     def aux_ctx_tensors(self) -> List[torch.Tensor]:
         """The cuDNN aux pack, in the order the forward returned it."""
@@ -2154,6 +2157,11 @@ def _fused_attn_setup_ctx(
         aux_softmax_offset,
         packed_qkv,
         packed_kv,
+        (
+            bwd_args.S_quantizer.scale
+            if fp8 and isinstance(bwd_args.S_quantizer, Float8Quantizer)
+            else None
+        ),
     )
 
 
