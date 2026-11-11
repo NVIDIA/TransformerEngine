@@ -41,7 +41,7 @@ def run(args, impl):
     import pandas as pd
     import torch
 
-    tex = common.te_backend(impl)
+    tex = common.load_tex_backend(impl)
 
     def factory(m, n, g, layout, activation, swizzle, input_dtype, group):
         dtype = getattr(torch, common.INPUTS[input_dtype][0])

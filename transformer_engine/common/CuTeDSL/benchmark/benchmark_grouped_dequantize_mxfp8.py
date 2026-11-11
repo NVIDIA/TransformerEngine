@@ -35,7 +35,7 @@ def run(args, impl):
     import pandas as pd
     import torch
 
-    tex = common.te_backend(impl)
+    tex = common.load_tex_backend(impl)
 
     def factory(m, n, g, layout, direction, output, group):
         quantizer = grouped._quantizer(tex, direction, "off")  # pylint: disable=protected-access

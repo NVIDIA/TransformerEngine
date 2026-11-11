@@ -73,7 +73,7 @@ def _cutedsl_launcher(activation):
     # pylint: disable=import-outside-toplevel
     import torch
 
-    common.cuda_backend(True)
+    common.enable_cutedsl(True)
     from transformer_engine.common.CuTeDSL import get_mxfp8_quantization_function
 
     # Resolve the defining module instead of naming it: it was renamed between revisions.
@@ -108,7 +108,7 @@ def _cutedsl_launcher(activation):
 
     @functools.lru_cache(maxsize=None)
     def te_setup():
-        return _te_launcher(common.te_backend("CuTeDSL"), activation)
+        return _te_launcher(common.load_tex_backend("CuTeDSL"), activation)
 
     def setup(x, act_input, direction, fusion, scaling, swizzle):
         dtype = next(v[1] for v in common.INPUTS.values() if getattr(torch, v[0]) == x.dtype)
@@ -141,7 +141,7 @@ def run(args, impl):
 
     activation = args.activation or "gelu"
     if impl == "CUDA":
-        setup = _te_launcher(common.te_backend("CUDA"), activation)
+        setup = _te_launcher(common.load_tex_backend("CUDA"), activation)
     else:
         setup = _cutedsl_launcher(activation)
 

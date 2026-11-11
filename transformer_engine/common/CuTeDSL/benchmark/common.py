@@ -281,16 +281,16 @@ def mxfp8_data_bytes(numel, direction):
     return sum(DIRECTIONS[direction]) * (numel + numel // MXFP8_BLOCK)
 
 
-def cuda_backend(enable):
+def enable_cutedsl(enable):
     """Sets NVTE_ENABLE_CUTEDSL_BACKEND for TE's own dispatch; call before importing TE."""
     os.environ["NVTE_ENABLE_CUTEDSL_BACKEND"] = "1" if enable else "0"
 
 
-def te_backend(impl):
+def load_tex_backend(impl):
     """Imports TE with its dispatch set to `impl` ("CuTeDSL": CuTeDSL kernels where TE has them,
     CUDA otherwise; "CUDA": CUDA only). Returns tex, TE's PyTorch extension."""
     # pylint: disable=import-outside-toplevel
-    cuda_backend(impl == "CuTeDSL")
+    enable_cutedsl(impl == "CuTeDSL")
     import transformer_engine.pytorch  # pylint: disable=unused-import
     import transformer_engine_torch as tex
 

@@ -54,7 +54,7 @@ def run(args, impl):
     import torch
     from transformer_engine.pytorch import MXFP8Quantizer
 
-    tex = common.te_backend(impl)
+    tex = common.load_tex_backend(impl)
 
     def factory(m, n, step, activation, direction, swizzle, input_dtype):
         dtype = getattr(torch, common.INPUTS[input_dtype][0])

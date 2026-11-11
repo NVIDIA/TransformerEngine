@@ -36,7 +36,7 @@ def run(args, impl):
     import torch
     from transformer_engine.pytorch import MXFP8Quantizer
 
-    tex = common.te_backend(impl)
+    tex = common.load_tex_backend(impl)
 
     def factory(m, n, direction, swizzle, output):
         rowwise, colwise = common.DIRECTIONS[direction]
