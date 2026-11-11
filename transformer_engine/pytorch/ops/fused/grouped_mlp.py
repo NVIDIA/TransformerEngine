@@ -247,6 +247,7 @@ def _quantize_unquantized_weights(
     *,
     rowwise: bool,
     columnwise: bool,
+    expected_shape: Optional[tuple[int, int]] = None,
 ) -> list:
     """Quantize plain weights with the given per-expert weight quantizers.
 
@@ -259,6 +260,16 @@ def _quantize_unquantized_weights(
     a later forward under a different (or no) recipe replaces or clears the op's quantizers
     before an earlier backward runs.
     """
+    weights = list(weights)
+    if len(weights) != len(quantizers):
+        raise RuntimeError(
+            f"Grouped MLP materialized {len(weights)} weights, but expected {len(quantizers)}."
+        )
+    if expected_shape is not None and any(tuple(w.shape) != expected_shape for w in weights):
+        raise RuntimeError(
+            f"Grouped MLP materialized weights of shapes {[tuple(w.shape) for w in weights]}, "
+            f"but expected full weights of shape {expected_shape}."
+        )
     out = []
     for weight, quantizer in zip(weights, quantizers):
         if is_quantized_tensor(weight):
@@ -567,7 +578,7 @@ def _cudnn_compute_wgrad(
         )
         b_tensor = torch.empty_strided(
             (0, in_features),
-            (in_features, 1),
+            (1, 16) if use_nvfp4 else (in_features, 1),
             dtype=data_dtype,
             device=device,
         )
@@ -844,7 +855,66 @@ def is_glu_activation(activation_op) -> bool:
     return isinstance(activation_op, (ScaledSwiGLU, ScaledSiTUGLU, ScaledClampedQGeGLU))
 
 
-def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
+def _cudnn_kernel_supports_gate_then_up(kernel, precision: str) -> bool:
+    """Require natural tensor layouts and explicit gate/up channel-order support."""
+    tensor_layout_capability = (
+        "supports_bf16_canonical_layouts" if precision == "bf16" else "supports_canonical_layouts"
+    )
+    return (
+        getattr(kernel, tensor_layout_capability, False)
+        and "gate_then_up" in getattr(kernel, "supports_glu_layouts", ())
+        and precision in getattr(kernel, "supports_gate_then_up_precisions", ())
+    )
+
+
+def _gate_then_up_launch_kwargs(kernel) -> dict:
+    """Use the selected kernel's preferred or supported gate/up tile."""
+    tile = getattr(kernel, "preferred_gate_then_up_mma_tiler", None)
+    if tile is None:
+        tilers = getattr(kernel, "supports_gate_then_up_mma_tilers", ((128, 256),))
+        tile = (128, 256) if (128, 256) in tilers else tilers[0]
+    return {
+        "glu_layout": "gate_then_up",
+        "mma_tiler_mn": tile,
+        "cluster_shape_mn": (1, 1) if tile[0] == 128 else (2, 1),
+    }
+
+
+def _flatten_cudnn_packed_scales(kwargs: dict) -> None:
+    """Expose packed scale bytes as flat views for the natural-rank API."""
+    for name in ("sfa_tensor", "sfb_tensor"):
+        if name in kwargs:
+            kwargs[name] = kwargs[name].view(-1)
+
+
+def _prefer_gate_then_up_hadamard(kernel) -> bool:
+    """Use the qualified regular GLU path unless RHT supports its own smaller tile."""
+    return (128, 256) in getattr(kernel, "supports_gate_then_up_mma_tilers", ())
+
+
+def _cudnn_frontend_supports_gate_then_up(precision: str = "mxfp8") -> bool:
+    """Whether both GLU kernels accept canonical gate/up storage in a precision.
+
+    ``supports_canonical_layouts`` describes tensor ranks and strides, not GLU
+    channel order. New gate/up fusion requires both capabilities; legacy
+    interleave32 callers retain their existing tensor-layout compatibility.
+    """
+    if get_device_compute_capability() not in ((10, 0), (10, 3)):
+        return False
+    try:
+        from cudnn import (  # pylint: disable=import-outside-toplevel,no-name-in-module
+            grouped_gemm_glu_wrapper_sm100,
+            grouped_gemm_dglu_wrapper_sm100,
+        )
+    except ImportError:
+        return False
+    return all(
+        _cudnn_kernel_supports_gate_then_up(kernel, precision)
+        for kernel in (grouped_gemm_glu_wrapper_sm100, grouped_gemm_dglu_wrapper_sm100)
+    )
+
+
+def validate_grouped_mlp_dims(fc1, activation_op, fc2, *, allow_gate_then_up=False) -> None:
     """Validate FC1 / activation / FC2 dimensions for fused grouped MLP."""
     if fc1.in_features % 64 != 0 or fc1.out_features % 64 != 0:
         raise ValueError(
@@ -870,11 +940,25 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
             f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
             f"out_features={fc2.out_features}) do not match."
         )
-    if is_glu_activation(activation_op) and activation_op.glu_interleave_size != 32:
+    if (
+        is_glu_activation(activation_op)
+        and activation_op.glu_interleave_size != 32
+        and not (
+            allow_gate_then_up
+            and isinstance(activation_op, ScaledSwiGLU)
+            and activation_op.glu_interleave_size is None
+        )
+    ):
         raise ValueError(
-            "Fused kernel requires 32-wide GLU interleaving, "
+            "Fused kernel requires 32-wide GLU interleaving or supported canonical SwiGLU storage, "
             f"but got glu_interleave_size={activation_op.glu_interleave_size}."
         )
+    if (
+        is_glu_activation(activation_op)
+        and activation_op.glu_interleave_size is None
+        and fc2.in_features % 128 != 0
+    ):
+        raise ValueError("Canonical fused GLU requires the FFN dimension to be divisible by 128.")
 
 
 def _is_grouped_mlp_fusion_candidate(
@@ -962,7 +1046,22 @@ def fuse_grouped_mlp_ops(
             matches_pattern = False
         else:
             try:
-                validate_grouped_mlp_dims(window[0], window[1], window[2])
+                gate_then_up = (
+                    isinstance(window[1], ScaledSwiGLU) and window[1].glu_interleave_size is None
+                )
+                if recipe.custom():
+                    use_nvfp4 = isinstance(window[0].get_quantizer("forward", 0), NVFP4Quantizer)
+                else:
+                    use_nvfp4 = recipe.nvfp4()
+                precision = "nvfp4" if use_nvfp4 else "mxfp8"
+                allow_gate_then_up = (
+                    gate_then_up
+                    and (not recipe.nvfp4() or recipe.fp8_format != RecipeFormat.UE5M3)
+                    and _cudnn_frontend_supports_gate_then_up(precision)
+                )
+                validate_grouped_mlp_dims(
+                    window[0], window[1], window[2], allow_gate_then_up=allow_gate_then_up
+                )
             except (TypeError, ValueError):
                 matches_pattern = False
 
@@ -1002,11 +1101,12 @@ def fuse_grouped_mlp_ops(
 class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     """Joint fused op for block-scaled GroupedLinear + activation + GroupedLinear.
 
-    MXFP8 uses CuTe DSL grouped-GEMM kernels via the cuDNN front-end. When
+    MXFP8 and NVFP4 use CuTe DSL grouped-GEMM kernels via the cuDNN front-end. When
     caller output/grad_input buffers are provided, the GEMMs write into them
     directly. When the front-end wrappers advertise ``supports_canonical_layouts``,
-    MXFP8 operands are passed in their natural layouts instead of kernel-facing
-    views, in the forward and, with a supporting dGLU wrapper, the backward.
+    operands with GEMM-packed scales use natural tensor ranks in forward and
+    backward. Gate/up SwiGLU storage requires this API; interleave32 retains
+    compatibility with older tensor layouts.
     NVFP4 does the same for its cuDNN GEMMs when the scales are swizzled.
 
     """
@@ -1079,7 +1179,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         super().__init__((fc1, activation, fc2))
         if not self.is_supported():
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
-        validate_grouped_mlp_dims(fc1, activation, fc2)
+        self._gate_then_up = (
+            is_glu_activation(activation) and activation.glu_interleave_size is None
+        )
+        validate_grouped_mlp_dims(
+            fc1,
+            activation,
+            fc2,
+            allow_gate_then_up=self._gate_then_up
+            and any(_cudnn_frontend_supports_gate_then_up(p) for p in ("mxfp8", "nvfp4")),
+        )
         if not is_glu_activation(activation):
             # grouped_gemm_srelu_wrapper_sm100 and grouped_gemm_dsrelu_wrapper_sm100 are
             # SReLU-specific and do not take GLU ``act_func`` selectors.
@@ -1171,13 +1280,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # read the full shape, so all-gather the full weight first. A plain weight is a no-op.
         fc1_is_dist = is_distributed_weight(fc1_weight_param)
         fc2_is_dist = is_distributed_weight(fc2_weight_param)
-        assert fc1_is_dist == fc2_is_dist, "FC1/FC2 must share one distributed-weight group."
-        if fc1_is_dist:
-            assert (
-                not fc1_op.single_grouped_weight and not fc2_op.single_grouped_weight
-            ), "distributed-weight fused grouped-MLP requires single_grouped_weight=False."
-            assert fc1_op.weight0.is_routed_expert and fc1_op.weight0.weight_list is not None
-            assert fc2_op.weight0.is_routed_expert and fc2_op.weight0.weight_list is not None
+        if fc1_is_dist != fc2_is_dist:
+            raise RuntimeError(
+                "FC1/FC2 must both use distributed weights or both use plain weights."
+            )
+        if fc1_is_dist and (fc1_op.single_grouped_weight or fc2_op.single_grouped_weight):
+            raise RuntimeError(
+                "Distributed-weight fused grouped-MLP requires single_grouped_weight=False."
+            )
 
         device = fc1_weight_param.device
         dtype = maybe_autocast_dtype(default_dtype=fc1_weight_param.dtype)
@@ -1331,6 +1441,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_weight_quantizers,
                 rowwise=True,
                 columnwise=input_requires_grad and not fc1_is_dist,
+                expected_shape=fc1_weight_shape if fc1_is_dist else None,
             )
 
         # Prepare FC2 grouped weight tensor for fused kernels.
@@ -1419,43 +1530,46 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
 
-        # Choose kernel implementation for FC1 + act
+        # Select FC1 fusion without changing the quantization recipe.
         kernel_impl = "gemm_act"
+        fc1_kernel = self.grouped_gemm_activation_kernel()
         if (
             use_nvfp4
             and isinstance(fc2_input_quantizer, NVFP4Quantizer)
             and fc2_input_quantizer.with_rht
         ):
             if fc2_input_quantizer.disable_second_level_scale:
-                # Use GEMM + act + RHT + quant kernel if available
-                if self.grouped_gemm_act_hadamard_quant_kernel() is None:
-                    # Kernel is not available
-                    pass
-                elif fc2_input_quantizer.rht_matrix_random_sign_mask_t != 0:
-                    # Kernel does not apply sign mask in RHT
-                    pass
-                elif fc1_bias_packed is not None:
-                    # Kernel has large numerical error with bias
-                    pass
-                elif self._cudnn_act_func == "swiglu":
-                    kernel_impl = "gemm_act_rht_quant"
+                rht_kernel = self.grouped_gemm_act_hadamard_quant_kernel()
+                # Wgrad needs MMA-packed column scales; the logical CuTe scale
+                # layout is not interchangeable with this physical storage.
+                rht_kernel_compatible = (
+                    rht_kernel is not None
+                    and "mma" in getattr(rht_kernel, "supports_rht_colwise_sf_layouts", ())
+                    and (
+                        not self._gate_then_up
+                        or _cudnn_kernel_supports_gate_then_up(rht_kernel, "nvfp4")
+                    )
+                )
+                if (
+                    rht_kernel_compatible
+                    and fc2_input_quantizer.rht_matrix_random_sign_mask_t == 0
+                    and fc1_bias_packed is None
+                    and self._cudnn_act_func == "swiglu"
+                ):
+                    kernel_impl, fc1_kernel = "gemm_act_rht_quant", rht_kernel
             elif fc2_input_quantizer.with_post_rht_amax:
-                # Use GEMM + act + RHT + amax kernel if available
-                if self.grouped_gemm_act_hadamard_kernel() is None:
-                    # Kernel is not available
-                    pass
-                elif self._cudnn_act_func in ("swiglu", "situglu"):
-                    kernel_impl = "gemm_act_rht_amax"
-                elif activation_is_srelu:
-                    kernel_impl = "gemm_act_rht_amax"
-        if kernel_impl == "gemm_act":
-            fc1_kernel = self.grouped_gemm_activation_kernel()
-        elif kernel_impl == "gemm_act_rht_amax":
-            fc1_kernel = self.grouped_gemm_act_hadamard_kernel()
-        elif kernel_impl == "gemm_act_rht_quant":
-            fc1_kernel = self.grouped_gemm_act_hadamard_quant_kernel()
-        else:
-            raise RuntimeError(f"Unrecognized kernel variant ({kernel_impl})")
+                rht_kernel = self.grouped_gemm_act_hadamard_kernel()
+                rht_kernel_compatible = rht_kernel is not None and (
+                    not self._gate_then_up
+                    or (
+                        _cudnn_kernel_supports_gate_then_up(rht_kernel, "nvfp4")
+                        and _prefer_gate_then_up_hadamard(rht_kernel)
+                    )
+                )
+                if rht_kernel_compatible and (
+                    self._cudnn_act_func in ("swiglu", "situglu") or activation_is_srelu
+                ):
+                    kernel_impl, fc1_kernel = "gemm_act_rht_amax", rht_kernel
 
         # Choose operand layouts
         # With canonical layouts, cuDNN takes A as (sum(m), k), B as
@@ -1463,18 +1577,22 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # The kernel has to accept them, and NVFP4 scales are packed
         # that way only when swizzled for GEMM.
         with_gemm_swizzled_scales = grouped_fc1_x._with_gemm_swizzled_scales
-        canonical = (
+        use_natural_layouts = (
             is_glu_activation(activation_op)
             and getattr(fc1_kernel, "supports_canonical_layouts", False)
             and (not use_nvfp4 or with_gemm_swizzled_scales)
         )
+        if self._gate_then_up and not use_natural_layouts:
+            raise RuntimeError(
+                "Gate/up SwiGLU requires natural tensor layouts and GEMM-packed scales."
+            )
 
         # Pack data tensors
         fc1_x_data = grouped_fc1_x.rowwise_data.view(dtype=data_dtype)
         fc1_x_data = fc1_x_data.view(in_shape[0], data_in_k)
         fc1_x_scales = grouped_fc1_x.scale_inv
         fc1_x_scales = fc1_x_scales.view(dtype=scale_view_dtype)
-        if not canonical:
+        if not use_natural_layouts:
             # Note: Fused kernel expects tensor with non-contiguous
             # logical dims.
             # Data actual shape: (1, sum(m), k)
@@ -1520,11 +1638,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         current_stream = torch.cuda.current_stream(device.index).cuda_stream
 
         fc1_prob_tensor = None
-        if not unit_activation_scale:
+        if unit_activation_scale and kernel_impl != "gemm_act":
+            # The specialized RHT wrappers require an explicit probability tensor.
+            fc1_prob_tensor = get_cached_ones_tensor(in_shape[0], torch.float32, device).reshape(
+                (-1,) if use_natural_layouts else (-1, 1, 1)
+            )
+        elif not unit_activation_scale:
             fc1_prob_tensor = (
                 scales.detach()
                 .to(dtype=torch.float32 if use_nvfp4 else dtype)
-                .reshape((-1,) if canonical else (-1, 1, 1))
+                .reshape((-1,) if use_natural_layouts else (-1, 1, 1))
             )
         if use_nvfp4:
             # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
@@ -1585,6 +1708,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         elif kernel_impl == "gemm_act_rht_quant":
             fc1_activation_kwargs["d_dtype"] = torch.float4_e2m1fn_x2
             fc1_activation_kwargs["rht_colwise_dtype"] = torch.float4_e2m1fn_x2
+            fc1_activation_kwargs["rht_colwise_sf_layout"] = "mma"
 
         # Kernel arguments based on activation
         if activation_is_srelu:
@@ -1592,6 +1716,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_activation_kwargs["act_func"] = "srelu"
         elif self._cudnn_act_func is not None:
             fc1_activation_kwargs["act_func"] = self._cudnn_act_func
+        if self._gate_then_up:
+            fc1_activation_kwargs.update(_gate_then_up_launch_kwargs(fc1_kernel))
         if self._cudnn_act_func == "geglu" and self._pass_geglu_runtime_params:
             if kernel_impl == "gemm_act_rht_quant":
                 fc1_activation_kwargs["glu_alpha"] = self._cudnn_geglu_alpha
@@ -1637,7 +1763,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_w_data = fc1_w_data.view(dtype=data_dtype)
             fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_k)
             fc1_w_scales = fc1_w_scales.view(dtype=scale_view_dtype)
-            if not canonical:
+            if not use_natural_layouts:
                 fc1_w_data = fc1_w_data.permute(1, 2, 0)
                 fc1_w_scales = fc1_w_scales.view(
                     num_groups,
@@ -1675,7 +1801,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_weight_k,
                 )
                 fc1_w_scales = swizzled_rowwise_scale.view(dtype=scale_view_dtype)
-                if not canonical:
+                if not use_natural_layouts:
                     fc1_w_data = fc1_w_data.permute(1, 2, 0)
                     fc1_w_scales = fc1_w_scales.view(
                         1,
@@ -1704,12 +1830,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_activation_kwargs["b_dtype"] = data_dtype
                 fc1_activation_kwargs["b_major"] = "k"
 
+        if use_natural_layouts:
+            _flatten_cudnn_packed_scales(fc1_activation_kwargs)
+
         # Launch FC1 + act kernel
         # pylint: disable-next=not-callable
         fc1_kernel_out = fc1_kernel(**fc1_activation_kwargs)
 
         activation_in = fc1_kernel_out["c_tensor"]
-        if not canonical:
+        if not use_natural_layouts:
             activation_in = activation_in.view(in_shape[0], fc1_weight_shape[0])
 
         if fc2_is_dist:
@@ -1719,6 +1848,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_weight_quantizers,
                 rowwise=True,
                 columnwise=False,
+                expected_shape=fc2_weight_shape,
             )
         if isinstance(grouped_fc2_weight, GroupedTensor) and not hasattr(
             grouped_fc2_weight, "_with_gemm_swizzled_scales"
@@ -1760,7 +1890,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_in_row_data = fc1_kernel_out["d_tensor"]
                 fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1] // 2)
                 fc2_in_row_scale = fc1_kernel_out["sfd_tensor"]
-                fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 4, 0, 1, 3)
+                if not use_natural_layouts:
+                    fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 4, 0, 1, 3)
                 fc2_in_col_data = fc1_kernel_out["rht_colwise_tensor"]
                 fc2_in_col_scale = fc1_kernel_out["sfrht_colwise_tensor"]
                 grouped_fc2_x = GroupedTensorStorage(
@@ -1784,7 +1915,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_in_row_scale = fc1_kernel_out["sfd_row_tensor"]
             fc2_in_col_data = fc1_kernel_out["d_col_tensor"]
             fc2_in_col_scale = fc1_kernel_out["sfd_col_tensor"]
-            if not canonical:
+            if not use_natural_layouts:
                 fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1])
                 fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 4, 0, 1, 3)
                 fc2_in_col_data = fc2_in_col_data.view(in_shape[0], fc2_weight_shape[1])
@@ -1966,7 +2097,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_scales_tensor = (
                         fc2_scales.detach()
                         .to(dtype=torch.float32)
-                        .reshape((-1,) if canonical else (-1, 1, 1))
+                        .reshape((-1,) if use_natural_layouts else (-1, 1, 1))
                     )
                 fc2_quant_kwargs = {
                     "a_tensor": fc1_kernel_out["d_tensor"],
@@ -2008,7 +2139,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc2_weight_shape[1],
                     )
                     fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
-                    if not canonical:
+                    if not use_natural_layouts:
                         fc2_w_data = fc2_w_data.permute(1, 2, 0)
                         fc2_w_scales = fc2_w_scales.view(
                             num_groups,
@@ -2038,7 +2169,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
                 fc2_quant_kwargs["d_tensor"] = (
                     fc2_out_buf
-                    if canonical
+                    if use_natural_layouts
                     else fc2_out_buf.as_strided(
                         (in_shape[0], fc2_weight_shape[0], 1),
                         (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
@@ -2299,16 +2430,20 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # GEMM.
         dactivation_kernel = self.grouped_gemm_dactivation_kernel()
         with_gemm_swizzled_scales = grouped_fc2_dy._with_gemm_swizzled_scales
-        canonical = getattr(dactivation_kernel, "supports_canonical_layouts", False) and (
+        use_natural_layouts = getattr(dactivation_kernel, "supports_canonical_layouts", False) and (
             not use_nvfp4 or with_gemm_swizzled_scales
         )
+        if self._gate_then_up and not use_natural_layouts:
+            raise RuntimeError(
+                "Gate/up SwiGLU requires natural tensor layouts and GEMM-packed scales."
+            )
 
         # Pack data tensors
         fc2_dy_data = grouped_fc2_dy.rowwise_data.view(dtype=data_dtype)
         fc2_dy_data = fc2_dy_data.view(out_shape[0], data_k)
         fc2_dy_scales = grouped_fc2_dy.scale_inv
         fc2_dy_scales = fc2_dy_scales.view(dtype=scale_view_dtype)
-        if not canonical:
+        if not use_natural_layouts:
             # Note: Fused kernel expects tensor with non-contiguous
             # logical dims.
             # Data actual shape: (1, sum(m), k)
@@ -2380,7 +2515,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         dscales_tensor = None
         if not unit_activation_scale:
             scales_f32 = scales.detach().to(dtype=torch.float32)
-            scales_tensor = scales_f32.reshape((-1,) if canonical else (-1, 1, 1))
+            scales_tensor = scales_f32.reshape((-1,) if use_natural_layouts else (-1, 1, 1))
             dscales_tensor = torch.zeros_like(scales_tensor)
 
         # Distributed weight (e.g. GTP): re-gather before any use (the NVFP4 global scale below
@@ -2393,6 +2528,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_ctx.weight_quantizers,
                 rowwise=False,
                 columnwise=True,
+                expected_shape=fc2_weight_shape,
             )
 
         fc2_d_dtype = torch.bfloat16 if use_nvfp4 else torch.float8_e4m3fn
@@ -2434,7 +2570,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         fc2_dactivation_kwargs = {
             "a_tensor": fc2_dy_data,
-            "c_tensor": activation_in if canonical else activation_in.unsqueeze(0).permute(1, 2, 0),
+            "c_tensor": (
+                activation_in
+                if use_natural_layouts
+                else activation_in.unsqueeze(0).permute(1, 2, 0)
+            ),
             "sfa_tensor": fc2_dy_scales,
             "padded_offsets": split_points,
             "alpha_tensor": fc2_alpha_tensor,
@@ -2460,6 +2600,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if self._cudnn_dact_func is not None:
             fc2_dactivation_kwargs["beta_tensor"] = fc2_beta_tensor
             fc2_dactivation_kwargs["act_func"] = self._cudnn_dact_func
+            if self._gate_then_up:
+                fc2_dactivation_kwargs["glu_layout"] = "gate_then_up"
         else:
             fc2_dactivation_kwargs["use_dsrelu_reuse"] = recompute_fc2_x_from_dsrelu
         if self._pass_geglu_runtime_params:
@@ -2488,7 +2630,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_w_data = fc2_w_data.view(dtype=data_dtype)
             fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_k)
             fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=scale_view_dtype)
-            if canonical and not use_nvfp4:
+            if use_natural_layouts and not use_nvfp4:
                 # The column-wise weight is (num_groups, k, n): an n-major B for this GEMM.
                 fc2_dactivation_kwargs["b_major"] = "n"
             else:
@@ -2528,7 +2670,18 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_weight_single._columnwise_scale_inv = original_columnwise_scale
                 fc2_weight_single._with_gemm_swizzled_scales = original_swizzled
 
-                if use_nvfp4:
+                if use_natural_layouts:
+                    fc2_w_data = fc2_weight_single._columnwise_data.view(dtype=data_dtype)
+                    if use_nvfp4:
+                        # NVFP4 stores the physical transpose, packed along GEMM K.
+                        fc2_w_data = fc2_w_data.view(
+                            1, fc2_weight_shape[1], fc2_weight_shape[0] // 2
+                        )
+                    else:
+                        fc2_w_data = fc2_w_data.view(1, *fc2_weight_shape)
+                        fc2_dactivation_kwargs["b_major"] = "n"
+                    fc2_w_scales = swizzled_columnwise_scale.view(dtype=scale_view_dtype)
+                elif use_nvfp4:
                     # NVFP4 column-wise data is physically transposed, so it is already
                     # (in_features, out_features) and stays K-major.
                     fc2_w_data, fc2_w_scales = _convert_to_cudnn_grouped_gemm_tensor_format(
@@ -2575,6 +2728,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_dactivation_kwargs["b_dtype"] = data_dtype
                 fc2_dactivation_kwargs["b_major"] = "k" if use_nvfp4 else "n"
 
+        if use_natural_layouts:
+            _flatten_cudnn_packed_scales(fc2_dactivation_kwargs)
         fc2_dgrad_kernel_out = dactivation_kernel(**fc2_dactivation_kwargs)
 
         if use_nvfp4:
@@ -2590,7 +2745,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_dy_row_scale = fc2_dgrad_kernel_out["sfd_row_tensor"]
             fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
             fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"]
-            if not canonical:
+            if not use_natural_layouts:
                 fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0])
                 # View scale in their actual swizzled shape
                 fc1_dy_row_scale = fc1_dy_row_scale.permute(5, 2, 4, 0, 1, 3)
@@ -2770,6 +2925,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_ctx.weight_quantizers,
                     rowwise=False,
                     columnwise=True,
+                    expected_shape=fc1_weight_shape,
                 )
 
             fc1_dgrad_sf_override = _nvfp4_sf_dtype_override(fc1_grad_output_quantizer)
@@ -2941,7 +3097,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_w_scales = fc1_weight_for_gemm.columnwise_scale_inv.view(
                         dtype=torch.float8_e8m0fnu
                     )
-                    if canonical:
+                    if use_natural_layouts:
                         # The column-wise weight is (num_groups, k, n): an n-major B for this GEMM.
                         fc1_dgrad_kwargs["b_major"] = "n"
                     else:
@@ -2981,7 +3137,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 )
                 fc1_dgrad_kwargs["d_tensor"] = (
                     grad_input_buffer
-                    if canonical
+                    if use_natural_layouts
                     else grad_input_buffer.as_strided(
                         (out_shape[0], fc1_weight_shape[1], 1),
                         (fc1_weight_shape[1], 1, out_shape[0] * fc1_weight_shape[1]),
@@ -3511,7 +3667,14 @@ def _bf16_window_matches(window) -> bool:
         return False
     # Same check as the constructor, so an accepted window always builds.
     try:
-        validate_grouped_mlp_dims(fc1, activation, fc2)
+        validate_grouped_mlp_dims(
+            fc1,
+            activation,
+            fc2,
+            allow_gate_then_up=isinstance(activation, ScaledSwiGLU)
+            and activation.glu_interleave_size is None
+            and _cudnn_frontend_supports_gate_then_up("bf16"),
+        )
     except (TypeError, ValueError):
         return False
     # BF16 weights only.
@@ -3611,7 +3774,16 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
             self.grouped_gemm_activation_kernel()  # Try triggering the import error
             self.grouped_gemm_dactivation_kernel()
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
-        validate_grouped_mlp_dims(fc1, activation, fc2)
+        self._gate_then_up = (
+            is_glu_activation(activation) and activation.glu_interleave_size is None
+        )
+        validate_grouped_mlp_dims(
+            fc1,
+            activation,
+            fc2,
+            allow_gate_then_up=self._gate_then_up and _cudnn_frontend_supports_gate_then_up("bf16"),
+        )
+        self._glu_layout_kwargs = {"glu_layout": "gate_then_up"} if self._gate_then_up else {}
         act_funcs = _bf16_glu_act_funcs(activation)
         if act_funcs is None:
             raise RuntimeError(
@@ -3777,6 +3949,7 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
                 use_dynamic_sched=True,
                 current_stream=current_stream,
                 **_bf16_fprop_weight_kwargs(fc1_op, num_groups, device, fc1_weights),
+                **self._glu_layout_kwargs,
             )
             activation_in = fc1_kernel_out["c_tensor"] if requires_grad else None
             if requires_grad and activation_in is None:
@@ -3973,6 +4146,7 @@ class GroupedMLP_CuTeGEMMGLUBf16(FusedOperation):
                 use_dynamic_sched=True,
                 current_stream=current_stream,
                 **_bf16_dgrad_weight_kwargs(fc2_op, num_groups, device, fc2_weights),
+                **self._glu_layout_kwargs,
             )
             fc1_dy = fc2_dgrad_kernel_out["d_row_tensor"]
             grad_scales = None
