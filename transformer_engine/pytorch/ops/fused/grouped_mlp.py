@@ -599,17 +599,12 @@ def _cudnn_compute_wgrad(
             )
             .T
         )
-        sfa_tensor = grouped_dy.columnwise_scale_inv.view(sfa_leading_dim, -1).view(
-            dtype=scale_view_dtype
-        )
-        sfb_tensor = grouped_x.columnwise_scale_inv.view(sfb_leading_dim, -1).view(
-            dtype=scale_view_dtype
-        )
     else:
         a_tensor = (
             grouped_dy.columnwise_data.view(dtype=data_dtype).view(total_tokens, out_features).T
         )
         b_tensor = grouped_x.columnwise_data.view(dtype=data_dtype).view(total_tokens, in_features)
+    if total_tokens != 0:
         sfa_tensor = grouped_dy.columnwise_scale_inv.view(dtype=scale_view_dtype)
         sfb_tensor = grouped_x.columnwise_scale_inv.view(dtype=scale_view_dtype)
         if getattr(wgrad_kernel_fn, "supports_canonical_layouts", False):
@@ -1012,6 +1007,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     directly. When the front-end wrappers advertise ``supports_canonical_layouts``,
     MXFP8 operands are passed in their natural layouts instead of kernel-facing
     views, in the forward and, with a supporting dGLU wrapper, the backward.
+    NVFP4 does the same for its cuDNN GEMMs when the scales are swizzled.
 
     """
 
@@ -1452,56 +1448,72 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     kernel_impl = "gemm_act_rht_amax"
                 elif activation_is_srelu:
                     kernel_impl = "gemm_act_rht_amax"
+        if kernel_impl == "gemm_act":
+            fc1_kernel = self.grouped_gemm_activation_kernel()
+        elif kernel_impl == "gemm_act_rht_amax":
+            fc1_kernel = self.grouped_gemm_act_hadamard_kernel()
+        elif kernel_impl == "gemm_act_rht_quant":
+            fc1_kernel = self.grouped_gemm_act_hadamard_quant_kernel()
+        else:
+            raise RuntimeError(f"Unrecognized kernel variant ({kernel_impl})")
 
-        # Pack data tensors
-        # Note: Fused kernel expects tensor with non-contiguous
-        # logical dims.
-        # Data actual shape: (1, sum(m), k)
-        # Scale actual shape: (1, sum(m)/128, k/128, 32 (block row),
-        #  4 (block row), 4 (block col))
-        # Data logical shape: (sum(m), k, 1)
-        # Scale logical shape: (32 (block row), 4 (block row),
-        #   sum(m)/128, 4 (block col), k/128, 1)
+        # Choose operand layouts
         # With canonical layouts, cuDNN takes A as (sum(m), k), B as
         # (num_groups, n, k), and scales as the packed buffers as-is.
-        canonical = kernel_impl == "gemm_act" and not use_nvfp4 and is_glu_activation(activation_op)
+        # The kernel has to accept them, and NVFP4 scales are packed
+        # that way only when swizzled for GEMM.
+        with_gemm_swizzled_scales = grouped_fc1_x._with_gemm_swizzled_scales
+        canonical = (
+            is_glu_activation(activation_op)
+            and getattr(fc1_kernel, "supports_canonical_layouts", False)
+            and (not use_nvfp4 or with_gemm_swizzled_scales)
+        )
+
+        # Pack data tensors
         fc1_x_data = grouped_fc1_x.rowwise_data.view(dtype=data_dtype)
         fc1_x_data = fc1_x_data.view(in_shape[0], data_in_k)
-        if not canonical:
-            fc1_x_data = fc1_x_data.unsqueeze(0).permute(1, 2, 0)
         fc1_x_scales = grouped_fc1_x.scale_inv
         fc1_x_scales = fc1_x_scales.view(dtype=scale_view_dtype)
-        with_gemm_swizzled_scales = grouped_fc1_x._with_gemm_swizzled_scales
-        if use_nvfp4 and with_gemm_swizzled_scales:
-            fc1_x_scales = fc1_x_scales.view(
-                1,
-                ceil_div(in_shape[0], 128),
-                ceil_div(data_in_k, k_sf_divisor),
-                32,
-                4,
-                4,
-            )
-            fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
-        elif use_nvfp4:
-            fc1_x_scales = fc1_x_scales.view(
-                1,
-                ceil_div(in_shape[0], 128),
-                4,
-                32,
-                ceil_div(data_in_k, k_sf_divisor),
-                4,
-            )
-            fc1_x_scales = fc1_x_scales.permute(3, 2, 1, 5, 4, 0)
-        elif not canonical:
-            fc1_x_scales = fc1_x_scales.view(
-                1,
-                ceil_div(in_shape[0], 128),
-                ceil_div(in_shape[1], k_sf_divisor),
-                32,
-                4,
-                4,
-            )
-            fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
+        if not canonical:
+            # Note: Fused kernel expects tensor with non-contiguous
+            # logical dims.
+            # Data actual shape: (1, sum(m), k)
+            # Scale actual shape: (1, sum(m)/128, k/128, 32 (block row),
+            #  4 (block row), 4 (block col))
+            # Data logical shape: (sum(m), k, 1)
+            # Scale logical shape: (32 (block row), 4 (block row),
+            #   sum(m)/128, 4 (block col), k/128, 1)
+            fc1_x_data = fc1_x_data.unsqueeze(0).permute(1, 2, 0)
+            if use_nvfp4 and with_gemm_swizzled_scales:
+                fc1_x_scales = fc1_x_scales.view(
+                    1,
+                    ceil_div(in_shape[0], 128),
+                    ceil_div(data_in_k, k_sf_divisor),
+                    32,
+                    4,
+                    4,
+                )
+                fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
+            elif use_nvfp4:
+                fc1_x_scales = fc1_x_scales.view(
+                    1,
+                    ceil_div(in_shape[0], 128),
+                    4,
+                    32,
+                    ceil_div(data_in_k, k_sf_divisor),
+                    4,
+                )
+                fc1_x_scales = fc1_x_scales.permute(3, 2, 1, 5, 4, 0)
+            else:
+                fc1_x_scales = fc1_x_scales.view(
+                    1,
+                    ceil_div(in_shape[0], 128),
+                    ceil_div(in_shape[1], k_sf_divisor),
+                    32,
+                    4,
+                    4,
+                )
+                fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
 
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
@@ -1693,16 +1705,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_activation_kwargs["b_major"] = "k"
 
         # Launch FC1 + act kernel
-        if kernel_impl == "gemm_act":
-            fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
-        elif kernel_impl == "gemm_act_rht_amax":
-            # pylint: disable-next=not-callable
-            fc1_kernel_out = self.grouped_gemm_act_hadamard_kernel()(**fc1_activation_kwargs)
-        elif kernel_impl == "gemm_act_rht_quant":
-            # pylint: disable-next=not-callable
-            fc1_kernel_out = self.grouped_gemm_act_hadamard_quant_kernel()(**fc1_activation_kwargs)
-        else:
-            raise RuntimeError(f"Unrecognized kernel variant ({kernel_impl})")
+        # pylint: disable-next=not-callable
+        fc1_kernel_out = fc1_kernel(**fc1_activation_kwargs)
 
         activation_in = fc1_kernel_out["c_tensor"]
         if not canonical:
@@ -2288,56 +2292,62 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_weight_k = fc2_weight_shape[1] // 2 if use_nvfp4 else fc2_weight_shape[1]
         k_sf_divisor = 2 * sf_vec_size if use_nvfp4 else 4 * sf_vec_size
 
-        # Pack data tensors
-        # Note: Fused kernel expects tensor with non-contiguous
-        # logical dims.
-        # Data actual shape: (1, sum(m), k)
-        # Scale actual shape: (1, sum(m)/128, k/128, 32 (block row),
-        #  4 (block row), 4 (block col))
-        # Data logical shape: (sum(m), k, 1)
-        # Scale logical shape: (32 (block row), 4 (block row),
-        #   sum(m)/128, 4 (block col), k/128, 1)
+        # Choose operand layouts
+        # With canonical layouts, cuDNN takes the grad output as (sum(m), k)
+        # and scales as the packed buffers as-is. The kernel has to accept
+        # them, and NVFP4 scales are packed that way only when swizzled for
+        # GEMM.
         dactivation_kernel = self.grouped_gemm_dactivation_kernel()
-        canonical = not use_nvfp4 and getattr(
-            dactivation_kernel, "supports_canonical_layouts", False
+        with_gemm_swizzled_scales = grouped_fc2_dy._with_gemm_swizzled_scales
+        canonical = getattr(dactivation_kernel, "supports_canonical_layouts", False) and (
+            not use_nvfp4 or with_gemm_swizzled_scales
         )
+
+        # Pack data tensors
         fc2_dy_data = grouped_fc2_dy.rowwise_data.view(dtype=data_dtype)
         fc2_dy_data = fc2_dy_data.view(out_shape[0], data_k)
-        if not canonical:
-            fc2_dy_data = fc2_dy_data.unsqueeze(0).permute(1, 2, 0)
         fc2_dy_scales = grouped_fc2_dy.scale_inv
         fc2_dy_scales = fc2_dy_scales.view(dtype=scale_view_dtype)
-        with_gemm_swizzled_scales = grouped_fc2_dy._with_gemm_swizzled_scales
-        if use_nvfp4 and with_gemm_swizzled_scales:
-            fc2_dy_scales = fc2_dy_scales.view(
-                1,
-                ceil_div(out_shape[0], 128),
-                ceil_div(data_k, k_sf_divisor),
-                32,
-                4,
-                4,
-            )
-            fc2_dy_scales = fc2_dy_scales.permute(3, 4, 1, 5, 2, 0)
-        elif use_nvfp4:
-            fc2_dy_scales = fc2_dy_scales.view(
-                1,
-                ceil_div(out_shape[0], 128),
-                4,
-                32,
-                ceil_div(data_k, k_sf_divisor),
-                4,
-            )
-            fc2_dy_scales = fc2_dy_scales.permute(3, 2, 1, 5, 4, 0)
-        elif not canonical:
-            fc2_dy_scales = fc2_dy_scales.view(
-                1,
-                ceil_div(out_shape[0], 128),
-                ceil_div(out_shape[1], k_sf_divisor),
-                32,
-                4,
-                4,
-            )
-            fc2_dy_scales = fc2_dy_scales.permute(3, 4, 1, 5, 2, 0)
+        if not canonical:
+            # Note: Fused kernel expects tensor with non-contiguous
+            # logical dims.
+            # Data actual shape: (1, sum(m), k)
+            # Scale actual shape: (1, sum(m)/128, k/128, 32 (block row),
+            #  4 (block row), 4 (block col))
+            # Data logical shape: (sum(m), k, 1)
+            # Scale logical shape: (32 (block row), 4 (block row),
+            #   sum(m)/128, 4 (block col), k/128, 1)
+            fc2_dy_data = fc2_dy_data.unsqueeze(0).permute(1, 2, 0)
+            if use_nvfp4 and with_gemm_swizzled_scales:
+                fc2_dy_scales = fc2_dy_scales.view(
+                    1,
+                    ceil_div(out_shape[0], 128),
+                    ceil_div(data_k, k_sf_divisor),
+                    32,
+                    4,
+                    4,
+                )
+                fc2_dy_scales = fc2_dy_scales.permute(3, 4, 1, 5, 2, 0)
+            elif use_nvfp4:
+                fc2_dy_scales = fc2_dy_scales.view(
+                    1,
+                    ceil_div(out_shape[0], 128),
+                    4,
+                    32,
+                    ceil_div(data_k, k_sf_divisor),
+                    4,
+                )
+                fc2_dy_scales = fc2_dy_scales.permute(3, 2, 1, 5, 4, 0)
+            else:
+                fc2_dy_scales = fc2_dy_scales.view(
+                    1,
+                    ceil_div(out_shape[0], 128),
+                    ceil_div(out_shape[1], k_sf_divisor),
+                    32,
+                    4,
+                    4,
+                )
+                fc2_dy_scales = fc2_dy_scales.permute(3, 4, 1, 5, 2, 0)
 
         # Kernel scaling factors
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
@@ -2478,7 +2488,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_w_data = fc2_w_data.view(dtype=data_dtype)
             fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_k)
             fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=scale_view_dtype)
-            if canonical:
+            if canonical and not use_nvfp4:
                 # The column-wise weight is (num_groups, k, n): an n-major B for this GEMM.
                 fc2_dactivation_kwargs["b_major"] = "n"
             else:
