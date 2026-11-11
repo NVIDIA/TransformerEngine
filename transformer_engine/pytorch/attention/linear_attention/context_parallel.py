@@ -56,7 +56,7 @@ def _device_partition(host, device):
             offsets.append(offsets[-1] + frag.end - frag.start)
         return torch.tensor(offsets, device=device, dtype=torch.int32)
 
-    first = [i for i, f in enumerate(host.fragments) if f.first_rank == host.rank]
+    first = [i for i, f in enumerate(host.fragments) if f.first_rank == host.cp_rank]
     forward = torch.tensor(host.forward_descriptors, device=device, dtype=torch.int32).reshape(
         -1, 4
     )
@@ -88,15 +88,15 @@ def _device_partition(host, device):
 def _gather_summaries(additive, transition, group):
     """One fixed-size all-gather for both summary tensors, in CP group rank order."""
     slots, heads, value_dim, key_dim = additive.shape
-    size = dist.get_world_size(group)
+    cp_size = dist.get_world_size(group)
     packed = torch.cat((additive.flatten(), transition.flatten()))
-    gathered = torch.empty(size * packed.numel(), device=packed.device, dtype=packed.dtype)
+    gathered = torch.empty(cp_size * packed.numel(), device=packed.device, dtype=packed.dtype)
     dist.all_gather_into_tensor(gathered, packed, group=group)
-    gathered = gathered.view(size, -1)
+    gathered = gathered.view(cp_size, -1)
     split = additive.numel()
     return (
-        gathered[:, :split].contiguous().view(size * slots, heads, value_dim, key_dim),
-        gathered[:, split:].contiguous().view(size * slots, heads, key_dim, key_dim),
+        gathered[:, :split].contiguous().view(cp_size * slots, heads, value_dim, key_dim),
+        gathered[:, split:].contiguous().view(cp_size * slots, heads, key_dim, key_dim),
     )
 
 
@@ -150,7 +150,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
         q = tensors[0]
         k = tensors[1]
         v = tensors[2]
-        state_shape = (len(plan.host.documents) - 1, q.shape[1], v.shape[-1], k.shape[-1])
+        state_shape = (len(plan.host.cu_seqlens) - 1, q.shape[1], v.shape[-1], k.shape[-1])
         seed = (
             q.new_zeros((1, *state_shape[1:]), dtype=torch.float32)
             if initial_state is None
@@ -213,7 +213,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
         if grad_output is None:
             grad_output = torch.zeros_like(output)
         grad_output = grad_output.contiguous()
-        shape = (len(plan.host.documents) - 1, q.shape[1], v.shape[-1], k.shape[-1])
+        shape = (len(plan.host.cu_seqlens) - 1, q.shape[1], v.shape[-1], k.shape[-1])
         seed = starting.new_zeros(shape if ctx.final else (1, *shape[1:]))
         if ctx.final:
             if grad_final is not None:
@@ -281,7 +281,7 @@ def context_parallel_attention(
 ):
     """Derive local fragment boundaries from full-document metadata and run CP."""
     adapter._validate_inputs(q, k, v, gates, initial_state, qkv_format)
-    size, rank = dist.get_world_size(group), dist.get_rank(group)
+    cp_size, cp_rank = dist.get_world_size(group), dist.get_rank(group)
     tensors = tuple(_to_thd(t, qkv_format).contiguous() for t in (q, k, v, *gates.values()))
     dense = qkv_format != "thd"
     batch, length = None, None
@@ -301,25 +301,27 @@ def context_parallel_attention(
             id(cu_seqlens),
             cu_seqlens._version if cacheable else None,
             q.device,
-            size,
-            rank,
+            cp_size,
+            cp_rank,
         )
     else:
-        key, cacheable = (qkv_format, batch, length, q.device, size, rank), True
+        key, cacheable = (qkv_format, batch, length, q.device, cp_size, cp_rank), True
     cache = getattr(adapter, "_cp_partition_cache", None)
     if not cacheable:
         # Inference tensors have no mutation counter, so revalidate their
         # metadata instead of silently reusing a stale partition.
         cache = None
     if cache is None or cache[0] != key:
-        documents = (
+        document_cu_seqlens = (
             tuple(cu_seqlens.tolist())
             if cu_seqlens is not None
-            else tuple(i * length * size for i in range(batch + 1))
+            else tuple(i * length * cp_size for i in range(batch + 1))
         )
-        if dense and len(documents) != batch + 1:
+        if dense and len(document_cu_seqlens) != batch + 1:
             raise ValueError("Dense cu_seqlens must describe the full batch.")
-        host = build_linear_attention_partition(documents, size, rank, dense=dense)
+        host = build_linear_attention_partition(
+            document_cu_seqlens, cp_size=cp_size, cp_rank=cp_rank, dense=dense
+        )
         plan = _device_partition(host, q.device)
         # Hold the metadata tensor to prevent object-ID reuse in the cache key.
         adapter._cp_partition_cache = (key, plan, cu_seqlens)
@@ -328,7 +330,7 @@ def context_parallel_attention(
     if tensors[0].shape[0] != plan.host.local_cu_seqlens[-1]:
         raise ValueError("Local token count does not match this CP rank's token interval.")
     adapter._validate_initial_state(
-        initial_state, batch_size=len(plan.host.documents) - 1, device=q.device
+        initial_state, batch_size=len(plan.host.cu_seqlens) - 1, device=q.device
     )
     tensors, initial_state = adapter._prepare_cp_inputs(tensors, initial_state)
     if adapter._op is None:

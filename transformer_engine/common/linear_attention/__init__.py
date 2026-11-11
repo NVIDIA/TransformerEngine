@@ -24,14 +24,14 @@ class LinearAttentionFragment:
 class LinearAttentionCPPartition:
     """Host metadata, independent of tensor frameworks and attention flavors.
 
-    Packed inputs intersect document intervals with contiguous rank intervals.
-    Dense inputs give every rank a contiguous, nearly equal slice of each document.
+    Packed (THD) inputs intersect documents with contiguous rank intervals.
+    Dense (BSHD/SBHD) inputs give each rank a nearly equal slice of every document.
     Empty documents have no fragments; their state is unchanged.
     """
 
-    documents: Tuple[int, ...]
-    rank: int
-    size: int
+    cu_seqlens: Tuple[int, ...]
+    cp_rank: int
+    cp_size: int
     fragments: Tuple[LinearAttentionFragment, ...]
     local_cu_seqlens: Tuple[int, ...]
     forward_descriptors: Tuple[Tuple[int, int, int, int], ...]
@@ -41,70 +41,78 @@ class LinearAttentionCPPartition:
     terminal: Tuple[int, ...]
     seed_owners: Tuple[int, ...]
     empty_owned: Tuple[int, ...]
-    slots: int
+    slots: int  # One per rank for packed inputs; one per document for dense inputs.
     communicates: bool
 
 
-def build_linear_attention_partition(documents, size, rank, *, dense=False):
-    """Build ordered fragment intersections and prefix/suffix record ranges.
+def build_linear_attention_partition(cu_seqlens, cp_size, cp_rank, *, dense=False):
+    """Build one rank's fragment and summary metadata on the host.
 
-    ``documents`` are global cumulative offsets. Packed rank r owns
-    [floor(r*T/P), floor((r+1)*T/P)). Dense documents must all have the same
-    length. Descriptor rows are (document, first, count, stride).
-    Their record ranges never cross an independent document's boundary.
+    ``cu_seqlens`` contains full-document boundaries as host integers. For
+    P = ``cp_size``, packed rank r owns [r*T//P:(r+1)*T//P] of T total tokens.
+    Dense rank r owns [r*S//P:(r+1)*S//P] of each length-S document.
+    Descriptor rows are (document, first_record, count, stride). Each selects
+    summaries of one document, in forward or reverse order.
     """
-    documents = tuple(documents)
-    if size < 1 or not 0 <= rank < size:
+    cu_seqlens = tuple(cu_seqlens)
+    if cp_size < 1 or not 0 <= cp_rank < cp_size:
         raise ValueError("CP size must be positive and rank must lie inside the group.")
-    if len(documents) < 2 or documents[0] != 0:
+    if len(cu_seqlens) < 2 or cu_seqlens[0] != 0:
         raise ValueError("Global cumulative sequence lengths must start at zero.")
-    if any(a > b for a, b in zip(documents, documents[1:])):
+    if any(a > b for a, b in zip(cu_seqlens, cu_seqlens[1:])):
         raise ValueError("Global cumulative sequence lengths must be nondecreasing.")
-    total = documents[-1]
-    boundaries = tuple(r * total // size for r in range(size + 1))
-    slots = len(documents) - 1 if dense else 1
+    total = cu_seqlens[-1]
+    boundaries = tuple(r * total // cp_size for r in range(cp_size + 1))
+    slots = len(cu_seqlens) - 1 if dense else 1
     fragments, seeds, empty = [], [], []
     communicates = False
-    for doc, (start, end) in enumerate(zip(documents, documents[1:])):
+    for doc, (start, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:])):
         if dense:
             length = end - start
-            if length != documents[1]:
+            if length != cu_seqlens[1]:
                 raise ValueError("Dense CP needs equal global document lengths.")
-            cuts = tuple(r * length // size for r in range(size + 1))
-            first = min(size - 1, bisect_right(cuts, 0) - 1) if length else 0
-            last = min(size - 1, bisect_right(cuts, length - 1) - 1) if length else 0
-            left, right = start + cuts[rank], start + cuts[rank + 1]
+            cuts = tuple(r * length // cp_size for r in range(cp_size + 1))
+            first_rank = min(cp_size - 1, bisect_right(cuts, 0) - 1) if length else 0
+            last_rank = min(cp_size - 1, bisect_right(cuts, length - 1) - 1) if length else 0
+            fragment_start, fragment_end = start + cuts[cp_rank], start + cuts[cp_rank + 1]
         else:
-            first = min(size - 1, bisect_right(boundaries, start) - 1)
-            last = min(size - 1, bisect_right(boundaries, end - 1) - 1) if end > start else first
-            left, right = max(start, boundaries[rank]), min(end, boundaries[rank + 1])
-        seeds.append(first)
-        communicates |= first != last
-        if start == end and first == rank:
+            first_rank = min(cp_size - 1, bisect_right(boundaries, start) - 1)
+            last_rank = (
+                min(cp_size - 1, bisect_right(boundaries, end - 1) - 1)
+                if end > start
+                else first_rank
+            )
+            fragment_start = max(start, boundaries[cp_rank])
+            fragment_end = min(end, boundaries[cp_rank + 1])
+        seeds.append(first_rank)
+        communicates |= first_rank != last_rank
+        if start == end and first_rank == cp_rank:
             empty.append(doc)
-        if left < right:
-            fragments.append(LinearAttentionFragment(doc, left, right, first, last))
+        if fragment_start < fragment_end:
+            fragments.append(
+                LinearAttentionFragment(doc, fragment_start, fragment_end, first_rank, last_rank)
+            )
     cu = [0]
     forward, backward, outgoing, incoming, terminal = [], [], [], [], []
     for index, frag in enumerate(fragments):
         cu.append(cu[-1] + frag.end - frag.start)
         slot = frag.document if dense else 0
         forward.append(
-            (frag.document, frag.first_rank * slots + slot, rank - frag.first_rank, slots)
+            (frag.document, frag.first_rank * slots + slot, cp_rank - frag.first_rank, slots)
         )
         backward.append(
-            (frag.document, frag.last_rank * slots + slot, frag.last_rank - rank, -slots)
+            (frag.document, frag.last_rank * slots + slot, frag.last_rank - cp_rank, -slots)
         )
-        if rank < frag.last_rank:
+        if cp_rank < frag.last_rank:
             outgoing.append(index)
         else:
             terminal.append(index)
-        if rank > frag.first_rank:
+        if cp_rank > frag.first_rank:
             incoming.append(index)
     return LinearAttentionCPPartition(
-        documents,
-        rank,
-        size,
+        cu_seqlens,
+        cp_rank,
+        cp_size,
         tuple(fragments),
         tuple(cu),
         tuple(forward),

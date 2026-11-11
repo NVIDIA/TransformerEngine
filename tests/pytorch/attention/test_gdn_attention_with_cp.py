@@ -20,8 +20,8 @@ from transformer_engine.common.linear_attention import build_linear_attention_pa
 import transformer_engine_torch as tex
 
 
-@pytest.mark.parametrize("size", [1, 2, 4, 8])
-def test_partition_intersections(size):
+@pytest.mark.parametrize("cp_size", [1, 2, 4, 8])
+def test_partition_intersections(cp_size):
     """Recover all document intervals without dropping tokens or crossing documents."""
     rng = random.Random(301)
     for _ in range(100):
@@ -29,50 +29,55 @@ def test_partition_intersections(size):
         cu = [0]
         for length in lengths:
             cu.append(cu[-1] + length)
-        partitions = [build_linear_attention_partition(cu, size, rank) for rank in range(size)]
+        partitions = [
+            build_linear_attention_partition(cu, cp_size=cp_size, cp_rank=cp_rank)
+            for cp_rank in range(cp_size)
+        ]
         for doc, (start, end) in enumerate(zip(cu, cu[1:])):
             fragments = [f for p in partitions for f in p.fragments if f.document == doc]
             assert sum(f.end - f.start for f in fragments) == end - start
             assert all(start <= f.start < f.end <= end for f in fragments)
             assert all(a.end == b.start for a, b in zip(fragments, fragments[1:]))
-        for rank, partition in enumerate(partitions):
+        for cp_rank, partition in enumerate(partitions):
             assert (
                 partition.local_cu_seqlens[-1]
-                == (rank + 1) * cu[-1] // size - rank * cu[-1] // size
+                == (cp_rank + 1) * cu[-1] // cp_size - cp_rank * cu[-1] // cp_size
             )
             assert len(partition.incoming) <= 1
             assert len(partition.outgoing) <= 1
             for f, forward, backward in zip(
                 partition.fragments, partition.forward_descriptors, partition.backward_descriptors
             ):
-                assert forward[2] == rank - f.first_rank
-                assert backward[2] == f.last_rank - rank
+                assert forward[2] == cp_rank - f.first_rank
+                assert backward[2] == f.last_rank - cp_rank
                 # Every referenced recipe belongs to this same document.
-                for predecessor in range(f.first_rank, rank):
+                for predecessor in range(f.first_rank, cp_rank):
                     p = partitions[predecessor]
                     if p.fragments:
                         assert p.fragments[p.outgoing[0]].document == f.document
-                for successor in range(rank + 1, f.last_rank + 1):
+                for successor in range(cp_rank + 1, f.last_rank + 1):
                     p = partitions[successor]
                     # An empty rank contributes an identity recipe.
                     if p.fragments:
                         assert p.fragments[p.incoming[0]].document == f.document
 
 
-@pytest.mark.parametrize("documents", [[1, 2], [0], [0, 2, 1]])
-def test_invalid_documents(documents):
+@pytest.mark.parametrize("cu_seqlens", [[1, 2], [0], [0, 2, 1]])
+def test_invalid_documents(cu_seqlens):
     """Reject malformed global offsets before computing communication descriptors."""
     with pytest.raises(ValueError):
-        build_linear_attention_partition(documents, 4, 0)
+        build_linear_attention_partition(cu_seqlens, cp_size=4, cp_rank=0)
 
 
-@pytest.mark.parametrize("size", [1, 2, 4, 8])
+@pytest.mark.parametrize("cp_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("length", [0, 1, 5, 9])
-def test_dense_partition_intersections(size, length):
+def test_dense_partition_intersections(cp_size, length):
     """Dense rows retain their document identity, including uneven and empty ranks."""
     partitions = [
-        build_linear_attention_partition([0, length, 2 * length], size, rank, dense=True)
-        for rank in range(size)
+        build_linear_attention_partition(
+            [0, length, 2 * length], cp_size=cp_size, cp_rank=cp_rank, dense=True
+        )
+        for cp_rank in range(cp_size)
     ]
     for doc in (0, 1):
         spans = [f for p in partitions for f in p.fragments if f.document == doc]
@@ -81,8 +86,8 @@ def test_dense_partition_intersections(size, length):
         if length:
             assert spans[0].start == doc * length
             assert spans[-1].end == (doc + 1) * length
-    for rank, partition in enumerate(partitions):
-        local_length = (rank + 1) * length // size - rank * length // size
+    for cp_rank, partition in enumerate(partitions):
+        local_length = (cp_rank + 1) * length // cp_size - cp_rank * length // cp_size
         assert partition.local_cu_seqlens[-1] == 2 * local_length
         assert partition.slots == 2
         assert len(partition.fragments) == (2 if local_length else 0)
