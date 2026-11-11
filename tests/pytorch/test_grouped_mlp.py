@@ -311,7 +311,6 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
                 {
                     "kind": "fwd_hadamard_quant",
                     "act_func": kwargs["act_func"],
-                    "rht_colwise_sf_layout": kwargs.get("rht_colwise_sf_layout"),
                     **({"glu_layout": kwargs["glu_layout"]} if "glu_layout" in kwargs else {}),
                 }
             )
@@ -1385,40 +1384,43 @@ class TestGroupedMLPFusedOp:
         else:
             assert all("mma_tiler_mn" not in call for call in forwards)
 
-    @pytest.mark.parametrize("variant", ("amax", "quant", "quant_fallback", "quant_legacy_api"))
+    @pytest.mark.parametrize(
+        "variant", ("amax", "quant", "quant_interleave_only", "quant_legacy_api")
+    )
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     def test_canonical_glu_rht_training(
         self, monkeypatch, variant, glu_interleave_size, traced_cudnn_grouped_glu_wrappers
     ):
-        """Canonical NVFP4 uses the advertised fused RHT variant and correct gradients."""
+        """RHT fusion honors its weight-layout support and produces correct gradients."""
         import cudnn
         from transformer_engine.common.recipe import CustomRecipe
 
-        if not grouped_mlp_module._cudnn_frontend_supports_gate_then_up("nvfp4"):
+        if not GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("Fused grouped GLU is unavailable")
+        if glu_interleave_size is None and not (
+            grouped_mlp_module._cudnn_frontend_supports_gate_then_up("nvfp4")
+        ):
             pytest.skip("Canonical NVFP4 GLU is unavailable")
         name = (
             "grouped_gemm_glu_hadamard_wrapper_sm100"
             if variant == "amax"
             else "grouped_gemm_glu_hadamard_quant_wrapper_sm100"
         )
-        if not grouped_mlp_module._cudnn_kernel_supports_gate_then_up(
-            getattr(cudnn, name, None), "nvfp4"
+        kernel = getattr(cudnn, name, None)
+        if kernel is None:
+            pytest.skip(f"{name} is unavailable")
+        if glu_interleave_size is None and not (
+            grouped_mlp_module._cudnn_kernel_supports_gate_then_up(kernel, "nvfp4")
         ):
             pytest.skip(f"{name} does not advertise canonical NVFP4")
-        if variant == "quant" and "mma" not in getattr(
-            getattr(cudnn, name), "supports_rht_colwise_sf_layouts", ()
-        ):
-            pytest.skip("Fused RHT quantization requires native MMA column scales")
         if variant == "amax":
             # Qualify the supported two-CTA specialization independently of
             # the default regular GLU plus native RHT quantization.
             monkeypatch.setattr(grouped_mlp_module, "_prefer_gate_then_up_hadamard", lambda _: True)
-        elif variant == "quant_fallback":
-            monkeypatch.setattr(
-                getattr(cudnn, name), "supports_rht_colwise_sf_layouts", (), raising=False
-            )
+        elif variant == "quant_interleave_only":
+            monkeypatch.setattr(kernel, "supports_glu_layouts", ("interleaved_32",), raising=False)
         elif variant == "quant_legacy_api":
-            monkeypatch.setattr(getattr(cudnn, name), "supports_canonical_layouts", False)
+            monkeypatch.setattr(kernel, "supports_canonical_layouts", False, raising=False)
 
         recipe = None
         if variant.startswith("quant"):
@@ -1455,16 +1457,10 @@ class TestGroupedMLPFusedOp:
         expected_kind = {
             "amax": "fwd_hadamard",
             "quant": "fwd_hadamard_quant",
-            "quant_fallback": "fwd",
+            "quant_interleave_only": "fwd" if glu_interleave_size is None else "fwd_hadamard_quant",
             "quant_legacy_api": "fwd" if glu_interleave_size is None else "fwd_hadamard_quant",
         }[variant]
         assert any(call["kind"] == expected_kind for call in calls)
-        if variant == "quant":
-            assert all(
-                call["rht_colwise_sf_layout"] == "mma"
-                for call in calls
-                if call["kind"] == expected_kind
-            )
         assert any(call["kind"] == "bwd" for call in calls)
         if glu_interleave_size is None:
             assert all(call["glu_layout"] == "gate_then_up" for call in calls)
