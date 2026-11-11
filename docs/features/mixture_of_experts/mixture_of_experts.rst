@@ -461,9 +461,6 @@ frontend's ``preferred_gate_then_up_mma_tiler`` when advertised; older canonical
 frontends retain the one-CTA ``(128, 256)`` fallback. Specialized RHT kernels
 keep their own tile selection. Canonical NVFP4 applies its usual RHT quantization
 after the fused GEMM + activation when the separate RHT path is preferred.
-Specialized GLU + RHT + quantization additionally requires the wrapper to advertise ``mma`` in ``supports_rht_colwise_sf_layouts``
-so weight gradients receive native column scale storage. Older wrappers use
-the regular GLU kernel followed by native RHT quantization.
 cuDNN pairs gate/up internally; when training starts with canonical storage,
 parameters and optimizer state need no GLU layout conversion. This option does
 not migrate an existing interleaved optimizer checkpoint; that conversion
@@ -471,6 +468,14 @@ remains the training framework's responsibility. Frontends without the canonical
 GLU capabilities execute the unfused canonical path. Custom recipes retain their existing explicit fusion
 opt-in and must use compatible quantizers. The existing per-expert token
 alignment of 256 still applies.
+
+Fused NVFP4 GLU + RHT + quantization consumes the kernel's columnwise scales
+directly in standard GEMM-swizzled order for weight gradients. This output
+contract applies to both GLU channel layouts; it is independent of
+``glu_interleave_size`` and does not require a scale-layout option. This path
+requires the `cuDNN Frontend columnwise-scale correction
+<https://github.com/NVIDIA/cudnn-frontend/pull/2455>`_; support for older
+input-rank APIs does not imply compatibility with the old scale output order.
 
 BF16 and MXFP8 support discrete per-expert weights and a single grouped weight
 for ordinary parameters. NVFP4 uses discrete weights; packed NVFP4 grouped
