@@ -26,7 +26,7 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax>=0.5.3", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0", "triton"]
+    return ["jax>=0.5.3", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.31.0", "triton"]
 
 
 def test_requirements() -> List[str]:
