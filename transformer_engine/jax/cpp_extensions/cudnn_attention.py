@@ -91,6 +91,7 @@ class AttentionGraph:
     ragged_stats: bool
     multipliers: tuple
     fp8: bool
+    fp8_o: bool = False
 
 
 @dataclass(frozen=True)
@@ -144,13 +145,22 @@ def _supported_graph(spec, capabilities, frontend_version, backend_version):
 
 def _request(direction, avals, config):
     shapes = tuple((tuple(aval.shape), jnp.dtype(aval.dtype)) for aval in avals[:5])
+    fp8_backward = bool(int(os.getenv("NVTE_FP8_DPA_BWD", "1")))
+    fp8_o = (
+        direction == "bwd"
+        and bool(config.fp8)
+        and config.fp8 != "mxfp8"
+        and fp8_backward
+        and not bool(int(os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1")))
+    )
     return (
         direction,
         shapes,
         config,
         device_capabilities(),
         bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))),
-        bool(int(os.getenv("NVTE_FP8_DPA_BWD", "1"))),
+        fp8_backward,
+        fp8_o,
     )
 
 
@@ -184,9 +194,11 @@ def get_graph(direction, avals, config):
 
 
 @lru_cache(maxsize=None)
-def _build_graph(direction, shapes, config, capabilities, nondeterministic, fp8_backward):
+def _build_graph(
+    direction, shapes, config, capabilities, nondeterministic, fp8_backward, fp8_o=False
+):
     description = _describe_graph(
-        direction, shapes, config, capabilities, nondeterministic, fp8_backward
+        direction, shapes, config, capabilities, nondeterministic, fp8_backward, fp8_o
     )
     cudnn = import_cudnn()
     version = check_frontend_version(cudnn)
@@ -226,10 +238,13 @@ def _build_graph(direction, shapes, config, capabilities, nondeterministic, fp8_
         description.ragged_stats,
         description.multipliers,
         description.fp8,
+        fp8_o,
     )
 
 
-def _describe_graph(direction, shapes, config, capabilities, nondeterministic, fp8_backward):
+def _describe_graph(
+    direction, shapes, config, capabilities, nondeterministic, fp8_backward, fp8_o=False
+):
     """Translate JAX's API and storage conventions into a common graph description."""
     avals = tuple(jax.ShapeDtypeStruct(*shape) for shape in shapes)
     batch, sq, sk, h, hg, dq, dv = _dims(avals, config)
@@ -373,7 +388,7 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
             constant("scale_s", 448.0)
             constant("descale_s", 1.0 / 448.0)
     if backward:
-        tensor("o", odim, ostride, ragged_offset=o_offset)
+        tensor("o", odim, ostride, "FP8_E4M3" if fp8_o else io_dtype, ragged_offset=o_offset)
         tensor(
             "do",
             odim,
@@ -411,7 +426,11 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
             inputs.append(("descale_do", "descale_do", 0))
         elif fp8:
             tensor("descale_do", (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
-            for name in ("descale_o", "scale_dp", "descale_dp", "scale_dq", "scale_dk", "scale_dv"):
+            if fp8_o:
+                tensor("descale_o", (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
+            else:
+                constant("descale_o", 1.0)
+            for name in ("scale_dp", "descale_dp", "scale_dq", "scale_dk", "scale_dv"):
                 constant(name, 1.0)
             for slot, name in enumerate(("amax_dq", "amax_dk", "amax_dv", "amax_dp"), 5):
                 output(name, (1, 1, 1, 1), (1, 1, 1, 1), slot, dtype="FLOAT")
@@ -566,6 +585,8 @@ def execute(direction, args, config, result_avals, prepared_qkv=None):
             values.update(mxfp8_attention.prepare_doutput(do))
         elif plan.fp8:
             values["do"], values["descale_do"] = _quantize(do, jnp.float8_e5m2)
+            if plan.fp8_o:
+                values["o"], values["descale_o"] = _quantize(o, jnp.float8_e4m3fn)
         specs = list(result_avals[:-1])
         if plan.fp8 and config.fp8 != "mxfp8":
             specs += [jax.ShapeDtypeStruct((1,), jnp.float32)] * 4

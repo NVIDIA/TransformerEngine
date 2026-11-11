@@ -288,7 +288,11 @@ FP8 Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: For Float8CurrentScaling in DotProductAttention, use FP16/BF16 for the output tensor in the backward pass. ``1`` = use F16/BF16 output in backward, ``0`` = use FP8 output in backward.
+   :Description: For current-scaled FP8 attention in PyTorch or JAX, control the precision
+      of the forward output tensor consumed by the backward pass. ``1`` = use FP16/BF16
+      output in backward, ``0`` = quantize it to FP8. This option does not affect MXFP8
+      attention or FP16/BF16 backward selected with ``NVTE_FP8_DPA_BWD=0``. In JAX,
+      public forward outputs are unchanged; set this option before tracing/compilation.
 
 .. envvar:: NVTE_DPA_FP8_RECIPE
 

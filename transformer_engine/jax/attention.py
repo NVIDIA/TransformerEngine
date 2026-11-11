@@ -1688,9 +1688,12 @@ def fused_attn(
         score_mod_bprop_tensors (Optional[Mapping[str, Any]]): Additional tensors or
             Python/NumPy scalars made available to `score_mod_bprop`.
         fp8 (bool | str): False disables FP8 attention; True enables FP8 attention
-            with current tensor scaling; "mxfp8" enables block-scaled MXFP8
-            attention. This option is independent of the GEMM quantization recipe.
-            Outputs and gradients retain the input FP16/BF16 dtype.
+            with current tensor scaling (CS); "mxfp8" enables block-scaled MXFP8
+            attention. Delayed scaling (DS) is not supported for JAX attention.
+            This option is independent of the GEMM quantization recipe.
+            Outputs and gradients retain the input FP16/BF16 dtype. For CS FP8
+            backward, ``NVTE_DPA_FP8CS_O_in_F16`` selects whether the saved output
+            is consumed in FP16/BF16 (default, ``1``) or quantized to FP8 (``0``).
         quantized_qkv (Optional[Tuple[ScaledTensor2x, ...]]): Prequantized MXFP8
             Q/K/V, each with independent unswizzled BHSD rowwise/columnwise data
             and E8M0 scales. Requires ``fp8="mxfp8"``. The original ``qkv``

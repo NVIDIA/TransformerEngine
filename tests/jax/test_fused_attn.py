@@ -472,6 +472,59 @@ def test_fused_attn_support_query_defers_compilation(setup_error, monkeypatch):
             pytest.skip(f"Baseline attention is unsupported: {message}")
 
 
+@pytest.mark.parametrize(
+    "fp8,fp8_backward", ((False, True), (True, False), (True, True), ("mxfp8", True))
+)
+def test_cudnn_attention_backward_o_precision_cache(fp8, fp8_backward, monkeypatch):
+    """Support and execution share O precision, without duplicating unaffected graphs."""
+    from transformer_engine.jax.cpp_extensions import cudnn_attention
+    from transformer_engine.jax.cpp_extensions.attention import _FusedAttnConfig
+
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
+    q = jax.ShapeDtypeStruct((1, 128, 2, 64), jnp.bfloat16)
+    empty = jax.ShapeDtypeStruct((0,), q.dtype)
+    avals = (q, q, q, empty, jax.ShapeDtypeStruct((0,), jnp.float32))
+    _require_cudnn_attention(q, q, q, fp8=fp8)
+    config = _FusedAttnConfig(
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        scaling_factor=0.125,
+        dropout_probability=0.0,
+        is_training=True,
+        max_segments_per_seq=1,
+        window_size=(-1, -1),
+        bottom_right_diagonal=False,
+        context_parallel_load_balanced=False,
+        cp_axis="",
+        cp_striped_window_size=None,
+        stripe_size=None,
+        fp8=fp8,
+    )
+    backward, forward = [], []
+    for o_in_f16 in (True, False):
+        monkeypatch.setenv("NVTE_DPA_FP8CS_O_in_F16", "1" if o_in_f16 else "0")
+        cudnn_attention.check_attention_support("bwd", avals, config)
+        plan = cudnn_attention.get_graph("bwd", avals, config)
+        expected_fp8_o = fp8 is True and fp8_backward and not o_in_f16
+        assert plan.fp8_o == expected_fp8_o
+        assert ("descale_o" in plan.names) == expected_fp8_o
+        description = cudnn_attention._describe_graph(
+            *cudnn_attention._request("bwd", avals, config)
+        )
+        assert dict(description.spec.tensors)["o"].dtype == (
+            "FP8_E4M3" if expected_fp8_o else "BFLOAT16"
+        )
+        backward.append(plan)
+        forward.append(cudnn_attention.get_graph("fwd", avals, config))
+    assert forward[0] is forward[1]
+    if fp8 is True and fp8_backward:
+        assert backward[0].graph.graph_hash != backward[1].graph.graph_hash
+    else:
+        assert backward[0] is backward[1]
+
+
 @pytest.mark.parametrize("batch,seqlen", ((0, 128), (2, 0)))
 def test_cudnn_attention_empty_ragged_capacities(batch, seqlen, monkeypatch):
     """Empty storage must retain positive graph capacities for ragged metadata."""
@@ -674,6 +727,7 @@ def test_cudnn_attention_output_initialization(layout, direction, fp8, monkeypat
         ragged_stats=layout.is_thd(),
         multipliers=(128, 128, 128, 128, 2),
         fp8=fp8,
+        fp8_o=False,
     )
     monkeypatch.setattr(cudnn_attention, "get_graph", lambda *_args: plan)
     monkeypatch.setattr(cudnn_attention, "graph_attributes", lambda _graph: {})
@@ -2476,6 +2530,7 @@ def _require_cudnn_attention(q, k, v, **overrides):
         pytest.skip(reason)
 
 
+@pytest.mark.parametrize("o_in_f16", [True, False])
 @pytest.mark.parametrize("dtype", [jnp.float16, jnp.bfloat16])
 @pytest.mark.parametrize("fp8_backward", [False, True])
 @pytest.mark.parametrize(
@@ -2486,9 +2541,10 @@ def _require_cudnn_attention(q, k, v, **overrides):
         QKVLayout.BSHD_BSHD_BSHD,
     ],
 )
-def test_cudnn_python_fp8_forward_backward(dtype, layout, fp8_backward, monkeypatch):
+def test_cudnn_python_fp8_forward_backward(dtype, layout, fp8_backward, o_in_f16, monkeypatch):
     """Exercise real FP8 SDPA with exactly representable operands and probabilities."""
     monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
+    monkeypatch.setenv("NVTE_DPA_FP8CS_O_in_F16", "1" if o_in_f16 else "0")
     q = jnp.full((2, 128, 4, 64), 0.5, dtype)
     k = jnp.full_like(q, 0.5)
     v = jnp.zeros_like(q).at[:, ::2, :, 0].set(1.0)
@@ -2593,6 +2649,7 @@ def test_cudnn_python_attention_does_not_call_common_attention(monkeypatch):
     np.testing.assert_array_equal(gradients, tensor)
 
 
+@pytest.mark.parametrize("o_in_f16", [True, False])
 @pytest.mark.parametrize("scaling_factor", [0.125, 0.25])
 @pytest.mark.parametrize(
     "kind,sm_arch",
@@ -2608,8 +2665,9 @@ def test_cudnn_python_attention_does_not_call_common_attention(monkeypatch):
         ("ragged_dense_stats_f16", 129),
     ],
 )
-def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, scaling_factor, monkeypatch, request):
+def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, scaling_factor, o_in_f16, monkeypatch, request):
     """Compare FP8 GQA against FP32, including cached plans with different scalar values."""
+    monkeypatch.setenv("NVTE_DPA_FP8CS_O_in_F16", "1" if o_in_f16 else "0")
     ragged = kind.startswith("ragged")
     fp8 = not kind.endswith("_f16")
     if ragged and get_device_compute_capability(0) < 100:
@@ -2877,10 +2935,12 @@ def test_cudnn_python_dropout_replay(fp8, fp8_backward, monkeypatch):
         np.testing.assert_array_equal(actual, expected)
 
 
+@pytest.mark.parametrize("o_in_f16", [True, False])
 @pytest.mark.parametrize("strategy", [CPStrategy.ALL_GATHER, CPStrategy.RING])
 @pytest.mark.parametrize("fp8", [False, True])
-def test_cudnn_python_context_parallel(strategy, fp8):
+def test_cudnn_python_context_parallel(strategy, fp8, o_in_f16, monkeypatch):
     """Two-device context parallel attention preserves FP8 forward and backward."""
+    monkeypatch.setenv("NVTE_DPA_FP8CS_O_in_F16", "1" if o_in_f16 else "0")
     if jax.local_device_count() < 2:
         pytest.skip("Context parallel attention requires two GPUs.")
     mesh = Mesh(np.asarray(jax.local_devices()[:2]), ("cp",))
