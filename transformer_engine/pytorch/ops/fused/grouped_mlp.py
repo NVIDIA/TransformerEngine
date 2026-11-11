@@ -887,11 +887,6 @@ def _flatten_cudnn_packed_scales(kwargs: dict) -> None:
             kwargs[name] = kwargs[name].view(-1)
 
 
-def _prefer_gate_then_up_hadamard(kernel) -> bool:
-    """Use the qualified regular GLU path unless RHT supports its own smaller tile."""
-    return (128, 256) in getattr(kernel, "supports_gate_then_up_mma_tilers", ())
-
-
 def _cudnn_frontend_supports_gate_then_up(precision: str = "mxfp8") -> bool:
     """Whether both GLU kernels accept canonical gate/up storage in a precision.
 
@@ -1553,14 +1548,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     kernel_impl, fc1_kernel = "gemm_act_rht_quant", rht_kernel
             elif fc2_input_quantizer.with_post_rht_amax:
                 rht_kernel = self.grouped_gemm_act_hadamard_kernel()
-                rht_kernel_compatible = rht_kernel is not None and (
-                    not self._gate_then_up
-                    or (
-                        _cudnn_kernel_supports_gate_then_up(rht_kernel, "nvfp4")
-                        and _prefer_gate_then_up_hadamard(rht_kernel)
-                    )
-                )
-                if rht_kernel_compatible and (
+                if rht_kernel is not None and (
                     self._cudnn_act_func in ("swiglu", "situglu") or activation_is_srelu
                 ):
                     kernel_impl, fc1_kernel = "gemm_act_rht_amax", rht_kernel

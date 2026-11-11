@@ -296,6 +296,16 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
                     "c_dtype": kwargs["c_dtype"],
                     "d_dtype": kwargs["d_dtype"],
                     "act_func": kwargs["act_func"],
+                    **(
+                        {
+                            key: kwargs.get(
+                                key, inspect.signature(original_hadamard).parameters[key].default
+                            )
+                            for key in ("mma_tiler_mn", "cluster_shape_mn")
+                        }
+                        if kwargs.get("glu_layout") == "gate_then_up"
+                        else {}
+                    ),
                     **({"glu_layout": kwargs["glu_layout"]} if "glu_layout" in kwargs else {}),
                     "situ_betas": (kwargs.get("situ_beta1"), kwargs.get("situ_beta2")),
                     "with_bias": kwargs.get("bias_tensor") is not None,
@@ -1346,7 +1356,7 @@ class TestGroupedMLPFusedOp:
         glu_interleave_size,
         traced_cudnn_grouped_glu_wrappers,
     ):
-        """New frontends select their qualified tile; older and legacy routes retain defaults."""
+        """Regular GLU tile preferences do not change recipe-selected RHT fusion."""
         import cudnn
 
         precision = "mxfp8" if quantization == "mxfp8" else "nvfp4"
@@ -1375,7 +1385,12 @@ class TestGroupedMLPFusedOp:
             call for call in traced_cudnn_grouped_glu_wrappers if call["kind"].startswith("fwd")
         ]
         assert forwards
-        if glu_interleave_size is None:
+        if quantization == "nvfp4_rht":
+            assert all(call["kind"] == "fwd_hadamard" for call in forwards)
+            if glu_interleave_size is None:
+                assert all(call["mma_tiler_mn"] == (256, 256) for call in forwards)
+                assert all(call["cluster_shape_mn"] == (2, 1) for call in forwards)
+        elif glu_interleave_size is None:
             tile = (128, 256) if preferred_tile is None else preferred_tile
             cluster = (1, 1) if tile[0] == 128 else (2, 1)
             assert all(call["kind"] == "fwd" for call in forwards)
@@ -1413,11 +1428,7 @@ class TestGroupedMLPFusedOp:
             grouped_mlp_module._cudnn_kernel_supports_gate_then_up(kernel, "nvfp4")
         ):
             pytest.skip(f"{name} does not advertise canonical NVFP4")
-        if variant == "amax":
-            # Qualify the supported two-CTA specialization independently of
-            # the default regular GLU plus native RHT quantization.
-            monkeypatch.setattr(grouped_mlp_module, "_prefer_gate_then_up_hadamard", lambda _: True)
-        elif variant == "quant_interleave_only":
+        if variant == "quant_interleave_only":
             monkeypatch.setattr(kernel, "supports_glu_layouts", ("interleaved_32",), raising=False)
         elif variant == "quant_legacy_api":
             monkeypatch.setattr(kernel, "supports_canonical_layouts", False, raising=False)

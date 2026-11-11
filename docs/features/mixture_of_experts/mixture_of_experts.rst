@@ -459,8 +459,8 @@ Tensor ranks and gate/up channel order are separate properties: the legacy
 Saved pre-activations use BF16. Regular canonical MXFP8/NVFP4 GLU uses the
 frontend's ``preferred_gate_then_up_mma_tiler`` when advertised; older canonical
 frontends retain the one-CTA ``(128, 256)`` fallback. Specialized RHT kernels
-keep their own tile selection. Canonical NVFP4 applies its usual RHT quantization
-after the fused GEMM + activation when the separate RHT path is preferred.
+keep their own tile selection. NVFP4 selects the RHT fusion from the quantization
+recipe for both GLU channel layouts.
 cuDNN pairs gate/up internally; when training starts with canonical storage,
 parameters and optimizer state need no GLU layout conversion. This option does
 not migrate an existing interleaved optimizer checkpoint; that conversion
