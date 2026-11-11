@@ -54,9 +54,7 @@ def test_cudnn_score_mod_backend_guard(monkeypatch, has_score_mod, selected_engi
         assert (
             graph.mock_calls.index(call.build_operation_graph())
             < graph.mock_calls.index(exclusion)
-            < graph.mock_calls.index(
-                call.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-            )
+            < graph.mock_calls.index(call.create_execution_plans([cudnn.heur_mode.A]))
         )
     else:
         graph.deselect_engines.assert_not_called()

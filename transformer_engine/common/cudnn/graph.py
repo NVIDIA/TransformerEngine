@@ -57,7 +57,7 @@ def check_graph_support(cudnn, graph, run_stage=None, *, has_score_mod=False, fi
             run("deselect_engines", lambda: graph.deselect_engines(["sdpa_fwd", "sdpa_bwd"]))
         run(
             "create_execution_plans",
-            lambda: graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]),
+            lambda: graph.create_execution_plans([cudnn.heur_mode.A]),
         )
         if filter_plans is not None:
             run("filter_plans", lambda: filter_plans(graph))
