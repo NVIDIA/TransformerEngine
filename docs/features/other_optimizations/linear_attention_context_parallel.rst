@@ -28,8 +28,10 @@ For CP size ``P`` and group rank ``r``:
   ``global_cu_seqlens`` on every rank. This metadata can be on CPU or CUDA;
   local fragment boundaries are derived automatically.
 * **BSHD/SBHD:** rank ``r`` owns ``[r*S//P:(r+1)*S//P]`` of every batch row.
-  With equal local sequence lengths, TE infers ``S``. For uneven slices,
-  also pass global offsets ``[0,S,2*S,...,B*S]``.
+  Here ``B`` is batch size and ``S`` is each row's full sequence length.
+  When ``S`` is divisible by ``P``, TE can infer ``S`` from the local length.
+  Otherwise, pass global document offsets ``[0,S,2*S,...,B*S]``. Rank slices
+  still follow the formula above; arbitrary rank splits are not supported.
 
 Q, K, V, ``g`` and ``beta`` must follow the same ownership. TE does not
 redistribute inputs or interpret SDPA's dual-chunk layout. A local conversion

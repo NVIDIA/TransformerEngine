@@ -335,9 +335,8 @@ class GatedDeltaNetAttention(LinearAttentionBase):
     def set_context_parallel_group(self, cp_group: Optional[dist.ProcessGroup]) -> None:
         """Set or disable CP before forward, including after distributed initialization.
 
-        A single process group is supported. This first implementation uses the
-        current CUDA stream and contiguous token ordering, without SDPA's dual
-        chunk layout or communication-stream configuration.
+        A single process group is supported. CP uses the current CUDA stream
+        and contiguous token ordering.
         """
         if cp_group is not None and not isinstance(cp_group, dist.ProcessGroup):
             raise TypeError("GDN cp_group must be one torch.distributed.ProcessGroup or None.")
@@ -378,7 +377,12 @@ class GatedDeltaNetAttention(LinearAttentionBase):
             Overrides the module's configured `qkv_format` for this call.
         cu_seqlens : Optional[torch.Tensor], default = `None`
             Cumulative sequence lengths for packed (`thd`) inputs, of shape
-            `[batch_size + 1]` and dtype `torch.int32`.
+            `[batch_size + 1]` and dtype `torch.int32` without CP. With THD CP,
+            TE intersects the global documents with this rank's token interval
+            and derives cumulative lengths for the resulting local fragments.
+            Documents with no tokens on this rank are omitted. With THD CP,
+            this argument is optional; if supplied, its values must equal
+            those derived offsets.
         checkpoint_core_attention : bool, default = `False`
             If true, forward activations for this module are recomputed
             during the backward pass instead of saved.
@@ -391,17 +395,18 @@ class GatedDeltaNetAttention(LinearAttentionBase):
         use_qk_l2norm_in_kernel : bool, default = `False`
             If true, L2-normalize Q and K inside the kernel before the recurrence.
         global_cu_seqlens : Optional[torch.Tensor], default = `None`
-            Required for THD CP: global cumulative document lengths, int32 on
-            CPU or CUDA, identical on all ranks. Rank ``r`` supplies tokens
+            Global cumulative document lengths, dtype `torch.int32`, identical
+            on all ranks. Required for THD CP: rank ``r`` supplies tokens
             ``[r*T//P:(r+1)*T//P]`` from each packed input, where ``T`` is the
             final global offset and ``P`` is CP size. No CP divisibility constraint
-            applies; pack tokens without gaps. Local ``cu_seqlens`` is derived; if
-            supplied, it must match the nonempty local document fragments.
-            Optional for dense CP: supply ``[0, S, 2*S, ..., B*S]`` for global
-            sequence length ``S`` when it is not divisible by CP size. Each
-            rank then supplies the sequence slice ``[r*S//P:(r+1)*S//P]`` from
-            every batch row. Without this metadata, dense CP assumes equal local
-            sequence lengths and infers ``S = local_sequence_length * P``.
+            applies; pack tokens without gaps.
+            For BSHD/SBHD CP, use ``[0, S, 2*S, ..., B*S]``, where ``B`` is
+            batch size and ``S`` is the full sequence length of each batch row.
+            These are document boundaries, not rank boundaries. Each rank must
+            supply ``[r*S//P:(r+1)*S//P]`` of every row. This metadata is required
+            when ``S`` is not divisible by ``P``; otherwise TE can infer
+            ``S = local_sequence_length * P``. Arbitrary rank splits are not
+            supported.
 
         Notes
         -----
