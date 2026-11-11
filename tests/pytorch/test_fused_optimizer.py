@@ -429,6 +429,8 @@ class TestFusedAdam(TestFusedOptimizer):
             store_param_remainders=store_param_remainders,
             **options,
         )
+        # The saved FP32 states must remain usable for a second restore.
+        tst_optim.load_state_dict(state_dict)
         tst_optim.load_state_dict(state_dict)
 
         for i in range(self.iters):
