@@ -3957,8 +3957,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         quantizer_scales = _prepare_backward_quantizers(
             ctx, (QKV_quantizer, O_quantizer, S_quantizer)
         )
+        # Backward unpacks two steps; NO_LOAD_BALANCE THD computes only the first.
         thd_q_metadata = (
-            (*thd_cu_seqlens_q_per_step, *thd_cu_seqlens_q_padded_per_step)
+            tuple(
+                steps[step] if step < len(steps) else None
+                for steps in (thd_cu_seqlens_q_per_step, thd_cu_seqlens_q_padded_per_step)
+                for step in range(2)
+            )
             if qkv_format == "thd"
             else (None,) * 4
         )
