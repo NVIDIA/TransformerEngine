@@ -431,6 +431,16 @@ class TestFusedAdam(TestFusedOptimizer):
         )
         # The saved FP32 states must remain usable for a second restore.
         tst_optim.load_state_dict(state_dict)
+        if exp_avg_dtype == torch.float16:
+            param = model_params[0]
+            row = torch.ones_like(param[:1], dtype=torch.float32)
+            tst_optim.set_scaled_state(param, "exp_avg", row)
+            if not torch.equal(
+                tst_optim.get_unscaled_state(param, "exp_avg"), row.expand_as(param)
+            ):
+                raise RuntimeError("A broadcast moment must fill the parameter's state")
+            with pytest.raises(RuntimeError):
+                tst_optim.set_scaled_state(param, "exp_avg", row.unsqueeze(0))
         tst_optim.load_state_dict(state_dict)
 
         for i in range(self.iters):

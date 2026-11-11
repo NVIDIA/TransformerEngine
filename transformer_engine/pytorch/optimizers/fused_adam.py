@@ -295,8 +295,10 @@ class FusedAdam(torch.optim.Optimizer):
         if unscaled_state.device != scaled_state.device:
             unscaled_state = unscaled_state.to(scaled_state.device)
         min_val, max_val = torch.aminmax(unscaled_state)
+        if dtype == torch.float16 and unscaled_state.shape != scaled_state.shape:
+            # Broadcast only the write operand so the source transfer and reduction stay small.
+            unscaled_state = unscaled_state.expand_as(scaled_state)
         absmax = torch.maximum(-min_val, max_val)
-        absmax = absmax.to(dtype=torch.float32, device=unscaled_state.device)
         torch.div(absmax, max_range, out=scale)
         if isinstance(scaled_state, Float8Tensor):
             scaled_state._quantizer.scale.copy_(1 / scale)
