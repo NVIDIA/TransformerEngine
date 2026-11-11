@@ -183,10 +183,30 @@ class DSv4Attention(torch.nn.Module):
     ):
         """Run full self-attention and optionally expose single-sequence CSA context.
 
-        Packed calls require contiguous INT32 ``cu_seqlens_q`` on the input
-        device and ``max_seqlen_q``. Prefixes have no padding/global offsets;
-        their contents are caller-owned and are not checked on the host.
-        These metadata arguments are accepted only for ``thd``.
+        Parameters
+        ----------
+        hidden_states : torch.Tensor
+            Input ``[S,B,hidden_size]`` for ``sbhd``, ``[B,S,hidden_size]`` for
+            ``bshd``, or ``[T,hidden_size]`` for packed ``thd``.
+        cu_seqlens_q : torch.Tensor, optional
+            Contiguous CUDA INT32 ``[B+1]`` prefixes, required only for ``thd``.
+            Prefixes start at zero, end at T, and contain no padding/global offsets;
+            their contents are caller-owned and are not checked on the host.
+        max_seqlen_q : int, optional
+            Maximum sequence length, required only for ``thd``.
+        return_indexer_context : bool, default = False
+            Return context for a caller-owned CSA auxiliary loss; requires B=1.
+
+        Returns
+        -------
+        torch.Tensor or tuple
+            Output with the input shape, or ``(output, context)``. Context contains
+            live ``index_q[T,H,128]``, ``index_k[Tc,128]``, ``index_w[T,H]`` and
+            discrete compressed-row ``indices[T,K]``; H is ``index_n_heads``.
+            Teacher ``attn_q[T,64,512]``, ``local_kv[T,512]``,
+            ``compressed_kv[Tc,512]`` and ``sink[64]`` are detached. Indexer inputs
+            are detached from the shared hidden/query projections, so auxiliary
+            gradients train only the indexer tower. See the README loss example.
         """
         packed = self.qkv_format == "thd"
         if (

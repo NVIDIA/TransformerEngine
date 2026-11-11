@@ -67,7 +67,36 @@ class Indexer(torch.nn.Module):
         max_seqlen,
         return_context=False,
     ):
-        """Select compressed KV entries and optionally expose live tensors for the indexer loss."""
+        """Select compressed KV entries and optionally expose live indexer tensors.
+
+        Parameters
+        ----------
+        hidden_states : torch.Tensor
+            Batch-major ``[B,S,hidden_size]`` or packed ``[T,hidden_size]`` input.
+        q_residual : torch.Tensor
+            Query-down residual with matching leading axes and width ``q_lora_rank``.
+        cu, cu_comp : torch.Tensor
+            CUDA INT32 ``[B+1]`` token/compressed prefixes.
+        token_rope, compressed_rope : tuple of torch.Tensor
+            FP32 cosine/sine pairs ``[1,max_positions,1,rotary_width]`` for
+            token and compressed-window positions, respectively.
+        total_comp : int
+            Compressed output capacity: exactly ``B * (S // ratio)`` for dense
+            input; packed input may reserve extra rows beyond ``cu_comp[-1]``.
+        max_seqlen : int
+            Maximum token sequence length used to bound selection. For dense
+            input this must equal S; for packed input use the maximum segment length.
+        return_context : bool, default = False
+            Also return differentiable Q/K/head weights for a caller-owned loss.
+
+        Returns
+        -------
+        torch.Tensor or tuple of torch.Tensor
+            INT32 ``[T,min(top_k,max_seqlen // ratio)]`` global compressed-row
+            IDs, with invalid slots set to -1. With context, return
+            ``(indices, query[T,n_heads,head_dim], key[total_comp,head_dim],
+            weights[T,n_heads])``. Selection IDs do not carry gradients.
+        """
         n_comp = max_seqlen // self.ratio
         comp_shape = (total_comp,) if hidden_states.ndim == 2 else (hidden_states.shape[0], n_comp)
         index_compressed = self.compressor(hidden_states, cu, cu_comp, total_comp=total_comp)

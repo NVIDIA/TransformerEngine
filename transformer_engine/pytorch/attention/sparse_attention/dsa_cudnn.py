@@ -128,7 +128,9 @@ def compress(
 ) -> torch.Tensor:
     """Compress token windows with cuDNN forward and backward.
 
-    kv/score: contiguous [T, coff*D]; ape: FP32 [ratio, coff*D].
+    kv/score: contiguous [T, coff*D] projected KV/gate scores.
+    ape: FP32 [ratio, coff*D] additive position embedding, a learned per-channel
+    bias added to gate scores before the compression softmax.
     coff is 2 for overlapping compression, 1 otherwise. Sequence prefixes are
     CUDA INT32 [B+1]; compressed segment lengths are floor(length / ratio).
     Returns [total_comp, D]. Per-segment tails are dropped by cuDNN.
@@ -167,10 +169,12 @@ def select_indices(
     max_compressed_seqlen: int,
     scale: Optional[float] = None,
 ) -> torch.Tensor:
-    """CSA selection using cuDNN's combined score + Top-K operation.
+    """Select compressed rows with cuDNN's combined index-score + Top-K operation.
 
-    Inputs are the indexer's projected Q/K/head weights.
+    Inputs are the indexer's projected Q/K/head weights, after compression/RoPE.
+    Unlike the Indexer module, this operation does not project or compress inputs.
     query [T,H,128], compressed_key [Tc,128], weights [T,H]; H=32 or 64.
+    cu_seqlens/cu_seqlens_comp are CUDA INT32 [B+1] token/compressed prefixes.
     Full packed-sequence prefill only: causal timeline offsets start at zero.
     Returns INT32 [T,top_k] indices into compressed_key's global packed rows;
     -1 denotes an invalid slot. These are NOT IDs into local+compressed KV.
@@ -242,9 +246,13 @@ def dense_indexer_loss_scores(
 ):
     """Return cuDNN dense index/teacher score dictionaries for B1 prefill.
 
+    index_q/index_k/index_w are [1,S,H,128], [1,Sc,128], [1,S,H],
+    with H=32 or 64. attn_q/compressed_kv are [1,S,64,D], [1,Sc,D].
     full_lse is FP32 [1,S,64] and must include the local window, every eligible
     compressed key, and the sink. The sparse-attention saved LSE covers only
     selected keys and excludes the sink, so it cannot serve this dense teacher.
+    Returned score/denominator dictionaries feed dense_indexer_loss_backward;
+    these calls do not attach an autograd loss to the indexer tensors.
     """
     if any(t.dtype != torch.bfloat16 for t in (index_k, attn_q, compressed_kv)):
         raise TypeError("Dense indexer keys and attention Q/K must be BF16.")
@@ -282,6 +290,9 @@ def dense_indexer_loss_backward(
 ):
     """Return dQ/dK/dW for B1 KL averaged over query tokens, padding H32 at cuDNN.
 
+    index_q/index_k/index_w and score dictionaries are the inputs/outputs of
+    dense_indexer_loss_scores. Returned gradients match those input shapes and
+    must be propagated through the live indexer tensors by the caller.
     grad_loss is the scalar upstream gradient; loss_coeff scales the loss.
     """
     padded_q, padded_w = _pad_index_heads(index_q, index_w)
@@ -315,7 +326,13 @@ def _prepare_sparse_indices(
     indices: Optional[torch.Tensor],
     max_compressed_seqlen: Optional[int],
 ) -> torch.Tensor:
-    """Map local and compressed entries into one concatenated KV address space."""
+    """Build one KV-index row per original query token, using its shape/device.
+
+    Query values are not read. Concatenate causal local-row IDs and compressed
+    IDs offset by T into [T, window_size + compressed_slots]; invalid slots
+    are -1. This prepares attention addresses, whereas select_indices chooses
+    compressed entries from indexer scores.
+    """
     total_q = query.shape[0]
     device = query.device
     lengths = cu_seqlens[1:] - cu_seqlens[:-1]
@@ -366,7 +383,11 @@ def _prepare_sparse_indices(
 class _SparseAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, query, kv, indices, sink, scale):
-        """Run cuDNN sparse prefill and save its backward inputs."""
+        """Attend query [T,64,D] to concatenated KV [T+Tc,D] using INT32 rows.
+
+        indices [T,window_size+compressed_slots] addresses that KV tensor, with
+        -1 for invalid slots. No compressed query is constructed.
+        """
         result = _dsa_op("sparse_attention_forward_wrapper")(
             query,
             kv,
@@ -417,6 +438,8 @@ def sparse_attention(
 
     Full packed-sequence prefill: query [T,H,D], local_kv [T,D], compressed_kv
     [Tc,D], sink [H]. Q/KV have already had the model's norm/RoPE applied.
+    The high-level layer repacks dense SBHD/BSHD inputs to these batch-major
+    packed rows; THD inputs already use packed rows. There is no compressed Q.
     cu_seqlens describes both query and local KV; cu_seqlens_comp describes
     valid compressed rows, excluding capacity padding. Values are the first
     512 channels of each shared KV row (Q/K width may also be 576).

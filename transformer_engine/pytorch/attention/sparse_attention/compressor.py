@@ -12,7 +12,7 @@ from .dsa_cudnn import compress
 
 
 class Compressor(torch.nn.Module):
-    """Project KV/gates, compress token windows with cuDNN, and apply RMSNorm.
+    """Project KV/gates for HCA or CSA, compress with cuDNN, and apply RMSNorm.
 
     Non-overlapping compression combines each block of ``ratio`` tokens into
     one compressed KV entry. Overlapping compression mixes the current block
@@ -57,7 +57,7 @@ class Compressor(torch.nn.Module):
         projected = width * (2 if overlap else 1)
         kw = {"bias": False, "device": device, "params_dtype": params_dtype}
         if fused:
-            # Fuse the KV, gate, and optional index-weight projections of x.
+            # Fuse the KV, gate, and optional index-weight projections of hidden states.
             # Keep one contiguous weight for the shared projection call.
             self.fused_proj = Linear(hidden_size, 2 * projected + weight_width, **kw)
         else:
@@ -70,10 +70,29 @@ class Compressor(torch.nn.Module):
         self.ratio, self.overlap = ratio, overlap
         self.projected, self.weight_width = projected, weight_width
 
-    def forward(self, x, cu_seqlens, cu_seqlens_comp, *, total_comp):
-        """Project and compress KV entries, returning optional fused index weights."""
+    def forward(self, hidden_states, cu_seqlens, cu_seqlens_comp, *, total_comp):
+        """Project and compress KV entries before RoPE.
+
+        Parameters
+        ----------
+        hidden_states : torch.Tensor
+            Batch-major ``[B,S,hidden_size]`` or packed ``[T,hidden_size]`` input.
+        cu_seqlens, cu_seqlens_comp : torch.Tensor
+            Contiguous CUDA INT32 ``[B+1]`` token/compressed prefixes. Compressed
+            segment lengths are ``floor(length / ratio)``.
+        total_comp : int
+            Output row capacity. For dense input, use exactly ``B * (S // ratio)``;
+            packed input may reserve extra rows beyond ``cu_seqlens_comp[-1]``.
+
+        Returns
+        -------
+        torch.Tensor or tuple of torch.Tensor
+            Normalized ``[total_comp,width]`` KV rows. When ``weight_width > 0``,
+            also return head weights with shape ``hidden_states.shape[:-1] +
+            (weight_width,)``. Only rows below the final compressed prefix are valid.
+        """
         if hasattr(self, "fused_proj"):
-            projected = self.fused_proj(x)
+            projected = self.fused_proj(hidden_states)
             widths = (
                 (self.projected, self.projected, self.weight_width)
                 if self.weight_width
@@ -82,7 +101,7 @@ class Compressor(torch.nn.Module):
             parts = projected.split(widths, dim=-1)
             kv, gate = parts[:2]
         else:
-            kv, gate = self.kv_proj(x), self.gate_proj(x)
+            kv, gate = self.kv_proj(hidden_states), self.gate_proj(hidden_states)
         compressed_kv = compress(
             kv.reshape(-1, self.projected).contiguous(),
             gate.reshape(-1, self.projected).contiguous(),
@@ -94,10 +113,10 @@ class Compressor(torch.nn.Module):
             overlap=self.overlap,
             total_comp=total_comp,
         )
-        if x.ndim == 2:
+        if hidden_states.ndim == 2:
             # cuDNN only guarantees valid rows below the final prefix. Clear
             # unused capacity before RMSNorm so it cannot poison weight gradients.
-            valid = torch.arange(total_comp, device=x.device) < cu_seqlens_comp[-1]
+            valid = torch.arange(total_comp, device=hidden_states.device) < cu_seqlens_comp[-1]
             compressed_kv = compressed_kv.masked_fill(~valid[:, None], 0)
         compressed = self.kv_norm(compressed_kv)
         return (compressed, parts[2]) if self.weight_width else compressed
