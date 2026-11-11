@@ -204,6 +204,32 @@ def _is_module_grouped_tensor_path_supported(
     return False
 
 
+def _prefer_grouped_tensor_path_for_row_scaled_nvfp4(
+    recipe: Optional[Recipe],
+    inp: torch.Tensor,
+    m_splits: torch.Tensor,
+    in_features: int,
+    out_features: int,
+) -> bool:
+    """Whether to use the native GroupedTensor path when the caller did not choose a path.
+
+    The split-quantize path quantizes row-scaled NVFP4 inputs one split at a time, so these
+    recipes default to the native path when its 128 alignment can be confirmed without a
+    device synchronization. Host ``m_splits`` are not used during CUDA Graph capture since
+    copying them to the device would not be replayed with new values.
+    """
+    if recipe is None or not recipe.nvfp4() or not recipe.row_scaled_activation:
+        return False
+    num_tokens = inp.numel() // in_features
+    if in_features % 128 != 0 or out_features % 128 != 0 or num_tokens % 128 != 0:
+        return False
+    if m_splits.device.type == te_device_type():
+        return True
+    if torch.cuda.is_current_stream_capturing():
+        return False
+    return bool((m_splits % 128 == 0).all())
+
+
 @dataclass(slots=True)
 class GroupedLinearFwdArgs:
     """Forward configuration and operands."""
@@ -1767,6 +1793,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                        The native path requires CUDA ``m_splits``. ``None`` preserves the deprecated
                        ``NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM`` environment-variable
                        selection for compatibility. New callers should pass a boolean explicitly.
+                       When neither is set, row-scaled NVFP4 recipes use the native path if it is
+                       supported and the feature dimensions, token count, and host ``m_splits``
+                       entries are multiples of 128. Host ``m_splits`` are copied to the device,
+                       except during CUDA Graph capture, where the split-quantize path is used.
                        With MXFP8, FP8 block scaling, or NVFP4, the native path requires every
                        ``m_splits`` entry to be a multiple of 128. This is checked only on the
                        device, so other split sizes can produce incorrect results.
@@ -1819,8 +1849,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
         self.save_original_input = save_original_input
+        self._use_grouped_tensor_unspecified = False
         if use_grouped_tensor is None:
             use_grouped_tensor_env = os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM")
+            self._use_grouped_tensor_unspecified = use_grouped_tensor_env is None
             if use_grouped_tensor_env is not None:
                 warnings.warn(
                     "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM is deprecated and will be "
@@ -2417,8 +2449,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                 )
 
             # Choose between grouped tensor path or split-quantize path
+            use_grouped_tensor = self.use_grouped_tensor or (
+                self._use_grouped_tensor_unspecified
+                and _prefer_grouped_tensor_path_for_row_scaled_nvfp4(
+                    _recipe, inp, m_splits, self.in_features, self.out_features
+                )
+            )
             use_grouped_tensor_path = False
-            if self.use_grouped_tensor and not (self.fp8_calibration or debug or cpu_offloading):
+            if use_grouped_tensor and not (self.fp8_calibration or debug or cpu_offloading):
                 use_grouped_tensor_path = is_module_grouped_tensor_path_supported(
                     _recipe,
                     self.activation_dtype,
@@ -2512,12 +2550,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                         )
                         save_original_input = False
 
-            if use_grouped_tensor_path:
-                if m_splits.device.type != te_device_type():
+            if use_grouped_tensor_path and m_splits.device.type != te_device_type():
+                if self.use_grouped_tensor:
                     raise ValueError(
                         "The native grouped_tensor path requires CUDA m_splits. Pass a CUDA int64 "
                         "tensor, or set use_grouped_tensor=False."
                     )
+                m_splits = m_splits.to(device=inp.device)
             fwd_args = GroupedLinearFwdArgs(
                 # tensors
                 inp=inp,
