@@ -44,11 +44,14 @@ def _validate_tensors(reference, bf16, fp32, cu_seqlens, cu_seqlens_comp):
     Callers own prefix contents: start at zero, monotonic, final offsets equal
     valid row counts, and compressed lengths floor(length / ratio).
     """
-    if not reference.is_cuda or torch.cuda.get_device_capability(reference.device) != (
-        10,
-        0,
+    if not reference.is_cuda or torch.cuda.get_device_capability(reference.device) not in (
+        (10, 0),
+        (10, 3),
+        (10, 7),
     ):
-        raise ValueError("These cuDNN sparse attention kernels require an SM100 GPU.")
+        raise ValueError(
+            "These cuDNN sparse attention kernels require an SM100, SM103, or SM107 GPU."
+        )
     for tensor in (reference, *bf16, *fp32, cu_seqlens, cu_seqlens_comp):
         if tensor.device != reference.device or not tensor.is_contiguous():
             raise ValueError("Inputs must be contiguous on the same CUDA device.")
@@ -125,10 +128,10 @@ def compress(
 ) -> torch.Tensor:
     """Compress token windows with cuDNN forward and backward.
 
-    kv/score: contiguous BF16 [T, coff*D]; ape: FP32 [ratio, coff*D].
+    kv/score: contiguous [T, coff*D]; ape: FP32 [ratio, coff*D].
     coff is 2 for overlapping compression, 1 otherwise. Sequence prefixes are
     CUDA INT32 [B+1]; compressed segment lengths are floor(length / ratio).
-    Returns BF16 [total_comp, D]. Per-segment tails are dropped by cuDNN.
+    Returns [total_comp, D]. Per-segment tails are dropped by cuDNN.
 
     total_comp specifies output capacity; only entries before
     cu_seqlens_comp[-1] are valid.
@@ -164,18 +167,18 @@ def select_indices(
     max_compressed_seqlen: int,
     scale: Optional[float] = None,
 ) -> torch.Tensor:
-    """CSA selection using cuDNN's SM100 combined score + Top-K operation.
+    """CSA selection using cuDNN's combined score + Top-K operation.
 
     Inputs are the indexer's projected Q/K/head weights.
-    BF16 query [T,H,128], compressed_key [Tc,128], weights [T,H]; H=32 or 64.
+    query [T,H,128], compressed_key [Tc,128], weights [T,H]; H=32 or 64.
     Full packed-sequence prefill only: causal timeline offsets start at zero.
     Returns INT32 [T,top_k] indices into compressed_key's global packed rows;
     -1 denotes an invalid slot. These are NOT IDs into local+compressed KV.
 
     Selection is discrete. Scale defaults to 1/sqrt(index head dim). If the
     model also scales by 1/sqrt(index heads), fold that positive factor into
-    scale and pass raw BF16 projected weights. Scaling in FP32 then rounding
-    weights to BF16 can change close top-k boundaries. This helper does not
+    scale and pass raw projected weights. Scaling in FP32 then rounding
+    weights back to activation dtype can change close top-k boundaries. This helper does not
     implement the separate indexer auxiliary loss or autograd through IDs.
     max_compressed_seqlen is a compile bound and must cover the partial final
     ratio; use ceil(max_seqlen / ratio) even though prefixes count only complete
@@ -237,7 +240,7 @@ def dense_indexer_loss_scores(
     index_scale: float,
     attention_scale: float,
 ):
-    """Return cuDNN dense index/teacher score dictionaries for B1 BF16 prefill.
+    """Return cuDNN dense index/teacher score dictionaries for B1 prefill.
 
     full_lse is FP32 [1,S,64] and must include the local window, every eligible
     compressed key, and the sink. The sparse-attention saved LSE covers only
@@ -277,7 +280,7 @@ def dense_indexer_loss_backward(
     index_scale: float,
     loss_coeff: float,
 ):
-    """Return dQ/dK/dW for B1 BF16 KL averaged over query tokens, padding H32 at cuDNN.
+    """Return dQ/dK/dW for B1 KL averaged over query tokens, padding H32 at cuDNN.
 
     grad_loss is the scalar upstream gradient; loss_coeff scales the loss.
     """

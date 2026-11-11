@@ -31,7 +31,7 @@ DSv4Attention
 ## Inside DSv4Attention
 
 The following sketch expands the cuDNN calls underneath Compressor, Indexer, and attention.
-Query and local KV are already projected, normalized, and rotated; tensors are contiguous CUDA BF16, with FP32 position bias/sink and CUDA INT32 sequence prefixes.
+Query and local KV are already projected, normalized, and rotated; tensors are contiguous CUDA, with FP32 position bias/sink and CUDA INT32 sequence prefixes.
 
 ```python
 from transformer_engine.pytorch.attention.sparse_attention import (
@@ -119,11 +119,18 @@ output = packed_csa(hidden_states, cu_seqlens_q=cu, max_seqlen_q=max_length)
 
 ## Note on support
 
-The current layer supports full-sequence BF16 forward/backward on SM100 only,
-with 64 heads of width 512 and at least one complete compression window
-per sequence. Sequences start at position zero; cache/decode, padding,
-TP/SP/CP, and FP8 are unsupported. CSA and HCA include sliding-window attention;
-standalone sliding-window-only layers are unsupported.
+The layer admits SM100, SM103, and SM107 GPUs for full-sequence
+forward/backward and requires BF16 activations. FP16 is unsupported by the
+compression and indexer training dependencies. The operations require cuDNN
+Frontend 1.29 or newer with its CSA/DSA APIs and are delivered as CuTe kernels.
+Hardware validation includes prior SM100 runs and SM103/SM107 runs with
+cuDNN Frontend 1.30.0, Cutlass DSL 4.8.0, CUDA 13.4, and cuDNN 9.27.
+
+The layer uses 64 heads of width 512 and requires at least one complete
+compression window per sequence. Sequences start at position zero;
+cache/decode, physical inter-sequence padding, TP/SP/CP, and FP8 are unsupported.
+CSA and HCA include sliding-window attention; standalone sliding-window-only
+layers are unsupported.
 
 Compression and attention support autograd; top-k selection is discrete.
 CSA's `return_indexer_context=True` returns `(output, context)` for a

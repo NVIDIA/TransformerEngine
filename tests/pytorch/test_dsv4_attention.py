@@ -20,8 +20,12 @@ from transformer_engine.pytorch.attention.sparse_attention import (
 @pytest.mark.parametrize("variant", ["hca", "csa"])
 @pytest.mark.parametrize("head_dim", [512, 576])
 def test_dsa_sparse_attention_forward_backward(variant, head_dim):
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("cuDNN sparse attention requires SM100")
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in (
+        (10, 0),
+        (10, 3),
+        (10, 7),
+    ):
+        pytest.skip("cuDNN sparse attention requires SM100, SM103, or SM107")
     cudnn = pytest.importorskip("cudnn")
     dsa = getattr(cudnn, "DSA", None)
     if not all(
@@ -217,8 +221,12 @@ def test_dsa_rope_non_power_of_two_forward_backward(monkeypatch):
 @pytest.mark.parametrize("index_heads", [32, 64])
 def test_dsa_indexer_backward(index_heads):
     """Train the standalone Indexer and its Compressor against a dense KL reference."""
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("cuDNN indexer training requires SM100")
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in (
+        (10, 0),
+        (10, 3),
+        (10, 7),
+    ):
+        pytest.skip("cuDNN indexer training requires SM100, SM103, or SM107")
     cudnn = pytest.importorskip("cudnn")
     if not all(
         hasattr(getattr(cudnn, "DSA", None), op)
@@ -438,8 +446,12 @@ def test_dsa_packed_rope_eager_forward_backward():
 @pytest.mark.parametrize("lengths", [[129, 257], [255, 383]])
 def test_dsv4_attention_thd_forward_backward(variant, ratio, lengths):
     """Packed full-layer output and gradients match independent dense sequences."""
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("DSv4 requires SM100")
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in (
+        (10, 0),
+        (10, 3),
+        (10, 7),
+    ):
+        pytest.skip("DSv4 requires SM100, SM103, or SM107")
     cudnn = pytest.importorskip("cudnn")
     if not hasattr(getattr(cudnn, "DSA", None), "sparse_attention_forward_wrapper"):
         pytest.skip("DSv4 requires cuDNN Frontend 1.29 sparse attention APIs")
