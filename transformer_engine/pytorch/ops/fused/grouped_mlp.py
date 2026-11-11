@@ -1685,18 +1685,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         ):
             if fc2_input_quantizer.disable_second_level_scale:
                 rht_kernel = self.grouped_gemm_act_hadamard_quant_kernel()
-                # Wgrad needs MMA-packed column scales; the logical CuTe scale
-                # layout is not interchangeable with this physical storage.
-                rht_kernel_compatible = (
-                    rht_kernel is not None
-                    and "mma" in getattr(rht_kernel, "supports_rht_colwise_sf_layouts", ())
-                    and (
-                        not self._gate_then_up
-                        or _cudnn_kernel_supports_gate_then_up(rht_kernel, "nvfp4")
-                    )
+                supports_weight_layout = rht_kernel is not None and (
+                    not self._gate_then_up
+                    or _cudnn_kernel_supports_gate_then_up(rht_kernel, "nvfp4")
                 )
                 if (
-                    rht_kernel_compatible
+                    supports_weight_layout
                     and fc2_input_quantizer.rht_matrix_random_sign_mask_t == 0
                     and fc1_bias_packed is None
                     and self._cudnn_act_func == "swiglu"
@@ -1864,7 +1858,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         elif kernel_impl == "gemm_act_rht_quant":
             fc1_activation_kwargs["d_dtype"] = torch.float4_e2m1fn_x2
             fc1_activation_kwargs["rht_colwise_dtype"] = torch.float4_e2m1fn_x2
-            fc1_activation_kwargs["rht_colwise_sf_layout"] = "mma"
 
         # Kernel arguments based on activation
         if isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU)):
