@@ -576,9 +576,26 @@ class NVFP4BlockScaling(Recipe):
     disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
     row_scaled_activation : bool, default = False
-             If set to `True`, forward activation quantizers emit row-scaled
-             NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
-             as a vector with one FP32 value per tensor row.
+             If set to `True`, activation and gradient-output quantizers emit
+             row-scaled NVFP4 tensors. Weights follow ``row_scaled_weight``.
+             In this mode, rowwise ``amax`` metadata is stored as a vector with
+             one FP32 value per tensor row and columnwise ``amax`` metadata as a
+             vector with one FP32 value per tensor column. Random Hadamard
+             transforms and stochastic rounding follow the same settings as
+             per-tensor NVFP4. Sequence parallelism, Userbuffers
+             communication overlap, and ``te.ops.GroupedLinear`` are not
+             supported.
+    row_scaled_weight : bool, default = False
+             If set to `True`, weight quantizers emit row-scaled NVFP4 tensors
+             with 1D (1x16) block scales, i.e. one global scale per output
+             channel for the forward GEMM and per input channel for the dgrad
+             GEMM. Weight 2D quantization is disabled in this mode. If `False`,
+             weights use a single per-tensor global scale with 16x16 (2D)
+             block scales, or 1x16 (1D) block scales when
+             ``disable_2d_quantization=True``. Row-scaled weights require BF16
+             weight tensors with both dimensions divisible by 32. The same
+             restrictions as ``row_scaled_activation`` apply, and 4over6 on
+             weights and quantized primary weights are not supported.
     nvfp4_4over6 : {'none', 'weights', 'activations', 'all'}, default = 'none'
              Enable 4over6 adaptive NVFP4 block scaling for selected tensor
              scopes. For each selected FP4 block, quantization compares
@@ -606,6 +623,7 @@ class NVFP4BlockScaling(Recipe):
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
+    row_scaled_weight: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_WEIGHT", "0") == "1"
     nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
     nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
     nvfp4_4over6_err_mode: str = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").upper()
@@ -639,6 +657,9 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
         ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
+        assert not (
+            self.row_scaled_weight and self.nvfp4_4over6 in ("weights", "all")
+        ), "Row-scaled NVFP4 weights (row_scaled_weight=True) do not support 4over6."
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -651,7 +672,7 @@ class NVFP4BlockScaling(Recipe):
         self.fp4_quant_fwd_weight = QParams(
             random_hadamard_transform=False,
             stochastic_rounding=False,
-            fp4_2d_quantization=not self.disable_2d_quantization,
+            fp4_2d_quantization=not (self.disable_2d_quantization or self.row_scaled_weight),
         )
         self.fp4_quant_bwd_grad = QParams(
             random_hadamard_transform=not self.disable_rht,
@@ -669,6 +690,7 @@ class NVFP4BlockScaling(Recipe):
             f"backward_override={self.backward_override}, "
             f"disable_rht={self.disable_rht}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
+            f"row_scaled_weight={self.row_scaled_weight}, "
             f"nvfp4_4over6={self.nvfp4_4over6}, "
             f"nvfp4_4over6_e4m3_use_256={self.nvfp4_4over6_e4m3_use_256}, "
             f"nvfp4_4over6_err_mode={self.nvfp4_4over6_err_mode}, "

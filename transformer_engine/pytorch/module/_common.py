@@ -69,6 +69,9 @@ def can_reconstruct_wgrad_input_from_original(quantizer) -> bool:
     target = getattr(quantizer, "parent_quantizer", quantizer)
     if target is None:
         target = quantizer
+    if getattr(target, "row_scaled_nvfp4", False):
+        # Row-scaled NVFP4 quantization cannot produce a columnwise-only tensor.
+        return False
     if isinstance(target, HybridQuantizer):
         if target.columnwise_source == "original":
             return True

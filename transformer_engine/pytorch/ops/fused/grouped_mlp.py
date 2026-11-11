@@ -942,8 +942,12 @@ def fuse_grouped_mlp_ops(
         if recipe.disable_rht:
             # Graph-safe grouped quantize is only supported with RHT
             return ops
-        if recipe.row_scaled_activation or recipe.nvfp4_4over6 != "none":
-            # 4over6 doesn't used fused kernels
+        if (
+            recipe.row_scaled_activation
+            or recipe.row_scaled_weight
+            or recipe.nvfp4_4over6 != "none"
+        ):
+            # Row-scaled NVFP4 and 4over6 don't use fused kernels
             return ops
         if recipe.fp8_format == RecipeFormat.UE5M3:
             # cuDNN has no SReLU support for UE5M3 for now

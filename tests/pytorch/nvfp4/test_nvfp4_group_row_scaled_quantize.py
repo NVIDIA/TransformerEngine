@@ -74,6 +74,76 @@ def _assert_matches_reference(grouped, x_valid: torch.Tensor, split_sections: li
     torch.testing.assert_close(g_scale[:, : N // 16], ref_scale, atol=0, rtol=0)
 
 
+def _row_scaled_rht_quantizer(with_random_sign_mask: bool) -> NVFP4Quantizer:
+    return NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_rht=True,
+        with_post_rht_amax=True,
+        with_random_sign_mask=with_random_sign_mask,
+        row_scaled_nvfp4=True,
+    )
+
+
+def _assert_rht_matches_per_expert(
+    grouped, x_valid: torch.Tensor, split_sections: list[int], with_random_sign_mask: bool
+) -> None:
+    N = x_valid.shape[1]
+    capacity = int(grouped.logical_shape[0])
+    q_row = grouped.rowwise_data.view(torch.uint8).reshape(-1)
+    s_row = grouped.scale_inv.view(torch.uint8).reshape(capacity, -1)
+    q_col = grouped.columnwise_data.view(torch.uint8).reshape(-1)
+    s_col = grouped.columnwise_scale_inv.view(torch.uint8).reshape(-1)
+    amax_row = grouped.amax.reshape(-1)
+    amax_col = grouped.columnwise_amax.reshape(-1)
+
+    def assert_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    row_start = 0
+    for i, m in enumerate(split_sections):
+        if m == 0:
+            continue
+        ref = _row_scaled_rht_quantizer(with_random_sign_mask)(x_valid[row_start : row_start + m])
+        assert_equal(amax_row[row_start : row_start + m], ref._amax_rowwise.reshape(-1))
+        assert_equal(amax_col[i * N : (i + 1) * N], ref._amax_columnwise.reshape(-1))
+        data_range = slice(row_start * N // 2, (row_start + m) * N // 2)
+        assert_equal(
+            q_row[data_range].reshape(m, N // 2),
+            ref._rowwise_data.view(torch.uint8).reshape(m, N // 2),
+        )
+        assert_equal(
+            q_col[data_range].reshape(N, m // 2),
+            ref._columnwise_data.view(torch.uint8).reshape(N, m // 2),
+        )
+        assert_equal(
+            s_row[row_start : row_start + m, : N // 16],
+            ref._rowwise_scale_inv.view(torch.uint8)[:m, : N // 16],
+        )
+        assert_equal(
+            s_col[row_start * N // 16 : (row_start + m) * N // 16].reshape(N, m // 16),
+            ref._columnwise_scale_inv.view(torch.uint8)[:N, : m // 16],
+        )
+        row_start += m
+
+
+_QUANTIZE_MODES = ("rowwise", "rht", "rht_no_sign_mask")
+
+
+def _mode_quantizer(mode: str) -> NVFP4Quantizer:
+    if mode == "rowwise":
+        return _row_scaled_quantizer()
+    return _row_scaled_rht_quantizer(with_random_sign_mask=mode == "rht")
+
+
+def _assert_mode_matches(grouped, x_valid: torch.Tensor, split_sections: list[int], mode: str):
+    if mode == "rowwise":
+        _assert_matches_reference(grouped, x_valid, split_sections)
+    else:
+        _assert_rht_matches_per_expert(grouped, x_valid, split_sections, mode == "rht")
+
+
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "split_sections, N",
@@ -82,17 +152,20 @@ def _assert_matches_reference(grouped, x_valid: torch.Tensor, split_sections: li
         ([128, 256, 128], 256),
         ([384, 128, 256], 128),
         ([256, 128], 512),
+        ([256, 0, 384], 512),
+        ([128] * 4, 2048),
     ],
 )
-def test_matches_per_expert_quantize(split_sections: list[int], N: int) -> None:
+@pytest.mark.parametrize("mode", _QUANTIZE_MODES)
+def test_matches_per_expert_quantize(split_sections: list[int], N: int, mode: str) -> None:
     torch.manual_seed(0)
     x = torch.randn((sum(split_sections), N), dtype=torch.bfloat16, device="cuda")
     first_dims = torch.tensor(split_sections, dtype=torch.int64, device="cuda")
 
-    grouped = _group_quantize(x, len(split_sections), first_dims)
+    grouped = tex.group_quantize(x, _mode_quantizer(mode), len(split_sections), first_dims)
 
     assert grouped.row_scaled_nvfp4
-    _assert_matches_reference(grouped, x, split_sections)
+    _assert_mode_matches(grouped, x, split_sections, mode)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -127,12 +200,14 @@ def test_paged_stashing_capacity_noop(split_sections: list[int], N: int, capacit
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-def test_capture_once_replay_changed_routing() -> None:
+@pytest.mark.parametrize("mode", ("rowwise", "rht"))
+def test_capture_once_replay_changed_routing(mode: str) -> None:
     N = 256
     num_experts = 3
     capacity = 768
     splits_a = [256, 128, 128]
-    splits_b = [128, 256, 128]
+    splits_b = [128, 384, 0]
+    quantizer = _mode_quantizer(mode)
 
     first_dims = torch.empty(num_experts, dtype=torch.int64, device="cuda")
     x = torch.empty((capacity, N), dtype=torch.bfloat16, device="cuda")
@@ -151,22 +226,18 @@ def test_capture_once_replay_changed_routing() -> None:
     warmup_stream = torch.cuda.Stream()
     warmup_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(warmup_stream):
-        _ = _group_quantize(x, num_experts, first_dims)
+        _ = tex.group_quantize(x, quantizer, num_experts, first_dims)
     torch.cuda.current_stream().wait_stream(warmup_stream)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        grouped = _group_quantize(x, num_experts, first_dims)
+        grouped = tex.group_quantize(x, quantizer, num_experts, first_dims)
 
-    program_routing(splits_a, x_a)
-    graph.replay()
-    torch.cuda.synchronize()
-    _assert_matches_reference(grouped, x_a, splits_a)
-
-    program_routing(splits_b, x_b)
-    graph.replay()
-    torch.cuda.synchronize()
-    _assert_matches_reference(grouped, x_b, splits_b)
+    for splits, x_src in ((splits_a, x_a), (splits_b, x_b)):
+        program_routing(splits, x_src)
+        graph.replay()
+        torch.cuda.synchronize()
+        _assert_mode_matches(grouped, x_src, splits, mode)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

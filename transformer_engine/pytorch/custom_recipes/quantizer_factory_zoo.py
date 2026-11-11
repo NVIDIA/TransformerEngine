@@ -263,7 +263,7 @@ def nvfp4_row_scaled_fwd_mxfp8_bwd_factory(
         * ``grad_output`` -> MXFP8
         * everything else -> MXFP8
 
-    Row-scaled NVFP4 is fprop-only, so the forward NVFP4 quantizers avoid RHT,
+    NVFP4 is used only for fprop here, so the forward NVFP4 quantizers avoid RHT,
     stochastic rounding, and 2D scaling. The backward input and weight
     representations are quantized to MXFP8 from the dequantized NVFP4 forward
     representations rather than directly from the original high-precision
@@ -315,7 +315,7 @@ def nvfp4_row_scaled_fwd_high_precision_bwd_factory(
         * ``grad_output`` -> ``IdentityQuantizer``
         * everything else -> plain NVFP4
 
-    Row-scaled NVFP4 is fprop-only, so the forward quantizers avoid RHT,
+    NVFP4 is used only for fprop here, so the forward quantizers avoid RHT,
     stochastic rounding, and 2D scaling.
 
     The backward input and weight representations are high-precision values
