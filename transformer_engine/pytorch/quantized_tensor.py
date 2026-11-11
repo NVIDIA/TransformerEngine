@@ -334,9 +334,33 @@ def prepare_for_saving(
     (e.g. activation offloading) unpack saved tensors as plain tensors, which
     drops the subclass and its distributed-weight hooks."""
 
+    # GroupedTensorStorage imports this module, so defer its import until use.
+    from .tensor.storage.grouped_tensor_storage import GroupedTensorStorage
+
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
-        if tensor is None:
+        decompose_wrapper = False
+        if (
+            isinstance(tensor, torch.Tensor)
+            and isinstance(tensor, (QuantizedTensorStorage, GroupedTensorStorage))
+            and not getattr(tensor, "is_distributed_weight", False)
+        ):
+            # Slot arenas and legacy offload hooks must save physical buffers, not copy
+            # a wrapper by its nominal dtype (which would dequantize it). Detach first
+            # because prepare_for_saving clears the wrapper's buffer references. A
+            # DistributedWeight is restored by reference below and keeps its identity.
+            from .cpu_offload import NVTE_CPU_OFFLOAD_V1, is_cpu_offload_enabled
+            from .graph import _is_graph_slot_memory_capturing
+
+            decompose_wrapper = _is_graph_slot_memory_capturing() or (
+                NVTE_CPU_OFFLOAD_V1 and is_cpu_offload_enabled()
+            )
+
+        if decompose_wrapper:
+            t, t_obj = tensor.detach().prepare_for_saving()
+            tensor_list.extend(t)
+            tensor_objects_list.append(t_obj)
+        elif tensor is None:
             tensor_list.append(None)
             tensor_objects_list.append(None)
         elif isinstance(tensor, torch.Tensor):
@@ -382,10 +406,18 @@ def restore_from_saved(
     """Recombine the tensor data and metadata during backward pass.
     Note: please use `restore_from_func_ctx` instead if you are restoring tensors from a function context to make sure tensor_objects is detached and its memory can be freed
     """
+    from .tensor.storage.grouped_tensor_storage import GroupedTensorStorage
+
     tensor_objects = []
     offset = 0
     for tensor in tensors:
-        if tensor is None or isinstance(tensor, torch.Tensor):
+        if isinstance(tensor, (QuantizedTensorStorage, GroupedTensorStorage)):
+            if offset:
+                saved_tensors = saved_tensors[offset:]
+                offset = 0
+            saved_tensors = tensor.restore_from_saved(saved_tensors)
+            tensor_objects.append(tensor)
+        elif tensor is None or isinstance(tensor, torch.Tensor):
             tensor_objects.append(saved_tensors[offset])
             offset += 1
         elif isinstance(tensor, _SavedTensorRef):

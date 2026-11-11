@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Context Parallelism."""
+
 import os
 from typing import List, Union, Tuple
 import torch
@@ -21,7 +22,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.jit import jit_fuser
@@ -60,6 +61,31 @@ _softmax_offset_chunk_ids_cache = {}
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
+
+
+def _prepare_backward_quantizers(ctx, quantizers):
+    """Return scale snapshots through saved tensors, not only through quantizer objects.
+
+    Delayed-scaling quantizers, including S under current scaling, keep their forward scale.
+    """
+    scales = []
+    for name, quantizer in zip(("QKV_quantizer", "O_quantizer", "S_quantizer"), quantizers):
+        if ctx.fp8 and quantizer is not None:
+            quantizer = quantizer.copy()
+        scale = None
+        if ctx.fp8 and isinstance(quantizer, Float8Quantizer):
+            scale = quantizer.scale.clone()
+            quantizer.scale = scale
+        setattr(ctx, name, quantizer)
+        scales.append(scale)
+    return scales
+
+
+def _restore_backward_quantizers(ctx, scales):
+    """Rebind quantizers to the saved scales restored by autograd or the graph slot arena."""
+    for name, scale in zip(("QKV_quantizer", "O_quantizer", "S_quantizer"), scales):
+        if scale is not None:
+            getattr(ctx, name).scale = scale
 
 
 def _reject_custom_recipe_under_cp(fp8, fp8_recipe):
@@ -2359,7 +2385,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             kv_f16 = kv
             f16_tensors = (q_f16, kv_f16, out_f16)
 
+        quantizer_scales = _prepare_backward_quantizers(
+            ctx, (QKV_quantizer, O_quantizer, S_quantizer)
+        )
         tensors_to_save, tensor_objects = prepare_for_saving(
+            *quantizer_scales,
             *fp8_tensors,
             *f16_tensors,
             softmax_lse,
@@ -2414,18 +2444,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.dQKV_quantizer = dQKV_quantizer
         ctx.dO_quantizer = dO_quantizer
         ctx.dP_quantizer = dP_quantizer
-        ctx.QKV_quantizer = QKV_quantizer
-        ctx.O_quantizer = O_quantizer
-        ctx.S_quantizer = S_quantizer
-        if ctx.fp8:
-            ctx.QKV_quantizer = QKV_quantizer.copy()
-            ctx.O_quantizer = O_quantizer.copy()
-            ctx.S_quantizer = S_quantizer.copy() if S_quantizer is not None else None
-            if fp8_recipe.delayed():
-                ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
-                ctx.O_quantizer.scale = O_quantizer.scale.clone()
-                ctx.S_quantizer.scale = S_quantizer.scale.clone()
-
         nvtx_range_pop(f"{nvtx_label}")
 
         if return_max_logit:
@@ -2468,6 +2486,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # get saved tensors
         (
+            qkv_scale,
+            o_scale,
+            s_scale,
             q_fp8,
             kv_fp8,
             out_fp8,
@@ -2479,6 +2500,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             cu_seqlens_kv_padded,
             *other_tensors,
         ) = restore_from_func_ctx(ctx)
+        _restore_backward_quantizers(ctx, (qkv_scale, o_scale, s_scale))
         cu_seqlens_q_per_step = other_tensors[:cp_size]
         cu_seqlens_kv_per_step = other_tensors[cp_size : cp_size * 2]
         rng_states = other_tensors[cp_size * 2 : cp_size * 3]
@@ -3932,7 +3954,23 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # v: [s, b, h, d]
             # out_f16: [b, s, h, d] or [s, b, h, d]
             f16_tensors = (q, k, v, out_f16)
+        quantizer_scales = _prepare_backward_quantizers(
+            ctx, (QKV_quantizer, O_quantizer, S_quantizer)
+        )
+        # Backward unpacks two steps; NO_LOAD_BALANCE THD computes only the first.
+        thd_q_metadata = (
+            tuple(
+                steps[step] if step < len(steps) else None
+                for steps in (thd_cu_seqlens_q_per_step, thd_cu_seqlens_q_padded_per_step)
+                for step in range(2)
+            )
+            if qkv_format == "thd"
+            else (None,) * 4
+        )
         tensors_to_save, tensor_objects = prepare_for_saving(
+            *quantizer_scales,
+            *thd_q_metadata,
+            cu_seqlens_kv_padded,
             *fp8_tensors,
             *f16_tensors,
             cu_seqlens_q,
@@ -3974,27 +4012,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.load_balancing_strategy = load_balancing_strategy
         if qkv_format == "thd":
             ctx.max_seqlen_kv = max_seqlen_kv
-            ctx.cu_seqlens_kv_padded = cu_seqlens_kv_padded
-            ctx.thd_cu_seqlens_q_per_step = thd_cu_seqlens_q_per_step
-            ctx.thd_cu_seqlens_q_padded_per_step = thd_cu_seqlens_q_padded_per_step
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
 
         ctx.dQKV_quantizer = dQKV_quantizer
         ctx.dO_quantizer = dO_quantizer
         ctx.dP_quantizer = dP_quantizer
-        ctx.QKV_quantizer = QKV_quantizer
-        ctx.O_quantizer = O_quantizer
-        ctx.S_quantizer = S_quantizer
-        if ctx.fp8:
-            ctx.QKV_quantizer = QKV_quantizer.copy()
-            ctx.O_quantizer = O_quantizer.copy()
-            ctx.S_quantizer = S_quantizer.copy() if S_quantizer is not None else None
-            if ctx.fp8_recipe.delayed():
-                ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
-                ctx.O_quantizer.scale = O_quantizer.scale.clone()
-                ctx.S_quantizer.scale = S_quantizer.scale.clone()
-
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
         if return_max_logit:
             return out_ret, max_logit
@@ -4010,7 +4033,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cu_seqlens_kv_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
+        thd_cu_seqlens_q_per_step = [None, None]
+        thd_cu_seqlens_q_padded_per_step = [None, None]
         (
+            qkv_scale,
+            o_scale,
+            s_scale,
+            thd_cu_seqlens_q_per_step[0],
+            thd_cu_seqlens_q_per_step[1],
+            thd_cu_seqlens_q_padded_per_step[0],
+            thd_cu_seqlens_q_padded_per_step[1],
+            cu_seqlens_kv_padded,
             q_fp8,
             k_fp8,
             v_fp8,
@@ -4028,6 +4061,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             rng_states[0],
             rng_states[1],
         ) = restore_from_func_ctx(ctx)
+        _restore_backward_quantizers(ctx, (qkv_scale, o_scale, s_scale))
         kv_seq_range_per_step = ctx.kv_seq_range_per_step
         window_size_per_step = ctx.window_size_per_step
 
@@ -4114,8 +4148,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         v_ag, _ = gather_along_first_dim(v, ctx.cp_group)
 
         if ctx.qkv_format == "thd":
-            cu_seqlens_kv_padded = ctx.cu_seqlens_kv_padded
-            thd_cu_seqlens_q_per_step = ctx.thd_cu_seqlens_q_per_step
             # [cp*t, h, d] -> reorder to sequence order
             k_ag = restore_thd_gathered_kv(
                 k_ag, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
@@ -4124,7 +4156,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 v_ag, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
             )
 
-            thd_cu_seqlens_q_padded_per_step = ctx.thd_cu_seqlens_q_padded_per_step
         else:
             # split s: [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
@@ -5005,7 +5036,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             else:
                 # all tensors are in F16
                 f16_tensors = (q_part, k_part, v_part, out_part)
+        quantizer_scales = _prepare_backward_quantizers(
+            ctx, (QKV_quantizer, O_quantizer, S_quantizer)
+        )
         tensors_to_save, tensor_objects = prepare_for_saving(
+            *quantizer_scales,
             *fp8_tensors,
             *f16_tensors,
             cu_seqlens_q,
@@ -5042,18 +5077,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.dQKV_quantizer = dQKV_quantizer
         ctx.dO_quantizer = dO_quantizer
         ctx.dP_quantizer = dP_quantizer
-        ctx.QKV_quantizer = QKV_quantizer
-        ctx.O_quantizer = O_quantizer
-        ctx.S_quantizer = S_quantizer
-        if ctx.fp8:
-            ctx.QKV_quantizer = QKV_quantizer.copy()
-            ctx.O_quantizer = O_quantizer.copy()
-            ctx.S_quantizer = S_quantizer.copy() if S_quantizer is not None else None
-            if fp8_recipe.delayed():
-                ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
-                ctx.O_quantizer.scale = O_quantizer.scale.clone()
-                ctx.S_quantizer.scale = S_quantizer.scale.clone()
-
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
         if return_max_logit:
             return out_ret, max_logit
@@ -5066,6 +5089,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         cp_size = get_distributed_world_size(ctx.cp_group)
 
         (
+            qkv_scale,
+            o_scale,
+            s_scale,
             q_fp8,
             k_fp8,
             v_fp8,
@@ -5080,6 +5106,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cu_seqlens_kv_padded,
             *aux_ctx_tensors,
         ) = restore_from_func_ctx(ctx)
+        _restore_backward_quantizers(ctx, (qkv_scale, o_scale, s_scale))
 
         _, seq_dim_dqkv, _ = get_bsh_dims(ctx.dqkv_format)
         _, seq_dim_do, _ = get_bsh_dims(ctx.o_format)
