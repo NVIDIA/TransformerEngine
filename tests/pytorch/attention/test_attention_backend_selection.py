@@ -86,6 +86,100 @@ def test_fa4_deterministic_backend_selection(
     assert available == [expect_flash, False, unfused]
 
 
+@pytest.mark.parametrize("is_training", (False, True))
+@pytest.mark.parametrize("requires_backward", (False, True))
+def test_fused_backend_backward_requirement(monkeypatch, is_training, requires_backward):
+    """Pass the autograd requirement to the fused backend independently of training."""
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    probe = Mock(return_value=(dpa_utils.FusedAttnBackend.F16_arbitrary_seqlen.value, ""))
+    monkeypatch.setattr(dpa_utils, "_get_fused_attn_backend", probe)
+    params = dpa_utils.AttentionParams(
+        device=torch.device("cuda:0"),
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="bshd_bshd_bshd",
+        num_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=64,
+        head_dim_v=64,
+        deterministic=False,
+        is_training=is_training,
+        requires_backward=requires_backward,
+    )
+    _, _, fused, _, _, _ = dpa_utils.get_attention_backend(params)
+    assert fused
+    probe.assert_called_once()
+    assert probe.call_args.kwargs["is_training"] is is_training
+    assert probe.call_args.kwargs["requires_backward"] is requires_backward
+
+
+@pytest.mark.parametrize("grad_target", ("bias", "softmax_offset"))
+def test_backward_requirement_with_frozen_qkv(monkeypatch, grad_target):
+    """Bias and sink parameters still need backward support when Q/K/V are frozen."""
+    selector = Mock(return_value=(False, None, False, None, True, [False, False, True]))
+    monkeypatch.setattr(dpa_utils, "get_attention_backend", selector)
+    attention = (
+        DotProductAttention(
+            num_attention_heads=4,
+            kv_channels=64,
+            qkv_format="bshd",
+            attn_mask_type="no_mask",
+            softmax_type="learnable" if grad_target == "softmax_offset" else "vanilla",
+        )
+        .cuda()
+        .eval()
+    )
+    qkv = [torch.randn(2, 128, 4, 64, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
+    kwargs = {}
+    if grad_target == "bias":
+        kwargs = {
+            "core_attention_bias_type": "post_scale_bias",
+            "core_attention_bias": torch.zeros(
+                1, 4, 128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            ),
+        }
+    output = attention(*qkv, **kwargs)
+    assert output.requires_grad
+    assert selector.call_args.args[0].requires_backward
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_fused_eval_backward_after_forward_only(monkeypatch, dtype):
+    """Evaluation with autograd must retain numerical parity after a cached inference call."""
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    qkv = [
+        torch.randn(2, 128, 4, 64, device="cuda", dtype=dtype, requires_grad=True) for _ in range(3)
+    ]
+    attention = (
+        DotProductAttention(
+            num_attention_heads=4,
+            kv_channels=64,
+            qkv_format="bshd",
+            attn_mask_type="no_mask",
+            attention_dropout=0.125,
+        )
+        .cuda()
+        .eval()
+    )
+    with torch.no_grad():
+        inference = attention(*qkv)
+    output = attention(*qkv)
+    assert dpa_module._attention_backends["use_fused_attention"]
+    torch.testing.assert_close(output, inference)
+    refs = [tensor.detach().float().requires_grad_() for tensor in qkv]
+    qr, kr, vr = [tensor.transpose(1, 2) for tensor in refs]
+    reference = (torch.softmax(qr @ kr.transpose(-1, -2) / 8, dim=-1) @ vr).transpose(1, 2)
+    reference = reference.reshape_as(output)
+    gradient = torch.randn_like(output)
+    output.backward(gradient)
+    reference.backward(gradient.float())
+    rtol, atol = (2e-2, 1e-2) if dtype == torch.bfloat16 else (3e-3, 2e-3)
+    torch.testing.assert_close(output.float(), reference, rtol=rtol, atol=atol)
+    for actual, ref in zip(qkv, refs):
+        torch.testing.assert_close(actual.grad.float(), ref.grad, rtol=rtol, atol=atol)
+
+
 @pytest.mark.parametrize("capability", ((12, 0), (12, 1), (12, 9)))
 @pytest.mark.parametrize("case", ("fp8", "kv_cache", "mla", "thd_version", "thd_packed"))
 def test_sm12x_fused_backend_restrictions(monkeypatch, capability, case):

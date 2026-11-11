@@ -590,6 +590,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_attn_rng_state", &transformer_engine::pytorch::fused_attn_rng_state,
         "Reserve and unpack the CUDA generator's Philox state", py::arg("generator"),
         py::arg("elts_per_thread"));
+  m.def("cu_seqlens_to_actual_seqlens", &transformer_engine::pytorch::cu_seqlens_to_actual_seqlens,
+        "Convert and pad cumulative Q and KV sequence lengths", py::arg("cu_seqlens_q"),
+        py::arg("cu_seqlens_kv"), py::arg("max_batch"), py::call_guard<py::gil_scoped_release>());
   m.def("copy_to_kv_cache", &transformer_engine::pytorch::copy_to_kv_cache,
         "Copy new KV tokens to KV cache", py::call_guard<py::gil_scoped_release>());
   m.def("convert_thd_to_bshd", &transformer_engine::pytorch::convert_thd_to_bshd,

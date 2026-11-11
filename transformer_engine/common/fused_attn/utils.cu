@@ -11,6 +11,7 @@
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "transformer_engine/fused_attn.h"
+#include "transformer_engine/utils.h"
 #include "utils.h"
 
 namespace transformer_engine {
@@ -522,6 +523,38 @@ __global__ void extract_seed_and_offset(int64_t *rng_state_ptr, bool captured, i
 
 }  // namespace fused_attn
 }  // namespace transformer_engine
+
+void nvte_cu_seqlens_to_actual_seqlens(const NVTETensor cu_seqlens_q,
+                                       const NVTETensor cu_seqlens_kv, NVTETensor seqlens_q,
+                                       NVTETensor seqlens_kv, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cu_seqlens_to_actual_seqlens);
+  using namespace transformer_engine;
+  const auto &q_in = *convertNVTETensorCheck(cu_seqlens_q);
+  const auto &kv_in = *convertNVTETensorCheck(cu_seqlens_kv);
+  const auto &q_out = *convertNVTETensorCheck(seqlens_q);
+  const auto &kv_out = *convertNVTETensorCheck(seqlens_kv);
+  for (const auto *tensor : {&q_in, &kv_in, &q_out, &kv_out}) {
+    NVTE_CHECK(tensor->data.dtype == DType::kInt32 && tensor->data.shape.size() == 1,
+               "Sequence lengths must be one-dimensional INT32 tensors.");
+  }
+  NVTE_CHECK(q_in.data.shape == kv_in.data.shape && q_in.data.shape[0] >= 1,
+             "Cumulative sequence lengths must have matching nonempty shapes.");
+  NVTE_CHECK(q_out.data.shape == kv_out.data.shape && q_out.data.shape[0] >= q_in.data.shape[0] - 1,
+             "Output sequence lengths must have matching shapes covering the input batch.");
+  CheckInputTensor(q_in, "cu_seqlens_q");
+  CheckInputTensor(kv_in, "cu_seqlens_kv");
+  CheckOutputTensor(q_out, "seqlens_q", true);
+  CheckOutputTensor(kv_out, "seqlens_kv", true);
+  const auto max_batch = q_out.data.shape[0];
+  if (max_batch == 0) return;
+  constexpr int threads = 128;
+  const auto blocks = (max_batch + threads - 1) / threads;
+  fused_attn::cu_seqlens_to_actual_seqlens<<<blocks, threads, 0, stream>>>(
+      q_in.data.shape[0] - 1, max_batch, static_cast<const int32_t *>(q_in.data.dptr),
+      static_cast<const int32_t *>(kv_in.data.dptr), static_cast<int32_t *>(q_out.data.dptr),
+      static_cast<int32_t *>(kv_out.data.dptr));
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
 void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t *seed_ptr,
                                   uint64_t seed_val, int64_t *offset_ptr, uint64_t offset_val,

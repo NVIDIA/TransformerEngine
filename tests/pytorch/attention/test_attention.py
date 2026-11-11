@@ -956,7 +956,7 @@ def test_fused_attn_query_propagates_setup_errors(error, monkeypatch):
             },
             92000,
             (10, 0),
-            "MXFP8 fused attention requires cuDNN 9.21.0",
+            "MXFP8 attention requires cuDNN 9.21.0",
         ),
         (
             {"qkv_layout": QKVLayout["paged_kv_bshd_bshd_bshd"]},
@@ -969,15 +969,15 @@ def test_fused_attn_query_propagates_setup_errors(error, monkeypatch):
 def test_fused_attn_python_capability_exclusions(monkeypatch, changes, version, capability, reason):
     """Preserve capability and tracked-defect exclusions before asking cuDNN to build."""
     import cudnn
-    from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import _AttentionGraph
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
 
     monkeypatch.setattr(cudnn, "backend_version", lambda: version)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: capability)
 
-    def build(_self):
-        raise AssertionError("Excluded configuration reached cuDNN graph construction")
+    def query(*_args):
+        raise AssertionError("Excluded configuration reached descriptor construction")
 
-    monkeypatch.setattr(_AttentionGraph, "build", build)
+    monkeypatch.setattr(implementation, "_query_graph", query)
     baseline = FusedAttentionParams(
         qkv_layout=QKVLayout["bshd_bshd_bshd"],
         batch_size=2,
@@ -993,12 +993,138 @@ def test_fused_attn_python_capability_exclusions(monkeypatch, changes, version, 
     assert message.startswith(reason)
 
 
+@pytest.mark.parametrize(
+    "capability,version,layout,reason",
+    (
+        ((9, 0), 92700, "bshd_bshd_bshd", "requires SM100"),
+        ((12, 1), 92700, "bshd_bshd_bshd", "not supported on SM12x"),
+        ((10, 0), 92300, "bshd_bshd_bshd", "known cuDNN 9.23.0/9.23.1 defects"),
+        ((10, 0), 92301, "bshd_bshd_bshd", "known cuDNN 9.23.0/9.23.1 defects"),
+        ((10, 0), 92700, "thd_thd_thd", "does not support THD"),
+    ),
+)
+def test_fused_attn_python_mxfp8_exclusions(monkeypatch, capability, version, layout, reason):
+    """Apply the shared MXFP8 policy before constructing any descriptors."""
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    monkeypatch.setattr(cudnn, "backend_version", lambda: version)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: capability)
+    query = Mock(
+        side_effect=AssertionError("Excluded MXFP8 config reached descriptor construction")
+    )
+    monkeypatch.setattr(implementation, "_query_graph", query)
+    config = FusedAttentionParams(
+        qkv_dtype=DType.kFloat8E4M3,
+        scaling_mode=tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING,
+        qkv_layout=QKVLayout[layout],
+        attn_mask_type=AttnMaskType["padding"],
+        num_tokens_q=128,
+        num_tokens_kv=128,
+    )
+    backend, message = get_fused_attn_backend(config)
+    assert backend == FusedAttnBackend.No_Backend
+    assert reason in message
+    query.assert_not_called()
+
+
+@pytest.mark.parametrize("is_training", (False, True))
+@pytest.mark.parametrize("requires_backward", (False, True, None))
+def test_fused_attn_python_backward_selection(monkeypatch, is_training, requires_backward):
+    """Backward support and dropout must follow independent flags."""
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    queried = []
+
+    def entry(attn):
+        queried.append(attn.backward)
+        assert attn.params["dropout"] == (0.125 if is_training else 0.0)
+        if attn.backward:
+            raise ValueError("unsupported backward")
+
+    monkeypatch.setattr(implementation._AttentionGraph, "entry", entry)
+    config = FusedAttentionParams(
+        is_training=is_training,
+        requires_backward=requires_backward,
+        dropout=0.125,
+        qkv_layout=QKVLayout["bshd_bshd_bshd"],
+        batch_size=2,
+        num_attn_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=64,
+        head_dim_v=64,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+    )
+    backend, message = get_fused_attn_backend(config)
+    backward = is_training if requires_backward is None else requires_backward
+    assert queried == ([False, True] if backward else [False])
+    assert backend == (
+        FusedAttnBackend.No_Backend if backward else FusedAttnBackend.F16_arbitrary_seqlen
+    )
+    assert message == ("unsupported backward" if backward else "")
+
+
+@pytest.mark.parametrize(
+    "batch,capacity", ((0, 0), (0, 32), (3, 3), (3, 32), (129, 256), (513, 1024))
+)
+def test_cu_seqlens_to_actual_seqlens(batch, capacity):
+    """Convert both length arrays on the current stream, including CUDA graph replay."""
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        q_lengths = torch.arange(batch, dtype=torch.int32, device="cuda") % 7
+        kv_lengths = torch.arange(batch, dtype=torch.int32, device="cuda") % 11
+        zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+        cu_q = torch.cat((zero, q_lengths.cumsum(0, dtype=torch.int32)))
+        cu_kv = torch.cat((zero, kv_lengths.cumsum(0, dtype=torch.int32)))
+        expected = [
+            torch.nn.functional.pad(t, (0, capacity - batch)) for t in (q_lengths, kv_lengths)
+        ]
+        actual = tex.cu_seqlens_to_actual_seqlens(cu_q, cu_kv, capacity)
+        for output, reference in zip(actual, expected):
+            torch.testing.assert_close(output, reference)
+        if capacity:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                captured = tex.cu_seqlens_to_actual_seqlens(cu_q, cu_kv, capacity)
+            cu_q.mul_(2)
+            cu_kv.mul_(3)
+            graph.replay()
+            for output, reference, factor in zip(captured, expected, (2, 3)):
+                torch.testing.assert_close(output, reference * factor)
+    torch.cuda.current_stream().wait_stream(stream)
+
+
+@pytest.mark.parametrize("case", ("dtype", "rank", "stride", "batch", "capacity", "cpu"))
+def test_cu_seqlens_to_actual_seqlens_invalid(case):
+    """Reject invalid metadata before launching the common kernel."""
+    q = torch.tensor([0, 2, 5], dtype=torch.int32, device="cuda")
+    kv, capacity = q, 3
+    if case == "dtype":
+        q = q.long()
+    elif case == "rank":
+        q = q.unsqueeze(0)
+    elif case == "stride":
+        q = torch.empty(6, dtype=torch.int32, device="cuda")[::2]
+    elif case == "batch":
+        kv = kv[:2]
+    elif case == "capacity":
+        capacity = 1
+    else:
+        q = q.cpu()
+    with pytest.raises(RuntimeError):
+        tex.cu_seqlens_to_actual_seqlens(q, kv, capacity)
+
+
 @pytest.mark.parametrize("dtype", (DType.kFloat16, DType.kBFloat16))
 @pytest.mark.parametrize("head_dim_v", (64, 128, 192, 256))
 @pytest.mark.parametrize("version", (92500, 92600))
-@pytest.mark.parametrize("is_training", (False, True))
+@pytest.mark.parametrize(
+    "is_training,requires_backward", ((False, None), (True, None), (False, True), (True, False))
+)
 def test_fused_attn_python_thd_learnable_support(
-    dtype, head_dim_v, version, is_training, monkeypatch
+    dtype, head_dim_v, version, is_training, requires_backward, monkeypatch
 ):
     """Only generic THD learnable-softmax backward kernels need cuDNN 9.26."""
     import cudnn
@@ -1009,6 +1135,7 @@ def test_fused_attn_python_thd_learnable_support(
     monkeypatch.setattr(_AttentionGraph, "entry", lambda _self: None)
     config = FusedAttentionParams(
         is_training=is_training,
+        requires_backward=requires_backward,
         qkv_dtype=dtype,
         qkv_layout=QKVLayout["thd_thd_thd"],
         attn_mask_type=AttnMaskType["padding"],
@@ -1024,7 +1151,8 @@ def test_fused_attn_python_thd_learnable_support(
         num_tokens_kv=256,
     )
     backend, message = get_fused_attn_backend(config)
-    if is_training and version < 92600 and head_dim_v == 192:
+    backward = is_training if requires_backward is None else requires_backward
+    if backward and version < 92600 and head_dim_v == 192:
         assert backend == FusedAttnBackend.No_Backend
         assert "THD learnable softmax backward" in message
     else:
@@ -1032,10 +1160,53 @@ def test_fused_attn_python_thd_learnable_support(
         assert message == ""
 
 
+@pytest.mark.parametrize("fp8_bwd", ("0", "1"))
+def test_fused_attn_python_eval_backward_precision(monkeypatch, fp8_bwd):
+    """FP8 THD backward exclusions must allow a model-precision backward on SM90."""
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", fp8_bwd)
+    monkeypatch.setattr(cudnn, "backend_version", lambda: 92500)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (9, 0))
+    queried = []
+    monkeypatch.setattr(implementation._AttentionGraph, "entry", lambda attn: queried.append(attn))
+    config = FusedAttentionParams(
+        is_training=False,
+        requires_backward=True,
+        qkv_dtype=DType.kFloat8E4M3,
+        nominal_dtype=DType.kBFloat16,
+        qkv_layout=QKVLayout["thd_thd_thd"],
+        attn_mask_type=AttnMaskType["padding"],
+        batch_size=2,
+        num_attn_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=64,
+        head_dim_v=64,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        num_tokens_q=256,
+        num_tokens_kv=256,
+    )
+    backend, message = get_fused_attn_backend(config)
+    if fp8_bwd == "0":
+        assert backend == FusedAttnBackend.FP8
+        assert message == ""
+        assert [attn.fp8 for attn in queried] == [True, False]
+    else:
+        assert backend == FusedAttnBackend.No_Backend
+        assert "supports backward on sm100+" in message
+        assert not queried
+
+
 @pytest.mark.parametrize("softmax", ("vanilla", "off-by-one", "learnable"))
 @pytest.mark.parametrize("version", (92300, 92500, 92600))
-@pytest.mark.parametrize("is_training", (False, True))
-def test_fused_attn_python_fp8_thd_sink_support(softmax, version, is_training, monkeypatch):
+@pytest.mark.parametrize(
+    "is_training,requires_backward", ((False, None), (True, None), (False, True), (True, False))
+)
+def test_fused_attn_python_fp8_thd_sink_support(
+    softmax, version, is_training, requires_backward, monkeypatch
+):
     """Every FP8 THD sink-token backward kernel needs cuDNN 9.26, even at D=64."""
     import cudnn
     from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import _AttentionGraph
@@ -1045,6 +1216,7 @@ def test_fused_attn_python_fp8_thd_sink_support(softmax, version, is_training, m
     monkeypatch.setattr(_AttentionGraph, "entry", lambda _self: None)
     config = FusedAttentionParams(
         is_training=is_training,
+        requires_backward=requires_backward,
         qkv_dtype=DType.kFloat8E4M3,
         qkv_layout=QKVLayout["thd_thd_thd"],
         attn_mask_type=AttnMaskType["padding"],
@@ -1060,7 +1232,8 @@ def test_fused_attn_python_fp8_thd_sink_support(softmax, version, is_training, m
         num_tokens_kv=256,
     )
     backend, message = get_fused_attn_backend(config)
-    if is_training and version < 92600 and softmax != "vanilla":
+    backward = is_training if requires_backward is None else requires_backward
+    if backward and version < 92600 and softmax != "vanilla":
         assert backend == FusedAttnBackend.No_Backend
         assert "sink token requires cuDNN 9.26" in message
     else:

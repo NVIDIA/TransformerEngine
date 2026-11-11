@@ -436,6 +436,9 @@ class FusedAttentionParams:
     bias_seqlen_q: int = 0
     bias_seqlen_kv: int = 0
 
+    # None preserves the training-mode default for direct support queries.
+    requires_backward: Optional[bool] = None
+
 
 class _NoOpLogger:
     """
@@ -1652,6 +1655,7 @@ def get_attention_backend(
             model_dtype = nominal_dtype if nominal_dtype is not None else torch.bfloat16
         base_fused_attn_kwargs = {
             "is_training": is_training,
+            "requires_backward": attention_params.requires_backward,
             "deterministic": deterministic,
             "cuda_graph": cuda_graph,
             "return_max_logit": return_max_logit,
@@ -1825,7 +1829,7 @@ def get_attention_backend(
             fused_attention_backend = None
         if (
             fused_attention_backend == FusedAttnBackend.FP8.value
-            and is_training
+            and attention_params.requires_backward
             and (device_compute_capability < (9, 0) or cudnn_version < (9, 19, 0))
         ):
             logger.debug(
@@ -1836,7 +1840,7 @@ def get_attention_backend(
             fused_attention_backend = None
         if (
             fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
-            and is_training
+            and attention_params.requires_backward
             and (device_compute_capability < (9, 0) or core_attention_bias_requires_grad)
         ):
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
@@ -1848,15 +1852,15 @@ def get_attention_backend(
         # was observed to grow super-linearly (B=4 took ~4x the B=2 amount, not 2x) —
         # revisit if a config uses B>2.
         SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
-        is_sm90_f16_thd_training = (
+        is_sm90_f16_thd_backward = (
             fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
-            and is_training
+            and attention_params.requires_backward
             and qkv_format == "thd"
             and device_compute_capability == (9, 0)
         )
         if (
             use_fused_attention
-            and is_sm90_f16_thd_training
+            and is_sm90_f16_thd_backward
             and batch_size * num_heads * max_seqlen_q * max_seqlen_kv
             >= SM90_DET_FUSED_THD_BWD_MAX_BHSS
         ):

@@ -2816,7 +2816,16 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "is_training": self.training,
                 "device": query_layer.device,
                 "requires_backward": torch.is_grad_enabled()
-                and any(t.requires_grad for t in (query_layer, key_layer, value_layer)),
+                and any(
+                    t is not None and t.requires_grad
+                    for t in (
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        core_attention_bias,
+                        self.softmax_offset,
+                    )
+                ),
                 "fp8": self.fp8,
                 "fp8_meta": self.fp8_meta,
                 "inference_params": inference_params,

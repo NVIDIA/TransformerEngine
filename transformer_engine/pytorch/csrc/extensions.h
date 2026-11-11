@@ -97,6 +97,10 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
 
 at::Tensor fused_attn_rng_state(const std::optional<at::Generator> rng_gen, size_t elts_per_thread);
 
+std::tuple<at::Tensor, at::Tensor> cu_seqlens_to_actual_seqlens(const at::Tensor &cu_seqlens_q,
+                                                                const at::Tensor &cu_seqlens_kv,
+                                                                int64_t max_batch);
+
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 

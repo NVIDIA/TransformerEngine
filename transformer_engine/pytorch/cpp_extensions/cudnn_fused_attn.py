@@ -4,8 +4,8 @@
 
 """cuDNN attention graphs constructed and executed through the Python frontend.
 
-The extension is used only to obtain capture-safe Philox state. Tensor allocation,
-graph construction, plan caching, and execution do not use the common attention API.
+The extension supplies capture-safe Philox state and sequence-length conversion.
+Graph construction, plan caching, and execution use the Python frontend.
 """
 
 from dataclasses import dataclass, replace
@@ -31,6 +31,7 @@ from transformer_engine.common.cudnn.graph import (
     bucket,
     uses_ragged_attention_graph,
 )
+from transformer_engine.common.cudnn.mxfp8 import support_error as mxfp8_support_error
 
 from .cudnn import (
     _import_cudnn_frontend,
@@ -298,6 +299,15 @@ class _AttentionGraph:
                 _event(self, "HIT", key)
         return entry
 
+    def build(self):
+        """Construct and check the common graph description without compiling it."""
+        cudnn = _import_cudnn_frontend()
+        graph = _build_cudnn_pygraph(getattr(cudnn.data_type, self.specs["q"].dtype), self.device)
+        built = build_attention_graph(cudnn, graph, self.description())
+        _event(self, "CREATE_GRAPH")
+        check_graph_support(cudnn, graph, lambda name, function: _build_stage(self, name, function))
+        return _PlanEntry(graph, built.tensors)
+
     def execute(self):
         """Compile once, then bind this invocation's runtime tensor addresses."""
         entry = self.entry()
@@ -317,15 +327,6 @@ class _AttentionGraph:
         )
         _event(self, "EXECUTE")
 
-    def build(self):
-        """Construct and check the common graph description without compiling it."""
-        cudnn = _import_cudnn_frontend()
-        graph = _build_cudnn_pygraph(getattr(cudnn.data_type, self.specs["q"].dtype), self.device)
-        built = build_attention_graph(cudnn, graph, self.description())
-        _event(self, "CREATE_GRAPH")
-        check_graph_support(cudnn, graph, lambda name, function: _build_stage(self, name, function))
-        return _PlanEntry(graph, built.tensors)
-
 
 def _prepare_inputs(attn):
     p = attn.params
@@ -342,16 +343,11 @@ def _prepare_inputs(attn):
             attn.scale("descale_" + name, _descale(p[name], col), name, scale_fmt, col)
     attn.scalar("attn_scale", torch.tensor([p["attn_scale"]], dtype=torch.float32), by_value=True)
     if "padding" in p["attn_mask_type"]:
-        for name, cu in (("seq_q", p["cu_seqlens_q"]), ("seq_kv", p["cu_seqlens_kv"])):
-            if attn.use_cu_seqlens:
-                lengths = cu
-            else:
-                lengths = cu[1:] - cu[:-1]
-                if attn.graph_b > attn.b:
-                    lengths = torch.nn.functional.pad(lengths, (0, attn.graph_b - attn.b))
-            attn.add(
-                name, lengths, (attn.graph_b + int(attn.use_cu_seqlens), 1, 1, 1), (1, 1, 1, 1)
-            )
+        lengths = (p["cu_seqlens_q"], p["cu_seqlens_kv"])
+        if not attn.use_cu_seqlens:
+            lengths = tex.cu_seqlens_to_actual_seqlens(*lengths, attn.graph_b)
+        for name, tensor in zip(("seq_q", "seq_kv"), lengths):
+            attn.add(name, tensor, (attn.graph_b + int(attn.use_cu_seqlens), 1, 1, 1), (1, 1, 1, 1))
     if p["attn_bias_type"] not in ("no_bias", "alibi"):
         attn.add("bias", p["attn_bias"])
     if p["softmax_type"] != "vanilla":
@@ -434,14 +430,10 @@ def _normalize(params):
     return p
 
 
-def _query_graph(config, backward):
-    """Describe a support query without allocating tensors or touching RNG state."""
-    from .fused_attn import QKVLayout, QKVFormat, AttnMaskType, AttnBiasType, SoftmaxType
-
-    if (
-        backward
-        and DType.cast(config.qkv_dtype) in (DType.kFloat8E4M3, DType.kFloat8E5M2)
-        and not int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+def _backward_config(config):
+    """Match the precision and layout saved by FusedAttnFunc for backward."""
+    if DType.cast(config.qkv_dtype) in (DType.kFloat8E4M3, DType.kFloat8E5M2) and not int(
+        os.getenv("NVTE_FP8_DPA_BWD", "1")
     ):
         # FusedAttnFunc saves model-precision Q/K/V and O for this backward.
         # The gradient layout records the inputs' layout before FP8 quantization.
@@ -467,6 +459,15 @@ def _query_graph(config, backward):
                 else config.qkv_layout
             ),
         )
+    return config
+
+
+def _query_graph(config, backward):
+    """Describe a support query without allocating tensors or touching RNG state."""
+    from .fused_attn import QKVLayout, QKVFormat, AttnMaskType, AttnBiasType, SoftmaxType
+
+    if backward:
+        config = _backward_config(config)
 
     def name(mapping, value):
         return next(k for k, v in mapping.items() if v == value)
@@ -653,16 +654,31 @@ def _query_graph(config, backward):
     return attn
 
 
-def _support_reason(config, attn, version, capability):
-    """Preserve TE's hardware, recipe, and known cuDNN defect exclusions."""
-    p = attn.params
-    ragged = attn.q_format == "thd" or attn.kv_format == "thd"
-    padding = "padding" in p["attn_mask_type"]
+def _support_reason(config, version, capability, backward=False):
+    """Check TE's hardware, recipe, and known cuDNN defect exclusions."""
+    from .fused_attn import QKVLayout, AttnMaskType, SoftmaxType
+
+    layout = next(k for k, v in QKVLayout.items() if v == config.qkv_layout)
+    q_format, kv_format = _formats(layout)
+    fp8 = DType.cast(config.qkv_dtype) in (DType.kFloat8E4M3, DType.kFloat8E5M2)
+    mxfp8 = fp8 and config.scaling_mode == tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING
+    sm_arch = 10 * capability[0] + capability[1]
+    if mxfp8:
+        reason = mxfp8_support_error(sm_arch, version, q_format)
+        if reason:
+            return reason
+    mask = next(k for k, v in AttnMaskType.items() if v == config.attn_mask_type)
+    softmax = next(k for k, v in SoftmaxType.items() if v == config.softmax_type)
+    ragged = q_format == "thd" or kv_format == "thd"
+    ragged_stats = q_format == "thd" and uses_ragged_attention_graph(sm_arch)
+    padding = "padding" in mask
     if ragged and not padding:
         return "THD format requires PADDING / PADDING_CAUSAL / PADDING_CAUSAL_BOTTOM_RIGHT mask."
-    if (attn.q_format == "thd" and not attn.tq) or (attn.kv_format == "thd" and not attn.tk):
+    if (q_format == "thd" and not config.num_tokens_q) or (
+        kv_format == "thd" and not config.num_tokens_kv
+    ):
         return "THD format requires num_tokens_q / num_tokens_kv to be set for the ragged inputs."
-    if p["page_table_k"] is not None:
+    if layout.startswith("paged_kv_"):
         if not padding:
             return "Paged KV requires PADDING / PADDING_CAUSAL / PADDING_CAUSAL_BOTTOM_RIGHT mask."
         if not all(
@@ -671,24 +687,24 @@ def _support_reason(config, attn, version, capability):
             for name in ("k", "v")
         ):
             return "Paged KV requires num_pages, page_size and max_pages_per_seq for both K and V."
-    if not attn.fp8:
-        if attn.q_format == attn.kv_format == "thd" and capability < (9, 0):
+    if not fp8:
+        if q_format == kv_format == "thd" and capability < (9, 0):
             return "F16/BF16 fused attention with THD format requires sm90 or later."
         affected_cuda_graph = version <= 91500 and config.cuda_graph and config.max_seqlen_kv % 128
         if (
             affected_cuda_graph
             and config.is_training
-            and attn.q_format == attn.kv_format
-            and attn.q_format in ("bshd", "sbhd")
+            and q_format == kv_format
+            and q_format in ("bshd", "sbhd")
             and not padding
         ):
             return "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN."
         if (
-            config.is_training
-            and attn.ragged_stats
-            and p["softmax_type"] == "learnable"
+            backward
+            and ragged_stats
+            and softmax == "learnable"
             and version < 92600
-            and attn.dv not in (64, 128, 256)
+            and config.head_dim_v not in (64, 128, 256)
         ):
             return (
                 "Known cuDNN < 9.26.0 issue with THD learnable softmax backward. Please upgrade"
@@ -697,43 +713,39 @@ def _support_reason(config, attn, version, capability):
         return ""
     if config.return_max_logit:
         return "FP8 fused attention does not support return_max_logit=True."
-    if attn.q_format != attn.kv_format:
+    if q_format != kv_format:
         return "FP8 fused attention supports BSHD/SBHD/BHSD/THD formats."
-    if config.is_training and config.dqkv_layout != tex.NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET:
-        from .fused_attn import QKVLayout
-
+    if backward and config.dqkv_layout != tex.NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET:
         grad_layout = next(k for k, v in QKVLayout.items() if v == config.dqkv_layout)
         qfmt, kvfmt = _formats(grad_layout)
         if qfmt != kvfmt:
             return "FP8 fused attention supports BSHD/SBHD/BHSD/THD gradient formats."
-    if attn.q_format == "thd":
+    if q_format == "thd":
         if version < 92300:
             return "FP8 fused attention with THD format requires cuDNN 9.23.0 or later!"
-        if config.is_training and capability < (10, 0):
+        if backward and capability < (10, 0):
             return "FP8 fused attention with THD format supports backward on sm100+ only!"
-        if config.is_training and p["softmax_type"] != "vanilla" and version < 92600:
+        if backward and softmax != "vanilla" and version < 92600:
             return (
                 "FP8 THD attention with a sink token requires cuDNN 9.26.0 or later for backward!"
             )
-        if capability >= (10, 0) and max(attn.dq, attn.dv) > 128:
+        if capability >= (10, 0) and max(config.head_dim_qk, config.head_dim_v) > 128:
             return "FP8 THD attention supports head dimensions up to 128 on sm100+ only!"
-    if p["attn_bias_type"] != "no_bias":
+    if config.bias_type != tex.NVTE_Bias_Type.NVTE_NO_BIAS:
         return "FP8 fused attention does not support attention bias."
     half_types = (DType.kFloat16, DType.kBFloat16)
     fp8_types = (DType.kFloat8E4M3, DType.kFloat8E5M2)
-    allowed_types = half_types if attn.mxfp8 else half_types + fp8_types
+    allowed_types = half_types if mxfp8 else half_types + fp8_types
     tensor_scaling = config.scaling_mode == tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
     if (
-        not (tensor_scaling or attn.mxfp8)
+        not (tensor_scaling or mxfp8)
         or DType.cast(config.o_dtype) not in allowed_types
-        or (config.is_training and DType.cast(config.dqkv_dtype) not in allowed_types)
+        or (backward and DType.cast(config.dqkv_dtype) not in allowed_types)
     ):
         return (
             "FP8 fused attention only supports FP8DelayedScaling, FP8CurrentScaling, or MXFP8"
             " recipes!"
         )
-    if attn.mxfp8 and version < 92100:
-        return "MXFP8 fused attention requires cuDNN 9.21.0 or later!"
     return ""
 
 
@@ -751,17 +763,23 @@ def get_fused_attn_backend(config):
         DType.kFloat8E5M2,
     ):
         return FusedAttnBackend.No_Backend, f"Unsupported QKV dtype qkv_dtype={config.qkv_dtype}."
+    requires_backward = config.requires_backward
+    if requires_backward is None:
+        requires_backward = config.is_training
     try:
-        fwd = _query_graph(config, False)
-        reason = _support_reason(
-            config, fwd, cudnn.backend_version(), torch.cuda.get_device_capability()
-        )
-        if reason:
-            return FusedAttnBackend.No_Backend, reason
-        fwd.entry()
-        if config.is_training:
-            _query_graph(config, True).entry()
-        return FusedAttnBackend.FP8 if fwd.fp8 else FusedAttnBackend.F16_arbitrary_seqlen, ""
+        configs = [(config, False)]
+        if requires_backward:
+            configs.append((_backward_config(config), True))
+        version = cudnn.backend_version()
+        capability = torch.cuda.get_device_capability()
+        for direction_config, backward in configs:
+            reason = _support_reason(direction_config, version, capability, backward)
+            if reason:
+                return FusedAttnBackend.No_Backend, reason
+        for direction_config, backward in configs:
+            _query_graph(direction_config, backward).entry()
+        fp8 = DType.cast(config.qkv_dtype) in (DType.kFloat8E4M3, DType.kFloat8E5M2)
+        return FusedAttnBackend.FP8 if fp8 else FusedAttnBackend.F16_arbitrary_seqlen, ""
     except (cudnn.cudnnGraphNotSupportedError, ValueError) as exc:
         return FusedAttnBackend.No_Backend, str(exc)
 

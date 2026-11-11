@@ -10,6 +10,31 @@
 
 namespace transformer_engine::pytorch {
 
+std::tuple<at::Tensor, at::Tensor> cu_seqlens_to_actual_seqlens(const at::Tensor &cu_seqlens_q,
+                                                                const at::Tensor &cu_seqlens_kv,
+                                                                int64_t max_batch) {
+  NVTE_CHECK(cu_seqlens_q.is_cuda() && cu_seqlens_kv.device() == cu_seqlens_q.device(),
+             "Cumulative sequence lengths must be on the same CUDA device.");
+  for (const auto &tensor : {cu_seqlens_q, cu_seqlens_kv}) {
+    NVTE_CHECK(tensor.scalar_type() == at::kInt && tensor.dim() == 1 && tensor.is_contiguous(),
+               "Cumulative sequence lengths must be contiguous one-dimensional INT32 tensors.");
+  }
+  NVTE_CHECK(cu_seqlens_q.numel() >= 1 && cu_seqlens_q.numel() == cu_seqlens_kv.numel(),
+             "Cumulative sequence lengths must have matching nonempty shapes.");
+  NVTE_CHECK(max_batch >= cu_seqlens_q.numel() - 1, "Output capacity must cover the input batch.");
+  at::cuda::CUDAGuard device_guard(cu_seqlens_q.device());
+  auto lengths = at::empty({2, max_batch}, cu_seqlens_q.options());
+  auto seqlens_q = lengths[0];
+  auto seqlens_kv = lengths[1];
+  auto te_cu_q = makeTransformerEngineTensor(cu_seqlens_q);
+  auto te_cu_kv = makeTransformerEngineTensor(cu_seqlens_kv);
+  auto te_q = makeTransformerEngineTensor(seqlens_q);
+  auto te_kv = makeTransformerEngineTensor(seqlens_kv);
+  nvte_cu_seqlens_to_actual_seqlens(te_cu_q.data(), te_cu_kv.data(), te_q.data(), te_kv.data(),
+                                    at::cuda::getCurrentCUDAStream());
+  return {seqlens_q, seqlens_kv};
+}
+
 // Keep dropout on the framework's CUDA generator, including graph replay offsets.
 // This helper does not construct or execute an attention graph.
 at::Tensor fused_attn_rng_state(const std::optional<at::Generator> rng_gen,
