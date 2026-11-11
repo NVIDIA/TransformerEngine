@@ -3781,22 +3781,26 @@ def test_slot_memory_preserves_expanded_public_outputs() -> None:
         reset_graphs(graphed)
 
 
-@pytest.mark.parametrize("different_layout", ("shape", "stride"))
+@pytest.mark.parametrize("different_layout", ("shape", "stride", "module_state"))
 def test_slot_memory_rejects_incompatible_branch_output_layouts(different_layout) -> None:
-    """Mutually exclusive branches must expose the same output shape and strides."""
+    """Mutually exclusive branches must expose the same output shapes and strides.
+
+    This includes outputs that view module state, which stay outside the slot arenas.
+    """
 
     class Module(torch.nn.Module):
         def __init__(self, layout):
             super().__init__()
             self.layout = layout
+            self.register_buffer("state", torch.zeros(4, device="cuda"))
 
         def forward(self, inp):
             output = inp * 2.0
             if self.layout == "shape":
-                return output[:2]
-            if self.layout == "stride":
-                return output.t()
-            return output
+                output = output[:2]
+            elif self.layout == "stride":
+                output = output.t()
+            return output, self.state[: 3 if self.layout == "module_state" else 2]
 
     modules = (Module("same").cuda(), Module(different_layout).cuda())
     samples = tuple((torch.randn(4, 4, device="cuda", requires_grad=True),) for _ in modules)

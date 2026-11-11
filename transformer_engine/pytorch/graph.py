@@ -1838,9 +1838,8 @@ def _make_graphed_callables(
                         f"at position {tensor_idx}."
                     )
                 modes = {spec[0] for spec in specs}
-                if modes == {"external_output"}:
-                    continue
-                if modes != {kind}:
+                # Module-state views keep their own storage but still need one layout.
+                if modes not in ({kind}, {"external_output"}):
                     raise RuntimeError(
                         f"CUDA graph {kind} family {family} has incompatible storage modes "
                         f"at position {tensor_idx}: {sorted(modes)}."
@@ -3378,7 +3377,8 @@ def make_graphed_callables(
         arena only if their forward-to-backward lifetimes never overlap in any schedule the
         caller replays. Graph inputs with equal ``(io_slot, chunk, layer)`` are branches of one
         slot: they must name the same ``saved_arena`` and ``grad_arena``, expose identical output
-        and gradient layouts, are told apart by ``branch``, and share output and gradient storage.
+        and gradient layouts, are told apart by ``branch``, and share output and gradient storage
+        (outputs that view module parameters or buffers keep that storage instead).
         Graph inputs with equal ``warmup_group`` share one warmup run.
         Only tensors saved for backward (``ctx.save_for_backward`` or saved-tensor hooks) are
         protected between a forward replay and its backward replay. A tensor that backward reads
