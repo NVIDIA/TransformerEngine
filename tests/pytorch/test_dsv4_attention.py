@@ -17,9 +17,12 @@ from transformer_engine.pytorch.attention.sparse_attention import (
 )
 
 
+# Sparse attention
+
+
 @pytest.mark.parametrize("variant", ["hca", "csa"])
 @pytest.mark.parametrize("head_dim", [512, 576])
-def test_dsa_sparse_attention_forward_backward(variant, head_dim):
+def test_dsa_sparse_attention(variant, head_dim):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in (
         (10, 0),
         (10, 3),
@@ -136,19 +139,11 @@ def test_dsa_rejects_unsupported_metadata():
         )
 
 
-def test_dsv4_attention_rejects_fp8(monkeypatch):
-    from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-
-    monkeypatch.setattr(FP8GlobalStateManager, "is_fp8_enabled", lambda: True)
-    layer = dsv4_attention.DSv4Attention.__new__(dsv4_attention.DSv4Attention)
-    torch.nn.Module.__init__(layer)
-    layer.qkv_format, layer.hidden_size = "sbhd", 8
-    with pytest.raises(NotImplementedError, match="BF16 only"):
-        layer(torch.empty(4, 1, 8))
+# RoPE
 
 
 @pytest.mark.parametrize("heads", [1, 64])
-def test_dsa_triton_rope_batched_forward_backward(monkeypatch, heads):
+def test_dsa_triton_rope_batched(monkeypatch, heads):
     """The packed Triton kernels must reset positions at each BSHD sequence."""
     if not torch.cuda.is_available():
         pytest.skip("Triton DSA RoPE requires CUDA")
@@ -192,7 +187,7 @@ def test_dsa_triton_rope_batched_forward_backward(monkeypatch, heads):
     torch.testing.assert_close(query_grad, reference_grad, atol=0.03125, rtol=0.002)
 
 
-def test_dsa_rope_non_power_of_two_forward_backward(monkeypatch):
+def test_dsa_rope_non_power_of_two(monkeypatch):
     """An accepted width of 96 must fall back for both rotary entry points."""
     if not torch.cuda.is_available():
         pytest.skip("DSA rotary dispatch requires CUDA")
@@ -216,6 +211,129 @@ def test_dsa_rope_non_power_of_two_forward_backward(monkeypatch):
         candidate_grad = torch.autograd.grad(candidate, candidate_input, gradient)[0]
         torch.testing.assert_close(candidate, reference)
         torch.testing.assert_close(candidate_grad, reference_grad)
+
+
+def test_dsa_packed_rope_eager():
+    """Reset per-sequence positions and safely rotate unused compressed capacity."""
+    torch.manual_seed(31)
+    cu = torch.tensor([0, 3, 8], dtype=torch.int32)
+    (cos, sin), _ = dsa_rope.rotary_embeddings(5, 1, 4, 12345.0, "cpu")
+    x = torch.randn(9, 2, 8, requires_grad=True)
+    reference_input = x.detach().clone().requires_grad_()
+    actual = dsa_rope.apply_rotary(x, cos, sin, cu)
+    expected = torch.cat(
+        [
+            dsa_rope._apply_rotary_eager(
+                reference_input[start:end].unsqueeze(0),
+                cos[:, : end - start],
+                sin[:, : end - start],
+            ).squeeze(0)
+            for start, end in ((0, 3), (3, 8), (8, 9))
+        ]
+    )
+    gradient = torch.randn_like(actual)
+    actual.backward(gradient)
+    expected.backward(gradient)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(x.grad, reference_input.grad)
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.parametrize("inverse", [False, True])
+@pytest.mark.parametrize("cp_rank", [0, 1])
+def test_common_rope_layout_inverse_packed(interleaved, inverse, cp_rank):
+    """Independent pair equations cover shared lookup, both layouts and transpose."""
+    if not torch.cuda.is_available():
+        pytest.skip("Triton RoPE requires CUDA")
+    kernels = dsa_rope._triton_rope_module()
+    if kernels is None:
+        pytest.skip("Triton DSL is unavailable")
+    import triton
+
+    torch.manual_seed(53)
+    # CP2 local lengths are 4 and 6, plus one padded row. Each rank owns
+    # the first/last chunks prescribed by the zig-zag CP mapping.
+    positions = (
+        [0, 1, 6, 7, 0, 1, 2, 9, 10, 11, 0] if cp_rank == 0 else [2, 3, 4, 5, 3, 4, 5, 6, 7, 8, 0]
+    )
+    cu = torch.tensor([0, 8, 20], device="cuda", dtype=torch.int32)
+    x = torch.randn(11, 3, 80, device="cuda", dtype=torch.bfloat16)
+    # Noncontiguous rows ensure callers preserve the explicit table strides.
+    cos = torch.randn(12, 128, device="cuda")[:, ::2]
+    sin = torch.randn(12, 128, device="cuda")[:, ::2]
+    reference_input = x.detach().requires_grad_()
+    tail = reference_input[..., 16:].float()
+    c, s = cos[positions, None], sin[positions, None]
+    if inverse:
+        s = -s
+    left = tail[..., 0::2] * c[..., :32] - tail[..., 1::2] * s[..., :32]
+    right = tail[..., 1::2] * c[..., 32:] + tail[..., 0::2] * s[..., 32:]
+    rotated = (
+        torch.stack((left, right), -1).flatten(-2) if interleaved else torch.cat((left, right), -1)
+    )
+    reference = torch.cat((reference_input[..., :16], rotated.to(x.dtype)), -1)
+    gradient = torch.randn_like(x)
+    expected_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
+    candidate, actual_grad = x.clone(), gradient.clone()
+    grid = lambda meta: (11, triton.cdiv(3, meta["BLOCK_H"]))
+    # The tables have strided columns; materialize those columns while retaining
+    # a larger row stride, which is the kernel's supported table contract.
+    cos = torch.stack((cos, cos), 1)[:, 0, :]
+    sin = torch.stack((sin, sin), 1)[:, 0, :]
+    for kernel, tensor in (
+        (kernels._autotuned_mla_rope_fwd_inplace_kernel, candidate),
+        (kernels._autotuned_mla_rope_bwd_inplace_kernel, actual_grad),
+    ):
+        kernel[grid](
+            tensor,
+            cos,
+            sin,
+            16,
+            64,
+            3,
+            1,
+            2,
+            cu,
+            None,
+            tensor.stride(0),
+            tensor.stride(1),
+            cos.stride(0),
+            sin.stride(0),
+            cp_rank,
+            2,
+            INVERSE=inverse,
+            REMOVE_INTERLEAVING=interleaved,
+        )
+    torch.testing.assert_close(candidate, reference, atol=0.03125, rtol=0.002)
+    torch.testing.assert_close(actual_grad, expected_grad, atol=0.03125, rtol=0.002)
+
+
+# Compressor
+
+
+def test_dsa_compressor_clears_unused_capacity(monkeypatch):
+    """Unused cuDNN output must not contaminate normalization weight gradients."""
+    layer = Compressor.__new__(Compressor)
+    torch.nn.Module.__init__(layer)
+    layer.kv_proj = layer.gate_proj = torch.nn.Identity()
+    layer.kv_norm = torch.nn.RMSNorm(4)
+    layer.position_bias = torch.nn.Parameter(torch.zeros(4, 4))
+    layer.projected, layer.ratio, layer.overlap, layer.weight_width = 4, 4, False, 0
+    monkeypatch.setattr(
+        compressor,
+        "compress",
+        lambda *args, **kwargs: torch.cat((torch.ones(1, 4), torch.full((1, 4), float("nan")))),
+    )
+    cu = torch.tensor([0, 3, 8], dtype=torch.int32)
+    cu_comp = torch.tensor([0, 0, 1], dtype=torch.int32)
+    output = layer(torch.empty(8, 4), cu, cu_comp, total_comp=2)
+    output.sum().backward()
+    assert torch.isfinite(output).all()
+    assert torch.isfinite(layer.kv_norm.weight.grad).all()
+    assert torch.count_nonzero(output[1]) == 0
+
+
+# Indexer
 
 
 @pytest.mark.parametrize("index_heads", [32, 64])
@@ -347,6 +465,20 @@ def test_dsa_indexer_backward(index_heads):
         assert error < 0.03, error.item()
 
 
+# DSv4 layer wiring
+
+
+def test_dsv4_attention_rejects_fp8(monkeypatch):
+    from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+
+    monkeypatch.setattr(FP8GlobalStateManager, "is_fp8_enabled", lambda: True)
+    layer = dsv4_attention.DSv4Attention.__new__(dsv4_attention.DSv4Attention)
+    torch.nn.Module.__init__(layer)
+    layer.qkv_format, layer.hidden_size = "sbhd", 8
+    with pytest.raises(NotImplementedError, match="BF16 only"):
+        layer(torch.empty(4, 1, 8))
+
+
 def test_dsv4_thd_compressed_prefixes():
     """Floor each sequence independently, retaining a safe allocation capacity."""
     for lengths, capacity in (([129, 257], 96), ([131, 257], 97)):
@@ -356,28 +488,6 @@ def test_dsv4_thd_compressed_prefixes():
         assert cu_comp.tolist() == [0, 32, 96]
         assert total_comp == capacity
         assert maximum == 257
-
-
-def test_dsa_compressor_clears_unused_capacity(monkeypatch):
-    """Unused cuDNN output must not contaminate normalization weight gradients."""
-    layer = Compressor.__new__(Compressor)
-    torch.nn.Module.__init__(layer)
-    layer.kv_proj = layer.gate_proj = torch.nn.Identity()
-    layer.kv_norm = torch.nn.RMSNorm(4)
-    layer.position_bias = torch.nn.Parameter(torch.zeros(4, 4))
-    layer.projected, layer.ratio, layer.overlap, layer.weight_width = 4, 4, False, 0
-    monkeypatch.setattr(
-        compressor,
-        "compress",
-        lambda *args, **kwargs: torch.cat((torch.ones(1, 4), torch.full((1, 4), float("nan")))),
-    )
-    cu = torch.tensor([0, 3, 8], dtype=torch.int32)
-    cu_comp = torch.tensor([0, 0, 1], dtype=torch.int32)
-    output = layer(torch.empty(8, 4), cu, cu_comp, total_comp=2)
-    output.sum().backward()
-    assert torch.isfinite(output).all()
-    assert torch.isfinite(layer.kv_norm.weight.grad).all()
-    assert torch.count_nonzero(output[1]) == 0
 
 
 @pytest.mark.parametrize(
@@ -417,34 +527,9 @@ def test_dsv4_thd_rejects_hidden_batch_axis_and_multi_sequence_context():
         )
 
 
-def test_dsa_packed_rope_eager_forward_backward():
-    """Reset per-sequence positions and safely rotate unused compressed capacity."""
-    torch.manual_seed(31)
-    cu = torch.tensor([0, 3, 8], dtype=torch.int32)
-    (cos, sin), _ = dsa_rope.rotary_embeddings(5, 1, 4, 12345.0, "cpu")
-    x = torch.randn(9, 2, 8, requires_grad=True)
-    reference_input = x.detach().clone().requires_grad_()
-    actual = dsa_rope.apply_rotary(x, cos, sin, cu)
-    expected = torch.cat(
-        [
-            dsa_rope._apply_rotary_eager(
-                reference_input[start:end].unsqueeze(0),
-                cos[:, : end - start],
-                sin[:, : end - start],
-            ).squeeze(0)
-            for start, end in ((0, 3), (3, 8), (8, 9))
-        ]
-    )
-    gradient = torch.randn_like(actual)
-    actual.backward(gradient)
-    expected.backward(gradient)
-    torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(x.grad, reference_input.grad)
-
-
 @pytest.mark.parametrize("variant,ratio", [("hca", 128), ("csa", 4)])
 @pytest.mark.parametrize("lengths", [[129, 257], [255, 383]])
-def test_dsv4_attention_thd_forward_backward(variant, ratio, lengths):
+def test_dsv4_attention_thd(variant, ratio, lengths):
     """Packed full-layer output and gradients match independent dense sequences."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in (
         (10, 0),
@@ -510,73 +595,3 @@ def test_dsv4_attention_thd_forward_backward(variant, ratio, lengths):
         assert torch.isfinite(packed_grad).all() and torch.isfinite(reference_grad).all()
         error = (packed_grad.float() - reference_grad.float()).norm()
         assert error / reference_grad.float().norm().clamp_min(1e-8) < 0.03
-
-
-@pytest.mark.parametrize("interleaved", [False, True])
-@pytest.mark.parametrize("inverse", [False, True])
-@pytest.mark.parametrize("cp_rank", [0, 1])
-def test_common_rope_layout_inverse_packed(interleaved, inverse, cp_rank):
-    """Independent pair equations cover shared lookup, both layouts and transpose."""
-    if not torch.cuda.is_available():
-        pytest.skip("Triton RoPE requires CUDA")
-    kernels = dsa_rope._triton_rope_module()
-    if kernels is None:
-        pytest.skip("Triton DSL is unavailable")
-    import triton
-
-    torch.manual_seed(53)
-    # CP2 local lengths are 4 and 6, plus one padded row. Each rank owns
-    # the first/last chunks prescribed by the zig-zag CP mapping.
-    positions = (
-        [0, 1, 6, 7, 0, 1, 2, 9, 10, 11, 0] if cp_rank == 0 else [2, 3, 4, 5, 3, 4, 5, 6, 7, 8, 0]
-    )
-    cu = torch.tensor([0, 8, 20], device="cuda", dtype=torch.int32)
-    x = torch.randn(11, 3, 80, device="cuda", dtype=torch.bfloat16)
-    # Noncontiguous rows ensure callers preserve the explicit table strides.
-    cos = torch.randn(12, 128, device="cuda")[:, ::2]
-    sin = torch.randn(12, 128, device="cuda")[:, ::2]
-    reference_input = x.detach().requires_grad_()
-    tail = reference_input[..., 16:].float()
-    c, s = cos[positions, None], sin[positions, None]
-    if inverse:
-        s = -s
-    left = tail[..., 0::2] * c[..., :32] - tail[..., 1::2] * s[..., :32]
-    right = tail[..., 1::2] * c[..., 32:] + tail[..., 0::2] * s[..., 32:]
-    rotated = (
-        torch.stack((left, right), -1).flatten(-2) if interleaved else torch.cat((left, right), -1)
-    )
-    reference = torch.cat((reference_input[..., :16], rotated.to(x.dtype)), -1)
-    gradient = torch.randn_like(x)
-    expected_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
-    candidate, actual_grad = x.clone(), gradient.clone()
-    grid = lambda meta: (11, triton.cdiv(3, meta["BLOCK_H"]))
-    # The tables have strided columns; materialize those columns while retaining
-    # a larger row stride, which is the kernel's supported table contract.
-    cos = torch.stack((cos, cos), 1)[:, 0, :]
-    sin = torch.stack((sin, sin), 1)[:, 0, :]
-    for kernel, tensor in (
-        (kernels._autotuned_mla_rope_fwd_inplace_kernel, candidate),
-        (kernels._autotuned_mla_rope_bwd_inplace_kernel, actual_grad),
-    ):
-        kernel[grid](
-            tensor,
-            cos,
-            sin,
-            16,
-            64,
-            3,
-            1,
-            2,
-            cu,
-            None,
-            tensor.stride(0),
-            tensor.stride(1),
-            cos.stride(0),
-            sin.stride(0),
-            cp_rank,
-            2,
-            INVERSE=inverse,
-            REMOVE_INTERLEAVING=interleaved,
-        )
-    torch.testing.assert_close(candidate, reference, atol=0.03125, rtol=0.002)
-    torch.testing.assert_close(actual_grad, expected_grad, atol=0.03125, rtol=0.002)
