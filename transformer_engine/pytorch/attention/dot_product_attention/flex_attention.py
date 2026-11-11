@@ -10,6 +10,7 @@ import inspect
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
+from transformer_engine.pytorch.device import te_device_type
 
 _cudnn_score_mod_handles: Dict[torch.device, Any] = {}
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
@@ -140,7 +141,7 @@ def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
 
 def _score_mod_device_key(device: torch.device) -> Tuple[Any, ...]:
     """Normalize a tensor device for graph cache keys."""
-    if device.type == "cuda":
+    if device.type == te_device_type():
         index = device.index
         if index is None:
             index = torch.cuda.current_device()
@@ -194,10 +195,10 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
 
 def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
     """Return a cuDNN handle for device, bound to PyTorch's current stream."""
-    if device.type != "cuda":
+    if device.type != te_device_type():
         raise ValueError(f"Flex Attention only supports CUDA tensors, got device {device}.")
     if device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device(te_device_type(), torch.cuda.current_device())
 
     handle = _cudnn_score_mod_handles.get(device)
     with torch.cuda.device(device):
@@ -269,12 +270,21 @@ def _finalize_cudnn_graph(graph) -> int:
 
     graph.validate()
     graph.build_operation_graph()
+    # Only the cuDNN backend implements score_mod. cuDNN frontend 1.31 can offer its Python SDPA
+    # engines for these graphs, and those engines run plain attention without the modifier.
+    graph.deselect_engines(["sdpa_fwd", "sdpa_bwd"])
     try:
         graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
         graph.check_support()
     except cudnn.cudnnGraphNotSupportedError as exc:
         raise RuntimeError(f"cuDNN Flex Attention SDPA graph is not supported: {exc}") from exc
     graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
+    selected_engine = getattr(graph, "selected_engine", None)
+    if selected_engine is not None:
+        raise RuntimeError(
+            f"cuDNN frontend {cudnn.__version__} selected {selected_engine} for a score_mod graph. "
+            "Only the cuDNN backend implements score_mod."
+        )
     return max(graph.get_workspace_size(), 1)
 
 
@@ -287,8 +297,8 @@ def _execute_cudnn_graph(
     """Execute a built cuDNN frontend Python graph."""
     cudnn = _import_cudnn_frontend()
 
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+    if device.type == te_device_type() and device.index is None:
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     workspace = torch.empty(
         workspace_size,
         device=device,

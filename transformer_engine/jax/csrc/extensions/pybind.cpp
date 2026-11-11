@@ -127,6 +127,9 @@ pybind11::dict Registrations() {
   dict["te_ep_dispatch_ffi"] =
       pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
                      pybind11::arg("execute") = EncapsulateFFI(EpDispatchHandler));
+  dict["te_ep_prepare_and_dispatch_ffi"] =
+      pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(EpPrepareAndDispatchHandler));
   dict["te_ep_combine_ffi"] =
       pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
                      pybind11::arg("execute") = EncapsulateFFI(EpCombineHandler));

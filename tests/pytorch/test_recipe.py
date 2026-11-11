@@ -593,8 +593,9 @@ def test_nvfp4_row_scaled_quantizer_roles(
         expected_e4m3_max(tensor_type) for tensor_type in ("input", "weight", "output")
     ]
     assert [q.nvfp4_4over6_err_mode for q in forward_quantizers] == [nvfp4_4over6_err_mode] * 3
-    assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
-    assert forward_quantizers[1].is_quantizable(torch.empty(16, 16))
+    all_gather_input = torch.empty(16, 32)
+    assert not forward_quantizers[0].supports_quantized_allgather(all_gather_input)
+    assert forward_quantizers[1].supports_quantized_allgather(all_gather_input)
 
     role_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
@@ -861,3 +862,31 @@ def test_builtin_autocast_still_requires_fp8_hardware(recipe, monkeypatch):
     )
     with pytest.raises(AssertionError, match="FP8 hardware unavailable"):
         FP8GlobalStateManager.autocast_enter(enabled=True, fp8_recipe=recipe)
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+@pytest.mark.parametrize(
+    "role", ["fp8_quant_fwd_inp", "fp8_quant_fwd_weight", "fp8_quant_bwd_grad"]
+)
+def test_float8_block_scaling_non_pow2_scales_arch_support(role):
+    """Non-power-of-2 FP8 block scales are rejected on Blackwell and newer, accepted on Hopper."""
+    fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling()
+    setattr(
+        fp8_recipe,
+        role,
+        transformer_engine.common.recipe.QParams(power_2_scale=False, amax_epsilon=0.0),
+    )
+    if torch.cuda.get_device_capability() >= (10, 0):
+        with pytest.raises(RuntimeError, match="power-of-2"):
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                pass
+    else:
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            pass
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+def test_float8_block_scaling_default_recipe_supported():
+    """The default FP8 block-scaling recipe (power-of-2 scales) is accepted on every arch."""
+    with te.autocast(enabled=True, recipe=transformer_engine.common.recipe.Float8BlockScaling()):
+        pass

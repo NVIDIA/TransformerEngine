@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Tensor class with NVFP4 data"""
+
 from __future__ import annotations
 from collections.abc import Iterable
 import math
@@ -13,10 +14,12 @@ import functools
 import torch
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
 from ..utils import (
     canonicalize_process_group,
+    ceil_div,
     devices_match,
     round_up_to_nearest_multiple,
 )
@@ -280,15 +283,20 @@ class NVFP4Quantizer(Quantizer):
         """NVFP4 quantization is replay-safe unless stochastic rounding is enabled."""
         return not self.stochastic_rounding
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
+
+        For distributed all-gather with columnwise scaling, the first
+        dimension must be aligned to the block size so that no scaling
+        block spans across GPU boundaries.
+        """
         if self.row_scaled_nvfp4:
             return False
         if inp.ndim < 2:
             return False
-        if inp.shape[-1] % NVFP4_BLOCK_SCALING_SIZE != 0:
+        if inp.shape[-1] % 32 != 0:
             return False
-        if math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
+        if self.columnwise_usage and math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
             return False
         return True
 
@@ -321,43 +329,27 @@ class NVFP4Quantizer(Quantizer):
 
         if columnwise:
             outer = round_up_to_nearest_multiple(K, 128)
-            inner = round_up_to_nearest_multiple(math.ceil(M / NVFP4_BLOCK_SCALING_SIZE), 4)
+            inner = round_up_to_nearest_multiple(ceil_div(M, NVFP4_BLOCK_SCALING_SIZE), 4)
             return (outer, inner)
         # rowwise
         outer = round_up_to_nearest_multiple(M, 128)
-        inner = round_up_to_nearest_multiple(math.ceil(K / NVFP4_BLOCK_SCALING_SIZE), 4)
+        inner = round_up_to_nearest_multiple(ceil_div(K, NVFP4_BLOCK_SCALING_SIZE), 4)
         return (outer, inner)
 
     @staticmethod
     def get_columnwise_shape(shape: Iterable[int]) -> Tuple[int, ...]:
-        """Calculate the shape of a tensor after columnwise quantization.
-
-        For NVFP4 columnwise quantization, it's performing 16x1 quantization block scaling.
-
-        Parameters
-        ----------
-        shape : Iterable[int]
-            Original shape of the tensor
-
-        Returns
-        -------
-        Tuple[int, ...]
-            New shape with dimensions rearranged for columnwise layout.
-            For a shape (d1, d2, ..., dn), returns (dn, d1, d2, ..., dn-1).
-            Returns empty tuple for empty input shape.
-        """
-        if len(shape) == 0:
-            return tuple()
-        # and then after AG, a reorganize kernel will be called to restore the shape
-        colwise_shape = [shape[-1]]
-        for i in range(len(shape) - 1):
-            colwise_shape.append(shape[i])
-        return tuple(colwise_shape)
+        """Return the flattened columnwise shape before FP4 packing."""
+        shape = tuple(shape)
+        if not shape:
+            return ()
+        return (shape[-1], math.prod(shape[:-1]))
 
     @staticmethod
     def convert_shape_for_fp4(shape: Iterable[int]) -> Tuple[int, ...]:
         """Convert shape for FP4 data by dividing the last dimension by 2"""
         shape = list(shape)
+        if shape[-1] % 2 != 0:
+            raise ValueError(f"FP4 packing requires an even last dimension, got shape {shape}")
         shape[-1] = shape[-1] // 2
         return tuple(shape)
 
@@ -418,7 +410,8 @@ class NVFP4Quantizer(Quantizer):
             amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
             specs["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
         if self.columnwise_usage:
-            specs["_amax_columnwise"] = ((1,), torch.float32)
+            amax_columnwise_shape = (shape[-1],) if self.row_scaled_nvfp4 else (1,)
+            specs["_amax_columnwise"] = (amax_columnwise_shape, torch.float32)
         return specs
 
 
@@ -813,7 +806,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 qt._amax_rowwise,
                 qt._amax_columnwise,
             ):
-                if t is not None and t.is_cuda:
+                if t is not None and t.device.type == te_device_type():
                     t.record_stream(stream)
             return None
 
@@ -971,7 +964,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         """
 
         # Tensor device
-        new_device = tensor.device if tensor.is_cuda else self.device
+        new_device = tensor.device if tensor.device.type == te_device_type() else self.device
         if not devices_match(new_device, tensor.device):
             tensor = tensor.to(device=new_device)
 

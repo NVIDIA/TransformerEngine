@@ -237,11 +237,26 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
   // barrier condition:
   // - leader must arrive (i.e. 1 thread as set above)
   // - TMA hardware substracts bytes from expect_tx counter, must reach zero
+#if __CUDA_ARCH__ >= 1200
+  // sm_12x: use the .shared::cta destination. dst_shmem and mbar are always in the executing
+  // CTA, so both forms copy the same bytes. For .shared::cluster, ptxas emits a run-time branch
+  // whose remote-CTA side calls a driver syscall
+  // (__cuda_syscall_cp_async_bulk_tensor_2d_tile_unicast). The first launch of any kernel that
+  // contains it raises the per-thread stack limit from 1 KB to ~14.6 KB, and the driver keeps
+  // the matching local memory (~1.2 GiB on a 60-SM RTX 5080 Laptop GPU) reserved for the life
+  // of the context.
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cta.global.tile"
+      ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
+      "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
+      : "memory");
+#else
   asm volatile(
       "cp.async.bulk.tensor.2d.shared::cluster.global.tile"
       ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
       "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
       : "memory");
+#endif  // #if __CUDA_ARCH__ >= 1200
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_tensor_2d_global_to_shared is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -561,6 +576,17 @@ __device__ __forceinline__ float stochastic_round_fp4_e2m1(const float x, const 
   const float inv_step_t = (t >= 4.0f) ? 0.5f : ((t >= 2.0f) ? 1.0f : 2.0f);
   const float q = fminf(floorf(t * inv_step_t) * step_t, max_norm);
   return copysignf(q, (x != x) ? 1.0f : x);
+}
+
+// Software equivalent of cvt.rs.satfinite.e2m1x4.f32 on four consecutive values:
+// value i uses bits [8i, 8i + 8) of rbits and lands in nibble i of the result.
+__device__ __forceinline__ uint16_t stochastic_round_fp4_e2m1x4(const float x0, const float x1,
+                                                                const float x2, const float x3,
+                                                                const uint32_t rbits) {
+  const fp4e2m1x4 packed(make_float4(
+      stochastic_round_fp4_e2m1(x0, rbits), stochastic_round_fp4_e2m1(x1, rbits >> 8),
+      stochastic_round_fp4_e2m1(x2, rbits >> 16), stochastic_round_fp4_e2m1(x3, rbits >> 24)));
+  return *reinterpret_cast<const uint16_t *>(&packed);
 }
 
 #endif  // FP4_TYPE_SUPPORTED

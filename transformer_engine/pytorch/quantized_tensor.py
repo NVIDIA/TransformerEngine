@@ -19,6 +19,8 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.constants import dist_group_type
+
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
@@ -29,6 +31,28 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
 # QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
 # handle quantized tensors internally.
 _quantized_tensor_passthrough_ops: set = set()
+
+# Ops that copy a tensor to another device and/or dtype. The ``aten.to.*``
+# overloads are CompositeImplicitAutograd, so they normally decompose into
+# ``aten._to_copy`` before reaching __torch_dispatch__. That decomposition is
+# skipped when they are called from within another __torch_dispatch__ (for
+# example when the dequantizing fallback moves a CPU tensor to the GPU),
+# because autograd keys are excluded there. Both forms therefore need handling.
+_device_conversion_ops: set = {
+    torch.ops.aten._to_copy.default,
+    torch.ops.aten.to.device,
+    torch.ops.aten.to.dtype,
+    torch.ops.aten.to.dtype_layout,
+    torch.ops.aten.to.other,
+}
+
+
+def _bind_op_args(func, args, kwargs) -> Dict[str, Any]:
+    """Map an op's arguments to the argument names in its schema"""
+    bound_args = dict(zip((arg.name for arg in func._schema.arguments), args))
+    if kwargs:
+        bound_args.update(kwargs)
+    return bound_args
 
 
 class InnerTensor(NamedTuple):
@@ -289,21 +313,46 @@ class _SavedQuantizedTensor(NamedTuple):
     metadata: Dict[str, Any]
 
 
+class _SavedTensorRef(NamedTuple):
+    """A DistributedWeight's original object, restored in place of its saved tensor."""
+
+    weight: torch.Tensor
+
+
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorStorage],
 ) -> Tuple[
     list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
-    list[Optional[Union[QuantizedTensorStorage, _SavedQuantizedTensor]]],
+    list[Optional[Union[QuantizedTensorStorage, _SavedQuantizedTensor, _SavedTensorRef]]],
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
-    the internal TensorStorage types too."""
+    the internal TensorStorage types too.
+
+    A DistributedWeight is still saved through autograd (which keeps autograd's
+    in-place modification check), but its original object is also kept by
+    reference and restored in place of the saved tensor: saved-tensor hooks
+    (e.g. activation offloading) unpack saved tensors as plain tensors, which
+    drops the subclass and its distributed-weight hooks."""
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
-        if tensor is None or isinstance(tensor, torch.Tensor):
-            tensor_list.append(tensor)
+        if tensor is None:
+            tensor_list.append(None)
             tensor_objects_list.append(None)
+        elif isinstance(tensor, torch.Tensor):
+            # Inline is_distributed_weight(): this runs for every saved tensor.
+            if getattr(tensor, "is_distributed_weight", False):
+                if torch.compiler.is_compiling():
+                    raise RuntimeError(
+                        "Saving a DistributedWeight for backward is not supported under "
+                        "torch.compile."
+                    )
+                tensor_list.append(tensor)
+                tensor_objects_list.append(_SavedTensorRef(tensor))
+            else:
+                tensor_list.append(tensor)
+                tensor_objects_list.append(None)
         elif torch.compiler.is_compiling():
             inner_names, metadata = tensor.__tensor_flatten__()
             tensor_list.extend(getattr(tensor, name) for name in inner_names)
@@ -317,7 +366,11 @@ def prepare_for_saving(
 
 
 def restore_from_saved(
-    tensors: list[Optional[Union[torch.Tensor, QuantizedTensorStorage, _SavedQuantizedTensor]]],
+    tensors: list[
+        Optional[
+            Union[torch.Tensor, QuantizedTensorStorage, _SavedQuantizedTensor, _SavedTensorRef]
+        ]
+    ],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
     return_saved_tensors: bool = False,
 ) -> (
@@ -331,23 +384,34 @@ def restore_from_saved(
     Note: please use `restore_from_func_ctx` instead if you are restoring tensors from a function context to make sure tensor_objects is detached and its memory can be freed
     """
     tensor_objects = []
+    offset = 0
     for tensor in tensors:
         if tensor is None or isinstance(tensor, torch.Tensor):
-            tensor_objects.append(saved_tensors[0])
-            saved_tensors = saved_tensors[1:]
+            tensor_objects.append(saved_tensors[offset])
+            offset += 1
+        elif isinstance(tensor, _SavedTensorRef):
+            # The saved tensor was unpacked (running autograd's version check), but
+            # may have lost its subclass under hooks; use the original object.
+            tensor_objects.append(tensor.weight)
+            offset += 1
         elif isinstance(tensor, _SavedQuantizedTensor):
             count = len(tensor.inner_names)
-            inner = dict(zip(tensor.inner_names, saved_tensors[:count]))
+            inner = dict(zip(tensor.inner_names, saved_tensors[offset : offset + count]))
             tensor_objects.append(
                 QuantizedTensorStorage.__tensor_unflatten__(inner, tensor.metadata, None, None)
             )
-            saved_tensors = saved_tensors[count:]
+            offset += count
         else:
+            # Storage restorers receive the full remaining list/tuple and own the
+            # returned remainder. Preserve that protocol for custom implementations.
+            if offset:
+                saved_tensors = saved_tensors[offset:]
             saved_tensors = tensor.restore_from_saved(saved_tensors)
+            offset = 0
             tensor_objects.append(tensor)
 
     if return_saved_tensors:
-        return tensor_objects, saved_tensors
+        return tensor_objects, saved_tensors[offset:] if offset else saved_tensors
     return tensor_objects
 
 
@@ -528,7 +592,7 @@ class Quantizer(abc.ABC):
             )
 
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         # Handle the device passed as string
         device = torch.device(device)
         result = tex.create_empty_quantized_tensor(
@@ -584,7 +648,7 @@ class Quantizer(abc.ABC):
         Returns ``{attr_name: torch.Tensor}`` suitable as the ``inner_tensors``
         argument of the storage's ``__tensor_unflatten__``.
         """
-        device = torch.device(device if device is not None else "cuda")
+        device = torch.device(device if device is not None else te_device_type())
         return {
             attr: torch.empty(buf_shape, dtype=buf_dtype, device=device)
             for attr, (buf_shape, buf_dtype) in self.inner_tensor_specs(tuple(shape)).items()
@@ -660,13 +724,15 @@ class Quantizer(abc.ABC):
         """
         return False
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
-        """Whether tensor supports quantized all-gather
+    # pylint: disable-next=unused-argument
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
 
-        Consider a less misleading function name.
-
+        When False, the distributed all-gather falls back to gathering
+        in high precision and quantizing afterward. This is needed when
+        the quantizer does not support gathering its packed data directly.
         """
-        return True
+        return False
 
     def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the quantizer"""
@@ -940,18 +1006,20 @@ class QuantizedTensor(torch.Tensor):
                 dst.copy_(src)
             return None
 
-        # _to_copy op (used by .to(device=...), .cpu(), DCP staging).
+        # Device conversion ops (used by .to(device=...), .cpu(), DCP staging).
         # Preserve the QuantizedTensor subclass and move all internal
         # buffers (data, scales, etc.) to the requested device.
-        if func == torch.ops.aten._to_copy.default:
+        if func in _device_conversion_ops and isinstance(args[0], QuantizedTensor):
             tensor = args[0]
-            kw = dict(kwargs) if kwargs else {}
-            dtype = kw.get("dtype", None)
+            bound_args = _bind_op_args(func, args, kwargs)
+            # ``aten.to.other`` takes the target dtype and device from a tensor
+            other = bound_args.get("other", None)
+            dtype = other.dtype if other is not None else bound_args.get("dtype", None)
+            device = other.device if other is not None else bound_args.get("device", None)
             if dtype is None or dtype == tensor.dtype:
-                target_device = kw.get("device", tensor.device) or tensor.device
-                target_device = torch.device(target_device)
-                pin_memory = bool(kw.get("pin_memory", False))
-                non_blocking = bool(kw.get("non_blocking", False))
+                target_device = torch.device(device) if device is not None else tensor.device
+                pin_memory = bool(bound_args.get("pin_memory", False))
+                non_blocking = bool(bound_args.get("non_blocking", False))
                 new_metadata = {"device": target_device}
                 # Update tensor storage metadata
                 for key, value in tensor.get_metadata().items():

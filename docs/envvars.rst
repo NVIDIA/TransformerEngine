@@ -150,14 +150,16 @@ General
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: Use CuTeDSL kernel implementations when available. This requires that Transformer Engine was built with ``NVTE_WITH_CUTEDSL=1``.
-                 It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
+                 It also requires ``apache-tvm-ffi`` and ``nvidia-cutlass-dsl>=4.8.0`` to be installed and you are using CPython 3.10 or later.
                  If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
 
-.. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
+.. envvar:: NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN
 
-   :Type: ``int`` (0 or 1)
-   :Default: ``0``
-   :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to available CuTeDSL kernels. Useful to verify if the CuTeDSL path is taken.
+   :Type: ``str`` (``WARN`` or ``ERROR``)
+   :Default: None
+   :Description: Control what happens when TE fails dispatch to a CuTeDSL kernel and would fall back to the CUDA C++ kernel.
+                 ``WARN`` emits a warning explaining why CuTeDSL kernels are unavailable and falls back to CUDA kernels. ``ERROR`` raises an error and fails instead.
+                 Only effective when the CuTeDSL backend is enabled (see :envvar:`NVTE_ENABLE_CUTEDSL_BACKEND`).
 
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
@@ -166,6 +168,15 @@ General
    :Description: Size in MiB of the internal ``NVTEGroupedTensor`` handle pool. Increase
                  this value if an application legitimately creates more grouped tensor
                  handles than the default pool can hold.
+
+.. envvar:: NVTE_CUTEDSL_FUSED_GROUPED_MLP
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: **Deprecated** (use ``split_alignment=256`` when constructing
+                 :class:`transformer_engine.pytorch.ops.GroupedLinear` instead).
+                 When set to ``1``, overrides the operation's declared split alignment
+                 to 256, enabling grouped MLP fusion when its other requirements are met.
 
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -341,12 +352,6 @@ Kernel Configuration
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. NVFP4 4over6 quantization, fused softmax, and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_NVFP4``, ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX``, or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
-
-.. envvar:: NVTE_MXFP8_PER_TILE_SWIZZLE
-
-   :Type: ``int`` (0 or 1)
-   :Default: ``0``
-   :Description: Swizzle MXFP8 scaling factors for GEMM with kernels that give each 128-row tile of scaling factors (row-wise) or each 128-column by 32-row block (column-wise) its own thread block, instead of batching 32 tiles in one block. This lowers the latency of swizzling the scaling factors of tensors with few tiles, such as activations.
 
 .. envvar:: NVTE_USE_CUTLASS_GROUPED_GEMM
 
@@ -561,6 +566,12 @@ JAX-Specific Variables
    :Type: ``str``
    :Default: None
    :Description: Test level for JAX unit tests (``"L0"``, ``"L1"``, ``"L2"``). Used internally by the test suite.
+
+.. envvar:: NVTE_EP_FUSED_PREPARE_DISPATCH
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use the fused prepare + dispatch path for expert parallelism (NCCL EP count mode) instead of separate prepare and dispatch calls. Supported only when EP stays within a single NVLink domain, and the received row order within an expert block may differ from the unfused path. In JAX the value is latched on first use.
 
 JAX Triton Extensions
 ^^^^^^^^^^^^^^^^^^^^^
