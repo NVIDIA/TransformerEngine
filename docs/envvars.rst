@@ -178,6 +178,18 @@ General
                  When set to ``1``, overrides the operation's declared split alignment
                  to 256, enabling grouped MLP fusion when its other requirements are met.
 
+.. envvar:: NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: When set to ``1``, the fused grouped MLP runs its plain GEMMs, i.e. those
+                 without a fused activation, on cuBLAS instead of the cuDNN frontend CuTe
+                 DSL kernels where both implement them: the weight-gradient GEMMs and, for
+                 NVFP4, the FC2 forward and FC1 input-gradient GEMMs. A single-group MLP
+                 on the dense single-group path keeps its dense GEMMs either way.
+                 ``NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP``
+                 is a deprecated alias, honored when this variable is unset.
+
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

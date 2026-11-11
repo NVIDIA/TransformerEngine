@@ -12,8 +12,9 @@ import warnings
 import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.device import te_device_type
-from ..constants import TE_DType, DType
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType, DType
 from ..utils import (
+    ceil_div,
     get_device_compute_capability,
     get_sm_count,
     _empty_tensor,
@@ -221,6 +222,106 @@ def validate_or_alloc_output(
     if not buffer.is_contiguous():
         raise ValueError("Output buffer must be contiguous.")
     return buffer
+
+
+def _convert_to_cudnn_grouped_gemm_tensor_format(
+    data: torch.Tensor,
+    scale_inv: torch.Tensor,
+    *,
+    data_dtype: torch.dtype,
+    scale_dtype: torch.dtype,
+    valid_M_or_N: int,
+    k_logical: int,
+    L: int = 1,
+    sf_swizzled: bool = False,
+    use_N_major_for_B: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reshape a plain buffer into the layout cuDNN's grouped GEMM expects.
+
+    cuDNN requirements:
+    A: (valid_m, K, 1), K-major
+    B: (N, K, L), K-major (FP8 also supports N-major)
+
+    SFA: (32, 4, ceil(valid_m/128), 4, ceil(ceil(K/sf_vec_size)/4), 1)
+    SFB: (32, 4, ceil(N/128),       4, ceil(ceil(K/sf_vec_size)/4), L)
+
+    whereas TE stores flat buffers which can be intepreted as contiguous tensors
+    with the following layouts:
+
+    Note: K_packed is K/2 for FP4 (two values per byte) and K for FP8
+
+    A (K-major):    (1, valid_m, K_packed)
+    B (K-major):    (L, N,       K_packed)   -- used for FP4 only now
+    B (N-major):    (L, K,       N)          -- used for FP8 only now
+
+    SFA (unswizzled): (1, ceil(valid_m/128), 4, 32, ceil(ceil(K/sf_vec_size)/4), 4)
+    SFB (unswizzled): (L, ceil(N/128),       4, 32, ceil(ceil(K/sf_vec_size)/4), 4)
+    SFA (swizzled): (1, ceil(valid_m/128), ceil(ceil(K/sf_vec_size)/4), 32, 4, 4)
+    SFB (swizzled): (L, ceil(N/128),       ceil(ceil(K/sf_vec_size)/4), 32, 4, 4)
+
+    """
+
+    if use_N_major_for_B:
+        assert data_dtype in (
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
+        ), f"Using N-major layout for B is only supported for FP8, but got {data_dtype}."
+
+    available_scalings = {
+        # NVFP4 recipe (UE5M3 scales ride as E4M3 since torch has no ue5m3 dtype)
+        (torch.float4_e2m1fn_x2, torch.float8_e4m3fn): NVFP4_BLOCK_SCALING_SIZE,
+        # MXFP8 recipe
+        (torch.float8_e4m3fn, torch.float8_e8m0fnu): MXFP8_BLOCK_SCALING_SIZE,
+    }
+    assert (data_dtype, scale_dtype) in available_scalings, (
+        "Unsupported (data_dtype, scale_dtype) pair for a cuDNN block-scaled operand: "
+        f"({data_dtype}, {scale_dtype}). Expected NVFP4 (float4_e2m1fn_x2, "
+        "float8_e4m3fn) or MXFP8 (float8_e4m3fn, float8_e8m0fnu)."
+    )
+    sf_vec_size = available_scalings[(data_dtype, scale_dtype)]
+
+    k_sf_tiles = ceil_div(k_logical, 4 * sf_vec_size)
+
+    if data_dtype == torch.float4_e2m1fn_x2:
+        k_packed = k_logical // 2  # fp4 packs two values per byte
+    else:
+        k_packed = k_logical  # fp8 packs one value per byte
+
+    data = data.view(dtype=data_dtype)
+    if use_N_major_for_B:
+        # B is stored untransposed, i.e. (L, K, N); permuting to (N, K, L) leaves
+        # stride 1 on N. Only FP8 accepts this, asserted above.
+        data = data.view(L, k_packed, valid_M_or_N)
+        data = data.permute(2, 1, 0)
+    else:
+        # (L, N, K) -> (N, K, L), stride 1 on K.
+        data = data.view(L, valid_M_or_N, k_packed)
+        data = data.permute(1, 2, 0)
+
+    if sf_swizzled:
+        scale_inv = scale_inv.view(dtype=scale_dtype)
+        scale_inv = scale_inv.view(
+            L,
+            ceil_div(valid_M_or_N, 128),
+            k_sf_tiles,
+            32,
+            4,
+            4,
+        )
+        scale_inv = scale_inv.permute(3, 4, 1, 5, 2, 0)
+        return data, scale_inv
+
+    scale_inv = scale_inv.view(dtype=scale_dtype)
+    scale_inv = scale_inv.view(
+        L,
+        ceil_div(valid_M_or_N, 128),
+        4,
+        32,
+        k_sf_tiles,
+        4,
+    )
+    scale_inv = scale_inv.permute(3, 2, 1, 5, 4, 0)
+    return data, scale_inv
 
 
 def general_gemm(

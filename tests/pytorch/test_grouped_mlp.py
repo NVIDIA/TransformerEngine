@@ -1896,6 +1896,136 @@ class TestGroupedMLPFusedOp:
             },
         ]
 
+    @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu", "scaled_tanh_srelu"))
+    @pytest.mark.parametrize("disable_cutedsl", (None, "1"), ids=("cutedsl", "cublas"))
+    @pytest.mark.parametrize("group_size", (4, 1), ids=("grouped", "single_group"))
+    def test_grouped_mlp_nvfp4_gemm_backend(
+        self,
+        monkeypatch,
+        activation: str,
+        disable_cutedsl: Optional[str],
+        group_size: int,
+    ) -> None:
+        """FC2 fprop, FC1 dgrad and wgrad run on CuTe DSL unless it is disabled for plain GEMMs.
+
+        A single group on the dense single-group path (every activation but the SReLU ones)
+        keeps its dense GEMMs and calls no grouped GEMM at all, whatever the setting.
+        """
+        fused_cls = (
+            te.ops.fused.GroupedMLP_CuTeGEMMGLU
+            if activation == "scaled_swiglu"
+            else te.ops.fused.GroupedMLP_CuTeGEMMUnary
+        )
+        if not fused_cls.is_supported():
+            pytest.skip("Fused grouped MLP is not supported on this system")
+        import cudnn
+
+        gemm_calls = []
+
+        def _traced(fn, label):
+            @functools.wraps(fn)
+            def traced(*args, **kwargs):
+                gemm_calls.append(kwargs["layout"] if label is None else label)
+                return fn(*args, **kwargs)
+
+            return traced
+
+        monkeypatch.setattr(
+            cudnn,
+            "grouped_gemm_quant_wrapper_sm100",
+            _traced(cudnn.grouped_gemm_quant_wrapper_sm100, "cutedsl"),
+        )
+        monkeypatch.setattr(
+            cudnn,
+            "grouped_gemm_wgrad_wrapper_sm100",
+            _traced(cudnn.grouped_gemm_wgrad_wrapper_sm100, "cutedsl_wgrad"),
+        )
+        # cuBLAS calls are recorded by their GEMM layout
+        monkeypatch.setattr(
+            grouped_mlp_module,
+            "general_grouped_gemm_for_grouped_tensor",
+            _traced(grouped_mlp_module.general_grouped_gemm_for_grouped_tensor, None),
+        )
+        if disable_cutedsl is None:
+            monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM", raising=False)
+        else:
+            monkeypatch.setenv("NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM", disable_cutedsl)
+
+        def _clear_caches():
+            fused_cls.grouped_gemm_quant_kernel.cache_clear()
+            fused_cls.grouped_gemm_wgrad_kernel.cache_clear()
+            grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+
+        _clear_caches()
+        try:
+            self.test_grouped_mlp(
+                enable_fusion=True,
+                group_size=group_size,
+                bias=False,
+                hidden_size=256,
+                quantization="nvfp4_rht",
+                single_grouped_weight=False,
+                activation=activation,
+                strict_fusion=True,
+            )
+            torch.cuda.synchronize()
+        finally:
+            _clear_caches()
+
+        # FC2 fprop, FC2 wgrad, FC1 dgrad, FC1 wgrad
+        expected_calls = {
+            None: ["cutedsl", "cutedsl_wgrad", "cutedsl", "cutedsl_wgrad"],
+            "1": ["TN", "NT", "NN", "NT"],
+        }
+        dense_single_group = group_size == 1 and activation == "scaled_swiglu"
+        assert gemm_calls == ([] if dense_single_group else expected_calls[disable_cutedsl])
+
+    @pytest.mark.parametrize(
+        "env,expected,warns",
+        (
+            ({}, True, False),
+            ({"NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM": "1"}, False, False),
+            ({"NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM": "0"}, True, False),
+            # Deprecated alias: honored only while the new variable is unset
+            ({"NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP": "1"}, False, True),
+            ({"NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP": "0"}, True, True),
+            (
+                {
+                    "NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM": "0",
+                    "NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP": "1",
+                },
+                True,
+                False,
+            ),
+        ),
+        ids=("unset", "disabled", "enabled", "alias_disabled", "alias_enabled", "new_wins"),
+    )
+    def test_cutedsl_plain_gemm_env_var(
+        self,
+        monkeypatch,
+        recwarn,
+        env: dict[str, str],
+        expected: bool,
+        warns: bool,
+    ) -> None:
+        """The plain-GEMM backend switch, including its deprecated wgrad-only alias."""
+        for name in (
+            "NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM",
+            "NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+
+        grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+        try:
+            assert grouped_mlp_module._use_cutedsl_plain_gemm() is expected
+        finally:
+            grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+        deprecations = [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+        assert bool(deprecations) is warns
+
     @pytest.mark.parametrize("weight_requires_grad", (False, True))
     def test_grouped_mlp_prequantized_mxfp8_input(
         self,
@@ -3080,13 +3210,14 @@ class TestGroupedMLPFusedOp:
         split_alignment: int = 256,
         glu_interleave_size: int = 32,
         token_padding: int = 2048,
+        quantization: str = "mxfp8",
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
-            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+            pytest.skip("Fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
-            pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
+            pytest.skip("Fused grouped MLP is only supported with BF16/FP16")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -3094,7 +3225,7 @@ class TestGroupedMLPFusedOp:
         # Pad the input tokens to validate the sync-free MOE
         num_active_tokens = split_sizes.sum().item()
         in_shape = (num_active_tokens + token_padding, hidden_size)
-        recipe = make_recipe("mxfp8")
+        recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=True, recipe=recipe):
             fc1 = te.ops.GroupedLinear(
                 group_size,
@@ -3342,6 +3473,76 @@ class TestGroupedMLPFusedOp:
         else:
             for graph_grad, param in zip(graph_param_grads, reference_module.parameters()):
                 assert_close(graph_grad, param.grad, **tols)
+
+    @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
+    @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+    def test_grouped_mlp_cuda_graph_safe_nvfp4(
+        self,
+        monkeypatch,
+        accumulate_into_main_grad: bool,
+    ) -> None:
+        """Grouped MLP forward+backward should be CUDA graph capturable (NVFP4).
+
+        With NVFP4 every GEMM of the fused op runs on a CuTe DSL kernel by default,
+        including the FC2 forward and FC1 input-gradient GEMMs, which re-swizzle or
+        re-pack the weight scales on each call.
+        """
+        monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM", raising=False)
+        monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", raising=False)
+        grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+        try:
+            # NVFP4 supports discrete weights only.
+            self.test_grouped_mlp_cuda_graph_safe_mxfp8(
+                single_grouped_weight=False,
+                accumulate_into_main_grad=accumulate_into_main_grad,
+                activation="scaled_swiglu",
+                quantization="nvfp4_rht",
+            )
+        finally:
+            grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+
+    @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+    def test_grouped_mlp_nvfp4_rejects_single_grouped_weight(
+        self,
+        monkeypatch,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+    ) -> None:
+        """NVFP4 with a single grouped weight fails with a clear error, not inside a kernel."""
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("Fused grouped MLP is not supported on this system")
+        monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM", raising=False)
+        monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", raising=False)
+        grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+
+        split_sizes = torch.full((group_size,), split_alignment, dtype=torch.int64, device=device)
+        in_shape = (group_size * split_alignment, hidden_size)
+        recipe = make_recipe("nvfp4_rht")
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc_kwargs = dict(
+                bias=False,
+                device=device,
+                dtype=dtype,
+                single_grouped_weight=True,
+                split_alignment=split_alignment,
+            )
+            module = te.ops.Sequential(
+                te.ops.GroupedLinear(group_size, hidden_size, 2 * hidden_size, **fc_kwargs),
+                te.ops.ScaledSwiGLU(glu_interleave_size=32),
+                te.ops.GroupedLinear(group_size, hidden_size, hidden_size, **fc_kwargs),
+            )
+        x = torch.randn(in_shape, device=device, dtype=dtype)
+        probs = torch.randn((in_shape[0],), device=device, dtype=dtype)
+        try:
+            with pytest.raises(NotImplementedError, match="single_grouped_weight=True"):
+                with te.autocast(enabled=True, recipe=recipe):
+                    module(x, split_sizes, probs, split_sizes)
+        finally:
+            grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
 
     # (group_size, tokens_per_group): token counts chosen so the quantized inputs' byte sizes
     # never coincide with a weight's, which the saved-tensor counting below relies on.
