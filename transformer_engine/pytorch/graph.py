@@ -333,12 +333,14 @@ class _CopyOverlappingOutput(torch.autograd.Function):
     """Preserve an overlapping public view while forwarding its logical gradient."""
 
     @staticmethod
-    def forward(ctx, source: torch.Tensor, target: torch.Tensor, size_bytes: int):
+    def forward(_ctx, source: torch.Tensor, target: torch.Tensor, size_bytes: int):
+        """Copy the addressed storage span of ``source`` into ``target``."""
         _copy_tensor_storage_span(target, source, size_bytes)
         return target
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
+    def backward(_ctx, grad_output: torch.Tensor):
+        """Pass the output gradient through to ``source``."""
         return grad_output, None, None
 
 
@@ -665,6 +667,17 @@ def _make_graphed_callables(
             for slot in _graph_memory_slots
         ):
             raise TypeError("Each graph-memory slot must be a tuple of seven integers.")
+        # Branches of one (io_slot, chunk, layer) share output and gradient storage only if
+        # they name the same arenas, since those targets are carved from them.
+        family_arenas = {}
+        for slot in _graph_memory_slots:
+            family, arenas = (slot[1], slot[3], slot[4]), (slot[0], slot[6])
+            expected = family_arenas.setdefault(family, arenas)
+            if arenas != expected:
+                raise ValueError(
+                    f"Graph-memory slot branches of (io_slot, chunk, layer) {family} must "
+                    f"name the same saved and gradient arenas, got {expected} and {arenas}."
+                )
         saved_tensor_arena_ids = [slot[0] for slot in _graph_memory_slots]
         slot_io_memory_alias_groups = [(slot[1], slot[2]) for slot in _graph_memory_slots]
         slot_io_liveness_groups = [(slot[3], slot[4]) for slot in _graph_memory_slots]
@@ -3364,16 +3377,20 @@ def make_graphed_callables(
         ``grad_arena`` holds the gradients returned for user inputs. Graph inputs may share an
         arena only if their forward-to-backward lifetimes never overlap in any schedule the
         caller replays. Graph inputs with equal ``(io_slot, chunk, layer)`` are branches of one
-        slot: they must expose identical output and gradient layouts, are told apart by
-        ``branch``, and share output and gradient storage. Graph inputs with equal
-        ``warmup_group`` share one warmup run.
+        slot: they must name the same ``saved_arena`` and ``grad_arena``, expose identical output
+        and gradient layouts, are told apart by ``branch``, and share output and gradient storage.
+        Graph inputs with equal ``warmup_group`` share one warmup run.
         Only tensors saved for backward (``ctx.save_for_backward`` or saved-tensor hooks) are
         protected between a forward replay and its backward replay. A tensor that backward reads
         from a plain ``ctx`` attribute may be overwritten by another variant's replay, so delayed
         weight-gradient ``_order`` entries are rejected.
-        Captured offload scopes may use the private ``_graph_memory_offload_context(checker)``
-        instead of nesting another saved-tensor hook. Selected saves use pinned CPU arenas with
-        the same saved-arena IDs; forward and backward graphs capture their D2H and H2D copies.
+        Captured offload scopes may use the private
+        ``_graph_memory_offload_context(checker, d2h_stream=..., h2d_stream=...)`` instead of
+        nesting another saved-tensor hook. Selected saves use pinned CPU arenas with the same
+        saved-arena IDs; forward and backward graphs capture their D2H and H2D copies. When a
+        ``d2h_stream`` other than the current stream is given, each offloaded save is first
+        copied on the current stream, so a later in-place write cannot change what is
+        offloaded; these copies stay in the graph pool until the end of that forward graph.
         The caller owns the offload policy. Reconstructed saved views retain their aliases.
         Requires the first positional sample argument of every graph input to be a plain CUDA
         tensor. Plain
