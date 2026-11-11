@@ -73,6 +73,7 @@ def run(args, impl):
         )
         if grouped.valid_group(m, g, lay)
     ]
+    configs = grouped.without_empty_groups(configs)
     if not configs:
         sys.exit("No config to run: check --shapes/--experts/--layout")
     factories = ((nbytes(c[6], c[7]), functools.partial(factory, *c)) for c in configs)

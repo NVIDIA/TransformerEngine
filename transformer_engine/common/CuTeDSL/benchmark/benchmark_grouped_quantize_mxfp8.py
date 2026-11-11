@@ -28,6 +28,7 @@ import itertools
 import math
 import random
 import sys
+import warnings
 
 import common
 
@@ -78,6 +79,18 @@ def members(m, n, experts, layout):
         lasts = [(1 + c) * ROW_BLOCK for c in _split(n * experts, [ROW_BLOCK] * experts, rng)]
     blocks = _split(fill * m * n, [ROW_BLOCK * v for v in lasts], rng)
     return [(c * ROW_BLOCK, v) for c, v in zip(blocks, lasts)]
+
+
+def without_empty_groups(configs):
+    """The configs (each ending in its group's member shapes) whose group has any element; a
+    buffer too small for the layout can leave every member empty."""
+    kept = []
+    for config in configs:
+        if any(a * b for a, b in config[-1]):
+            kept.append(config)
+        else:
+            warnings.warn(f"Skipped a config: every member of its group is empty ({config[:-1]})")
+    return kept
 
 
 def valid_group(m, experts, layout):
@@ -271,6 +284,7 @@ def run(args, impl):
         and (sc == "1d" or f == "none")  # TE only fuses 2D scaling into a plain cast
         for grp in [members(m, n, g, lay)]
     ]
+    configs = without_empty_groups(configs)
     if not configs:
         sys.exit("No config to run: check --shapes/--experts/--layout/--fusion/--scaling")
     factories = (
