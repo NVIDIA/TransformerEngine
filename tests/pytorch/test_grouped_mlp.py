@@ -1860,9 +1860,14 @@ class TestGroupedMLPFusedOp:
         )
         torch.cuda.synchronize()
 
+        # The recipe randomizes the Hadamard transform, so the fused GLU-Hadamard kernel
+        # is only used when the cuDNN frontend applies the sign mask.
+        uses_hadamard_kernel = (
+            grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_hadamard_sign_mask()
+        )
         assert traced_cudnn_grouped_glu_wrappers == [
             {
-                "kind": "fwd_hadamard",
+                "kind": "fwd_hadamard" if uses_hadamard_kernel else "fwd",
                 "weight_mode": "discrete",
                 "a_dtype": torch.float4_e2m1fn_x2,
                 "b_dtype": torch.float4_e2m1fn_x2,
@@ -2782,11 +2787,20 @@ class TestGroupedMLPFusedOp:
             torch.testing.assert_close(on["fc2_db"], off["fc2_db"], **tols)
         # The dSReLU kernel regenerates fc2_x bit-exactly from the saved pre-activation and
         # the NVFP4 backward re-quantizes it with the forward amax, so FC2's weight gradient
-        # matches bitwise. Plain SReLU needs a cuDNN frontend whose Hadamard-fused kernel
-        # rounds the accumulator through C's dtype before the activation; older versions
-        # regenerate a tensor that differs by a few BF16 ulps, hence the tolerance. MXFP8
-        # quantizes the regenerated tensor inside the dSReLU kernel with its own scales.
-        if quantization == "nvfp4_rht" and activation == "scaled_tanh_srelu":
+        # matches bitwise. This needs a cuDNN frontend whose forward kernels round the
+        # accumulator through C's dtype before the activation; older versions regenerate a
+        # tensor that differs by a few BF16 ulps, hence the tolerance. Support for the tanh
+        # clamp in the Hadamard-fused kernel marks such a frontend, so only the clamped
+        # SReLU is checked bitwise. MXFP8 quantizes the regenerated tensor inside the
+        # dSReLU kernel with its own scales.
+        regenerates_fc2_x_bitwise = (
+            grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh_hadamard()
+        )
+        if (
+            quantization == "nvfp4_rht"
+            and activation == "scaled_tanh_srelu"
+            and regenerates_fc2_x_bitwise
+        ):
             torch.testing.assert_close(on["fc2_dw"], off["fc2_dw"], rtol=0, atol=0)
         else:
             assert_close_rms(
