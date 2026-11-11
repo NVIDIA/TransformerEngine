@@ -15,6 +15,15 @@ def _is_nan(x):
 
 
 @triton.jit
+def _safe_shift(m):
+    """Shift of the exponentials of an online softmax: the running maximum m, or 0 while m is
+    -inf, that is while every logit seen so far is -inf (masked). Shifting by m = -inf would
+    compute exp(-inf - (-inf)) = NaN and make the sum of exponentials NaN for good; shifting
+    by 0 keeps the sum at 0 until a finite logit is seen. With a finite m nothing changes."""
+    return tl.where(m == float("-inf"), 0.0, m)
+
+
+@triton.jit
 def _fold_block_argmax(x, offsets, n_cols, run_max, run_idx, run_nan):
     """Fold one block of a row into a running argmax with torch.argmax's semantics: NaN counts
     as the maximum, and the first maximum (or the first NaN) wins.
@@ -92,7 +101,8 @@ def cross_entropy_forward_kernel(
             )
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
-        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
+        shift = _safe_shift(m_new)
+        d = d * tl.exp(m - shift) + tl.sum(tl.exp(x - shift))
         m = m_new
         if label_smoothing > 0:
             x_sum += tl.sum(tl.where(mask, x, 0.0))
@@ -178,7 +188,8 @@ def cross_entropy_tp_pre_kernel(
             )
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
-        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
+        shift = _safe_shift(m_new)
+        d = d * tl.exp(m - shift) + tl.sum(tl.exp(x - shift))
         m = m_new
         if COMPUTE_X_SUM:
             x_sum += tl.sum(tl.where(mask, x, 0.0))
@@ -241,7 +252,8 @@ def cross_entropy_tp_post_kernel(
                     argmax = rank_idx.to(tl.int64) * n_cols + local_argmax.to(tl.int64)
                     argmax_max = rank_argmax_max
         global_m = tl.maximum(m, m_new)
-        d = d * tl.exp(m - global_m) + d_new * tl.exp(m_new - global_m)
+        shift = _safe_shift(global_m)
+        d = d * tl.exp(m - shift) + d_new * tl.exp(m_new - shift)
         m = global_m
         x_y = tl.maximum(x_y, tl.load(rank_data_ptr + 2))
         if label_smoothing > 0:
