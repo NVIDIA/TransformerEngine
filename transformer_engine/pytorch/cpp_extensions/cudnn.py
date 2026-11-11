@@ -5,6 +5,7 @@
 """cuDNN Python frontend graph lifecycle shared by attention implementations."""
 
 import threading
+from contextlib import nullcontext
 
 import torch
 
@@ -27,7 +28,11 @@ def _get_cudnn_current_stream_handle(cudnn, device):
         device = torch.device(te_device_type(), torch.cuda.current_device())
     if not hasattr(_handles, "by_device"):
         _handles.by_device = {}
-    with torch.cuda.device(device):
+    # cuDNN also needs the handle's device when rebinding its stream.
+    device_context = (
+        torch.cuda.device(device) if device.index != torch.cuda.current_device() else nullcontext()
+    )
+    with device_context:
         handle = _handles.by_device.get(device)
         if handle is None:
             handle = cudnn.create_handle()

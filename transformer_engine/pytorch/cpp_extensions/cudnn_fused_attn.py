@@ -924,10 +924,10 @@ def fused_attn_fwd(
         stats = torch.empty(stats_shape, dtype=torch.float32, device=attn.device)
         attn.stats("stats", stats, output=True)
         aux_ctx_tensors = [stats, p["rng_state"]]
-        maximum = None
+        max_s_tensor = None
         if p["return_max_logit"]:
-            maximum = torch.empty_like(stats)
-            attn.stats("max", maximum, output=True)
+            max_s_tensor = torch.empty_like(stats)
+            attn.stats("max", max_s_tensor, output=True)
         if p["attn_bias_type"] not in ("no_bias", "alibi"):
             aux_ctx_tensors.append(p["attn_bias"])
         if p["softmax_type"] != "vanilla":
@@ -947,38 +947,40 @@ def fused_attn_fwd(
         attn.execute()
         if not attn.ragged_stats and attn.graph_b > attn.b:
             aux_ctx_tensors[0] = stats[: attn.b]
-            if maximum is not None:
-                maximum = maximum[: attn.b]
+            if max_s_tensor is not None:
+                max_s_tensor = max_s_tensor[: attn.b]
 
     if return_max_logit:
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
         # Reduce over batch and sequence positions, excluding THD storage padding.
-        amax_dims = (0, 2) if maximum.ndim == 3 else (0, 2, 3)
+        amax_dims = (0, 2) if max_s_tensor.ndim == 3 else (0, 2, 3)
 
         if qkv_format == "thd":
-            if maximum.ndim == 4:
-                seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(device=maximum.device)
-                sq_idx = torch.arange(maximum.shape[2], device=maximum.device).view(1, 1, -1, 1)
+            if max_s_tensor.ndim == 4:
+                seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(device=max_s_tensor.device)
+                sq_idx = torch.arange(max_s_tensor.shape[2], device=max_s_tensor.device).view(
+                    1, 1, -1, 1
+                )
                 valid = sq_idx < seqlens_q.view(-1, 1, 1, 1)
-                maximum = maximum.masked_fill(~valid, float("-inf"))
-            elif maximum.ndim == 3:
+                max_s_tensor = max_s_tensor.masked_fill(~valid, float("-inf"))
+            elif max_s_tensor.ndim == 3:
                 if cu_seqlens_q_padded is not None:
                     # Exclude padding; CP may pass nonzero padded offsets.
                     actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
-                        device=maximum.device
+                        device=max_s_tensor.device
                     )
-                    tq = maximum.shape[0]
-                    starts = cu_seqlens_q_padded[:-1].to(device=maximum.device)
+                    tq = max_s_tensor.shape[0]
+                    starts = cu_seqlens_q_padded[:-1].to(device=max_s_tensor.device)
                     ends = (starts + actual_seqlens).clamp(max=tq)
-                    delta = torch.zeros(tq + 1, dtype=torch.int32, device=maximum.device)
+                    delta = torch.zeros(tq + 1, dtype=torch.int32, device=max_s_tensor.device)
                     updates = torch.ones_like(starts, dtype=torch.int32)
                     delta.scatter_add_(0, starts.clamp(max=tq), updates)
                     delta.scatter_add_(0, ends, -updates)
                     valid = delta[:-1].cumsum(0) > 0
-                    maximum = maximum.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
+                    max_s_tensor = max_s_tensor.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
 
         # Max -> max_logit [h]
-        max_logit = torch.amax(maximum, dim=amax_dims).to(dtype=out.dtype)
+        max_logit = torch.amax(max_s_tensor, dim=amax_dims).to(dtype=out.dtype)
         return out, aux_ctx_tensors, max_logit
 
     return out, aux_ctx_tensors

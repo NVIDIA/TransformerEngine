@@ -262,7 +262,9 @@ class FusedAttnBackend(enum.IntEnum):
     """Fused attention sub-backends.
 
     This is the canonical fused-attention backend enum for
-    ``transformer_engine.pytorch``. It mirrors the backend
+    ``transformer_engine.pytorch``. The F16 and FP8 labels describe the precision
+    of the Python cuDNN attention path and do not select the deprecated C API.
+    It mirrors the backend
     ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
     value-for-value, and instances of the two enums compare equal when they
     share the same integer value. Unlike the pybind enum, a plain-python

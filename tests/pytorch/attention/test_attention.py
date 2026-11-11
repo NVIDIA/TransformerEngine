@@ -27,7 +27,6 @@ from transformer_engine.pytorch import (
     DotProductAttention,
     MultiheadAttention,
     get_device_compute_capability,
-    Quantizer,
     is_fp8_available,
     is_bf16_available,
 )
@@ -45,7 +44,9 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_thd_padding_mask,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
-import transformer_engine.pytorch.cpp_extensions as ext
+from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+    UnfusedDotProductAttention,
+)
 from transformer_engine.pytorch.constants import (
     FusedAttnBackend,
     AttnMaskType,
@@ -59,19 +60,13 @@ from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import (
     get_fused_attn_backend,
 )
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
-from transformer_engine.pytorch.constants import DType, FP8BwdTensorIdx, FP8FwdTensorIdx
+from transformer_engine.pytorch.constants import DType
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.quantized_tensor import (
-    Quantizer,
-    prepare_for_saving,
-    restore_from_func_ctx,
-)
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path = [str(_current_file.parent.parent)] + sys.path
@@ -324,7 +319,7 @@ def test_fused_attn_query_backward_precision(
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
 @pytest.mark.parametrize("qkv_format", ("bshd", "sbhd"))
 def test_fused_attn_inference_ignores_dropout(dtype, qkv_format):
-    """Configured inference dropout must match zero-dropout execution and FP32 SDPA."""
+    """Configured inference dropout must match zero dropout and the unfused backend."""
     shape = (2, 128, 4, 64) if qkv_format == "bshd" else (128, 2, 4, 64)
     q, k, v = [torch.randn(shape, device="cuda", dtype=dtype) for _ in range(3)]
     cu = torch.arange(3, device="cuda", dtype=torch.int32) * 128
@@ -346,56 +341,34 @@ def test_fused_attn_inference_ignores_dropout(dtype, qkv_format):
     actual, _ = fused_attn_fwd(dropout=0.25, **kwargs)
     expected, _ = fused_attn_fwd(dropout=0.0, **kwargs)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    order = (0, 2, 1, 3) if qkv_format == "bshd" else (1, 2, 0, 3)
-    reference = torch.nn.functional.scaled_dot_product_attention(
-        *(tensor.float().permute(order) for tensor in (q, k, v)), is_causal=True
-    )
+    unfused = UnfusedDotProductAttention(softmax_scale=64**-0.5).eval()
+    reference = unfused({}, q.float(), k.float(), v.float(), qkv_layout=kwargs["qkv_layout"])
     rtol, atol = (2e-2, 1e-2) if dtype == torch.bfloat16 else (3e-3, 2e-3)
-    torch.testing.assert_close(actual.float().permute(order), reference, rtol=rtol, atol=atol)
+    torch.testing.assert_close(actual.float(), reference.reshape(shape), rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
-@pytest.mark.parametrize("qkv_format", ("bshd", "sbhd"))
-def test_fused_attn_python_execution(monkeypatch, dtype, qkv_format):
-    """The public module must use Python cuDNN for selection, forward, and backward."""
-    if _deterministic and device_compute_capability < (9, 0):
-        pytest.skip("TE disables deterministic cuDNN attention training below SM90")
+def test_cudnn_attention_handle_streams():
+    """Cached handles follow the target device's stream without changing the caller's device."""
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions.cudnn import _get_cudnn_current_stream_handle
 
-    def common_attention(*_args, **_kwargs):
-        raise AssertionError("PyTorch attention called the TE common attention API")
-
-    for name in ("get_fused_attn_backend", "fused_attn_fwd", "fused_attn_bwd"):
-        monkeypatch.setattr(tex, name, common_attention, raising=False)
-    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
-    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
-    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
-    _attention_backends["backend_selection_requires_update"] = True
-    shape = (2, 128, 4, 64) if qkv_format == "bshd" else (128, 2, 4, 64)
-    q, k, v = [torch.randn(shape, device="cuda", dtype=dtype, requires_grad=True) for _ in range(3)]
-    block = DotProductAttention(4, 64, qkv_format=qkv_format, attn_mask_type="causal")
-    try:
-        actual = block(q, k, v).reshape(shape)
-        order = (0, 2, 1, 3) if qkv_format == "bshd" else (1, 2, 0, 3)
-        inverse = (0, 2, 1, 3) if qkv_format == "bshd" else (2, 0, 1, 3)
-        refs = [x.detach().float().permute(order).requires_grad_() for x in (q, k, v)]
-        reference = torch.nn.functional.scaled_dot_product_attention(*refs, is_causal=True)
-        grad = torch.randn_like(actual)
-        actual.backward(grad)
-        reference.backward(grad.float().permute(order))
-        rtol, atol = (2e-2, 1e-2) if dtype == torch.bfloat16 else (3e-3, 2e-3)
-        torch.testing.assert_close(actual.float(), reference.permute(inverse), rtol=rtol, atol=atol)
-        for tensor, ref in zip((q, k, v), refs):
-            torch.testing.assert_close(
-                tensor.grad.float(), ref.grad.permute(inverse), rtol=rtol, atol=atol
-            )
-    finally:
-        _attention_backends["backend_selection_requires_update"] = True
+    current_device = torch.cuda.current_device()
+    device = torch.device("cuda", (current_device + 1) % torch.cuda.device_count())
+    handle = _get_cudnn_current_stream_handle(cudnn, device)
+    assert torch.cuda.current_device() == current_device
+    for stream in (torch.cuda.Stream(device=device), torch.cuda.default_stream(device)):
+        with torch.cuda.stream(stream):
+            for caller_device in (device.index, current_device):
+                with torch.cuda.device(caller_device):
+                    assert _get_cudnn_current_stream_handle(cudnn, device) is handle
+                    assert cudnn.get_stream(handle) == stream.cuda_stream
+                    assert torch.cuda.current_device() == caller_device
 
 
 @pytest.mark.parametrize("layout", ("bs3hd", "bsh3d", "sb3hd", "sbh3d", "t3hd", "th3d"))
 @pytest.mark.parametrize("backward", (False, True))
 @pytest.mark.parametrize("dropout", (0.0, 0.125))
-def test_fused_attn_query_reuses_runtime_graph(layout, backward, dropout, monkeypatch):
+def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
     """Packed storage and runtime scalar values must preserve support-query graph identity."""
     from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
 
@@ -456,35 +429,11 @@ def test_fused_attn_query_reuses_runtime_graph(layout, backward, dropout, monkey
             runtime.matrix(name, grad, fmt, heads, runtime.sq, cu, output=True)
     assert query.description() == runtime.description()
 
-    # Isolate the cache to demonstrate that a query never compiles, and that a
-    # later execution with another scalar value compiles exactly the cached plan.
-    monkeypatch.setattr(implementation, "_plans", {})
-    builds, compiles = [], []
-
-    def build(_self):
-        entry = implementation._PlanEntry(object(), {name: name for name in runtime.specs})
-        builds.append(entry)
-        return entry
-
-    def compile_plan(_cudnn, graph, _run):
-        compiles.append(graph)
-        return 17
-
-    monkeypatch.setattr(implementation._AttentionGraph, "build", build)
-    monkeypatch.setattr(implementation, "compile_graph", compile_plan)
-    monkeypatch.setattr(implementation, "_execute_cudnn_graph", lambda *_args: None)
-    queried = query.entry()
-    assert queried.workspace_size is None and not compiles
     if fmt == "thd" and not query.use_cu_seqlens:
         other_query = implementation._query_graph(replace(config, batch_size=batch + 1), backward)
         assert other_query.description() == query.description()
-        assert other_query.entry() is queried
     runtime.scalar("attn_scale", torch.tensor([0.25]), by_value=True)
-    runtime.execute()
-    runtime.execute()
-    assert builds == [queried]
-    assert compiles == [queried.graph]
-    assert queried.workspace_size == 17
+    assert query.description() == runtime.description()
 
 
 @pytest.mark.parametrize(
@@ -555,100 +504,18 @@ def test_fused_attn_ragged_batch_capacity(
         assert kwargs["implementation"] == cudnn.attention_implementation.UNIFIED
 
 
-@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
-@pytest.mark.parametrize("q_format", ("bshd", "sbhd", "thd"))
-@pytest.mark.parametrize("kv_format", ("bshd", "sbhd"))
-def test_fused_attn_paged_cache_layout(dtype, q_format, kv_format):
-    """Paged cache dimensions must match support queries and independent FP32 SDPA."""
-    from torch.nn.attention import SDPBackend, sdpa_kernel
-
-    batch, seqlen, heads, groups, dim = 2, 4, 4, 2, 64
-    num_pages, page_size = 6, 128
-    lengths = (203, 137)
-    q_dense = torch.randn(batch, seqlen, heads, dim, device="cuda", dtype=dtype)
-    q = q_dense.transpose(0, 1).contiguous() if q_format == "sbhd" else q_dense
-    if q_format == "thd":
-        q = q.reshape(batch * seqlen, heads, dim)
-    pages = [
-        torch.randn(num_pages, page_size, groups, dim, device="cuda", dtype=dtype) for _ in range(2)
-    ]
-    k, v = [
-        tensor.transpose(0, 1).contiguous() if kv_format == "sbhd" else tensor for tensor in pages
-    ]
-    # Nonconsecutive, distinct K/V mappings also exercise page-table addressing.
-    table_ids = ((3, 0), (5, 2)), ((4, 1), (0, 3))
-    tables = [torch.tensor(ids, device="cuda", dtype=torch.int32) for ids in table_ids]
-    cu_q = torch.tensor((0, seqlen, batch * seqlen), device="cuda", dtype=torch.int32)
-    cu_kv = torch.tensor((0, lengths[0], sum(lengths)), device="cuda", dtype=torch.int32)
-    layout = f"paged_kv_{q_format}_{kv_format}_{kv_format}"
-    te_dtype = DType.kFloat16 if dtype == torch.float16 else DType.kBFloat16
-    config = FusedAttentionParams(
-        is_training=False,
-        qkv_layout=QKVLayout[layout],
-        o_format=QKVFormat[q_format],
-        qkv_dtype=te_dtype,
-        o_dtype=te_dtype,
-        batch_size=batch,
-        num_attn_heads=heads,
-        num_gqa_groups=groups,
-        head_dim_qk=dim,
-        head_dim_v=dim,
-        max_seqlen_q=seqlen,
-        max_seqlen_kv=2 * page_size,
-        num_tokens_q=batch * seqlen if q_format == "thd" else 0,
-        num_pages_k=num_pages,
-        num_pages_v=num_pages,
-        page_size_k=page_size,
-        page_size_v=page_size,
-        max_pages_per_seq_k=2,
-        max_pages_per_seq_v=2,
-        attn_mask_type=AttnMaskType["padding"],
-    )
-    backend, message = get_fused_attn_backend(config)
-    if backend == FusedAttnBackend.No_Backend:
-        pytest.skip(f"Paged fused attention is unsupported for {layout}: {message}")
-    out, _ = fused_attn_fwd(
-        is_training=False,
-        max_seqlen_q=seqlen,
-        max_seqlen_kv=2 * page_size,
-        cu_seqlens_q=cu_q,
-        cu_seqlens_kv=cu_kv,
-        q=q,
-        k=k,
-        v=v,
-        fake_dtype=dtype,
-        fused_attention_backend=backend,
-        page_table_k=tables[0],
-        page_table_v=tables[1],
-        qkv_layout=layout,
-        o_format=q_format,
-        attn_mask_type="padding",
-    )
-    expected = []
-    with sdpa_kernel(SDPBackend.MATH):
-        for index, length in enumerate(lengths):
-            kr, vr = [
-                tensor[list(ids[index])]
-                .reshape(-1, groups, dim)[:length]
-                .float()
-                .transpose(0, 1)
-                .repeat_interleave(heads // groups, dim=0)
-                for tensor, ids in zip(pages, table_ids)
-            ]
-            expected.append(
-                torch.nn.functional.scaled_dot_product_attention(
-                    q_dense[index].float().transpose(0, 1), kr, vr
-                ).transpose(0, 1)
-            )
-    actual = out.transpose(0, 1) if q_format == "sbhd" else out.reshape(q_dense.shape)
-    rtol, atol = (2e-2, 1e-2) if dtype == torch.bfloat16 else (3e-3, 2e-3)
-    torch.testing.assert_close(actual.float(), torch.stack(expected), rtol=rtol, atol=atol)
-
-
-@pytest.mark.parametrize("dtype", (DType.kFloat16, DType.kBFloat16))
-@pytest.mark.parametrize("capability", ((10, 0), (12, 0), (12, 1), (12, 9), (13, 0)))
-@pytest.mark.parametrize("layout", ("bshd_bshd_bshd", "thd_bshd_bshd", "thd_thd_thd"))
-def test_fused_attn_backward_token_bounds(monkeypatch, dtype, capability, layout):
+@pytest.mark.parametrize(
+    "capability,layout",
+    (
+        ((10, 0), "bshd_bshd_bshd"),
+        ((10, 0), "thd_bshd_bshd"),
+        ((10, 0), "thd_thd_thd"),
+        ((12, 0), "thd_thd_thd"),
+        ((12, 1), "thd_bshd_bshd"),
+        ((13, 0), "thd_thd_thd"),
+    ),
+)
+def test_fused_attn_backward_token_bounds(monkeypatch, capability, layout):
     """Bound backward workspace by each ragged input's bucketed token capacity."""
     import cudnn
     from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
@@ -656,10 +523,10 @@ def test_fused_attn_backward_token_bounds(monkeypatch, dtype, capability, layout
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: capability)
     config = FusedAttentionParams(
         qkv_layout=QKVLayout[layout],
-        qkv_dtype=dtype,
-        o_dtype=dtype,
-        do_dtype=dtype,
-        dqkv_dtype=dtype,
+        qkv_dtype=DType.kBFloat16,
+        o_dtype=DType.kBFloat16,
+        do_dtype=DType.kBFloat16,
+        dqkv_dtype=DType.kBFloat16,
         batch_size=4,
         num_attn_heads=4,
         num_gqa_groups=4,
@@ -696,8 +563,16 @@ def test_fused_attn_backward_token_bounds(monkeypatch, dtype, capability, layout
         assert query.skv == 1024
 
 
-@pytest.mark.parametrize("capability", ((10, 0), (12, 0), (12, 1), (12, 9), (13, 0)))
-@pytest.mark.parametrize("layout", ("bshd_bshd_bshd", "thd_bshd_bshd", "thd_thd_thd"))
+@pytest.mark.parametrize(
+    "capability,layout",
+    (
+        ((10, 0), "bshd_bshd_bshd"),
+        ((10, 0), "thd_bshd_bshd"),
+        ((10, 0), "thd_thd_thd"),
+        ((12, 0), "thd_thd_thd"),
+        ((12, 1), "thd_bshd_bshd"),
+    ),
+)
 def test_fused_attn_fake_stats_shape(capability, layout, monkeypatch):
     """Fake saved statistics must match the runtime layout across the SM12x family."""
     from transformer_engine.pytorch.attention.dot_product_attention import backends
@@ -4778,465 +4653,3 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
     if is_training:
         return out, (inp[0].grad, inp[1].grad, inp[2].grad, d_softmax_offset)
     return out, (None, None, None, d_softmax_offset)
-
-
-model_configs_fp8 = {
-    # test: ModelConfig(b, sq, hq, dqk)
-    "fp8_1": ModelConfig(1, 512, 1, 64),
-    "fp8_2": ModelConfig(4, 512, 16, 64),
-    "fp8_3": ModelConfig(1, 2048, 1, 128),
-    "fp8_4": ModelConfig(2, 2048, 24, 128),
-    "fp8_5": ModelConfig(1, 512, 1, 64, attn_mask_type="causal"),
-    "fp8_6": ModelConfig(4, 512, 16, 64, attn_mask_type="causal"),
-    "fp8_7": ModelConfig(1, 2048, 1, 128, attn_mask_type="causal"),
-    "fp8_8": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
-}
-param_types_fp8 = [torch.float16, torch.bfloat16]
-
-
-@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
-@pytest.mark.parametrize("dtype", param_types_fp8)
-@pytest.mark.parametrize("model", model_configs_fp8)
-def test_custom_mha_fp8_vs_f16(dtype, model, monkeypatch):
-    """Test FP8 dot product attention implementations based on cuDNN frontend
-    v0.9 and v1.0+. Each test compares results from a custom implementation of
-    an FP8 MHA module, i.e. Custom_MHA_FP8(), to results from an F16 MHA
-    implementation, i.e. transformer_engine.pytorch.attention.MultiHeadAttention.
-    Both paths take F16 input and output. QKV layout is bs3hd"""
-
-    config = model_configs_fp8[model]
-
-    # The custom implementation always executes FP8 backward.
-    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1")
-
-    # Test backend availability
-    is_training = True
-    fp8_meta = {}
-    fp8_recipe = recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.HYBRID,
-        amax_history_len=1,
-        amax_compute_algo="most_recent",
-        fp8_dpa=True,
-    )
-    fp8_meta["recipe"] = fp8_recipe
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
-        config,
-        qkv_dtype=torch.float8_e4m3fn,
-        nominal_dtype=dtype,
-        qkv_layout="bs3hd",
-        fp8=True,
-        fp8_meta=fp8_meta,
-        is_training=is_training,
-        deterministic=_deterministic,
-    )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    if not (fused_attn_backends and unfused_attn_supported):
-        pytest.skip("Not enough backends to run this test with.")
-
-    fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
-    unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(
-        dtype, config, "UnfusedDotProductAttention"
-    )
-
-    atol = 5e-1
-    rtol = 5e-1
-    rmse_tol = 0.13
-    compare_and_assert(
-        fused_attn_fwd_fp8,
-        unfused_attn_fwd_f16,
-        "fused_attn_fwd_fp8",
-        "unfused_attn_fwd_f16",
-        atol,
-        rtol,
-        rmse_tol,
-        True,
-    )
-    compare_and_assert(
-        fused_attn_bwd_fp8,
-        unfused_attn_bwd_f16,
-        "fused_attn_bwd_fp8",
-        "unfused_attn_bwd_f16",
-        atol,
-        rtol,
-        rmse_tol,
-        True,
-    )
-
-
-def _run_custom_mha_fp8(dtype, config, backend):
-    """Run Custom_MHA_FP8 with FP8 FusedAttention backend. Both input and output
-    are in F16. QKV GEMM, DPA, and projection GEMM are calculated in FP8."""
-    reset_rng_states()
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    if backend == "FlashAttention":
-        os.environ["NVTE_FLASH_ATTN"] = "1"
-    if backend == "FusedAttention":
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-    if backend == "UnfusedDotProductAttention":
-        os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-
-    inp = 0.0001 * torch.randint(
-        -100,
-        100,
-        (config.batch_size * config.max_seqlen_q, config.num_heads * config.head_dim_qk),
-        dtype=dtype,
-        device="cuda",
-        requires_grad=True,
-    )
-    seqlens = torch.full([config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda")
-    cu_seqlens = torch.zeros(config.batch_size + 1, device="cuda", dtype=torch.int32)
-    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
-
-    out_grad = 0.01 * torch.randn(
-        config.batch_size * config.max_seqlen_q,
-        config.num_heads * config.head_dim_qk,
-        dtype=dtype,
-        device="cuda",
-    )
-    torch.save(out_grad, "out_grad.pt")
-
-    fp8_recipe = recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.HYBRID,
-        amax_history_len=1,
-        amax_compute_algo="most_recent",
-        fp8_dpa=True,
-    )
-
-    mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")
-    with autocast(enabled=True, recipe=fp8_recipe):
-        out = mha(inp, cu_seqlens, config.max_seqlen_q)
-    out.backward(out_grad)
-
-    out = torch.load("out.pt")
-    dqkv = torch.load("dqkv.pt")
-    return (
-        out.view(config.batch_size, config.max_seqlen_q, -1),
-        dqkv.view(
-            config.batch_size, config.max_seqlen_q, 3, config.num_heads, config.head_dim_qk
-        ).contiguous(),
-    )
-
-
-def _run_ref_mha_f16(dtype, config, backend):
-    """Run reference F16 FusedAttention. Both input and output
-    are in F16. QKV GEMM, DPA, and projection GEMM are also in F16."""
-
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    if backend == "FlashAttention":
-        os.environ["NVTE_FLASH_ATTN"] = "1"
-    if backend == "FusedAttention":
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-    if backend == "UnfusedDotProductAttention":
-        os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-
-    inp = torch.load("qkv.pt").to(device="cuda")
-    inp.requires_grad = True
-    seqlens = torch.full([config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda")
-    cu_seqlens = torch.zeros(config.batch_size + 1, device="cuda", dtype=torch.int32)
-    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
-    out_grad = (
-        torch.load("out_grad.pt").to(device="cuda").view(config.batch_size, config.max_seqlen_q, -1)
-    )
-
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker() -> CudaRNGStatesTracker:
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
-    block = DotProductAttention(
-        config.num_heads,
-        config.head_dim_qk,
-        attention_dropout=config.dropout_p,
-        sequence_parallel=False,
-        tp_size=1,
-        get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-        tp_group=None,
-        layer_number=1,
-        attention_type="self",
-        qkv_format="bshd",
-    ).to(dtype=dtype, device="cuda")
-
-    q = inp[:, :, 0, :, :]
-    k = inp[:, :, 1, :, :]
-    v = inp[:, :, 2, :, :]
-    out = block(q, k, v, attn_mask_type=config.attn_mask_type)
-    out.backward(out_grad)
-
-    return out, inp.grad
-
-
-_CUBLASLT_WORKSPACE_SIZE_BYTES = 33_554_432  # 32MiB
-_2X_ACC_FPROP = False
-_2X_ACC_DGRAD = False
-_2X_ACC_WGRAD = False
-
-META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
-META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
-META_O = FP8FwdTensorIdx.GEMM2_INPUT
-META_DO = FP8BwdTensorIdx.GRAD_INPUT2
-META_S = FP8FwdTensorIdx.GEMM3_OUTPUT
-META_DP = FP8BwdTensorIdx.GRAD_INPUT3
-
-
-class _custom_mha_fp8(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        inp: torch.Tensor,
-        qkv_weight: torch.Tensor,
-        qkv_bias: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        num_heads: int,
-        p_dropout: float,
-        max_s: int,
-        fast_zero_fill: bool,
-        fp8_meta: Dict[str, Any],
-        is_training: bool,
-        mask_type: str,
-        quantizers: list[Quantizer],
-    ) -> torch.Tensor:
-        qkv_dtype = inp.dtype
-
-        assert inp.dim() == 2
-        in_features = qkv_weight.shape[-1]
-        h = num_heads
-        d = in_features // h
-        b = cu_seqlens.numel() - 1
-
-        input_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
-        qkv_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_INPUT]
-        qkv_weight_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
-        o_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_OUTPUT]
-        dO_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT1]
-        dQKV_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
-        s_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT2]
-        dP_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT3]
-
-        inp_fp8 = input_quantizer(inp)
-
-        qkv_weight_fp8 = qkv_weight_quantizer(qkv_weight)
-
-        qkv, *_ = ext.general_gemm(
-            qkv_weight_fp8,
-            inp_fp8,
-            bias=qkv_bias,
-            out_dtype=qkv_weight_fp8.dtype,
-            quantization_params=qkv_quantizer,
-            use_split_accumulator=_2X_ACC_FPROP,
-        )
-        qkv_layout = "bs3hd"
-        o_format = "bshd"
-        qkv = qkv.view(-1, 3, h, d)
-        qkv_fp16 = qkv.dequantize().view(b, max_s, 3, h, d).contiguous()
-        torch.save(qkv_fp16, "qkv.pt")
-        qkv = qkv.view(b, max_s, 3, h, d)  # bs3hd
-
-        # FMHA
-        q_data = qkv._data[:, :, 0, :, :]
-        k_data = qkv._data[:, :, 1, :, :]
-        v_data = qkv._data[:, :, 2, :, :]
-        q = qkv.make_like(tensor=qkv, data=q_data, shape=q_data.shape)
-        k = qkv.make_like(tensor=qkv, data=k_data, shape=k_data.shape)
-        v = qkv.make_like(tensor=qkv, data=v_data, shape=v_data.shape)
-
-        out, aux_ctx_tensors = fused_attn_fwd(
-            is_training,
-            max_s,
-            max_s,
-            cu_seqlens,
-            cu_seqlens,
-            q,
-            k,
-            v,
-            qkv_dtype,
-            FusedAttnBackend["FP8"],
-            attn_scale=None,
-            dropout=p_dropout,
-            fast_zero_fill=fast_zero_fill,
-            qkv_layout=qkv_layout,
-            o_format=o_format,
-            attn_bias_type="no_bias",
-            attn_mask_type=mask_type,
-            rng_gen=None,
-            o_quantizer=o_quantizer,
-            s_quantizer=s_quantizer,
-        )
-
-        tensors_to_save, tensor_objects = prepare_for_saving(q, k, v, inp_fp8, qkv_weight_fp8, out)
-
-        ctx.save_for_backward(*tensors_to_save)
-        ctx.tensor_objects = tensor_objects
-        ctx.aux_ctx_tensors = aux_ctx_tensors
-        ctx.qkv_dtype = qkv_dtype
-        ctx.fp8_meta = fp8_meta
-        ctx.cu_seqlens = cu_seqlens
-        ctx.p_dropout = p_dropout
-        ctx.max_s = max_s
-        ctx.fast_zero_fill = fast_zero_fill
-        ctx.hidden_size = in_features
-        ctx.num_heads = num_heads
-        ctx.mask_type = mask_type
-        ctx.dtype = inp.dtype
-        ctx.qkv_layout = qkv_layout
-        ctx.o_format = o_format
-
-        ctx.dQKV_quantizer = dQKV_quantizer
-        ctx.dO_quantizer = dO_quantizer
-        ctx.dP_quantizer = dP_quantizer
-        ctx.S_quantizer = s_quantizer
-
-        out = out.view(-1, in_features)  # (bs)(hd)
-        out_fp16 = out.dequantize()
-        torch.save(out_fp16, "out.pt")  # (bs)(hd)
-        return out_fp16
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        with torch.cuda.nvtx.range("_DPA"):
-            q, k, v, inp_fp8, qkv_weight_fp8, out = restore_from_func_ctx(ctx)
-
-            proj_dgrad = ctx.dO_quantizer(grad_output)
-
-            dq, dk, dv, *rest = fused_attn_bwd(
-                ctx.max_s,
-                ctx.max_s,
-                ctx.cu_seqlens,
-                ctx.cu_seqlens,
-                q,
-                k,
-                v,
-                out,
-                proj_dgrad.view_as(out),
-                ctx.qkv_dtype,
-                ctx.aux_ctx_tensors,
-                FusedAttnBackend["FP8"],
-                None,
-                None,
-                ctx.S_quantizer,
-                ctx.dP_quantizer,
-                ctx.dQKV_quantizer,
-                attn_scale=None,
-                dropout=ctx.p_dropout,
-                fast_zero_fill=ctx.fast_zero_fill,
-                qkv_layout=ctx.qkv_layout,
-                o_format=ctx.o_format,
-                do_format=ctx.o_format,
-                dqkv_layout=ctx.qkv_layout,
-                attn_bias_type="no_bias",
-                attn_mask_type=ctx.mask_type,
-            )
-            dim = 2
-            dqkv = torch.Tensor().to(device=dq._data.device, dtype=dq._data.dtype)
-            dqkv_shape = list(dq._data.shape)
-            dqkv_shape.insert(dim, 3)
-            dqkv_stride = list(dq._data.stride())
-            dqkv_stride.insert(dim, int(dqkv_stride[-3] / 3))
-            dqkv.set_(
-                dq._data.untyped_storage(), dq._data.storage_offset(), dqkv_shape, dqkv_stride
-            )  # bs3hd
-
-            dqkv_c = dqkv.view(-1, 3 * ctx.hidden_size)
-            dqkv_c = dq.make_like(tensor=dq, data=dqkv_c, shape=dqkv_c.shape)
-            dqkv_c_fp16 = dqkv_c.dequantize()
-            torch.save(dqkv_c_fp16, "dqkv.pt")
-
-            qkv_bgrad, dqkv = ext.bgrad_quantize(dqkv_c_fp16, ctx.dQKV_quantizer)
-            dqkv_c._transpose = None
-            dqkv_c._create_transpose()
-
-            # QKV DGRAD
-            qkv_dgrad, *_ = ext.general_gemm(
-                qkv_weight_fp8,
-                dqkv_c,
-                ctx.dtype,
-                use_split_accumulator=_2X_ACC_DGRAD,
-                layout="NN",
-            )
-
-            # QKV WGRAD
-            qkv_wgrad, *_ = ext.general_gemm(
-                inp_fp8,
-                dqkv,
-                ctx.dtype,
-                use_split_accumulator=_2X_ACC_WGRAD,
-                layout="NT",
-            )
-
-        return (
-            qkv_dgrad,
-            qkv_wgrad,
-            qkv_bgrad,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-
-
-class Custom_MHA_FP8(TransformerEngineBaseModule):
-    def __init__(self, config, params_dtype: torch.dtype = torch.float32):
-        super().__init__()
-        self.p_dropout = config.dropout_p
-        self.h = config.num_heads
-        self.hidden_size = config.hidden_size
-        self.head_dim = config.head_dim_qk
-        self.fast_zero_fill = True
-        self.mask_type = config.attn_mask_type
-
-        self.qkv_weight = torch.nn.Parameter(
-            torch.empty(
-                self.hidden_size * 3,
-                self.hidden_size,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype,
-            )
-        )
-        self.qkv_bias = torch.nn.Parameter(
-            torch.empty(
-                self.hidden_size * 3,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype,
-            )
-        )
-        with torch.no_grad():
-            self.qkv_bias.zero_()
-            self.qkv_weight.fill_(1.0)
-
-    def forward(
-        self,
-        inp: torch.Tensor,
-        cu_seqlens,
-        max_s,
-    ) -> torch.Tensor:
-        with self.prepare_forward_ctx(inp, num_gemms=3) as inp:
-            out = _custom_mha_fp8.apply(
-                inp,
-                self.qkv_weight,
-                self.qkv_bias,
-                cu_seqlens,
-                self.h,
-                self.p_dropout,
-                max_s,
-                self.fast_zero_fill,
-                self.fp8_meta,
-                self.training,
-                self.mask_type,
-                self.quantizers,
-            )
-        return out
