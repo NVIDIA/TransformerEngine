@@ -23,7 +23,7 @@ import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
 from transformer_engine.pytorch.device import te_device_type
-from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+from transformer_engine.pytorch.constants import (
     QKVLayout,
     QKVFormat,
     AttnBiasType,
@@ -36,6 +36,9 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DO,
     META_S,
     META_DP,
+    TE_DType,
+    DType,
+    MXFP8_BLOCK_SCALING_SIZE,
 )
 from transformer_engine.common.cudnn.mxfp8 import (
     quantization_layouts as mxfp8_quantization_layouts,
@@ -56,7 +59,6 @@ from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
-from transformer_engine.pytorch.constants import TE_DType, DType, MXFP8_BLOCK_SCALING_SIZE
 
 
 from transformer_engine.pytorch.utils import (

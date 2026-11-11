@@ -46,13 +46,13 @@ from transformer_engine.pytorch.constants import (
     CPLoadBalancingStrategy,
     QKVLayouts,
     dist_group_type,
-)
-from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    fused_attn_fwd,
-    fused_attn_bwd,
     FusedAttnBackend,
     META_O,
     META_QKV,
+)
+from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import (
+    fused_attn_fwd,
+    fused_attn_bwd,
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import get_distributed_world_size

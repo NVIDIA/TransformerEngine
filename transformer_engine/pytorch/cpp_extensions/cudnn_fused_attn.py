@@ -9,8 +9,10 @@ Graph construction, plan caching, and execution use the Python frontend.
 """
 
 from dataclasses import dataclass, replace
+import math
 import os
 import threading
+from typing import List, Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
@@ -40,7 +42,21 @@ from .cudnn import (
 )
 from ..tensor.float8_tensor import Float8Quantizer
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from ..constants import DType
+from ..quantized_tensor import Quantizer
+from ..constants import (
+    DType,
+    QKVLayout,
+    QKVFormat,
+    AttnMaskType,
+    AttnBiasType,
+    SoftmaxType,
+    FusedAttnBackend,
+)
+
+__all__ = ["fused_attn_fwd", "fused_attn_bwd"]
+
+_FP8_THREADS_PER_CTA = 128
+_F16_RNG_ELTS_PER_THREAD = 16
 
 _plans = {}
 _cache_lock = threading.RLock()
@@ -464,8 +480,6 @@ def _backward_config(config):
 
 def _query_graph(config, backward):
     """Describe a support query without allocating tensors or touching RNG state."""
-    from .fused_attn import QKVLayout, QKVFormat, AttnMaskType, AttnBiasType, SoftmaxType
-
     if backward:
         config = _backward_config(config)
 
@@ -656,8 +670,6 @@ def _query_graph(config, backward):
 
 def _support_reason(config, version, capability, backward=False):
     """Check TE's hardware, recipe, and known cuDNN defect exclusions."""
-    from .fused_attn import QKVLayout, AttnMaskType, SoftmaxType
-
     layout = next(k for k, v in QKVLayout.items() if v == config.qkv_layout)
     q_format, kv_format = _formats(layout)
     fp8 = DType.cast(config.qkv_dtype) in (DType.kFloat8E4M3, DType.kFloat8E5M2)
@@ -751,8 +763,6 @@ def _support_reason(config, version, capability, backward=False):
 
 def get_fused_attn_backend(config):
     """Select an attention backend by validating the Python frontend graphs."""
-    from .fused_attn import FusedAttnBackend
-
     cudnn = _import_cudnn_frontend()
     if config.bias_type == tex.NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS:
         return FusedAttnBackend.No_Backend, "Fused attention does not support pre-scale bias."
@@ -784,9 +794,118 @@ def get_fused_attn_backend(config):
         return FusedAttnBackend.No_Backend, str(exc)
 
 
-def fused_attn_fwd(params):
-    """Execute forward; preserve the extension's output and auxiliary tensor order."""
-    p = _normalize(params)
+def fused_attn_fwd(
+    is_training: bool,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    fake_dtype: torch.dtype,
+    fused_attention_backend: FusedAttnBackend,
+    attn_bias: torch.Tensor = None,
+    cu_seqlens_q_padded: torch.Tensor = None,
+    cu_seqlens_kv_padded: torch.Tensor = None,
+    page_table_k: torch.Tensor = None,
+    page_table_v: torch.Tensor = None,
+    s_quantizer: Quantizer = None,
+    o_quantizer: Quantizer = None,
+    attn_scale: float = None,
+    dropout: float = 0.0,
+    fast_zero_fill: bool = True,
+    qkv_layout: str = "sbh3d",
+    o_format: str = "sbhd",
+    qkv_scale_inv_format: str = None,
+    attn_bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+    softmax_type: str = "vanilla",
+    window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = None,
+    rng_gen: torch.Generator = None,
+    softmax_offset: torch.Tensor = None,
+    return_max_logit: bool = False,
+    cuda_graph: bool = False,
+) -> Tuple[Union[torch.Tensor, None], ...]:
+    """Execute forward, returning output, backward auxiliaries, and optional max logits."""
+    if bottom_right_diagonal is None:
+        bottom_right_diagonal = attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }
+
+    if attn_scale is None:
+        d = q.size(-1)
+        attn_scale = 1.0 / math.sqrt(d)
+
+    if attn_bias_type not in ["no_bias", "alibi"]:
+        if attn_bias is None:
+            raise ValueError(
+                f"attn_bias tensor cannot be None when attn_bias_type={attn_bias_type!r}."
+            )
+        if attn_bias.dtype != q.dtype:
+            raise ValueError(
+                "attn_bias tensor must have the same dtype as q and kv: "
+                f"attn_bias.dtype={attn_bias.dtype} but q.dtype={q.dtype}."
+            )
+
+    # Accept the pybind enum for backward compatibility.
+    fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
+    if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+        raise ValueError(
+            "Fused attention does not support this input combination:"
+            f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
+            f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
+            f" q.dtype={q.dtype}, backend={fused_attention_backend}."
+        )
+
+    if fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
+        rng_elts_per_thread = _F16_RNG_ELTS_PER_THREAD
+    elif fused_attention_backend == FusedAttnBackend["FP8"]:
+        rng_elts_per_thread = (
+            max_seqlen_q * max_seqlen_q + _FP8_THREADS_PER_CTA - 1
+        ) // _FP8_THREADS_PER_CTA
+    else:
+        raise ValueError(f"Unsupported backend {fused_attention_backend}")
+
+    p = _normalize(
+        {
+            "is_training": is_training,
+            "max_seqlen_q": max_seqlen_q,
+            "max_seqlen_kv": max_seqlen_kv,
+            "cu_seqlens_q": cu_seqlens_q,
+            "cu_seqlens_kv": cu_seqlens_kv,
+            "q": q,
+            "k": k,
+            "v": v,
+            "fake_dtype": fake_dtype,
+            "fused_attention_backend": fused_attention_backend,
+            "attn_bias": attn_bias,
+            "cu_seqlens_q_padded": cu_seqlens_q_padded,
+            "cu_seqlens_kv_padded": cu_seqlens_kv_padded,
+            "page_table_k": page_table_k,
+            "page_table_v": page_table_v,
+            "s_quantizer": s_quantizer,
+            "o_quantizer": o_quantizer,
+            "attn_scale": attn_scale,
+            "dropout": dropout,
+            "fast_zero_fill": fast_zero_fill,
+            "qkv_layout": qkv_layout,
+            "o_format": o_format,
+            "qkv_scale_inv_format": qkv_scale_inv_format,
+            "attn_bias_type": attn_bias_type,
+            "attn_mask_type": attn_mask_type,
+            "softmax_type": softmax_type,
+            "window_size": window_size,
+            "bottom_right_diagonal": bottom_right_diagonal,
+            "rng_gen": rng_gen,
+            "softmax_offset": softmax_offset,
+            "return_max_logit": return_max_logit,
+            "cuda_graph": cuda_graph,
+            "rng_elts_per_thread": rng_elts_per_thread,
+        }
+    )
     if not p["is_training"]:
         p["dropout"] = 0.0
     with torch.cuda.device(p["q"].device):
@@ -830,12 +949,141 @@ def fused_attn_fwd(params):
             aux_ctx_tensors[0] = stats[: attn.b]
             if maximum is not None:
                 maximum = maximum[: attn.b]
-        return out, aux_ctx_tensors, maximum
+
+    if return_max_logit:
+        qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+        # Reduce over batch and sequence positions, excluding THD storage padding.
+        amax_dims = (0, 2) if maximum.ndim == 3 else (0, 2, 3)
+
+        if qkv_format == "thd":
+            if maximum.ndim == 4:
+                seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(device=maximum.device)
+                sq_idx = torch.arange(maximum.shape[2], device=maximum.device).view(1, 1, -1, 1)
+                valid = sq_idx < seqlens_q.view(-1, 1, 1, 1)
+                maximum = maximum.masked_fill(~valid, float("-inf"))
+            elif maximum.ndim == 3:
+                if cu_seqlens_q_padded is not None:
+                    # Exclude padding; CP may pass nonzero padded offsets.
+                    actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
+                        device=maximum.device
+                    )
+                    tq = maximum.shape[0]
+                    starts = cu_seqlens_q_padded[:-1].to(device=maximum.device)
+                    ends = (starts + actual_seqlens).clamp(max=tq)
+                    delta = torch.zeros(tq + 1, dtype=torch.int32, device=maximum.device)
+                    updates = torch.ones_like(starts, dtype=torch.int32)
+                    delta.scatter_add_(0, starts.clamp(max=tq), updates)
+                    delta.scatter_add_(0, ends, -updates)
+                    valid = delta[:-1].cumsum(0) > 0
+                    maximum = maximum.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
+
+        # Max -> max_logit [h]
+        max_logit = torch.amax(maximum, dim=amax_dims).to(dtype=out.dtype)
+        return out, aux_ctx_tensors, max_logit
+
+    return out, aux_ctx_tensors
 
 
-def fused_attn_bwd(params):
-    """Execute backward, including FP8/MXFP8 and shared packed gradient storage."""
-    p = _normalize(params)
+def fused_attn_bwd(
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    d_o: torch.Tensor,
+    fake_dtype: torch.dtype,
+    aux_ctx_tensors: List[torch.Tensor],
+    fused_attention_backend: FusedAttnBackend,
+    cu_seqlens_q_padded: torch.Tensor = None,
+    cu_seqlens_kv_padded: torch.Tensor = None,
+    s_quantizer: Quantizer = None,
+    dp_quantizer: Quantizer = None,
+    dqkv_quantizer: Quantizer = None,
+    attn_scale: Optional[float] = None,
+    dropout: float = 0.0,
+    fast_zero_fill: bool = True,
+    qkv_layout: str = "sbh3d",
+    o_format: str = "sbhd",
+    do_format: str = "sbhd",
+    dqkv_layout: str = "sbh3d",
+    qkv_scale_inv_format: str = None,
+    do_scale_inv_format: str = None,
+    attn_bias_type: str = "no_bias",
+    attn_mask_type: str = "padding",
+    softmax_type: str = "vanilla",
+    window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = None,
+    deterministic: bool = False,
+    cuda_graph: bool = False,
+) -> Tuple[Union[torch.Tensor, None], ...]:
+    """Execute backward and return Q/K/V, bias, and softmax-offset gradients."""
+    if bottom_right_diagonal is None:
+        bottom_right_diagonal = attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }
+
+    if attn_scale is None:
+        d = q.size(-1)
+        attn_scale = 1.0 / math.sqrt(d)
+
+    # Accept the pybind enum for backward compatibility.
+    fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
+    if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+        raise ValueError(
+            "Fused attention backward does not support this input combination:"
+            f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
+            f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
+            f" q.dtype={q.dtype}, backend={fused_attention_backend}."
+        )
+
+    if len(aux_ctx_tensors) < 1:
+        raise ValueError(
+            "aux_ctx_tensors must contain rng_state as its last element,"
+            f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
+            f" for backend={fused_attention_backend}."
+        )
+
+    p = _normalize(
+        {
+            "max_seqlen_q": max_seqlen_q,
+            "max_seqlen_kv": max_seqlen_kv,
+            "cu_seqlens_q": cu_seqlens_q,
+            "cu_seqlens_kv": cu_seqlens_kv,
+            "q": q,
+            "k": k,
+            "v": v,
+            "o": o,
+            "d_o": d_o,
+            "fake_dtype": fake_dtype,
+            "aux_ctx_tensors": aux_ctx_tensors,
+            "fused_attention_backend": fused_attention_backend,
+            "cu_seqlens_q_padded": cu_seqlens_q_padded,
+            "cu_seqlens_kv_padded": cu_seqlens_kv_padded,
+            "s_quantizer": s_quantizer,
+            "dp_quantizer": dp_quantizer,
+            "dqkv_quantizer": dqkv_quantizer,
+            "attn_scale": attn_scale,
+            "dropout": dropout,
+            "fast_zero_fill": fast_zero_fill,
+            "qkv_layout": qkv_layout,
+            "o_format": o_format,
+            "do_format": do_format,
+            "dqkv_layout": dqkv_layout,
+            "qkv_scale_inv_format": qkv_scale_inv_format,
+            "do_scale_inv_format": do_scale_inv_format,
+            "attn_bias_type": attn_bias_type,
+            "attn_mask_type": attn_mask_type,
+            "softmax_type": softmax_type,
+            "window_size": window_size,
+            "bottom_right_diagonal": bottom_right_diagonal,
+            "deterministic": deterministic,
+            "cuda_graph": cuda_graph,
+        }
+    )
     aux = iter(p["aux_ctx_tensors"])
     stats, p["rng_state"] = next(aux), next(aux)
     p["attn_bias"] = next(aux) if p["attn_bias_type"] not in ("no_bias", "alibi") else None

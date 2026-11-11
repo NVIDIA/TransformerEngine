@@ -46,16 +46,18 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
-from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+from transformer_engine.pytorch.constants import (
     FusedAttnBackend,
     AttnMaskType,
     QKVFormat,
     QKVLayout,
-    fused_attn_bwd,
-    fused_attn_fwd,
     SoftmaxType,
 )
-from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import get_fused_attn_backend
+from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import (
+    fused_attn_fwd,
+    fused_attn_bwd,
+    get_fused_attn_backend,
+)
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
