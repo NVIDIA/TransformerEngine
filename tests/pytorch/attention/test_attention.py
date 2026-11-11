@@ -392,7 +392,8 @@ def test_fused_attn_python_execution(monkeypatch, dtype, qkv_format):
 
 @pytest.mark.parametrize("layout", ("bs3hd", "bsh3d", "sb3hd", "sbh3d", "t3hd", "th3d"))
 @pytest.mark.parametrize("backward", (False, True))
-def test_fused_attn_query_reuses_runtime_graph(layout, backward, monkeypatch):
+@pytest.mark.parametrize("dropout", (0.0, 0.125))
+def test_fused_attn_query_reuses_runtime_graph(layout, backward, dropout, monkeypatch):
     """Packed storage and runtime scalar values must preserve support-query graph identity."""
     from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
 
@@ -418,7 +419,8 @@ def test_fused_attn_query_reuses_runtime_graph(layout, backward, monkeypatch):
         attn_mask_type="padding" if fmt == "thd" else "no_mask",
         attn_bias_type="no_bias",
         softmax_type="vanilla",
-        dropout=0.0,
+        dropout=dropout,
+        rng_state=torch.zeros(2, device="cuda", dtype=torch.int64),
         attn_scale=0.125,
         window_size=(-1, -1),
         bottom_right_diagonal=True,
@@ -436,6 +438,7 @@ def test_fused_attn_query_reuses_runtime_graph(layout, backward, monkeypatch):
         num_tokens_q=batch * seqlen if fmt == "thd" else 0,
         num_tokens_kv=batch * seqlen if fmt == "thd" else 0,
         attn_mask_type=AttnMaskType[params["attn_mask_type"]],
+        dropout=dropout,
     )
     query = implementation._query_graph(config, backward)
     runtime = implementation._AttentionGraph(params, backward)
@@ -470,12 +473,84 @@ def test_fused_attn_query_reuses_runtime_graph(layout, backward, monkeypatch):
     monkeypatch.setattr(implementation, "_execute_cudnn_graph", lambda *_args: None)
     queried = query.entry()
     assert queried.workspace_size is None and not compiles
+    if fmt == "thd" and not query.use_cu_seqlens:
+        other_query = implementation._query_graph(replace(config, batch_size=batch + 1), backward)
+        assert other_query.description() == query.description()
+        assert other_query.entry() is queried
     runtime.scalar("attn_scale", torch.tensor([0.25]), by_value=True)
     runtime.execute()
     runtime.execute()
     assert builds == [queried]
     assert compiles == [queried.graph]
     assert queried.workspace_size == 17
+
+
+@pytest.mark.parametrize(
+    "backward,dropout,version,fp8,layout,capability,expected_batch,direct",
+    (
+        (False, 0.0, 92300, False, "thd_thd_thd", (10, 0), 64, False),
+        (False, 0.0, 92400, False, "thd_thd_thd", (10, 0), 33, True),
+        (False, 0.0, 92400, True, "thd_thd_thd", (10, 0), 64, False),
+        (False, 0.0, 92500, True, "thd_thd_thd", (10, 0), 33, True),
+        (False, 0.125, 92700, False, "thd_thd_thd", (10, 0), 64, False),
+        (True, 0.0, 92700, False, "thd_thd_thd", (10, 0), 64, False),
+        (True, 0.0, 92700, True, "thd_thd_thd", (10, 0), 64, False),
+        (True, 0.0, 92700, False, "thd_bshd_bshd", (10, 0), 64, False),
+        (True, 0.0, 92700, False, "thd_sbhd_sbhd", (10, 0), 64, False),
+        (True, 0.0, 92700, False, "thd_thd_thd", (12, 0), 33, False),
+        (True, 0.0, 92700, False, "thd_thd_thd", (12, 1), 33, False),
+        (True, 0.0, 92700, False, "bshd_bshd_bshd", (10, 0), 33, False),
+    ),
+)
+def test_fused_attn_ragged_batch_capacity(
+    backward, dropout, version, fp8, layout, capability, expected_batch, direct, monkeypatch
+):
+    """Match common forward/backward batch capacities and cumulative-length inputs."""
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    monkeypatch.setattr(cudnn, "backend_version", lambda: version)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: capability)
+    dtype = DType.kFloat8E4M3 if fp8 else DType.kBFloat16
+    config = FusedAttentionParams(
+        qkv_layout=QKVLayout[layout],
+        qkv_dtype=dtype,
+        batch_size=33,
+        num_attn_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=64,
+        head_dim_v=64,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        num_tokens_q=4096,
+        num_tokens_kv=4096,
+        attn_mask_type=AttnMaskType["padding"],
+        dropout=dropout,
+    )
+    query = implementation._query_graph(config, backward)
+    assert query.b == 33
+    assert query.graph_b == expected_batch
+    assert query.use_cu_seqlens == direct
+    assert query.specs["q"].dim[0] == expected_batch
+    assert query.specs["seq_q"].dim == (expected_batch + direct, 1, 1, 1)
+    if layout.startswith("thd"):
+        assert query.specs["q_offset"].dim == (expected_batch + 1, 1, 1, 1)
+        assert query.specs["q_offset"].dtype == ("INT32" if direct else "INT64")
+        assert query.specs["q"].ragged_offset_multiplier == (256 if direct else 1)
+
+    graph = Mock()
+    if fp8:
+        operation = graph.sdpa_fp8_backward if backward else graph.sdpa_fp8
+        operation.return_value = tuple(Mock() for _ in range(7 if backward else 4))
+    else:
+        operation = graph.sdpa_backward if backward else graph.sdpa
+        operation.return_value = tuple(Mock() for _ in range(3 if backward else 2))
+    implementation.build_attention_graph(cudnn, graph, query.description())
+    kwargs = operation.call_args.kwargs
+    assert ("cu_seq_len_q" in kwargs) == direct
+    assert ("seq_len_q" in kwargs) == (not direct)
+    if direct:
+        assert kwargs["implementation"] == cudnn.attention_implementation.UNIFIED
 
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
@@ -656,17 +731,29 @@ def test_fused_attn_fake_stats_shape(capability, layout, monkeypatch):
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
 @pytest.mark.parametrize("kv_format", ("thd", "bshd", "sbhd"))
-def test_fused_attn_packed_backward(dtype, kv_format):
+@pytest.mark.parametrize("batch", (3, 33))
+def test_fused_attn_packed_backward(dtype, kv_format, batch):
     """Packed backward must match FP32 SDPA with unequal lengths and padded capacities."""
     if device_compute_capability < (9, 0):
         pytest.skip("FP16/BF16 THD fused attention requires SM90 or later")
-    q_lengths, kv_lengths = (64, 128, 32), (96, 160, 64)
-    q_offsets = (0, 128, 384, 512)
-    kv_offsets = (0, 384, 768, 1152) if kv_format == "thd" else (0, 256, 512, 768)
-    cu_q = torch.tensor((0, 64, 192, 224), device="cuda", dtype=torch.int32)
-    cu_kv = torch.tensor((0, 96, 256, 320), device="cuda", dtype=torch.int32)
-    q = torch.randn(512, 4, 64, device="cuda", dtype=dtype)
-    kv_shape = {"thd": (1152, 4, 64), "bshd": (3, 256, 4, 64), "sbhd": (256, 3, 4, 64)}
+    q_lengths, kv_lengths = (64, 128, 32) * (batch // 3), (96, 160, 64) * (batch // 3)
+    q_offsets = [0]
+    for capacity in (128, 256, 128) * (batch // 3):
+        q_offsets.append(q_offsets[-1] + capacity)
+    kv_capacity = 384 if kv_format == "thd" else 256
+    kv_offsets = tuple(index * kv_capacity for index in range(batch + 1))
+    cu_q = torch.tensor((0, *q_lengths), device="cuda", dtype=torch.int32).cumsum(
+        0, dtype=torch.int32
+    )
+    cu_kv = torch.tensor((0, *kv_lengths), device="cuda", dtype=torch.int32).cumsum(
+        0, dtype=torch.int32
+    )
+    q = torch.randn(q_offsets[-1], 4, 64, device="cuda", dtype=dtype)
+    kv_shape = {
+        "thd": (kv_offsets[-1], 4, 64),
+        "bshd": (batch, 256, 4, 64),
+        "sbhd": (256, batch, 4, 64),
+    }
     k, v = [torch.randn(kv_shape[kv_format], device="cuda", dtype=dtype) for _ in range(2)]
     layout = f"thd_{kv_format}_{kv_format}"
     kwargs = dict(
@@ -720,6 +807,69 @@ def test_fused_attn_packed_backward(dtype, kv_format):
                 torch.testing.assert_close(
                     actual[active].float(), ref.grad[active], rtol=rtol, atol=atol
                 )
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("batch", (3, 33))
+def test_fused_attn_ragged_dropout(dtype, batch):
+    """Bucketed forward/backward graphs preserve dropout numerics and packed padding."""
+    if device_compute_capability < (9, 0):
+        pytest.skip("FP16/BF16 THD fused attention requires SM90 or later")
+    heads, dim, capacity, dropout = 2, 64, 64, 0.25
+    lengths = (16, 32, 64) * (batch // 3)
+    cu = torch.tensor((0, *lengths), device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    offsets = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * capacity
+    q, k = [
+        0.1 * torch.randn(batch * capacity, heads, dim, device="cuda", dtype=dtype)
+        for _ in range(2)
+    ]
+    v = torch.zeros_like(q)
+    for index, length in enumerate(lengths):
+        start = index * capacity
+        v[start : start + length] = torch.eye(length, dim, device="cuda", dtype=dtype)[:, None, :]
+    kwargs = dict(
+        max_seqlen_q=capacity,
+        max_seqlen_kv=capacity,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        cu_seqlens_q_padded=offsets,
+        cu_seqlens_kv_padded=offsets,
+        q=q,
+        k=k,
+        v=v,
+        fake_dtype=dtype,
+        fused_attention_backend=FusedAttnBackend.F16_arbitrary_seqlen,
+        qkv_layout="thd_thd_thd",
+        o_format="thd",
+        attn_mask_type="padding",
+        dropout=dropout,
+    )
+    out, aux = fused_attn_fwd(is_training=True, **kwargs)
+    grad = torch.randn_like(out)
+    dq, dk, dv, *_ = fused_attn_bwd(
+        o=out,
+        d_o=grad,
+        aux_ctx_tensors=aux,
+        do_format="thd",
+        dqkv_layout="thd_thd_thd",
+        **kwargs,
+    )
+    refs = [tensor.float().requires_grad_() for tensor in (q, k, v)]
+    reference = torch.zeros_like(refs[0])
+    for index, length in enumerate(lengths):
+        active = slice(index * capacity, index * capacity + length)
+        qr, kr, vr = [tensor[active].transpose(0, 1) for tensor in refs]
+        # Identity V exposes the sampled dropout mask in O. Recompute attention
+        # independently in FP32 using that mask, without depending on cuDNN's RNG algorithm.
+        mask = out[active, :, :length].transpose(0, 1) != 0
+        assert mask.any() and (~mask).any()
+        probabilities = torch.softmax(qr @ kr.transpose(-1, -2) / dim**0.5, dim=-1)
+        reference[active] = ((probabilities * mask / (1.0 - dropout)) @ vr).transpose(0, 1)
+    reference.backward(grad.float())
+    rtol, atol = (2e-2, 1e-2) if dtype == torch.bfloat16 else (3e-3, 2e-3)
+    torch.testing.assert_close(out.float(), reference, rtol=rtol, atol=atol)
+    for actual, ref in zip((dq, dk, dv), refs):
+        torch.testing.assert_close(actual.float(), ref.grad, rtol=rtol, atol=atol)
 
 
 @pytest.mark.parametrize("error", (RuntimeError("device failure"), ImportError("frontend missing")))

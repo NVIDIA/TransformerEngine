@@ -138,17 +138,31 @@ class _AttentionGraph:
                 params["k"].shape[0] if self.kv_format == "thd" else 0,
             )
         self.b, self.h, self.hg, self.dq, self.dv, self.tq, self.tk = dimensions
+        self.fp8 = hasattr(params["q"], "_fp8_dtype") if fp8 is None else fp8
+        self.mxfp8 = isinstance(params["q"], MXFP8TensorStorage) if mxfp8 is None else mxfp8
         capability = torch.cuda.get_device_capability(self.device)
         self.ragged_graph = uses_ragged_attention_graph(10 * capability[0] + capability[1])
         self.ragged_stats = self.q_format == "thd" and self.ragged_graph
+        # The supported Python frontend versions include cumulative-length inputs.
+        # Like the common path, use them for dropout-free forward graphs only.
+        self.use_cu_seqlens = (
+            not backward
+            and "padding" in params["attn_mask_type"]
+            and not params["dropout"]
+            and _import_cudnn_frontend().backend_version() >= (92500 if self.fp8 else 92400)
+        )
+        ragged = self.q_format == "thd" or self.kv_format == "thd"
+        self.graph_b = (
+            bucket(self.b, 32, 512)
+            if ragged and self.ragged_graph and not self.use_cu_seqlens
+            else self.b
+        )
         self.sq = bucket(self.tq, 1024, 32768) if self.ragged_stats else params["max_seqlen_q"]
         self.skv = (
             bucket(self.tk, 1024, 32768)
             if self.kv_format == "thd" and self.ragged_graph
             else params["max_seqlen_kv"]
         )
-        self.fp8 = hasattr(params["q"], "_fp8_dtype") if fp8 is None else fp8
-        self.mxfp8 = isinstance(params["q"], MXFP8TensorStorage) if mxfp8 is None else mxfp8
         self.specs = {}
         self.tensors = {}
 
@@ -172,11 +186,15 @@ class _AttentionGraph:
     ):
         """Bind storage using the same matrix descriptors as support queries."""
         data = _raw(tensor, columnwise)
-        dim = (self.b, heads, seqlen, tensor.shape[-1])
+        dim = (self.graph_b, heads, seqlen, tensor.shape[-1])
         offset_name = name + "_offset" if fmt == "thd" else ""
         if offset_name:
-            offsets = cu_padded.to(torch.int64) * data.stride(0)
-            self.add(offset_name, offsets, (self.b + 1, 1, 1, 1), (1, 1, 1, 1))
+            self.add(
+                offset_name,
+                self.offsets(cu_padded, data.stride(0)),
+                (self.graph_b + 1, 1, 1, 1),
+                (1, 1, 1, 1),
+            )
         elif name in ("k", "v") and self.params.get("page_table_k") is not None:
             order = {"bshd": (0, 2, 1, 3), "sbhd": (1, 2, 0, 3), "bhsd": (0, 1, 2, 3)}[fmt]
             dim = tuple(data.shape[index] for index in order)
@@ -188,17 +206,36 @@ class _AttentionGraph:
             storage_stride=data.stride(),
             output=output,
             ragged_offset=offset_name,
+            ragged_offset_multiplier=data.stride(0) if offset_name and self.use_cu_seqlens else 1,
         )
         return name
+
+    def offsets(self, cu_padded, multiplier):
+        """Bind token offsets directly or pad converted offsets with the terminal value."""
+        if self.use_cu_seqlens:
+            return cu_padded
+        offsets = cu_padded.to(torch.int64) * multiplier
+        if self.graph_b > self.b:
+            offsets = torch.cat((offsets, offsets[-1:].expand(self.graph_b - self.b)))
+        return offsets
 
     def stats(self, name, tensor, output=False):
         """Bind dense or packed softmax statistics."""
         if self.ragged_stats:
-            offsets = self.params["cu_seqlens_q_padded"].to(torch.int64) * self.h
-            self.add("stats_offset", offsets, (self.b + 1, 1, 1, 1), (1, 1, 1, 1))
+            offsets = self.offsets(self.params["cu_seqlens_q_padded"], self.h)
+            self.add("stats_offset", offsets, (self.graph_b + 1, 1, 1, 1), (1, 1, 1, 1))
+        elif tensor.shape[0] < self.graph_b:
+            tensor = torch.nn.functional.pad(
+                tensor, (0, 0, 0, 0, 0, 0, 0, self.graph_b - tensor.shape[0])
+            )
         self.tensors[name] = tensor
         self.specs[name] = attention_stats_spec(
-            self.b, self.h, self.sq, ragged=self.ragged_stats, output=output
+            self.graph_b,
+            self.h,
+            self.sq,
+            ragged=self.ragged_stats,
+            output=output,
+            ragged_offset_multiplier=self.h if self.ragged_stats and self.use_cu_seqlens else 1,
         )
         return name
 
@@ -230,6 +267,7 @@ class _AttentionGraph:
             left_bound=left + 1 if left != -1 else None,
             right_bound=0 if causal else (right if right != -1 else None),
             padding="padding" in mask,
+            use_cu_seqlens=self.use_cu_seqlens,
             alibi=p["attn_bias_type"] == "alibi",
             dropout=p["dropout"],
             deterministic=p.get("deterministic", False),
@@ -305,7 +343,15 @@ def _prepare_inputs(attn):
     attn.scalar("attn_scale", torch.tensor([p["attn_scale"]], dtype=torch.float32), by_value=True)
     if "padding" in p["attn_mask_type"]:
         for name, cu in (("seq_q", p["cu_seqlens_q"]), ("seq_kv", p["cu_seqlens_kv"])):
-            attn.add(name, cu[1:] - cu[:-1], (attn.b, 1, 1, 1), (1, 1, 1, 1))
+            if attn.use_cu_seqlens:
+                lengths = cu
+            else:
+                lengths = cu[1:] - cu[:-1]
+                if attn.graph_b > attn.b:
+                    lengths = torch.nn.functional.pad(lengths, (0, attn.graph_b - attn.b))
+            attn.add(
+                name, lengths, (attn.graph_b + int(attn.use_cu_seqlens), 1, 1, 1), (1, 1, 1, 1)
+            )
     if p["attn_bias_type"] not in ("no_bias", "alibi"):
         attn.add("bias", p["attn_bias"])
     if p["softmax_type"] != "vanilla":
@@ -474,21 +520,37 @@ def _query_graph(config, backward):
         attn.specs[n] = _TensorSpec(tuple(dim), tuple(stride), dtype, **kwargs)
 
     def matrix(n, fmt, h, s, d, dtype, packed="", output=False):
-        dim = (attn.b, h, s, d)
+        dim = (attn.graph_b, h, s, d)
         if n in ("k", "v") and layout.startswith("paged_kv_"):
             dim = (getattr(config, "num_pages_" + n), h, getattr(config, "page_size_" + n), d)
         offset = n + "_offset" if fmt == "thd" else ""
         if offset:
-            spec(offset, (attn.b + 1, 1, 1, 1), dtype="INT64")
+            spec(
+                offset,
+                (attn.graph_b + 1, 1, 1, 1),
+                dtype="INT32" if attn.use_cu_seqlens else "INT64",
+            )
         attn.specs[n] = attention_matrix_spec(
             dim, fmt, dtype, packed=packed, output=output, ragged_offset=offset
         )
+        if offset and attn.use_cu_seqlens:
+            desc = attn.specs[n]
+            attn.specs[n] = replace(desc, ragged_offset_multiplier=desc.stride[2])
 
     def stats(n, output=False):
         if attn.ragged_stats:
-            spec("stats_offset", (attn.b + 1, 1, 1, 1), dtype="INT64")
+            spec(
+                "stats_offset",
+                (attn.graph_b + 1, 1, 1, 1),
+                dtype="INT32" if attn.use_cu_seqlens else "INT64",
+            )
         attn.specs[n] = attention_stats_spec(
-            attn.b, attn.h, attn.sq, ragged=attn.ragged_stats, output=output
+            attn.graph_b,
+            attn.h,
+            attn.sq,
+            ragged=attn.ragged_stats,
+            output=output,
+            ragged_offset_multiplier=attn.h if attn.ragged_stats and attn.use_cu_seqlens else 1,
         )
 
     def scale(n, matrix_name, fmt, columnwise=False):
@@ -510,7 +572,7 @@ def _query_graph(config, backward):
     spec("attn_scale", by_value=True)
     if "padding" in attn.params["attn_mask_type"]:
         for n in ("seq_q", "seq_kv"):
-            spec(n, (attn.b, 1, 1, 1), dtype="INT32")
+            spec(n, (attn.graph_b + int(attn.use_cu_seqlens), 1, 1, 1), dtype="INT32")
     if attn.params["dropout"]:
         spec("seed", dtype="INT64")
         spec("offset", dtype="INT64")
@@ -719,7 +781,9 @@ def fused_attn_fwd(params):
         if p["o_format"] == "thd":
             _raw(out).zero_()
         attn.matrix("o", out, p["o_format"], attn.h, attn.sq, p["cu_seqlens_q_padded"], output=True)
-        stats_shape = (attn.tq, attn.h, 1) if attn.ragged_stats else (attn.b, attn.h, attn.sq, 1)
+        stats_shape = (
+            (attn.tq, attn.h, 1) if attn.ragged_stats else (attn.graph_b, attn.h, attn.sq, 1)
+        )
         stats = torch.empty(stats_shape, dtype=torch.float32, device=attn.device)
         attn.stats("stats", stats, output=True)
         aux_ctx_tensors = [stats, p["rng_state"]]
@@ -744,6 +808,10 @@ def fused_attn_fwd(params):
             attn.scalar("scale_o", scale_o)
             attn.scalar("amax_o", amax_o, output=True)
         attn.execute()
+        if not attn.ragged_stats and attn.graph_b > attn.b:
+            aux_ctx_tensors[0] = stats[: attn.b]
+            if maximum is not None:
+                maximum = maximum[: attn.b]
         return out, aux_ctx_tensors, maximum
 
 

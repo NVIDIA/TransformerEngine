@@ -88,6 +88,7 @@ class TensorSpec:
     ragged_offset: str = ""
     reordered: bool = False
     by_value: bool = False
+    ragged_offset_multiplier: int = 1
 
 
 def apply_tensor_spec(cudnn, tensor, spec, uid=None):
@@ -99,6 +100,8 @@ def apply_tensor_spec(cudnn, tensor, spec, uid=None):
         tensor.set_uid(uid)
     if spec.output:
         tensor.set_output(True)
+    if spec.ragged_offset_multiplier != 1:
+        tensor.set_ragged_offset_multiplier(spec.ragged_offset_multiplier)
     return tensor
 
 
@@ -150,7 +153,15 @@ def attention_stride(dim, fmt):
 
 
 def attention_matrix_spec(
-    dim, fmt, dtype, *, storage_stride=None, packed="", output=False, ragged_offset=""
+    dim,
+    fmt,
+    dtype,
+    *,
+    storage_stride=None,
+    packed="",
+    output=False,
+    ragged_offset="",
+    ragged_offset_multiplier=1,
 ):
     """Describe either actual storage strides or a hypothetical support-query tensor."""
     if storage_stride is not None and fmt == "thd":
@@ -168,10 +179,19 @@ def attention_matrix_spec(
             if "h3d" in packed or "h2d" in packed:
                 stride[1] *= count
         stride = tuple(stride)
-    return TensorSpec(tuple(dim), stride, dtype, output=output, ragged_offset=ragged_offset)
+    return TensorSpec(
+        tuple(dim),
+        stride,
+        dtype,
+        output=output,
+        ragged_offset=ragged_offset,
+        ragged_offset_multiplier=ragged_offset_multiplier,
+    )
 
 
-def attention_stats_spec(batch, heads, seqlen, *, ragged=False, output=False):
+def attention_stats_spec(
+    batch, heads, seqlen, *, ragged=False, output=False, ragged_offset_multiplier=1
+):
     """Describe dense BHS1 or packed TH1 softmax statistics."""
     stride = (heads * seqlen, 1, heads, 1) if ragged else (heads * seqlen, seqlen, 1, 1)
     return TensorSpec(
@@ -180,6 +200,7 @@ def attention_stats_spec(batch, heads, seqlen, *, ragged=False, output=False):
         "FLOAT",
         output=output,
         ragged_offset="stats_offset" if ragged else "",
+        ragged_offset_multiplier=ragged_offset_multiplier,
     )
 
 

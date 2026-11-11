@@ -21,6 +21,7 @@ class AttentionOptions:
     left_bound: int | None = None
     right_bound: int | None = None
     padding: bool = False
+    use_cu_seqlens: bool = False
     alibi: bool = False
     dropout: float = 0.0
     deterministic: bool = False
@@ -106,7 +107,15 @@ def build_attention_graph(cudnn, graph, spec, *, score_mod=None, score_mod_bprop
         if bound is not None:
             kwargs[name] = bound
     if options.padding:
-        kwargs.update(use_padding_mask=True, seq_len_q=tensor("seq_q"), seq_len_kv=tensor("seq_kv"))
+        kwargs["use_padding_mask"] = True
+        if options.use_cu_seqlens:
+            kwargs.update(
+                cu_seq_len_q=tensor("seq_q"),
+                cu_seq_len_kv=tensor("seq_kv"),
+                implementation=cudnn.attention_implementation.UNIFIED,
+            )
+        else:
+            kwargs.update(seq_len_q=tensor("seq_q"), seq_len_kv=tensor("seq_kv"))
     if options.alibi:
         kwargs["use_alibi_mask"] = True
     if "bias" in specs:
