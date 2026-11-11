@@ -621,6 +621,8 @@ def _compare(bench, script, repo, args, worker_args):
                 print(f"=== {label}: CuTeDSL @ {rev} ({shas[rev][:12]}) ===", flush=True)
                 checkout(shas[rev])
                 frames.append(run(label, "CuTeDSL"))
+            if frames[-1].empty:
+                sys.exit(f"No config ran on the {label} side: all were skipped (see the warnings)")
     print(explanation)
     return with_delta(frames, bench.config, _columns(bench))
 
@@ -1042,6 +1044,9 @@ def main(bench, script, doc):
                 sys.path.insert(0, str(repo))
             df = bench.run(args, args.impl)
             df.insert(0, "impl", args.impl)
+            # A compare worker reports an empty run to its parent through the CSV.
+            if df.empty and not args.worker_csv:
+                sys.exit("No config ran: all were skipped (see the warnings)")
 
     if args.worker_csv:
         df.to_csv(args.worker_csv, index=False)
