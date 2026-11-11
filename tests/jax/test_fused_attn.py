@@ -2538,13 +2538,13 @@ def test_cudnn_python_fp8_forward_backward(dtype, layout, fp8_backward, monkeypa
         np.testing.assert_allclose(actual_grad, expected_grad, rtol=1e-2, atol=1e-2)
 
 
-def test_cudnn_python_attention_does_not_call_common(monkeypatch):
-    """Backend selection, workspace sizing and execution are independent of common."""
+def test_cudnn_python_attention_does_not_call_common_attention(monkeypatch):
+    """Backend selection, workspace sizing and execution bypass the common attention APIs."""
     import transformer_engine_jax
     from transformer_engine.jax.cpp_extensions import cudnn_attention
 
     def forbidden(*_args, **_kwargs):
-        raise AssertionError("JAX attention called TE common")
+        raise AssertionError("JAX attention called a common attention API")
 
     for name in (
         "get_fused_attn_backend",

@@ -12,8 +12,8 @@ import transformer_engine_jax
 
 from transformer_engine.common.cudnn.graph import (
     import_cudnn as _import_cudnn,
-    check_graph_support,
-    compile_graph,
+    check_graph_support as _check_graph_support,
+    compile_graph as _compile_graph,
 )
 
 
@@ -107,22 +107,52 @@ def serialize_graph(
     )
 
 
-def deselect_frost_plans(graph):
-    """Temporarily exclude FROST SDPA plans from the JAX C++ serialization path."""
+def _serializable_plan_indices(graph, *, has_score_mod=False):
+    """Return plan indices eligible for the JAX C++ serialization path."""
     # cuDNN cannot currently serialize FROST SDPA plans for C++ execution.
     # Remove this workaround once cuDNN fixes its serialization path.
     plan_names = [
         graph.get_plan_name_at_index(index) for index in range(graph.get_execution_plan_count())
     ]
-    graph.deselect_engines(
-        [name for name in plan_names if name.startswith(("sdpa_fwd_", "sdpa_bwd_"))]
+    prefixes = ("sdpa_fwd", "sdpa_bwd") if has_score_mod else ("sdpa_fwd_", "sdpa_bwd_")
+    return tuple(index for index, name in enumerate(plan_names) if not name.startswith(prefixes))
+
+
+def check_graph_support(cudnn, graph, run_stage=None, *, has_score_mod=False):
+    """Require support from a plan that the JAX executor can deserialize."""
+
+    def filter_plans(candidate):
+        candidate.deselect_engines(["sdpa_fwd_", "sdpa_bwd_"])
+        indices = _serializable_plan_indices(candidate, has_score_mod=has_score_mod)
+        if not indices:
+            raise cudnn.cudnnGraphNotSupportedError("No serializable cuDNN SDPA execution plan.")
+        # Frontend 1.29/1.31 check_support can accept an excluded Python plan,
+        # or suppress a backend rejection if Python plans remain. Pin an eligible
+        # plan so support comes from the same executor used at runtime.
+        candidate.select_plan(indices[0])
+
+    _check_graph_support(
+        cudnn, graph, run_stage, has_score_mod=has_score_mod, filter_plans=filter_plans
     )
+
+
+def compile_graph(cudnn, graph, run_stage=None, *, has_score_mod=False):
+    """Compile an eligible plan, retaining fallback after support-query pinning."""
+    last_error = None
+    for index in _serializable_plan_indices(graph, has_score_mod=has_score_mod):
+        graph.select_plan(index)
+        try:
+            return _compile_graph(cudnn, graph, run_stage, has_score_mod=has_score_mod)
+        except cudnn.cudnnGraphNotSupportedError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise cudnn.cudnnGraphNotSupportedError("No serializable cuDNN SDPA execution plan.")
 
 
 def finalize_graph(cudnn, graph, *, has_score_mod=False):
     """Validate, select and compile a supported execution plan."""
     check_graph_support(cudnn, graph, has_score_mod=has_score_mod)
-    deselect_frost_plans(graph)
     workspace_size = compile_graph(cudnn, graph, has_score_mod=has_score_mod)
     return workspace_size, bytes(graph.serialize()), check_frontend_version(cudnn)
 

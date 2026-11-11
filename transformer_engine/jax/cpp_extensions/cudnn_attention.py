@@ -26,8 +26,6 @@ from transformer_engine.common.cudnn.graph import (
     bucket as _bucket,
     row_major_stride as _stride,
     create_graph,
-    check_graph_support,
-    compile_graph,
     uses_ragged_attention_graph,
     mxfp8_scale_spec,
 )
@@ -36,7 +34,8 @@ from transformer_engine.common.cudnn import mxfp8 as mxfp8_rules
 from .cudnn_graph import (
     import_cudnn,
     check_frontend_version,
-    deselect_frost_plans,
+    check_graph_support,
+    compile_graph,
     serialize_graph,
     graph_attributes,
 )
@@ -197,7 +196,6 @@ def _build_graph(direction, shapes, config, capabilities, nondeterministic, fp8_
     backend, direction = _site(description.spec)
     with _plan_lock:
         if entry.workspace_size is None:
-            deselect_frost_plans(entry.built.graph)
             workspace_size = compile_graph(
                 cudnn,
                 entry.built.graph,

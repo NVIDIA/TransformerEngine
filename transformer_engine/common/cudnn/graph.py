@@ -46,8 +46,8 @@ def create_graph(cudnn, dtype, handle=None):
     )
 
 
-def check_graph_support(cudnn, graph, run_stage=None, *, has_score_mod=False):
-    """Validate and select supported plans, without compiling their kernels."""
+def check_graph_support(cudnn, graph, run_stage=None, *, has_score_mod=False, filter_plans=None):
+    """Validate support, applying an optional plan filter before checking candidates."""
     run = run_stage or (lambda _name, function: function())
     try:
         run("validate", graph.validate)
@@ -59,6 +59,8 @@ def check_graph_support(cudnn, graph, run_stage=None, *, has_score_mod=False):
             "create_execution_plans",
             lambda: graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]),
         )
+        if filter_plans is not None:
+            run("filter_plans", lambda: filter_plans(graph))
         run("check_support", graph.check_support)
     except cudnn.cudnnGraphNotSupportedError as exc:
         raise UnsupportedGraph(f"cuDNN SDPA graph is not supported: {exc}") from exc

@@ -658,10 +658,10 @@ def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
 @pytest.mark.parametrize("selected_engine", (None, "sdpa_fwd", "sdpa_bwd"))
 def test_fused_attn_score_mod_backend_guard(monkeypatch, selected_engine):
     """Score-mod graphs must use cuDNN while retaining JAX's serialization exclusions."""
-    cudnn = Mock(__version__="1.31.0")
+    cudnn = Mock(__version__="1.31.0", cudnnGraphNotSupportedError=NotImplementedError)
     graph = Mock(selected_engine=selected_engine)
     graph.get_execution_plan_count.return_value = 2
-    graph.get_plan_name_at_index.side_effect = ["sdpa_fwd_frost", "cudnn_plan"]
+    graph.get_plan_name_at_index.side_effect = lambda index: ("sdpa_fwd_frost", "cudnn_plan")[index]
     graph.get_workspace_size.return_value = 0
     graph.serialize.return_value = b"graph"
     monkeypatch.setattr(tex_cudnn_graph, "check_frontend_version", lambda _cudnn: 13100)
@@ -679,8 +679,63 @@ def test_fused_attn_score_mod_backend_guard(monkeypatch, selected_engine):
 
     assert graph.deselect_engines.call_args_list == [
         call(["sdpa_fwd", "sdpa_bwd"]),
-        call(["sdpa_fwd_frost"]),
+        call(["sdpa_fwd_", "sdpa_bwd_"]),
     ]
+
+
+@pytest.mark.parametrize("has_score_mod", (False, True))
+@pytest.mark.parametrize(
+    "plans,backend_supported",
+    (
+        (("sdpa_fwd_frost",), True),
+        (("sdpa_bwd_frost", "cudnn_plan"), True),
+        (("sdpa_fwd_frost", "cudnn_plan"), False),
+        (("cudnn_plan", "sdpa_bwd_frost"), False),
+        (("cudnn_plan",), True),
+    ),
+)
+def test_cudnn_graph_support_requires_serializable_plan(plans, backend_supported, has_score_mod):
+    """Excluded Python plans must not hide missing or unsupported backend plans."""
+    from transformer_engine.common.cudnn.graph import UnsupportedGraph
+
+    cudnn = Mock(cudnnGraphNotSupportedError=NotImplementedError)
+    graph = Mock()
+    graph.get_execution_plan_count.return_value = len(plans)
+    graph.get_plan_name_at_index.side_effect = lambda index: plans[index]
+    selected = []
+    graph.select_plan.side_effect = lambda index: selected.append(index)
+
+    def check_support():
+        # Match the frontend's behavior: an unpinned query may accept a Python
+        # plan even when the backend cannot execute the graph.
+        if not selected or plans[selected[-1]].startswith("sdpa_"):
+            return
+        if not backend_supported:
+            raise NotImplementedError("Backend rejected graph")
+
+    graph.check_support.side_effect = check_support
+    if backend_supported and "cudnn_plan" in plans:
+        tex_cudnn_graph.check_graph_support(cudnn, graph, has_score_mod=has_score_mod)
+        assert plans[selected[-1]] == "cudnn_plan"
+    else:
+        with pytest.raises(UnsupportedGraph):
+            tex_cudnn_graph.check_graph_support(cudnn, graph, has_score_mod=has_score_mod)
+    graph.build_plans.assert_not_called()
+    graph.serialize.assert_not_called()
+
+
+def test_cudnn_graph_compilation_retains_backend_fallback():
+    """Pinning support to the backend must not discard its later execution plans."""
+    cudnn = Mock(cudnnGraphNotSupportedError=NotImplementedError)
+    graph = Mock()
+    plans = ("sdpa_fwd_frost", "cudnn_first", "cudnn_fallback")
+    graph.get_execution_plan_count.return_value = len(plans)
+    graph.get_plan_name_at_index.side_effect = lambda index: plans[index]
+    graph.build_plans.side_effect = [NotImplementedError("First plan failed"), None]
+    graph.get_workspace_size.return_value = 64
+
+    assert tex_cudnn_graph.compile_graph(cudnn, graph) == 64
+    assert graph.select_plan.call_args_list == [call(1), call(2)]
 
 
 def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):

@@ -215,12 +215,12 @@ class FusedAttnHelper:
                 max_segments_per_seq=self.max_segments_per_seq,
                 window_size=self.window_size,
                 bottom_right_diagonal=self.bottom_right_diagonal,
+                return_max_logit=self.return_max_logit,
+                fp8=self.fp8,
                 context_parallel_load_balanced=False,
                 cp_axis="",
                 cp_striped_window_size=None,
                 stripe_size=None,
-                return_max_logit=self.return_max_logit,
-                fp8=self.fp8,
             )
             qshape = (self.batch_size, self.q_max_seqlen, self.q_num_heads, self.head_dim_qk)
             kshape = (self.batch_size, self.kv_max_seqlen, self.kv_num_heads, self.head_dim_qk)
@@ -526,12 +526,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         ), f"Expected seed_dtype={checker.rng_state_dtype}, but got seed_dtype={seed_dtype}"
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
-
-        if config.attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
-            bias_batch = bias_heads = 0
-        else:
-            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
-            bias_batch = reduce(operator.mul, bias_batch_shape)
 
         graph = cudnn_attention.get_graph(
             "fwd", (q_aval, k_aval, v_aval, bias_aval, softmax_offset_aval), config

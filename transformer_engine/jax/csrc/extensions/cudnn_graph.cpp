@@ -5,7 +5,6 @@
  ************************************************************************/
 
 // JAX-owned execution of generic graphs built with the cuDNN Python frontend.
-// This translation unit deliberately has no TE common dependencies.
 #include <cuda_runtime_api.h>
 #include <cudnn.h>
 #include <cudnn_frontend.h>
@@ -20,6 +19,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "cudnn_utils.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -42,22 +43,6 @@ T Attribute(ffi::Dictionary &attrs, const char *name) {
     throw std::runtime_error(std::string("Missing cuDNN graph attribute: ") + name);
   }
   return value.value();
-}
-
-struct Handle {
-  cudnnHandle_t value = nullptr;
-  Handle() { CheckCudnn(cudnnCreate(&value)); }
-  ~Handle() { cudnnDestroy(value); }
-};
-
-cudnnHandle_t GetHandle() {
-  // Handles are thread-local and device-local; assign the stream on each call.
-  thread_local std::unordered_map<int, std::unique_ptr<Handle>> handles;
-  int device;
-  CheckCuda(cudaGetDevice(&device));
-  auto &handle = handles[device];
-  if (!handle) handle = std::make_unique<Handle>();
-  return handle->value;
 }
 
 using Graph = cudnn_frontend::graph::Graph;
@@ -114,7 +99,7 @@ const std::vector<Scalar> &GetScalars(ffi::Span<const uint8_t> values) {
 ffi::Error InitializeGraph(cudaStream_t stream, ffi::RemainingArgs, ffi::RemainingRets,
                            ffi::Dictionary attrs) {
   try {
-    auto handle = GetHandle();
+    auto handle = nvte_get_cudnn_handle();
     CheckCudnn(cudnnSetStream(handle, stream));
     GetGraph(handle, attrs);
     return ffi::Error::Success();
@@ -126,7 +111,7 @@ ffi::Error InitializeGraph(cudaStream_t stream, ffi::RemainingArgs, ffi::Remaini
 ffi::Error ExecuteGraph(cudaStream_t stream, ffi::RemainingArgs args, ffi::RemainingRets rets,
                         ffi::Dictionary attrs) {
   try {
-    auto handle = GetHandle();
+    auto handle = nvte_get_cudnn_handle();
     CheckCudnn(cudnnSetStream(handle, stream));
     auto graph = GetGraph(handle, attrs);
     auto input_uids = Attribute<ffi::Span<const int64_t>>(attrs, "input_uids");
