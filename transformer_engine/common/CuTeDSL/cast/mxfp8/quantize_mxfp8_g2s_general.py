@@ -66,8 +66,8 @@ from .quantize_mxfp8_common import (
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
     MXFP8_BLOCK_SCALING_SIZE,
-    SUPPORTED_ACTIVATIONS,
-    SUPPORTED_DACTIVATIONS,
+    activation_op,
+    dactivation_op,
     SYM_N_DIVISIBILITY,
     THREADS_PER_WARP,
     derive_swizzled_scale_layout,
@@ -87,6 +87,7 @@ def _quantize_rowwise_mxfp8(
     M: Int32,
     N: Int32,
     ACTIVATION: cutlass.Constexpr[str | None],
+    ACTIVATION_TABLE: cutlass.Constexpr[str],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     TILE_X: cutlass.Constexpr[int],
@@ -210,14 +211,14 @@ def _quantize_rowwise_mxfp8(
 
         if cutlass.const_expr(WITH_DACT):
             # Backward: out = grad · act'(act_input). sX is grad, sA is act_input.
-            dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+            dop = dactivation_op(ACTIVATION, ACTIVATION_TABLE)
             sA_thread = cute.composition(sActInput_tile, tv_layout)[tidx, None]
             sA_thread_rw = cute.make_tensor(
                 sA_thread.iterator,
                 cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(0, 1)),
             )
         elif cutlass.const_expr(WITH_ACT):
-            op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+            op = activation_op(ACTIVATION, ACTIVATION_TABLE)
 
         if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
             truncate_f32 = truncate_f32_f16 if DTYPE is cutlass.Float16 else truncate_f32_bf16
@@ -341,6 +342,7 @@ def _quantize_colwise_mxfp8(
     M: Int32,
     N: Int32,
     ACTIVATION: cutlass.Constexpr[str | None],
+    ACTIVATION_TABLE: cutlass.Constexpr[str],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     SWIZZLE: cutlass.Constexpr[bool],
@@ -352,8 +354,10 @@ def _quantize_colwise_mxfp8(
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
     CACHE_ACTIVATION: cutlass.Constexpr[bool] = False,  # cache post-activation values to sX_tile
+    dbias_running: Float32 = 0.0,  # the column's dbias sum over the CTA's earlier stages
 ):
-    """Quantize one SMEM tile colwise to MXFP8 (per-column 32-elt block scales); returns (amax, dbias_partial)."""
+    """Quantize one SMEM tile colwise to MXFP8 (per-column 32-elt block scales); returns (amax, dbias),
+    dbias being dbias_running plus this stage's rows, added in row order."""
     tidx, _, _ = cute.arch.thread_idx()
 
     _, tv_layout = cute.make_layout_tv(
@@ -372,7 +376,8 @@ def _quantize_colwise_mxfp8(
     FUSE_RELU = cutlass.const_expr(ACTIVATION == "relu") and not WITH_DBIAS
     # Keep input in half precision format if possible
     USE_HALF_PRECISION = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU)
-    dbias_partial = Float32(0.0)
+    # One running sum down the column across the stages, as the CUDA kernels add the chunk's rows.
+    dbias_partial = Float32(dbias_running)
 
     if cutlass.const_expr(USE_HALF_PRECISION):
         max_scalar = max_scalar_f16 if DTYPE is cutlass.Float16 else max_scalar_bf16
@@ -412,12 +417,12 @@ def _quantize_colwise_mxfp8(
             rX_thread_f32[i] = Float32(sX_thread[i])
         # Apply activation (fwd) or grad·act'(act_input) (bwd dact) in f32.
         if cutlass.const_expr(WITH_DACT):
-            dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+            dop = dactivation_op(ACTIVATION, ACTIVATION_TABLE)
             sA_thread = cute.composition(sActInput_tile, tv_layout)[tidx, None]
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 rX_thread_f32[i] = rX_thread_f32[i] * dop(Float32(sA_thread[i]))
         elif cutlass.const_expr(WITH_ACT):
-            op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+            op = activation_op(ACTIVATION, ACTIVATION_TABLE)
             # Don't repeat these OOB masking computation in the loop
             thread_col_start = tile_col_start + tidx
             thread_col_oob = thread_col_start >= N
@@ -515,12 +520,15 @@ def _dbias_reduction_colwise(
     sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16/fp32 smem view, post-TMA
     sA_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
     ACTIVATION: cutlass.Constexpr[str | None],
+    ACTIVATION_TABLE: cutlass.Constexpr[str],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     TILE_X: cutlass.Constexpr[int],
     WITH_DACT: cutlass.Constexpr[bool] = False,
     CACHE_ACTIVATION: cutlass.Constexpr[bool] = False,  # cache post-activation values to sX_tile
+    dbias_running: Float32 = 0.0,  # the column's dbias sum over the CTA's earlier stages
 ):
-    """Reduce one SMEM tile along rows (the dbias direction) and possibly cache dact values, with no quantization."""
+    """Reduce one SMEM tile along rows (the dbias direction) and possibly cache dact values, with no quantization.
+    Returns dbias_running plus this stage's rows, added in row order."""
     tidx, _, _ = cute.arch.thread_idx()
 
     # Same TV layout as _quantize_colwise_mxfp8: thread tidx owns column tidx, all TILE_Y rows.
@@ -530,9 +538,9 @@ def _dbias_reduction_colwise(
     )
     sX_thread = cute.composition(sX_tile, tv_layout)[tidx, None]
 
-    dbias_partial = Float32(0.0)
+    dbias_partial = Float32(dbias_running)
     if cutlass.const_expr(WITH_DACT):
-        dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+        dop = dactivation_op(ACTIVATION, ACTIVATION_TABLE)
         sA_thread = cute.composition(sA_tile, tv_layout)[tidx, None]
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
             x = Float32(sX_thread[i]) * dop(Float32(sA_thread[i]))
@@ -576,11 +584,14 @@ def quantize_mxfp8_smem_tile_general(
     DBIAS_REDUCTION_IN_COLWISE: cutlass.Constexpr[bool],
     COLWISE_DBIAS_REDUCTION_ONLY: cutlass.Constexpr[bool],
     DBIAS_REDUCTION_IN_ROWWISE: cutlass.Constexpr[bool],
+    ACTIVATION_TABLE: cutlass.Constexpr[str] = "none",
+    dbias_running: Float32 = 0.0,
 ):
     """Quantize one SMEM tile in the directions enabled by ROWWISE / COLWISE; returns (amax, dbias).
 
     amax is this thread's amax over the tile (None unless WITH_AMAX). dbias is this thread's
-    column partial sum (None unless DBIAS_REDUCTION_IN_COLWISE or COLWISE_DBIAS_REDUCTION_ONLY);
+    column sum so far, dbias_running plus this tile's rows (None unless DBIAS_REDUCTION_IN_COLWISE
+    or COLWISE_DBIAS_REDUCTION_ONLY);
     with DBIAS_REDUCTION_IN_ROWWISE the partial sums are accumulated into rowwise_dbias_acc instead.
     """
     amax = None
@@ -597,6 +608,7 @@ def quantize_mxfp8_smem_tile_general(
             M,
             N,
             ACTIVATION=ACTIVATION,
+            ACTIVATION_TABLE=ACTIVATION_TABLE,
             DTYPE=DTYPE,
             FP8_DTYPE=FP8_DTYPE,
             SWIZZLE=WITH_GEMM_SWIZZLED_SCALES,
@@ -608,6 +620,7 @@ def quantize_mxfp8_smem_tile_general(
             WITH_DACT=WITH_DACT,
             WITH_DBIAS=DBIAS_REDUCTION_IN_COLWISE,
             CACHE_ACTIVATION=CACHE_ACTIVATION,
+            dbias_running=dbias_running,
         )
         # Either direction's amax already spans every element of the tile, so favor colwise
         # and skip the redundant comparison in the rowwise pass.
@@ -621,10 +634,12 @@ def quantize_mxfp8_smem_tile_general(
             sX_tile,
             sActInput_tile,
             ACTIVATION=ACTIVATION,
+            ACTIVATION_TABLE=ACTIVATION_TABLE,
             DTYPE=DTYPE,
             TILE_X=TILE_X,
             WITH_DACT=WITH_DACT,
             CACHE_ACTIVATION=CACHE_ACTIVATION,
+            dbias_running=dbias_running,
         )
     # If we cache the activation in shared memory, we need to ensure that all threads have finished writing to the shared memory
     # from the columnwise pass before any thread reads from it in the rowwise pass.
@@ -642,6 +657,7 @@ def quantize_mxfp8_smem_tile_general(
             M,
             N,
             ACTIVATION=None if CACHE_ACTIVATION else ACTIVATION,
+            ACTIVATION_TABLE=ACTIVATION_TABLE,
             DTYPE=DTYPE,
             FP8_DTYPE=FP8_DTYPE,
             TILE_X=TILE_X,
@@ -742,6 +758,7 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
         mWorkspace: Optional[
             cute.Tensor
         ],  # Workspace for the dbias reduction, only used when WITH_DBIAS is True
+        mActTable: cute.Pointer,  # activation table; null without one
         stream: CUstream,
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
@@ -1172,11 +1189,11 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
                 rowwise_dbias_acc[c] = Float32(0.0)
             block_dbias = Float32(0.0)
         # Prepare thread-level register for columnwise dbias reduction.
-        # Each thread will process two (MXFP8_BLOCK_SCALING_SIZE, 1) columns in two stages, and in each stage the thread will reduce the
-        # (after dact applied) column to (1,) and add to this register.
-        # Then this partial sum scalar will be written to the GMEM workspace buffer directly.
-        if cutlass.const_expr(self.DBIAS_REDUCTION_IN_COLWISE or self.COLWISE_DBIAS_REDUCTION_ONLY):
-            block_dbias = Float32(0.0)
+        # Each thread will process two (MXFP8_BLOCK_SCALING_SIZE, 1) columns in two stages; each
+        # stage continues this running sum with its (after dact applied) column, in row order, as
+        # the CUDA kernels' columnwise reduction does. Then this sum will be written to the GMEM
+        # workspace buffer directly.
+        block_dbias = Float32(0.0)
 
         # Consumer: all warps fetch from the pipeline, process its tile, and issue a new load to the tile buffer it just consumed
         for tile_idx in cutlass.range(num_tiles, unroll=1):
@@ -1235,6 +1252,7 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
                 WITH_ACT=self.cfg.WITH_ACT,
                 WITH_DACT=self.cfg.WITH_DACT,
                 ACTIVATION=self.cfg.ACTIVATION,
+                ACTIVATION_TABLE=self.cfg.ACTIVATION_TABLE,
                 MAX_NORM_RCP=self.cfg.MAX_NORM_RCP,
                 DTYPE=self.cfg.DTYPE,
                 FP8_DTYPE=self.cfg.FP8_DTYPE,
@@ -1247,13 +1265,14 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
                 DBIAS_REDUCTION_IN_COLWISE=self.DBIAS_REDUCTION_IN_COLWISE,
                 COLWISE_DBIAS_REDUCTION_ONLY=self.COLWISE_DBIAS_REDUCTION_ONLY,
                 DBIAS_REDUCTION_IN_ROWWISE=self.DBIAS_REDUCTION_IN_ROWWISE,
+                dbias_running=block_dbias,
             )
             if cutlass.const_expr(cfg.WITH_AMAX):
                 per_thread_amax = cute.arch.fmax(per_thread_amax, amax)
             if cutlass.const_expr(
                 self.DBIAS_REDUCTION_IN_COLWISE or self.COLWISE_DBIAS_REDUCTION_ONLY
             ):
-                block_dbias += dbias
+                block_dbias = dbias
 
             # Make the shared-memory writes visible to the TMA's async proxy before the TMA reads them.
             cute.arch.fence_proxy(
