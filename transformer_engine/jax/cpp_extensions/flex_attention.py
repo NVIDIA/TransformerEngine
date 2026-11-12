@@ -41,6 +41,7 @@ from .cudnn_graph import (
     serialize_graph as _serialized_score_mod_graph,
     finalize_graph as _finalize_score_mod_graph,
     import_cudnn as _import_cudnn_for_score_mod,
+    graph_attributes,
     _graph_cache,
 )
 
@@ -563,15 +564,7 @@ def _fused_attn_score_mod_fwd(
         k,
         v,
         *score_mod_tensors,
-        serialized_graph=graph.serialized_graph,
-        graph_hash0=graph.graph_hash[0],
-        graph_hash1=graph.graph_hash[1],
-        cudnn_frontend_version=graph.cudnn_frontend_version,
-        input_uids=graph.input_uids,
-        output_uids=graph.output_uids,
-        scalar_uids=graph.scalar_uids,
-        scalar_sizes=graph.scalar_sizes,
-        scalar_values=graph.scalar_values,
+        **graph_attributes(graph),
     )
     return output, softmax_stats
 
@@ -620,15 +613,7 @@ def _fused_attn_score_mod_bwd(
         softmax_stats,
         *score_mod_tensors,
         *score_mod_bprop_tensors,
-        serialized_graph=graph.serialized_graph,
-        graph_hash0=graph.graph_hash[0],
-        graph_hash1=graph.graph_hash[1],
-        cudnn_frontend_version=graph.cudnn_frontend_version,
-        input_uids=graph.input_uids,
-        output_uids=graph.output_uids,
-        scalar_uids=graph.scalar_uids,
-        scalar_sizes=graph.scalar_sizes,
-        scalar_values=graph.scalar_values,
+        **graph_attributes(graph),
     )
     return dq, dk, dv
 
