@@ -413,8 +413,12 @@ def quantize_mxfp8_gmem_tile_bidimensional(
     ELEMENTS_Y_PER_THREAD: cutlass.Constexpr[int],
     ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     cache_policy: Int64,
+    load_cache_policy: Optional[Int64] = None,
 ):
     """Quantize one (TILE_ROWS, TILE_COLS) GMEM tile in the directions enabled by ROWWISE / COLWISE.
+
+    cache_policy is the L2 policy of the stores, and of the loads unless load_cache_policy is
+    given.
 
     TILE_ROWS = CTA_THREADS_Y * ELEMENTS_Y_PER_THREAD = 32, so every columnwise
     MXFP8 block is contained in the tile. Each warp owns ELEMENTS_Y_PER_THREAD
@@ -468,7 +472,10 @@ def quantize_mxfp8_gmem_tile_bidimensional(
     # Copy all rows a thread sweeps into the RMEM fragment at once
     for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
         cute.copy(
-            load_atom, gX_thread[(None, row_idx),], rX[None, row_idx], cache_policy=cache_policy
+            load_atom,
+            gX_thread[(None, row_idx),],
+            rX[None, row_idx],
+            cache_policy=cache_policy if load_cache_policy is None else load_cache_policy,
         )
 
     if cutlass.const_expr(WITH_ACT or WITH_DACT):
