@@ -44,6 +44,25 @@ bool is_empty_grouped_tensor_param(const NVTEBasicTensor &t) {
 
 }  // namespace
 
+void set_compact_tensor_data(TensorWrapper &view, const TensorWrapper &tensor, bool rowwise,
+                             void *scales) {
+  if (rowwise) {
+    const auto data = tensor.get_rowwise_data();
+    const auto scale_inv = tensor.get_rowwise_scale_inv();
+    const auto amax = tensor.get_amax();
+    view.set_rowwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape)
+        .set_rowwise_scale_inv(scales, static_cast<DType>(scale_inv.dtype), scale_inv.shape)
+        .set_amax(amax.data_ptr, static_cast<DType>(amax.dtype), amax.shape);
+  } else {
+    const auto data = tensor.get_columnwise_data();
+    const auto scale_inv = tensor.get_columnwise_scale_inv();
+    const auto amax = tensor.get_columnwise_amax();
+    view.set_columnwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape)
+        .set_columnwise_scale_inv(scales, static_cast<DType>(scale_inv.dtype), scale_inv.shape)
+        .set_columnwise_amax(amax.data_ptr, static_cast<DType>(amax.dtype), amax.shape);
+  }
+}
+
 std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_for_gemm(
     transformer_engine::TensorWrapper &tensor, bool rowwise_usage, bool columnwise_usage) {
   // Return early if scale swizzling is not required
@@ -727,9 +746,10 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::obje
                                                     /*check_scale_inv_shapes=*/false);
 }
 
-namespace {
+void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
+  // Convert Python tensor to C++ tensor
+  auto tensor_nvte = makeTransformerEngineTensor(tensor, py::none());
 
-void inplace_swizzle_scale_for_gemm_impl(TensorWrapper &tensor_nvte, py::handle tensor) {
   // Return early if scale swizzling is not required
   const auto scaling_mode = tensor_nvte.scaling_mode();
   switch (scaling_mode) {
@@ -783,19 +803,6 @@ void inplace_swizzle_scale_for_gemm_impl(TensorWrapper &tensor_nvte, py::handle 
     default:
       NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
   }
-}
-
-}  // namespace
-
-void Quantizer::optimize_tensor_for_gemm(TensorWrapper &tensor, py::handle tensor_py) const {
-  if (optimize_for_gemm && !tensor.get_with_gemm_swizzled_scales()) {
-    inplace_swizzle_scale_for_gemm_impl(tensor, tensor_py);
-  }
-}
-
-void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
-  auto tensor_nvte = makeTransformerEngineTensor(tensor, py::none());
-  inplace_swizzle_scale_for_gemm_impl(tensor_nvte, tensor);
 }
 
 }  // namespace pytorch

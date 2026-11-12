@@ -15,7 +15,6 @@ from torch.nn import init
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from transformer_engine.pytorch.device import te_device_type
 from .base import (
@@ -34,7 +33,6 @@ from .base import (
 )
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
-    assert_dim_for_fp8_exec,
     cast_if_needed,
     clear_tensor_data,
     divide,
@@ -368,8 +366,6 @@ def _layernorm_linear_forward_impl(
     inp_shape = inp.shape
     assert inp_shape[-1] == in_features, "GEMM not possible"
     inputmat = inp
-    if fp8:
-        assert_dim_for_fp8_exec(inputmat, weight)
 
     # Cast for native AMP
     nvtx_range_push(f"{nvtx_label}.norm_input_cast")
@@ -2025,8 +2021,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
-                   Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
-                   is used.
+                   When set to ``None``, standard all-reduce is used.
     """
 
     def __init__(
@@ -2163,13 +2158,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.ub_overlap_rs_dgrad = self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad
             self.ub_bulk_dgrad = False
             self.ub_bulk_wgrad = False
-
-        if self.symmetric_ar_type is not None:
-            assert torch_version() >= (
-                2,
-                7,
-                0,
-            ), "Torch version must be at least 2.7 to use symmetric memory"
 
         self.eps = eps
         layer_norm_weight = torch.nn.Parameter(
@@ -2629,7 +2617,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
 
             if use_compiled_op:
-                check_gemm_dims(inp, weight_tensor, self.fp8)
+                check_gemm_dims(inp, weight_tensor)
                 out, ln_out, new_weight_workspace = _layernorm_linear_op(fwd_args)
             else:
                 out, ln_out, new_weight_workspace = _layernorm_linear_eager(

@@ -135,9 +135,6 @@ class Quantizer {
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
                         const std::optional<TensorWrapper>& noop_flag = std::nullopt) = 0;
 
-  /*! @brief Apply the requested GEMM scale layout to a computed tensor. */
-  void optimize_tensor_for_gemm(TensorWrapper& tensor, py::handle tensor_py) const;
-
   virtual ~Quantizer() = default;
 
   DType dtype = DType::kNumTypes;
@@ -426,6 +423,7 @@ class NVFP4Quantizer : public Quantizer {
    *  skipped entirely.
    */
   static bool is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape);
+  bool emits_gemm_swizzled_scales(const std::vector<size_t>& shape) const;
 
   // Flattened row/column alignment for directly emitted GEMM-swizzled scales, or no such path.
   static ShapeAlignment gemm_swizzled_scales_alignment(bool optimize_for_gemm, bool with_rht,
@@ -440,7 +438,6 @@ class NVFP4Quantizer : public Quantizer {
                                                   bool for_grouped_kernel = false);
   static ShapeAlignment get_2d_swizzle_fusion_alignment(int sm_arch);
   static bool meets_alignment(const std::vector<size_t>& shape, const ShapeAlignment& alignment);
-  bool emits_gemm_swizzled_scales(const std::vector<size_t>& shape) const;
 
   void quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out,
                                         TensorWrapper& rht_output_t_cpp,

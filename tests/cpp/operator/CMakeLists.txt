@@ -21,7 +21,7 @@ add_executable(test_operator
                test_cast_float8blockwise_grouped.cu
                test_dequantize_mxfp8.cu
                test_dequantize_mxfp8_grouped.cu
-               test_fused_group_requantize_mxfp8.cu
+               test_requantize_mxfp8_grouped.cu
                test_dequantize_float8blockwise_grouped.cu
                test_dequantize_nvfp4.cu
                test_transpose.cu
@@ -46,6 +46,7 @@ add_executable(test_operator
                test_multi_swizzle.cu
                test_swizzle_block_scaling.cu
                test_swap_first_dims.cu
+               test_gemm.cu
                test_grouped_gemm.cu
                ../test_common.cu)
 

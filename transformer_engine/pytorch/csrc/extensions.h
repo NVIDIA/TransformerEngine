@@ -158,6 +158,12 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false,
                              float alpha = 1.0f, std::optional<float> beta = std::nullopt);
 
+at::Tensor strided_batched_gemm(py::handle A, bool transa, int64_t batch_dim_a, py::handle B,
+                                bool transb, int64_t batch_dim_b, at::Tensor D, int64_t batch_dim_d,
+                                at::Tensor workspace, bool accumulate, bool use_split_accumulator,
+                                int math_sm_count, float alpha = 1.0f,
+                                std::optional<float> beta = std::nullopt);
+
 void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
                     at::Tensor B_scale_inverse, DType B_type, std::vector<int64_t> B_scaling_mode,
@@ -421,6 +427,18 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
                                           const at::Tensor &columnwise_amax,
                                           std::optional<at::Tensor> tensor_offsets);
 
+/*! @brief Per-group NVFP4 amax of a grouped BF16 tensor without quantizing it.
+ *
+ *  Returns (pre-RHT amax, post-RHT amax), one float32 value per group, as the group
+ *  Hadamard-amax kernel computes them for the RHT recipe. Lets a caller quantize row-wise
+ *  now and column-wise later from the same amax, e.g. when the column-wise copy is
+ *  regenerated in the backward pass.
+ */
+std::tuple<at::Tensor, at::Tensor> nvfp4_group_hadamard_amax(
+    const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
+    std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+    std::optional<at::Tensor> tensor_offsets);
+
 py::object group_dequantize(const py::handle &input, DType otype);
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
@@ -480,24 +498,26 @@ py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
 at::Tensor scaled_softmax_forward(at::Tensor input, float scale_factor);
 
 at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                   float scale_factor);
+                                   float scale_factor, bool overwrite_output_grads = false);
 
 at::Tensor scaled_masked_softmax_forward(at::Tensor input, at::Tensor mask, float scale_factor);
 
 at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                          float scale_factor);
+                                          float scale_factor, bool overwrite_output_grads = false);
 
 at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input, float scale_factor);
 
 at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        at::Tensor softmax_results_,
-                                                       float scale_factor);
+                                                       float scale_factor,
+                                                       bool overwrite_output_grads = false);
 
 at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input, float scale_factor);
 
 at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads_,
                                                          at::Tensor softmax_results_,
-                                                         float scale_factor);
+                                                         float scale_factor,
+                                                         bool overwrite_output_grads = false);
 
 /***************************************************************************************************
  * FP8 recipe
