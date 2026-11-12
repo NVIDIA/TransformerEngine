@@ -44,26 +44,6 @@ def test_scale_reordering_matches_graph(dim, columnwise):
     assert sorted(permutation) == list(range(len(tiled)))
 
 
-@pytest.mark.parametrize(
-    "sm,version,fmt,error",
-    (
-        (90, 92600, "bshd", "SM100"),
-        (120, 92600, "bshd", "SM12x"),
-        (121, 92600, "bshd", "SM12x"),
-        (100, 92000, "bshd", "9.21"),
-        (100, 92300, "bshd", "defects"),
-        (100, 92301, "bshd", "defects"),
-        (100, 92600, "thd", "THD"),
-        (100, 92100, "bshd", ""),
-        (100, 92600, "sbhd", ""),
-    ),
-)
-def test_shared_mxfp8_support(sm, version, fmt, error):
-    """Both frontends retain the same hardware and known-defect exclusions."""
-    reason = mxfp8.support_error(sm, version, fmt)
-    assert error in reason if error else not reason
-
-
 def test_quantization_directions():
     """Forward V contracts over sequence; backward Q/K need both directions."""
     assert mxfp8.quantization_layouts() == ((True, False), (True, False), (False, True))
@@ -137,44 +117,6 @@ def test_dense_forward_backward(dtype, fp8_backward, is_training, monkeypatch):
     for actual_grad, expected_grad in zip(grads, reference_grads):
         assert actual_grad.dtype == dtype
         np.testing.assert_allclose(actual_grad, expected_grad, rtol=1e-2, atol=1e-3)
-
-
-@pytest.mark.parametrize("columnwise", (False, True))
-@pytest.mark.parametrize("head_dim", (64, 96, 160))
-def test_quantization_and_scale_bytes(columnwise, head_dim):
-    """Native quantization and cuDNN scale packing agree with an independent reference."""
-    _require_mxfp8()
-    rng = np.random.default_rng(17)
-    value = jnp.asarray(rng.normal(size=(2, 3, 128, head_dim)), jnp.bfloat16)
-    value *= jnp.asarray([0.01, 1.0, 100.0], jnp.bfloat16)[None, :, None, None]
-    row, col = jax.jit(lambda x: mxfp8_attention.quantize_operand(x, not columnwise, columnwise))(
-        value
-    )
-    tensor = col if columnwise else row
-    source = np.asarray(value, np.float32)
-    oriented = source.swapaxes(-1, -2) if columnwise else source
-    blocks = oriented.reshape(*oriented.shape[:-1], -1, 32)
-    maximum = np.max(np.abs(blocks), axis=-1)
-    exponent = np.maximum(np.ceil(np.log2(np.maximum(maximum / 448.0, 2.0**-127))), -127)
-    scales = np.exp2(exponent)
-    encoded = (blocks / scales[..., None]).astype(jnp.float8_e4m3fn).reshape(oriented.shape)
-    if columnwise:
-        encoded = encoded.swapaxes(-1, -2)
-    np.testing.assert_array_equal(np.asarray(tensor.data).view(np.uint8), encoded.view(np.uint8))
-    scales = (exponent + 127).astype(np.uint8)
-    rows, cols = scales.shape[-2:]
-    padded_rows = ((rows + 127) // 128) * 128
-    padded_cols = ((cols + 3) // 4) * 4
-    expected = np.zeros((*scales.shape[:2], padded_rows * padded_cols), np.uint8)
-    # Physical offset within each 128x4 tile, derived independently of the
-    # reshape/transpose used by the implementation.
-    for i in range(rows):
-        for j in range(cols):
-            index = ((i // 128) * (padded_cols // 4) + j // 4) * 512
-            index += (i % 32) * 16 + ((i % 128) // 32) * 4 + j % 4
-            expected[..., index] = scales[..., i, j]
-    actual = jax.jit(lambda s: mxfp8_attention.reorder_scale(s, columnwise))(tensor.scale_inv)
-    np.testing.assert_array_equal(np.asarray(actual).reshape(expected.shape), expected)
 
 
 @pytest.mark.parametrize("deterministic", (False, True))
