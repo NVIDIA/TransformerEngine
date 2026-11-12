@@ -445,6 +445,10 @@ def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
 @pytest.mark.parametrize("qkv_format", ("bshd", "sbhd"))
 @pytest.mark.parametrize("bias_layout", ("contiguous", "gapped", "permuted"))
+@pytest.mark.skipif(
+    _deterministic,
+    reason="Fused attention backward with dBias does not support deterministic execution",
+)
 def test_fused_attn_bias_graph_cache(dtype, qkv_format, bias_layout, monkeypatch):
     """Bias layouts reuse queried plans and preserve forward/backward numerics."""
     from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
