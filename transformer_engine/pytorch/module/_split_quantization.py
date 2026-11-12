@@ -235,8 +235,9 @@ def _split_quantize_non_hybrid(
         )
 
     if type(reference) in _CUSTOM_SPLIT_QUANTIZER_TYPES:
+        # Custom quantizers own dtype conversion and must receive the original source.
         return tex.split_quantize_custom(
-            cast_if_needed(tensor, dtype),
+            tensor,
             split_sizes,
             quantizers,
             disable_bulk_allocation=disable_bulk_allocation,

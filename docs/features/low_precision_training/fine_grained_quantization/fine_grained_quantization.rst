@@ -403,8 +403,9 @@ experiments, not mixed-format hardware performance.
 Forward and backward examples
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The following factories support ``Linear`` and ``GroupedLinear`` with discrete
-expert parameters. With BF16 module compute precision:
+The following factories support ``Linear``, ``GroupedLinear`` with discrete
+expert parameters, ``LayerNormLinear``, ``LayerNormMLP``, and their use in
+``MultiheadAttention`` and ``TransformerLayer``. With BF16 module compute precision:
 
 * ``nvfp4_qdq_weight_fwd_bf16_bwd_factory`` models ``X[BF16] x W[NVFP4-QDQ]``
   forward and uses BF16 backward. Backward consumes the original inputs and
@@ -441,8 +442,10 @@ Hybrid limitations still apply, and RL convergence has not been validated.
 Backends and custom QDQ formats
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Output defaults to the source dtype; a module compute-dtype override changes
-only the decoded dtype. For ``NVFP4QDQQuantizer``, ``backend="auto"`` fuses
+Output defaults to the source dtype. The main modules use their compute dtype
+for high-precision input and weight representations.
+QDQ still quantizes the original source values before decoding to that dtype.
+For ``NVFP4QDQQuantizer``, ``backend="auto"`` fuses
 plain 1D E2M1/E4M3 QDQ with tensor or per-row outer scaling on
 GPUs with compute capability 8.0 or higher and a TE build with CUDA 12.8 or
 higher for contiguous, 16-byte-aligned BF16/FP16 tensors with matching output

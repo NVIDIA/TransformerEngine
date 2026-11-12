@@ -21,6 +21,7 @@ from transformer_engine.pytorch.custom_recipes.qdq import (
     NVFP4QDQQuantizer,
 )
 from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+    mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory,
     nvfp4_qdq_weight_fwd_bf16_bwd_factory,
 )
 from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import (
@@ -28,6 +29,7 @@ from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import (
     cast_to_fp4x2,
 )
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.module import _split_quantization
 
@@ -186,8 +188,9 @@ def test_portable_lifecycle_and_graph(fmt):
 
 
 @pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float32])
 @requires_fp4_build
-def test_portable_weight_recipe(grouped):
+def test_portable_weight_recipe(grouped, input_dtype):
     factory = partial(nvfp4_qdq_weight_fwd_bf16_bwd_factory, backend="fused")
     recipe = CustomRecipe(qfactory=factory)
     options = dict(bias=False, params_dtype=torch.bfloat16, device="cuda")
@@ -196,8 +199,8 @@ def test_portable_weight_recipe(grouped):
         if grouped
         else te.Linear(128, 128, **options)
     )
-    x = inputs((32, 128), torch.bfloat16, "normal").requires_grad_()
-    dy = torch.ones_like(x)
+    x = inputs((32, 128), input_dtype, "normal").requires_grad_()
+    dy = torch.ones_like(x, dtype=torch.bfloat16)
     weights = [layer.weight0, layer.weight1] if grouped else [layer.weight]
     splits = [16, 16] if grouped else [32]
     with te.autocast(recipe=recipe), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -205,12 +208,100 @@ def test_portable_weight_recipe(grouped):
     y.backward(dy)
     expected_y, expected_dx = [], []
     for weight, source, grad in zip(weights, x.detach().split(splits), dy.split(splits)):
+        source = source.bfloat16()
         decoded = reference(weight.detach(), "nvfp4")
         expected_y.append(source @ decoded.T)
         expected_dx.append(grad @ decoded)
         torch.testing.assert_close(weight.grad, grad.T @ source, rtol=0.016, atol=0.002)
     torch.testing.assert_close(y, torch.cat(expected_y), rtol=0.016, atol=0.002)
-    torch.testing.assert_close(x.grad, torch.cat(expected_dx), rtol=0.016, atol=0.002)
+    torch.testing.assert_close(x.grad, torch.cat(expected_dx).to(x.dtype), rtol=0.016, atol=0.002)
+
+
+@pytest.mark.parametrize(
+    "module_type",
+    ["layernorm_linear", "layernorm_mlp", "mha", "mha_layernorm", "transformer", "decoder"],
+)
+@pytest.mark.parametrize("compute_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("fp32_params", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+@requires_fp4_build
+def test_qdq_main_modules_amp(module_type, compute_dtype, fp32_params, mixed):
+    """Main modules preserve QDQ numerics with FP32 inputs under native AMP."""
+    if mixed and not te.is_mxfp8_available():
+        pytest.skip("Mixed QDQ backward requires native MXFP8")
+    if fp32_params and not te.is_nvfp4_available():
+        pytest.skip("FP32 QDQ sources require native NVFP4 fallback")
+    torch.manual_seed(31)
+    params_dtype = torch.float32 if fp32_params else compute_dtype
+    common = dict(params_dtype=params_dtype, device="cuda")
+
+    def make_module():
+        if module_type == "layernorm_linear":
+            return te.LayerNormLinear(128, 128, **common)
+        if module_type == "layernorm_mlp":
+            return te.LayerNormMLP(128, 256, **common)
+        if module_type.startswith("mha"):
+            return te.MultiheadAttention(
+                128,
+                4,
+                attention_dropout=0.0,
+                input_layernorm=module_type == "mha_layernorm",
+                fuse_qkv_params=True,
+                **common,
+            )
+        return te.TransformerLayer(
+            128,
+            256,
+            4,
+            hidden_dropout=0.0,
+            attention_dropout=0.0,
+            layer_type="decoder" if module_type == "decoder" else "encoder",
+            fuse_qkv_params=True,
+            **common,
+        )
+
+    layer, oracle = make_module(), make_module()
+    oracle.load_state_dict(layer.state_dict())
+    if mixed:
+        factory = mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        oracle_recipe = CustomRecipe(qfactory=partial(factory, backend="reference"))
+    else:
+        factory = nvfp4_qdq_weight_fwd_bf16_bwd_factory
+        # Independent PyTorch QDQ weights plus HP GEMMs model the same STE.
+        with torch.no_grad():
+            for param in oracle.parameters():
+                if param.ndim == 2:
+                    param.copy_(reference(param, "nvfp4").to(compute_dtype))
+        oracle_recipe = CustomRecipe(qfactory=lambda role: IdentityQuantizer())
+    recipe = CustomRecipe(qfactory=factory)
+    x = torch.randn(32, 2, 128, device="cuda", dtype=torch.float32) * 0.023
+    encoder_output = torch.randn_like(x) if module_type == "decoder" else None
+    dy = torch.randn_like(x)
+
+    def run(model, current_recipe):
+        model_input = x.clone().requires_grad_()
+        kwargs = {}
+        if encoder_output is not None:
+            kwargs["encoder_output"] = encoder_output.clone().requires_grad_()
+        with te.autocast(recipe=current_recipe), torch.autocast("cuda", dtype=compute_dtype):
+            out = model(model_input, **kwargs)
+        out.backward(dy.to(out.dtype))
+        assert model_input.grad.dtype == torch.float32
+        assert out.dtype == compute_dtype
+        values = [out.detach(), model_input.grad]
+        if encoder_output is not None:
+            values.append(kwargs["encoder_output"].grad)
+        for param in model.parameters():
+            assert param.grad is not None
+            assert param.grad.dtype == params_dtype
+            values.append(param.grad)
+        return values
+
+    actual = run(layer, recipe)
+    expected = run(oracle, oracle_recipe)
+    for value, ref in zip(actual, expected):
+        assert torch.isfinite(value).all()
+        torch.testing.assert_close(value, ref, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("fmt", portable_formats)

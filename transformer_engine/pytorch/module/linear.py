@@ -2054,6 +2054,8 @@ class Linear(TransformerEngineBaseModule):
         self.rng_tracker_name = rng_tracker_name
         self.symmetric_ar_type = symmetric_ar_type
         self.save_original_input = save_original_input
+        self._uses_custom_recipe = False
+        self._custom_quantizer_cache = {}
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
@@ -2301,6 +2303,20 @@ class Linear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        self._uses_custom_recipe = recipe.custom()
+
+    def _get_input_quantizer_with_dtype(self, input_quantizer):
+        """Bind HP storage precision once per CustomRecipe generation and compute dtype."""
+        generation = self.quantizers["scaling_fwd"]
+        dtype = self.activation_dtype
+        cached = self._custom_quantizer_cache.get("input_dtype")
+        if cached is not None and cached[0] is generation and cached[1] == dtype:
+            return cached[2]
+
+        # Keep old copies intact for backward if a later forward changes dtype.
+        bound = input_quantizer.with_output_dtype(dtype)
+        self._custom_quantizer_cache["input_dtype"] = (generation, dtype, bound)
+        return bound
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
@@ -2447,6 +2463,8 @@ class Linear(TransformerEngineBaseModule):
                 grad_weight_quantizer,
                 grad_output_quantizer,
             ) = quantizers
+            if input_quantizer is not None and self._uses_custom_recipe and not debug:
+                input_quantizer = self._get_input_quantizer_with_dtype(input_quantizer)
             if weight_quantizer is not None and not debug:
                 weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
                     weight_quantizer, weight_tensor
