@@ -3364,7 +3364,14 @@ def _check_te_ops_activation_compile(
             else (x.dequantize() if layout == "fp8" else x).detach().double()
         ).requires_grad_(training)
         with torch.set_grad_enabled(training):
-            actual = compiled(x)
+            if layout == "strided":
+                with pytest.raises(
+                    Exception, match="requires contiguous inputs under torch.compile"
+                ):
+                    compiled(x)
+                actual = run(x)
+            else:
+                actual = compiled(x)
             expected = (
                 run(ref_x)
                 if eager_reference
@@ -3386,7 +3393,8 @@ def _check_te_ops_activation_compile(
                 graph_count = len(graphs)
             elif step > 1:
                 assert len(graphs) == graph_count
-    _assert_custom_ops(graphs, activation.lower(), backward=training)
+    if layout != "strided":
+        _assert_custom_ops(graphs, activation.lower(), backward=training)
 
 
 @pytest.mark.parametrize(

@@ -172,7 +172,7 @@ class SwiGLU(_ActivationOperation):
         out = cls._activation_forward_impl(swiglu_in, args.output_quantizer, args=args)
         if args.input_quantizer is not None:
             x = args.input_quantizer(x)
-        return out, [()], (x,) if cls._save_prepared_input(args) else ()
+        return out, [()], (x,) if args.requires_grad and x is not args.input_ else ()
 
     def pack_backward_args(self, *args, **kwargs) -> SwiGLUBwdArgs:
         args = super().pack_backward_args(*args, **kwargs)
