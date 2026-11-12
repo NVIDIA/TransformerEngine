@@ -402,6 +402,18 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
                                           const at::Tensor &columnwise_amax,
                                           std::optional<at::Tensor> tensor_offsets);
 
+/*! @brief Per-group NVFP4 amax of a grouped BF16 tensor without quantizing it.
+ *
+ *  Returns (pre-RHT amax, post-RHT amax), one float32 value per group, as the group
+ *  Hadamard-amax kernel computes them for the RHT recipe. Lets a caller quantize row-wise
+ *  now and column-wise later from the same amax, e.g. when the column-wise copy is
+ *  regenerated in the backward pass.
+ */
+std::tuple<at::Tensor, at::Tensor> nvfp4_group_hadamard_amax(
+    const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
+    std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+    std::optional<at::Tensor> tensor_offsets);
+
 py::object group_dequantize(const py::handle &input, DType otype);
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,

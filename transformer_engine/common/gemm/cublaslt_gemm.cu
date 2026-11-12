@@ -708,6 +708,20 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *input
         if (dtype == DType::kFloat8E4M3) {
           return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
         }
+        if (dtype == DType::kFloat8UE5M3) {
+#if CUBLAS_VERSION >= 131100
+          NVTE_CHECK(transformer_engine::cuda::cublas_version() >= 131100,
+                     "NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
+                     "but run-time cuBLAS version is ",
+                     transformer_engine::cuda::cublas_version(), ".");
+          return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE5M3;
+#else
+          NVTE_ERROR(
+              "NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
+              "but compile-time cuBLAS version is ",
+              CUBLAS_VERSION, ".");
+#endif
+        }
         NVTE_ERROR("Unsupported dtype for NVFP4 scales (", to_string(dtype), ").");
       };
       scaling_mode_a = get_scale_mode(param.A_scale_inv_type);
