@@ -406,7 +406,7 @@ namespace transformer_engine {
 
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
 
-void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
+void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *inputC, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
                  const void *alpha, const void *beta, bool alpha_beta_on_device,
@@ -436,7 +436,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
   const GemmParam param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
 
-  void *C = outputD->data.dptr;
   void *D = outputD->data.dptr;
   void *D_scale = outputD->scale.dptr;
   void *D_amax = outputD->amax.dptr;
@@ -452,6 +451,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
   const bool nvfp4_tensor_scaling =
       is_nvfp_scaling(inputA->scaling_mode) && is_nvfp_scaling(inputB->scaling_mode);
+
+  // Missing accumulation input is treated as zero
+  const float zero = 0.f;
+  if (inputC == nullptr) {
+    beta = alpha_beta_on_device ? GetScalarZero() : &zero;
+  }
 
   // Update scaling factors with NVFP4 tensor scales
   // TODO Fix bug where amax is ignored when alpha and beta are on device
@@ -533,6 +538,39 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                ". Cast bias to the output dtype before calling.");
   }
 
+  // Accumulation input, which cuBLAS reads with the same layout as D.
+  // If there is none, beta was set to zero and cuBLAS does not read C.
+  void *C = nullptr;
+  cudaDataType_t C_type = D_type;
+  if (inputC != nullptr) {
+    const DType C_dtype = inputC->dtype();
+    NVTE_CHECK(is_high_precision_dtype(C_dtype),
+               "GEMM input C must be FP32, FP16, or BF16, but got ", to_string(C_dtype), ".");
+    if (is_fp8_dtype(outputD->data.dtype)) {
+      NVTE_CHECK(C_dtype != DType::kFloat32, "GEMM with FP8 output requires FP16 or BF16 C.");
+      NVTE_CHECK(!bias || C_dtype == inputBias->data.dtype,
+                 "GEMM with FP8 output requires C and bias to have the same dtype (C=",
+                 to_string(C_dtype), ", bias=", to_string(inputBias->data.dtype), ").");
+    } else {
+      NVTE_CHECK(C_dtype == outputD->data.dtype,
+                 "GEMM requires C and D to have the same dtype (C=", to_string(C_dtype),
+                 ", D=", to_string(outputD->data.dtype), ").");
+    }
+    if (inputC != outputD) {
+      const auto [C0, C1] = inputC->flat_2d_dims();
+      NVTE_CHECK(C0 == n && C1 == m, "GEMM input C has incompatible dimensions (expected ", n, "x",
+                 m, ", got ", C0, "x", C1, ")");
+    }
+    C = inputC->data.dptr;
+    C_type = get_cuda_dtype(C_dtype);
+  } else if (is_fp8_dtype(outputD->data.dtype)) {
+    // cuBLAS requires FP16/BF16 C with the same dtype as the bias
+    C_type = bias ? bias_type : CUDA_R_16BF;
+  } else {
+    // C is not read. Pass D anyway so the cuBLAS call matches in-place accumulation.
+    C = D;
+  }
+
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
   cublasLtMatmulDesc_t operationDesc = nullptr;
@@ -555,7 +593,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                param.transA == CUBLAS_OP_N ? k : m, param.lda));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Bdesc, B_type, param.transB == CUBLAS_OP_N ? k : n,
                                                param.transB == CUBLAS_OP_N ? n : k, param.ldb));
-
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, C_type, m, n, ldd));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, gemm_compute_type, CUDA_R_32F));
@@ -727,8 +765,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     }
 #endif  // CUBLAS_VERSION >= 120800
     if (is_fp8_dtype(outputD->data.dtype)) {
-      // Accumulation mode not supported for FP8 output
-      C = nullptr;
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           operationDesc, CUBLASLT_MATMUL_DESC_D_SCALE_POINTER, &D_scale, sizeof(D_scale)));
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
@@ -742,19 +778,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                          &scaling_mode_a, sizeof(scaling_mode_a)));
       }
 #endif  // CUBLAS_VERSION >= 120800
-      // For FP8 output, cuBLAS requires C_type to match bias_type and
-      // be FP16/BF16
-      const cudaDataType_t C_type = bias ? bias_type : CUDA_R_16BF;
-      NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, C_type, m, n, ldd));
-    } else {
-      NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
     }
     if (bias) {
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           operationDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_type, sizeof(bias_type)));
     }
-  } else {
-    NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, D_type, m, n, ldd));
   }
 
   if (bias && gelu) {
@@ -955,11 +983,11 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
     NVTE_ERROR("nvte_cublas_gemm does not support NVFP4 data. Use nvte_cublas_gemm_v2 instead.");
   }
 
-  // Launch GEMM
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
-              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              &alpha, &beta, false, use_split_accumulator, math_sm_count, 0, 0, false, nullptr,
-              stream);
+  // Launch GEMM, accumulating in-place if needed
+  cublas_gemm(inputA, inputB, accumulate ? outputD : nullptr, outputD, biasTensor, outputGelu,
+              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
+              wspace->data.dptr, wspace->data.shape[0], &alpha, &beta, false, use_split_accumulator,
+              math_sm_count, 0, 0, false, nullptr, stream);
 }
 
 void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTETensor A,
@@ -971,10 +999,8 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
   // Data tensors
   const Tensor *A_tensor = convertNVTETensorCheck(A);
   const Tensor *B_tensor = convertNVTETensorCheck(B);
-  const Tensor *C_tensor = convertNVTETensorCheck(C);
+  const Tensor *C_tensor = convertNVTETensor(C);
   Tensor *D_tensor = convertNVTETensorCheck(D);
-  NVTE_CHECK(C_tensor == D_tensor,
-             "Currently nvte_cublas_gemm_v2 does not support different C and D tensors.");
 
   // Workspace
   void *workspace_ptr = nullptr;
@@ -1017,7 +1043,7 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
   }
 
   // Launch GEMM
-  cublas_gemm(A_tensor, B_tensor, D_tensor, epilogue_bias_tensor, epilogue_aux_tensor,
+  cublas_gemm(A_tensor, B_tensor, C_tensor, D_tensor, epilogue_bias_tensor, epilogue_aux_tensor,
               transa ? CUBLAS_OP_T : CUBLAS_OP_N, transb ? CUBLAS_OP_T : CUBLAS_OP_N,
               with_grad_epilogue, workspace_ptr, workspace_size, alpha, beta,
               config_.alpha_beta_on_device, config_.use_split_accumulator, config_.sm_count, 0, 0,
@@ -1045,11 +1071,11 @@ void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor 
     NVTE_ERROR("nvte_cublas_gemm does not support NVFP4 data. Use nvte_cublas_gemm_v2 instead.");
   }
 
-  // Launch GEMM
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
-              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              &alpha, &beta, false, use_split_accumulator, math_sm_count, 0, 0, false, nullptr,
-              stream);
+  // Launch GEMM, accumulating in-place if needed
+  cublas_gemm(inputA, inputB, beta != 0 ? outputD : nullptr, outputD, biasTensor, outputGelu,
+              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
+              wspace->data.dptr, wspace->data.shape[0], &alpha, &beta, false, use_split_accumulator,
+              math_sm_count, 0, 0, false, nullptr, stream);
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -1093,10 +1119,11 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   NVTE_CHECK(is_delayed_tensor_scaling(inputA->scaling_mode) &&
                  is_delayed_tensor_scaling(inputB->scaling_mode),
              "Atomic GEMM only supports delayed scaling.");
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
-              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              alpha_ptr, beta_ptr, true, use_split_accumulator, math_sm_count, m_split, n_split,
-              gemm_producer, inputCounter, stream);
+  cublas_gemm(inputA, inputB, accumulate ? outputD : nullptr, outputD, biasTensor, outputGelu,
+              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
+              wspace->data.dptr, wspace->data.shape[0], alpha_ptr, beta_ptr, true,
+              use_split_accumulator, math_sm_count, m_split, n_split, gemm_producer, inputCounter,
+              stream);
 #endif
 }
 
@@ -1139,8 +1166,8 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
     // Launch GEMM
     const float alpha = 1.f;
     const float beta = accumulate ? 1.f : 0.f;
-    nvte_cublas_gemm_v2(transa, transb, &alpha, A[i], B[i], &beta, D[i], D[i],
-                        workspace[i % num_streams], &config,
+    nvte_cublas_gemm_v2(transa, transb, &alpha, A[i], B[i], &beta, accumulate ? D[i] : nullptr,
+                        D[i], workspace[i % num_streams], &config,
                         detail::get_compute_stream(i % num_streams));
   }
 

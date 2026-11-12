@@ -15,9 +15,10 @@ Prerequisites
 2. `CUDA 12.1+ (12.8+ for Blackwell support) <https://developer.nvidia.com/cuda-downloads>`__
 3. |driver link|_ supporting CUDA 12.1 or later.
 4. `cuDNN 9.12 <https://developer.nvidia.com/cudnn>`__ or later.
+5. `cuDNN Frontend 1.31.0 <https://pypi.org/project/nvidia-cudnn-frontend/>`__ or later.
 
 PyTorch and JAX cuDNN attention require ``nvidia-cudnn-frontend`` version
-1.29.0 or later. JAX builds pin the runtime dependency to the frontend version
+1.31.0 or later. JAX builds pin the runtime dependency to the frontend version
 used for the build headers. The JAX extension and frontend Python package must
 use matching versions; rebuild the extension after upgrading that package.
 
@@ -57,8 +58,8 @@ pip - from GitHub
 Additional Prerequisites
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. [For PyTorch support] `PyTorch <https://pytorch.org/>`__ with GPU support.
-2. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.4.7.
+1. [For PyTorch support] `PyTorch <https://pytorch.org/>`__ with GPU support, version >= 2.8.
+2. [For JAX support] `JAX <https://github.com/google/jax/>`__ with GPU support, version >= 0.5.3.
 
 Installation (stable release)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
