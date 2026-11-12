@@ -2166,6 +2166,7 @@ namespace {
 
 // QDQ has high-precision storage, so it does not use the native packed-tensor
 // converters. Keep its split dispatch separate from packed tensor allocation.
+// Quantizer families are validated when GroupedLinear installs the recipe.
 std::vector<py::object> split_quantize_qdq(const at::Tensor &tensor,
                                            const std::vector<size_t> &split_sections,
                                            const std::vector<py::handle> &quantizers,
@@ -2174,8 +2175,6 @@ std::vector<py::object> split_quantize_qdq(const at::Tensor &tensor,
   const auto inputs = tensor.split_with_sizes(sizes, 0);
   bool fused = tensor.is_cuda() && tensor.numel() != 0;
   for (size_t i = 0; i < inputs.size(); ++i) {
-    NVTE_CHECK(Py_TYPE(quantizers[i].ptr()) == Py_TYPE(quantizers[0].ptr()),
-               "QDQ split quantizers must have the same concrete type");
     if (inputs[i].numel() != 0 &&
         quantizers[i].attr("selected_backend")(inputs[i]).cast<std::string>() != "fused") {
       fused = false;
@@ -2215,15 +2214,23 @@ std::vector<py::object> split_quantize_qdq(const at::Tensor &tensor,
   const auto amax = needs_amax ? at::empty({static_cast<int64_t>(inputs.size())},
                                            tensor.options().dtype(at::kFloat))
                                : at::Tensor();
+  const auto stream = at::cuda::getCurrentCUDAStream();
   NVTE_SCOPED_GIL_RELEASE({
     for (size_t i = 0; i < inputs.size(); ++i) {
       if (inputs[i].numel() == 0) continue;
+      auto input_cpp = makeTransformerEngineTensor(inputs[i]);
+      auto output_cpp = makeTransformerEngineTensor(outputs[i]);
       if (!nvfp4) {
-        mxfp8_qdq(inputs[i], outputs[i], std::nullopt);
+        nvte_mxfp8_qdq(input_cpp.data(), output_cpp.data(), nullptr, stream);
       } else if (row_scaled[i]) {
-        nvfp4_qdq_row_scaled(inputs[i], outputs[i], std::nullopt);
+        nvte_nvfp4_qdq_row_scaled(input_cpp.data(), output_cpp.data(), nullptr, stream);
       } else {
-        nvfp4_qdq(inputs[i], outputs[i], amax.narrow(0, i, 1), std::nullopt, true);
+        auto expert_amax = amax.narrow(0, i, 1);
+        auto amax_cpp = makeTransformerEngineTensor(expert_amax);
+        TensorWrapper reduction_output(nullptr, input_cpp.shape(), DType::kFloat32,
+                                       expert_amax.data_ptr<float>());
+        nvte_compute_amax(input_cpp.data(), reduction_output.data(), stream);
+        nvte_nvfp4_qdq(input_cpp.data(), output_cpp.data(), amax_cpp.data(), nullptr, stream);
       }
     }
   });

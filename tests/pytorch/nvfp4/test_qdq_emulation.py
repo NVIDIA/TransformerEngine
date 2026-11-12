@@ -420,3 +420,19 @@ def test_hybrid_split_qdq_dispatch(fmt, source, monkeypatch):
         torch.testing.assert_close(
             out.columnwise_sub_storage.dequantize(), expected_col, rtol=0, atol=0
         )
+
+
+@pytest.mark.parametrize("fmt", portable_formats)
+@pytest.mark.parametrize("disable_bulk", [False, True])
+def test_split_qdq_contiguous_slices_of_strided_input(fmt, disable_bulk):
+    # The leading dimension has gaps, but each expert is a contiguous matrix.
+    x = inputs((3, 32, 128), torch.bfloat16, "normal")[:, :16, :]
+    splits = [1, 1, 1]
+    assert not x.is_contiguous()
+    assert all(part.is_contiguous() for part in x.split(splits))
+    qs = [quantizer(fmt, "fused") for _ in splits]
+    actual = tex.split_quantize_custom(x, splits, qs, disable_bulk_allocation=disable_bulk)
+    for part, out in zip(x.split(splits), actual):
+        assert torch.equal(
+            out.dequantize().view(torch.int16), reference(part, fmt).view(torch.int16)
+        )
