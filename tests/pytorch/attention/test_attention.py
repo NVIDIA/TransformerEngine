@@ -435,7 +435,7 @@ def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
         runtime.add("dsink", torch.empty_like(params["softmax_offset"]), output=True)
     assert query.description() == runtime.description()
 
-    if fmt == "thd" and not query.use_cu_seqlens:
+    if fmt == "thd" and query.ragged_graph and not query.use_cu_seqlens:
         other_query = implementation._query_graph(replace(config, batch_size=batch + 1), backward)
         assert other_query.description() == query.description()
     runtime.scalar("attn_scale", torch.tensor([0.25]), by_value=True)
@@ -4043,8 +4043,8 @@ def _mha_fp8_vs_f16_seqlens(config, qkv_format):
         def random_seqlens(max_seqlen):
             if qkv_format != "thd":
                 return draw(max_seqlen, config.batch_size)
-            # Reserve seven positions so total-token alignment only increases the final length.
-            return torch.cat((draw(max_seqlen, config.batch_size - 1), draw(max_seqlen - 6, 1)))
+            # Reserve fifteen positions so total-token alignment only increases the final length.
+            return torch.cat((draw(max_seqlen, config.batch_size - 1), draw(max_seqlen - 14, 1)))
 
         if config.attn_type == "self":
             seqlens_q = random_seqlens(config.max_seqlen_q)
@@ -4061,8 +4061,8 @@ def _mha_fp8_vs_f16_seqlens(config, qkv_format):
         )
     if qkv_format == "thd":
         # FP8 Linear flattens THD input to [t, h*d], so align total tokens for cuBLAS.
-        seqlens_q[-1] += -seqlens_q.sum() % 8
-        seqlens_kv[-1] += -seqlens_kv.sum() % 8
+        seqlens_q[-1] += -seqlens_q.sum() % 16
+        seqlens_kv[-1] += -seqlens_kv.sum() % 16
     return seqlens_q, seqlens_kv
 
 

@@ -144,6 +144,10 @@ def test_backward_requirement_with_frozen_qkv(monkeypatch, grad_target):
 
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="Deterministic fused attention backward requires SM90 or later",
+)
 def test_fused_eval_backward_after_forward_only(monkeypatch, dtype):
     """Evaluation with autograd must retain numerical parity after a cached inference call."""
     monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
