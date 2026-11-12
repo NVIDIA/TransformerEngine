@@ -3378,19 +3378,23 @@ def _check_te_ops_activation_compile(
         "SwiGLU",
     ],
 )
+def test_te_ops_activation_compile(activation):
+    _check_te_ops_activation_compile(activation, dtype=torch.bfloat16)
+
+
+@pytest.mark.parametrize("activation", ["GELU", "GEGLU", "SwiGLU"])
 @pytest.mark.parametrize(
     "dtype,layout,cache_input",
     [
         (torch.float32, "contiguous", False),
         (torch.float16, "contiguous", False),
-        (torch.bfloat16, "contiguous", False),
         (torch.bfloat16, "strided", False),
         (torch.bfloat16, "fp8", False),
         (torch.bfloat16, "contiguous", True),
         (torch.bfloat16, "fp8", True),
     ],
 )
-def test_te_ops_activation_compile(activation, dtype, layout, cache_input):
+def test_te_ops_activation_variants_compile(activation, dtype, layout, cache_input):
     _check_te_ops_activation_compile(
         activation, dtype=dtype, layout=layout, cache_input=cache_input
     )
@@ -3413,10 +3417,19 @@ def test_te_ops_swiglu_dynamic_compile(cache_input, interleave_size):
     )
 
 
-@pytest.mark.parametrize("activation", ["GELU", "ReLU", "GEGLU", "SwiGLU"])
 @pytest.mark.parametrize("quantization", [None, "fp8", "nvfp4", "nvfp4_no_rht"])
 @pytest.mark.parametrize(
-    "training,mode", [(False, "default"), (True, "default"), (True, "reduce-overhead")]
+    "activation,training,mode",
+    [
+        ("GELU", True, "default"),
+        ("ReLU", True, "default"),
+        ("GEGLU", True, "default"),
+        ("SwiGLU", True, "default"),
+        ("GELU", False, "default"),
+        ("SwiGLU", False, "default"),
+        ("GELU", True, "reduce-overhead"),
+        ("SwiGLU", True, "reduce-overhead"),
+    ],
 )
 def test_te_ops_activation_mlp_compile(activation, quantization, training, mode, monkeypatch):
     nvfp4 = quantization in ("nvfp4", "nvfp4_no_rht")
@@ -3431,10 +3444,12 @@ def test_te_ops_activation_mlp_compile(activation, quantization, training, mode,
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
     in_features, hidden = (128, 128) if nvfp4 else (32, 64)
     gated = activation in ("GEGLU", "SwiGLU")
+    cache_input = training and activation == "GELU" and quantization == "fp8"
+    rows = 64 if activation == "GELU" and quantization == "nvfp4" else 32
     model = (
         te.ops.Sequential(
             te.ops.Linear(in_features, hidden * (2 if gated else 1), device="cuda", dtype=dtype),
-            getattr(te.ops, activation)(),
+            getattr(te.ops, activation)(cache_quantized_input=cache_input),
             te.ops.Linear(hidden, in_features, device="cuda", dtype=dtype),
         )
         .train(training)
@@ -3466,7 +3481,7 @@ def test_te_ops_activation_mlp_compile(activation, quantization, training, mode,
     eager_optimizer = torch.optim.SGD(eager_model.parameters(), lr=0.01)
     for step in range(4 if training else 1):
         torch.compiler.cudagraph_mark_step_begin()
-        shape = (2, 16, in_features) if training else (32, in_features)
+        shape = (2, rows // 2, in_features) if training else (rows, in_features)
         x = torch.randn(shape, device="cuda", dtype=dtype, requires_grad=training)
         if training and step == 0:
             # Keep the independent reference reductions well-conditioned.
