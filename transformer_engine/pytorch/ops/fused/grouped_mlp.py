@@ -2325,7 +2325,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 saved_tensors[:num_groups],
                 saved_tensors[num_groups:],
             )
-        fc2_x_amax, fc2_x_post_rht_amax = saved_tensors[:2]
+        fc2_x_amax, fc2_x_post_rht_amax, saved_tensors = (
+            saved_tensors[0],
+            saved_tensors[1],
+            saved_tensors[2:],
+        )
 
         # Group splits
         if int(split_sizes.numel()) != num_groups:
