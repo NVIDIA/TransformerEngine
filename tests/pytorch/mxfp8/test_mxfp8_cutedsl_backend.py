@@ -241,6 +241,8 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
         + "_".join("1" if f else "0" for f in flags)
         + "_"
         + desc
+        + f"_device_{torch.cuda.current_device()}_generation_"
+        + str(tex.get_cuda_state_version())
     )
 
 
@@ -332,6 +334,34 @@ def run_test_case(
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_cast_only(swizzled, fp8_dtype, in_dtype, block_size, shape):
     run_test_case("CAST_ONLY", IDENTITY, shape, block_size, in_dtype, fp8_dtype, swizzled)
+
+
+def test_release_retires_and_recompiles_cutedsl_executors():
+    """Do not retain a context-bound executor through a live-context release."""
+    x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    set_cutedsl_backend(False)
+    reference = extract_quantized_output(quantizer(x), True, True, False)
+    set_cutedsl_backend(True)
+    try:
+        for _ in range(2):
+            output = extract_quantized_output(quantizer(x), True, True, False)
+            for name, expected in reference.items():
+                assert torch.equal(output[name], expected)
+            key = get_cfg_key(
+                "CAST_ONLY", IDENTITY, x.dtype, tex.DType.kFloat8E4M3, True, True, False
+            )
+            assert tvm_ffi.get_global_func(key, allow_missing=True) is not None
+            # Even a mistaken post-loss call must reject active opaque executors
+            # before advancing the generation or mutating registered state.
+            generation = tex.get_cuda_state_version()
+            with pytest.raises(RuntimeError, match="CuTeDSL"):
+                tex.reset_cuda_state()
+            assert tex.get_cuda_state_version() == generation
+            te.release_cuda_state()
+            assert tvm_ffi.get_global_func(key, allow_missing=True) is None
+    finally:
+        set_cutedsl_backend(False)
 
 
 def test_cast_only_rowwise_specialized_grid_y_overflow():

@@ -8,6 +8,7 @@
 #define TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_
 
 #include <dlfcn.h>
+#include <transformer_engine/cuda_context.h>
 #include <tvm/ffi/any.h>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/function.h>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include "common.h"
+#include "util/cuda_context.h"
 #include "util/cuda_runtime.h"
 #include "util/logging.h"
 #include "util/system.h"
@@ -228,22 +230,23 @@ namespace tvm_ffi_bridge {
 //
 //   - std::optional<tvm::ffi::Function> get_kernel() const
 // Retrieves the possibly cached function. If the config provides a
-// `uint32_t to_id() const` method, it can reuse TVMFFIConfigCache with the
+// `Key to_id() const` method, it can reuse TVMFFIConfigCache<Key> with the
 // canonical implementation:
 // ```
 // std::optional<tvm::ffi::Function> get_kernel() const {
-//   static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
+//   static auto &cache = TVMFFIConfigCache<Key>::create();
 //   return cache.get_or_load(*this);
 // }
 // ```
 // The ID only has to be unique within the config type because the function-local
 // cache belongs to that type. Configs that need a different key type or caching
-// policy may implement get_kernel() themselves.
+// policy may select a different Key type or implement get_kernel() themselves.
 //
 // Note: TVMFFIConfigCache::create() intentionally gives its cache process lifetime.
 // This prevents cached tvm::ffi::Function handles from being destroyed during
 // static teardown, when Python or TVM-FFI runtime state may already have been
 // finalized. The OS reclaims the allocation when the process exits.
+template <typename Key = uint32_t>
 class TVMFFIConfigCache;
 
 namespace detail {
@@ -287,7 +290,10 @@ class TVMFFICentral {
       });
       return std::nullopt;
     }
-    const std::string key = cfg.to_key();
+    int device;
+    NVTE_CHECK_CUDA(cudaGetDevice(&device));
+    const std::string key = cfg.to_key() + "_device_" + std::to_string(device) + "_generation_" +
+                            std::to_string(nvte_get_cuda_state_version());
     bool success = false;
     {
       PythonGCPause gc_pause;
@@ -436,17 +442,17 @@ class TVMFFICentral {
 };
 
 // A utility class that each Config struct can use to cache the registered TVM-FFI functions
-// via `to_id` method, where an id is a unique integer that represents a specific config.
+// via `to_id`, whose key uniquely represents a config within its config type.
 // Defined after TVMFFICentral because get_or_load names it.
 //
+template <typename Key>
 class TVMFFIConfigCache {
  public:
   static TVMFFIConfigCache &create() { return *new TVMFFIConfigCache(); }
 
   // Lazy-load the CuTeDSL function for this config and cache the result.
   // Returns std::nullopt if the config is unsupported or CuTeDSL backend is disabled.
-  // This requires the config to have a `uint32_t to_id() const` method, which returns an unique
-  // identifier among all configs of this type.
+  // This requires a `Key to_id() const` method returning a unique key within the config type.
   template <typename Config>
   std::optional<tvm::ffi::Function> get_or_load(const Config &cfg) {
     TVMFFICentral &central = TVMFFICentral::getInstance();
@@ -456,35 +462,60 @@ class TVMFFIConfigCache {
       return std::nullopt;
     }
     // Otherwise try the cache first, and ask Python to compile/register the kernel if not found.
-    const uint32_t id = cfg.to_id();
+    const Key id = cfg.to_id();
+    int device;
+    NVTE_CHECK_CUDA(cudaGetDevice(&device));
     {
       std::shared_lock<std::shared_mutex> read_lock(mutex_);
-      auto it = map_.find(id);
-      if (it != map_.end()) {
-        return it->second;
+      auto cache = devices_.find(device);
+      if (cache != devices_.end()) {
+        auto it = cache->second->functions.find(id);
+        if (it != cache->second->functions.end()) return it->second;
       }
     }
 
     std::unique_lock<std::shared_mutex> write_lock(mutex_);
     // After I grab the write lock, check again in case another thread already loaded it.
-    auto it = map_.find(id);
-    if (it != map_.end()) {
+    auto &cache = devices_[device];
+    if (!cache) cache = std::make_unique<DeviceFunctions>(device);
+    auto it = cache->functions.find(id);
+    if (it != cache->functions.end()) {
       // Another thread must have loaded it before I obtained the write lock, so just return it.
       return it->second;
     }
 
     // No other thread has loaded it, and none can load it now while I hold the write lock.
     std::optional<tvm::ffi::Function> fn = central.load_tvm_ffi_function(cfg);
-    map_.emplace(id, fn);
+    cache->functions.emplace(id, fn);
     return fn;
   }
 
  private:
+  struct DeviceFunctions : cuda_context::Resource {
+    explicit DeviceFunctions(int device) : cuda_context::Resource(device), device(device) {}
+    void check_context_loss() const override {
+      for (const auto &entry : functions) {
+        NVTE_CHECK(!entry.second.has_value(),
+                   "Loaded CuTeDSL/TVM-FFI functions retain context-specific executors. "
+                   "Release the backend while the context is usable before destroying it; "
+                   "otherwise restart the worker.");
+      }
+    }
+    void release_context() override {
+      functions.clear();
+      auto cleanup = tvm::ffi::Function::GetGlobal("release_cutedsl_cuda_state");
+      NVTE_CHECK(cleanup.has_value(), "CuTeDSL CUDA-state cleanup callback is not registered.");
+      (*cleanup)(device);
+    }
+    void invalidate_context() noexcept override { functions.clear(); }
+    int device;
+    std::unordered_map<Key, std::optional<tvm::ffi::Function>> functions;
+  };
   TVMFFIConfigCache() = default;
   ~TVMFFIConfigCache() = default;
 
   std::shared_mutex mutex_;
-  std::unordered_map<uint32_t, std::optional<tvm::ffi::Function>> map_;
+  std::unordered_map<int, std::unique_ptr<DeviceFunctions>> devices_;
 };
 
 // Optionally warn or fail when CuTeDSL kernels are not chosen based on NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN.

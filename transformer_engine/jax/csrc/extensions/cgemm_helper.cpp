@@ -133,6 +133,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK_CUDA(cudaMalloc(&handler._device_barrier, sizeof(int)));
 
   handler._initialize = true;
+  // Cleanup starts in the barrier allocation's context; the registry is global.
+  handler.set_device(handler.local_device_ids_within_process.back());
 
   // Bootstrap UB/cuBlasMp via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
@@ -164,6 +166,11 @@ int GetCgemmNumMaxStreams() {
 CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape,
                                                           DType dtype,
                                                           JAXX_Collective_Op collective_op) {
+  int device;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
+  auto &cache = devices_[device];
+  if (!cache) cache = std::make_unique<DevicePlans>(device);
+  auto &plan_map = cache->plans;
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
 
@@ -245,7 +252,8 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
   cudaDeviceSynchronize();
 }
 
-CommunicatorHandler::CommunicatorHandler() : _device_barrier(nullptr) {
+CommunicatorHandler::CommunicatorHandler()
+    : FrontendResource(-1, NVTE_CUDA_STATE_RELEASE_COMMUNICATORS), _device_barrier(nullptr) {
   allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf,
                           size_t input_bytes, ExtComm comm) {
     this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
@@ -266,6 +274,41 @@ CommunicatorHandler::~CommunicatorHandler() {
   for (const auto &file_path : _nccl_id_file_name) {
     std::remove(file_path.c_str());
   }
+}
+
+void CommunicatorHandler::check_context_loss() const {
+  NVTE_CHECK(!_initialize,
+             "Active JAX collective-GEMM communicators must be released before context loss; "
+             "the XLA/NCCL runtime cannot be recovered by a TE cache reset.");
+}
+
+void CommunicatorHandler::release_context() {
+  if (!_initialize) return;
+  int previous;
+  NVTE_CHECK_CUDA(cudaGetDevice(&previous));
+  try {
+    for (size_t i = 0; i < tp_comms.size(); ++i) {
+      if (tp_comms[i] != nullptr) {
+        NVTE_CHECK_CUDA(cudaSetDevice(local_device_ids_within_process[i]));
+        NVTE_CHECK_NCCL(ncclCommDestroy(tp_comms[i]));
+        tp_comms[i] = nullptr;
+      }
+    }
+    if (_device_barrier != nullptr) {
+      // init allocates the barrier after selecting the last local device.
+      NVTE_CHECK_CUDA(cudaSetDevice(local_device_ids_within_process.back()));
+      NVTE_CHECK_CUDA(cudaFree(_device_barrier));
+      _device_barrier = nullptr;
+    }
+  } catch (...) {
+    cudaSetDevice(previous);
+    throw;
+  }
+  NVTE_CHECK_CUDA(cudaSetDevice(previous));
+  for (const auto &path : _nccl_id_file_name) std::remove(path.c_str());
+  _nccl_id_file_name.clear();
+  tp_comms.clear();
+  _initialize = false;
 }
 
 }  // namespace jax

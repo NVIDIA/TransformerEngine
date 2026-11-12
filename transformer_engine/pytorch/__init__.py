@@ -179,3 +179,5 @@ torch.serialization.add_safe_globals(
         _make_identity_tensor_in_reduce_ex,
     ]
 )
+
+from .cuda_context import release_cuda_state, reset_cuda_state

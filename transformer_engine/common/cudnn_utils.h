@@ -21,6 +21,7 @@ namespace transformer_engine {
 namespace detail {
 
 void CreateCuDNNHandle(cudnnHandle_t* handle);
+void DestroyCuDNNHandle(cudnnHandle_t handle);
 
 }  // namespace detail
 
@@ -28,7 +29,8 @@ cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t);
 
 cudnn_frontend::DataType_t get_cudnn_fe_dtype(const transformer_engine::DType t);
 
-using cudnnExecutionPlanManager = detail::HandleManager<cudnnHandle_t, detail::CreateCuDNNHandle>;
+using cudnnExecutionPlanManager =
+    detail::HandleManager<cudnnHandle_t, detail::CreateCuDNNHandle, detail::DestroyCuDNNHandle>;
 
 }  // namespace transformer_engine
 

@@ -58,6 +58,19 @@ _seq_chunk_ids_cache_for_reordering_after_attn = {}
 _softmax_offset_chunk_ids_cache = {}
 
 
+def _release_cuda_state(device):
+    """Release cached sequence/chunk tensors on this CUDA device."""
+    from ..._cuda_state import clear_tensor_cache  # pylint: disable=import-outside-toplevel
+
+    for cache in (
+        _cu_seqlens_info_with_cp_cache,
+        _seq_chunk_ids_cache_for_reordering_before_attn,
+        _seq_chunk_ids_cache_for_reordering_after_attn,
+        _softmax_offset_chunk_ids_cache,
+    ):
+        clear_tensor_cache(cache, device)
+
+
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
 

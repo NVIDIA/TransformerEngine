@@ -5,6 +5,7 @@
  ************************************************************************/
 #include "transformer_engine/gemm.h"
 
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -481,19 +482,63 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<JAXX_Collective_Op>("collective_op"),
                               FFI_CudaGraph_Traits);
 
+namespace {
+struct GroupSizesTransfer {
+  cudaEvent_t event = nullptr;
+  int32_t *sizes = nullptr;
+  size_t count = 0;
+};
+
+struct GroupSizesTransfers : cuda_context::FrontendResource {
+  explicit GroupSizesTransfers(int device) : FrontendResource(device) {}
+  std::mutex mutex;
+  std::map<cudaStream_t, GroupSizesTransfer> streams;
+
+ private:
+  void check_context_loss() const override {
+    NVTE_CHECK(streams.empty(),
+               "Release JAX grouped GEMM pinned transfers before CUDA context destruction; "
+               "the XLA runtime cannot recover after context loss.");
+  }
+  void release_context() override {
+    for (auto &[stream, transfer] : streams) {
+      if (transfer.event) {
+        NVTE_CHECK_CUDA(cudaEventDestroy(transfer.event));
+        transfer.event = nullptr;
+      }
+      if (transfer.sizes) {
+        NVTE_CHECK_CUDA(cudaFreeHost(transfer.sizes));
+        transfer.sizes = nullptr;
+      }
+    }
+    streams.clear();
+  }
+  void invalidate_context() noexcept override {}
+};
+
+GroupSizesTransfers &group_sizes_transfers() {
+  static auto &mutex = *new std::mutex;
+  static auto &devices = *new std::map<int, std::unique_ptr<GroupSizesTransfers>>;
+  std::lock_guard<std::mutex> lock(mutex);
+  auto &state = devices[cuda::current_device()];
+  if (!state) state = std::make_unique<GroupSizesTransfers>(cuda::current_device());
+  return *state;
+}
+}  // namespace
+
 size_t GroupedGemmGetGroupSizes(cudaStream_t stream, size_t num_gemms, int32_t *dev_group_sizes,
                                 int32_t *host_group_sizes) {
-  static std::once_flag init_flag;
-  static cudaEvent_t d2h_event;
-  static size_t host_num_gemms;
-  static const size_t max_num_gemms = 1024;
-  //static int32_t host_group_sizes_internal[max_num_gemms];
-  static int32_t *host_group_sizes_internal = nullptr;
-  auto init = [&]() {
-    NVTE_CHECK_CUDA(cudaEventCreate(&d2h_event));
-    NVTE_CHECK_CUDA(cudaMallocHost(&host_group_sizes_internal, sizeof(int32_t) * max_num_gemms));
-  };
-  std::call_once(init_flag, init);
+  constexpr size_t max_num_gemms = 1024;
+  auto &state = group_sizes_transfers();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  auto &transfer = state.streams[stream];
+  if (!transfer.event) NVTE_CHECK_CUDA(cudaEventCreate(&transfer.event));
+  if (!transfer.sizes) {
+    NVTE_CHECK_CUDA(cudaMallocHost(&transfer.sizes, sizeof(int32_t) * max_num_gemms));
+  }
+  auto d2h_event = transfer.event;
+  auto host_group_sizes_internal = transfer.sizes;
+  auto &host_num_gemms = transfer.count;
 
   NVTE_CHECK(dev_group_sizes == nullptr || host_group_sizes == nullptr,
              "Only one of dev_group_sizes and host_group_sizes can be non-nullptr.");
@@ -524,6 +569,7 @@ size_t GroupedGemmGetGroupSizes(cudaStream_t stream, size_t num_gemms, int32_t *
     memcpy(host_group_sizes, host_group_sizes_internal, sizeof(int32_t) * host_num_gemms);
     return host_num_gemms;
   }
+  return 0;
 }
 
 Error_Type GroupedGemmD2HGroupSizesFFI(cudaStream_t stream, Buffer_Type group_sizes,

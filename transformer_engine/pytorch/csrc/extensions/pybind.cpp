@@ -11,6 +11,7 @@
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <transformer_engine/cuda_context.h>
 
 #include <memory>
 #include <optional>
@@ -198,6 +199,9 @@ void bind_quantize_with_amax_extensions(py::module_ &m) {
 #include "common/util/pybind_helper.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("reset_cuda_state", &nvte_reset_cuda_state, py::call_guard<py::gil_scoped_release>());
+  m.def("release_cuda_state", &nvte_release_cuda_state, py::call_guard<py::gil_scoped_release>());
+  m.def("get_cuda_state_version", &nvte_get_cuda_state_version);
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
 
   // Register __eq__/__ne__ on the pybind ``DType`` enum so it compares by integer.
