@@ -3275,9 +3275,19 @@ def _check_linear_bias_compile(
     )
 
 
-def _ops_activation_reference(name, x, *, beta1=4.0, beta2=25.0, interleave_size=None):
+def _ops_activation_reference(
+    name,
+    x,
+    *,
+    beta1=4.0,
+    beta2=25.0,
+    limit=7.0,
+    alpha=1.702,
+    glu_linear_offset=1.0,
+    interleave_size=None,
+):
     gate = None
-    if name in ("GLU", "GEGLU", "QGEGLU", "ReGLU", "SReGLU", "SwiGLU", "SiTUGLU"):
+    if name in ("GLU", "GEGLU", "QGEGLU", "ReGLU", "SReGLU", "SwiGLU", "SiTUGLU", "ClampedSwiGLU"):
         if interleave_size is None:
             x, gate = x.chunk(2, dim=-1)
         else:
@@ -3296,6 +3306,10 @@ def _ops_activation_reference(name, x, *, beta1=4.0, beta2=25.0, interleave_size
     elif name == "SiTUGLU":
         x = beta1 * torch.tanh(x / beta1) * x.sigmoid()
         gate = beta2 * torch.tanh(gate / beta2)
+    elif name == "ClampedSwiGLU":
+        x = x.clamp(max=limit)
+        x = x * torch.sigmoid(alpha * x)
+        gate = gate.clamp(min=-limit, max=limit) + glu_linear_offset
     elif name == "GLU":
         x = x.sigmoid()
     else:
@@ -3390,6 +3404,7 @@ def _check_te_ops_activation_compile(
         "SiLU",
         "SwiGLU",
         "SiTUGLU",
+        "ClampedSwiGLU",
     ],
 )
 def test_te_ops_activation_compile(activation):
@@ -3414,7 +3429,7 @@ def test_te_ops_activation_variants_compile(activation, dtype, layout, cache_inp
     )
 
 
-@pytest.mark.parametrize("activation", ["GELU", "SwiGLU", "SiTUGLU"])
+@pytest.mark.parametrize("activation", ["GELU", "SwiGLU", "SiTUGLU", "ClampedSwiGLU"])
 @pytest.mark.parametrize("cache_input", [False, True])
 @pytest.mark.parametrize("training", [False, True])
 def test_te_ops_activation_autocast_compile(activation, cache_input, training):
@@ -3423,7 +3438,7 @@ def test_te_ops_activation_autocast_compile(activation, cache_input, training):
     )
 
 
-@pytest.mark.parametrize("activation", ["SwiGLU", "SiTUGLU"])
+@pytest.mark.parametrize("activation", ["SwiGLU", "SiTUGLU", "ClampedSwiGLU"])
 @pytest.mark.parametrize("cache_input", [False, True])
 @pytest.mark.parametrize("interleave_size", [None, 4])
 def test_te_ops_swiglu_dynamic_compile(activation, cache_input, interleave_size):
@@ -3442,6 +3457,16 @@ def test_te_ops_situglu_parameters_compile(beta1, beta2):
     )
 
 
+@pytest.mark.parametrize("limit,alpha,glu_linear_offset", [(0.75, 1.3, 0.0), (1.25, 2.0, 0.5)])
+def test_te_ops_clamped_swiglu_parameters_compile(limit, alpha, glu_linear_offset):
+    _check_te_ops_activation_compile(
+        "ClampedSwiGLU",
+        cache_input=True,
+        interleave_size=4,
+        activation_kwargs={"limit": limit, "alpha": alpha, "glu_linear_offset": glu_linear_offset},
+    )
+
+
 @pytest.mark.parametrize("quantization", [None, "fp8", "nvfp4", "nvfp4_no_rht"])
 @pytest.mark.parametrize(
     "activation,training,mode",
@@ -3451,6 +3476,7 @@ def test_te_ops_situglu_parameters_compile(beta1, beta2):
         ("GEGLU", True, "default"),
         ("SwiGLU", True, "default"),
         ("SiTUGLU", True, "default"),
+        ("ClampedSwiGLU", True, "default"),
         ("GELU", False, "default"),
         ("SwiGLU", False, "default"),
         ("GELU", True, "reduce-overhead"),
@@ -3469,7 +3495,7 @@ def test_te_ops_activation_mlp_compile(activation, quantization, training, mode,
     counters.clear()
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
     in_features, hidden = (128, 128) if nvfp4 else (32, 64)
-    gated = activation in ("GEGLU", "SwiGLU", "SiTUGLU")
+    gated = activation in ("GEGLU", "SwiGLU", "SiTUGLU", "ClampedSwiGLU")
     cache_input = training and activation == "GELU" and quantization == "fp8"
     rows = 64 if activation == "GELU" and quantization == "nvfp4" else 32
     model = (
