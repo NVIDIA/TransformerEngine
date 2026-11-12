@@ -11,6 +11,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from test_fused_attn import attention_reference as _reference
+
 from transformer_engine.common.cudnn import mxfp8_utils as mxfp8
 from transformer_engine.common.cudnn.graph import mxfp8_scale_spec
 from transformer_engine.jax.attention import (
@@ -75,24 +77,6 @@ def _attention(qkv, **kwargs):
     descriptor = options.pop("sequence_descriptor", SequenceDescriptor())
     seed = options.pop("seed", None)
     return fused_attn(qkv, None, descriptor, seed, **options)
-
-
-def _reference(qkv, mask=None, sink=None):
-    q, k, v = (x.astype(jnp.float32) for x in qkv)
-    repeats = q.shape[-2] // k.shape[-2]
-    k, v = (jnp.repeat(x, repeats, axis=-2) for x in (k, v))
-    scores = jnp.einsum("bqhd,bkhd->bhqk", q, k) * 0.125
-    if mask is not None:
-        scores = jnp.where(mask[:, None], scores, -1e30)
-    if sink is None:
-        probability = jax.nn.softmax(scores, -1)
-    else:
-        sink = jnp.broadcast_to(sink, (*scores.shape[:-1], 1))
-        probability = jax.nn.softmax(jnp.concatenate((scores, sink), axis=-1), -1)[..., :-1]
-    output = jnp.einsum("bhqk,bkhd->bqhd", probability, v)
-    if mask is not None:
-        output = jnp.where(jnp.any(mask, axis=-1)[..., None, None], output, 0.0)
-    return output
 
 
 @pytest.mark.parametrize("dtype", (jnp.float16, jnp.bfloat16))
@@ -377,6 +361,8 @@ def test_flax_prequantized_inputs(transpose):
     q = jnp.full((1, 128, 2, 64), 0.5, jnp.bfloat16)
     v = jnp.zeros_like(q).at[:, ::2, :, 0].set(1.0)
     prepared = jax.jit(quantize_attention_qkv)((q, q, v))
+    # A dropped quantized_qkv argument would produce zeros from the nominal V.
+    v = jnp.zeros_like(v)
     if transpose:
         q, v = q.swapaxes(0, 1), v.swapaxes(0, 1)
     module = DotProductAttention(

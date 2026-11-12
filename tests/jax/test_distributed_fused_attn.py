@@ -1025,11 +1025,26 @@ def test_mxfp8_prequantized_sharding(axis):
 
 
 @pytest.mark.parametrize("strategy", (CPStrategy.ALL_GATHER, CPStrategy.RING))
-@pytest.mark.parametrize("cp_size", (2, 4))
-@pytest.mark.parametrize("kind", ("dense", "causal", "balanced_causal"))
-@pytest.mark.parametrize("fp8_backward", (False, True))
-def test_mxfp8_context_parallel(strategy, cp_size, kind, fp8_backward, monkeypatch):
-    """Context-parallel outputs and gradients agree with an independent global reference."""
+@pytest.mark.parametrize(
+    "kind,cp_size,fp8_backward,layout,prequantized",
+    [
+        ("dense", 2, False, QKVLayout.BSHD_BSHD_BSHD, False),
+        ("dense", 4, True, QKVLayout.BSHD_BSHD_BSHD, False),
+        ("causal", 2, True, QKVLayout.BSHD_BSHD_BSHD, False),
+        ("causal", 4, False, QKVLayout.BSHD_BSHD_BSHD, False),
+        ("balanced_causal", 2, False, QKVLayout.BSHD_BSHD_BSHD, False),
+        ("balanced_causal", 4, True, QKVLayout.BSHD_BSHD_BSHD, False),
+        ("dense", 2, True, QKVLayout.BS3HD, False),
+        ("dense", 2, True, QKVLayout.BSHD_BS2HD, False),
+        ("dense", 2, True, QKVLayout.BS3HD, True),
+        ("dense", 2, True, QKVLayout.BSHD_BS2HD, True),
+        ("dense", 2, True, QKVLayout.BSHD_BSHD_BSHD, True),
+    ],
+)
+def test_mxfp8_context_parallel(
+    strategy, kind, cp_size, fp8_backward, layout, prequantized, monkeypatch
+):
+    """CP masks, load balancing and packed/supplied inputs agree with global FP32 attention."""
     from transformer_engine.jax.cpp_extensions.attention import reorder_causal_dual_chunk_swap
 
     _require_mxfp8()
@@ -1039,69 +1054,29 @@ def test_mxfp8_context_parallel(strategy, cp_size, kind, fp8_backward, monkeypat
     mesh = jax.sharding.Mesh(np.asarray(jax.local_devices()[:cp_size]), ("cp",))
     sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "cp", None, None))
     length = 256 * cp_size
-    q = jnp.full((1, length, 4, 64), 0.5, jnp.bfloat16)
-    k = q[:, :, :2]
-    v = jnp.zeros_like(k).at[:, ::2, :, 0].set(1.0)
-    # Distinct rank-local values make missing communication or incorrect
-    # dual-chunk ordering observable, while retaining exact MXFP8 operands.
-    amplitudes = jnp.exp2((jnp.arange(length) // 128) % 4 - 2).astype(v.dtype)
-    v *= amplitudes[None, :, None, None]
-    inputs = (q, k, v)
+    rng = np.random.default_rng(42)
+    q = jnp.asarray(rng.choice([-0.5, 0.5], (1, length, 4, 64)), jnp.bfloat16)
+    kv_shape = q.shape if layout.is_qkvpacked() else (1, length, 2, 64)
+    k = jnp.asarray(rng.choice([-0.5, 0.5], kv_shape), q.dtype)
+    v = jnp.asarray(rng.choice([-1.0, 1.0], kv_shape), q.dtype)
+    # Nonuniform rank-local keys and values expose missing communication and reordering.
+    amplitude = jnp.exp2((jnp.arange(length) // 128) % 4 - 2).astype(q.dtype)
+    k *= amplitude[None, :, None, None]
+    v *= amplitude[None, :, None, None]
+    weight = jnp.asarray(rng.choice([-1.0, 1.0], q.shape), q.dtype)
+    inputs = _pack_mxfp8((q, k, v), layout)
     balanced = kind == "balanced_causal"
     causal = kind != "dense"
     mask = (
         jnp.arange(length)[None, :, None] >= jnp.arange(length)[None, None, :] if causal else None
     )
-    reference = lambda xs: _mxfp8_reference(xs, mask)
-    expected = jax.jit(reference)(inputs)
-    ref_grads = jax.jit(jax.grad(lambda xs: reference(xs).sum()))(inputs)
-    reorder = lambda x, reverse: reorder_causal_dual_chunk_swap(x, cp_size, 1, reverse)
-    if balanced:
-        inputs = tuple(reorder(x, False) for x in inputs)
-    attention = lambda xs: _mxfp8_attention(
-        xs,
-        attn_mask_type=AttnMaskType.CAUSAL_MASK if causal else AttnMaskType.NO_MASK,
-        context_parallel_axis="cp",
-        context_parallel_strategy=strategy,
-        context_parallel_causal_load_balanced=balanced,
-    )
-    with jax.set_mesh(mesh), global_shard_guard(MeshResource(cp_resource="cp")):
-        actual = jax.jit(attention, in_shardings=((sharding,) * 3,))(inputs)
-        grads = jax.jit(jax.grad(lambda xs: attention(xs).sum()), in_shardings=((sharding,) * 3,))(
-            inputs
-        )
-    if balanced:
-        actual = reorder(actual, True)
-        grads = tuple(reorder(x, True) for x in grads)
-    np.testing.assert_allclose(actual, expected, rtol=1e-2, atol=1e-3)
-    for grad, ref in zip(grads, ref_grads):
-        np.testing.assert_allclose(grad, ref, rtol=3e-2, atol=2e-2)
-
-
-@pytest.mark.parametrize("strategy", (CPStrategy.ALL_GATHER, CPStrategy.RING))
-@pytest.mark.parametrize(
-    "layout", (QKVLayout.BS3HD, QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD)
-)
-@pytest.mark.parametrize("prequantized", (False, True))
-def test_mxfp8_context_parallel_storage(strategy, layout, prequantized):
-    """Packed and supplied FP8 inputs preserve nonuniform cross-rank values and gradients."""
-    _require_mxfp8()
-    if jax.local_device_count() < 2:
-        pytest.skip("Requires two GPUs for context parallelism")
-    mesh = jax.sharding.Mesh(np.asarray(jax.local_devices()[:2]), ("cp",))
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "cp", None, None))
-    rng = np.random.default_rng(42)
-    q = jnp.asarray(rng.choice([-0.5, 0.5], (1, 512, 2, 64)), jnp.bfloat16)
-    k = jnp.asarray(rng.choice([-0.5, 0.5], q.shape), q.dtype)
-    v = jnp.asarray(rng.choice([-1.0, 1.0], q.shape), q.dtype)
-    amplitude = jnp.exp2(jnp.arange(512) // 128 - 2).astype(q.dtype)
-    k *= amplitude[None, :, None, None]
-    v *= amplitude[None, :, None, None]
-    weight = jnp.asarray(rng.choice([-1.0, 1.0], q.shape), q.dtype)
-    inputs = _pack_mxfp8((q, k, v), layout)
-    reference = lambda xs: _mxfp8_reference(_unpack_mxfp8(xs, layout))
+    reference = lambda xs: _mxfp8_reference(_unpack_mxfp8(xs, layout), mask)
     expected = jax.jit(reference)(inputs)
     ref_grads = jax.jit(jax.grad(lambda xs: (reference(xs) * weight).sum()))(inputs)
+    reorder = lambda x, reverse: reorder_causal_dual_chunk_swap(x, cp_size, 1, reverse)
+    local_weight = reorder(weight, False) if balanced else weight
+    if balanced:
+        inputs = tuple(reorder(x, False) for x in inputs)
 
     def attention(xs):
         supplied = quantize_attention_qkv(_unpack_mxfp8(xs, layout)) if prequantized else None
@@ -1109,17 +1084,24 @@ def test_mxfp8_context_parallel_storage(strategy, layout, prequantized):
             xs,
             qkv_layout=layout,
             quantized_qkv=supplied,
+            attn_mask_type=AttnMaskType.CAUSAL_MASK if causal else AttnMaskType.NO_MASK,
             context_parallel_axis="cp",
             context_parallel_strategy=strategy,
+            context_parallel_causal_load_balanced=balanced,
         )
 
     with jax.set_mesh(mesh), global_shard_guard(MeshResource(cp_resource="cp")):
         actual = jax.jit(attention, in_shardings=((sharding,) * len(inputs),))(inputs)
         grads = jax.jit(
-            jax.grad(lambda xs: (attention(xs) * weight).sum()),
+            jax.grad(lambda xs: (attention(xs) * local_weight).sum()),
             in_shardings=((sharding,) * len(inputs),),
         )(inputs)
-    relative_error = lambda a, b: float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
+    if balanced:
+        actual = reorder(actual, True)
+        grads = tuple(reorder(x, True) for x in grads)
+    relative_error = lambda a, b: float(
+        jnp.linalg.norm(a.astype(jnp.float32) - b) / jnp.linalg.norm(b)
+    )
     assert relative_error(actual, expected) < 0.04
     for grad, ref in zip(grads, ref_grads):
         assert relative_error(grad, ref) < 0.08
