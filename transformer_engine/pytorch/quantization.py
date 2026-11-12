@@ -235,7 +235,9 @@ def check_fp8_ue5m3_support() -> Tuple[bool, str]:
             if get_device_compute_capability() != (10, 7):  # Rubin
                 return False, "Device compute capability 10.7 is required for FP8 UE5M3 support."
             if float(torch.version.cuda) < 13.4:
-                return False, "CUDA 13.4 is required for FP8 UE5M3 support."
+                return False, "CUDA 13.4+ is required for FP8 UE5M3 support."
+            if tex.get_cublasLt_version() < 131100:
+                return False, "cuBLAS 13.11+ is required for FP8 UE5M3 support."
             return True, ""
 
         _FP8_UE5M3_SUPPORT = _check_support()
