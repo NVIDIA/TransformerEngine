@@ -42,144 +42,24 @@ bool is_empty_grouped_tensor_param(const NVTEBasicTensor &t) {
   return t.shape.ndim == 1 && t.shape.data[0] == 0;
 }
 
-NVTEBasicTensor get_scales(const TensorWrapper &tensor, bool rowwise) {
-  return rowwise ? tensor.get_rowwise_scale_inv() : tensor.get_columnwise_scale_inv();
-}
-
-void set_scales_ptr(TensorWrapper &tensor, bool rowwise, void *ptr) {
-  const auto scales = get_scales(tensor, rowwise);
-  tensor.set_parameter(rowwise ? kNVTERowwiseScaleInv : kNVTEColumnwiseScaleInv, ptr,
-                       static_cast<DType>(scales.dtype), scales.shape);
-}
-
-// Tensor holding only one direction's scales, as consumed by the swizzle kernels
-TensorWrapper scale_view(const TensorWrapper &tensor, bool rowwise, void *scales_ptr,
-                         bool swizzled) {
-  const auto data = rowwise ? tensor.get_rowwise_data() : tensor.get_columnwise_data();
-  TensorWrapper view(tensor.scaling_mode());
-  view.set_parameter(rowwise ? kNVTERowwiseData : kNVTEColumnwiseData, nullptr,
-                     static_cast<DType>(data.dtype), data.shape);
-  const auto scales = get_scales(tensor, rowwise);
-  view.set_parameter(rowwise ? kNVTERowwiseScaleInv : kNVTEColumnwiseScaleInv, scales_ptr,
-                     static_cast<DType>(scales.dtype), scales.shape);
-  view.set_with_gemm_swizzled_scales(swizzled);
-  return view;
-}
-
-void redirect_scales(TensorWrapper &output, bool rowwise, at::Tensor scratch,
-                     RedirectedScales &redirected, bool preserve_scales) {
-  void *swizzled = get_scales(output, rowwise).data_ptr;
-  if (preserve_scales) {
-    // A GPU no-op must preserve the previous scales through finalization.
-    auto input_scales = scale_view(output, rowwise, swizzled, true);
-    auto output_scales = scale_view(output, rowwise, scratch.data_ptr(), false);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_unswizzle_scaling_factors(input_scales.data(), output_scales.data(),
-                                     at::cuda::getCurrentCUDAStream());
-    });
-  }
-  set_scales_ptr(output, rowwise, scratch.data_ptr());
-  redirected.swizzled[!rowwise] = swizzled;
-  redirected.scratch[!rowwise] = std::move(scratch);
-}
-
-// Restores the output's scale buffers and returns the compact scratch scales
-void *restore_scales(TensorWrapper &output, bool rowwise, const RedirectedScales &redirected) {
-  const auto &scratch = redirected.scratch[!rowwise];
-  if (!scratch.defined()) return nullptr;
-  set_scales_ptr(output, rowwise, redirected.swizzled[!rowwise]);
-  return scratch.data_ptr();
-}
-
 }  // namespace
 
-RedirectedScales redirect_scales_to_scratch(TensorWrapper &output, bool preserve_scales) {
-  NVTE_CHECK(output.get_with_gemm_swizzled_scales(), "Expected a GEMM-ready output");
-  RedirectedScales redirected;
-  for (bool rowwise : {true, false}) {
-    const auto scales = get_scales(output, rowwise);
-    if (scales.data_ptr == nullptr) continue;
-    redirect_scales(output, rowwise, allocateSpace(scales.shape, DType::kByte, false), redirected,
-                    preserve_scales);
-  }
-  output.set_with_gemm_swizzled_scales(false);
-  redirected.active = true;
-  return redirected;
-}
-
-void restore_and_swizzle_scales(TensorWrapper &output, const RedirectedScales &redirected) {
-  if (!redirected.active) return;
-  output.set_with_gemm_swizzled_scales(true);
-  for (bool rowwise : {true, false}) {
-    void *compact = restore_scales(output, rowwise, redirected);
-    if (compact == nullptr || output.numel() == 0) continue;
-    auto input_scales = scale_view(output, rowwise, compact, false);
-    auto output_scales = scale_view(output, rowwise, get_scales(output, rowwise).data_ptr, true);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_swizzle_scaling_factors(input_scales.data(), output_scales.data(),
-                                   at::cuda::getCurrentCUDAStream());
-    });
-  }
-}
-
-std::vector<RedirectedScales> redirect_scales_to_scratch(std::vector<TensorWrapper> &outputs,
-                                                         const std::vector<bool> &compact_scales) {
-  NVTE_CHECK(outputs.size() == compact_scales.size(), "Mismatched output layouts");
-  std::vector<RedirectedScales> redirected(outputs.size());
-  for (size_t i = 0; i < outputs.size(); ++i) {
-    NVTE_CHECK(!compact_scales[i] || outputs[i].get_with_gemm_swizzled_scales(),
-               "Expected a GEMM-ready output");
-  }
-  for (bool rowwise : {true, false}) {
-    std::vector<std::vector<size_t>> shapes;
-    std::vector<size_t> indices;
-    for (size_t i = 0; i < outputs.size(); ++i) {
-      const auto scales = get_scales(outputs[i], rowwise);
-      if (compact_scales[i] && scales.data_ptr != nullptr) {
-        shapes.emplace_back(scales.shape.data, scales.shape.data + scales.shape.ndim);
-        indices.push_back(i);
-      }
-    }
-    if (indices.empty()) continue;
-    auto buffers = bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), at::kByte),
-                                 std::nullopt, std::vector<size_t>(shapes.size(), 16));
-    for (size_t j = 0; j < indices.size(); ++j) {
-      redirect_scales(outputs[indices[j]], rowwise, std::move(buffers[j]), redirected[indices[j]],
-                      false);
-    }
-  }
-  for (size_t i = 0; i < outputs.size(); ++i) {
-    if (!compact_scales[i]) continue;
-    outputs[i].set_with_gemm_swizzled_scales(false);
-    redirected[i].active = true;
-  }
-  return redirected;
-}
-
-void restore_and_swizzle_scales(std::vector<TensorWrapper> &outputs,
-                                const std::vector<RedirectedScales> &redirected) {
-  NVTE_CHECK(outputs.size() == redirected.size(), "Mismatched quantization outputs");
-  for (size_t i = 0; i < outputs.size(); ++i) {
-    if (redirected[i].active) outputs[i].set_with_gemm_swizzled_scales(true);
-  }
-  for (bool rowwise : {true, false}) {
-    std::vector<TensorWrapper> input_views, output_views;
-    std::vector<NVTETensor> sources, destinations;
-    for (size_t i = 0; i < outputs.size(); ++i) {
-      void *compact = restore_scales(outputs[i], rowwise, redirected[i]);
-      if (compact == nullptr || outputs[i].numel() == 0) continue;
-      input_views.emplace_back(scale_view(outputs[i], rowwise, compact, false));
-      output_views.emplace_back(
-          scale_view(outputs[i], rowwise, get_scales(outputs[i], rowwise).data_ptr, true));
-      sources.push_back(input_views.back().data());
-      destinations.push_back(output_views.back().data());
-    }
-    if (!sources.empty()) {
-      NVTE_SCOPED_GIL_RELEASE({
-        nvte_multi_tensor_swizzle_scaling_factors(sources.data(), destinations.data(),
-                                                  sources.size(), at::cuda::getCurrentCUDAStream());
-      });
-    }
+void set_compact_tensor_data(TensorWrapper &view, const TensorWrapper &tensor, bool rowwise,
+                             void *scales) {
+  if (rowwise) {
+    const auto data = tensor.get_rowwise_data();
+    const auto scale_inv = tensor.get_rowwise_scale_inv();
+    const auto amax = tensor.get_amax();
+    view.set_rowwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape)
+        .set_rowwise_scale_inv(scales, static_cast<DType>(scale_inv.dtype), scale_inv.shape)
+        .set_amax(amax.data_ptr, static_cast<DType>(amax.dtype), amax.shape);
+  } else {
+    const auto data = tensor.get_columnwise_data();
+    const auto scale_inv = tensor.get_columnwise_scale_inv();
+    const auto amax = tensor.get_columnwise_amax();
+    view.set_columnwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape)
+        .set_columnwise_scale_inv(scales, static_cast<DType>(scale_inv.dtype), scale_inv.shape)
+        .set_columnwise_amax(amax.data_ptr, static_cast<DType>(amax.dtype), amax.shape);
   }
 }
 

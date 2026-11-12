@@ -236,8 +236,13 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     // At the moment, only use-case for fused GEMM:
     // Delayed scaling quantizer with per-tensor scaling inputs
     bool is_per_tensor_scaling_input = IsFloat8Tensor(A.ptr()) || IsFloat8Tensor(B.ptr());
-    if (IsFloat8Quantizers(quantizer.ptr()) && is_per_tensor_scaling_input)
+    if (IsFloat8Quantizers(quantizer.ptr()) && is_per_tensor_scaling_input) {
+      NVTE_CHECK(
+          !convert_quantizer(quantizer)->columnwise_usage || nvte_is_non_tn_fp8_gemm_supported(),
+          "Fused FP8 GEMM cannot produce a separate columnwise output. "
+          "Set columnwise_usage=False or quantize the GEMM output separately.");
       unfused_quantization_needed = false;
+    }
   }
 
   // Output tensor
@@ -245,11 +250,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   if (D.is_none()) {
     std::tie(D_tensor, D) = createOutputTensor(D_shape, output_dtype, quantizer);
   } else {
-    if (unfused_quantization_needed) {
-      std::tie(D_tensor, D) = convert_quantizer(quantizer)->convert_and_update_tensor(D);
-    } else {
-      D_tensor = makeTransformerEngineTensor(D, quantizer);
-    }
+    std::tie(D_tensor, D) = convert_quantizer(quantizer)->convert_and_update_tensor(D);
     NVTE_CHECK(detail::checkGemmShape(D_shape, D_tensor.shape()),
                "GEMM output has invalid dims (expected ", std::to_string(D_shape), ", got ",
                std::to_string(D_tensor.shape()), ")");
@@ -408,11 +409,11 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
         }
       }
     } else {
-      // Launch GEMM
+      // Launch GEMM, accumulating in-place if needed
       NVTE_SCOPED_GIL_RELEASE({
         nvte_cublas_gemm_v2(transa, transb, &alpha, A_tensor.data(), B_tensor.data(), &beta.value(),
-                            out_tensor.data(), out_tensor.data(), te_workspace.data(), config,
-                            main_stream);
+                            accumulate ? out_tensor.data() : nullptr, out_tensor.data(),
+                            te_workspace.data(), config, main_stream);
       });
     }
   } else {

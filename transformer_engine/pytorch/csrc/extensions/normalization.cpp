@@ -11,6 +11,26 @@
 
 namespace transformer_engine::pytorch {
 
+namespace {
+
+TensorWrapper prepare_compact_norm_output(const TensorWrapper &output,
+                                          std::vector<at::Tensor> &scale_buffers,
+                                          std::vector<TensorWrapper> &scale_inputs) {
+  TensorWrapper compact_output(NVTE_MXFP8_1D_SCALING);
+  for (bool rowwise : {true, false}) {
+    const auto scales =
+        rowwise ? output.get_rowwise_scale_inv() : output.get_columnwise_scale_inv();
+    if (scales.data_ptr == nullptr) continue;
+    auto &buffer = scale_buffers.emplace_back(allocateSpace(scales.shape, DType::kByte, false));
+    set_compact_tensor_data(compact_output, output, rowwise, buffer.data_ptr());
+    auto &scale_view = scale_inputs.emplace_back(NVTE_MXFP8_1D_SCALING);
+    set_compact_tensor_data(scale_view, output, rowwise, buffer.data_ptr());
+  }
+  return compact_output;
+}
+
+}  // namespace
+
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
                                       const at::Tensor &gamma, const int sm_margin,
@@ -147,32 +167,34 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     std::tie(out_nvte, out) = quantizer_cpp->convert_and_update_tensor(out);
   }
 
-  // Construct unquantized output tensor if needed
-  TensorWrapper unquantized_out_nvte;
+  // Construct intermediate output tensor if needed
+  TensorWrapper intermediate_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  RedirectedScales redirected_scales;
+  std::vector<at::Tensor> scale_buffers;
+  std::vector<TensorWrapper> scale_inputs;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
       NoneQuantizer q{none};
-      std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
+      std::tie(intermediate_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
+      kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      redirected_scales = redirect_scales_to_scratch(out_nvte);
+      intermediate_out_nvte = prepare_compact_norm_output(out_nvte, scale_buffers, scale_inputs);
+      kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      std::tie(unquantized_out_nvte, unquantized_out, amax_buf) =
+      std::tie(intermediate_out_nvte, unquantized_out, amax_buf) =
           fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
+      kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      std::tie(unquantized_out_nvte, unquantized_out) =
+      std::tie(intermediate_out_nvte, unquantized_out) =
           nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(out_nvte, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
+      kernel_out_nvte = &intermediate_out_nvte;
     } break;
     default: {
     }
@@ -205,18 +227,23 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   // Quantize output if needed
   switch (impl) {
     case Impl::UNFUSED: {
-      quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
+      quantizer_cpp->quantize(intermediate_out_nvte, out_nvte);
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      restore_and_swizzle_scales(out_nvte, redirected_scales);
+      for (auto &scale_view : scale_inputs) {
+        NVTE_SCOPED_GIL_RELEASE({
+          nvte_swizzle_scaling_factors(scale_view.data(), out_nvte.data(),
+                                       at::cuda::getCurrentCUDAStream());
+        });
+      }
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte, amax_buf);
+      fp8_quantizer_cpp->quantize_with_amax(intermediate_out_nvte, out_nvte, amax_buf);
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      nvfp4_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
+      nvfp4_quantizer_cpp->quantize_with_amax(intermediate_out_nvte, out_nvte);
     } break;
     default: {
     }
@@ -395,32 +422,34 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     std::tie(out_nvte, out) = quantizer_cpp->convert_and_update_tensor(out);
   }
 
-  // Construct unquantized output tensor if needed
-  TensorWrapper unquantized_out_nvte;
+  // Construct intermediate output tensor if needed
+  TensorWrapper intermediate_out_nvte;
   py::object unquantized_out;
   at::Tensor amax_buf;
-  RedirectedScales redirected_scales;
+  std::vector<at::Tensor> scale_buffers;
+  std::vector<TensorWrapper> scale_inputs;
   TensorWrapper *kernel_out_nvte = &out_nvte;
   switch (impl) {
     case Impl::UNFUSED: {
       NoneQuantizer q{none};
-      std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
+      std::tie(intermediate_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
+      kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      redirected_scales = redirect_scales_to_scratch(out_nvte);
+      intermediate_out_nvte = prepare_compact_norm_output(out_nvte, scale_buffers, scale_inputs);
+      kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      std::tie(unquantized_out_nvte, unquantized_out, amax_buf) =
+      std::tie(intermediate_out_nvte, unquantized_out, amax_buf) =
           fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
+      kernel_out_nvte = &intermediate_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      std::tie(unquantized_out_nvte, unquantized_out) =
+      std::tie(intermediate_out_nvte, unquantized_out) =
           nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(out_nvte, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
+      kernel_out_nvte = &intermediate_out_nvte;
     } break;
     default: {
     }
@@ -451,18 +480,23 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   // Quantize output if needed
   switch (impl) {
     case Impl::UNFUSED: {
-      quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
+      quantizer_cpp->quantize(intermediate_out_nvte, out_nvte);
     } break;
     case Impl::FUSED_NORM_QUANT_UNSWIZZLED: {
-      restore_and_swizzle_scales(out_nvte, redirected_scales);
+      for (auto &scale_view : scale_inputs) {
+        NVTE_SCOPED_GIL_RELEASE({
+          nvte_swizzle_scaling_factors(scale_view.data(), out_nvte.data(),
+                                       at::cuda::getCurrentCUDAStream());
+        });
+      }
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte, amax_buf);
+      fp8_quantizer_cpp->quantize_with_amax(intermediate_out_nvte, out_nvte, amax_buf);
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      nvfp4_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
+      nvfp4_quantizer_cpp->quantize_with_amax(intermediate_out_nvte, out_nvte);
     } break;
     default: {
     }

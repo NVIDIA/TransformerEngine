@@ -26,6 +26,7 @@ from transformer_engine.pytorch import (
     QuantizedTensor,
 )
 
+from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.quantized_tensor import prepare_for_saving, restore_from_saved
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
@@ -218,6 +219,24 @@ class TestFloat8Tensor:
         assert list(tensor.size()) == dims, "Incorrect dims"
         assert tensor.dtype == dtype, "Incorrect nominal dtype"
         assert tensor.is_cuda, "Incorrect device"
+
+    def test_gemm_output_without_quantizer(self):
+        quantizer = Float8Quantizer(
+            torch.ones(1, device="cuda"),
+            torch.zeros(1, device="cuda"),
+            te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+        )
+        weight = torch.randint(-4, 5, (64, 128), device="cuda").float() / 16
+        inp = torch.randint(-4, 5, (32, 128), device="cuda").float() / 16
+        out = quantizer(torch.zeros((32, 64), device="cuda"))
+        data_ptr = out._data.data_ptr()
+        result, *_ = general_gemm(quantizer(weight), quantizer(inp), out=out)
+        expected = quantizer(inp @ weight.T)
+        assert result is out
+        assert result._data.data_ptr() == data_ptr
+        torch.testing.assert_close(result.dequantize(), expected.dequantize(), atol=0, rtol=0)
 
     def _test_quantize_dequantize(
         self,
@@ -1172,11 +1191,18 @@ class TestMXFP8Tensor:
             torch.testing.assert_close(x_deq, -x_ref, **_tols[fp8_dtype])
 
 
-@pytest.mark.parametrize("quantization", _quantization_list)
+@pytest.mark.parametrize(
+    "quantization,optimize_for_gemm",
+    [
+        (quantization, optimize_for_gemm)
+        for quantization in _quantization_list
+        for optimize_for_gemm in ([False, True] if quantization.startswith("nvfp4") else [False])
+    ],
+)
 @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
 @pytest.mark.parametrize("shape", [(256, 512), (128, 320)], ids=lambda s: f"{s[0]}x{s[1]}")
 def test_skip_quantization_with_noop_flag(
-    quantization: str, usage: str, shape: Tuple[int, int]
+    quantization: str, optimize_for_gemm: bool, usage: str, shape: Tuple[int, int]
 ) -> None:
     """
     Test if the quantization honors the noop flag and skips quantization.
@@ -1189,6 +1215,7 @@ def test_skip_quantization_with_noop_flag(
         pytest.skip("Row-scaled NVFP4 does not produce columnwise output")
 
     quantizer = make_quantizer(quantization)
+    quantizer.optimize_for_gemm = optimize_for_gemm
     quantizer.set_usage(
         rowwise=usage in ("rowwise", "both"),
         columnwise=usage in ("columnwise", "both"),
@@ -1235,13 +1262,15 @@ def test_skip_quantization_with_noop_flag(
         ):
             buf = getattr(quantized, attr, None)
             if buf is not None:
-                output_buffers[attr] = buf.clone()
+                output_buffers[attr] = (buf.clone(), buf.data_ptr())
         # Delayed scaling keeps its global amax on the quantizer rather than on the tensor.
         quantizer_amax = getattr(quantizer, "amax", None)
         if quantizer_amax is not None:
-            output_buffers["quantizer.amax"] = quantizer_amax.clone()
+            output_buffers["quantizer.amax"] = (quantizer_amax.clone(), quantizer_amax.data_ptr())
         assert output_buffers, f"{quantization}: quantized tensor exposes no data buffer"
         return output_buffers
+
+    initial_output = clone_quantized_output()
 
     # Obtain the quantized x by setting the noop flag to false (zero)
     noop.zero_()
@@ -1258,11 +1287,14 @@ def test_skip_quantization_with_noop_flag(
     quantized_with_noop = clone_quantized_output()
 
     for attr in quantized_without_noop:
-        buf_without_noop = quantized_without_noop[attr]
-        buf_with_noop = quantized_with_noop[attr]
+        buf_without_noop, ptr_without_noop = quantized_without_noop[attr]
+        buf_with_noop, ptr_with_noop = quantized_with_noop[attr]
+        assert initial_output[attr][1] == ptr_without_noop == ptr_with_noop
         assert torch.equal(
             buf_without_noop, buf_with_noop
         ), f"{quantization}/{usage}: noop flag fails to take effect because {attr} changed."
+    if quantization.startswith("nvfp4"):
+        assert quantized._with_gemm_swizzled_scales == optimize_for_gemm
 
 
 def test_saved_storage_protocol(monkeypatch):
