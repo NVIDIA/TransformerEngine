@@ -141,7 +141,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             input_quantizer = Float8CurrentScalingQuantizer(DType.kFloat8E4M3, input_.device)
             input_quantizer.set_usage(rowwise=True, columnwise=False)
             input_quantizer.internal = True
-        return ActivationFwdArgs(
+        return self.fwd_args_type(
             input_,
             dtype,
             next_op_input_quantizer,
@@ -191,7 +191,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         self, basic_op_ctxs, grad_output, **unused  # pylint: disable=unused-argument
     ) -> ActivationBwdArgs:
         ctx = basic_op_ctxs[0]
-        return ActivationBwdArgs(
+        return self.bwd_args_type(
             grad_output, ctx.saved_tensors[0], ctx.dtype, ctx.prev_op_grad_output_quantizer
         )
 

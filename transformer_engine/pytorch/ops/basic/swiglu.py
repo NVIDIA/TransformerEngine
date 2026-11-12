@@ -7,7 +7,7 @@
 from __future__ import annotations
 from collections.abc import Iterable, Sequence
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
@@ -35,30 +35,30 @@ __all__ = [
 class SwiGLUFwdArgs(ActivationFwdArgs):
     """Activation configuration with the GLU input layout."""
 
-    glu_interleave_size: Optional[int]
+    glu_interleave_size: Optional[int] = None
 
 
 @dataclass(slots=True)
 class SwiGLUBwdArgs(ActivationBwdArgs):
     """Activation gradient with the GLU input layout."""
 
-    glu_interleave_size: Optional[int]
+    glu_interleave_size: Optional[int] = None
 
 
 @dataclass(slots=True)
 class SiTUGLUFwdArgs(SwiGLUFwdArgs):
     """SwiGLU inputs with gate and up-branch soft caps."""
 
-    beta1: float
-    beta2: float
+    beta1: float = 4.0
+    beta2: float = 25.0
 
 
 @dataclass(slots=True)
 class SiTUGLUBwdArgs(SwiGLUBwdArgs):
     """SwiGLU gradients with gate and up-branch soft caps."""
 
-    beta1: float
-    beta2: float
+    beta1: float = 4.0
+    beta2: float = 25.0
 
 
 def _interleave_glu(tensor: torch.Tensor, size: int, *, reverse: bool = False) -> torch.Tensor:
@@ -141,10 +141,8 @@ class SwiGLU(_ActivationOperation):
 
     def pack_forward_args(self, *args, **kwargs) -> SwiGLUFwdArgs:
         args = super().pack_forward_args(*args, **kwargs)
-        return SwiGLUFwdArgs(
-            **{field.name: getattr(args, field.name) for field in fields(args)},
-            glu_interleave_size=self.glu_interleave_size,
-        )
+        args.glu_interleave_size = self.glu_interleave_size
+        return args
 
     @classmethod
     def forward_compute(cls, args: SwiGLUFwdArgs, *, in_custom_op: bool = False):
@@ -160,10 +158,8 @@ class SwiGLU(_ActivationOperation):
 
     def pack_backward_args(self, *args, **kwargs) -> SwiGLUBwdArgs:
         args = super().pack_backward_args(*args, **kwargs)
-        return SwiGLUBwdArgs(
-            **{field.name: getattr(args, field.name) for field in fields(args)},
-            glu_interleave_size=self.glu_interleave_size,
-        )
+        args.glu_interleave_size = self.glu_interleave_size
+        return args
 
     @classmethod
     def backward_compute(cls, args: SwiGLUBwdArgs, *, in_custom_op: bool = False):
@@ -256,19 +252,15 @@ class SiTUGLU(SwiGLU):
 
     def pack_forward_args(self, *args, **kwargs) -> SiTUGLUFwdArgs:
         args = super().pack_forward_args(*args, **kwargs)
-        return SiTUGLUFwdArgs(
-            **{field.name: getattr(args, field.name) for field in fields(args)},
-            beta1=self.beta1,
-            beta2=self.beta2,
-        )
+        args.beta1 = self.beta1
+        args.beta2 = self.beta2
+        return args
 
     def pack_backward_args(self, *args, **kwargs) -> SiTUGLUBwdArgs:
         args = super().pack_backward_args(*args, **kwargs)
-        return SiTUGLUBwdArgs(
-            **{field.name: getattr(args, field.name) for field in fields(args)},
-            beta1=self.beta1,
-            beta2=self.beta2,
-        )
+        args.beta1 = self.beta1
+        args.beta2 = self.beta2
+        return args
 
 
 class ClampedSwiGLU(BasicOperation):
