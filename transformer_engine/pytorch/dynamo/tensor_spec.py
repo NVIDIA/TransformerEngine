@@ -18,7 +18,7 @@ from transformer_engine.pytorch.device import te_device_type
 class TensorSpec:
     """A data-free description of a tensor or quantized tensor.
 
-    Captures ``shape`` / ``dtype`` and, for quantized tensors, the
+    Captures ``shape`` / ``dtype`` / ``strides`` and, for quantized tensors, the
     (value-opaque) ``quantizer`` -- enough to rebuild a tensor without holding
     storage. The common abstraction over plain ``torch.Tensor``,
     ``QuantizedTensorStorage`` and ``QuantizedTensor``, used for custom-op fake
@@ -31,6 +31,7 @@ class TensorSpec:
     requires_grad: bool = False
     device: Optional[torch.device] = field(default=None)
     with_gemm_swizzled_scales: Optional[bool] = None
+    strides: Optional[Tuple[int, ...]] = None
 
     def __post_init__(self) -> None:
         # Own a private copy of the quantizer so usage changes (update_usage)
@@ -44,6 +45,22 @@ class TensorSpec:
     def is_quantized(self) -> bool:
         """Whether this spec describes a quantized tensor."""
         return self.quantizer is not None
+
+    def stride(self) -> Tuple[int, ...]:
+        """Explicit strides, or contiguous strides for a fresh output."""
+        return self.strides if self.strides is not None else make_contiguous_strides_for(self.shape)
+
+    def is_contiguous(self) -> bool:
+        """Check contiguous layout using only shape and strides."""
+        if self.strides is None or any(size == 0 for size in self.shape):
+            return True
+        expected = 1
+        for size, stride in zip(reversed(self.shape), reversed(self.strides)):
+            if size != 1:
+                if stride != expected:
+                    return False
+                expected *= size
+        return True
 
     def update_usage(
         self,
@@ -111,7 +128,11 @@ class TensorSpec:
         """
         device = self.device if self.device is not None else torch.device(te_device_type())
         if self.quantizer is None:
-            return [torch.empty(tuple(self.shape), dtype=self.dtype, device=device)]
+            return [
+                torch.empty_strided(
+                    tuple(self.shape), self.stride(), dtype=self.dtype, device=device
+                )
+            ]
         inner = self.quantizer.alloc_tensors(tuple(self.shape), device=device)
         return [inner[name] for name in self.inner_names()]
 
@@ -141,8 +162,9 @@ class TensorSpec:
         """
         if self.quantizer is None:
             device = self.device if self.device is not None else torch.device(te_device_type())
-            return torch.empty(
+            return torch.empty_strided(
                 tuple(self.shape),
+                self.stride(),
                 dtype=self.dtype,
                 device=device,
                 requires_grad=self.requires_grad,
@@ -161,11 +183,17 @@ def to_tensor_spec(tensor: Any) -> TensorSpec:
     dtype = getattr(tensor, "dtype", None)
     if dtype is None:
         dtype = getattr(tensor, "_dtype", None)
+    quantizer = getattr(tensor, "_quantizer", None)
     return TensorSpec(
         shape=tuple(tensor.shape),
         dtype=dtype,
-        quantizer=getattr(tensor, "_quantizer", None),
+        quantizer=quantizer,
         requires_grad=requires_grad,
         device=tensor.device,
         with_gemm_swizzled_scales=getattr(tensor, "_with_gemm_swizzled_scales", None),
+        strides=(
+            tuple(tensor.stride())
+            if quantizer is None and isinstance(tensor, torch.Tensor)
+            else None
+        ),
     )

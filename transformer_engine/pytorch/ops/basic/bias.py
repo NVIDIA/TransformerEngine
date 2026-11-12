@@ -157,11 +157,19 @@ class Bias(BasicOperation):
 
     @classmethod
     def forward_compute_fake(cls, args: BiasFwdArgs):
+        input_ = torch.empty_strided(
+            args.input_.shape, args.input_.stride(), dtype=args.input_.dtype, device="meta"
+        )
+        bias = torch.empty_strided(
+            args.bias.shape, args.bias.stride(), dtype=args.bias.dtype, device="meta"
+        )
+        out = input_ + bias
         return (
             TensorSpec(
-                shape=args.input_.shape,
-                dtype=torch.promote_types(args.input_.dtype, args.bias.dtype),
+                shape=tuple(out.shape),
+                dtype=out.dtype,
                 device=args.input_.device,
+                strides=tuple(out.stride()),
             ),
             [()],
             (),

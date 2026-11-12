@@ -162,7 +162,9 @@ class SwiGLU(_ActivationOperation):
         return args
 
     @classmethod
-    def forward_compute(cls, args: SwiGLUFwdArgs, *, in_custom_op: bool = False):
+    def forward_compute(
+        cls, args: SwiGLUFwdArgs, *, in_custom_op: bool = False
+    ):  # pylint: disable=unused-argument
         x = maybe_dequantize(args.input_, args.dtype).contiguous()
         swiglu_in = x
         if args.glu_interleave_size is not None:
@@ -170,8 +172,7 @@ class SwiGLU(_ActivationOperation):
         out = cls._activation_forward_impl(swiglu_in, args.output_quantizer, args=args)
         if args.input_quantizer is not None:
             x = args.input_quantizer(x)
-        save_input = args.requires_grad and (not in_custom_op or args.input_quantizer is not None)
-        return out, [()], (x,) if save_input else ()
+        return out, [()], (x,) if cls._save_prepared_input(args) else ()
 
     def pack_backward_args(self, *args, **kwargs) -> SwiGLUBwdArgs:
         args = super().pack_backward_args(*args, **kwargs)

@@ -21,7 +21,7 @@ from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import _compile_safe_warn, clear_tensor_data
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_autocast_dtype, maybe_dequantize
+from .._common import is_quantized_tensor, maybe_autocast_dtype, maybe_dequantize
 
 __all__ = [
     "GELU",
@@ -150,15 +150,24 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             basic_op_ctxs[0].requires_grad,
         )
 
+    @staticmethod
+    def _save_prepared_input(args: ActivationFwdArgs) -> bool:
+        return args.requires_grad and (
+            args.input_quantizer is not None
+            or is_quantized_tensor(args.input_)
+            or args.input_.dtype != args.dtype
+            or not args.input_.is_contiguous()
+        )
+
     @classmethod
-    def forward_compute(cls, args: ActivationFwdArgs, *, in_custom_op: bool = False):
+    def forward_compute(
+        cls, args: ActivationFwdArgs, *, in_custom_op: bool = False
+    ):  # pylint: disable=unused-argument
         x = maybe_dequantize(args.input_, args.dtype).contiguous()
         y = cls._activation_forward_impl(x, args.output_quantizer)
         if args.input_quantizer is not None:
             x = args.input_quantizer(x)
-        # Custom ops return only fresh saved tensors; setup retains the original input.
-        save_input = args.requires_grad and (not in_custom_op or args.input_quantizer is not None)
-        return y, [()], (x,) if save_input else ()
+        return y, [()], (x,) if cls._save_prepared_input(args) else ()
 
     @classmethod
     def forward_compute_fake(cls, args: ActivationFwdArgs):
@@ -170,7 +179,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             gated=cls._output_halves_last_dim,
         )
         saved = ()
-        if args.requires_grad and args.input_quantizer is not None:
+        if cls._save_prepared_input(args):
             saved = (
                 TensorSpec(
                     shape=x.shape, dtype=args.dtype, device=x.device, quantizer=args.input_quantizer
