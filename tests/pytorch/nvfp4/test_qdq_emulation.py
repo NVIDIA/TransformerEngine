@@ -29,6 +29,7 @@ from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import (
 )
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.module import _split_quantization
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0),
@@ -282,3 +283,140 @@ def test_nvfp4_build_support_dispatch(fp4_supported, fmt, monkeypatch):
     if not fp4_supported:
         with pytest.raises(ValueError, match="Forced fused NVFP4 QDQ"):
             quantizer(fmt, "fused").selected_backend(x)
+
+
+@pytest.mark.parametrize("fmt", portable_formats)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("disable_bulk", [False, True])
+def test_split_qdq_exact(fmt, dtype, internal, disable_bulk, monkeypatch):
+    splits = [0, 16, 32, 0, 48]
+    x = inputs((sum(splits), 128), dtype, "normal")
+    # Different expert ranges must not share a tensor-wide NVFP4 amax.
+    x[16:48].mul_(64)
+    qs = [quantizer(fmt, "fused") for _ in splits]
+    for q in qs:
+        q.internal = internal
+
+    def unexpected_quantize(*args, **kwargs):
+        pytest.fail("Fused split QDQ reentered Python quantization")
+
+    def unexpected_native_split(*args, **kwargs):
+        pytest.fail("QDQ entered native split_quantize")
+
+    monkeypatch.setattr(type(qs[0]), "quantize_impl", unexpected_quantize)
+    monkeypatch.setattr(tex, "split_quantize", unexpected_native_split)
+    result = _split_quantization._split_quantize_non_hybrid(
+        x, splits, qs, dtype, disable_bulk_allocation=disable_bulk
+    )
+    for src, out, q in zip(x.split(splits), result, qs):
+        assert out.shape == src.shape
+        assert out._dtype == dtype
+        assert out._hp_data.grad_fn is None
+        assert type(out._get_quantizer()) is type(q)
+        if src.numel():
+            assert torch.equal(
+                out.dequantize().view(torch.int16), reference(src, fmt).view(torch.int16)
+            )
+    if not disable_bulk:
+        nonempty = [out._hp_data for out in result if out._hp_data.numel()]
+        assert len({out.untyped_storage().data_ptr() for out in nonempty}) == 1
+
+
+@pytest.mark.parametrize("fmt", portable_formats)
+@pytest.mark.parametrize("fallback", ["reference", "dtype", "noncontiguous"])
+def test_split_qdq_python_fallback(fmt, fallback, monkeypatch):
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Native packed Q+DQ fallback requires compute capability 10.0+")
+    splits = [32, 0, 64]
+    x = inputs((sum(splits), 128), torch.bfloat16, "normal")
+    if fallback == "noncontiguous":
+        x = x.T.contiguous().T
+    qs = [quantizer(fmt, "reference" if fallback == "reference" else "auto") for _ in splits]
+    if fallback == "dtype":
+        # One ineligible expert sends the operand through the Python fallback.
+        qs[-1].dtype = torch.float32
+    expected = [q(src).dequantize() for src, q in zip(x.split(splits), qs)]
+    calls = []
+    original = type(qs[0]).quantize_impl
+
+    def tracked(q, src, **kwargs):
+        calls.append(src.shape)
+        return original(q, src, **kwargs)
+
+    monkeypatch.setattr(type(qs[0]), "quantize_impl", tracked)
+    actual = tex.split_quantize_custom(x, splits, qs)
+    assert calls == [torch.Size([32, 128]), torch.Size([64, 128])]
+    for out, ref in zip(actual, expected):
+        assert out.dtype == ref.dtype
+        torch.testing.assert_close(out.dequantize(), ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("fmt", portable_formats)
+def test_split_qdq_empty_and_forced_backend(fmt):
+    qs = [quantizer(fmt, "fused") for _ in range(2)]
+    x = torch.empty((0, 128), device="cuda", dtype=torch.bfloat16)
+    qs[1].dtype = torch.float32
+    result = tex.split_quantize_custom(x, [0, 0], qs)
+    assert [out.dtype for out in result] == [torch.bfloat16, torch.float32]
+    assert all(out.numel() == 0 for out in result)
+    x = inputs((32, 128), torch.bfloat16, "normal")
+    with pytest.raises(ValueError, match="Forced fused"):
+        tex.split_quantize_custom(x, [16, 16], qs)
+
+
+@pytest.mark.parametrize("fmt", portable_formats)
+def test_split_qdq_graph_and_device(fmt):
+    device = 1 if torch.cuda.device_count() > 1 else 0
+    with torch.cuda.device(device):
+        x = inputs((48, 128), torch.bfloat16, "normal")
+        qs = [quantizer(fmt, "fused") for _ in range(2)]
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            tex.split_quantize_custom(x, [16, 32], qs)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            outputs = tex.split_quantize_custom(x, [16, 32], qs)
+        x.mul_(2)
+        graph.replay()
+        torch.cuda.synchronize()
+        for src, out in zip(x.split([16, 32]), outputs):
+            assert torch.equal(
+                out.dequantize().view(torch.int16), reference(src, fmt).view(torch.int16)
+            )
+
+
+@pytest.mark.parametrize("fmt", portable_formats)
+@pytest.mark.parametrize("source", ["original", "rowwise_dequantized"])
+def test_hybrid_split_qdq_dispatch(fmt, source, monkeypatch):
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    splits = [16, 32]
+    x = inputs((48, 128), torch.bfloat16, "normal")
+    qs = [
+        HybridQuantizer(
+            rowwise_quantizer=quantizer(fmt, "fused"),
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source=source,
+        )
+        for _ in splits
+    ]
+    calls = []
+    original = tex.split_quantize_custom
+
+    def tracked(tensor, sizes, quantizers, **kwargs):
+        calls.append(type(quantizers[0]))
+        return original(tensor, sizes, quantizers, **kwargs)
+
+    monkeypatch.setattr(tex, "split_quantize_custom", tracked)
+    actual, _ = _split_quantization._split_quantize(x, splits, qs, x.dtype)
+    assert calls == [type(qs[0].rowwise_quantizer)]
+    for src, out in zip(x.split(splits), actual):
+        decoded = reference(src, fmt)
+        torch.testing.assert_close(out.rowwise_sub_storage.dequantize(), decoded, rtol=0, atol=0)
+        expected_col = src if source == "original" else decoded
+        torch.testing.assert_close(
+            out.columnwise_sub_storage.dequantize(), expected_col, rtol=0, atol=0
+        )

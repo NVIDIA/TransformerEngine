@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -2160,6 +2161,115 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 }
 
 }  // namespace
+
+namespace {
+
+// QDQ has high-precision storage, so it does not use the native packed-tensor
+// converters. Keep its split dispatch separate from packed tensor allocation.
+std::vector<py::object> split_quantize_qdq(const at::Tensor &tensor,
+                                           const std::vector<size_t> &split_sections,
+                                           const std::vector<py::handle> &quantizers,
+                                           bool disable_bulk_allocation, bool nvfp4) {
+  std::vector<int64_t> sizes(split_sections.begin(), split_sections.end());
+  const auto inputs = tensor.split_with_sizes(sizes, 0);
+  bool fused = tensor.is_cuda() && tensor.numel() != 0;
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    NVTE_CHECK(Py_TYPE(quantizers[i].ptr()) == Py_TYPE(quantizers[0].ptr()),
+               "QDQ split quantizers must have the same concrete type");
+    if (inputs[i].numel() != 0 &&
+        quantizers[i].attr("selected_backend")(inputs[i]).cast<std::string>() != "fused") {
+      fused = false;
+    }
+  }
+
+  std::vector<py::object> results;
+  results.reserve(inputs.size());
+  if (!fused) {
+    // Preserve reference options and dtype overrides without duplicating their
+    // Python implementation. Empty experts require no quantization kernel.
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      if (inputs[i].numel() == 0) {
+        results.push_back(quantizers[i].attr("make_empty")(
+            inputs[i].sizes().vec(), py::arg("dtype") = py::cast(tensor).attr("dtype"),
+            py::arg("device") = tensor.device()));
+      } else {
+        results.push_back(quantizers[i](inputs[i]));
+      }
+    }
+    return results;
+  }
+
+  at::cuda::CUDAGuard guard(tensor.device());
+  const auto output = disable_bulk_allocation ? at::Tensor() : at::empty_like(tensor);
+  std::vector<at::Tensor> outputs;
+  if (!disable_bulk_allocation) outputs = output.split_with_sizes(sizes, 0);
+  std::vector<bool> row_scaled(inputs.size(), false);
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    if (disable_bulk_allocation) outputs.push_back(at::empty_like(inputs[i]));
+    if (nvfp4) {
+      row_scaled[i] = quantizers[i].attr("nvfp4_quantizer").attr("row_scaled_nvfp4").cast<bool>();
+    }
+  }
+  const bool needs_amax =
+      nvfp4 && std::any_of(row_scaled.begin(), row_scaled.end(), [](bool value) { return !value; });
+  const auto amax = needs_amax ? at::empty({static_cast<int64_t>(inputs.size())},
+                                           tensor.options().dtype(at::kFloat))
+                               : at::Tensor();
+  NVTE_SCOPED_GIL_RELEASE({
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      if (inputs[i].numel() == 0) continue;
+      if (!nvfp4) {
+        mxfp8_qdq(inputs[i], outputs[i], std::nullopt);
+      } else if (row_scaled[i]) {
+        nvfp4_qdq_row_scaled(inputs[i], outputs[i], std::nullopt);
+      } else {
+        nvfp4_qdq(inputs[i], outputs[i], amax.narrow(0, i, 1), std::nullopt, true);
+      }
+    }
+  });
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    if (inputs[i].numel() == 0) {
+      results.push_back(quantizers[i].attr("make_empty")(
+          inputs[i].sizes().vec(), py::arg("dtype") = py::cast(tensor).attr("dtype"),
+          py::arg("device") = tensor.device()));
+    } else {
+      results.push_back(quantizers[i].attr("_wrap")(outputs[i]));
+    }
+  }
+  return results;
+}
+
+}  // namespace
+
+std::vector<py::object> split_quantize_custom(const at::Tensor &tensor,
+                                              const std::vector<size_t> &split_sections,
+                                              std::vector<py::handle> quantizer_list,
+                                              bool disable_bulk_allocation) {
+  init_extension();
+
+  // Check number of tensors
+  const size_t num_splits = split_sections.size();
+  NVTE_CHECK(quantizer_list.size() == num_splits, "Expected ", num_splits, " quantizers, but got ",
+             quantizer_list.size());
+  if (num_splits == 0) {
+    return {};
+  }
+
+  // Borrowed classes remain owned by the imported module. Exact-type checks
+  // preserve Python dispatch for user subclasses of these experimental types.
+  static const py::handle mxfp8_qdq_class =
+      py::module_::import("transformer_engine.pytorch.custom_recipes.qdq")
+          .attr("MXFP8QDQQuantizer");
+  static const py::handle nvfp4_qdq_class =
+      py::module_::import("transformer_engine.pytorch.custom_recipes.qdq")
+          .attr("NVFP4QDQQuantizer");
+  const auto type = reinterpret_cast<PyObject *>(Py_TYPE(quantizer_list[0].ptr()));
+  if (type == mxfp8_qdq_class.ptr() || type == nvfp4_qdq_class.ptr()) {
+    return split_quantize_qdq(tensor, split_sections, quantizer_list, disable_bulk_allocation,
+                              type == nvfp4_qdq_class.ptr());
+  }
+  NVTE_ERROR("Unexpected type for custom split quantizer");
+}
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                        const std::vector<size_t> &split_sections,

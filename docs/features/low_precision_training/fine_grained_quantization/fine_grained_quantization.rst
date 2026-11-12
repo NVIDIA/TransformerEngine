@@ -492,6 +492,10 @@ requantizes the forward reconstruction for backward; ``"original"`` uses
 the original input. QDQ models quantization error for convergence studies;
 the high-precision GEMM does not model mixed-format hardware performance.
 
+``GroupedLinear`` optimizes QDQ split quantization when all nonempty experts
+use the fused backend. Configurations requiring the reference backend retain
+the Python quantization fallback.
+
 Both formats inherit the experimental ``custom_recipes.qdq.QDQQuantizer``
 base, which supplies allocation, IdentityTensor wrapping, dtype overrides,
 update validation, and straight-through gradients. Custom QDQ subclasses

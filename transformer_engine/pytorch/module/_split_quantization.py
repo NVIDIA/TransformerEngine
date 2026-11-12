@@ -11,6 +11,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
+from ..custom_recipes.qdq import MXFP8QDQQuantizer, NVFP4QDQQuantizer
 from ..tensor import (
     Float8BlockQuantizer,
     Float8CurrentScalingQuantizer,
@@ -34,6 +35,8 @@ _NATIVE_SPLIT_QUANTIZER_TYPES = frozenset(
     }
 )
 
+_CUSTOM_SPLIT_QUANTIZER_TYPES = frozenset({MXFP8QDQQuantizer, NVFP4QDQQuantizer})
+
 _NATIVE_BGRAD_QUANTIZER_TYPES = frozenset(
     {
         Float8Quantizer,
@@ -53,7 +56,7 @@ _DYNAMIC_QUANTIZER_FIELDS = frozenset(
 
 
 def _supports_native_split_quantize(quantizer: Quantizer) -> bool:
-    """Whether ``tex.split_quantize`` has an exact converter for this quantizer."""
+    """Whether ``tex.split_quantize`` supports this exact quantizer type."""
     return type(quantizer) in _NATIVE_SPLIT_QUANTIZER_TYPES
 
 
@@ -226,6 +229,14 @@ def _split_quantize_non_hybrid(
     if _supports_native_split_quantize(reference):
         return tex.split_quantize(
             tensor,
+            split_sizes,
+            quantizers,
+            disable_bulk_allocation=disable_bulk_allocation,
+        )
+
+    if type(reference) in _CUSTOM_SPLIT_QUANTIZER_TYPES:
+        return tex.split_quantize_custom(
+            cast_if_needed(tensor, dtype),
             split_sizes,
             quantizers,
             disable_bulk_allocation=disable_bulk_allocation,
