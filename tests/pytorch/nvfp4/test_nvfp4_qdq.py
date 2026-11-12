@@ -31,6 +31,8 @@ backward_modes = [
     pytest.param(True, marks=pytest.mark.skipif(not mxfp8_available, reason=mxfp8_reason)),
 ]
 
+hp_dtypes = (torch.float16, torch.bfloat16, torch.float32)
+
 
 @pytest.mark.parametrize("row_scaled", [False, True])
 def test_auto_matches_native_on_available_device(row_scaled, monkeypatch):
@@ -571,12 +573,116 @@ def test_qdq_linear_preserves_bf16_forward_values_from_fp16_weights(mixed):
     torch.testing.assert_close(x.grad, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("mixed", backward_modes)
+@pytest.mark.parametrize("rowwise", [False, True])
+@pytest.mark.parametrize("splits", [[64, 64], [0, 128]])
+@pytest.mark.parametrize(
+    "source_dtype,output_dtype",
+    [(torch.bfloat16, torch.float32), (torch.float16, torch.bfloat16)],
+)
+def test_split_qdq_columnwise_source_preserves_forward_precision(
+    mixed, rowwise, splits, source_dtype, output_dtype
+):
+    """Grouped column construction retains the same forward values as HybridQuantizer."""
+    from transformer_engine.pytorch.module import _split_quantization
+    from transformer_engine.pytorch.quantization import QuantizerRole
+
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    role = QuantizerRole(module_type="grouped_linear", tensor_type="weight")
+    quantizers = [factory(role).with_output_dtype(output_dtype) for _ in splits]
+    for quantizer in quantizers:
+        quantizer.internal = True
+        quantizer.set_usage(rowwise=rowwise, columnwise=True)
+    if source_dtype == torch.float16:
+        x = torch.full((128, 128), 65504.0, device="cuda", dtype=source_dtype)
+    else:
+        generator = torch.Generator(device="cuda").manual_seed(0)
+        x = (torch.randn(128, 128, device="cuda", generator=generator) * 0.023).to(source_dtype)
+
+    actual = _split_quantization._split_quantize_hybrid(x, splits, quantizers)
+    for src, out in zip(x.split(splits), actual):
+        expected_row = (
+            native_qdq(src, output_dtype)
+            if src.numel()
+            else torch.empty_like(src, dtype=output_dtype)
+        )
+        assert torch.isfinite(expected_row).all()
+        if rowwise:
+            assert_bits(out.rowwise_sub_storage.dequantize(), expected_row)
+        else:
+            assert out.rowwise_sub_storage is None
+        expected_col = (
+            mx_value(expected_row.float(), columnwise=True)
+            if mixed and src.numel()
+            else expected_row.to(torch.float32 if mixed else output_dtype)
+        )
+        assert_bits(out.columnwise_sub_storage.dequantize(dtype=expected_col.dtype), expected_col)
+        if src.numel():
+            assert not torch.equal(expected_row, expected_row.to(source_dtype).to(output_dtype))
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("save_original_input", [False, True])
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_qdq_input_preserves_bf16_backward_values_from_fp16_source(
+    grouped, save_original_input, fmt
+):
+    """BF16 decoded activations must not overflow through an intermediate FP16 cast."""
+    from transformer_engine.pytorch.custom_recipes.qdq import MXFP8QDQQuantizer
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    def factory(role):
+        if role is not None and role.tensor_type == "input":
+            return HybridQuantizer(
+                rowwise_quantizer=NVFP4QDQQuantizer() if fmt == "nvfp4" else MXFP8QDQQuantizer(),
+                columnwise_quantizer=IdentityQuantizer(),
+                columnwise_source="rowwise_dequantized",
+            )
+        return IdentityQuantizer()
+
+    options = dict(
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        save_original_input=save_original_input,
+    )
+    layer = te.GroupedLinear(2, 128, 128, **options) if grouped else te.Linear(128, 128, **options)
+    with torch.no_grad():
+        for weight in layer.parameters():
+            weight.fill_(1.0 / 128)
+    splits = [32, 64] if grouped else [96]
+    weights = [layer.weight0, layer.weight1] if grouped else [layer.weight]
+    x = torch.full((96, 128), 65504.0, device="cuda", dtype=torch.float16, requires_grad=True)
+    with te.autocast(recipe=CustomRecipe(qfactory=factory)), torch.autocast(
+        "cuda", dtype=torch.bfloat16
+    ):
+        y = layer(x, splits) if grouped else layer(x)
+    y.backward(torch.ones_like(y))
+    torch.testing.assert_close(y, torch.full_like(y, 65536.0), rtol=0, atol=0)
+    torch.testing.assert_close(x.grad, torch.ones_like(x), rtol=0, atol=0)
+    for weight, rows in zip(weights, splits):
+        torch.testing.assert_close(
+            weight.grad, torch.full_like(weight, rows * 65536.0), rtol=0, atol=0
+        )
+
+
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("mixed", backward_modes)
-@pytest.mark.parametrize("compute_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "source_dtype,params_dtype,compute_dtype",
+    [(s, p, c) for s in hp_dtypes for p in hp_dtypes for c in hp_dtypes[:2]]
+    + [(torch.float32, torch.float32, torch.float32)],
+)
 @pytest.mark.parametrize("save_original_input", [False, True])
-def test_qdq_amp_fp32_input(grouped, mixed, compute_dtype, save_original_input, monkeypatch):
-    """AMP binds decoded precision while QDQ still quantizes the original FP32 input."""
+def test_qdq_module_input_dtypes(
+    grouped, mixed, source_dtype, params_dtype, compute_dtype, save_original_input, monkeypatch
+):
+    """Compute precision is independent of source and parameter storage precision."""
     from transformer_engine.pytorch.custom_recipes.qdq import MXFP8QDQQuantizer
 
     torch.manual_seed(31)
@@ -587,7 +693,7 @@ def test_qdq_amp_fp32_input(grouped, mixed, compute_dtype, save_original_input, 
     )
     options = dict(
         bias=False,
-        params_dtype=compute_dtype,
+        params_dtype=params_dtype,
         device="cuda",
         save_original_input=save_original_input,
     )
@@ -597,7 +703,7 @@ def test_qdq_amp_fp32_input(grouped, mixed, compute_dtype, save_original_input, 
         else te.Linear(128, 128, **options)
     )
     torch.manual_seed(31)
-    x = (torch.randn(96, 128, device="cuda", dtype=torch.float32) * 0.023).requires_grad_()
+    x = (torch.randn(96, 128, device="cuda") * 0.023).to(source_dtype).requires_grad_()
     dy = torch.randn(x.shape, device="cuda", dtype=compute_dtype)
     splits = [32, 64] if grouped else [96]
     weights = [layer.weight0, layer.weight1] if grouped else [layer.weight]
@@ -612,12 +718,12 @@ def test_qdq_amp_fp32_input(grouped, mixed, compute_dtype, save_original_input, 
     if mixed:
         monkeypatch.setattr(MXFP8QDQQuantizer, "quantize_impl", capture)
     with te.autocast(recipe=CustomRecipe(qfactory=factory)), torch.autocast(
-        "cuda", dtype=compute_dtype
+        "cuda", dtype=compute_dtype, enabled=compute_dtype != torch.float32
     ):
         y = layer(x, splits) if grouped else layer(x)
     y.backward(dy)
     assert y.dtype == compute_dtype
-    assert x.grad.dtype == torch.float32
+    assert x.grad.dtype == source_dtype
 
     expected_y, expected_dx = [], []
     for weight, src, grad in zip(weights, x.detach().split(splits), dy.split(splits)):
@@ -633,16 +739,27 @@ def test_qdq_amp_fp32_input(grouped, mixed, compute_dtype, save_original_input, 
         expected_dx.append(grad_row @ backward_weight)
         tolerance = 0.016 if compute_dtype == torch.bfloat16 else 0.002
         torch.testing.assert_close(
-            weight.grad, grad_col.T @ backward_input, rtol=tolerance, atol=0.002
+            weight.grad,
+            (grad_col.T @ backward_input).to(params_dtype),
+            rtol=tolerance,
+            atol=0.002,
         )
     torch.testing.assert_close(y, torch.cat(expected_y), rtol=tolerance, atol=0.002)
-    torch.testing.assert_close(x.grad, torch.cat(expected_dx).float(), rtol=tolerance, atol=0.002)
+    torch.testing.assert_close(
+        x.grad, torch.cat(expected_dx).to(source_dtype), rtol=tolerance, atol=0.002
+    )
     if mixed:
-        assert len(quantized_inputs) == len(splits)
+        # Matching-dtype fused split bypasses Python quantize_impl. Mixed-dtype
+        # sources take the reference path, where we can inspect the source values.
+        if not (grouped and source_dtype == compute_dtype and compute_dtype != torch.float32):
+            assert len(quantized_inputs) == len(splits)
         for (src, decoded), expected_src in zip(quantized_inputs, x.detach().split(splits)):
-            assert src.dtype == torch.float32
+            assert src.dtype == source_dtype
             assert_bits(src, expected_src)
-            assert_bits(decoded, mx_value(expected_src).to(compute_dtype))
+            # Native FP16 quantization may canonicalize negative zero.
+            torch.testing.assert_close(
+                decoded, mx_value(expected_src).to(compute_dtype), rtol=0, atol=0
+            )
 
 
 @pytest.mark.parametrize("mixed", backward_modes)
@@ -726,19 +843,32 @@ def test_input_dtype_binding_reused(mixed, save_original_input, grouped, monkeyp
 
 
 @pytest.mark.parametrize("fmt", ["mxfp8", "nvfp4", "nvfp4_row"])
-def test_split_qdq_preserves_fp32_source(fmt):
+@pytest.mark.parametrize("subclassed", [False, True])
+@pytest.mark.parametrize("source_dtype", hp_dtypes)
+@pytest.mark.parametrize("output_dtype", hp_dtypes)
+def test_split_qdq_preserves_source_dtype(fmt, subclassed, source_dtype, output_dtype):
     from transformer_engine.pytorch.custom_recipes.qdq import MXFP8QDQQuantizer
     from transformer_engine.pytorch.module import _split_quantization
 
     torch.manual_seed(31)
-    x = torch.randn(96, 128, device="cuda", dtype=torch.float32) * 0.023
+    x = (torch.randn(96, 128, device="cuda") * 0.023).to(source_dtype)
     splits = [32, 64]
+    quantizer_type = MXFP8QDQQuantizer if fmt == "mxfp8" else NVFP4QDQQuantizer
+    sources = []
+    if subclassed:
+
+        class PythonQDQQuantizer(quantizer_type):
+            def quantize_impl(self, tensor, **kwargs):
+                sources.append(tensor.detach().clone())
+                return super().quantize_impl(tensor, **kwargs)
+
+        quantizer_type = PythonQDQQuantizer
     qs = [
         (
-            MXFP8QDQQuantizer(dtype=torch.bfloat16)
+            quantizer_type(dtype=output_dtype)
             if fmt == "mxfp8"
-            else NVFP4QDQQuantizer(
-                NVFP4Quantizer(row_scaled_nvfp4=fmt == "nvfp4_row"), dtype=torch.bfloat16
+            else quantizer_type(
+                NVFP4Quantizer(row_scaled_nvfp4=fmt == "nvfp4_row"), dtype=output_dtype
             )
         )
         for _ in splits
@@ -746,11 +876,17 @@ def test_split_qdq_preserves_fp32_source(fmt):
 
     def decode(values):
         if fmt == "mxfp8":
-            return mx_value(values).bfloat16()
-        return native_qdq(values, torch.bfloat16, row_scaled_nvfp4=fmt == "nvfp4_row")
+            return mx_value(values).to(output_dtype)
+        return native_qdq(values, output_dtype, row_scaled_nvfp4=fmt == "nvfp4_row")
 
-    outputs = _split_quantization._split_quantize_non_hybrid(x, splits, qs, torch.bfloat16)
+    outputs = _split_quantization._split_quantize_non_hybrid(x, splits, qs, output_dtype)
     for src, out in zip(x.split(splits), outputs):
         expected = decode(src)
-        assert_bits(out.dequantize(), expected)
-        assert not torch.equal(expected, decode(src.bfloat16()))
+        torch.testing.assert_close(out.dequantize(), expected, rtol=0, atol=0)
+        if source_dtype == torch.float32 and output_dtype == torch.bfloat16:
+            assert not torch.equal(expected, decode(src.bfloat16()))
+    if subclassed:
+        assert len(sources) == len(splits)
+        for actual, expected in zip(sources, x.split(splits)):
+            assert actual.dtype == source_dtype
+            assert_bits(actual, expected)

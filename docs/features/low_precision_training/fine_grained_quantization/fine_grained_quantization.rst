@@ -445,6 +445,8 @@ Backends and custom QDQ formats
 Output defaults to the source dtype. The main modules use their compute dtype
 for high-precision input and weight representations.
 QDQ still quantizes the original source values before decoding to that dtype.
+QDQ primary weights created with ``quantized_model_init`` must already use the
+module compute dtype; AMP does not convert their stored representations.
 For ``NVFP4QDQQuantizer``, ``backend="auto"`` fuses
 plain 1D E2M1/E4M3 QDQ with tensor or per-row outer scaling on
 GPUs with compute capability 8.0 or higher and a TE build with CUDA 12.8 or

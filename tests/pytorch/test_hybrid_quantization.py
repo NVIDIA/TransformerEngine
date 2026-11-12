@@ -7871,7 +7871,8 @@ def test_hybrid_weight_workspace_checks_child_dtype(direction):
 
 
 @pytest.mark.parametrize("nested", [False, True])
-def test_hybrid_columnwise_identity_inherits_reconstructed_source_dtype(nested):
+@pytest.mark.parametrize("grouped", [False, True])
+def test_hybrid_columnwise_identity_inherits_reconstructed_source_dtype(nested, grouped):
     """An implicit column dtype follows the promoted source, not the original input."""
     row = IdentityQuantizer(dtype=torch.float16)
     if nested:
@@ -7886,7 +7887,12 @@ def test_hybrid_columnwise_identity_inherits_reconstructed_source_dtype(nested):
     )
     q.set_usage(rowwise=False, columnwise=True)
     x = torch.tensor([[0.023, -0.031]], dtype=torch.bfloat16)
-    out = q.quantize(x)
+    if grouped:
+        outputs = split_quantization._split_quantize_hybrid(x, [0, 1], [q, q.copy()])
+        assert outputs[0]._columnwise_storage._hp_data.dtype == torch.float32
+        out = outputs[1]
+    else:
+        out = q.quantize(x)
     assert out._columnwise_storage._hp_data.dtype == torch.float32
     torch.testing.assert_close(
         out._columnwise_storage.dequantize(), x.half().float(), rtol=0, atol=0

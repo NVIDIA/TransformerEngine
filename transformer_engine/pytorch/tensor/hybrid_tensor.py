@@ -216,6 +216,22 @@ class HybridQuantizer(Quantizer):
             if hasattr(sub, "amax_reduction_group"):
                 sub.amax_reduction_group = value
 
+    @staticmethod
+    def _columnwise_src_dtype(source_dtype: torch.dtype, rowwise_result: Any) -> torch.dtype:
+        """Select reconstruction precision for both individual and grouped quantization."""
+        # Preserve HP forward values when the source dtype would narrow them.
+        # Native representations retain their existing decode-to-source behavior.
+        rowwise_storage = rowwise_result
+        while isinstance(rowwise_storage, HybridQuantizedTensorStorage):
+            rowwise_storage = (
+                rowwise_storage._rowwise_storage
+                if rowwise_storage._rowwise_storage is not None
+                else rowwise_storage._columnwise_storage
+            )
+        if isinstance(rowwise_storage, IdentityTensorStorage):
+            return torch.promote_types(source_dtype, rowwise_storage._dtype)
+        return source_dtype
+
     def _columnwise_src_from_rowwise(
         self,
         tensor: torch.Tensor,
@@ -227,19 +243,9 @@ class HybridQuantizer(Quantizer):
         if rowwise_result is None:
             quantizer = rowwise_quantizer or self.rowwise_quantizer
             rowwise_result = quantizer.quantize(tensor, dtype=dtype)
-        # Preserve HP forward values when the source dtype would narrow them.
-        # Native representations retain their existing decode-to-source behavior.
-        rowwise_storage = rowwise_result
-        while isinstance(rowwise_storage, HybridQuantizedTensorStorage):
-            rowwise_storage = (
-                rowwise_storage._rowwise_storage
-                if rowwise_storage._rowwise_storage is not None
-                else rowwise_storage._columnwise_storage
-            )
-        columnwise_dtype = tensor.dtype
-        if isinstance(rowwise_storage, IdentityTensorStorage):
-            columnwise_dtype = torch.promote_types(tensor.dtype, rowwise_storage._dtype)
-        return rowwise_result.dequantize(dtype=columnwise_dtype)
+        return rowwise_result.dequantize(
+            dtype=self._columnwise_src_dtype(tensor.dtype, rowwise_result)
+        )
 
     def _quantize_impl_with_dtype(self, tensor, *, dtype=None):
         """Forward a compute-dtype request to the quantization implementation."""

@@ -222,11 +222,12 @@ def test_portable_weight_recipe(grouped, input_dtype):
     ["layernorm_linear", "layernorm_mlp", "mha", "mha_layernorm", "transformer", "decoder"],
 )
 @pytest.mark.parametrize("compute_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("source_dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("fp32_params", [False, True])
 @pytest.mark.parametrize("mixed", [False, True])
 @requires_fp4_build
-def test_qdq_main_modules_amp(module_type, compute_dtype, fp32_params, mixed):
-    """Main modules preserve QDQ numerics with FP32 inputs under native AMP."""
+def test_qdq_main_modules_amp(module_type, compute_dtype, source_dtype, fp32_params, mixed):
+    """Main modules preserve QDQ numerics with mixed source and compute dtypes."""
     if mixed and not te.is_mxfp8_available():
         pytest.skip("Mixed QDQ backward requires native MXFP8")
     if fp32_params and not te.is_nvfp4_available():
@@ -274,7 +275,7 @@ def test_qdq_main_modules_amp(module_type, compute_dtype, fp32_params, mixed):
                     param.copy_(reference(param, "nvfp4").to(compute_dtype))
         oracle_recipe = CustomRecipe(qfactory=lambda role: IdentityQuantizer())
     recipe = CustomRecipe(qfactory=factory)
-    x = torch.randn(32, 2, 128, device="cuda", dtype=torch.float32) * 0.023
+    x = (torch.randn(32, 2, 128, device="cuda") * 0.023).to(source_dtype)
     encoder_output = torch.randn_like(x) if module_type == "decoder" else None
     dy = torch.randn_like(x)
 
@@ -286,7 +287,7 @@ def test_qdq_main_modules_amp(module_type, compute_dtype, fp32_params, mixed):
         with te.autocast(recipe=current_recipe), torch.autocast("cuda", dtype=compute_dtype):
             out = model(model_input, **kwargs)
         out.backward(dy.to(out.dtype))
-        assert model_input.grad.dtype == torch.float32
+        assert model_input.grad.dtype == source_dtype
         assert out.dtype == compute_dtype
         values = [out.detach(), model_input.grad]
         if encoder_output is not None:
