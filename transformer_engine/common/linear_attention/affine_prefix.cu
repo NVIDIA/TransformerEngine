@@ -23,6 +23,7 @@ __global__ void affine_prefix_kernel(const float *seeds, const float *additive,
   float *state = storage;
   float *next = storage + kRows * key_dim;
   const size_t tiles = (value_dim + kRows - 1) / kRows;
+  // span indexes a local fragment; each fragment uses heads * tiles blocks.
   const size_t span = blockIdx.x / (heads * tiles);
   const size_t head = (blockIdx.x / tiles) % heads;
   const size_t first_value = (blockIdx.x % tiles) * kRows;
@@ -38,6 +39,9 @@ __global__ void affine_prefix_kernel(const float *seeds, const float *additive,
       if (value < value_dim) {
         if (begin) {
           assert(first >= 0 && static_cast<size_t>(first) < num_records);
+          // H[first, head, value, col]: summary record, head, value row, key column.
+          // Flat offset = first*(heads*value_dim*key_dim) + head*(value_dim*key_dim)
+          //             + value*key_dim + col.
           initial = additive[((first * heads + head) * value_dim + value) * key_dim + col];
         } else if (seed >= 0) {
           initial = seeds[((seed * heads + head) * value_dim + value) * key_dim + col];
