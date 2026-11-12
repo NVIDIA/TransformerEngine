@@ -5,7 +5,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -41,6 +41,7 @@ from .cudnn_graph import (
     serialize_graph as _serialized_score_mod_graph,
     finalize_graph as _finalize_score_mod_graph,
     import_cudnn as _import_cudnn_for_score_mod,
+    _graph_cache,
 )
 
 __all__ = [
@@ -210,8 +211,6 @@ _SCORE_MOD_FWD_TENSOR_UID_BASE = 1000
 _SCORE_MOD_BPROP_TENSOR_UID_BASE = 2000
 _SCORE_MOD_FWD_SCALAR_UID_BASE = 3000
 _SCORE_MOD_BPROP_SCALAR_UID_BASE = 4000
-
-_score_mod_graph_cache: Dict[Tuple[Any, ...], _SerializedScoreModGraph] = {}
 
 
 def _matrix_spec(cudnn, aval, output=False):
@@ -405,6 +404,7 @@ def _graph_cache_key(
     ):
         return None
     return (
+        "score_mod",
         direction,
         config,
         tuple((tuple(aval.shape), _dtype_name(aval.dtype)) for aval in avals),
@@ -545,14 +545,9 @@ def _fused_attn_score_mod_fwd(
     q_aval, k_aval, v_aval = map(_shape_dtype, (q, k, v))
     score_mod_avals = tuple(_shape_dtype(arg) for arg in score_mod_tensors)
     key = _graph_cache_key("fwd", config, (q_aval, k_aval, v_aval, *score_mod_avals))
-    if key is None:
-        graph = _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config)
-    else:
-        if key not in _score_mod_graph_cache:
-            _score_mod_graph_cache[key] = _build_score_mod_fwd_graph(
-                q_aval, k_aval, v_aval, score_mod_avals, config
-            )
-        graph = _score_mod_graph_cache[key]
+    graph = _graph_cache.get(
+        key, lambda: _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config)
+    )
 
     batch, q_seqlen, q_heads, _ = q.shape
     _, _, _, v_head_dim = v.shape
@@ -599,22 +594,15 @@ def _fused_attn_score_mod_bwd(
     all_inputs = (*all_inputs, *score_mod_bprop_tensors)
     avals = tuple(_shape_dtype(arg) for arg in all_inputs)
     key = _graph_cache_key("bwd", config, avals)
-    if key is None:
-        graph = _build_score_mod_bwd_graph(
+    graph = _graph_cache.get(
+        key,
+        lambda: _build_score_mod_bwd_graph(
             *avals[:6],
             avals[6 : 6 + len(score_mod_tensors)],
             avals[6 + len(score_mod_tensors) :],
             config,
-        )
-    else:
-        if key not in _score_mod_graph_cache:
-            _score_mod_graph_cache[key] = _build_score_mod_bwd_graph(
-                *avals[:6],
-                avals[6 : 6 + len(score_mod_tensors)],
-                avals[6 + len(score_mod_tensors) :],
-                config,
-            )
-        graph = _score_mod_graph_cache[key]
+        ),
+    )
 
     dq = jax.ShapeDtypeStruct(q.shape, q.dtype)
     dk = jax.ShapeDtypeStruct(k.shape, k.dtype)

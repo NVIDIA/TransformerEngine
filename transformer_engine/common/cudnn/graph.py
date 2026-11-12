@@ -15,6 +15,52 @@ import threading
 import time
 
 
+@dataclass
+class GraphCacheEntry:
+    """A supported graph and its optional compiled plan and serialization."""
+
+    built: object
+    workspace_size: int | None = None
+    serialized_graph: bytes | None = None
+
+
+class GraphCache:
+    """Own graph entries and serialize lookup, construction, and compilation."""
+
+    def __init__(self):
+        self.entries = {}
+        self.lock = threading.RLock()
+
+    def get(self, key, build, event=None):
+        """Build once per key; None explicitly bypasses storage for mutable callbacks."""
+        if key is None:
+            return build()
+        with self.lock:
+            if key in self.entries:
+                if event is not None:
+                    event("HIT", key)
+                return self.entries[key]
+            if event is not None:
+                event("MISS", key)
+            entry = build()
+            self.entries[key] = entry
+            if event is not None:
+                event("CACHE_GRAPH")
+            return entry
+
+    def compile(self, entry, compile_plan, *, serialize=False, event=None):
+        """Publish compilation state only after all requested stages succeed."""
+        with self.lock:
+            if entry.workspace_size is None:
+                workspace_size = compile_plan()
+                data = bytes(entry.built.graph.serialize()) if serialize else None
+                entry.workspace_size = workspace_size
+                entry.serialized_graph = data
+                if event is not None:
+                    event("BUILD_PLANS")
+        return entry.workspace_size
+
+
 class UnsupportedGraph(ValueError):
     """A configuration rejected by cuDNN, rather than an execution/setup failure."""
 

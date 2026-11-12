@@ -14,7 +14,10 @@ from transformer_engine.common.cudnn.graph import (
     import_cudnn as _import_cudnn,
     check_graph_support as _check_graph_support,
     compile_graph as _compile_graph,
+    GraphCache,
 )
+
+_graph_cache = GraphCache()
 
 
 @dataclass(frozen=True)

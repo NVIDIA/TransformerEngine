@@ -452,7 +452,7 @@ def test_fused_attn_bias_graph_cache(dtype, qkv_format, bias_layout, monkeypatch
     monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
     monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
     monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
-    monkeypatch.setattr(implementation, "_plans", {})
+    monkeypatch.setattr(implementation._graph_cache, "entries", {})
     compile_graph = Mock(wraps=implementation.compile_graph)
     monkeypatch.setattr(implementation, "compile_graph", compile_graph)
     original_entry = implementation._AttentionGraph.entry
@@ -520,7 +520,7 @@ def test_fused_attn_bias_graph_cache(dtype, qkv_format, bias_layout, monkeypatch
         # dBias subtracts dO.O using low-precision saved O, amplifying pointwise cancellation.
         error = torch.linalg.vector_norm(bias.grad.float() - ref_bias.grad)
         assert error <= torch.finfo(dtype).eps * torch.linalg.vector_norm(ref_bias.grad)
-        assert len(implementation._plans) == 2
+        assert len(implementation._graph_cache.entries) == 2
         assert compile_graph.call_count == 2
     assert executed == [False, True, False, True]
 
@@ -745,7 +745,7 @@ def test_fused_attn_query_propagates_setup_errors(error, monkeypatch):
         raise error
 
     monkeypatch.setattr(implementation._AttentionGraph, "build", fail)
-    monkeypatch.setattr(implementation, "_plans", {})
+    monkeypatch.setattr(implementation._graph_cache, "entries", {})
     config = FusedAttentionParams(
         qkv_layout=QKVLayout["bshd_bshd_bshd"],
         batch_size=2,

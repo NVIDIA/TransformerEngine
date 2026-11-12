@@ -8,10 +8,10 @@ The extension supplies capture-safe Philox state and sequence-length conversion.
 Graph construction, plan caching, and execution use the Python frontend.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
+from functools import partial
 import math
 import os
-import threading
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -25,6 +25,7 @@ from transformer_engine.common.cudnn.attention import (
 from transformer_engine.common.cudnn.graph import (
     TensorSpec as _TensorSpec,
     CacheDiagnostics,
+    GraphCacheEntry,
     attention_matrix_spec,
     attention_stats_spec,
     mxfp8_scale_spec,
@@ -39,6 +40,7 @@ from .cudnn import (
     _import_cudnn_frontend,
     _build_cudnn_pygraph,
     _execute_cudnn_graph,
+    _graph_cache,
 )
 from ..tensor.float8_tensor import Float8Quantizer
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -58,8 +60,6 @@ __all__ = ["fused_attn_fwd", "fused_attn_bwd"]
 _FP8_THREADS_PER_CTA = 128
 _F16_RNG_ELTS_PER_THREAD = 16
 
-_plans = {}
-_cache_lock = threading.RLock()
 _diagnostics = CacheDiagnostics("PyTorch")
 
 
@@ -123,15 +123,6 @@ def _descale(tensor, columnwise=False):
     if isinstance(tensor, MXFP8TensorStorage):
         return tensor._columnwise_scale_inv if columnwise else tensor._rowwise_scale_inv
     return tensor._scale_inv
-
-
-@dataclass
-class _PlanEntry:
-    """A supported graph, compiled lazily under the cache lock."""
-
-    graph: object
-    tensors: dict
-    workspace_size: int | None = None
 
 
 class _AttentionGraph:
@@ -301,19 +292,11 @@ class _AttentionGraph:
 
     def entry(self):
         """Share support-query graphs with execution without compiling on queries."""
-        key = (self.device, self.description())
         # Autograd may run backward on another thread. Share device-specific plans;
         # each execution supplies its thread-local handle on the current stream.
-        with _cache_lock:
-            entry = _plans.get(key)
-            if entry is None:
-                _event(self, "MISS", key)
-                entry = self.build()
-                _plans[key] = entry
-                _event(self, "CACHE_GRAPH")
-            else:
-                _event(self, "HIT", key)
-        return entry
+        return _graph_cache.get(
+            (self.device, self.description()), self.build, event=partial(_event, self)
+        )
 
     def build(self):
         """Construct and check the common graph description without compiling it."""
@@ -322,22 +305,23 @@ class _AttentionGraph:
         built = build_attention_graph(cudnn, graph, self.description())
         _event(self, "CREATE_GRAPH")
         check_graph_support(cudnn, graph, lambda name, function: _build_stage(self, name, function))
-        return _PlanEntry(graph, built.tensors)
+        return GraphCacheEntry(built)
 
     def execute(self):
         """Compile once, then bind this invocation's runtime tensor addresses."""
         entry = self.entry()
-        with _cache_lock:
-            if entry.workspace_size is None:
-                entry.workspace_size = compile_graph(
-                    _import_cudnn_frontend(),
-                    entry.graph,
-                    lambda name, function: _build_stage(self, name, function),
-                )
-                _event(self, "BUILD_PLANS")
+        _graph_cache.compile(
+            entry,
+            lambda: compile_graph(
+                _import_cudnn_frontend(),
+                entry.built.graph,
+                lambda name, function: _build_stage(self, name, function),
+            ),
+            event=partial(_event, self),
+        )
         _execute_cudnn_graph(
-            entry.graph,
-            {entry.tensors[n]: t for n, t in self.tensors.items()},
+            entry.built.graph,
+            {entry.built.tensors[n]: t for n, t in self.tensors.items()},
             entry.workspace_size,
             self.device,
         )

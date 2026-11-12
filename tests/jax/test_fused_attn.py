@@ -437,7 +437,7 @@ def test_fused_attn_support_query_defers_compilation(setup_error, monkeypatch):
         raise AssertionError("Support query compiled an execution plan")
 
     monkeypatch.setattr(cudnn_attention, "compile_graph", forbidden)
-    cudnn_attention._supported_graph.cache_clear()
+    monkeypatch.setattr(cudnn_attention._graph_cache, "entries", {})
     if setup_error is not None:
 
         def fail(*_args, **_kwargs):

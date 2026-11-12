@@ -5,12 +5,20 @@
 import os
 import sys
 import pathlib
-from types import FunctionType
+from types import FunctionType, SimpleNamespace
 from unittest.mock import Mock, call
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 import pytest
 import torch
 
+from transformer_engine.common.cudnn.attention import (
+    AttentionOptions,
+    AttentionGraphSpec,
+    BuiltAttentionGraph,
+)
+from transformer_engine.common.cudnn.graph import GraphCache, GraphCacheEntry
 from transformer_engine.pytorch import DotProductAttention, is_bf16_available
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 import transformer_engine.pytorch.attention.dot_product_attention.flex_attention as flex_attention
@@ -58,6 +66,59 @@ def test_cudnn_score_mod_backend_guard(monkeypatch, has_score_mod, selected_engi
         )
     else:
         graph.deselect_engines.assert_not_called()
+
+
+@pytest.mark.parametrize("serialize", (False, True))
+def test_cudnn_graph_cache_compiles_once_across_threads(serialize):
+    """Concurrent requests share one supported graph and one completed compilation."""
+    cache = GraphCache()
+    graph = Mock()
+    graph.serialize.return_value = b"graph"
+
+    def build():
+        time.sleep(0.01)
+        return GraphCacheEntry(BuiltAttentionGraph(graph, {}, {}))
+
+    def compile_plan():
+        time.sleep(0.01)
+        return 64
+
+    build = Mock(side_effect=build)
+    compile_plan = Mock(side_effect=compile_plan)
+
+    def request(_index):
+        entry = cache.get("graph", build)
+        assert cache.compile(entry, compile_plan, serialize=serialize) == 64
+        return entry
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        entries = list(pool.map(request, range(8)))
+    assert all(entry is entries[0] for entry in entries)
+    assert build.call_count == compile_plan.call_count == 1
+    assert graph.serialize.call_count == int(serialize)
+
+
+@pytest.mark.parametrize("failure", ("support", "compile", "serialize"))
+def test_cudnn_graph_cache_retries_failed_build(failure):
+    """Failures must not publish an incomplete cache entry or compilation state."""
+    cache = GraphCache()
+    graph = Mock()
+    graph.serialize.return_value = b"graph"
+    entry = GraphCacheEntry(BuiltAttentionGraph(graph, {}, {}))
+    build = Mock(side_effect=[RuntimeError("failure"), entry] if failure == "support" else [entry])
+    compile_plan = Mock(
+        side_effect=[RuntimeError("failure"), 64] if failure == "compile" else [64, 64]
+    )
+    if failure == "serialize":
+        graph.serialize.side_effect = [RuntimeError("failure"), b"graph"]
+    with pytest.raises(RuntimeError, match="failure"):
+        cached = cache.get("graph", build)
+        cache.compile(cached, compile_plan, serialize=True)
+    assert entry.workspace_size is entry.serialized_graph is None
+    assert bool(cache.entries) == (failure != "support")
+    cached = cache.get("graph", build)
+    assert cache.compile(cached, compile_plan, serialize=True) == 64
+    assert cached.serialized_graph == b"graph"
 
 
 def _score_mod_causal(score_mod_graph, score_tensor, tensors):
@@ -201,6 +262,41 @@ def _clone_score_mod(default=False, options=None):
     return callback
 
 
+def _mock_score_mod_build(monkeypatch):
+    """Replace cuDNN construction while exercising the real cache and bindings."""
+    monkeypatch.setattr(cudnn_graph._graph_cache, "entries", {})
+
+    def build(spec, _device, _callback, _bprop, extra, bprop_extra):
+        handles = flex_attention._score_mod_bindings(
+            {name: object() for name, _ in spec.tensors},
+            {name: object() for name in extra},
+            {name: object() for name in bprop_extra},
+        )
+        return GraphCacheEntry(BuiltAttentionGraph(object(), handles, {}))
+
+    build = Mock(side_effect=build)
+    monkeypatch.setattr(flex_attention, "_build_cudnn_score_mod_graph", build)
+    monkeypatch.setattr(flex_attention, "compile_graph", Mock(return_value=1))
+    return build
+
+
+def _get_score_mod_test_graph(callback, *, backward=False, extra=None):
+    q, k, v, out, stats = _score_mod_cache_cpu_inputs()
+    tensors = {"q": q, "k": k, "v": v, "o": out, "stats": stats}
+    if backward:
+        tensors.update(do=out, dq=q, dk=k, dv=v)
+    entry, _ = flex_attention._get_cudnn_score_mod_graph(
+        AttentionOptions(backward=backward, attn_scale=1.0),
+        tensors,
+        "bshd",
+        "bshd",
+        _score_mod_identity_bprop if backward else callback,
+        callback if backward else None,
+        score_mod_tensors=extra,
+    )
+    return entry
+
+
 @pytest.mark.parametrize("direction", ("fwd", "bwd"))
 @pytest.mark.parametrize("difference", ("positional", "keyword", "code", "type"))
 def test_score_mod_cache_separates_function_defaults(monkeypatch, direction, difference):
@@ -214,32 +310,10 @@ def test_score_mod_cache_separates_function_defaults(monkeypatch, direction, dif
         second.__qualname__ = first.__qualname__
     elif difference == "type":
         second = _clone_score_mod(0)
-    q, k, v, out, stats = _score_mod_cache_cpu_inputs()
-    monkeypatch.setattr(flex_attention, "_cudnn_score_mod_graph_cache", {})
-    build = Mock(side_effect=lambda *_args: object())
-    monkeypatch.setattr(flex_attention, f"_build_cudnn_score_mod_{direction}_graph", build)
+    build = _mock_score_mod_build(monkeypatch)
 
     def get(callback):
-        if direction == "fwd":
-            return flex_attention._get_cudnn_score_mod_fwd_graph(
-                True, q, k, v, "bshd", "bshd", 1.0, callback, {}, out, stats
-            )
-        return flex_attention._get_cudnn_score_mod_bwd_graph(
-            q,
-            k,
-            v,
-            out,
-            out,
-            stats,
-            "bshd",
-            "bshd",
-            1.0,
-            _score_mod_identity_bprop,
-            callback,
-            {},
-            {},
-            False,
-        )
+        return _get_score_mod_test_graph(callback, backward=direction == "bwd")
 
     entry = get(first)
     assert get(first) is entry
@@ -355,137 +429,28 @@ def test_score_mod_cache_module_lambda_keys_do_not_collide():
 
 def test_score_mod_cache_key_ignores_pass_by_value_values():
     """Scalar CPU tensor values are runtime inputs, not execution-plan metadata."""
-    q, k, v, o, stats = _score_mod_cache_cpu_inputs()
-    key_0 = flex_attention._cudnn_score_mod_fwd_cache_key(
-        True,
-        q,
-        k,
-        v,
-        "bshd",
-        "bshd",
-        1.0,
-        _score_mod_causal,
-        {"softcap": torch.tensor(0.8, dtype=torch.float32)},
-        o,
-        stats,
-    )
-    key_1 = flex_attention._cudnn_score_mod_fwd_cache_key(
-        True,
-        q,
-        k,
-        v,
-        "bshd",
-        "bshd",
-        1.0,
-        _score_mod_causal,
-        {"softcap": torch.tensor(1.2, dtype=torch.float32)},
-        o,
-        stats,
-    )
-    key_2 = flex_attention._cudnn_score_mod_fwd_cache_key(
-        True,
-        q,
-        k,
-        v,
-        "bshd",
-        "bshd",
-        1.0,
-        _score_mod_causal,
-        {"softcap": torch.tensor([0.8], dtype=torch.float32)},
-        o,
-        stats,
-    )
+    spec = AttentionGraphSpec.from_dict(AttentionOptions(), {})
 
-    assert key_0 == key_1
-    assert key_0 != key_2
+    def key(tensor):
+        return flex_attention._cudnn_score_mod_cache_key(
+            spec, torch.device("cpu"), _score_mod_causal, None, {"softcap": tensor}, {}
+        )
+
+    assert key(torch.tensor(0.8)) == key(torch.tensor(1.2))
+    assert key(torch.tensor(0.8)) != key(torch.tensor([0.8]))
 
 
 def test_score_mod_cache_fwd_reuses_graph_for_pass_by_value_changes(monkeypatch):
     """Fprop graph cache should reuse entries when only scalar CPU tensor values change."""
-    q, k, v, o, stats = _score_mod_cache_cpu_inputs()
-    cache = flex_attention._cudnn_score_mod_graph_cache
-    saved_cache = dict(cache)
-    build_entries = []
-
-    def fake_build(
-        is_training,
-        query_layer,
-        key_layer,
-        value_layer,
-        q_format,
-        kv_format,
-        attn_scale,
-        score_mod,
-        score_mod_tensors,
-        output_layer,
-        stats,
-    ):
-        del (
-            is_training,
-            query_layer,
-            key_layer,
-            value_layer,
-            q_format,
-            kv_format,
-            attn_scale,
-            score_mod,
-            score_mod_tensors,
-            output_layer,
-            stats,
-        )
-        entry = object()
-        build_entries.append(entry)
-        return entry
-
-    monkeypatch.setattr(flex_attention, "_build_cudnn_score_mod_fwd_graph", fake_build)
-    try:
-        cache.clear()
-        entry_0 = flex_attention._get_cudnn_score_mod_fwd_graph(
-            True,
-            q,
-            k,
-            v,
-            "bshd",
-            "bshd",
-            1.0,
-            _score_mod_causal,
-            {"softcap": torch.tensor(0.8, dtype=torch.float32)},
-            o,
-            stats,
-        )
-        entry_1 = flex_attention._get_cudnn_score_mod_fwd_graph(
-            True,
-            q,
-            k,
-            v,
-            "bshd",
-            "bshd",
-            1.0,
-            _score_mod_causal,
-            {"softcap": torch.tensor(1.2, dtype=torch.float32)},
-            o,
-            stats,
-        )
-        entry_2 = flex_attention._get_cudnn_score_mod_fwd_graph(
-            True,
-            q,
-            k,
-            v,
-            "bshd",
-            "bshd",
-            1.0,
-            _score_mod_causal,
-            {"softcap": torch.tensor([0.8], dtype=torch.float32)},
-            o,
-            stats,
-        )
-    finally:
-        cache.clear()
-        cache.update(saved_cache)
-
-    assert entry_0 is entry_1
-    assert entry_2 is not entry_0
-    assert len(build_entries) == 2
+    build = _mock_score_mod_build(monkeypatch)
+    entries = [
+        _get_score_mod_test_graph(_score_mod_causal, extra={"softcap": torch.tensor(value)})
+        for value in (0.8, 1.2, [0.8])
+    ]
+    assert entries[0] is entries[1]
+    assert entries[2] is not entries[0]
+    assert build.call_count == 2
+    assert flex_attention.compile_graph.call_count == 2
 
 
 def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
@@ -495,91 +460,18 @@ def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
         def forward(self, _score_mod_graph, score_tensor, _tensors):
             return score_tensor
 
-    q, k, v, o, stats = _score_mod_cache_cpu_inputs()
-    score_mod = UnkeyedScoreMod()
-    cache = flex_attention._cudnn_score_mod_graph_cache
-    saved_cache = dict(cache)
-    build_entries = []
-
-    def fake_build(
-        is_training,
-        query_layer,
-        key_layer,
-        value_layer,
-        q_format,
-        kv_format,
-        attn_scale,
-        score_mod,
-        score_mod_tensors,
-        output_layer,
-        stats,
-    ):
-        del (
-            is_training,
-            query_layer,
-            key_layer,
-            value_layer,
-            q_format,
-            kv_format,
-            attn_scale,
-            score_mod,
-            score_mod_tensors,
-            output_layer,
-            stats,
-        )
-        entry = object()
-        build_entries.append(entry)
-        return entry
-
-    monkeypatch.setattr(flex_attention, "_build_cudnn_score_mod_fwd_graph", fake_build)
-    try:
-        cache.clear()
-        entry_0 = flex_attention._get_cudnn_score_mod_fwd_graph(
-            True,
-            q,
-            k,
-            v,
-            "bshd",
-            "bshd",
-            1.0,
-            score_mod.forward,
-            None,
-            o,
-            stats,
-        )
-        entry_1 = flex_attention._get_cudnn_score_mod_fwd_graph(
-            True,
-            q,
-            k,
-            v,
-            "bshd",
-            "bshd",
-            1.0,
-            score_mod.forward,
-            None,
-            o,
-            stats,
-        )
-        assert len(cache) == 0
-    finally:
-        cache.clear()
-        cache.update(saved_cache)
-
-    assert entry_0 is not entry_1
-    assert len(build_entries) == 2
+    build = _mock_score_mod_build(monkeypatch)
+    callback = UnkeyedScoreMod().forward
+    assert _get_score_mod_test_graph(callback) is not _get_score_mod_test_graph(callback)
+    assert not cudnn_graph._graph_cache.entries
+    assert build.call_count == 2
 
 
 def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):
     """In-place score_mod tensor updates before backward should be rejected."""
 
     class FakeEntry:
-        graph = object()
-        q = object()
-        k = object()
-        v = object()
-        output = object()
-        stats = object()
-        score_mod_graph_tensors = {"softcap": object()}
+        built = SimpleNamespace(graph=object())
         workspace_size = 1
 
     def fake_execute(graph, variant_pack, workspace_size, device):
@@ -591,7 +483,9 @@ def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):
     v = v.requires_grad_()
     softcap = torch.tensor(0.8, dtype=torch.float32)
 
-    monkeypatch.setattr(flex_attention, "_get_cudnn_score_mod_fwd_graph", lambda *args: FakeEntry())
+    monkeypatch.setattr(
+        flex_attention, "_get_cudnn_score_mod_graph", lambda *_args, **_kwargs: (FakeEntry(), {})
+    )
     monkeypatch.setattr(flex_attention, "_execute_cudnn_graph", fake_execute)
 
     out = flex_attention.FusedAttentionWithScoreModFunc.apply(
@@ -685,8 +579,13 @@ def _pytorch_softcap_attention(q, k, v, qkv_format, softmax_scale, softcap):
         ("post_scale_bias", False),
     ],
 )
-def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scalar_loss):
+def test_dot_product_attention_score_mod(
+    dtype, qkv_format, score_mod_case, scalar_loss, monkeypatch
+):
     """Compare score_mod attention against equivalent reference implementations."""
+    monkeypatch.setattr(cudnn_graph._graph_cache, "entries", {})
+    compile_plan = Mock(wraps=flex_attention.compile_graph)
+    monkeypatch.setattr(flex_attention, "compile_graph", compile_plan)
     try:
         flex_attention._import_cudnn_frontend()
     except ImportError:
@@ -841,3 +740,48 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     torch.testing.assert_close(q.grad, q_ref.grad, **tols)
     torch.testing.assert_close(k.grad, k_ref.grad, **tols)
     torch.testing.assert_close(v.grad, v_ref.grad, **tols)
+
+    # New buffers with identical metadata must reuse both plans and rebind all operands.
+    repeated = [x.detach().clone().requires_grad_() for x in (q, k, v)]
+    repeated_kwargs = dict(score_mod_kwargs)
+    for name in ("score_mod_tensors", "score_mod_bprop_tensors"):
+        if name in repeated_kwargs:
+            repeated_kwargs[name] = {
+                key: value.clone() for key, value in repeated_kwargs[name].items()
+            }
+    repeated_out = flex_attn(
+        *repeated, qkv_format=qkv_format, attn_mask_type="no_mask", **repeated_kwargs
+    )
+    repeated_out.backward(torch.ones_like(repeated_out) if scalar_loss else d_out)
+    torch.testing.assert_close(repeated_out, out_ref, **tols)
+    for actual, ref in zip(repeated, (q_ref, k_ref, v_ref)):
+        torch.testing.assert_close(actual.grad, ref.grad, **tols)
+    assert compile_plan.call_count == 2
+    assert sum(key[0] == "score_mod" for key in cudnn_graph._graph_cache.entries) == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
+def test_score_mod_inference_reuses_graph(monkeypatch):
+    """Inference omits Stats and reuses its plan on new runtime buffers."""
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
+    monkeypatch.setattr(cudnn_graph._graph_cache, "entries", {})
+    compile_plan = Mock(wraps=flex_attention.compile_graph)
+    monkeypatch.setattr(flex_attention, "compile_graph", compile_plan)
+    _attention_backends["backend_selection_requires_update"] = True
+    attention = (
+        DotProductAttention(4, 64, qkv_format="bshd", attn_mask_type="no_mask").cuda().eval()
+    )
+    for _ in range(2):
+        q, k, v = (torch.randn(2, 128, 4, 64, device="cuda", dtype=torch.float16) for _ in range(3))
+        qr, kr, vr = (x.transpose(1, 2).float() for x in (q, k, v))
+        indices = torch.arange(128, device="cuda", dtype=torch.float32)
+        scores = qr @ kr.transpose(-1, -2) / 8 + indices[:, None] - indices[None, :]
+        reference = (scores.softmax(-1) @ vr).transpose(1, 2)
+        with torch.no_grad():
+            out = attention(q, k, v, score_mod=_score_mod_post_scale_bias)
+        torch.testing.assert_close(
+            out.reshape(reference.shape).float(), reference, rtol=0.003, atol=0.002
+        )
+    assert compile_plan.call_count == 1

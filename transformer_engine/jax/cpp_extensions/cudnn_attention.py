@@ -5,7 +5,6 @@
 
 import math
 import os
-import threading
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -17,12 +16,12 @@ from jax import ffi
 from transformer_engine.common.cudnn.attention import (
     AttentionOptions,
     AttentionGraphSpec,
-    BuiltAttentionGraph,
     build_attention_graph,
 )
 from transformer_engine.common.cudnn.graph import (
     TensorSpec,
     CacheDiagnostics,
+    GraphCacheEntry,
     bucket as _bucket,
     row_major_stride as _stride,
     create_graph,
@@ -38,6 +37,7 @@ from .cudnn_graph import (
     compile_graph,
     serialize_graph,
     graph_attributes,
+    _graph_cache,
 )
 from . import mxfp8_attention
 
@@ -108,39 +108,23 @@ class _AttentionDescription:
     fp8: bool
 
 
-@dataclass
-class _SupportedGraph:
-    """A supported live graph and its lazily compiled serialization."""
-
-    built: BuiltAttentionGraph
-    workspace_size: int | None = None
-    serialized_graph: bytes | None = None
-
-
 _diagnostics = CacheDiagnostics("JAX")
-_plan_lock = threading.RLock()
 
 
 def _site(spec):
     return "fp8" if spec.options.fp8 else "f16", "bwd" if spec.options.backward else "fwd"
 
 
-@lru_cache(maxsize=None)
-def _supported_graph(spec, capabilities, frontend_version, backend_version):
-    # Versions and target architecture are part of the plan identity, even when
-    # two targets happen to accept identical logical tensor descriptors.
-    del frontend_version, backend_version
+def _build_supported_graph(spec, capabilities):
     cudnn = import_cudnn()
     backend, direction = _site(spec)
-    _diagnostics.event(backend, direction, capabilities, "MISS", spec)
     graph = create_graph(cudnn, dict(spec.tensors)["o"].dtype)
     built = build_attention_graph(cudnn, graph, spec)
     _diagnostics.event(backend, direction, capabilities, "CREATE_GRAPH")
     check_graph_support(
         cudnn, graph, lambda stage, function: _diagnostics.run(backend, direction, stage, function)
     )
-    _diagnostics.event(backend, direction, capabilities, "CACHE_GRAPH")
-    return _SupportedGraph(built)
+    return GraphCacheEntry(built)
 
 
 def _request(direction, avals, config):
@@ -166,14 +150,11 @@ def _request(direction, avals, config):
 
 def _get_supported_graph(spec, capabilities, frontend_version, backend_version):
     """Share support-query graphs with compilation, and report cache reuse."""
-    # pylint infers the wrapped function's arguments for lru_cache.cache_info.
-    # pylint: disable=no-value-for-parameter
-    with _plan_lock:
-        hits = _supported_graph.cache_info().hits
-        entry = _supported_graph(spec, capabilities, frontend_version, backend_version)
-        if _supported_graph.cache_info().hits > hits:
-            _diagnostics.event(*_site(spec), capabilities, "HIT")
-        return entry
+    return _graph_cache.get(
+        ("attention", spec, capabilities, frontend_version, backend_version),
+        lambda: _build_supported_graph(spec, capabilities),
+        event=lambda event, key=None: _diagnostics.event(*_site(spec), capabilities, event, key),
+    )
 
 
 def check_attention_support(direction, avals, config):
@@ -206,17 +187,16 @@ def _build_graph(
         description.spec, capabilities, version, int(cudnn.backend_version())
     )
     backend, direction = _site(description.spec)
-    with _plan_lock:
-        if entry.workspace_size is None:
-            workspace_size = compile_graph(
-                cudnn,
-                entry.built.graph,
-                lambda stage, function: _diagnostics.run(backend, direction, stage, function),
-            )
-            serialized_graph = bytes(entry.built.graph.serialize())
-            entry.workspace_size = workspace_size
-            entry.serialized_graph = serialized_graph
-            _diagnostics.event(backend, direction, capabilities, "BUILD_PLANS")
+    _graph_cache.compile(
+        entry,
+        lambda: compile_graph(
+            cudnn,
+            entry.built.graph,
+            lambda stage, function: _diagnostics.run(backend, direction, stage, function),
+        ),
+        serialize=True,
+        event=lambda event: _diagnostics.event(backend, direction, capabilities, event),
+    )
     uids = entry.built.uids
     serialized = serialize_graph(
         serialized_graph=entry.serialized_graph,
