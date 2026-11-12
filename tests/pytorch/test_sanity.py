@@ -1651,3 +1651,21 @@ def test_inference_mode(
         with autocast(enabled=with_quantization, recipe=quantization_recipe):
             y = module(x, **kwargs)
     check_weights()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_linear_tp_group_not_set_raises_runtime_error():
+    """Forward with tp_size > 1 and no TP group must raise the intended RuntimeError."""
+    model = te.Linear(
+        16,
+        16,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        tp_size=2,
+        tp_group=None,
+        parallel_mode="column",
+    )
+    x = torch.ones(8, 16, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="Tensor parallel group not initialized"):
+        model(x)
