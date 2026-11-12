@@ -207,10 +207,8 @@ class FusedAdam(torch.optim.Optimizer):
             "master_param": self.master_weight_dtype,
         }
         self.dtype_to_range_map = {
-            torch.float16: torch.full(
-                [1], torch.finfo(torch.float16).max / 2.0, dtype=torch.float32
-            ),
-            torch.uint8: torch.full([1], 448.0, dtype=torch.float32),
+            torch.float16: torch.tensor(torch.finfo(torch.float16).max / 2.0, dtype=torch.float32),
+            torch.uint8: torch.tensor(448.0, dtype=torch.float32),
         }
         self._scales = {}
         self.use_decoupled_grad = use_decoupled_grad
@@ -297,16 +295,17 @@ class FusedAdam(torch.optim.Optimizer):
         if unscaled_state.device != scaled_state.device:
             unscaled_state = unscaled_state.to(scaled_state.device)
         min_val, max_val = torch.aminmax(unscaled_state)
+        if dtype == torch.float16 and unscaled_state.shape != scaled_state.shape:
+            # Broadcast only the write operand so the source transfer and reduction stay small.
+            unscaled_state = unscaled_state.expand_as(scaled_state)
         absmax = torch.maximum(-min_val, max_val)
-        absmax = absmax.to(dtype=torch.float32, device=unscaled_state.device)
         torch.div(absmax, max_range, out=scale)
         if isinstance(scaled_state, Float8Tensor):
             scaled_state._quantizer.scale.copy_(1 / scale)
             scaled_state.copy_(unscaled_state)
         else:
             rscale = torch.where(scale > 0, scale.reciprocal(), 0.0)
-            unscaled_state.mul_(rscale)
-            scaled_state.copy_(unscaled_state)
+            torch.mul(unscaled_state, rscale, out=scaled_state)
 
     def get_unscaled_state(
         self, param: torch.nn.Parameter, state_name: str, skip_unscale: bool = False
@@ -451,7 +450,7 @@ class FusedAdam(torch.optim.Optimizer):
             if param not in self._scales:
                 self._scales[param] = {}
             self._scales[param][state_name] = torch.ones(
-                [1], dtype=torch.float32, device=param.device
+                (), dtype=torch.float32, device=param.device
             )
 
     def initialize_state(self, param, store_param_remainders):
