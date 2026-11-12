@@ -1985,6 +1985,19 @@ class GroupedLinear(TransformerEngineBaseModule):
         # Cache only a fully validated generation so failures are retried.
         self._custom_quantizer_cache[meta_key] = generation
 
+    def _get_input_quantizers_with_dtype(self, input_quantizers):
+        """Bind HP storage precision once per CustomRecipe generation and compute dtype."""
+        generation = self.quantizers["scaling_fwd"]
+        dtype = self.activation_dtype
+        cached = self._custom_quantizer_cache.get("input_dtype")
+        if cached is not None and cached[0] is generation and cached[1] == dtype:
+            return cached[2]
+
+        # Keep old copies intact for backward if a later forward changes dtype.
+        bound = [q.with_output_dtype(dtype) if q is not None else None for q in input_quantizers]
+        self._custom_quantizer_cache["input_dtype"] = (generation, dtype, bound)
+        return bound
+
     def get_quantizer_roles(
         self,
         *,
@@ -2434,6 +2447,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_weight_quantizers,
                 grad_output_quantizers,
             ) = quantizers
+            if self.fp8 and self._uses_custom_recipe and not debug:
+                input_quantizers = self._get_input_quantizers_with_dtype(input_quantizers)
 
             if not debug and weight_quantizers[0] is not None:
                 # Experts share shape and recipe settings: compute once and broadcast.

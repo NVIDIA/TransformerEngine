@@ -67,7 +67,7 @@ class IdentityQuantizer(Quantizer):
         quantizer.optimize_for_gemm = self.optimize_for_gemm
         return quantizer
 
-    def _maybe_cast(self, tensor: torch.Tensor) -> torch.Tensor:
+    def _maybe_cast(self, tensor: torch.Tensor, *, dtype=None) -> torch.Tensor:
         # Detach so the held buffer is plain "data" with no autograd graph edge,
         # mirroring the real quantizers (whose quantize kernels emit fresh,
         # non-differentiable tensors). Autograd connectivity for the *quantize*
@@ -77,17 +77,33 @@ class IdentityQuantizer(Quantizer):
         # weight workspace returned across the module Function boundary), which
         # creates a spurious empty grad edge.
         out = tensor.detach()
-        if self.dtype is not None and out.dtype != self.dtype:
-            return out.to(self.dtype)
+        dtype = self.dtype if dtype is None else dtype
+        if dtype is not None and out.dtype != dtype:
+            return out.to(dtype)
         return out
 
-    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensorStorage:
-        data = self._maybe_cast(tensor)
+    def with_output_dtype(self, dtype):
+        """Bind a held dtype without changing this quantizer's default."""
+        quantizer = self.copy()
+        quantizer.dtype = dtype
+        return quantizer
+
+    def is_compatible_output(self, out: QuantizedTensorStorage, *, dtype=None) -> bool:
+        """An explicit request must match the destination's held dtype."""
+        return dtype is None or out._dtype == dtype
+
+    def _quantize_impl_with_dtype(self, tensor, *, dtype=None):
+        """Forward a held-dtype request to the quantization implementation."""
+        return self.quantize_impl(tensor, dtype=dtype)
+
+    def quantize_impl(self, tensor: torch.Tensor, *, dtype=None) -> QuantizedTensorStorage:
+        quantizer = self if dtype is None else self.with_output_dtype(dtype)
+        data = self._maybe_cast(tensor, dtype=dtype)
         if self.internal:
             return IdentityTensorStorage(
                 hp_data=data,
                 fake_dtype=data.dtype,
-                quantizer=self,
+                quantizer=quantizer,
             )
         # requires_grad=False: this is the quantized "data" tensor. Autograd
         # connectivity is provided by ``_QuantizeFunc`` in ``Quantizer.quantize``
@@ -96,7 +112,7 @@ class IdentityQuantizer(Quantizer):
             data.shape,
             data.dtype,
             hp_data=data,
-            quantizer=self,
+            quantizer=quantizer,
             requires_grad=False,
             device=data.device,
         )
@@ -145,22 +161,17 @@ class IdentityQuantizer(Quantizer):
             raise ValueError(
                 f"IdentityQuantizer can only update IdentityTensorStorage, got {type(dst).__name__}"
             )
-        data = self._maybe_cast(src)
-        if (
-            dst._hp_data is not None
-            and dst._hp_data.shape == data.shape
-            and dst._hp_data.dtype == data.dtype
-            and dst._hp_data.device == data.device
-        ):
-            if noop_flag is None:
-                dst._hp_data.copy_(data)
-            else:
-                torch.where(noop_flag == 0, data, dst._hp_data, out=dst._hp_data)
+        if dst._hp_data is None:
+            raise ValueError("IdentityQuantizer requires an allocated destination")
+        if src.shape != dst._hp_data.shape or src.device != dst._hp_data.device:
+            raise ValueError("Identity source and destination must have matching shape/device")
+        # The destination owns the representation, including when the source
+        # or this quantizer's default dtype differs from the original call.
+        data = self._maybe_cast(src, dtype=dst._hp_data.dtype)
+        if noop_flag is None:
+            dst._hp_data.copy_(data)
         else:
-            if noop_flag is not None and noop_flag.item() != 0:
-                return dst
-            dst._hp_data = data.detach()
-        dst._dtype = data.dtype
+            torch.where(noop_flag == 0, data, dst._hp_data, out=dst._hp_data)
         return dst
 
     def calibrate(self, tensor: torch.Tensor) -> None:

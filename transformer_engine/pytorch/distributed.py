@@ -49,6 +49,8 @@ from .tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from .tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from .tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
+from .tensor.storage.identity_tensor_storage import IdentityTensorStorage
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
@@ -1654,6 +1656,26 @@ def _all_gather_mxfp8(
     return out, handle
 
 
+def _dequantize_for_all_gather(inp: QuantizedTensorStorage) -> torch.Tensor:
+    """Preserve held HP values when a Hybrid's logical dtype would narrow them."""
+    if isinstance(inp, HybridQuantizedTensorStorage):
+        storage = inp
+        while isinstance(storage, HybridQuantizedTensorStorage):
+            storage = (
+                storage._rowwise_storage
+                if storage._rowwise_storage is not None
+                else storage._columnwise_storage
+            )
+        # Native encodings can reconstruct finite values outside FP16's range.
+        # Keep the existing BF16 path, which native NVFP4 RHT requires.
+        if isinstance(storage, IdentityTensorStorage):
+            dtype = storage._dtype
+        else:
+            dtype = torch.float32 if inp._dtype == torch.float16 else inp._dtype
+        return inp.dequantize(dtype=dtype)
+    return inp.dequantize()
+
+
 def gather_along_first_dim(
     inp: torch.Tensor,
     process_group: dist_group_type,
@@ -1784,7 +1806,7 @@ def gather_along_first_dim(
             "Falling back to high-precision all-gather."
         )
         if isinstance(inp, QuantizedTensorStorage):
-            inp = inp.dequantize()
+            inp = _dequantize_for_all_gather(inp)
         out = torch.empty(
             out_shape,
             dtype=inp.dtype,
@@ -1801,7 +1823,7 @@ def gather_along_first_dim(
             "Attempting to all-gather an unsupported quantized tensor. "
             "Falling back to high-precision all-gather."
         )
-        inp = inp.dequantize()
+        inp = _dequantize_for_all_gather(inp)
 
     # Communication for plain PyTorch tensors
     if output_tensor is None:

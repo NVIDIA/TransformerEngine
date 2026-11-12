@@ -459,6 +459,11 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                        std::vector<py::handle> quantizer_list,
                                        bool disable_bulk_allocation = false);
 
+std::vector<py::object> split_quantize_custom(const at::Tensor &tensor,
+                                              const std::vector<size_t> &split_sections,
+                                              std::vector<py::handle> quantizer_list,
+                                              bool disable_bulk_allocation = false);
+
 /***************************************************************************************************
  * Bias gradient fusions
  **************************************************************************************************/
@@ -523,6 +528,11 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
  * FP8 recipe
  **************************************************************************************************/
 
+void nvfp4_qdq(const at::Tensor &input, at::Tensor output, at::Tensor amax,
+               std::optional<at::Tensor> noop, bool compute_amax);
+void nvfp4_qdq_row_scaled(const at::Tensor &input, at::Tensor output,
+                          std::optional<at::Tensor> noop);
+void mxfp8_qdq(const at::Tensor &input, at::Tensor output, std::optional<at::Tensor> noop);
 void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
 
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,

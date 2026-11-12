@@ -11,6 +11,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
+from ..custom_recipes.qdq import MXFP8QDQQuantizer, NVFP4QDQQuantizer
 from ..tensor import (
     Float8BlockQuantizer,
     Float8CurrentScalingQuantizer,
@@ -34,6 +35,8 @@ _NATIVE_SPLIT_QUANTIZER_TYPES = frozenset(
     }
 )
 
+_CUSTOM_SPLIT_QUANTIZER_TYPES = frozenset({MXFP8QDQQuantizer, NVFP4QDQQuantizer})
+
 _NATIVE_BGRAD_QUANTIZER_TYPES = frozenset(
     {
         Float8Quantizer,
@@ -53,7 +56,7 @@ _DYNAMIC_QUANTIZER_FIELDS = frozenset(
 
 
 def _supports_native_split_quantize(quantizer: Quantizer) -> bool:
-    """Whether ``tex.split_quantize`` has an exact converter for this quantizer."""
+    """Whether ``tex.split_quantize`` supports this exact quantizer type."""
     return type(quantizer) in _NATIVE_SPLIT_QUANTIZER_TYPES
 
 
@@ -231,7 +234,18 @@ def _split_quantize_non_hybrid(
             disable_bulk_allocation=disable_bulk_allocation,
         )
 
-    tensor = cast_if_needed(tensor, dtype)
+    if type(reference) in _CUSTOM_SPLIT_QUANTIZER_TYPES:
+        # Custom quantizers own dtype conversion and must receive the original source.
+        return tex.split_quantize_custom(
+            tensor,
+            split_sizes,
+            quantizers,
+            disable_bulk_allocation=disable_bulk_allocation,
+        )
+
+    # Python custom quantizers own dtype conversion just as the C++ dispatch does.
+    if not getattr(reference, "custom", False):
+        tensor = cast_if_needed(tensor, dtype)
     if (
         allow_identity_views
         # Only the base IdentityQuantizer can bypass quantization; subclasses
@@ -282,8 +296,9 @@ def _split_quantize_hybrid(
     if columnwise_enabled and columnwise_source == "rowwise_dequantized":
         # Assemble the exact grouped row results in split order. NVFP4 padding
         # and scale layout can differ from independently quantizing each split.
+        columnwise_dtype = reference._columnwise_src_dtype(tensor.dtype, row_results[0])
         columnwise_src = torch.cat(
-            [result.dequantize(dtype=tensor.dtype) for result in row_results],
+            [result.dequantize(dtype=columnwise_dtype) for result in row_results],
             dim=0,
         )
     col_results = (
@@ -291,7 +306,7 @@ def _split_quantize_hybrid(
             columnwise_src,
             split_sizes,
             columnwise_quantizers,
-            tensor.dtype,
+            columnwise_src.dtype,
             disable_bulk_allocation=disable_bulk_allocation,
             allow_identity_views=False,
         )

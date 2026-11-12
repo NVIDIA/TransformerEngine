@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -115,6 +116,71 @@ void allreduce_nvfp4_amax_tensors(NVFP4Quantizer *nvfp4_quantizer_cpp,
 }
 
 }  // namespace
+
+void nvfp4_qdq(const at::Tensor &input, at::Tensor output, at::Tensor amax,
+               std::optional<at::Tensor> noop, bool compute_amax) {
+  TORCH_CHECK(input.is_cuda() && output.is_cuda() && amax.is_cuda(),
+              "NVFP4 QDQ requires CUDA tensors");
+  TORCH_CHECK(input.device() == output.device() && input.device() == amax.device(),
+              "NVFP4 QDQ tensors must share a device");
+  at::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output.is_contiguous() && amax.is_contiguous(),
+              "NVFP4 QDQ requires contiguous tensors");
+  TORCH_CHECK(at::cuda::getCurrentDeviceProperties()->major >= 8,
+              "NVFP4 QDQ requires compute capability 8.0 or higher");
+  TORCH_CHECK(
+      !noop || (noop->is_cuda() && noop->device() == input.device() && noop->is_contiguous()),
+      "Invalid QDQ noop device/layout");
+  auto in = makeTransformerEngineTensor(input);
+  auto out = makeTransformerEngineTensor(output);
+  auto amax_cpp = makeTransformerEngineTensor(amax);
+  std::optional<TensorWrapper> noop_cpp;
+  if (noop) noop_cpp = makeTransformerEngineTensor(*noop);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  if (compute_amax) {
+    TORCH_CHECK(amax.scalar_type() == at::kFloat && amax.numel() == 1,
+                "QDQ amax must be scalar FP32");
+    TensorWrapper reduction_output(nullptr, in.shape(), DType::kFloat32, amax.data_ptr<float>());
+    nvte_compute_amax(in.data(), reduction_output.data(), stream);
+  }
+  nvte_nvfp4_qdq(in.data(), out.data(), amax_cpp.data(), noop_cpp ? noop_cpp->data() : nullptr,
+                 stream);
+}
+
+void nvfp4_qdq_row_scaled(const at::Tensor &input, at::Tensor output,
+                          std::optional<at::Tensor> noop) {
+  TORCH_CHECK(input.is_cuda() && output.is_cuda() && input.device() == output.device(),
+              "Row-scaled NVFP4 QDQ requires CUDA tensors on the same device");
+  at::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output.is_contiguous(),
+              "Row-scaled NVFP4 QDQ requires contiguous tensors");
+  TORCH_CHECK(
+      !noop || (noop->is_cuda() && noop->device() == input.device() && noop->is_contiguous()),
+      "Invalid QDQ noop device/layout");
+  auto in = makeTransformerEngineTensor(input);
+  auto out = makeTransformerEngineTensor(output);
+  std::optional<TensorWrapper> noop_cpp;
+  if (noop) noop_cpp = makeTransformerEngineTensor(*noop);
+  nvte_nvfp4_qdq_row_scaled(in.data(), out.data(), noop_cpp ? noop_cpp->data() : nullptr,
+                            at::cuda::getCurrentCUDAStream());
+}
+
+void mxfp8_qdq(const at::Tensor &input, at::Tensor output, std::optional<at::Tensor> noop) {
+  TORCH_CHECK(input.is_cuda() && output.is_cuda() && input.device() == output.device(),
+              "MXFP8 QDQ requires tensors on the same CUDA device");
+  at::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output.is_contiguous(),
+              "MXFP8 QDQ requires contiguous tensors");
+  TORCH_CHECK(
+      !noop || (noop->is_cuda() && noop->device() == input.device() && noop->is_contiguous()),
+      "Invalid QDQ noop device/layout");
+  auto in = makeTransformerEngineTensor(input);
+  auto out = makeTransformerEngineTensor(output);
+  std::optional<TensorWrapper> noop_cpp;
+  if (noop) noop_cpp = makeTransformerEngineTensor(*noop);
+  nvte_mxfp8_qdq(in.data(), out.data(), noop_cpp ? noop_cpp->data() : nullptr,
+                 at::cuda::getCurrentCUDAStream());
+}
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag) {
@@ -2247,6 +2313,122 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 }
 
 }  // namespace
+
+namespace {
+
+// QDQ has high-precision storage, so it does not use the native packed-tensor
+// converters. Keep its split dispatch separate from packed tensor allocation.
+// Quantizer families are validated when GroupedLinear installs the recipe.
+std::vector<py::object> split_quantize_qdq(const at::Tensor &tensor,
+                                           const std::vector<size_t> &split_sections,
+                                           const std::vector<py::handle> &quantizers,
+                                           bool disable_bulk_allocation, bool nvfp4) {
+  std::vector<int64_t> sizes(split_sections.begin(), split_sections.end());
+  const auto inputs = tensor.split_with_sizes(sizes, 0);
+  bool fused = tensor.is_cuda() && tensor.numel() != 0;
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    if (inputs[i].numel() != 0 &&
+        quantizers[i].attr("selected_backend")(inputs[i]).cast<std::string>() != "fused") {
+      fused = false;
+    }
+  }
+
+  std::vector<py::object> results;
+  results.reserve(inputs.size());
+  if (!fused) {
+    // Preserve reference options and dtype overrides without duplicating their
+    // Python implementation. Empty experts require no quantization kernel.
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      if (inputs[i].numel() == 0) {
+        results.push_back(quantizers[i].attr("make_empty")(
+            inputs[i].sizes().vec(), py::arg("dtype") = py::cast(tensor).attr("dtype"),
+            py::arg("device") = tensor.device()));
+      } else {
+        results.push_back(quantizers[i](inputs[i]));
+      }
+    }
+    return results;
+  }
+
+  at::cuda::CUDAGuard guard(tensor.device());
+  const auto output = disable_bulk_allocation ? at::Tensor() : at::empty_like(tensor);
+  std::vector<at::Tensor> outputs;
+  if (!disable_bulk_allocation) outputs = output.split_with_sizes(sizes, 0);
+  std::vector<bool> row_scaled(inputs.size(), false);
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    if (disable_bulk_allocation) outputs.push_back(at::empty_like(inputs[i]));
+    if (nvfp4) {
+      row_scaled[i] = quantizers[i].attr("nvfp4_quantizer").attr("row_scaled_nvfp4").cast<bool>();
+    }
+  }
+  const bool needs_amax =
+      nvfp4 && std::any_of(row_scaled.begin(), row_scaled.end(), [](bool value) { return !value; });
+  const auto amax = needs_amax ? at::empty({static_cast<int64_t>(inputs.size())},
+                                           tensor.options().dtype(at::kFloat))
+                               : at::Tensor();
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      if (inputs[i].numel() == 0) continue;
+      auto input_cpp = makeTransformerEngineTensor(inputs[i]);
+      auto output_cpp = makeTransformerEngineTensor(outputs[i]);
+      if (!nvfp4) {
+        nvte_mxfp8_qdq(input_cpp.data(), output_cpp.data(), nullptr, stream);
+      } else if (row_scaled[i]) {
+        nvte_nvfp4_qdq_row_scaled(input_cpp.data(), output_cpp.data(), nullptr, stream);
+      } else {
+        auto expert_amax = amax.narrow(0, i, 1);
+        auto amax_cpp = makeTransformerEngineTensor(expert_amax);
+        TensorWrapper reduction_output(nullptr, input_cpp.shape(), DType::kFloat32,
+                                       expert_amax.data_ptr<float>());
+        nvte_compute_amax(input_cpp.data(), reduction_output.data(), stream);
+        nvte_nvfp4_qdq(input_cpp.data(), output_cpp.data(), amax_cpp.data(), nullptr, stream);
+      }
+    }
+  });
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    if (inputs[i].numel() == 0) {
+      results.push_back(quantizers[i].attr("make_empty")(
+          inputs[i].sizes().vec(), py::arg("dtype") = py::cast(tensor).attr("dtype"),
+          py::arg("device") = tensor.device()));
+    } else {
+      results.push_back(quantizers[i].attr("_wrap")(outputs[i]));
+    }
+  }
+  return results;
+}
+
+}  // namespace
+
+std::vector<py::object> split_quantize_custom(const at::Tensor &tensor,
+                                              const std::vector<size_t> &split_sections,
+                                              std::vector<py::handle> quantizer_list,
+                                              bool disable_bulk_allocation) {
+  init_extension();
+
+  // Check number of tensors
+  const size_t num_splits = split_sections.size();
+  NVTE_CHECK(quantizer_list.size() == num_splits, "Expected ", num_splits, " quantizers, but got ",
+             quantizer_list.size());
+  if (num_splits == 0) {
+    return {};
+  }
+
+  // Borrowed classes remain owned by the imported module. Exact-type checks
+  // preserve Python dispatch for user subclasses of these experimental types.
+  static const py::handle mxfp8_qdq_class =
+      py::module_::import("transformer_engine.pytorch.custom_recipes.qdq")
+          .attr("MXFP8QDQQuantizer");
+  static const py::handle nvfp4_qdq_class =
+      py::module_::import("transformer_engine.pytorch.custom_recipes.qdq")
+          .attr("NVFP4QDQQuantizer");
+  const auto type = reinterpret_cast<PyObject *>(Py_TYPE(quantizer_list[0].ptr()));
+  if (type == mxfp8_qdq_class.ptr() || type == nvfp4_qdq_class.ptr()) {
+    return split_quantize_qdq(tensor, split_sections, quantizer_list, disable_bulk_allocation,
+                              type == nvfp4_qdq_class.ptr());
+  }
+  NVTE_ERROR("Unexpected type for custom split quantizer");
+}
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                        const std::vector<size_t> &split_sections,

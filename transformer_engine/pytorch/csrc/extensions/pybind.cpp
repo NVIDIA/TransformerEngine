@@ -431,6 +431,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
         "Split and multi-tensor quantize", py::arg("tensor"), py::arg("split_sections"),
         py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false);
+  m.def("split_quantize_custom", &transformer_engine::pytorch::split_quantize_custom,
+        "Split and quantize with custom implementations", py::arg("tensor"),
+        py::arg("split_sections"), py::arg("quantizer_list"),
+        py::arg("disable_bulk_allocation") = false);
   m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size,
         "Required workspace size for grouped GEMM setup");
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
@@ -496,6 +500,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
         "Get Fused Attention backend", py::arg("fused_attn_params"));
+  m.def("nvfp4_qdq_supported", &nvte_nvfp4_qdq_supported,
+        "Whether the common library was built with NVFP4 QDQ kernels");
+  m.def("nvfp4_qdq", &transformer_engine::pytorch::nvfp4_qdq, "Plain rowwise NVFP4 QDQ",
+        py::arg("input"), py::arg("output"), py::arg("amax"), py::arg("noop") = py::none(),
+        py::arg("compute_amax") = true, py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_qdq_row_scaled", &transformer_engine::pytorch::nvfp4_qdq_row_scaled,
+        "Plain NVFP4 QDQ with per-row outer scaling", py::arg("input"), py::arg("output"),
+        py::arg("noop") = py::none(), py::call_guard<py::gil_scoped_release>());
+  m.def("mxfp8_qdq", &transformer_engine::pytorch::mxfp8_qdq, "Rowwise block-32 MXFP8 QDQ",
+        py::arg("input"), py::arg("output"), py::arg("noop") = py::none(),
+        py::call_guard<py::gil_scoped_release>());
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
         "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());

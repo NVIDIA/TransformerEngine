@@ -1,0 +1,892 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+"""Native parity, lifecycle, and operand-selection tests for weight QDQ."""
+
+from functools import partial
+
+import pytest
+import torch
+import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
+from transformer_engine.common.recipe import CustomRecipe
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.custom_recipes.qdq import NVFP4QDQQuantizer
+from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+    mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory,
+    nvfp4_qdq_weight_fwd_bf16_bwd_factory,
+)
+
+# Native packed Q+DQ is this file's oracle. The independently referenced
+# portable tests in test_qdq_emulation.py run on Ampere/Hopper as well.
+nvfp4_available, nvfp4_reason = te.is_nvfp4_available(return_reason=True)
+mxfp8_available, mxfp8_reason = te.is_mxfp8_available(return_reason=True)
+pytestmark = pytest.mark.skipif(not nvfp4_available, reason=nvfp4_reason)
+
+
+backward_modes = [
+    False,
+    pytest.param(True, marks=pytest.mark.skipif(not mxfp8_available, reason=mxfp8_reason)),
+]
+
+hp_dtypes = (torch.float16, torch.bfloat16, torch.float32)
+
+
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_auto_matches_native_on_available_device(row_scaled, monkeypatch):
+    monkeypatch.setenv("NVTE_USE_FAST_MATH", "0")
+    x = torch.randn(48, 80, device="cuda", dtype=torch.bfloat16)
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled))
+    assert q.selected_backend(x) == "fused"
+    assert_bits(q(x).dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
+
+
+@pytest.mark.parametrize(
+    "capability", [(7, 5), (8, 0), (8, 9), (9, 0), (10, 0), (10, 3), (10, 7), (11, 0), (12, 0)]
+)
+def test_architecture_dispatch(capability, monkeypatch):
+    """Exercise dispatch only; numerical execution uses the actual CI device."""
+    from transformer_engine.pytorch.custom_recipes.qdq import _supports_fused_device
+
+    x = torch.ones(16, 16, device="cuda", dtype=torch.bfloat16)
+    monkeypatch.setenv("NVTE_USE_FAST_MATH", "0")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: capability)
+    _supports_fused_device.cache_clear()
+    try:
+        expected = "fused" if capability >= (8, 0) else "reference"
+        assert NVFP4QDQQuantizer().selected_backend(x) == expected
+        assert NVFP4QDQQuantizer(backend="reference").selected_backend(x) == "reference"
+        if expected == "reference":
+            with pytest.raises(ValueError, match="Forced fused"):
+                NVFP4QDQQuantizer(backend="fused").selected_backend(x)
+    finally:
+        _supports_fused_device.cache_clear()
+
+
+def native_qdq(x, dtype=None, **options):
+    q = NVFP4Quantizer(rowwise=True, columnwise=False, **options)
+    q.internal = True
+    return q(x).dequantize(dtype=dtype or x.dtype)
+
+
+def assert_bits(actual, expected):
+    assert actual.dtype == expected.dtype
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("shape", [(16, 16), (48, 80), (128, 256), (512, 1024)])
+@pytest.mark.parametrize("distribution", ["normal", "zeros", "outliers", "boundaries"])
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_plain_exact(dtype, shape, distribution, row_scaled, monkeypatch):
+    monkeypatch.setenv("NVTE_USE_FAST_MATH", "0")
+    torch.manual_seed(42)
+    x = torch.randn(shape, device="cuda", dtype=dtype)
+    if distribution == "zeros":
+        x.zero_()
+        x[:, ::2] = -0.0
+    elif distribution == "outliers":
+        x[0, 0] = 4096
+        x[1, :] *= 1e-5
+    elif distribution == "boundaries":
+        values = torch.tensor(
+            [
+                0,
+                -0.0,
+                0.25,
+                0.75,
+                1.25,
+                1.75,
+                2.5,
+                3.5,
+                5.0,
+                6.0,
+                -6.0,
+                -5.0,
+                -2.5,
+                1e-7,
+                1e-4,
+                448.0,
+            ],
+            device="cuda",
+            dtype=dtype,
+        )
+        x.copy_(values.repeat(shape[0], shape[1] // 16))
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled), backend="fused")
+    assert q.selected_backend(x) == "fused"
+    assert_bits(q(x).dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("shape", [(16, 4096), (32, 6144), (16, 16384), (2, 8, 80)])
+def test_row_scaled_wide_and_batched(dtype, shape):
+    torch.manual_seed(27)
+    x = torch.randn(shape, device="cuda", dtype=dtype)
+    rows = x.reshape(-1, shape[-1])
+    # Separate row scales: a zero row, a tiny row, and a large outlier row.
+    rows[0].zero_()
+    rows[0, ::2] = -0.0
+    rows[1].mul_(1e-4)
+    rows[2, 0] = 4096
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=True), backend="fused")
+    actual = q(x).dequantize()
+    assert_bits(actual, native_qdq(x, row_scaled_nvfp4=True))
+    # Changing one row's outer scale must not affect any other row.
+    previous = actual.reshape_as(rows)[1:].clone()
+    rows[0].fill_(8192)
+    assert_bits(q(x).dequantize().reshape_as(rows)[1:], previous)
+
+
+@pytest.mark.parametrize("mode", ["MAE", "MSE"])
+@pytest.mark.parametrize("maximum", [256, 448])
+@pytest.mark.parametrize("fast_error", ["0", "1"])
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_4over6_fallback(mode, maximum, fast_error, row_scaled, monkeypatch):
+    monkeypatch.setenv("NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH", fast_error)
+    x = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
+    options = dict(
+        nvfp4_use_4over6=True,
+        nvfp4_e4m3_max=maximum,
+        nvfp4_4over6_err_mode=mode,
+        row_scaled_nvfp4=row_scaled,
+    )
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(**options))
+    assert q.selected_backend(x) == "reference"
+    assert_bits(q(x).dequantize(), native_qdq(x, **options))
+    q.backend = "fused"
+    with pytest.raises(ValueError, match="Forced fused"):
+        q(x)
+
+
+@pytest.mark.parametrize(
+    "options", [{"with_2d_quantization": True}, {"row_scaled_nvfp4": True}, {}]
+)
+def test_dtype_fallback(options):
+    x = torch.randn(128, 256, device="cuda", dtype=torch.float32)
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(**options))
+    actual = q.quantize(x, dtype=torch.bfloat16)
+    assert_bits(actual.dequantize(), native_qdq(x, torch.bfloat16, **options))
+    assert q.dtype is None
+    assert actual.dtype == torch.bfloat16
+    actual.quantize_(x * 2)
+    assert_bits(actual.dequantize(), native_qdq(x * 2, torch.bfloat16, **options))
+
+
+def test_row_scaled_ste_and_dispatch(monkeypatch):
+    x = torch.randn(16, 80, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=True))
+    assert q.selected_backend(x) == "fused"
+    q(x).sum().backward()
+    assert torch.equal(x.grad, torch.ones_like(x))
+    monkeypatch.setenv("NVTE_USE_FAST_MATH", "1")
+    assert q.selected_backend(x) == "reference"
+    q.backend = "fused"
+    with pytest.raises(ValueError, match="Forced fused"):
+        q(x)
+
+
+def test_row_scaled_low_level_validation():
+    x = torch.randn(16, 80, device="cuda", dtype=torch.bfloat16)
+    output = torch.empty_like(x)
+    tex.nvfp4_qdq_row_scaled(x, output, None)
+    assert_bits(output, native_qdq(x, row_scaled_nvfp4=True))
+    with pytest.raises(RuntimeError, match="matching dtype and shape"):
+        tex.nvfp4_qdq_row_scaled(x, output.float(), None)
+    with pytest.raises(RuntimeError, match="contiguous"):
+        tex.nvfp4_qdq_row_scaled(x.t(), output.t(), None)
+    with pytest.raises(RuntimeError, match="scalar FP32"):
+        tex.nvfp4_qdq_row_scaled(x, output, torch.ones(2, device="cuda"))
+
+
+@pytest.mark.parametrize("backend", ["reference", "fused"])
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_lifecycle_and_graph(backend, internal, row_scaled):
+    x = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled), backend=backend)
+    q.internal = internal
+    y = q(x)
+    assert y._get_quantizer().backend == backend
+    address = y._hp_data.data_ptr()
+    noop = torch.ones(1, device="cuda")
+    q.update_quantized(x * 3, y, noop_flag=noop)
+    assert_bits(y.dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
+    noop.zero_()
+    q.update_quantized(x * 2, y, noop_flag=noop)
+    assert y._hp_data.data_ptr() == address
+    assert_bits(y.dequantize(), native_qdq(x * 2, row_scaled_nvfp4=row_scaled))
+    # Warm up on a side stream, then replay with changed input and noop flag.
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            q.update_quantized(x, y, noop_flag=noop)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        q.update_quantized(x, y, noop_flag=noop)
+    x.mul_(2)
+    graph.replay()
+    assert_bits(y.dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
+    previous = y.dequantize().clone()
+    noop.fill_(1)
+    x.mul_(2)
+    graph.replay()
+    assert_bits(y.dequantize(), previous)
+
+
+def test_ste_and_rng():
+    x = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    q = NVFP4QDQQuantizer(backend="reference")
+    q(x).sum().backward()
+    assert torch.equal(x.grad, torch.ones_like(x))
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(stochastic_rounding=True))
+    assert not q.is_requantization_safe()
+    state = torch.cuda.get_rng_state()
+    actual = q(x).dequantize()
+    after = torch.cuda.get_rng_state()
+    torch.cuda.set_rng_state(state)
+    expected = native_qdq(x, stochastic_rounding=True)
+    assert_bits(actual, expected)
+    assert torch.equal(after, torch.cuda.get_rng_state())
+
+
+def mx_value(x, *, columnwise=False):
+    q = MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=not columnwise, columnwise=columnwise)
+    return q(x).dequantize()
+
+
+@pytest.mark.parametrize("backend", ["reference", "fused"])
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("params_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("mixed", backward_modes)
+def test_module_operands(backend, grouped, params_dtype, mixed, nvfp4_options=None):
+    if backend == "fused" and params_dtype == torch.float32:
+        pytest.skip("Mixed FP32 source/BF16 decode intentionally uses native fallback")
+    torch.manual_seed(12)
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    recipe = CustomRecipe(qfactory=partial(factory, backend=backend, nvfp4_options=nvfp4_options))
+    kwargs = dict(bias=True, params_dtype=params_dtype, device="cuda")
+    layer = (
+        te.GroupedLinear(2, 128, 128, single_grouped_weight=False, **kwargs)
+        if grouped
+        else te.Linear(128, 128, **kwargs)
+    )
+    splits = [32, 64] if grouped else [96]
+    x = torch.randn(sum(splits), 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    dy = torch.randn_like(x)
+    weights = [getattr(layer, f"weight{i}") for i in range(2)] if grouped else [layer.weight]
+    biases = [getattr(layer, f"bias{i}") for i in range(2)] if grouped else [layer.bias]
+    with te.autocast(recipe=recipe), torch.autocast("cuda", dtype=torch.bfloat16):
+        y = layer(x, splits) if grouped else layer(x)
+    y.backward(dy)
+    expected_y, expected_dx = [], []
+    for w, b, xs, gs in zip(weights, biases, x.detach().split(splits), dy.split(splits)):
+        wh = native_qdq(w.detach(), torch.bfloat16, **(nvfp4_options or {}))
+        expected_y.append(
+            torch.nn.functional.linear(
+                mx_value(xs) if mixed else xs, wh, b.detach().to(torch.bfloat16)
+            )
+        )
+        bw = mx_value(wh, columnwise=True) if mixed else wh
+        bx = mx_value(xs, columnwise=True) if mixed else xs
+        grow = mx_value(gs) if mixed else gs
+        gcol = mx_value(gs, columnwise=True) if mixed else gs
+        expected_dx.append(grow @ bw)
+        dw = gcol.T @ bx
+        torch.testing.assert_close(w.grad.float(), dw.float(), rtol=0.016, atol=0.002)
+        torch.testing.assert_close(
+            b.grad.float(),
+            gs.float().sum(0).to(b.grad.dtype).float(),
+            rtol=0.016,
+            atol=0.002,
+        )
+    torch.testing.assert_close(y, torch.cat(expected_y), rtol=0.016, atol=0.002)
+    torch.testing.assert_close(x.grad, torch.cat(expected_dx), rtol=0.016, atol=0.002)
+
+
+def test_weight_workspace_dtype_and_reuse():
+    from transformer_engine.pytorch.module.base import quantize_weight
+    from transformer_engine.pytorch.quantization import QuantizerRole
+
+    factory = mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+    q = factory(QuantizerRole(module_type="linear", tensor_type="weight"))
+    w = torch.randn(128, 256, device="cuda", dtype=torch.float32)
+    out, cache = quantize_weight(tensor=w, quantizer=q, workspace_dtype=torch.bfloat16, cache=True)
+    expected = native_qdq(w, torch.bfloat16)
+    assert_bits(out._rowwise_storage.dequantize(), expected)
+    pointer = out._rowwise_storage._hp_data.data_ptr()
+    w.mul_(3)
+    out2, new = quantize_weight(
+        tensor=w,
+        quantizer=q,
+        workspace=cache,
+        workspace_dtype=torch.bfloat16,
+        cache=True,
+    )
+    assert new is None and out2 is cache
+    assert out2._rowwise_storage._hp_data.data_ptr() == pointer
+    expected = native_qdq(w, torch.bfloat16)
+    assert_bits(out2._rowwise_storage.dequantize(), expected)
+    # Hybrid retains native decode-to-source-dtype behavior. Widening the
+    # BF16 QDQ value preserves its rounding while MXFP8 metadata stays FP32.
+    expected_col = mx_value(expected.to(w.dtype), columnwise=True)
+    assert_bits(out2._columnwise_storage.dequantize(), expected_col)
+    before = out2._rowwise_storage.dequantize().clone()
+    w.mul_(2)
+    quantize_weight(
+        tensor=w,
+        quantizer=q,
+        workspace=cache,
+        update_workspace=False,
+        workspace_dtype=torch.bfloat16,
+    )
+    assert_bits(out2._rowwise_storage.dequantize(), before)
+    out3, cache3 = quantize_weight(
+        tensor=w,
+        quantizer=q,
+        workspace=cache,
+        workspace_dtype=torch.float32,
+        cache=True,
+    )
+    assert cache3 is not cache and out3._rowwise_storage.dequantize().dtype == torch.float32
+    torch.testing.assert_close(out3._rowwise_storage.dequantize(), native_qdq(w), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_hybrid_qdq_workspace_checks_child_dtype(mixed):
+    """An FP32 Hybrid must not accept an explicit FP32 request for an FP16 QDQ row."""
+    from transformer_engine.pytorch.module.base import quantize_weight
+    from transformer_engine.pytorch.quantization import QuantizerRole
+
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    q = factory(QuantizerRole(module_type="linear", tensor_type="weight"), backend="reference")
+    q.rowwise_quantizer.dtype = torch.float16
+    w = torch.randn(128, 256, device="cuda", dtype=torch.float32) * 0.023
+    cache = q.quantize(w)
+    assert cache._dtype == torch.float32
+    assert cache._rowwise_storage._hp_data.dtype == torch.float16
+    before = cache._rowwise_storage._hp_data.clone()
+    assert not q.is_compatible_output(cache, dtype=torch.float32)
+    with pytest.raises(ValueError, match="dtype does not match"):
+        q.quantize(w * 3, out=cache, dtype=torch.float32)
+    assert_bits(cache._rowwise_storage._hp_data, before)
+
+    out, new_cache = quantize_weight(
+        tensor=w * 3,
+        quantizer=q,
+        workspace=cache,
+        workspace_dtype=torch.float32,
+        cache=True,
+    )
+    assert new_cache is out and out is not cache
+    assert q.rowwise_quantizer.dtype == torch.float16
+    expected_row = native_qdq(w * 3)
+    assert_bits(out._rowwise_storage.dequantize(), expected_row)
+    expected_col = mx_value(expected_row, columnwise=True) if mixed else expected_row
+    assert_bits(out._columnwise_storage.dequantize(), expected_col)
+
+
+def test_noncontiguous_and_fast_math_fallback(monkeypatch):
+    x = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16).T
+    q = NVFP4QDQQuantizer()
+    assert q.selected_backend(x) == "reference"
+    assert_bits(q(x).dequantize(), native_qdq(x))
+    monkeypatch.setenv("NVTE_USE_FAST_MATH", "1")
+    x = x.contiguous()
+    assert q.selected_backend(x) == "reference"
+    assert_bits(q(x).dequantize(), native_qdq(x))
+
+
+@pytest.mark.parametrize("shape", [(0, 128), (128, 0)])
+def test_empty_reference(shape):
+    x = torch.empty(shape, device="cuda", dtype=torch.bfloat16)
+    q = NVFP4QDQQuantizer()
+    assert q.selected_backend(x) == "reference"
+    assert_bits(q(x).dequantize(), native_qdq(x))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_exceptional_values(value, dtype, row_scaled):
+    x = torch.randn(128, 128, device="cuda", dtype=dtype)
+    x[0, 0] = value
+    actual = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled), backend="fused")(
+        x
+    ).dequantize()
+    expected = native_qdq(x, row_scaled_nvfp4=row_scaled)
+    assert torch.equal(torch.isnan(actual), torch.isnan(expected))
+    mask = ~torch.isnan(expected)
+    assert_bits(actual[mask], expected[mask])
+
+
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_current_stream_and_device(row_scaled):
+    device = 1 if torch.cuda.device_count() > 1 else 0
+    with torch.cuda.device(device), torch.cuda.stream(torch.cuda.Stream(device=device)):
+        x = torch.randn(48, 80, device=f"cuda:{device}", dtype=torch.bfloat16)
+        q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled), backend="fused")
+        assert_bits(q(x).dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
+
+
+def test_copy_preserves_runtime_reduction_state():
+    q = NVFP4QDQQuantizer(backend="reference")
+    group = object()
+    q.amax_reduction_group = group
+    q.with_amax_reduction = True
+    copied = q.copy()
+    assert copied.amax_reduction_group is group and copied.with_amax_reduction
+    copied.nvfp4_quantizer.stochastic_rounding = True
+    copied.with_amax_reduction = False
+    assert not q.nvfp4_quantizer.stochastic_rounding
+    assert q.with_amax_reduction
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("mixed", backward_modes)
+def test_4over6_modules(grouped, mixed):
+    test_module_operands(
+        "reference",
+        grouped,
+        torch.bfloat16,
+        mixed=mixed,
+        nvfp4_options={
+            "nvfp4_use_4over6": True,
+            "nvfp4_e4m3_max": 448,
+            "nvfp4_4over6_err_mode": "MSE",
+        },
+    )
+
+
+@pytest.mark.parametrize("backend", ["reference", "fused"])
+def test_qdq_explicit_dtype_and_destination(backend):
+    """Output overrides must not inherit the quantizer's conflicting default."""
+    q = NVFP4QDQQuantizer(dtype=torch.float16, backend=backend)
+    x = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
+    out = q.quantize(x, dtype=torch.bfloat16)
+    assert q.dtype == torch.float16
+    assert_bits(out.dequantize(), native_qdq(x))
+    pointer = out._hp_data.data_ptr()
+    q.quantize(x * 2, out=out, dtype=torch.bfloat16)
+    assert out._hp_data.data_ptr() == pointer
+    assert_bits(out.dequantize(), native_qdq(x * 2))
+    with pytest.raises(ValueError, match="dtype does not match"):
+        q.quantize(x, out=out, dtype=torch.float16)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_qdq_columnwise_only_workspace_dtype(empty):
+    """A transient forward QDQ source must round to the requested compute dtype."""
+    from transformer_engine.pytorch.quantization import QuantizerRole
+
+    q = mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory(
+        QuantizerRole(module_type="linear", tensor_type="weight")
+    )
+    q.set_usage(rowwise=False, columnwise=True)
+    x = torch.randn(128, 256, device="cuda", dtype=torch.float32)
+    out = (
+        q.make_empty(x.shape, dtype=torch.bfloat16, device=x.device)
+        if empty
+        else q.quantize(x, dtype=torch.bfloat16)
+    )
+    x.mul_(3)
+    q.update_quantized(x, out)
+    assert out._rowwise_storage is None
+    expected = mx_value(native_qdq(x, torch.bfloat16).float(), columnwise=True)
+    # Native make_empty honors its allocation dtype; native quantize retains
+    # the FP32 source dtype. Preserve both behaviors and compare equal decodes.
+    assert out._columnwise_storage._dtype == (torch.bfloat16 if empty else torch.float32)
+    assert_bits(out._columnwise_storage.dequantize(dtype=torch.float32), expected)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("rowwise", [False, True])
+@pytest.mark.parametrize(
+    "source_dtype,output_dtype",
+    [(torch.bfloat16, torch.float32), (torch.float16, torch.bfloat16)],
+)
+def test_qdq_columnwise_source_preserves_forward_precision(
+    mixed, rowwise, source_dtype, output_dtype
+):
+    """Column construction must not narrow a decoded forward value to the source dtype."""
+    from transformer_engine.pytorch.quantization import QuantizerRole
+
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    q = factory(QuantizerRole(module_type="linear", tensor_type="weight"), backend="reference")
+    q.set_usage(rowwise=rowwise, columnwise=True)
+    if source_dtype == torch.float16:
+        x = torch.full((128, 128), 65504.0, device="cuda", dtype=source_dtype)
+    else:
+        generator = torch.Generator(device="cuda").manual_seed(0)
+        x = (torch.randn(128, 128, device="cuda", generator=generator) * 0.023).to(source_dtype)
+    out = q.quantize(x, dtype=output_dtype)
+    expected_row = native_qdq(x, output_dtype)
+    assert torch.isfinite(expected_row).all()
+    if rowwise:
+        assert_bits(out._rowwise_storage.dequantize(), expected_row)
+    expected_col = mx_value(expected_row.float(), columnwise=True) if mixed else expected_row
+    assert_bits(out._columnwise_storage.dequantize(dtype=expected_col.dtype), expected_col)
+
+    # The same precision must be retained when reconstructing a dropped row.
+    if rowwise:
+        out.update_usage(rowwise_usage=False)
+        q.set_usage(rowwise=False, columnwise=True)
+    q.quantize(x, out=out, dtype=output_dtype)
+    assert_bits(out._columnwise_storage.dequantize(dtype=expected_col.dtype), expected_col)
+
+
+@pytest.mark.parametrize("mixed", backward_modes)
+def test_qdq_linear_preserves_bf16_forward_values_from_fp16_weights(mixed):
+    """Finite BF16 forward weights must stay finite when building the backward operand."""
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    recipe = CustomRecipe(qfactory=partial(factory, backend="reference"))
+    layer = te.Linear(128, 128, bias=False, params_dtype=torch.float16, device="cuda")
+    with torch.no_grad():
+        layer.weight.fill_(65504.0)
+    x = torch.ones(128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    with te.autocast(recipe=recipe), torch.autocast("cuda", dtype=torch.bfloat16):
+        y = layer(x)
+    y.backward(torch.ones_like(y))
+    # QDQ rounds 65504 to finite BF16 65536. Casting that value back to FP16
+    # would overflow; both HP and MXFP8 backward weights can retain it exactly.
+    expected = torch.full_like(x, 128 * 65536.0)
+    torch.testing.assert_close(y, expected, rtol=0, atol=0)
+    torch.testing.assert_close(x.grad, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("mixed", backward_modes)
+@pytest.mark.parametrize("rowwise", [False, True])
+@pytest.mark.parametrize("splits", [[64, 64], [0, 128]])
+@pytest.mark.parametrize(
+    "source_dtype,output_dtype",
+    [(torch.bfloat16, torch.float32), (torch.float16, torch.bfloat16)],
+)
+def test_split_qdq_columnwise_source_preserves_forward_precision(
+    mixed, rowwise, splits, source_dtype, output_dtype
+):
+    """Grouped column construction retains the same forward values as HybridQuantizer."""
+    from transformer_engine.pytorch.module import _split_quantization
+    from transformer_engine.pytorch.quantization import QuantizerRole
+
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    role = QuantizerRole(module_type="grouped_linear", tensor_type="weight")
+    quantizers = [factory(role).with_output_dtype(output_dtype) for _ in splits]
+    for quantizer in quantizers:
+        quantizer.internal = True
+        quantizer.set_usage(rowwise=rowwise, columnwise=True)
+    if source_dtype == torch.float16:
+        x = torch.full((128, 128), 65504.0, device="cuda", dtype=source_dtype)
+    else:
+        generator = torch.Generator(device="cuda").manual_seed(0)
+        x = (torch.randn(128, 128, device="cuda", generator=generator) * 0.023).to(source_dtype)
+
+    actual = _split_quantization._split_quantize_hybrid(x, splits, quantizers)
+    for src, out in zip(x.split(splits), actual):
+        expected_row = (
+            native_qdq(src, output_dtype)
+            if src.numel()
+            else torch.empty_like(src, dtype=output_dtype)
+        )
+        assert torch.isfinite(expected_row).all()
+        if rowwise:
+            assert_bits(out.rowwise_sub_storage.dequantize(), expected_row)
+        else:
+            assert out.rowwise_sub_storage is None
+        expected_col = (
+            mx_value(expected_row.float(), columnwise=True)
+            if mixed and src.numel()
+            else expected_row.to(torch.float32 if mixed else output_dtype)
+        )
+        assert_bits(out.columnwise_sub_storage.dequantize(dtype=expected_col.dtype), expected_col)
+        if src.numel():
+            assert not torch.equal(expected_row, expected_row.to(source_dtype).to(output_dtype))
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("save_original_input", [False, True])
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_qdq_input_preserves_bf16_backward_values_from_fp16_source(
+    grouped, save_original_input, fmt
+):
+    """BF16 decoded activations must not overflow through an intermediate FP16 cast."""
+    from transformer_engine.pytorch.custom_recipes.qdq import MXFP8QDQQuantizer
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
+
+    def factory(role):
+        if role is not None and role.tensor_type == "input":
+            return HybridQuantizer(
+                rowwise_quantizer=NVFP4QDQQuantizer() if fmt == "nvfp4" else MXFP8QDQQuantizer(),
+                columnwise_quantizer=IdentityQuantizer(),
+                columnwise_source="rowwise_dequantized",
+            )
+        return IdentityQuantizer()
+
+    options = dict(
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        save_original_input=save_original_input,
+    )
+    layer = te.GroupedLinear(2, 128, 128, **options) if grouped else te.Linear(128, 128, **options)
+    with torch.no_grad():
+        for weight in layer.parameters():
+            weight.fill_(1.0 / 128)
+    splits = [32, 64] if grouped else [96]
+    weights = [layer.weight0, layer.weight1] if grouped else [layer.weight]
+    x = torch.full((96, 128), 65504.0, device="cuda", dtype=torch.float16, requires_grad=True)
+    with te.autocast(recipe=CustomRecipe(qfactory=factory)), torch.autocast(
+        "cuda", dtype=torch.bfloat16
+    ):
+        y = layer(x, splits) if grouped else layer(x)
+    y.backward(torch.ones_like(y))
+    torch.testing.assert_close(y, torch.full_like(y, 65536.0), rtol=0, atol=0)
+    torch.testing.assert_close(x.grad, torch.ones_like(x), rtol=0, atol=0)
+    for weight, rows in zip(weights, splits):
+        torch.testing.assert_close(
+            weight.grad, torch.full_like(weight, rows * 65536.0), rtol=0, atol=0
+        )
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("mixed", backward_modes)
+@pytest.mark.parametrize(
+    "source_dtype,params_dtype,compute_dtype",
+    [(s, p, c) for s in hp_dtypes for p in hp_dtypes for c in hp_dtypes[:2]]
+    + [(torch.float32, torch.float32, torch.float32)],
+)
+@pytest.mark.parametrize("save_original_input", [False, True])
+def test_qdq_module_input_dtypes(
+    grouped, mixed, source_dtype, params_dtype, compute_dtype, save_original_input, monkeypatch
+):
+    """Compute precision is independent of source and parameter storage precision."""
+    from transformer_engine.pytorch.custom_recipes.qdq import MXFP8QDQQuantizer
+
+    torch.manual_seed(31)
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    options = dict(
+        bias=False,
+        params_dtype=params_dtype,
+        device="cuda",
+        save_original_input=save_original_input,
+    )
+    layer = (
+        te.GroupedLinear(2, 128, 128, single_grouped_weight=False, **options)
+        if grouped
+        else te.Linear(128, 128, **options)
+    )
+    torch.manual_seed(31)
+    x = (torch.randn(96, 128, device="cuda") * 0.023).to(source_dtype).requires_grad_()
+    dy = torch.randn(x.shape, device="cuda", dtype=compute_dtype)
+    splits = [32, 64] if grouped else [96]
+    weights = [layer.weight0, layer.weight1] if grouped else [layer.weight]
+    quantized_inputs = []
+    original = MXFP8QDQQuantizer.quantize_impl
+
+    def capture(quantizer, src, **kwargs):
+        out = original(quantizer, src, **kwargs)
+        quantized_inputs.append((src.detach().clone(), out.dequantize().detach().clone()))
+        return out
+
+    if mixed:
+        monkeypatch.setattr(MXFP8QDQQuantizer, "quantize_impl", capture)
+    with te.autocast(recipe=CustomRecipe(qfactory=factory)), torch.autocast(
+        "cuda", dtype=compute_dtype, enabled=compute_dtype != torch.float32
+    ):
+        y = layer(x, splits) if grouped else layer(x)
+    y.backward(dy)
+    assert y.dtype == compute_dtype
+    assert x.grad.dtype == source_dtype
+
+    expected_y, expected_dx = [], []
+    for weight, src, grad in zip(weights, x.detach().split(splits), dy.split(splits)):
+        decoded_weight = native_qdq(weight.detach(), compute_dtype)
+        decoded_input = mx_value(src).to(compute_dtype) if mixed else src.to(compute_dtype)
+        expected_y.append(decoded_input @ decoded_weight.T)
+        backward_weight = mx_value(decoded_weight, columnwise=True) if mixed else decoded_weight
+        backward_input = (
+            mx_value(src, columnwise=True).to(compute_dtype) if mixed else decoded_input
+        )
+        grad_row = mx_value(grad) if mixed else grad
+        grad_col = mx_value(grad, columnwise=True) if mixed else grad
+        expected_dx.append(grad_row @ backward_weight)
+        tolerance = 0.016 if compute_dtype == torch.bfloat16 else 0.002
+        torch.testing.assert_close(
+            weight.grad,
+            (grad_col.T @ backward_input).to(params_dtype),
+            rtol=tolerance,
+            atol=0.002,
+        )
+    torch.testing.assert_close(y, torch.cat(expected_y), rtol=tolerance, atol=0.002)
+    torch.testing.assert_close(
+        x.grad, torch.cat(expected_dx).to(source_dtype), rtol=tolerance, atol=0.002
+    )
+    if mixed:
+        # Matching-dtype fused split bypasses Python quantize_impl. Mixed-dtype
+        # sources take the reference path, where we can inspect the source values.
+        if not (grouped and source_dtype == compute_dtype and compute_dtype != torch.float32):
+            assert len(quantized_inputs) == len(splits)
+        for (src, decoded), expected_src in zip(quantized_inputs, x.detach().split(splits)):
+            assert src.dtype == source_dtype
+            assert_bits(src, expected_src)
+            # Native FP16 quantization may canonicalize negative zero.
+            torch.testing.assert_close(
+                decoded, mx_value(expected_src).to(compute_dtype), rtol=0, atol=0
+            )
+
+
+@pytest.mark.parametrize("mixed", backward_modes)
+@pytest.mark.parametrize("save_original_input", [False, True])
+@pytest.mark.parametrize("grouped", [False, True])
+def test_input_dtype_binding_reused(mixed, save_original_input, grouped, monkeypatch):
+    """Reuse dtype binding across forwards, refreshing on dtype or recipe generation changes."""
+    from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+
+    torch.manual_seed(31)
+    options = dict(
+        bias=False,
+        params_dtype=torch.float32,
+        device="cuda",
+        save_original_input=save_original_input,
+    )
+    layer = te.GroupedLinear(2, 128, 128, **options) if grouped else te.Linear(128, 128, **options)
+    input_indices = (0, 3) if grouped else (0,)
+    num_quantizers = len(input_indices)
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    recipe = CustomRecipe(qfactory=factory)
+    x = torch.randn(96, 128, device="cuda", dtype=torch.float32, requires_grad=True)
+    bindings = []
+    original = HybridQuantizer.with_output_dtype
+
+    def tracked(quantizer, dtype):
+        generation = layer.quantizers["scaling_fwd"]
+        if any(quantizer is generation[index] for index in input_indices):
+            bindings.append((quantizer, dtype))
+        return original(quantizer, dtype)
+
+    monkeypatch.setattr(HybridQuantizer, "with_output_dtype", tracked)
+
+    def forward(dtype, current_recipe=recipe):
+        with te.autocast(recipe=current_recipe), torch.autocast("cuda", dtype=dtype):
+            return layer(x, [32, 64]) if grouped else layer(x)
+
+    with torch.no_grad():
+        inference = forward(torch.bfloat16)
+        first_cache = layer._custom_quantizer_cache["input_dtype"]
+        torch.testing.assert_close(forward(torch.bfloat16), inference, rtol=0, atol=0)
+    assert len(bindings) == num_quantizers
+
+    bf16 = forward(torch.bfloat16)
+    assert len(bindings) == num_quantizers
+    assert layer._custom_quantizer_cache["input_dtype"] is first_cache
+    torch.testing.assert_close(bf16, inference, rtol=0, atol=0)
+
+    bf16_repeat = forward(torch.bfloat16)
+    with torch.no_grad():
+        torch.testing.assert_close(forward(torch.bfloat16), bf16, rtol=0, atol=0)
+    assert len(bindings) == num_quantizers
+
+    fp16 = forward(torch.float16)
+    assert len(bindings) == 2 * num_quantizers
+    bound = first_cache[2] if grouped else (first_cache[2],)
+    assert all(q.rowwise_quantizer.dtype == torch.bfloat16 for q in bound)
+    bf16_again = forward(torch.bfloat16)
+    assert len(bindings) == 3 * num_quantizers
+    torch.testing.assert_close(bf16_again, bf16, rtol=0, atol=0)
+
+    # Earlier forward graphs must retain their dtype-bound quantizers.
+    for output in (bf16, bf16_repeat, fp16, bf16_again):
+        layer.zero_grad(set_to_none=True)
+        x.grad = None
+        output.backward(torch.ones_like(output))
+        assert x.grad.dtype == torch.float32
+        assert torch.isfinite(x.grad).all()
+        assert all(torch.isfinite(param.grad).all() for param in layer.parameters())
+
+    rebuilt_recipe = CustomRecipe(qfactory=partial(factory, backend="reference"))
+    rebuilt = forward(torch.bfloat16, rebuilt_recipe)
+    assert len(bindings) == 4 * num_quantizers
+    assert layer._custom_quantizer_cache["input_dtype"][0] is not first_cache[0]
+    torch.testing.assert_close(rebuilt, bf16, rtol=0, atol=0)
+    assert all(q.rowwise_quantizer.dtype is None for q in layer.quantizers["scaling_fwd"][::3])
+
+
+@pytest.mark.parametrize("fmt", ["mxfp8", "nvfp4", "nvfp4_row"])
+@pytest.mark.parametrize("subclassed", [False, True])
+@pytest.mark.parametrize("source_dtype", hp_dtypes)
+@pytest.mark.parametrize("output_dtype", hp_dtypes)
+def test_split_qdq_preserves_source_dtype(fmt, subclassed, source_dtype, output_dtype):
+    from transformer_engine.pytorch.custom_recipes.qdq import MXFP8QDQQuantizer
+    from transformer_engine.pytorch.module import _split_quantization
+
+    torch.manual_seed(31)
+    x = (torch.randn(96, 128, device="cuda") * 0.023).to(source_dtype)
+    splits = [32, 64]
+    quantizer_type = MXFP8QDQQuantizer if fmt == "mxfp8" else NVFP4QDQQuantizer
+    sources = []
+    if subclassed:
+
+        class PythonQDQQuantizer(quantizer_type):
+            def quantize_impl(self, tensor, **kwargs):
+                sources.append(tensor.detach().clone())
+                return super().quantize_impl(tensor, **kwargs)
+
+        quantizer_type = PythonQDQQuantizer
+    qs = [
+        (
+            quantizer_type(dtype=output_dtype)
+            if fmt == "mxfp8"
+            else quantizer_type(
+                NVFP4Quantizer(row_scaled_nvfp4=fmt == "nvfp4_row"), dtype=output_dtype
+            )
+        )
+        for _ in splits
+    ]
+
+    def decode(values):
+        if fmt == "mxfp8":
+            return mx_value(values).to(output_dtype)
+        return native_qdq(values, output_dtype, row_scaled_nvfp4=fmt == "nvfp4_row")
+
+    outputs = _split_quantization._split_quantize_non_hybrid(x, splits, qs, output_dtype)
+    for src, out in zip(x.split(splits), outputs):
+        expected = decode(src)
+        torch.testing.assert_close(out.dequantize(), expected, rtol=0, atol=0)
+        if source_dtype == torch.float32 and output_dtype == torch.bfloat16:
+            assert not torch.equal(expected, decode(src.bfloat16()))
+    if subclassed:
+        assert len(sources) == len(splits)
+        for actual, expected in zip(sources, x.split(splits)):
+            assert actual.dtype == source_dtype
+            assert_bits(actual, expected)
