@@ -19,7 +19,6 @@ _model_factory = {
 }
 
 
-@pytest.mark.skipif(torch.__version__ < "2", reason="torch.compile not available")
 @pytest.mark.parametrize("model_name", list(_model_factory.keys()))
 def test_torch_dynamo(model_name: str):
     """Test compatibility with Torch Dynamo

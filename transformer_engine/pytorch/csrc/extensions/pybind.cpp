@@ -187,6 +187,10 @@ void bind_quantize_with_amax_extensions(py::module_ &m) {
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("rowwise_amax"), py::arg("columnwise_amax"),
         py::arg("tensor_offsets") = py::none());
+  m.def("nvfp4_group_hadamard_amax", nvfp4_group_hadamard_amax, py::arg("tensor"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
+        "Per-group (pre-RHT, post-RHT) NVFP4 amax of a grouped tensor without quantizing it");
 }
 
 }  // namespace transformer_engine::pytorch

@@ -270,12 +270,21 @@ def _finalize_cudnn_graph(graph) -> int:
 
     graph.validate()
     graph.build_operation_graph()
+    # Only the cuDNN backend implements score_mod. cuDNN frontend 1.31 can offer its Python SDPA
+    # engines for these graphs, and those engines run plain attention without the modifier.
+    graph.deselect_engines(["sdpa_fwd", "sdpa_bwd"])
     try:
         graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
         graph.check_support()
     except cudnn.cudnnGraphNotSupportedError as exc:
         raise RuntimeError(f"cuDNN Flex Attention SDPA graph is not supported: {exc}") from exc
     graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
+    selected_engine = getattr(graph, "selected_engine", None)
+    if selected_engine is not None:
+        raise RuntimeError(
+            f"cuDNN frontend {cudnn.__version__} selected {selected_engine} for a score_mod graph. "
+            "Only the cuDNN backend implements score_mod."
+        )
     return max(graph.get_workspace_size(), 1)
 
 
