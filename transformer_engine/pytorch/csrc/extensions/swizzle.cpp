@@ -47,6 +47,25 @@ bool is_empty_grouped_tensor_param(const GroupedTensorWrapper &input) {
 
 }  // namespace
 
+void set_compact_tensor_data(TensorWrapper &view, const TensorWrapper &tensor, bool rowwise,
+                             void *scales) {
+  if (rowwise) {
+    const auto data = tensor.get_rowwise_data();
+    const auto scale_inv = tensor.get_rowwise_scale_inv();
+    const auto amax = tensor.get_amax();
+    view.set_rowwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape)
+        .set_rowwise_scale_inv(scales, static_cast<DType>(scale_inv.dtype), scale_inv.shape)
+        .set_amax(amax.data_ptr, static_cast<DType>(amax.dtype), amax.shape);
+  } else {
+    const auto data = tensor.get_columnwise_data();
+    const auto scale_inv = tensor.get_columnwise_scale_inv();
+    const auto amax = tensor.get_columnwise_amax();
+    view.set_columnwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape)
+        .set_columnwise_scale_inv(scales, static_cast<DType>(scale_inv.dtype), scale_inv.shape)
+        .set_columnwise_amax(amax.data_ptr, static_cast<DType>(amax.dtype), amax.shape);
+  }
+}
+
 std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_for_gemm(
     transformer_engine::TensorWrapper &tensor, bool rowwise_usage, bool columnwise_usage) {
   // Return early if scale swizzling is not required

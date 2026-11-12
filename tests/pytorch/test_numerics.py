@@ -2728,6 +2728,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             torch.ones(1).cuda().squeeze(),
             torch.ones(1).cuda().squeeze(),
             DType.kFloat8E4M3,
+            columnwise=False,
         ),
     ],
 )
