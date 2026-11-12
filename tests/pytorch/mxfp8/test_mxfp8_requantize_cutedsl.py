@@ -4,6 +4,8 @@
 
 """Validate compact-input requantization against independent PyTorch arithmetic."""
 
+import os
+
 import pytest
 import torch
 
@@ -12,6 +14,9 @@ cute = pytest.importorskip("cutlass.cute")
 cuda = pytest.importorskip("cuda.bindings.driver")
 
 from cutlass.cute.runtime import from_dlpack
+import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
+from transformer_engine.common.CuTeDSL._cuda_state import _registered_kernels
 from transformer_engine.common.CuTeDSL.cast.mxfp8 import requantize_mxfp8
 from transformer_engine.common.CuTeDSL.cast.mxfp8.requantize_mxfp8 import GroupedRequantize
 from mxfp8_utils import swizzle_mxfp8_scale
@@ -39,6 +44,75 @@ def columnwise_reference(values):
     inverse = torch.exp2(-exponent).clamp(max=torch.finfo(torch.float32).max)
     quantized = (blocks * inverse[:, None]).clamp(-448, 448).to(torch.float8_e4m3fn)
     return quantized.reshape(rows, hidden).view(torch.uint8), (exponent + 127).to(torch.uint8)
+
+
+@pytest.mark.parametrize("device_count", [1, 2])
+def test_release_retires_and_recompiles_requantization_executors(device_count):
+    """Rebuild shape-specialized executors on each device after global cleanup."""
+    if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") == "0":
+        pytest.skip("NVTE_ENABLE_CUTEDSL_BACKEND is not set")
+    if torch.cuda.device_count() < device_count:
+        pytest.skip(f"Requires {device_count} CUDA devices")
+    tvm_ffi = pytest.importorskip("tvm_ffi")
+    rows, hidden = 256, 256
+    previous_keys = set()
+    te.release_cuda_state()
+    for _ in range(2):
+        for device in range(device_count):
+            with torch.cuda.device(device):
+                x = torch.randn(rows, hidden, device="cuda", dtype=torch.bfloat16)
+                splits = torch.tensor([128, 128], device="cuda", dtype=torch.int64)
+                wire_quantizer = te.MXFP8Quantizer(
+                    fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False
+                )
+                wire_quantizer.optimize_for_gemm = False
+                wire = tex.group_quantize(x, wire_quantizer, 2, splits)
+                decoded = tex.group_dequantize(wire, te.DType.kBFloat16).rowwise_data.view(
+                    rows, hidden
+                )
+                expected = [columnwise_reference(group) for group in decoded.split(128)]
+                quantizer = te.MXFP8Quantizer(
+                    fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True
+                )
+                quantizer.optimize_for_gemm = True
+                actual = tex.group_requantize_inplace(
+                    wire, quantizer, 2, splits, te.DType.kBFloat16, return_dequantized=True
+                )
+                torch.testing.assert_close(actual, decoded, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    wire.columnwise_data.view(torch.uint8).flatten(),
+                    torch.cat([data.flatten() for data, _ in expected]),
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    wire.columnwise_scale_inv.flatten(),
+                    torch.cat(
+                        [swizzle_mxfp8_scale(128, hidden, sf, True).flatten() for _, sf in expected]
+                    ),
+                    rtol=0,
+                    atol=0,
+                )
+        keys = {key for key in _registered_kernels if key.startswith("cutedsl_mxfp8_requant_")}
+        assert len(keys) == device_count
+        assert keys.isdisjoint(previous_keys)
+        for key in keys:
+            assert tvm_ffi.get_global_func(key, allow_missing=True) is not None
+        version = tex.get_cuda_state_version()
+        with pytest.raises(RuntimeError, match="CuTeDSL"):
+            tex.reset_cuda_state()
+        assert tex.get_cuda_state_version() == version
+        # Both native cache key types share the Python executor registry.
+        for device in range(device_count):
+            with torch.cuda.device(device):
+                quantizer = te.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+                quantizer(torch.ones((128, 128), device="cuda", dtype=torch.bfloat16))
+        te.release_cuda_state()
+        assert tex.get_cuda_state_version() > version
+        assert not _registered_kernels
+        for key in keys:
+            assert tvm_ffi.get_global_func(key, allow_missing=True) is None
+        previous_keys = keys
 
 
 @pytest.mark.parametrize("return_dequantized", [False, True])

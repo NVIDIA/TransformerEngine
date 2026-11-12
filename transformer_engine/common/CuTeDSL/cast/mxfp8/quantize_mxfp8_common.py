@@ -14,6 +14,7 @@ from cutlass import cute
 from cutlass import Boolean, Float32, Int32, Int64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
+from transformer_engine.common.CuTeDSL._cuda_state import register_kernel
 
 from transformer_engine.common.CuTeDSL.utils import (
     str_to_cutlass_dtype,
@@ -525,21 +526,6 @@ def compile_cutedsl_function_from_cfg(cfg):
     return compiled
 
 
-# Keep ownership until native references and the registry entry are released.
-# Cleanup is explicit and runs with a live context, outside all TE executions.
-_registered_kernels = {}
-
-
-def release_cuda_state(device=None) -> None:
-    """Remove TE-owned compiled entries globally or for one live cleanup callback."""
-    for name in tuple(_registered_kernels):
-        marker = f"_device_{device}_generation_"
-        if device is not None and marker not in name:
-            continue
-        tvm_ffi.remove_global_func(name)
-        del _registered_kernels[name]
-
-
 def get_mxfp8_quantization_function(
     fn_name: str,
     dtype: str,
@@ -609,11 +595,7 @@ def get_mxfp8_quantization_function(
         # https://github.com/NVIDIA/cutlass/pull/3589 recommends using an explicit positional only marker (/)
         # in the function signature, however it is not merged and it is something easy to miss and silently
         # introduce unnecessarry overhead.
-        native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
-        tvm_ffi.register_global_func(
-            fn_name, native if native is not None else compiled, override=True
-        )
-        _registered_kernels[fn_name] = compiled
+        register_kernel(fn_name, compiled)
         return True
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(

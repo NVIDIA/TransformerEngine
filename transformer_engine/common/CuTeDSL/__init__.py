@@ -10,9 +10,9 @@ They should provide a string function name which can be used to retrieve the cor
 
 import tvm_ffi
 
+from transformer_engine.common.CuTeDSL._cuda_state import release_cuda_state
 from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8_common import (
     get_mxfp8_quantization_function,
-    release_cuda_state,
 )
 from transformer_engine.common.CuTeDSL.cast.mxfp8.requantize_mxfp8 import (
     get_mxfp8_requantization_function,

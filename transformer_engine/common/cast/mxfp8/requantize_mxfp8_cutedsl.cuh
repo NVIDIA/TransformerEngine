@@ -7,11 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_CAST_MXFP8_REQUANTIZE_MXFP8_CUTEDSL_CUH_
 #define TRANSFORMER_ENGINE_COMMON_CAST_MXFP8_REQUANTIZE_MXFP8_CUTEDSL_CUH_
 
-#include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <string>
-#include <unordered_map>
 
 #include "../../common.h"
 #include "../../tvm_ffi_bridge.h"
@@ -45,29 +42,12 @@ struct MXFP8RequantConfig {
         .value_or(false);
   }
 
+  std::string to_id() const { return to_key(); }
+
   std::optional<tvm::ffi::Function> get_kernel() const {
-    using namespace tvm_ffi_bridge;
-    // Shape-specialized keys do not fit the quantization cache's 32-bit ID.
-    // Preserve cached TVM handles until process exit, as TVMFFIConfigCache does.
-    struct Cache {
-      std::shared_mutex mutex;
-      std::unordered_map<std::string, std::optional<tvm::ffi::Function>> kernels;
-    };
-    static auto *cache = new Cache();
-    auto &central = TVMFFICentral::getInstance();
-    if (!central.get_cutedsl_backend_enabled()) return std::nullopt;
-    const auto key = to_key();
-    {
-      std::shared_lock<std::shared_mutex> lock(cache->mutex);
-      auto it = cache->kernels.find(key);
-      if (it != cache->kernels.end()) return it->second;
-    }
-    std::unique_lock<std::shared_mutex> lock(cache->mutex);
-    auto it = cache->kernels.find(key);
-    if (it != cache->kernels.end()) return it->second;
-    auto kernel = central.load_tvm_ffi_function(*this);
-    cache->kernels.emplace(key, kernel);
-    return kernel;
+    // Requantization keys include shapes and do not fit the quantization cache's 32-bit ID.
+    static auto &cache = tvm_ffi_bridge::TVMFFIConfigCache<std::string>::create();
+    return cache.get_or_load(*this);
   }
 };
 

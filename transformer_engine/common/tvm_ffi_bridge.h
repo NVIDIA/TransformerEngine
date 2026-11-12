@@ -230,22 +230,23 @@ namespace tvm_ffi_bridge {
 //
 //   - std::optional<tvm::ffi::Function> get_kernel() const
 // Retrieves the possibly cached function. If the config provides a
-// `uint32_t to_id() const` method, it can reuse TVMFFIConfigCache with the
+// `Key to_id() const` method, it can reuse TVMFFIConfigCache<Key> with the
 // canonical implementation:
 // ```
 // std::optional<tvm::ffi::Function> get_kernel() const {
-//   static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
+//   static auto &cache = TVMFFIConfigCache<Key>::create();
 //   return cache.get_or_load(*this);
 // }
 // ```
 // The ID only has to be unique within the config type because the function-local
 // cache belongs to that type. Configs that need a different key type or caching
-// policy may implement get_kernel() themselves.
+// policy may select a different Key type or implement get_kernel() themselves.
 //
 // Note: TVMFFIConfigCache::create() intentionally gives its cache process lifetime.
 // This prevents cached tvm::ffi::Function handles from being destroyed during
 // static teardown, when Python or TVM-FFI runtime state may already have been
 // finalized. The OS reclaims the allocation when the process exits.
+template <typename Key = uint32_t>
 class TVMFFIConfigCache;
 
 namespace detail {
@@ -441,17 +442,17 @@ class TVMFFICentral {
 };
 
 // A utility class that each Config struct can use to cache the registered TVM-FFI functions
-// via `to_id` method, where an id is a unique integer that represents a specific config.
+// via `to_id`, whose key uniquely represents a config within its config type.
 // Defined after TVMFFICentral because get_or_load names it.
 //
+template <typename Key>
 class TVMFFIConfigCache {
  public:
   static TVMFFIConfigCache &create() { return *new TVMFFIConfigCache(); }
 
   // Lazy-load the CuTeDSL function for this config and cache the result.
   // Returns std::nullopt if the config is unsupported or CuTeDSL backend is disabled.
-  // This requires the config to have a `uint32_t to_id() const` method, which returns an unique
-  // identifier among all configs of this type.
+  // This requires a `Key to_id() const` method returning a unique key within the config type.
   template <typename Config>
   std::optional<tvm::ffi::Function> get_or_load(const Config &cfg) {
     TVMFFICentral &central = TVMFFICentral::getInstance();
@@ -461,7 +462,7 @@ class TVMFFIConfigCache {
       return std::nullopt;
     }
     // Otherwise try the cache first, and ask Python to compile/register the kernel if not found.
-    const uint32_t id = cfg.to_id();
+    const Key id = cfg.to_id();
     int device;
     NVTE_CHECK_CUDA(cudaGetDevice(&device));
     {
@@ -508,7 +509,7 @@ class TVMFFIConfigCache {
     }
     void invalidate_context() noexcept override { functions.clear(); }
     int device;
-    std::unordered_map<uint32_t, std::optional<tvm::ffi::Function>> functions;
+    std::unordered_map<Key, std::optional<tvm::ffi::Function>> functions;
   };
   TVMFFIConfigCache() = default;
   ~TVMFFIConfigCache() = default;

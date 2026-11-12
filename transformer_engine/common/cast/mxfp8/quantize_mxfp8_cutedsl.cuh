@@ -62,7 +62,7 @@ struct MXFP8QuantConfig {
   }
 
   std::optional<tvm::ffi::Function> get_kernel() const {
-    static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
+    static auto &cache = TVMFFIConfigCache<>::create();
     return cache.get_or_load(*this);
   }
 

@@ -22,6 +22,8 @@ from utils import assert_allclose
 
 from transformer_engine.common import _get_shared_object_file
 from transformer_engine.common.CuTeDSL.utils import device_compute_capability
+import transformer_engine.jax as te
+import transformer_engine_jax as native_tex
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
     QuantizerFactory,
@@ -185,6 +187,8 @@ def get_cfg_key(method, act_desc, in_dtype, fp8_dtype, q_layout):
         + "_".join("1" if f else "0" for f in flags)
         + "_"
         + desc
+        + f"_device_{jax.devices('gpu')[0].local_hardware_id}_generation_"
+        + str(native_tex.get_cuda_state_version())
     )
 
 
@@ -255,6 +259,35 @@ def run_test_case(method, act_type, act_desc, shape, q_layout, in_dtype, fp8_dty
 
 
 # Test cases with only cast kernels (mirrors C++ test's OperatorTest_FusedCastMXFP8_CastOnly).
+def test_release_retires_and_recompiles_cutedsl_executors():
+    """Release JAX's native and Python CuTeDSL owners before recompiling."""
+    te.release_cuda_state()
+    previous_key = None
+    for _ in range(2):
+        run_test_case(
+            "CAST_ONLY",
+            ("gelu",),
+            "none",
+            (128, 128),
+            QuantizeLayout.ROWWISE_COLWISE,
+            jnp.bfloat16,
+            jnp.float8_e4m3fn,
+        )
+        key = get_cfg_key(
+            "CAST_ONLY", "none", jnp.bfloat16, jnp.float8_e4m3fn, QuantizeLayout.ROWWISE_COLWISE
+        )
+        assert key != previous_key
+        assert tvm_ffi.get_global_func(key, allow_missing=True) is not None
+        version = native_tex.get_cuda_state_version()
+        with pytest.raises(RuntimeError, match="CuTeDSL"):
+            native_tex.reset_cuda_state()
+        assert native_tex.get_cuda_state_version() == version
+        te.release_cuda_state()
+        assert native_tex.get_cuda_state_version() > version
+        assert tvm_ffi.get_global_func(key, allow_missing=True) is None
+        previous_key = key
+
+
 @pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
 @pytest.mark.parametrize("q_layout", Q_LAYOUTS, ids=get_layout_id)
 @pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)

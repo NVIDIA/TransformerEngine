@@ -21,6 +21,7 @@ from cutlass._mlir.dialects import arith, llvm
 from cutlass.cute.typing import AddressSpace
 from cutlass.memory import SmemAllocator
 import tvm_ffi
+from transformer_engine.common.CuTeDSL._cuda_state import register_kernel
 
 logger = logging.getLogger("transformer_engine.cutedsl.requantize")
 
@@ -1001,10 +1002,7 @@ def get_mxfp8_requantization_function(
             cute.runtime.make_fake_stream(),
             options="--enable-tvm-ffi",
         )
-        native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
-        tvm_ffi.register_global_func(
-            fn_name, native if native is not None else compiled, override=True
-        )
+        register_kernel(fn_name, compiled)
         return True
     except Exception as error:  # pylint: disable=broad-exception-caught
         logger.warning("CuTeDSL grouped requantization unavailable; using CUDA: %s", error)
