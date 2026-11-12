@@ -4,17 +4,17 @@
 
 """Grouped GEMM with custom (reference) quantizers.
 
-These drive the two custom-recipe grouped entry points with the reference NVFP4/MXFP4 quantizer,
-which is the only in-tree way to reach the Python `qgemm` implementations: the module and ops
-grouped paths only ever build custom operands for the discrete (list) form, and the reference
-quantizer is what makes a `qgemm` callable without a compiled custom kernel.
+These drive the custom-recipe grouped entry point with the reference NVFP4/MXFP4 quantizer, which
+is the only in-tree way to reach the Python `qgemm` implementations: the module and ops grouped
+paths only ever build custom operands for the discrete (list) form, and the reference quantizer is
+what makes a `qgemm` callable without a compiled custom kernel.
 
 Covered here, because nothing else in the suite reaches it:
   * `_custom_grouped_gemm` (list form) — operand roles, m_splits slicing, per-expert bias, and the
     `qresult_x`/`qresult_w` hand-off that non-pow-2 NVFP4 needs.
-  * `_custom_grouped_tensor_gemm` (GroupedTensorStorage form) — per-group offsets and block scales.
-  * The refusals: dgrad/wgrad, non-TN layouts, malformed bias lists, and the non-pow-2 recipe that
-    this layout cannot serve.
+  * The refusals: dgrad/wgrad, non-TN layouts, malformed bias lists, and custom operands reaching
+    the grouped-tensor entry point.
+  * The reference quantizer's in-place update and fp32-epilogue-bias contracts.
 """
 
 import pytest
@@ -120,101 +120,27 @@ def test_custom_grouped_gemm_list_form(use_bias: bool, pow_2_scales: bool) -> No
     _assert_close_to_unquantized(out, weights, inputs, biases if use_bias else None)
 
 
-def test_custom_grouped_tensor_gemm() -> None:
-    """`general_grouped_gemm_for_grouped_tensor` slices groups out of GroupedTensorStorage."""
+def test_grouped_tensor_entry_point_refuses_custom_operands() -> None:
+    """Custom operands must be refused, not handed to the native grouped GEMM.
+
+    `GroupedTensorStorage.offsets` count elements (not rows) and the layout carries no per-group
+    quantized tensor for `qresult_x`/`qresult_w`, so this entry point has no correct way to run a
+    custom `qgemm`; the module and ops layers route custom recipes to the split-quantize path.
+    """
     quantizer = _quantizer(pow_2_scales=True)
-    weights, inputs, _ = _operands()
-    qweights = [quantizer(w) for w in weights]
-    qinputs = [quantizer(x) for x in inputs]
-
-    row_offsets = [0]
-    for m in SPLITS:
-        row_offsets.append(row_offsets[-1] + m)
-    weight_offsets = [i * N for i in range(len(SPLITS) + 1)]
-
-    grouped_weights = GroupedTensorStorage(
-        shape=(len(SPLITS) * N, K),
+    weights = quantizer(torch.randn(N, K, device=DEVICE, dtype=DTYPE))
+    grouped = GroupedTensorStorage(
+        shape=(N, K),
         dtype=DTYPE,
-        num_tensors=len(SPLITS),
+        num_tensors=1,
         quantizer=quantizer,
-        data=torch.cat([t.data for t in qweights], dim=0),
-        scale_inv=torch.cat([t.scale for t in qweights], dim=0),
-        offsets=weight_offsets,
-        scale_inv_offsets=weight_offsets,
+        data=weights.data.reshape(-1),
+        scale_inv=weights.scale.reshape(-1),
+        offsets=[0, weights.data.numel()],
+        scale_inv_offsets=[0, weights.scale.numel()],
     )
-    grouped_inputs = GroupedTensorStorage(
-        shape=(TOTAL_M, K),
-        dtype=DTYPE,
-        num_tensors=len(SPLITS),
-        quantizer=quantizer,
-        data=torch.cat([t.data for t in qinputs], dim=0),
-        scale_inv=torch.cat([t.scale for t in qinputs], dim=0),
-        offsets=row_offsets,
-        scale_inv_offsets=row_offsets,
-    )
-    grouped_out = GroupedTensorStorage(
-        shape=(TOTAL_M, N),
-        dtype=DTYPE,
-        num_tensors=len(SPLITS),
-        quantizer=None,
-        data=torch.empty(TOTAL_M, N, device=DEVICE, dtype=DTYPE),
-        offsets=row_offsets,
-    )
-
-    general_grouped_gemm_for_grouped_tensor(
-        grouped_weights, grouped_inputs, grouped_out, layout="TN"
-    )
-
-    torch.testing.assert_close(
-        grouped_out.rowwise_data,
-        _per_group_reference(quantizer, qweights, qinputs),
-    )
-    _assert_close_to_unquantized(grouped_out.rowwise_data, weights, inputs)
-
-
-def test_custom_grouped_tensor_gemm_refuses_nvfp4() -> None:
-    """This layout carries no per-group quantized tensors, so a non-pow-2 recipe must refuse."""
-    quantizer = _quantizer(pow_2_scales=False)
-    weights, inputs, _ = _operands()
-    qweights = [quantizer(w) for w in weights]
-    qinputs = [quantizer(x) for x in inputs]
-    row_offsets = [0]
-    for m in SPLITS:
-        row_offsets.append(row_offsets[-1] + m)
-    weight_offsets = [i * N for i in range(len(SPLITS) + 1)]
-
-    grouped_weights = GroupedTensorStorage(
-        shape=(len(SPLITS) * N, K),
-        dtype=DTYPE,
-        num_tensors=len(SPLITS),
-        quantizer=quantizer,
-        data=torch.cat([t.data for t in qweights], dim=0),
-        scale_inv=torch.cat([t.scale for t in qweights], dim=0),
-        offsets=weight_offsets,
-        scale_inv_offsets=weight_offsets,
-    )
-    grouped_inputs = GroupedTensorStorage(
-        shape=(TOTAL_M, K),
-        dtype=DTYPE,
-        num_tensors=len(SPLITS),
-        quantizer=quantizer,
-        data=torch.cat([t.data for t in qinputs], dim=0),
-        scale_inv=torch.cat([t.scale for t in qinputs], dim=0),
-        offsets=row_offsets,
-        scale_inv_offsets=row_offsets,
-    )
-    grouped_out = GroupedTensorStorage(
-        shape=(TOTAL_M, N),
-        dtype=DTYPE,
-        num_tensors=len(SPLITS),
-        quantizer=None,
-        data=torch.empty(TOTAL_M, N, device=DEVICE, dtype=DTYPE),
-        offsets=row_offsets,
-    )
-    with pytest.raises(ValueError, match="qresult"):
-        general_grouped_gemm_for_grouped_tensor(
-            grouped_weights, grouped_inputs, grouped_out, layout="TN"
-        )
+    with pytest.raises(NotImplementedError, match="custom quantizers"):
+        general_grouped_gemm_for_grouped_tensor(grouped, grouped, grouped, layout="TN")
 
 
 def test_custom_grouped_gemm_refuses_unsupported_contracts() -> None:
