@@ -4,7 +4,8 @@
 """Tests for cuDNN frontend score_mod fused attention."""
 
 from math import sqrt
-from types import FunctionType
+from collections import Counter
+from types import FunctionType, SimpleNamespace
 from unittest.mock import Mock, call
 
 import jax
@@ -737,6 +738,70 @@ def test_cudnn_graph_compilation_retains_backend_fallback():
 
     assert tex_cudnn_graph.compile_graph(cudnn, graph) == 64
     assert graph.select_plan.call_args_list == [call(1), call(2)]
+
+
+@pytest.mark.parametrize("level", (0, 1, 2))
+@pytest.mark.parametrize("cacheable", (False, True))
+def test_fused_attn_score_mod_cache_diagnostics(monkeypatch, capsys, level, cacheable):
+    """Tracing reports real graph/cache stages, never executions of the FFI call."""
+    diagnostics = tex_cudnn_graph._diagnostics
+    assert diagnostics is tex_attention._diagnostics
+    monkeypatch.setattr(diagnostics, "_level", level)
+    monkeypatch.setattr(diagnostics, "events", Counter())
+    monkeypatch.setattr(diagnostics, "times", Counter())
+    monkeypatch.setattr(tex_cudnn_graph._graph_cache, "entries", {})
+    devices = Mock(return_value=[SimpleNamespace(compute_capability="10.0")])
+    monkeypatch.setattr(jax, "local_devices", devices)
+
+    cudnn = Mock(__version__="1.31.0", cudnnGraphNotSupportedError=NotImplementedError)
+    cudnn.data_type = SimpleNamespace(
+        HALF=SimpleNamespace(name="HALF"), FLOAT=SimpleNamespace(name="FLOAT")
+    )
+    graph = Mock(selected_engine=None)
+    graph.sdpa.return_value = (Mock(), Mock())
+    graph.sdpa_backward.return_value = (Mock(), Mock(), Mock())
+    graph.get_execution_plan_count.return_value = 1
+    graph.get_plan_name_at_index.return_value = "cudnn_plan"
+    graph.get_workspace_size.return_value = 64
+    graph.serialize.return_value = b"graph"
+    monkeypatch.setattr(tex_attention, "_import_cudnn_for_score_mod", lambda: cudnn)
+    monkeypatch.setattr(tex_attention, "create_graph", lambda *_args: graph)
+    monkeypatch.setattr(tex_cudnn_graph, "check_frontend_version", lambda _cudnn: 13100)
+    monkeypatch.setattr(
+        tex_attention.ffi, "ffi_call", lambda _target, outputs: lambda *_args, **_kwargs: outputs
+    )
+
+    class UnkeyedScoreMod:
+        def forward(self, _graph, score, _tensors):
+            return score
+
+    callback = _identity_score_mod if cacheable else UnkeyedScoreMod().forward
+    config, _, _ = make_fused_attn_score_mod_config(callback, callback, None, None, 0.125, True)
+    qkv = (jax.ShapeDtypeStruct((2, 16, 4, 64), jnp.float16),) * 3
+    for _ in range(2):
+        out, stats = tex_attention.fused_attn_score_mod_fwd(qkv, (), config)
+        tex_attention.fused_attn_score_mod_bwd(qkv, out, out, stats, (), (), config)
+
+    assert len(tex_cudnn_graph._graph_cache.entries) == (2 if cacheable else 0)
+    for direction in ("fwd", "bwd"):
+        expected = {"CREATE_GRAPH": 1 if cacheable else 2, "BUILD_PLANS": 1 if cacheable else 2}
+        if cacheable:
+            expected.update(MISS=1, HIT=1, CACHE_GRAPH=1)
+        assert {
+            event: count
+            for (backend, event_direction, event), count in diagnostics.events.items()
+            if backend == "f16" and event_direction == direction
+        } == (expected if level else {})
+        assert diagnostics.times[("f16", direction, "build_plans", "calls")] == (
+            expected["BUILD_PLANS"] if level else 0
+        )
+    if not level:
+        devices.assert_not_called()
+    diagnostics.summary()
+    stderr = capsys.readouterr().err
+    assert ("JAX Python frontend summary" in stderr) == bool(level)
+    assert (" f16 fwd CREATE_GRAPH\n" in stderr) == (level == 2)
+    assert "EXECUTE" not in stderr
 
 
 def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):

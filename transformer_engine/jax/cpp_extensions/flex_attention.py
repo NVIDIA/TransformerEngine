@@ -5,6 +5,7 @@
 
 import os
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 import jax
@@ -43,6 +44,7 @@ from .cudnn_graph import (
     import_cudnn as _import_cudnn_for_score_mod,
     graph_attributes,
     _graph_cache,
+    _diagnostics,
 )
 
 __all__ = [
@@ -416,6 +418,15 @@ def _shape_dtype(value) -> jax.ShapeDtypeStruct:
     return jax.ShapeDtypeStruct(tuple(value.shape), value.dtype)
 
 
+def _score_mod_cache_event(direction, event, key=None):
+    """Report tracing activity without querying devices when diagnostics are disabled."""
+    if _diagnostics.level():
+        capabilities = tuple(
+            int(float(device.compute_capability) * 10) for device in jax.local_devices()
+        )
+        _diagnostics.event("f16", direction, capabilities, event, key)
+
+
 def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
     cudnn = _import_cudnn_for_score_mod()
     graph = create_graph(cudnn, _cudnn_data_type(cudnn, q_aval.dtype))
@@ -450,9 +461,11 @@ def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
         ),
         score_mod=_wrap_score_mod(config.score_mod, extra),
     )
+    _score_mod_cache_event("fwd", "CREATE_GRAPH")
     workspace_size, data, frontend_version = _finalize_score_mod_graph(
-        cudnn, graph, has_score_mod=True
+        cudnn, graph, partial(_diagnostics.run, "f16", "fwd"), has_score_mod=True
     )
+    _score_mod_cache_event("fwd", "BUILD_PLANS")
     return _serialized_score_mod_graph(
         serialized_graph=data,
         cudnn_frontend_version=frontend_version,
@@ -520,9 +533,11 @@ def _build_score_mod_bwd_graph(
         score_mod=_wrap_score_mod(config.score_mod, extra),
         score_mod_bprop=_wrap_score_mod(config.score_mod_bprop, bprop_extra),
     )
+    _score_mod_cache_event("bwd", "CREATE_GRAPH")
     workspace_size, data, frontend_version = _finalize_score_mod_graph(
-        cudnn, graph, has_score_mod=True
+        cudnn, graph, partial(_diagnostics.run, "f16", "bwd"), has_score_mod=True
     )
+    _score_mod_cache_event("bwd", "BUILD_PLANS")
     return _serialized_score_mod_graph(
         serialized_graph=data,
         cudnn_frontend_version=frontend_version,
@@ -547,7 +562,9 @@ def _fused_attn_score_mod_fwd(
     score_mod_avals = tuple(_shape_dtype(arg) for arg in score_mod_tensors)
     key = _graph_cache_key("fwd", config, (q_aval, k_aval, v_aval, *score_mod_avals))
     graph = _graph_cache.get(
-        key, lambda: _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config)
+        key,
+        lambda: _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config),
+        event=partial(_score_mod_cache_event, "fwd"),
     )
 
     batch, q_seqlen, q_heads, _ = q.shape
@@ -595,6 +612,7 @@ def _fused_attn_score_mod_bwd(
             avals[6 + len(score_mod_tensors) :],
             config,
         ),
+        event=partial(_score_mod_cache_event, "bwd"),
     )
 
     dq = jax.ShapeDtypeStruct(q.shape, q.dtype)

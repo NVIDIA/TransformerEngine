@@ -15,9 +15,11 @@ from transformer_engine.common.cudnn.graph import (
     check_graph_support as _check_graph_support,
     compile_graph as _compile_graph,
     GraphCache,
+    CacheDiagnostics,
 )
 
 _graph_cache = GraphCache()
+_diagnostics = CacheDiagnostics("JAX")
 
 
 @dataclass(frozen=True)
@@ -153,10 +155,10 @@ def compile_graph(cudnn, graph, run_stage=None, *, has_score_mod=False):
     raise cudnn.cudnnGraphNotSupportedError("No serializable cuDNN SDPA execution plan.")
 
 
-def finalize_graph(cudnn, graph, *, has_score_mod=False):
+def finalize_graph(cudnn, graph, run_stage=None, *, has_score_mod=False):
     """Validate, select and compile a supported execution plan."""
-    check_graph_support(cudnn, graph, has_score_mod=has_score_mod)
-    workspace_size = compile_graph(cudnn, graph, has_score_mod=has_score_mod)
+    check_graph_support(cudnn, graph, run_stage, has_score_mod=has_score_mod)
+    workspace_size = compile_graph(cudnn, graph, run_stage, has_score_mod=has_score_mod)
     return workspace_size, bytes(graph.serialize()), check_frontend_version(cudnn)
 
 

@@ -240,7 +240,7 @@ backend-selection overview.
 
    :Type: ``int`` (0, 1 or 2), optionally followed by ``:<ranks>``
    :Default: ``0``
-   :Description: Log FusedAttention graph cache activity to stderr, prefixed with ``[FUSED-ATTN-CACHE]``. ``1`` prints a summary of cache counters and build timings at process exit. ``2`` also prints individual events. At both levels, JAX diagnostics describe graph construction and caching during tracing, rather than each execution of a compiled function. When the launcher exports a rank, only rank 0 logs; append ``:<ranks>`` to override, as in ``1:all`` for level 1 on every rank or ``2:0,3`` for level 2 on ranks 0 and 3.
+   :Description: Log FusedAttention graph cache activity to stderr, prefixed with ``[FUSED-ATTN-CACHE]``. ``1`` prints a summary of cache counters and build timings at process exit. ``2`` also prints individual events. Ordinary SDPA and Flex Attention contribute to the same per-framework summary; Flex Attention uses the ``f16`` forward/backward counters. Uncacheable callbacks report graph construction and compilation without cache hits, misses, or insertions. At both levels, JAX diagnostics describe graph construction and caching during tracing, rather than each execution of a compiled function. When the launcher exports a rank, only rank 0 logs; append ``:<ranks>`` to override, as in ``1:all`` for level 1 on every rank or ``2:0,3`` for level 2 on ranks 0 and 3.
 
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 

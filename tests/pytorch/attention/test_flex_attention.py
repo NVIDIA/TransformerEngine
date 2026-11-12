@@ -5,6 +5,7 @@
 import os
 import sys
 import pathlib
+from collections import Counter
 from types import FunctionType, SimpleNamespace
 from unittest.mock import Mock, call
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,7 @@ from transformer_engine.pytorch import DotProductAttention, is_bf16_available
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 import transformer_engine.pytorch.attention.dot_product_attention.flex_attention as flex_attention
 from transformer_engine.pytorch.cpp_extensions import cudnn as cudnn_graph
+from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn
 from transformer_engine.pytorch.utils import get_device_compute_capability
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -465,6 +467,66 @@ def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
     assert _get_score_mod_test_graph(callback) is not _get_score_mod_test_graph(callback)
     assert not cudnn_graph._graph_cache.entries
     assert build.call_count == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
+@pytest.mark.parametrize("level", (0, 1, 2))
+@pytest.mark.parametrize("cacheable", (False, True))
+def test_score_mod_cache_diagnostics(monkeypatch, capsys, level, cacheable):
+    """Report real forward/backward builds and executions without caching unsafe callbacks."""
+    diagnostics = cudnn_graph._diagnostics
+    assert diagnostics is flex_attention._diagnostics is cudnn_fused_attn._diagnostics
+    monkeypatch.setattr(diagnostics, "_level", level)
+    monkeypatch.setattr(diagnostics, "events", Counter())
+    monkeypatch.setattr(diagnostics, "times", Counter())
+    monkeypatch.setattr(cudnn_graph._graph_cache, "entries", {})
+
+    class UnkeyedScoreMod:
+        def forward(self, graph, score, tensors):
+            return _score_mod_post_scale_bias(graph, score, tensors)
+
+    callback = _score_mod_post_scale_bias if cacheable else UnkeyedScoreMod().forward
+    for _ in range(2):
+        qkv = [
+            torch.randn(2, 16, 4, 64, device="cuda", dtype=torch.float16, requires_grad=True)
+            for _ in range(3)
+        ]
+        out = flex_attention.FusedAttentionWithScoreModFunc.apply(
+            True,
+            *qkv,
+            "bshd",
+            "bshd",
+            0.125,
+            callback,
+            _score_mod_identity_bprop,
+            None,
+            None,
+            False,
+        )
+        out.backward(torch.ones_like(out))
+    torch.cuda.synchronize()
+
+    assert len(cudnn_graph._graph_cache.entries) == (2 if cacheable else 0)
+    for direction in ("fwd", "bwd"):
+        expected = {
+            "CREATE_GRAPH": 1 if cacheable else 2,
+            "BUILD_PLANS": 1 if cacheable else 2,
+            "EXECUTE": 2,
+        }
+        if cacheable:
+            expected.update(MISS=1, HIT=1, CACHE_GRAPH=1)
+        assert {
+            event: count
+            for (backend, event_direction, event), count in diagnostics.events.items()
+            if backend == "f16" and event_direction == direction
+        } == (expected if level else {})
+        assert diagnostics.times[("f16", direction, "build_plans", "calls")] == (
+            expected["BUILD_PLANS"] if level else 0
+        )
+    diagnostics.summary()
+    stderr = capsys.readouterr().err
+    assert ("PyTorch Python frontend summary" in stderr) == bool(level)
+    assert (" f16 fwd EXECUTE\n" in stderr) == (level == 2)
 
 
 def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):

@@ -4,6 +4,7 @@
 
 """cuDNN-backed Flex Attention helpers."""
 
+from functools import partial
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
@@ -33,6 +34,7 @@ from transformer_engine.pytorch.cpp_extensions.cudnn import (
     _build_cudnn_pygraph,
     _graph_cache,
     _execute_cudnn_graph,
+    _diagnostics,
 )
 
 _SCORE_MOD_UNCACHEABLE = object()
@@ -162,7 +164,11 @@ def _build_cudnn_score_mod_graph(spec, device, score_mod, score_mod_bprop, extra
         score_mod_bprop=_wrap_score_mod(score_mod_bprop, bprop_extra),
     )
     built.tensors = _score_mod_bindings(built.tensors, extra, bprop_extra)
-    check_graph_support(cudnn, graph, has_score_mod=True)
+    direction = "bwd" if spec.options.backward else "fwd"
+    _diagnostics.event("f16", direction, device.index, "CREATE_GRAPH")
+    check_graph_support(
+        cudnn, graph, partial(_diagnostics.run, "f16", direction), has_score_mod=True
+    )
     return GraphCacheEntry(built)
 
 
@@ -194,16 +200,25 @@ def _get_cudnn_score_mod_graph(
     }
     spec = AttentionGraphSpec.from_dict(options, specs)
     device = tensors["q"].device
+    direction = "bwd" if options.backward else "fwd"
+    event = partial(_diagnostics.event, "f16", direction, device.index)
     key = _cudnn_score_mod_cache_key(spec, device, score_mod, score_mod_bprop, extra, bprop_extra)
     entry = _graph_cache.get(
         key,
         lambda: _build_cudnn_score_mod_graph(
             spec, device, score_mod, score_mod_bprop, extra, bprop_extra
         ),
+        event=event,
     )
     _graph_cache.compile(
         entry,
-        lambda: compile_graph(_import_cudnn_frontend(), entry.built.graph, has_score_mod=True),
+        lambda: compile_graph(
+            _import_cudnn_frontend(),
+            entry.built.graph,
+            partial(_diagnostics.run, "f16", direction),
+            has_score_mod=True,
+        ),
+        event=event,
     )
     bindings = _score_mod_bindings(tensors, extra, bprop_extra)
     return entry, {entry.built.tensors[name]: tensor for name, tensor in bindings.items()}
@@ -261,6 +276,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             entry.workspace_size,
             query_layer.device,
         )
+        _diagnostics.event("f16", "fwd", query_layer.device.index, "EXECUTE")
 
         ctx.is_training = is_training
         ctx.q_format = q_format
@@ -339,6 +355,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             entry.workspace_size,
             query_layer.device,
         )
+        _diagnostics.event("f16", "bwd", query_layer.device.index, "EXECUTE")
 
         return (
             None,

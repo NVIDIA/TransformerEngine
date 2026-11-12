@@ -20,7 +20,6 @@ from transformer_engine.common.cudnn.attention import (
 )
 from transformer_engine.common.cudnn.graph import (
     TensorSpec,
-    CacheDiagnostics,
     GraphCacheEntry,
     bucket as _bucket,
     row_major_stride as _stride,
@@ -38,6 +37,7 @@ from .cudnn_graph import (
     serialize_graph,
     graph_attributes,
     _graph_cache,
+    _diagnostics,
 )
 from . import mxfp8_attention
 
@@ -106,9 +106,6 @@ class _AttentionDescription:
     ragged_stats: bool
     multipliers: tuple
     fp8: bool
-
-
-_diagnostics = CacheDiagnostics("JAX")
 
 
 def _site(spec):

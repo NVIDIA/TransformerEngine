@@ -15,11 +15,13 @@ from transformer_engine.common.cudnn.graph import (
     check_graph_support,
     compile_graph,
     GraphCache,
+    CacheDiagnostics,
 )
 from transformer_engine.pytorch.device import te_device_type
 
 _handles = threading.local()
 _graph_cache = GraphCache()
+_diagnostics = CacheDiagnostics("PyTorch")
 
 
 def _get_cudnn_current_stream_handle(cudnn, device):

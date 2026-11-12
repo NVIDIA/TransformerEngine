@@ -24,7 +24,6 @@ from transformer_engine.common.cudnn.attention import (
 )
 from transformer_engine.common.cudnn.graph import (
     TensorSpec as _TensorSpec,
-    CacheDiagnostics,
     GraphCacheEntry,
     attention_matrix_spec,
     attention_stats_spec,
@@ -41,6 +40,7 @@ from .cudnn import (
     _build_cudnn_pygraph,
     _execute_cudnn_graph,
     _graph_cache,
+    _diagnostics,
 )
 from ..tensor.float8_tensor import Float8Quantizer
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -59,8 +59,6 @@ __all__ = ["fused_attn_fwd", "fused_attn_bwd"]
 
 _FP8_THREADS_PER_CTA = 128
 _F16_RNG_ELTS_PER_THREAD = 16
-
-_diagnostics = CacheDiagnostics("PyTorch")
 
 
 def _event(attn, event, key=None):
