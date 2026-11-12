@@ -399,6 +399,90 @@ TEST(GroupedRequantizeTest, BF16IntermediateIgnoresFastMath) {
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 }
 
+// Raw FP8 codes with NaN, Inf, -0, max-normal and subnormal values, and all-NaN and all -0
+// columns. Requesting the dequantized output selects the general kernel, so the faster kernel
+// for varying first dims is compared with it byte for byte.
+TEST(GroupedRequantizeTest, SpecialValuesMatchGeneralKernel) {
+  if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
+    GTEST_SKIP();
+  }
+  // An odd number of live 128 x 128 tiles, an empty member and a capacity tail.
+  const auto shape_info = make_shape_info({"Special", {{256, 384}, {0, 384}, {128, 384}}, 512});
+  const size_t cols = shape_info.logical_shape[1];
+  const std::vector<uint8_t> scale_codes = {1, 100, 110, 120, 127, 134, 200};
+  for (const DType input_dtype : {DType::kFloat8E4M3, DType::kFloat8E5M2}) {
+    const bool e5m2 = input_dtype == DType::kFloat8E5M2;
+    const uint8_t nan = e5m2 ? 0x7E : 0x7F;
+    const uint8_t max_normal = e5m2 ? 0x7B : 0x7E;
+    const uint8_t inf_or_max = e5m2 ? 0x7C : max_normal;
+    const std::vector<uint8_t> special = {nan,        static_cast<uint8_t>(nan | 0x80),
+                                          0x80,       0x00,
+                                          0x01,       0x81,
+                                          max_normal, static_cast<uint8_t>(max_normal | 0x80),
+                                          inf_or_max, static_cast<uint8_t>(inf_or_max | 0x80)};
+    std::vector<uint8_t> data(shape_info.total_elements);
+    for (size_t i = 0; i < data.size(); ++i) {
+      const size_t col = i % cols;
+      if (col == 5) {
+        data[i] = nan;
+      } else if (col == 6) {
+        data[i] = 0x80;
+      } else if (col == 7) {
+        data[i] = inf_or_max;
+      } else if (col % 4 == 0) {
+        data[i] = special[(i / cols + col) % special.size()];
+      } else {
+        data[i] = static_cast<uint8_t>((i * 2654435761u) >> 24);
+      }
+    }
+    std::vector<uint8_t> scales(shape_info.rowwise_scale_elements);
+    for (size_t i = 0; i < scales.size(); ++i) {
+      scales[i] = scale_codes[i % scale_codes.size()];
+    }
+    auto input = make_grouped_tensor(shape_info, input_dtype, NVTE_MXFP8_1D_SCALING,
+                                     /*rowwise=*/true, /*columnwise=*/false);
+    NVTE_CHECK_CUDA(
+        cudaMemcpy(input.rowwise_data.get(), data.data(), data.size(), cudaMemcpyHostToDevice));
+    NVTE_CHECK_CUDA(cudaMemcpy(input.rowwise_scale_inv.get(), scales.data(), scales.size(),
+                               cudaMemcpyHostToDevice));
+    auto dequantized = test::cuda_alloc(shape_info.total_elements * sizeof(bf16));
+    TensorWrapper dequantized_nvte(dequantized.get(), shape_info.logical_shape, DType::kBFloat16);
+
+    for (const bool swizzled : {false, true}) {
+      SCOPED_TRACE(std::string(e5m2 ? "E5M2" : "E4M3") + (swizzled ? " swizzled" : " compact"));
+      std::vector<OwnedGroupedTensor> outputs;
+      for (const bool return_dequantized : {false, true}) {
+        auto output = make_grouped_tensor(shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
+                                          /*rowwise=*/false, /*columnwise=*/true, swizzled);
+        output.rowwise_scale_bytes = shape_info.rowwise_scale_elements;
+        if (swizzled) {
+          output.rowwise_scale_inv = test::cuda_alloc(output.rowwise_scale_bytes);
+        }
+        output.tensor->set_rowwise_data(input.rowwise_data.get(), input_dtype,
+                                        std::vector<size_t>{shape_info.total_elements});
+        output.tensor->set_rowwise_scale_inv(
+            swizzled ? output.rowwise_scale_inv.get() : input.rowwise_scale_inv.get(),
+            DType::kFloat8E8M0, std::vector<size_t>{shape_info.rowwise_scale_elements});
+        fill_output_sentinel(output);
+        nvte_group_requantize(input.data(), output.data(),
+                              return_dequantized ? dequantized_nvte.data() : nullptr, nullptr, 0);
+        outputs.push_back(std::move(output));
+      }
+      NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+      const auto &fast = outputs[0];
+      const auto &general = outputs[1];
+      expect_bytes_equal("columnwise data", fast.columnwise_data.get(),
+                         general.columnwise_data.get(), fast.data_bytes);
+      expect_bytes_equal("columnwise scales", fast.columnwise_scale_inv.get(),
+                         general.columnwise_scale_inv.get(), fast.columnwise_scale_bytes);
+      if (swizzled) {
+        expect_bytes_equal("rowwise scales", fast.rowwise_scale_inv.get(),
+                           general.rowwise_scale_inv.get(), fast.rowwise_scale_bytes);
+      }
+    }
+  }
+}
+
 TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP();
@@ -524,10 +608,23 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   EXPECT_EQ(actual.tensor->get_with_gemm_swizzled_scales(), output_swizzled);
 }
 
+// More than 32 groups, with empty groups across the 32-group boundary.
+GroupShapeCase many_groups_case() {
+  GroupShapeCase test_case{"ManyGroupsWithEmpty", {}};
+  for (size_t i = 0; i < 40; ++i) {
+    const size_t rows = (i >= 31 && i <= 33) ? 0 : 128 * (1 + i % 3);
+    test_case.shapes.emplace_back(rows, 256);
+  }
+  return test_case;
+}
+
 const std::vector<GroupShapeCase> kGroupShapeCases = {
     {"Single", {{1024, 512}}},
     {"UniformSmall", {{512, 512}, {512, 512}, {512, 512}, {512, 512}}},
     {"VaryingFirstSmall", {{256, 256}, {1024, 256}, {128, 256}, {640, 256}}},
+    // An odd number of 128 x 128 tiles.
+    {"VaryingFirstOddTiles", {{256, 384}, {128, 384}}},
+    many_groups_case(),
     {"EmptyFront", {{0, 512}, {512, 512}, {256, 512}}},
     {"EmptyAdjacent", {{256, 384}, {0, 384}, {0, 384}, {512, 384}}},
     {"EmptyEnd", {{512, 512}, {256, 512}, {0, 512}}},
