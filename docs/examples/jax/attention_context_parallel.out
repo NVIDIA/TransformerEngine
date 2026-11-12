@@ -1,16 +1,16 @@
 # SINGLE_GPU_OUTPUT_START
 Single-GPU THD GQA + SWA:
-Mean time: 126.68747901916504 ms
+Mean time: 124.06466079410166 ms
 # SINGLE_GPU_OUTPUT_END
 
 # RING_OUTPUT_START
 THD CP Ring stripe_size=1:
-Mean time: 57.16729164123535 ms
-Speedup vs single GPU: 2.22x
+Mean time: 52.09881339687854 ms
+Speedup vs single GPU: 2.38x
 # RING_OUTPUT_END
 
 # AG_OUTPUT_START
 THD CP AllGather stripe_size=512:
-Mean time: 53.79219055175781 ms
-Speedup vs single GPU: 2.36x
+Mean time: 53.20774579886347 ms
+Speedup vs single GPU: 2.33x
 # AG_OUTPUT_END
