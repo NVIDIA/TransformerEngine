@@ -168,7 +168,7 @@ class OpaqueValueBundle:
     """
 
     PRIMITIVE_TYPES: Tuple[type, ...] = (
-        type(None),
+        _types.NoneType,
         bool,
         int,
         float,
@@ -385,8 +385,8 @@ def _strip_optional(annot: Any) -> Tuple[Any, bool]:
     """If ``annot`` is ``Optional[X]`` return ``(X, True)``; else ``(annot, False)``."""
     if _is_union(annot):
         args = get_args(annot)
-        if type(None) in args:
-            non_none = [a for a in args if a is not type(None)]
+        if _types.NoneType in args:
+            non_none = [a for a in args if a is not _types.NoneType]
             if len(non_none) == 1:
                 return non_none[0], True
     return annot, False
@@ -443,7 +443,7 @@ def _is_tensor_storage_union(annot: Any) -> bool:
     """Whether ``annot`` is exactly the tensor-or-quantized union."""
     if not _is_union(annot):
         return False
-    members = frozenset(a for a in get_args(annot) if a is not type(None))
+    members = frozenset(a for a in get_args(annot) if a is not _types.NoneType)
     return members == _TQ_MEMBERS
 
 
@@ -495,7 +495,7 @@ def _parse_field(name: str, annot: Any) -> _FieldPlan:
     # (e.g. a bare quantized-storage Optional, or Tensor | int): reject it at
     # registration instead of silently degrading to an unsupported field.
     if _is_union(annot):
-        members = [a for a in get_args(annot) if a is not type(None)]
+        members = [a for a in get_args(annot) if a is not _types.NoneType]
         if any(
             isinstance(m, type) and issubclass(m, (torch.Tensor, QuantizedTensorStorage))
             for m in members

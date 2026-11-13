@@ -31,7 +31,7 @@ export NVTE_FLASH_ATTN_V4=0
 # Nvinspect will be disabled if no feature is active.
 : ${NVTE_TEST_NVINSPECT_DUMMY_CONFIG_FILE:=$TE_PATH/tests/pytorch/debug/test_configs/dummy_feature.yaml}
 
-pip install pytest==8.2.1 || error_exit "Failed to install pytest"
+pip install pytest==8.4.2 || error_exit "Failed to install pytest"
 
 pytest -v -s --junitxml=$XML_LOG_DIR/test_sanity.xml $TE_PATH/tests/pytorch/debug/test_sanity.py  --feature_dirs=$NVTE_TEST_NVINSPECT_FEATURE_DIRS || test_fail "test_sanity.py"
 pytest -v -s --junitxml=$XML_LOG_DIR/test_config.xml $TE_PATH/tests/pytorch/debug/test_config.py --feature_dirs=$NVTE_TEST_NVINSPECT_FEATURE_DIRS || test_fail "test_config.py"
