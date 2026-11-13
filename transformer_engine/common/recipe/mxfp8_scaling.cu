@@ -6,6 +6,9 @@
 
 #include <transformer_engine/recipe.h>
 
+#include <algorithm>
+#include <utility>
+
 #include "../common.h"
 #include "../util/ptx.cuh"
 #include "../utils.cuh"
@@ -23,20 +26,31 @@ constexpr int kColsPerTile = 128;  // Columns each block processes
 
 constexpr int kThreadsPerBlock = 128;
 
+// First and past-the-end rows of the row tiles that hold elements
+// [start_offset, start_offset + len) of a (rows, cols) matrix.
+std::pair<int, int> partial_row_tiles(int rows, int cols, size_t start_offset, size_t len) {
+  if (len == 0) return {0, 0};
+  const size_t first_tile = start_offset / cols / kRowsPerTile;
+  const size_t last_tile = (start_offset + len - 1) / cols / kRowsPerTile;
+  return {static_cast<int>(first_tile * kRowsPerTile),
+          std::min(static_cast<int>((last_tile + 1) * kRowsPerTile), rows)};
+}
+
 template <typename IType, bool kWithColumnwise>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     mxfp8_scaling_compute_partial_amax_kernel(const IType *input, IType *amax_rowwise,
                                               IType *amax_colwise, int amax_rowwise_stride,
                                               int amax_colwise_stride, int rows, int cols,
-                                              size_t start_offset, size_t len) {
+                                              int row_offset, size_t start_offset, size_t len) {
   __shared__ float smem_amax_rowwise[kRowsPerTile][kColsPerTile / 32];
 
   size_t end_offset = start_offset + len;
   const IType *input_minus_offset = input - start_offset;
   int warp_idx = threadIdx.x / 32;
   int lane_idx = threadIdx.x % 32;
+  int tile_row = row_offset / kRowsPerTile + blockIdx.y;
   int c = blockIdx.x * kColsPerTile + threadIdx.x;
-  int r = blockIdx.y * kRowsPerTile;
+  int r = tile_row * kRowsPerTile;
 
   float col_amax = 0.0f;
 #pragma unroll
@@ -64,14 +78,14 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 
   if constexpr (kWithColumnwise) {
-    amax_colwise[blockIdx.y * amax_colwise_stride + c] = static_cast<IType>(col_amax);
+    amax_colwise[tile_row * amax_colwise_stride + c] = static_cast<IType>(col_amax);
   }
 
   __syncthreads();
 
   int r_ = threadIdx.x / (kColsPerTile / 32);  // rows in shared memory
   int c_ = threadIdx.x % (kColsPerTile / 32);  // cols in shared memory
-  r = blockIdx.y * kRowsPerTile + r_;
+  r = tile_row * kRowsPerTile + r_;
   c = blockIdx.x * kColsPerTile / 32 + c_;
   amax_rowwise[r * amax_rowwise_stride + c] = static_cast<IType>(smem_amax_rowwise[r_][c_]);
 }
@@ -82,15 +96,16 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                       OType *output_colwise, const e8m0_t *scale_inv_rowwise,
                                       const e8m0_t *scale_inv_colwise, int scale_inv_rowwise_stride,
                                       int scale_inv_colwise_stride, int rows, int cols,
-                                      size_t start_offset, size_t len) {
+                                      int row_offset, size_t start_offset, size_t len) {
   __shared__ float smem_scales_rowwise[kRowsPerTile][kColsPerTile / 32];
   __shared__ float smem_scales_colwise[kColsPerTile];
+  int tile_row = row_offset / kRowsPerTile + blockIdx.y;
 
   // Load scales_rowwise
   {
     int r_ = threadIdx.x / (kColsPerTile / 32);  // rows in shared memory
     int c_ = threadIdx.x % (kColsPerTile / 32);  // cols in shared memory
-    int r = blockIdx.y * kRowsPerTile + r_;
+    int r = tile_row * kRowsPerTile + r_;
     int c = blockIdx.x * kColsPerTile / 32 + c_;
     size_t idx = r * scale_inv_rowwise_stride + c;
     smem_scales_rowwise[r_][c_] = ptx::exp2f_rcp<float>(scale_inv_rowwise[idx]);
@@ -99,7 +114,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // Load scales_colwise
   if constexpr (kWithColumnwise) {
     int c_ = threadIdx.x;
-    int r = blockIdx.y * kRowsPerTile / 32;
+    int r = tile_row;
     int c = blockIdx.x * kColsPerTile + c_;
     size_t idx = r * scale_inv_colwise_stride + c;
     smem_scales_colwise[c_] = ptx::exp2f_rcp<float>(scale_inv_colwise[idx]);
@@ -114,7 +129,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   int warp_idx = threadIdx.x / 32;
   // int lane_idx = threadIdx.x % 32;
   int c = blockIdx.x * kColsPerTile + threadIdx.x;
-  int r = blockIdx.y * kRowsPerTile;
+  int r = tile_row * kRowsPerTile;
 
 #pragma unroll
   for (int i = 0; i < kRowsPerTile; i++) {
@@ -165,9 +180,26 @@ void mxfp8_scaling_compute_partial_amax(const Tensor input, Tensor amax_rowwise,
     NVTE_CHECK(amax_colwise.dtype() == input.dtype(), "Wrong dtype of amax_colwise");
   }
 
+  // Launch only the row tiles that hold the input, and zero the amaxes of the other row tiles.
   int blocks_x = (cols + kColsPerTile - 1) / kColsPerTile;
-  int blocks_y = (rows + kRowsPerTile - 1) / kRowsPerTile;
-  dim3 grid(blocks_x, blocks_y);
+  const auto [row_begin, row_end] =
+      partial_row_tiles(rows, cols, start_offset, input.data.shape[0]);
+  const size_t elt_size = typeToSize(input.dtype());
+  auto zero_rows = [&](const Tensor &amax, size_t row_width, int begin, int end) {
+    if (begin < end) {
+      NVTE_CHECK_CUDA(cudaMemset2DAsync(
+          static_cast<char *>(amax.data.dptr) + begin * amax.data.shape[1] * elt_size,
+          amax.data.shape[1] * elt_size, 0, row_width * elt_size, end - begin, stream));
+    }
+  };
+  zero_rows(amax_rowwise, blocks_x * kColsPerTile / 32, 0, row_begin);
+  zero_rows(amax_rowwise, blocks_x * kColsPerTile / 32, row_end, rows);
+  if (with_columnwise) {
+    zero_rows(amax_colwise, blocks_x * kColsPerTile, 0, row_begin / kRowsPerTile);
+    zero_rows(amax_colwise, blocks_x * kColsPerTile, row_end / kRowsPerTile, rows / kRowsPerTile);
+  }
+  if (row_begin == row_end) return;
+  dim3 grid(blocks_x, (row_end - row_begin) / kRowsPerTile);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input.dtype(), IType,
@@ -179,7 +211,8 @@ void mxfp8_scaling_compute_partial_amax(const Tensor input, Tensor amax_rowwise,
               reinterpret_cast<IType *>(amax_rowwise.data.dptr),
               with_columnwise ? reinterpret_cast<IType *>(amax_colwise.data.dptr) : nullptr,
               amax_rowwise.data.shape[1], with_columnwise ? amax_colwise.data.shape[1] : 0, rows,
-              cols, start_offset, input.data.shape[0]);))
+              cols, row_begin, start_offset, input.data.shape[0]);))
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tensor output_colwise,
@@ -231,9 +264,12 @@ void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tenso
     NVTE_CHECK(scale_inv_colwise.dtype() == DType::kByte, "Wrong dtype of scale_inv_colwise");
   }
 
+  // Launch only the row tiles that hold the input.
   int blocks_x = (cols + kColsPerTile - 1) / kColsPerTile;
-  int blocks_y = (rows + kRowsPerTile - 1) / kRowsPerTile;
-  dim3 grid(blocks_x, blocks_y);
+  const auto [row_begin, row_end] =
+      partial_row_tiles(rows, cols, start_offset, input.data.shape[0]);
+  if (row_begin == row_end) return;
+  dim3 grid(blocks_x, (row_end - row_begin) / kRowsPerTile);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input.dtype(), IType,
@@ -248,8 +284,9 @@ void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tenso
               with_columnwise ? reinterpret_cast<const e8m0_t *>(scale_inv_colwise.data.dptr)
                               : nullptr,
               scale_inv_rowwise.data.shape[1],
-              with_columnwise ? scale_inv_colwise.data.shape[1] : 0, rows, cols, start_offset,
-              input.data.shape[0]);))
+              with_columnwise ? scale_inv_colwise.data.shape[1] : 0, rows, cols, row_begin,
+              start_offset, input.data.shape[0]);))
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace mxfp8_scaling_recipe

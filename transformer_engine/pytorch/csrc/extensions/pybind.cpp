@@ -187,6 +187,10 @@ void bind_quantize_with_amax_extensions(py::module_ &m) {
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("rowwise_amax"), py::arg("columnwise_amax"),
         py::arg("tensor_offsets") = py::none());
+  m.def("nvfp4_group_hadamard_amax", nvfp4_group_hadamard_amax, py::arg("tensor"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
+        "Per-group (pre-RHT, post-RHT) NVFP4 amax of a grouped tensor without quantizing it");
 }
 
 }  // namespace transformer_engine::pytorch
@@ -213,11 +217,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
-  m.def("nvfp4_gemm_swizzled_scales_alignment",
-        &transformer_engine::pytorch::NVFP4Quantizer::gemm_swizzled_scales_alignment,
-        py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
-        py::arg("row_scaled_nvfp4"), py::arg("nvfp4_use_4over6"), py::arg("sm_arch"),
-        py::arg("disable_rht_cast_fusion"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
