@@ -842,6 +842,8 @@ def general_gemm(
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
     if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
+        if ub is not None:
+            raise NotImplementedError("Comm+GEMM overlap does not support FP8 block scaling.")
         # FP8 block-scaling requires split accumulator
         use_split_accumulator = True
 
