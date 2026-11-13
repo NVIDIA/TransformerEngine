@@ -97,6 +97,13 @@ enum NVTETensorParam {
    *  E4M3). 4over6 may use 256 for map-to-4 headroom.
    */
   kNVTENVFP4E4M3Max = 9,
+  /*! Whether FP8 block-scaling column-wise data is stored transposed (default: true).
+   *
+   *  Transposed column-wise data has the tensor's last dimension first. Otherwise it has the
+   *  tensor's shape, and 2D block-scaled tensors have no column-wise data because their
+   *  row-wise data and scales serve column-wise usage. Other formats ignore this parameter.
+   */
+  kNVTEColumnwiseTransposed = 10,
   kNVTENumTensorParams
 };
 
@@ -585,6 +592,9 @@ enum NVTEGroupedTensorParam {
       10, /*!< Whether scaling factors are in format expected by GEMM */
   kNVTEGroupedRowScaledNVFP4 =
       11, /*!< Whether NVFP4 data uses row scaling instead of tensor scaling */
+  kNVTEGroupedColumnwiseTransposed =
+      12, /*!< Whether FP8 block-scaling column-wise data is stored transposed (see
+             kNVTEColumnwiseTransposed) */
   kNVTENumGroupedTensorParams
 };
 
@@ -893,6 +903,11 @@ class TensorWrapper {
     nvte_set_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val));
   }
 
+  void set_columnwise_transposed(bool columnwise_transposed) {
+    const auto val = static_cast<uint8_t>(columnwise_transposed);
+    nvte_set_tensor_param_v2(tensor_, kNVTEColumnwiseTransposed, &val, sizeof(val));
+  }
+
   void set_nvfp4_e4m3_max(int nvfp4_e4m3_max) {
     const auto val = nvfp4_e4m3_max;
     nvte_set_tensor_param_v2(tensor_, kNVTENVFP4E4M3Max, &val, sizeof(val));
@@ -937,6 +952,12 @@ class TensorWrapper {
   bool get_row_scaled_nvfp4() const {
     uint8_t val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+
+  bool get_columnwise_transposed() const {
+    uint8_t val = 1;
+    nvte_get_tensor_param_v2(tensor_, kNVTEColumnwiseTransposed, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
   }
 
@@ -1322,6 +1343,11 @@ class GroupedTensorWrapper {
     nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val));
   }
 
+  void set_columnwise_transposed(bool columnwise_transposed) {
+    const auto val = static_cast<uint8_t>(columnwise_transposed);
+    nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedColumnwiseTransposed, &val, sizeof(val));
+  }
+
   // Parameter getters
   NVTEBasicTensor get_parameter(const NVTEGroupedTensorParam param) const noexcept {
     NVTEBasicTensor ret;
@@ -1371,6 +1397,13 @@ class GroupedTensorWrapper {
   bool get_row_scaled_nvfp4() const {
     uint8_t val = 0;
     nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedRowScaledNVFP4, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+
+  bool get_columnwise_transposed() const {
+    uint8_t val = 1;
+    nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedColumnwiseTransposed, &val, sizeof(val),
+                                  nullptr);
     return static_cast<bool>(val);
   }
 

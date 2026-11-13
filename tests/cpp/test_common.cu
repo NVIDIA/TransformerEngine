@@ -432,6 +432,21 @@ void Tensor::set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
   tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
 }
 
+void Tensor::set_columnwise_transposed(bool columnwise_transposed) {
+  if (columnwise_ && columnwise_transposed != tensor_.get_columnwise_transposed()) {
+    // Same buffer, with the last dimension moved to the front or back
+    const NVTEBasicTensor data = tensor_.get_columnwise_data();
+    std::vector<size_t> shape(data.shape.data, data.shape.data + data.shape.ndim);
+    if (columnwise_transposed) {
+      std::rotate(shape.rbegin(), shape.rbegin() + 1, shape.rend());
+    } else {
+      std::rotate(shape.begin(), shape.begin() + 1, shape.end());
+    }
+    tensor_.set_columnwise_data(data.data_ptr, static_cast<DType>(data.dtype), shape);
+  }
+  tensor_.set_columnwise_transposed(columnwise_transposed);
+}
+
 void Tensor::set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
   NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
              "Row-scaled NVFP4 is only supported for NVFP4 tensors.");
