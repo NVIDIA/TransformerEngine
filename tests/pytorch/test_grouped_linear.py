@@ -2136,10 +2136,26 @@ def test_single_grouped_weight_rejects_host_m_splits(m_splits, exception):
             ),
             id="fp8-block-scaling",
         ),
+        pytest.param(
+            recipe.Float8BlockScaling(w_block_scaling_dim=1),
+            marks=pytest.mark.skipif(
+                not _fp8_block_scaling_available,
+                reason=_reason_for_no_fp8_block_scaling,
+            ),
+            id="fp8-block-scaling-w1D",
+        ),
     ],
 )
-def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
+@pytest.mark.parametrize(
+    "in_features,out_features", [(256, 256), (256, 384)], ids=("square", "non-square")
+)
+@pytest.mark.parametrize("quantized_weights", (False, True), ids=("bf16-weights", "fp8-weights"))
+def test_single_grouped_weight_matches_discrete_grouped_tensor_path(
+    fp8_recipe, in_features, out_features, quantized_weights
+):
     """Match single and discrete weights while both use CUDA m_splits and grouped GEMM."""
+    if quantized_weights and fp8_recipe is None:
+        pytest.skip("Quantized weights require a quantization recipe.")
     if not is_module_grouped_tensor_path_supported(
         fp8_recipe,
         torch.bfloat16,
@@ -2149,41 +2165,38 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
     FP8GlobalStateManager.reset()
 
     num_gemms = 3
-    in_features = 256
-    out_features = 256
     m_splits = torch.tensor([256, 512, 256], dtype=torch.int64, device="cuda")
     total_tokens = int(m_splits.sum())
-    weights = torch.randn(
-        num_gemms,
-        out_features,
-        in_features,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
 
-    discrete = GroupedLinear(
-        num_gemms,
-        in_features,
-        out_features,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        device="cuda",
-        use_grouped_tensor=True,
-    )
-    single = GroupedLinear(
-        num_gemms,
-        in_features,
-        out_features,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        device="cuda",
-        single_grouped_weight=True,
-        use_grouped_tensor=True,
-    )
-    with torch.no_grad():
-        for idx in range(num_gemms):
-            getattr(discrete, f"weight{idx}").copy_(weights[idx])
-        single.weight.rowwise_data.view_as(weights).copy_(weights)
+    def make_linear(single_grouped_weight):
+        # Both modules draw the same initial weights
+        torch.manual_seed(1234)
+        with quantized_model_init(enabled=quantized_weights, recipe=fp8_recipe):
+            return GroupedLinear(
+                num_gemms,
+                in_features,
+                out_features,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                device="cuda",
+                single_grouped_weight=single_grouped_weight,
+                use_grouped_tensor=True,
+            )
+
+    discrete = make_linear(single_grouped_weight=False)
+    single = make_linear(single_grouped_weight=True)
+    if not quantized_weights:
+        weights = torch.randn(
+            num_gemms,
+            out_features,
+            in_features,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        with torch.no_grad():
+            for idx in range(num_gemms):
+                getattr(discrete, f"weight{idx}").copy_(weights[idx])
+            single.weight.rowwise_data.view_as(weights).copy_(weights)
 
     x = torch.randn(total_tokens, in_features, dtype=torch.bfloat16, device="cuda")
     dy = torch.randn(total_tokens, out_features, dtype=torch.bfloat16, device="cuda")
@@ -2205,15 +2218,50 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
     torch.testing.assert_close(single.weight.grad.float(), discrete_wgrad.float(), **tolerances)
 
 
-@pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
-def test_single_grouped_weight_mxfp8_workspace_cache():
-    """BF16 primary weights update one persistent MXFP8 grouped workspace per iteration."""
-    mxfp8_recipe = recipe.MXFP8BlockScaling()
+_SINGLE_GROUPED_WEIGHT_WORKSPACE_RECIPES = [
+    pytest.param(
+        recipe.MXFP8BlockScaling(),
+        marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
+        id="mxfp8",
+    ),
+    pytest.param(
+        recipe.Float8BlockScaling(w_block_scaling_dim=1),
+        marks=pytest.mark.skipif(
+            not _fp8_block_scaling_available,
+            reason=_reason_for_no_fp8_block_scaling,
+        ),
+        id="fp8-block-scaling-w1D",
+    ),
+    pytest.param(
+        recipe.Float8BlockScaling(w_block_scaling_dim=2),
+        marks=pytest.mark.skipif(
+            not _fp8_block_scaling_available,
+            reason=_reason_for_no_fp8_block_scaling,
+        ),
+        id="fp8-block-scaling-w2D",
+    ),
+]
+
+
+def _grouped_buffer_pointers(grouped):
+    """Data pointers of a grouped tensor's data and scale buffers."""
+    buffers = (
+        grouped.rowwise_data,
+        grouped.columnwise_data,
+        grouped.scale_inv,
+        grouped.columnwise_scale_inv,
+    )
+    return tuple(None if buffer is None else buffer.data_ptr() for buffer in buffers)
+
+
+@pytest.mark.parametrize("fp8_recipe", _SINGLE_GROUPED_WEIGHT_WORKSPACE_RECIPES)
+def test_single_grouped_weight_workspace_cache(fp8_recipe):
+    """BF16 primary weights update one persistent quantized grouped workspace per iteration."""
     if not is_module_grouped_tensor_path_supported(
-        mxfp8_recipe,
+        fp8_recipe,
         torch.bfloat16,
     ):
-        pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
+        pytest.skip("Recipe is not supported with a single grouped weight on this system.")
     FP8GlobalStateManager.reset()
     grouped_linear = GroupedLinear(
         2,
@@ -2227,33 +2275,47 @@ def test_single_grouped_weight_mxfp8_workspace_cache():
     )
 
     x = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    dy = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda")
     m_splits = torch.tensor([256, 256], dtype=torch.int64, device="cuda")
 
-    with autocast(enabled=True, recipe=mxfp8_recipe):
-        grouped_linear(x, m_splits, is_first_microbatch=True)
+    def cached_workspace():
         workspace = grouped_linear._fp8_workspaces["weight"]
         assert isinstance(workspace, GroupedTensor)
-        pointers = (
-            workspace.rowwise_data.data_ptr(),
-            workspace.columnwise_data.data_ptr(),
-            workspace.scale_inv.data_ptr(),
-            workspace.columnwise_scale_inv.data_ptr(),
-        )
-        old_data = workspace.rowwise_data.clone()
+        return workspace
+
+    tolerances = dict(rtol=1e-2, atol=5e-3)
+
+    # A workspace cached in inference, without columnwise buffers, serves a training step
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        grouped_linear(x, m_splits, is_first_microbatch=True)
+    results = []
+    for is_first_microbatch in (False, None):
+        x.grad = None
+        grouped_linear.weight.grad = None
+        with autocast(enabled=True, recipe=fp8_recipe):
+            y = grouped_linear(x, m_splits, is_first_microbatch=is_first_microbatch)
+        y.backward(dy)
+        results.append((y, x.grad, grouped_linear.weight.grad))
+    for cached, uncached in zip(*results):
+        torch.testing.assert_close(cached.float(), uncached.float(), **tolerances)
+
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y_first = grouped_linear(x, m_splits, is_first_microbatch=True)
+        first_workspace = cached_workspace()
+        pointers = _grouped_buffer_pointers(first_workspace)
+        old_data = first_workspace.rowwise_data.clone()
 
         with torch.no_grad():
             grouped_linear.weight.rowwise_data.add_(1)
-        grouped_linear(x, m_splits, is_first_microbatch=False)
-        assert torch.equal(workspace.rowwise_data, old_data)
+        y_cached = grouped_linear(x, m_splits, is_first_microbatch=False)
+        assert _grouped_buffer_pointers(cached_workspace()) == pointers
+        assert torch.equal(cached_workspace().rowwise_data, old_data)
+        torch.testing.assert_close(y_cached, y_first, **tolerances)
 
-        grouped_linear(x, m_splits, is_first_microbatch=True)
-        assert pointers == (
-            workspace.rowwise_data.data_ptr(),
-            workspace.columnwise_data.data_ptr(),
-            workspace.scale_inv.data_ptr(),
-            workspace.columnwise_scale_inv.data_ptr(),
-        )
-        assert not torch.equal(workspace.rowwise_data, old_data)
+        y_updated = grouped_linear(x, m_splits, is_first_microbatch=True)
+        assert _grouped_buffer_pointers(cached_workspace()) == pointers
+        assert not torch.equal(cached_workspace().rowwise_data, old_data)
+        torch.testing.assert_close(y_updated, grouped_linear(x, m_splits), **tolerances)
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
