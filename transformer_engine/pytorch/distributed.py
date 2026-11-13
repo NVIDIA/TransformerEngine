@@ -781,6 +781,7 @@ def checkpoint(
     context_fn = kwargs.pop("context_fn", noop_context_fn)
     determinism_check = kwargs.pop("determinism_check", "default")
     debug = kwargs.pop("debug", False)
+    preserve_rng_state = kwargs.pop("preserve_rng_state", True)
     if not has_te_modules(function) and (
         not torch.cuda.is_initialized() or not torch.cuda.is_current_stream_capturing()
     ):
@@ -791,6 +792,7 @@ def checkpoint(
             context_fn=context_fn,
             determinism_check=determinism_check,
             debug=debug,
+            preserve_rng_state=preserve_rng_state,
             **kwargs,
         )
 
@@ -815,7 +817,7 @@ def checkpoint(
     #       cannot be sure there are no TE modules inside the function. It also means we might run
     #       the TE checkpoint for non-TE modules, so the TE checkpoint has to support a potential
     #       user context function.
-    del determinism_check, debug
+    del determinism_check, debug, preserve_rng_state
     if _USE_REENTRANT_ACTIVATION_RECOMPUTE:
         # If saved activations need to be distributed but there is no process group,
         # default to the world group.
