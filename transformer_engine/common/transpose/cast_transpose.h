@@ -48,9 +48,8 @@ enum class FP8BlockwiseColumnwiseOption {
   // Columnwise data transposed from original shape.
   // Scales in GEMM format corresponding to GEMM ingesting transposed column data.
   // On Hopper sm90, GEMM_READY means that columnwise quantization also fuses transpose op
-  // On higher sm versions with TN,NT,NN fp8 gemm, GEMM_READY doesn't fuse transpose
   COLUMNWISE_GEMM_READY,
-  // Deprecated
+  // Columnwise data in the original shape, for FP8 GEMMs that support non-TN layouts
   COLUMNWISE_COMPACT
 };
 
