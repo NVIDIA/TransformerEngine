@@ -45,6 +45,7 @@ then tears down EP and runs all cuDNN cases in the same processes:
 
 import importlib
 import os
+import re
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.5")
@@ -1137,6 +1138,167 @@ def test_ep_checkpoint_names(mesh, monkeypatch, make_block):
     assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
     for name in ("gate_kernel", "wi", "wo"):
         assert np.all(np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh)))
+
+
+def _assert_checkpoint_parity(actual, expected, mesh, *, relative_tolerance=1e-3):
+    """Compare saved-state and recomputed executions of the same quantized block."""
+    actual_leaves, actual_tree = jax.tree_util.tree_flatten(actual)
+    expected_leaves, expected_tree = jax.tree_util.tree_flatten(expected)
+    assert actual_tree == expected_tree
+    for actual_leaf, expected_leaf in zip(actual_leaves, expected_leaves):
+        actual_np = _to_global_numpy(actual_leaf, mesh)
+        expected_np = _to_global_numpy(expected_leaf, mesh)
+        assert np.all(np.isfinite(actual_np))
+        if jnp.issubdtype(actual_leaf.dtype, jnp.integer):
+            np.testing.assert_array_equal(actual_np, expected_np)
+        else:
+            # Fused EP permits different within-expert row orders. In particular,
+            # weight-gradient reductions need not be bitwise reproducible.
+            np.testing.assert_allclose(
+                actual_np.astype(np.float32),
+                expected_np.astype(np.float32),
+                atol=1e-7,
+                rtol=1e-3,
+            )
+            # Small gradients must not pass solely because of the absolute
+            # tolerance: losing or misrouting an entire gradient is a failure.
+            actual_f64 = actual_np.astype(np.float64)
+            expected_f64 = expected_np.astype(np.float64)
+            reference_norm = np.linalg.norm(expected_f64.reshape(-1))
+            if reference_norm > 0:
+                error_norm = np.linalg.norm((actual_f64 - expected_f64).reshape(-1))
+                assert error_norm <= relative_tolerance * reference_norm, (
+                    f"Checkpoint relative L2 error {error_norm / reference_norm:.3%} "
+                    f"for shape {actual_np.shape}"
+                )
+
+
+def _forward_dispatch_count(executable):
+    """Count forward EP custom calls, excluding the required backward transport."""
+    return len(
+        re.findall(
+            r'custom_call_target="te_ep_(?:dispatch|prepare_and_dispatch)_ffi"',
+            executable.as_text(),
+        )
+    )
+
+
+class TestTeEpMoeDispatchCheckpoint:
+    """Checkpoint the complete dispatch state, including opaque routing metadata."""
+
+    @pytest.mark.parametrize("quantization", _QUANTIZATION_CASES)
+    @pytest.mark.parametrize("skewed", [False, True], ids=["balanced", "empty_experts"])
+    def test_saved_dispatch_removes_redispatch(self, mesh, make_block, quantization, skewed):
+        recipe = _quantization_recipe(quantization)
+        block = make_block(
+            quantization_recipe=recipe,
+            dispatch_checkpoint_name="saved_dispatch",
+            score_function="sigmoid" if skewed else "softmax",
+            use_expert_routing_bias=skewed,
+            expert_bias_init=_strong_expert_bias_init if skewed else None,
+        )
+        x = _make_inputs(jax.random.PRNGKey(40))
+        variables, _, _, counts = _init_apply(block, mesh, x, jax.random.PRNGKey(41))
+        if skewed:
+            assert np.any(_to_global_numpy(counts, mesh) == 0)
+
+        def loss_fn(params, inputs):
+            output, _, total_recv, expert_counts = block.apply(params, inputs)
+            return jnp.mean(output.astype(jnp.float32) ** 2), (output, total_recv, expert_counts)
+
+        saved = jax.checkpoint(
+            loss_fn, policy=jax.checkpoint_policies.save_only_these_names("saved_dispatch")
+        )
+        recomputed = jax.checkpoint(loss_fn, policy=jax.checkpoint_policies.nothing_saveable)
+        with _ctx(mesh):
+            x = _shard_inputs(x, mesh)
+            reference = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
+            saved_exe = (
+                jax.jit(jax.value_and_grad(saved, argnums=(0, 1), has_aux=True))
+                .lower(variables, x)
+                .compile()
+            )
+            recomputed_exe = (
+                jax.jit(jax.value_and_grad(recomputed, argnums=(0, 1), has_aux=True))
+                .lower(variables, x)
+                .compile()
+            )
+            expected = reference(variables, x)
+            actual = saved_exe(variables, x)
+            control = recomputed_exe(variables, x)
+            jax.block_until_ready((expected, actual, control))
+        # One forward dispatch per layer. The control proves that the assertion
+        # distinguishes recomputation from merely attaching checkpoint names.
+        assert _forward_dispatch_count(saved_exe) == 1
+        assert _forward_dispatch_count(recomputed_exe) == 2
+        prepare_pattern = r'custom_call_target="te_ep_prepare_ffi"'
+        expected_prepares = 0 if os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH") == "1" else 1
+        assert len(re.findall(prepare_pattern, saved_exe.as_text())) == expected_prepares
+        assert len(re.findall(prepare_pattern, recomputed_exe.as_text())) == 2 * expected_prepares
+        _assert_checkpoint_parity(actual, expected, mesh)
+        _assert_checkpoint_parity(control, expected, mesh)
+
+    @pytest.mark.parametrize("quantization", _QUANTIZATION_CASES)
+    def test_saved_handles_in_scan(self, mesh, make_block, quantization):
+        recipe = _quantization_recipe(quantization)
+        block = make_block(
+            quantization_recipe=recipe,
+            dispatch_checkpoint_name="saved_dispatch",
+        )
+        x = _make_inputs(jax.random.PRNGKey(42))
+        variables, _, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(43))
+
+        def layer(params, inputs):
+            output, _, _, _ = block.apply(params, inputs)
+            return output
+
+        saved_layer = jax.checkpoint(
+            layer, policy=jax.checkpoint_policies.save_only_these_names("saved_dispatch")
+        )
+
+        def scanned_loss(params, inputs, *, apply_layer):
+            def body(carry, layer_input):
+                return carry, apply_layer(params, layer_input)
+
+            _, outputs = jax.lax.scan(body, None, inputs)
+            return jnp.mean(outputs.astype(jnp.float32) ** 2), outputs
+
+        def unrolled_loss(params, inputs):
+            outputs = jnp.stack([layer(params, inputs[i]) for i in range(2)])
+            return jnp.mean(outputs.astype(jnp.float32) ** 2), outputs
+
+        scanned = jax.jit(
+            jax.value_and_grad(
+                partial(scanned_loss, apply_layer=saved_layer), argnums=(0, 1), has_aux=True
+            )
+        )
+        plain_scanned = jax.jit(
+            jax.value_and_grad(
+                partial(scanned_loss, apply_layer=layer), argnums=(0, 1), has_aux=True
+            )
+        )
+        unrolled = jax.jit(jax.value_and_grad(unrolled_loss, argnums=(0, 1), has_aux=True))
+        # Different inputs give each layer its own routing state. Reuse the same
+        # executables on another batch to expose stale handles across invocations.
+        for seed in (44, 45):
+            with _ctx(mesh):
+                inputs = jnp.stack(
+                    [
+                        _shard_inputs(_make_inputs(jax.random.PRNGKey(seed + i)), mesh)
+                        for i in range(2)
+                    ]
+                )
+                actual = scanned(variables, inputs)
+                control = plain_scanned(variables, inputs)
+                expected = unrolled(variables, inputs)
+                jax.block_until_ready((actual, control, expected))
+            _assert_checkpoint_parity(actual, control, mesh)
+            # Scan and unrolled forms accumulate shared BF16 parameter gradients
+            # differently. Use the same scan as the checkpointing control, then
+            # allow one BF16 epsilon for the independent unrolled cross-check.
+            _assert_checkpoint_parity(
+                actual, expected, mesh, relative_tolerance=float(jnp.finfo(DTYPE).eps)
+            )
 
 
 def test_explicitly_disabled_fusion_with_native_weights(

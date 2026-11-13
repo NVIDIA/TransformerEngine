@@ -1142,6 +1142,58 @@ class TestEPOverflowDrop(unittest.TestCase):
         # The rank owning expert 0 demands more than it can receive.
         self.assertGreater(int(trt_prep.max()), self.recv_capacity_per_rank)
 
+    def test_checkpointed_routing_state_with_overflow(self):
+        """A saved routing handle remains usable by combine backward after drops."""
+        from jax.ad_checkpoint import checkpoint_name
+
+        total_tokens, indices, tokens, weights = self._make_concentrated_inputs()
+        token_spec = PartitionSpec(("dp", "ep"), None)
+        recv_spec = PartitionSpec(("dp", "ep"), None, None)
+
+        def loss_fn(scale, idx, toks, routing_weights):
+            idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, token_spec))
+            toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, token_spec))
+            routing_weights = jax.lax.with_sharding_constraint(
+                routing_weights, NamedSharding(self.mesh, token_spec)
+            )
+            received, received_weights, handle, counts, total_recv = ep_dispatch(
+                self.hk, idx, toks, routing_weights, self.recv_capacity_per_rank
+            )
+            received, received_weights, handle, counts = (
+                checkpoint_name(value, "saved_dispatch")
+                for value in (received, received_weights, handle, counts)
+            )
+            align = max(self.hk.dispatch_output_per_expert_alignment, 1)
+            padded = ((counts + align - 1) // align) * align
+            valid_slots = jnp.sum(padded, axis=-1, keepdims=True)
+            mask = jnp.arange(self.recv_capacity_per_rank)[None, :] < valid_slots
+            received = jnp.where(mask[..., None], received, 0)
+            received_weights = jnp.where(mask, received_weights, 0)
+            expert_output = (received * received_weights[..., None] * scale).astype(toks.dtype)
+            expert_output = jax.lax.with_sharding_constraint(
+                expert_output, NamedSharding(self.mesh, recv_spec)
+            )
+            output = ep_combine(self.hk, handle, counts, expert_output, total_tokens)
+            return jnp.sum(output.astype(jnp.float32) ** 2), total_recv
+
+        checkpointed = jax.checkpoint(
+            loss_fn, policy=jax.checkpoint_policies.save_only_these_names("saved_dispatch")
+        )
+        with self.mesh, global_shard_guard(self.mr):
+            args = (jnp.asarray(0.5, jnp.float32), indices, tokens, weights)
+            expected = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(*args)
+            actual = jax.jit(jax.value_and_grad(checkpointed, has_aux=True))(*args)
+            jax.block_until_ready((actual, expected))
+            actual = jmu.process_allgather(actual, tiled=True)
+            expected = jmu.process_allgather(expected, tiled=True)
+        for value, reference in zip(
+            jax.tree_util.tree_leaves(actual), jax.tree_util.tree_leaves(expected)
+        ):
+            self.assertTrue(np.all(np.isfinite(value)))
+            np.testing.assert_allclose(value, reference, atol=1e-5, rtol=1e-5)
+        self.assertGreater(int(np.max(np.asarray(actual[0][1]))), self.recv_capacity_per_rank)
+        self.assertGreater(float(np.max(np.abs(np.asarray(actual[1])))), 0.0)
+
 
 # lax.scan handle_mem relocation
 
