@@ -860,12 +860,11 @@ class GroupedTensorStorage:
                     raise ValueError(
                         "Row-scaled NVFP4 grouped quantization requires rowwise usage."
                     )
-                if columnwise_usage:
-                    raise ValueError(
-                        "Row-scaled NVFP4 grouped quantization does not support columnwise usage."
-                    )
             total_amax_elements = (
                 sum(math.prod(s[:-1]) for s in shape) if row_scaled_nvfp4 else num_tensors
+            )
+            total_columnwise_amax_elements = (
+                sum(s[-1] for s in shape) if row_scaled_nvfp4 else num_tensors
             )
 
             if rowwise_usage:
@@ -899,7 +898,9 @@ class GroupedTensorStorage:
                     total_columnwise_scale_elements, dtype=torch.uint8, device=device
                 )
                 if not disable_second_level_scale:
-                    columnwise_amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
+                    columnwise_amax = torch.empty(
+                        total_columnwise_amax_elements, dtype=torch.float32, device=device
+                    )
         elif compatible_recipe.float8_block_scaling():
             scale_inv_dtype = DType.kFloat32
 
@@ -1136,17 +1137,29 @@ class GroupedTensorStorage:
                     cum += math.prod(scale_shape)
                     columnwise_scale_inv_offsets.append(cum)
                 self.columnwise_scale_inv_offsets = columnwise_scale_inv_offsets
-        nvfp4_rowwise_amax_offsets = None
+
         row_scaled_nvfp4 = self.row_scaled_nvfp4
         nvfp4_use_4over6 = self.nvfp4_use_4over6
         nvfp4_e4m3_max = self.nvfp4_e4m3_max
         scale_inv_dtype = self.scale_inv_dtype
-        if recipe.nvfp4() and row_scaled_nvfp4:
-            cum = 0
-            nvfp4_rowwise_amax_offsets = [0]
-            for i in range(self.num_tensors):
-                cum += math.prod(self.tensor_shapes[i][:-1])
-                nvfp4_rowwise_amax_offsets.append(cum)
+
+        # Determine amax offsets for NVFP4 tensors
+        nvfp4_rowwise_amax_offsets = None
+        nvfp4_columnwise_amax_offsets = None
+        if recipe.nvfp4():
+            if row_scaled_nvfp4:
+                off_row = 0
+                off_col = 0
+                nvfp4_rowwise_amax_offsets = [0]
+                nvfp4_columnwise_amax_offsets = [0]
+                for shape in self.tensor_shapes:
+                    off_row += math.prod(shape[:-1])
+                    off_col += shape[-1]
+                    nvfp4_rowwise_amax_offsets.append(off_row)
+                    nvfp4_columnwise_amax_offsets.append(off_col)
+            else:
+                nvfp4_rowwise_amax_offsets = list(range(self.num_tensors + 1))
+                nvfp4_columnwise_amax_offsets = list(range(self.num_tensors + 1))
 
         for i in range(self.num_tensors):
             quantizer = self.quantizer
@@ -1342,15 +1355,12 @@ class GroupedTensorStorage:
                     ].view(cscale_shape)
 
                 if self.amax is not None:
-                    if nvfp4_rowwise_amax_offsets is not None:
-                        amax_start = nvfp4_rowwise_amax_offsets[i]
-                        amax_end = nvfp4_rowwise_amax_offsets[i + 1]
-                        amax_rowwise = amax_buffer[amax_start:amax_end]
-                    else:
-                        amax_rowwise = amax_buffer[i : i + 1]
+                    amax_start, amax_end = nvfp4_rowwise_amax_offsets[i : i + 2]
+                    amax_rowwise = amax_buffer[amax_start:amax_end]
 
                 if self.columnwise_amax is not None:
-                    amax_columnwise = columnwise_amax_buffer[i : i + 1]
+                    amax_start, amax_end = nvfp4_columnwise_amax_offsets[i : i + 2]
+                    amax_columnwise = columnwise_amax_buffer[amax_start:amax_end]
 
                 if quantizer.internal:
                     nvfp4_tensor_class = NVFP4TensorStorage

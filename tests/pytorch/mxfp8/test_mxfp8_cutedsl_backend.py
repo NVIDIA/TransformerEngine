@@ -554,3 +554,43 @@ def test_gated_sizes(swizzled, is_bwd, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_gated_dtypes(swizzled, is_bwd, act, fp8_dtype, in_dtype):
     run_gated_test_case(act, is_bwd, (256, 384), BOTH, in_dtype, fp8_dtype, swizzled)
+
+
+OUT_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
+DEQUANT_SHAPES = MATRIX_SIZES + [(100, 48)]
+
+
+# Test cases for dequantization (mirrors C++ test's OperatorTest_DequantizeMXFP8).
+# With both data copies present, dequantize reads the rowwise one.
+@pytest.mark.parametrize("shape", DEQUANT_SHAPES, ids=get_shape_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("out_dtype", OUT_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_dequantize(swizzled, fp8_dtype, out_dtype, block_size, shape):
+    M, N = shape
+    rowwise = block_size[1] != 1
+    columnwise = block_size[0] != 1
+    x, _ = generate_inputs(M, N, torch.bfloat16)
+    set_cutedsl_backend(False)
+    q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+    q.optimize_for_gemm = swizzled
+    qx = q(x)
+    out_cuda = qx.dequantize(dtype=out_dtype)
+
+    set_cutedsl_backend(True)
+    try:
+        out_cutedsl = qx.dequantize(dtype=out_dtype)
+    finally:
+        set_cutedsl_backend(False)
+
+    major, minor = device_compute_capability()
+    key = (
+        f"cutedsl_mxfp8_dequant_sm{major * 10 + minor}_{FP8_TO_KEY[fp8_dtype]}_"
+        f"{DTYPE_TO_STR[out_dtype]}_{int(rowwise)}_{int(columnwise)}_{int(swizzled)}"
+    )
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
+        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+        "to CUDA and this case compared CUDA against itself"
+    )
+    assert torch.equal(out_cutedsl, out_cuda)
