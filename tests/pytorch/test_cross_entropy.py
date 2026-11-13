@@ -13,7 +13,7 @@ from transformer_engine.pytorch import is_mxfp8_available, parallel_cross_entrop
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
 
-from utils import dtype_tols
+from utils import KernelLaunchCounter, dtype_tols
 
 
 class TestParallelCrossEntropy:
@@ -439,17 +439,20 @@ def test_parallel_cross_entropy_deprecated_input_alias():
 
 
 def _logits_with_argmax_cases(shape, dtype):
-    """BF16-representable logits whose rows exercise ties within and across 32K-wide blocks."""
+    """BF16-representable logits whose rows exercise ties within and across the blocks of the
+    single-rank forward kernel."""
 
     torch.manual_seed(7)
     values = torch.randn(shape, dtype=torch.bfloat16, device="cuda").to(dtype)
     vocab = shape[-1]
+    block = triton_cross_entropy._FWD_BLOCK_SIZE
     peak = 8.0
     values[0, 0, [5, vocab - 30000]] = peak  # equal maxima in different blocks
     values[0, 1, [vocab - 30000, vocab - 4]] = peak  # equal maxima in later blocks
     values[0, 2, [100, 7]] = peak  # equal maxima in the same block
     values[0, 3, vocab - 1] = peak  # a strictly larger maximum in the last block
     values[0, 4] = 0.5  # a constant row
+    values[1, 0, [block - 1, block]] = peak  # equal maxima on both sides of a block boundary
     return values
 
 
@@ -533,19 +536,20 @@ def test_parallel_cross_entropy_return_argmax_nan():
 
 def _masked_logits(n_rows, vocab, dtype, seed):
     """Logits with masked (-inf) entries and a finite maximum in every row, and targets that are
-    unmasked. Rows start with masked blocks of the forward kernels (4096 wide on a single rank,
-    32K wide before), keep only one logit, or are masked elsewhere. Row patterns repeat every
-    eight rows."""
+    unmasked. The masks are laid out against the blocks of the single-rank forward kernel: rows
+    whose first or last block is masked entirely, rows that keep only one or a few logits, and
+    rows masked elsewhere. Row patterns repeat every eight rows."""
 
+    block = triton_cross_entropy._FWD_BLOCK_SIZE
     generator = torch.Generator(device="cuda").manual_seed(seed)
     values = torch.randn((n_rows, vocab), device="cuda", generator=generator)
-    values[0::8, :4096] = -math.inf  # the first block is masked
+    values[0::8, :block] = -math.inf  # the first block is masked
     values[1::8, : vocab // 2] = -math.inf  # the first half is masked
     values[2::8, :-1] = -math.inf  # only the last logit is unmasked
     values[3::8, :] = -math.inf
-    values[3::8, 4100] = 0.0  # only one logit in the second block is unmasked
+    values[3::8, block + 4] = 0.0  # only one logit in the second block is unmasked
     values[4::8, ::2] = -math.inf  # no block is masked entirely
-    values[5::8, -4096:] = -math.inf  # the last block is masked
+    values[5::8, -block:] = -math.inf  # the last block is masked
     values[6::8, :-100] = -math.inf  # only the last 100 logits are unmasked
     values = values.to(dtype)
     target = torch.multinomial(values.isfinite().float(), 1, generator=generator).squeeze(-1)
@@ -647,28 +651,11 @@ _MXFP8_BUFFERS = (
 )
 
 
-class _KernelLaunchCounter:
-    """Stands in for a Triton kernel, counting its launches and forwarding them."""
-
-    def __init__(self, kernel):
-        self.kernel = kernel
-        self.launches = 0
-
-    def __getitem__(self, grid):
-        launch = self.kernel[grid]
-
-        def counted_launch(*args, **kwargs):
-            self.launches += 1
-            return launch(*args, **kwargs)
-
-        return counted_launch
-
-
 @pytest.fixture
 def mxfp8_kernel_launches(monkeypatch):
     """Counts the launches of the fused MXFP8 backward kernel, so that tests can tell the fused
     path from the fallback, which writes the same bytes."""
-    counter = _KernelLaunchCounter(triton_cross_entropy.cross_entropy_backward_mxfp8_kernel)
+    counter = KernelLaunchCounter(triton_cross_entropy.cross_entropy_backward_mxfp8_kernel)
     monkeypatch.setattr(triton_cross_entropy, "cross_entropy_backward_mxfp8_kernel", counter)
     return counter
 

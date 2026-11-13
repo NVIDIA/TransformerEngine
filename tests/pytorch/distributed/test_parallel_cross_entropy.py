@@ -20,7 +20,7 @@ import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
 
 # Prepend so installed packages with a top-level utils module cannot shadow the test helpers.
 sys.path = [str(pathlib.Path(__file__).resolve().parent.parent)] + sys.path
-from utils import dtype_tols
+from utils import KernelLaunchCounter, dtype_tols
 
 
 def _run_tensor_parallel(rank, world_size, init_file, label_smoothing):
@@ -171,14 +171,20 @@ def _run_tensor_parallel_masked(rank, world_size, init_file, label_smoothing):
     )
     try:
         generator = torch.Generator().manual_seed(2027)
-        for shape, block in (((1, 5, 22), 8), ((1, 5, 80000), 32768)):
+        # Row 2 masks the first masked_prefix logits of each shard: part of the only block of the
+        # tensor-parallel forward kernel for 11-wide shards, and the whole first block for
+        # 40000-wide shards.
+        for shape, masked_prefix in (
+            ((1, 5, 22), 8),
+            ((1, 5, 80000), triton_cross_entropy.MAX_FUSED_SIZE),
+        ):
             vocab = shape[-1]
             local_vocab = vocab // world_size
             values = torch.randn(shape, generator=generator)
             values[0, 0, :local_vocab] = -float("inf")  # the shard of rank 0 is masked
             values[0, 1, local_vocab:] = -float("inf")  # the shard of rank 1 is masked
             for start in range(0, vocab, local_vocab):
-                values[0, 2, start : start + block] = -float("inf")  # each first block
+                values[0, 2, start : start + masked_prefix] = -float("inf")
             values[0, 3, :-1] = -float("inf")  # only the last logit is unmasked
             target = torch.multinomial(
                 values.isfinite().float().reshape(-1, vocab), 1, generator=generator
@@ -227,23 +233,6 @@ def _run_tensor_parallel_masked(rank, world_size, init_file, label_smoothing):
         dist.destroy_process_group()
 
 
-class _KernelLaunchCounter:
-    """Stands in for a Triton kernel, counting its launches and forwarding them."""
-
-    def __init__(self, kernel):
-        self.kernel = kernel
-        self.launches = 0
-
-    def __getitem__(self, grid):
-        launch = self.kernel[grid]
-
-        def counted_launch(*args, **kwargs):
-            self.launches += 1
-            return launch(*args, **kwargs)
-
-        return counted_launch
-
-
 def _run_tensor_parallel_mxfp8_grad(rank, world_size, init_file, label_smoothing):
     """Two-rank worker: each rank's MXFP8 gradient is written by the fused kernel and has the
     bytes of its BF16 gradient shard quantized by the quantizer."""
@@ -257,7 +246,7 @@ def _run_tensor_parallel_mxfp8_grad(rank, world_size, init_file, label_smoothing
         world_size=world_size,
         device_id=device,
     )
-    counter = _KernelLaunchCounter(triton_cross_entropy.cross_entropy_backward_mxfp8_kernel)
+    counter = KernelLaunchCounter(triton_cross_entropy.cross_entropy_backward_mxfp8_kernel)
     triton_cross_entropy.cross_entropy_backward_mxfp8_kernel = counter
     try:
         generator = torch.Generator().manual_seed(2027)
