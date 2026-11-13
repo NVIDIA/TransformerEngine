@@ -479,9 +479,29 @@ def test_inputs_on_non_current_device():
 # --- MXFP8 attention scale layout and the RoPE backward kernels -----------------------------------
 
 
-def _rope_tables(s, dtype=torch.bfloat16, rows=None):
-    cos, sin = build_rope_tables(rows or s, emb_dim=HEAD_DIM_ROPE, device="cuda")
+def _rope_tables(s, dtype=torch.bfloat16, rows=None, asymmetric=False):
+    """RoPE tables scaled by 1.2 (as in YaRN, so the products are not exact). build_rope_tables
+    repeats the same frequencies in both halves; with asymmetric=True the right half uses
+    different frequencies, so a kernel that reads the wrong half of cos / sin fails."""
+    rows = rows or s
+    if not asymmetric:
+        cos, sin = build_rope_tables(rows, emb_dim=HEAD_DIM_ROPE, device="cuda")
+    else:
+        inv_freq = 1.0 / (
+            10000
+            ** (
+                torch.arange(0, HEAD_DIM_ROPE, 2, dtype=torch.float32, device="cuda")
+                / HEAD_DIM_ROPE
+            )
+        )
+        t = torch.arange(rows, device="cuda", dtype=torch.float32)
+        freqs = torch.cat([torch.outer(t, inv_freq), torch.outer(t, inv_freq * 0.5)], dim=-1)
+        cos, sin = freqs.cos(), freqs.sin()
+        assert not torch.equal(cos[1:, : HEAD_DIM_ROPE // 2], cos[1:, HEAD_DIM_ROPE // 2 :])
     return (cos * 1.2).to(dtype), (sin * 1.2).to(dtype)
+
+
+TABLES = pytest.mark.parametrize("asymmetric", [False, True], ids=["symmetric", "asymmetric"])
 
 
 def _q_input(s, b, h, seed=4321):
@@ -515,10 +535,11 @@ ATTN_SHAPES = [(4096, 1, 128), (2048, 2, 64), (512, 1, 16), (256, 3, 6), (128, 2
 
 
 @requires_kv_rope_kernel
+@TABLES
 @pytest.mark.parametrize("s, b, h", ATTN_SHAPES)
-def test_q_rope_mxfp8_matches_rope_quantize_swizzle(s, b, h):
+def test_q_rope_mxfp8_matches_rope_quantize_swizzle(s, b, h, asymmetric):
     q = _q_input(s, b, h)
-    cos, sin = _rope_tables(s)
+    cos, sin = _rope_tables(s, asymmetric=asymmetric)
     expected = _q_reference(q, cos, sin)
     q_before = q.clone()
     query = fused_mla_q_rope_mxfp8(q, cos.view(s, 1, 1, -1), sin.view(s, 1, 1, -1))
@@ -530,9 +551,12 @@ def test_q_rope_mxfp8_matches_rope_quantize_swizzle(s, b, h):
 
 
 @requires_kv_rope_kernel
+@TABLES
 @pytest.mark.parametrize("s, b, h", ATTN_SHAPES)
-def test_kv_rope_mxfp8_transpose_swizzle_scales(s, b, h):
+def test_kv_rope_mxfp8_transpose_swizzle_scales(s, b, h, asymmetric):
     kv, k_rope, cos, sin = _kv_rope_inputs(s, b, h, torch.bfloat16)
+    if asymmetric:
+        cos, sin = _rope_tables(s, asymmetric=True)
     ref_key, ref_value = _kv_rope_reference(kv, k_rope, cos, sin)
     mxfp8_transpose_swizzle([ref_key, ref_value], "sbhd")
     key, value = fused_mla_kv_rope_mxfp8(
@@ -630,10 +654,11 @@ def _grad_inputs(s, b, h, seed=99):
 
 
 @requires_kv_rope_kernel
+@TABLES
 @pytest.mark.parametrize("s, b, h", ATTN_SHAPES + [(64, 2, 4)])
-def test_q_rope_backward_in_place(s, b, h):
+def test_q_rope_backward_in_place(s, b, h, asymmetric):
     dq, _, _ = _grad_inputs(s, b, h)
-    cos, sin = _rope_tables(s)
+    cos, sin = _rope_tables(s, asymmetric=asymmetric)
     expected = _q_rope_backward_reference(dq, cos, sin)
     out = fused_mla_q_rope_backward_(dq, cos, sin)
     assert out.data_ptr() == dq.data_ptr()
@@ -641,10 +666,11 @@ def test_q_rope_backward_in_place(s, b, h):
 
 
 @requires_kv_rope_kernel
+@TABLES
 @pytest.mark.parametrize("s, b, h", ATTN_SHAPES + [(64, 2, 4)])
-def test_q_rope_backward_mxfp8(s, b, h):
+def test_q_rope_backward_mxfp8(s, b, h, asymmetric):
     dq, _, _ = _grad_inputs(s, b, h)
-    cos, sin = _rope_tables(s)
+    cos, sin = _rope_tables(s, asymmetric=asymmetric)
     expected_bf16 = _q_rope_backward_reference(dq, cos, sin)
     expected = _grad_quantizer()(expected_bf16.view(s * b, h * HEAD_DIM))
     dq_before = dq.clone()
