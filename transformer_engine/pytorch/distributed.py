@@ -437,10 +437,12 @@ class _CheckpointRNGState:
             with self.guard():
                 yield
         finally:
-            self._restore(live_states)
-            _set_cuda_rng_state(cuda_state)
-            if self.tracker is not None:
-                self.tracker.set_states(tracker_states)
+            try:
+                self._restore(live_states)
+            finally:
+                _set_cuda_rng_state(cuda_state)
+                if self.tracker is not None:
+                    self.tracker.set_states(tracker_states)
 
 
 class _CheckpointFunction(torch.autograd.Function):
