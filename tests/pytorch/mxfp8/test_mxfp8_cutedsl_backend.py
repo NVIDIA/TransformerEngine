@@ -63,8 +63,8 @@ ROW, COL, BOTH = (1, 32), (32, 1), (32, 32)
 BLOCK_SIZES = [ROW, COL, BOTH]
 
 # Every activation the CuTeDSL backend implements; "desc" is the name it goes by in the
-# config key (Activation in common/util/cutedsl_utils.h). Gated variants are absent because
-# they go to a separate TE/common kernel that the backend does not cover.
+# config key (Activation in common/util/cutedsl_utils.h). Gated variants go to a separate kernel
+# and are covered by GATED_ACTIVATIONS below.
 IDENTITY = {"name": "Identity", "act": None, "dact": None, "dbias_dact": None, "desc": "none"}
 ACTIVATIONS = [
     {
@@ -431,6 +431,129 @@ def test_specialized_kernels(shape, block_size, in_dtype, swizzled, input_offset
         swizzled,
         input_offset,
     )
+
+
+# Gated activations (gated_mxfp8.cuh). Input is [M, 2N] = [act | gate]; the forward writes
+# [M, N] and the backward, given grad [M, N], writes [M, 2N]. "desc" is the name the activation
+# goes by in the config key (GatedActivation in common/util/cutedsl_utils.h). The parameters of
+# the parameterized ones are chosen so that their clamps and tanh terms are active on the
+# [-2, 2] inputs generate_inputs draws.
+GATED_ACTIVATIONS = [
+    {"name": "GeGLU", "act": tex.geglu, "dact": tex.dgeglu, "desc": "geglu", "kwargs": {}},
+    {"name": "QGeGLU", "act": tex.qgeglu, "dact": tex.dqgeglu, "desc": "qgeglu", "kwargs": {}},
+    {"name": "ReGLU", "act": tex.reglu, "dact": tex.dreglu, "desc": "reglu", "kwargs": {}},
+    {"name": "SReGLU", "act": tex.sreglu, "dact": tex.dsreglu, "desc": "sreglu", "kwargs": {}},
+    {"name": "SwiGLU", "act": tex.swiglu, "dact": tex.dswiglu, "desc": "swiglu", "kwargs": {}},
+    {"name": "GLU", "act": tex.glu, "dact": tex.dglu, "desc": "glu", "kwargs": {}},
+    {
+        "name": "ClampedSwiGLU",
+        "act": tex.clamped_swiglu,
+        "dact": tex.clamped_dswiglu,
+        "desc": "clamped_swiglu",
+        "kwargs": {"limit": 1.0, "alpha": 1.702, "glu_linear_offset": 0.5},
+    },
+    {
+        "name": "SiTUGLU",
+        "act": tex.situglu,
+        "dact": tex.dsituglu,
+        "desc": "situglu",
+        "kwargs": {"beta1": 1.0, "beta2": 2.0},
+    },
+]
+get_gated_id = lambda a: a["name"]
+GATED_DIRECTIONS = [False, True]
+get_direction_id = lambda is_bwd: "bwd" if is_bwd else "fwd"
+
+
+def run_on_both_backends(run):
+    """Return (CUDA result, CuTeDSL result) of run(), with run() responsible for materializing
+    whatever it returns before the backend is switched."""
+    set_cutedsl_backend(False)
+    cuda_result = run()
+    set_cutedsl_backend(True)
+    try:
+        cutedsl_result = run()
+    finally:
+        set_cutedsl_backend(False)
+    return cuda_result, cutedsl_result
+
+
+def assert_cutedsl_kernel_registered(key):
+    """Guard against a silent CUDA fallback, which would make a cross-backend comparison compare
+    CUDA against itself."""
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
+        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+        "to CUDA and this case compared CUDA against itself"
+    )
+
+
+def get_gated_cfg_key(act, in_dtype, fp8_dtype, rowwise, colwise, swizzled, is_bwd):
+    """Mirror of MXFP8GatedQuantConfig::to_key (gated_mxfp8_cutedsl.cuh)."""
+    major, minor = device_compute_capability()
+    flags = (rowwise, colwise, swizzled, is_bwd)
+    return (
+        f"cutedsl_mxfp8_gated_sm{major * 10 + minor}_{DTYPE_TO_STR[in_dtype]}_"
+        f"{FP8_TO_KEY[fp8_dtype]}_"
+        + "_".join("1" if f else "0" for f in flags)
+        + f"_{act['desc']}"
+    )
+
+
+def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swizzled=False):
+    """Assert the CuTeDSL and CUDA backends produce bit-identical gated activation outputs.
+    shape is (M, N): the gated input is [M, 2N].
+    """
+    M, N = shape
+    if is_bwd and swizzled:
+        pytest.skip("CuTeDSL hands backward gated activations with GEMM-swizzled scales to CUDA")
+    rowwise = block_size[1] != 1
+    columnwise = block_size[0] != 1
+    x, _ = generate_inputs(M, 2 * N, in_dtype)
+    grad, _ = generate_inputs(M, N, in_dtype, seed=1)
+
+    def run():
+        q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+        q.optimize_for_gemm = swizzled
+        if is_bwd:
+            out = act["dact"](grad, x, q, **act["kwargs"])
+        else:
+            out = act["act"](x, q, **act["kwargs"])
+        return extract_quantized_output(out, rowwise, columnwise, swizzled)
+
+    cuda_output, cutedsl_output = run_on_both_backends(run)
+    assert_cutedsl_kernel_registered(
+        get_gated_cfg_key(act, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, is_bwd)
+    )
+
+    layout = "swizzled" if swizzled else "linear"
+    tag = (
+        f"{act['name']}/{get_direction_id(is_bwd)}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/"
+        f"{FP8_TO_STR[fp8_dtype]}/{layout}"
+    )
+    for name, cuda_bytes in cuda_output.items():
+        assert torch.equal(
+            cutedsl_output[name], cuda_bytes
+        ), f"{tag}: {name} differ between backends"
+
+
+@pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("act", GATED_ACTIVATIONS, ids=get_gated_id)
+@pytest.mark.parametrize("is_bwd", GATED_DIRECTIONS, ids=get_direction_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_gated_sizes(swizzled, is_bwd, act, block_size, shape):
+    run_gated_test_case(
+        act, is_bwd, shape, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled
+    )
+
+
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+@pytest.mark.parametrize("act", GATED_ACTIVATIONS, ids=get_gated_id)
+@pytest.mark.parametrize("is_bwd", GATED_DIRECTIONS, ids=get_direction_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_gated_dtypes(swizzled, is_bwd, act, fp8_dtype, in_dtype):
+    run_gated_test_case(act, is_bwd, (256, 384), BOTH, in_dtype, fp8_dtype, swizzled)
 
 
 OUT_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
