@@ -51,7 +51,7 @@ if license_src.is_file():
 
 from build_tools.build_ext import get_build_ext
 from build_tools.utils import copy_common_headers, min_python_version_str
-from build_tools.te_version import te_version
+from build_tools.te_version import append_local_version, te_raw_version, te_version
 from build_tools.pytorch import (
     setup_pytorch_extension,
     install_requirements,
@@ -106,9 +106,14 @@ def get_wheel_url():
     cuda_version = f"{torch_cuda_version.major}"
 
     # Determine wheel URL based on CUDA version, torch version, python version and OS
-    wheel_filename = f"{PACKAGE_NAME}-{nvte_version}+cu{cuda_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
+    wheel_version = append_local_version(
+        nvte_version, f"cu{cuda_version}torch{torch_version}cxx11abi{cxx11_abi}"
+    )
+    wheel_filename = (
+        f"{PACKAGE_NAME}-{wheel_version}-{python_version}-{python_version}-{platform_name}.whl"
+    )
 
-    wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{nvte_version}", wheel_name=wheel_filename)
+    wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{te_raw_version()}", wheel_name=wheel_filename)
 
     return wheel_url, wheel_filename
 
