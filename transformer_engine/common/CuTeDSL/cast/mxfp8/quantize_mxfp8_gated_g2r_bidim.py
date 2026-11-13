@@ -63,7 +63,8 @@ def _row_tile(
 
 class MXFP8GatedQuantizeG2RKernel:
     """Register-resident gated MXFP8 cast: BF16 [M, 2N] -> E4M3 or E5M2, both directions or
-    columnwise only, any M, N % 32 == 0 (the C++ dispatcher's requirement)."""
+    columnwise only, any M, N % 32 == 0 (the C++ dispatcher's requirement; N % 128 == 0 for the
+    backward with GEMM-swizzled scales)."""
 
     _CTA_THREADS_Y = 8
     _CTA_THREADS_X = 32
@@ -73,24 +74,23 @@ class MXFP8GatedQuantizeG2RKernel:
 
     @staticmethod
     def supports(cfg: MXFP8GatedQuantizeConfig) -> bool:
-        """BF16 with columnwise output (rowwise optional); GEMM-swizzled scales in the forward
-        only, like the shared-memory port."""
-        return (
-            cfg.DTYPE is cutlass.BFloat16
-            and cfg.COLWISE
-            and not (cfg.IS_BWD and cfg.WITH_GEMM_SWIZZLED_SCALES)
-        )
+        """BF16 with columnwise output (rowwise optional)."""
+        return cfg.DTYPE is cutlass.BFloat16 and cfg.COLWISE
 
-    @staticmethod
     @cute.jit
     def eligible_to_dispatch(
+        self,
         mGatedInput: cute.Tensor,
         mS_col: cute.Tensor,
     ) -> Boolean:
         """Whether the request fits this kernel. The C++ dispatcher checks 16-byte alignment of
-        the data pointers. Columnwise scales are 8-byte aligned, and grid.y stays within limits."""
+        the data pointers. Columnwise scales are 8-byte aligned, grid.y stays within limits, and
+        the backward with GEMM-swizzled scales has N % 128 == 0."""
         M = mGatedInput.shape[0]
-        return (M + 31) // 32 <= 65535 and mS_col.iterator.toint() % 8 == 0
+        eligible = (M + 31) // 32 <= 65535 and mS_col.iterator.toint() % 8 == 0
+        if cutlass.const_expr(self.cfg.IS_BWD and self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+            eligible = eligible and (mGatedInput.shape[1] // 2) % 128 == 0
+        return eligible
 
     def __init__(self, cfg: MXFP8GatedQuantizeConfig):
         assert self.supports(cfg), f"{cfg} is not supported by {type(self).__name__}"
@@ -131,9 +131,14 @@ class MXFP8GatedQuantizeG2RKernel:
         # Output parts: the forward output, or the two halves [d act | d gate] of the backward one.
         mO_row1 = mS_row1 = mO_col1 = mS_col1 = None
         if cutlass.const_expr(self.cfg.IS_BWD):
-            # The gate half's scales start at its first column: a pointer offset, which keeps the
-            # plain layouts the scale stores take.
             mS_row0, mS_col0 = mS_row, mS_col
+            if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+                mS_row0, mS_col0 = derive_swizzled_scale_layout(
+                    M, 2 * N, self.cfg.ROWWISE, True, mS_row, mS_col
+                )
+            # The gate half's scales start at its first column: a pointer offset, which keeps the
+            # plain layouts the scale stores take. With swizzled scales the half must then start
+            # on a 128-column scale tile, so eligible_to_dispatch requires N % 128 == 0.
             if cutlass.const_expr(self.cfg.ROWWISE):
                 mS_row1 = cute.domain_offset((0, N // 32), mS_row0)
             mS_col1 = cute.domain_offset((0, N), mS_col0)
