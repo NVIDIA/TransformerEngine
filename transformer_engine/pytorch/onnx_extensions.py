@@ -31,7 +31,6 @@ from .tensor.float8_tensor import Float8Quantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .constants import MXFP8_BLOCK_SCALING_SIZE, DType
 from .utils import round_up_to_nearest_multiple
-from .export import is_in_onnx_export_mode
 
 trt_opset = onnxscript.values.Opset(
     "trt", version=1
@@ -393,7 +392,6 @@ def onnx_attention_mask_func(
     attention_scores: torch.Tensor, attention_mask: torch.Tensor
 ) -> torch.Tensor:
     """Get attention mask without inp"""
-    assert is_in_onnx_export_mode()
     return attention_scores.masked_fill(attention_mask, -10000.0)
 
 

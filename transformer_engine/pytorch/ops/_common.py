@@ -19,7 +19,6 @@ from ..ep import (
     get_ep_drop_on_overflow,
     get_ep_group,
 )
-from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor import (
@@ -185,12 +184,8 @@ def maybe_autocast_dtype(
 ) -> torch.dtype:
     """Get autocast dtype if enabled"""
 
-    if torch_version() >= (2, 4, 3):
-        if torch.is_autocast_enabled(device_type):
-            return torch.get_autocast_dtype(device_type)
-    else:
-        if torch.is_autocast_enabled():
-            return torch.get_autocast_gpu_dtype()
+    if torch.is_autocast_enabled(device_type):
+        return torch.get_autocast_dtype(device_type)
     return canonicalize_dtype(default_dtype)
 
 
