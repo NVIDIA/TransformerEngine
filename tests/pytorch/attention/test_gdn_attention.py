@@ -44,6 +44,91 @@ requires_gdn = pytest.mark.skipif(
     not _GDN_AVAILABLE, reason="GDN requires a supported cuDNN frontend kernel runtime"
 )
 
+
+@requires_gdn
+@pytest.mark.parametrize("boundaries", [(0, 256), (0, 64, 256)])
+def test_context_parallel_state_operations(boundaries):
+    """Check summary orientation and all five gradients against the FP64 recurrence."""
+    torch.manual_seed(1937)
+    tokens, heads, dim = boundaries[-1], 4, 128
+    q = F.normalize(torch.randn(tokens, heads, dim, device="cuda"), dim=-1).bfloat16()
+    k = F.normalize(torch.randn_like(q.float()), dim=-1).bfloat16()
+    v = torch.randn_like(q)
+    g = -0.05 * torch.rand(tokens, heads, device="cuda")
+    beta = torch.rand_like(g)
+    cu = torch.tensor(boundaries, device="cuda", dtype=torch.int32)
+    shape = (len(boundaries) - 1, heads, dim, dim)
+    state = 0.01 * torch.randn(shape, device="cuda")
+    final_grad = 0.01 * torch.randn_like(state)
+    output_grad = torch.randn_like(v)
+    scale = dim**-0.5
+    # Deliberately differ from the module's head count: chunkwise retains all heads.
+    backend = GatedDeltaNetAttention(
+        num_attention_heads=1, kv_channels=dim
+    ).get_context_parallel_backend()
+    reference_inputs = [x.detach().double().requires_grad_() for x in (q, k, v, g, beta)]
+    ref_state = state.double().requires_grad_()
+    ref_output, ref_final = _gdn_reference(
+        *(x.unsqueeze(0) for x in reference_inputs),
+        initial_state=ref_state,
+        cu_seqlens=cu,
+        scale=scale,
+    )
+    expected = torch.autograd.grad(
+        (ref_output, ref_final),
+        reference_inputs,
+        (output_grad.unsqueeze(0).double(), final_grad.double()),
+    )
+    actual_output = backend.forward(q, k, v, g, beta, cu, scale=scale, initial_state=state)
+    _assert_rms_close(actual_output, ref_output.squeeze(0), _FWD_TOL[q.dtype], "output")
+    actual = backend.backward(
+        output_grad,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        cu,
+        scale=scale,
+        initial_state=state,
+        final_state_grad=final_grad,
+    )
+    for name, gradient, reference in zip(("q", "k", "v", "g", "beta"), actual, expected):
+        _assert_rms_close(gradient, reference, _BWD_TOL[q.dtype], name)
+
+    zero = torch.zeros_like(ref_state).requires_grad_()
+    zero_output, zero_final = _gdn_reference(
+        *(x.unsqueeze(0) for x in reference_inputs),
+        initial_state=zero,
+        cu_seqlens=cu,
+        scale=scale,
+    )
+    gamma_ref = torch.autograd.grad(zero_output, zero, output_grad.unsqueeze(0).double())[0]
+    update, transition = backend.forward_summary(k, v, g, beta, cu)
+    gamma, reverse_transition = backend.backward_summary(
+        q, k, g, beta, output_grad, cu, scale=scale
+    )
+    matrices = []
+    for start, stop in zip(boundaries[:-1], boundaries[1:]):
+        matrix = torch.eye(dim, device="cuda", dtype=torch.float64).expand(heads, dim, dim).clone()
+        identity = torch.eye(dim, device="cuda", dtype=torch.float64)
+        for i in range(start, stop):
+            key = k[i].double()
+            step = g[i].double().exp()[:, None, None] * (
+                identity - beta[i].double()[:, None, None] * key.unsqueeze(-1) * key.unsqueeze(-2)
+            )
+            matrix = matrix @ step
+        matrices.append(matrix)
+    expected_transition = torch.stack(matrices)
+    for name, actual, reference in (
+        ("state update", update, zero_final),
+        ("forward transition", transition, expected_transition),
+        ("backward transition", reverse_transition, expected_transition.transpose(-1, -2)),
+        ("initial state gradient", gamma, gamma_ref),
+    ):
+        _assert_rms_close(actual, reference, _STATE_TOL[q.dtype], name)
+
+
 _FWD_TOL = {torch.bfloat16: 2e-2, torch.float16: 1e-2}
 _STATE_TOL = {torch.bfloat16: 2e-2, torch.float16: 1e-2}
 _BWD_TOL = {torch.bfloat16: 4e-2, torch.float16: 2e-2}
