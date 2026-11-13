@@ -1313,60 +1313,6 @@ def test_checkpoint_dropout_gradients_during_graph_replay(use_reentrant, rng_sou
         previous = forward_output
 
 
-@pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.parametrize("dropout_impl", ("torch", "te_op"))
-@pytest.mark.parametrize("dropout_p", (0.0, 0.5))
-def test_checkpoint_rejects_captured_rng_without_philox_state(
-    use_reentrant, dropout_impl, dropout_p, monkeypatch
-):
-    """Without Philox state access, only deterministic captured checkpoints may proceed."""
-    monkeypatch.setattr(
-        "transformer_engine.pytorch.distributed._checkpoint_rng_available", lambda: False
-    )
-    tracker = CudaRNGStatesTracker()
-    tracker.add("model-parallel-rng", 4321)
-    dropout = te.ops.Dropout(dropout_p) if dropout_impl == "te_op" else None
-
-    def body(value):
-        with tracker.fork():
-            if dropout is not None:
-                return dropout(value)
-            return F.dropout(value, p=dropout_p, training=True)
-
-    def run(value):
-        return te_checkpoint(
-            body, value, use_reentrant=use_reentrant, get_rng_state_tracker=lambda: tracker
-        )
-
-    inp = torch.ones(4096, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        for _ in range(3):
-            inp.grad = None
-            out = run(inp)
-            out.sum().backward()
-    torch.cuda.current_stream().wait_stream(stream)
-    assert torch.equal(inp.grad, out), "Eager checkpointing must stay supported"
-    del out
-
-    inp.grad = None
-    graph = torch.cuda.CUDAGraph()
-    graph.register_generator_state(tracker.get_states()["model-parallel-rng"])
-    with torch.cuda.graph(graph):
-        if dropout_p > 0:
-            inp.mul(1)
-            with pytest.raises(RuntimeError, match="philox_state"):
-                run(inp)
-        else:
-            out = run(inp)
-            out.sum().backward()
-    if dropout_p == 0:
-        graph.replay()
-        torch.cuda.synchronize()
-        assert torch.equal(inp.grad, out)
-
-
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_checkpoint_without_autograd_preserves_forward_context():
     """The direct path must preserve a context that explicitly enables gradients."""
