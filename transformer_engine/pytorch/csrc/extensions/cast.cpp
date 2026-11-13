@@ -855,6 +855,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
                                          getTensorShape(*columnwise_scale_inv));
     }
   }
+  input_cpp.set_columnwise_transposed(input.attr("_columnwise_transposed").cast<bool>());
   if (first_dims.has_value()) {
     input_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
@@ -1176,11 +1177,15 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   }
 
   // Quantization parameters
-  const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
-  const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto is_2D_scaled = scaling_mode == NVTE_BLOCK_SCALING_2D;
   const auto fp8_dtype = quantizer_cpp_list[0]->dtype;
+  const bool columnwise_transposed = quantizer_cpp_list[0]->columnwise_transposed;
+  const bool rowwise_serves_columnwise = is_2D_scaled && !columnwise_transposed;
+  const bool rowwise_usage = quantizer_cpp_list[0]->rowwise_usage ||
+                             (quantizer_cpp_list[0]->columnwise_usage && rowwise_serves_columnwise);
+  const bool columnwise_usage =
+      quantizer_cpp_list[0]->columnwise_usage && !rowwise_serves_columnwise;
 
   // Allocate row-wise data
   std::vector<at::Tensor> rowwise_data_list, rowwise_scale_list;
@@ -1215,9 +1220,13 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     for (size_t i = 0; i < num_tensors; ++i) {
       columnwise_data_shapes.emplace_back();
       auto &shape = columnwise_data_shapes.back();
-      shape.push_back(shape_list[i].back());
-      for (size_t j = 0; j < shape_list[i].size() - 1; ++j) {
-        shape.push_back(shape_list[i][j]);
+      if (columnwise_transposed) {
+        shape.push_back(shape_list[i].back());
+        for (size_t j = 0; j < shape_list[i].size() - 1; ++j) {
+          shape.push_back(shape_list[i][j]);
+        }
+      } else {
+        shape = shape_list[i];
       }
       columnwise_scale_shapes.emplace_back(
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
@@ -1255,6 +1264,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     tensor_py_list.emplace_back(Float8BlockwiseQTensorClass(
         rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, MakePythonDType(fp8_dtype),
         quantizer_py_list[i], is_2D_scaled));
+    tensor_py_list.back().attr("_columnwise_transposed") = py::cast(columnwise_transposed);
 
     // Construct C++ tensor
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
@@ -1266,6 +1276,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
         rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
         columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
+    tensor_cpp_list.back().set_columnwise_transposed(columnwise_transposed);
   }
 
   return retval;

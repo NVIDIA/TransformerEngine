@@ -149,8 +149,11 @@ class TestFloat8BlockwiseTensor:
         atol: float = 0.0,
         dequant_columnwise: bool = False,
         use_cpp_allocation: bool = False,
-    ) -> None:
-        """Check numerical error when casting to FP8 and back"""
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Check numerical error when casting to FP8 and back
+
+        Returns the dequantized tensor and the reference, both on CPU.
+        """
         dims = _to_list(dims)
 
         # Initialize random data
@@ -181,6 +184,8 @@ class TestFloat8BlockwiseTensor:
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8, -x_ref, rtol=rtol, atol=atol)
 
+        return x_fp8, x_ref
+
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
@@ -199,9 +204,10 @@ class TestFloat8BlockwiseTensor:
 
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("block_scaling_dim", [1])
+    @pytest.mark.parametrize("block_scaling_dim", [1, 2])
+    @pytest.mark.parametrize("dims", [[], 311, [23, 128], [250, 500], [7, 5, 3]])
     def test_quantize_dequantize_columnwise_only(
-        self, fp8_dtype: DType, dtype: torch.dtype, block_scaling_dim: int
+        self, fp8_dtype: DType, dtype: torch.dtype, block_scaling_dim: int, dims: DimsType
     ) -> None:
         atol = _tols[fp8_dtype]["atol"]
         rtol = _tols[fp8_dtype]["rtol"]
@@ -211,9 +217,25 @@ class TestFloat8BlockwiseTensor:
             columnwise=True,
             block_scaling_dim=block_scaling_dim,
         )
-        self._test_quantize_dequantize(
-            quantizer=quantizer, dtype=dtype, atol=atol, rtol=rtol, use_cpp_allocation=True
+        x_dq, x_ref = self._test_quantize_dequantize(
+            quantizer=quantizer,
+            dtype=dtype,
+            dims=dims,
+            atol=atol,
+            rtol=rtol,
+            use_cpp_allocation=True,
         )
+
+        # Columnwise-only dequantization matches rowwise dequantization
+        rowwise_quantizer = Float8BlockQuantizer(
+            fp8_dtype=fp8_dtype,
+            rowwise=True,
+            columnwise=False,
+            block_scaling_dim=block_scaling_dim,
+        )
+        x_rowwise = tex.quantize(x_ref.to("cuda"), rowwise_quantizer, None, None)
+        x_rowwise_dq = x_rowwise.dequantize(dtype=dtype).cpu()
+        torch.testing.assert_close(x_dq, x_rowwise_dq, rtol=rtol, atol=atol)
 
     @pytest.mark.parametrize(
         "dims", [[], 256, 311, [264], [256, 512], [250, 500], [7, 5, 3], [2, 3, 5, 3]]

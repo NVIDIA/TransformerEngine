@@ -280,6 +280,17 @@ def reset_rng_states() -> None:
         random.setstate(random_state)
 
 
+def fp8_block_scaling_valid_scale_shape(
+    shape: Tuple[int, int], block_scaling_dim: int, columnwise: bool
+) -> Tuple[int, int]:
+    """Shape of the FP8 block-scaling scales that hold values, without alignment padding."""
+    rows, cols = shape
+    row_blocks, col_blocks = (rows + 127) // 128, (cols + 127) // 128
+    if block_scaling_dim == 2:
+        return (col_blocks, row_blocks) if columnwise else (row_blocks, col_blocks)
+    return (row_blocks, cols) if columnwise else (col_blocks, rows)
+
+
 def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol, is_fp8):
     if a is None and b is None:
         logging.debug(f"{name_a} vs {name_b}: both are None")

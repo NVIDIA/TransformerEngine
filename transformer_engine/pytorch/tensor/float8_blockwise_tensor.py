@@ -22,9 +22,14 @@ from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 from ..constants import DType
-from ..utils import devices_match, round_up_to_nearest_multiple
+from ..utils import devices_match, is_non_tn_fp8_gemm_supported, round_up_to_nearest_multiple
 
 aten = torch.ops.aten
+
+
+@torch.compiler.assume_constant_result
+def _columnwise_transposed() -> bool:
+    return not is_non_tn_fp8_gemm_supported()
 
 
 class Float8BlockQuantizer(Quantizer):
@@ -59,6 +64,11 @@ class Float8BlockQuantizer(Quantizer):
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
 
+    @property
+    def columnwise_transposed(self) -> bool:
+        """Whether column-wise data is stored transposed (where FP8 GEMM is TN-only)"""
+        return _columnwise_transposed()
+
     def copy(self) -> Float8BlockQuantizer:
         """Create shallow copy"""
 
@@ -84,6 +94,7 @@ class Float8BlockQuantizer(Quantizer):
                 "fp8_dtype": self.dtype,
                 "quantizer": self,
                 "is_2D_scaled": self.block_scaling_dim == 2,
+                "columnwise_transposed": self.columnwise_transposed,
                 "fake_dtype": fake_dtype,
             },
         }
@@ -93,14 +104,16 @@ class Float8BlockQuantizer(Quantizer):
     ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
         shape = tuple(shape)
         specs: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
-        # Blockwise FP8 scales are FP32; columnwise data is stored transposed.
-        if self.rowwise_usage:
+        # Blockwise FP8 scales are FP32. 2D row-wise data and scales serve column-wise usage
+        # unless column-wise data is stored transposed.
+        rowwise_serves_columnwise = self.block_scaling_dim == 2 and not self.columnwise_transposed
+        if self.rowwise_usage or (self.columnwise_usage and rowwise_serves_columnwise):
             specs["_rowwise_data"] = (shape, torch.uint8)
             specs["_rowwise_scale_inv"] = (
                 tuple(self.get_scale_shape(shape, columnwise=False)),
                 torch.float32,
             )
-        if self.columnwise_usage:
+        if self.columnwise_usage and not rowwise_serves_columnwise:
             specs["_columnwise_data"] = (tuple(self.get_columnwise_shape(shape)), torch.uint8)
             specs["_columnwise_scale_inv"] = (
                 tuple(self.get_scale_shape(shape, columnwise=True)),
@@ -215,8 +228,8 @@ class Float8BlockQuantizer(Quantizer):
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
         """Column-wise data shape
 
-        GEMMs expect that the column-wise data is transposed relative
-        to the logical tensor shape.
+        Where FP8 GEMM is TN-only, GEMMs expect that the column-wise
+        data is transposed relative to the logical tensor shape.
 
         Parameters
         ----------
@@ -228,6 +241,8 @@ class Float8BlockQuantizer(Quantizer):
         Tuple[int, ...]
             Column-wise data shape.
         """
+        if not self.columnwise_transposed:
+            return tuple(shape)
         colwise_shape = []
         if shape:
             colwise_shape.append(shape[-1])
@@ -272,7 +287,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
     rowwise_scale_inv : torch.Tensor
           FP32 dequantization scales in GEMM format for dequantizing rowwise_data.
     columnwise_data : Optional[torch.Tensor]
-          FP8 data in a uint8 tensor matching shape of dequantized tensor transpose.
+          FP8 data in a uint8 tensor matching shape of dequantized tensor transpose,
+          or of dequantized tensor if columnwise_transposed is False.
     columnwise_scale_inv : Optional[torch.Tensor]
           FP32 dequantization scales in GEMM format for dequantizing columnwise_data.
 
@@ -281,6 +297,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 is accepted for backward compatibility.
     quantizer : Quantizer - the Float8BlockQuantizer that quantized this tensor and
                holds configuration about quantization and dequantization modes.
+    columnwise_transposed : bool, default = True
+          Whether columnwise_data is stored transposed. If False, 2D block-scaled
+          rowwise data and scales also serve columnwise usage.
     """
 
     # NOTE: We reorder the *args so that we can instantiate a Float8BlockwiseQTensorStorage with positional args,
@@ -395,7 +414,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             data = tensor._rowwise_data
             if data is None:
                 # Columnwise data only.
-                super().__torch_dispatch__(func, types, args, kwargs)
+                return super().__torch_dispatch__(func, types, args, kwargs)
             orig_size = data.size()
             out_data = data.__torch_dispatch__(
                 func,
@@ -549,6 +568,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             dst._fp8_dtype = src._fp8_dtype
             dst._rowwise_scale_inv = src._rowwise_scale_inv
             dst._columnwise_scale_inv = src._columnwise_scale_inv
+            dst._columnwise_transposed = src._columnwise_transposed
 
         # Check that tensor dimensions match
         if (
@@ -586,6 +606,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         if self._rowwise_data is not None:
             return self._rowwise_data.shape
         if self._columnwise_data is not None:
+            if not self._columnwise_transposed:
+                return self._columnwise_data.shape
             # Columnwise data is stored transposed, matching size() in the storage.
             dims = self._columnwise_data.shape
             if len(dims) == 2:
@@ -702,6 +724,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 columnwise_scale_inv=None,
                 quantizer=self._quantizer,
                 is_2D_scaled=is_2D_scaled,
+                columnwise_transposed=self._columnwise_transposed,
                 device=rowwise_data.device,
             )
 
@@ -819,7 +842,9 @@ class _ViewFunc(torch.autograd.Function):
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.view(*shape)
         if tensor._columnwise_data is not None:
-            columnwise_shape = [shape[-1]] + list(shape[:-1])
+            columnwise_shape = shape
+            if tensor._columnwise_transposed:
+                columnwise_shape = [shape[-1]] + list(shape[:-1])
             new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
 
         return Float8BlockwiseQTensor(
@@ -832,6 +857,7 @@ class _ViewFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             quantizer=tensor._quantizer,
             is_2D_scaled=tensor._is_2D_scaled,
+            columnwise_transposed=tensor._columnwise_transposed,
             requires_grad=tensor.requires_grad,
             device=tensor.device,
         )
@@ -848,7 +874,9 @@ class _ViewFunc(torch.autograd.Function):
                 grad._rowwise_data.view(*ctx.shape) if grad._rowwise_data is not None else None
             )
             if grad._columnwise_data is not None:
-                columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
+                columnwise_shape = ctx.shape
+                if grad._columnwise_transposed:
+                    columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
                 new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
             else:
                 new_columnwise_data = None
@@ -862,6 +890,7 @@ class _ViewFunc(torch.autograd.Function):
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
                 is_2D_scaled=grad._is_2D_scaled,
+                columnwise_transposed=grad._columnwise_transposed,
                 requires_grad=grad.requires_grad,
                 device=grad.device,
             )
@@ -935,7 +964,9 @@ class _ReshapeFunc(torch.autograd.Function):
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.reshape(*shape)
         if tensor._columnwise_data is not None:
-            columnwise_shape = [shape[-1]] + list(shape[:-1])
+            columnwise_shape = shape
+            if tensor._columnwise_transposed:
+                columnwise_shape = [shape[-1]] + list(shape[:-1])
             new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
 
         return Float8BlockwiseQTensor(
@@ -948,6 +979,7 @@ class _ReshapeFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             quantizer=tensor._quantizer,
             is_2D_scaled=tensor._is_2D_scaled,
+            columnwise_transposed=tensor._columnwise_transposed,
             requires_grad=tensor.requires_grad,
             device=tensor.device,
         )
@@ -965,7 +997,9 @@ class _ReshapeFunc(torch.autograd.Function):
             if grad._rowwise_data is not None:
                 new_rowwise_data = grad._rowwise_data.view(*ctx.shape)
             if grad._columnwise_data is not None:
-                columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
+                columnwise_shape = ctx.shape
+                if grad._columnwise_transposed:
+                    columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
                 new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
             dgrad = Float8BlockwiseQTensor(
                 shape=ctx.shape,
@@ -977,6 +1011,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
                 is_2D_scaled=grad._is_2D_scaled,
+                columnwise_transposed=grad._columnwise_transposed,
                 requires_grad=grad.requires_grad,
                 device=grad.device,
             )

@@ -78,6 +78,7 @@ class GroupedTensorStorage:
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
         nvfp4_e4m3_max: int = 0,
+        columnwise_transposed: bool = True,
     ) -> None:
         """
         Initialize a GroupedTensor.
@@ -101,6 +102,7 @@ class GroupedTensorStorage:
             tensor_offsets: Device tensor of int64 array of length num_tensors+1 (CSR-style,
                 or None if uniform). offsets[i] = start of tensor i, offsets[num_tensors] = total.
             offsets: Vector of integer offsets for each tensor.
+            columnwise_transposed: Whether FP8 block-scaling column-wise data is stored transposed.
         """
         # `requires_grad` and `stride` are accepted for API symmetry with
         # GroupedTensor.__new__ but are not relevant for storage-only
@@ -159,6 +161,7 @@ class GroupedTensorStorage:
         instance.row_scaled_nvfp4 = row_scaled_nvfp4
         instance.nvfp4_use_4over6 = nvfp4_use_4over6
         instance.nvfp4_e4m3_max = nvfp4_e4m3_max
+        instance._columnwise_transposed = columnwise_transposed
 
     def __new__(
         cls,
@@ -188,6 +191,7 @@ class GroupedTensorStorage:
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
         nvfp4_e4m3_max: int = 0,
+        columnwise_transposed: bool = True,
     ):
         instance = object.__new__(cls)
         cls._initialize_storage_fields(
@@ -217,6 +221,7 @@ class GroupedTensorStorage:
             row_scaled_nvfp4=row_scaled_nvfp4,
             nvfp4_use_4over6=nvfp4_use_4over6,
             nvfp4_e4m3_max=nvfp4_e4m3_max,
+            columnwise_transposed=columnwise_transposed,
         )
         return instance
 
@@ -237,6 +242,10 @@ class GroupedTensorStorage:
             True if columnwise_data buffer is initialized, False otherwise
         """
         return self.columnwise_data is not None
+
+    def _rowwise_serves_columnwise(self) -> bool:
+        """Whether row-wise data and scales also serve column-wise usage"""
+        return not self._columnwise_transposed and self.quantizer.block_scaling_dim == 2
 
     def all_same_first_dim(self) -> bool:
         """
@@ -655,6 +664,7 @@ class GroupedTensorStorage:
             row_scaled_nvfp4=self.row_scaled_nvfp4,
             nvfp4_use_4over6=self.nvfp4_use_4over6,
             nvfp4_e4m3_max=self.nvfp4_e4m3_max,
+            columnwise_transposed=self._columnwise_transposed,
             scale_inv_dtype=self._scale_inv_dtype,
         )
 
@@ -789,6 +799,7 @@ class GroupedTensorStorage:
         row_scaled_nvfp4 = False
         nvfp4_use_4over6 = False
         nvfp4_e4m3_max = 0
+        columnwise_transposed = True
         if no_quantization:
             assert dtype is not None, "dtype must be provided for unquantized GroupedTensor"
             if rowwise_usage:
@@ -902,6 +913,14 @@ class GroupedTensorStorage:
                     columnwise_amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
         elif compatible_recipe.float8_block_scaling():
             scale_inv_dtype = DType.kFloat32
+            # 2D row-wise data and scales serve column-wise usage unless column-wise data is
+            # stored transposed
+            columnwise_transposed = quantizer.columnwise_transposed
+            rowwise_serves_columnwise = (
+                quantizer.block_scaling_dim == 2 and not columnwise_transposed
+            )
+            if rowwise_serves_columnwise:
+                rowwise_usage, columnwise_usage = True, False
 
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
@@ -994,6 +1013,7 @@ class GroupedTensorStorage:
             row_scaled_nvfp4=row_scaled_nvfp4,
             nvfp4_use_4over6=nvfp4_use_4over6,
             nvfp4_e4m3_max=nvfp4_e4m3_max,
+            columnwise_transposed=columnwise_transposed,
             scale_inv_dtype=scale_inv_dtype,
         )
         grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()
@@ -1307,6 +1327,7 @@ class GroupedTensorStorage:
                     fp8_dtype=quantizer.dtype,
                     quantizer=quantizer,
                     is_2D_scaled=is_2D_scaled,
+                    columnwise_transposed=self._columnwise_transposed,
                 )
                 result.append(tensor)
 
