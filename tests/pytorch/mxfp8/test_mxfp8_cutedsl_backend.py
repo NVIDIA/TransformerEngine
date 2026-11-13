@@ -280,16 +280,18 @@ def extract_quantized_output(out, rowwise, columnwise, swizzled):
 
 
 def run_test_case(
-    method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False, input_offset=0
+    method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False, input_offset=0, x=None
 ):
     """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the
     same input and config. input_offset (in elements) shifts x's data pointer past the
-    start of its allocation, to test misaligned inputs.
+    start of its allocation, to test misaligned inputs. x, if given, replaces the generated input.
     """
     M, N = shape
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
-    x, act_input = generate_inputs(M, N, in_dtype)
+    generated_x, act_input = generate_inputs(M, N, in_dtype)
+    if x is None:
+        x = generated_x
     if input_offset:
         buf = torch.empty(input_offset + M * N, dtype=in_dtype, device="cuda")
         x = buf[input_offset:].view(M, N).copy_(x)
@@ -439,6 +441,27 @@ def test_specialized_kernels(shape, block_size, in_dtype, swizzled, input_offset
         tex.DType.kFloat8E4M3,
         swizzled,
         input_offset,
+    )
+
+
+@pytest.mark.parametrize("shape", [(512, 1024), (512, 768)], ids=get_shape_id)
+@pytest.mark.parametrize("block_size", [BOTH, COL], ids=get_block_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_silu_fast_reciprocal_rows(monkeypatch, swizzled, block_size, shape):
+    """SiLU forward without a table on the register-resident kernel: a thread row takes the
+    sigmoid's fast reciprocal only if all its values are at least -80, and -100 changes the result
+    on that path. Each 16 columns of a row hold one -100, at another position in each of 16
+    consecutive rows, so the row check must read every value. N = 1024 runs 512-column tiles,
+    N = 768 256-column tiles."""
+    monkeypatch.setenv("NVTE_ACTIVATION_TABLE", "0")
+    M, N = shape
+    x, _ = generate_inputs(M, N, torch.bfloat16)
+    rows = torch.arange(M, device="cuda").unsqueeze(1)
+    cols = torch.arange(N, device="cuda")
+    x = x.masked_fill(cols % 16 == rows % 16, -100.0)
+    silu = next(a for a in ACTIVATIONS if a["name"] == "SiLU")
+    run_test_case(
+        "CAST_ACT", silu, shape, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled, x=x
     )
 
 

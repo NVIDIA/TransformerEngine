@@ -22,6 +22,7 @@ from transformer_engine.common.CuTeDSL.utils import (
     bf16_mx_scale_bytes_pair,
     create_l2_policy,
     max_num_bits_per_copy_ld_global,
+    min_nan_bf16x2,
     x2_hi_to_f32_bf16,
     x2_lo_to_f32_bf16,
     cvt_f32x2_to_bf16x2,
@@ -30,7 +31,9 @@ from transformer_engine.common.CuTeDSL.activations import (
     DERIVATIVE_SLOPES,
     DERIVATIVE_TABLE_WINDOWS,
     FORWARD_TABLE_WINDOWS,
+    SIGMOID_FAST_RCP_MIN,
     activation_table_bytes,
+    sigmoid,
     table_derivative_2x,
     table_forward_2x,
 )
@@ -738,6 +741,32 @@ def _quantize_colwise_f32_scaled(
 
 
 @cute.jit
+def _row_takes_fast_rcp(rX_row: cute.Tensor) -> Int32:
+    """1 if every BF16 value of the thread row is at least SIGMOID_FAST_RCP_MIN (so none is NaN),
+    else 0."""
+    rX_i32 = cute.recast_tensor(rX_row, Int32)
+    x_min = rX_i32[0]
+    for i in cutlass.range_constexpr(1, cute.size(rX_i32)):
+        x_min = min_nan_bf16x2(x_min, rX_i32[i])
+    return Int32(x2_lo_to_f32_bf16(x_min) >= Float32(SIGMOID_FAST_RCP_MIN)) & Int32(
+        x2_hi_to_f32_bf16(x_min) >= Float32(SIGMOID_FAST_RCP_MIN)
+    )
+
+
+@cute.jit
+def _silu_row(rX_row: cute.Tensor, FAST_RCP: cutlass.Constexpr[bool]):
+    """act_silu of the thread row's BF16 values, in place. FAST_RCP: the sigmoid takes its fast
+    reciprocal (sigmoid's fast_rcp), for a row where _row_takes_fast_rcp holds."""
+    rX_i32 = cute.recast_tensor(rX_row, Int32)
+    for i in cutlass.range_constexpr(cute.size(rX_i32)):
+        lo = x2_lo_to_f32_bf16(rX_i32[i])
+        hi = x2_hi_to_f32_bf16(rX_i32[i])
+        rX_i32[i] = cvt_f32x2_to_bf16x2(
+            lo * sigmoid(lo, fast_rcp=FAST_RCP), hi * sigmoid(hi, fast_rcp=FAST_RCP)
+        )
+
+
+@cute.jit
 def quantize_mxfp8_gmem_tile_bidimensional(
     gX_tile: cute.Tensor,
     gA_tile: Optional[cute.Tensor],
@@ -911,6 +940,15 @@ def quantize_mxfp8_gmem_tile_bidimensional(
                     rX[col, row_idx] = DTYPE(x)
                 if cutlass.const_expr(sDbias is not None):
                     cute.autovec_copy(rProducts, sDbias_thread[(None, row_idx),])
+        elif cutlass.const_expr(WITH_ACT and ACTIVATION == "silu" and ACTIVATION_TABLE == "none"):
+            # The sigmoid takes its fast reciprocal on rows whose values allow it. Each path is a
+            # loop of one trip or none, so a warp whose rows all take one path skips the other.
+            for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
+                fast = _row_takes_fast_rcp(rX[None, row_idx])
+                for _ in cutlass.range(fast, unroll=1):
+                    _silu_row(rX[None, row_idx], FAST_RCP=True)
+                for _ in cutlass.range(Int32(1) - fast, unroll=1):
+                    _silu_row(rX[None, row_idx], FAST_RCP=False)
         else:
             for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
                 rX_i32 = cute.recast_tensor(rX[None, row_idx], Int32)

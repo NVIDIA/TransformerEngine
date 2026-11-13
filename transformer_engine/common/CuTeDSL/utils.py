@@ -94,6 +94,28 @@ def fma_f32(a: Float32, b: Float32, c: Float32) -> Float32:
 
 
 @cute.jit
+def rcp_f32_in_range(y: Float32) -> Float32:
+    """1 / y rounded to nearest, for 1 <= y < 2^126: the approximate reciprocal refined by one
+    Newton step, as rcp.rn.f32 computes it in that range, without its range check."""
+    return cute.arch.inline_ptx(
+        "{ .reg .f32 r, e; rcp.approx.ftz.f32 r, {$r0}; fma.rn.f32 e, {$r0}, r, 0fBF800000; "
+        "neg.f32 e, e; fma.rn.f32 {$w0}, r, e, r; }",
+        write_only_types=[Float32],
+        read_only_args=[y],
+    )
+
+
+@cute.jit
+def min_nan_bf16x2(a: Int32, b: Int32) -> Int32:
+    """Lane-wise minimum of two packed BF16 pairs; a lane is NaN if either input lane is."""
+    return cute.arch.inline_ptx(
+        "min.NaN.bf16x2 {$w0}, {$r0}, {$r1};",
+        write_only_types=[Int32],
+        read_only_args=[a, b],
+    )
+
+
+@cute.jit
 def exp2f_rcp(scale_e8m0) -> Float32:
     """2^(127 - biased_exp) with special-case handling, for an e8m0 scale."""
     biased_exp = Int32(scale_e8m0.bitcast(cutlass.Uint8))
