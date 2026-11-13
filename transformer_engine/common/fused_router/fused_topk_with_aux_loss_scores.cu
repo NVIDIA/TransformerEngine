@@ -639,6 +639,10 @@ void fused_topk_with_aux_loss_scores_backward(const Tensor &logits, const Tensor
 
 int nvte_fused_topk_with_aux_loss_scores_is_supported(int num_experts, int topk, int num_groups,
                                                       int group_topk, int score_function) {
+  // The kernel selects the top-k like the separate kernels' naive path. With
+  // NVTE_RADIX_TOPK_THRESHOLD <= topk the separate kernels use radix selection instead, which
+  // breaks ties differently, so the fused kernel would not reproduce them: not supported.
+  if (topk >= transformer_engine::fused_router::get_radix_topk_threshold()) return 0;
   return transformer_engine::fused_router::is_supported_config(num_experts, topk, num_groups,
                                                                group_topk, score_function)
              ? 1

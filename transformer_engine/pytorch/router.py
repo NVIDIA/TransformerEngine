@@ -655,7 +655,9 @@ def fused_topk_with_aux_loss_scores_is_supported(
     """Whether :func:`fused_topk_with_aux_loss_scores` supports a router configuration.
 
     Supported: ``score_function="sigmoid"``, 256 experts, ``topk=8``, and either no group limit
-    or ``num_groups=8`` with ``group_topk=4`` (DeepSeek-V3 routing).
+    or ``num_groups=8`` with ``group_topk=4`` (DeepSeek-V3 routing); and ``topk`` below
+    ``NVTE_RADIX_TOPK_THRESHOLD`` (default 16). At or above it the separate top-k kernels use
+    radix selection, which breaks ties differently, so the fused kernel is not supported.
     """
     return tex.fused_topk_with_aux_loss_scores_is_supported(
         num_experts, topk, num_groups, group_topk, score_function

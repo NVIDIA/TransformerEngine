@@ -3,6 +3,9 @@
 # See LICENSE for license information.
 from copy import deepcopy
 from itertools import product
+import os
+import subprocess
+import sys
 from typing import Optional
 
 import pytest
@@ -2331,6 +2334,22 @@ def test_fused_topk_with_aux_loss_scores_unsupported():
     logits = torch.randn(16, 128, device="cuda")
     with pytest.raises(RuntimeError, match="does not support"):
         te_router.fused_topk_with_aux_loss_scores(logits, 8, 8, 4, 1.0, "sigmoid", None)
+
+
+@pytest.mark.parametrize("threshold, expected", [("8", False), ("9", True)])
+def test_fused_topk_with_aux_loss_scores_radix_threshold(threshold, expected):
+    """With NVTE_RADIX_TOPK_THRESHOLD <= topk the separate kernels use radix selection, whose
+    tie-breaking the fused kernel does not reproduce, so the fused kernel reports unsupported.
+    The threshold is read once per process, hence the subprocess."""
+    code = (
+        "import transformer_engine.pytorch.router as r;"
+        "print(r.fused_topk_with_aux_loss_scores_is_supported(256, 8, 8, 4, 'sigmoid'))"
+    )
+    env = dict(os.environ, NVTE_RADIX_TOPK_THRESHOLD=threshold)
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip().splitlines()[-1] == str(expected)
 
 
 def profile_topk_softmax(

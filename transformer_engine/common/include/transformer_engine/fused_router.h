@@ -235,7 +235,9 @@ void nvte_fused_topk_with_score_function_backward_with_indices(
  *         configuration.
  *
  *  Supported: score_function 0 (sigmoid), num_experts 256, topk 8, and either no group limit
- *  (group_topk <= 0) or num_groups 8 with group_topk 4.
+ *  (group_topk <= 0) or num_groups 8 with group_topk 4; and topk below NVTE_RADIX_TOPK_THRESHOLD
+ *  (default 16), i.e. the separate top-k kernels use their naive selection, whose tie-breaking
+ *  this kernel reproduces.
  *
  *  \return 1 if supported, 0 otherwise.
  */
