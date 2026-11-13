@@ -12,6 +12,7 @@ import warnings
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.quantization as quantization
 from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     MXFP8Quantizer,
@@ -55,6 +56,37 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
     return_reason=True
 )
 fp4_available, reason_for_no_fp4 = te.is_nvfp4_available(return_reason=True)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_autocast_reuse_after_failed_entry(monkeypatch):
+    monkeypatch.setattr(FP8GlobalStateManager, "quantization_state", quantization.FP8GlobalState())
+    original_check = quantization.check_recipe_support
+    fail_next_check = True
+
+    def fail_once(recipe):
+        nonlocal fail_next_check
+        if fail_next_check:
+            fail_next_check = False
+            raise RuntimeError("recipe validation failed")
+        original_check(recipe)
+
+    monkeypatch.setattr(quantization, "check_recipe_support", fail_once)
+    context = te.autocast(recipe=Float8CurrentScaling())
+    with te.autocast(enabled=False, calibrating=True, recipe=Float8CurrentScaling()):
+        saved_state = FP8GlobalStateManager.get_autocast_state()
+        saved_depth = FP8GlobalStateManager.quantization_state.autocast_depth
+        with pytest.raises(RuntimeError, match="recipe validation failed"):
+            with context:
+                pytest.fail("Autocast body ran after failed validation")
+        assert FP8GlobalStateManager.get_autocast_state() == saved_state
+        assert FP8GlobalStateManager.quantization_state.autocast_depth == saved_depth
+
+        with context:
+            assert FP8GlobalStateManager.is_fp8_enabled()
+            assert FP8GlobalStateManager.quantization_state.autocast_depth == saved_depth + 1
+        assert FP8GlobalStateManager.get_autocast_state() == saved_state
+        assert FP8GlobalStateManager.quantization_state.autocast_depth == saved_depth
 
 
 # FP8 per tensor delayed scaling
@@ -592,8 +624,9 @@ def test_nvfp4_row_scaled_quantizer_roles(
         expected_e4m3_max(tensor_type) for tensor_type in ("input", "weight", "output")
     ]
     assert [q.nvfp4_4over6_err_mode for q in forward_quantizers] == [nvfp4_4over6_err_mode] * 3
-    assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
-    assert forward_quantizers[1].is_quantizable(torch.empty(16, 16))
+    all_gather_input = torch.empty(16, 32)
+    assert not forward_quantizers[0].supports_quantized_allgather(all_gather_input)
+    assert forward_quantizers[1].supports_quantized_allgather(all_gather_input)
 
     role_quantizers = NVFP4BlockScalingRecipeState(
         recipe,

@@ -43,6 +43,7 @@ from .._common import (
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
+    maybe_autocast_dtype,
     maybe_dequantize,
 )
 
@@ -991,6 +992,8 @@ class BasicLinear(BasicOperation):
                         "Attempting to generate quantized grad input tensor "
                         "with unsupported quantizer"
                     )
+                grad_input_quantizer = grad_input_quantizer.copy()
+                grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
             # Check if accumulating into grad input tensor
             if accumulate_into_grad_input:
@@ -1108,11 +1111,7 @@ class BasicLinear(BasicOperation):
         return BasicLinearFwdArgs(
             input_=input_,
             weight=self.weight,
-            dtype=(
-                torch.get_autocast_dtype("cuda")
-                if torch.is_autocast_enabled()
-                else self.weight.dtype
-            ),
+            dtype=maybe_autocast_dtype(default_dtype=self.weight.dtype),
             input_requires_grad=basic_op_ctxs[0].requires_grad,
             weight_requires_grad=basic_op_ctxs[0].requires_grad and self.weight.requires_grad,
             with_quantized_compute=with_quantized_compute,
@@ -1294,6 +1293,8 @@ class BasicLinear(BasicOperation):
                     else None
                 ),
             )
+            if dx.is_quantized:
+                dx.update_usage(rowwise_usage=True, columnwise_usage=False)
         dw = None
         if args.weight_requires_grad:
             dw = TensorSpec(
