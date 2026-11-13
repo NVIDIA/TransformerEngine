@@ -721,6 +721,224 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
 #endif
 }
 
+// Varying first dims, no dequantized output, hidden size a multiple of 128: one warp per
+// 128 x 128 tile, tiles in row-major order. Lane l covers 8 columns (8 * (l / 2)) of the rows
+// l % 2, l % 2 + 2, ... of each 32-row block, so a column amax takes one shuffle. Each lane keeps
+// in registers, for 4 of its columns, the column scales of the tile's four 32-row blocks.
+constexpr size_t WARP_TILE_DIM = 128;
+constexpr size_t WARP_TILE_WARPS_PER_BLOCK = 2;
+
+// Two BF16 values times two BF16 multipliers, rounded to E4M3, as in requantize_bf16_4x.
+__device__ __forceinline__ uint16_t requantize_bf16_2x(const uint32_t values,
+                                                       const uint32_t multipliers) {
+  uint16_t output = 0;
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined CUDA_VERSION) && (CUDA_VERSION >= 13010)
+  asm volatile(
+      "{\n\t"
+      ".reg.b32 y01; \n\t"
+      "mul.rn.bf16x2 y01, %1, %2; \n\t"
+      "cvt.rn.satfinite.e4m3x2.bf16x2 %0, y01; \n"
+      "}"
+      : "=h"(output)
+      : "r"(values), "r"(multipliers));
+#else
+  asm volatile(
+      "{\n\t"
+      ".reg.b16 x0, x1, scale0, scale1; \n\t"
+      "mov.b32 {x0, x1}, %1; \n\t"
+      "mov.b32 {scale0, scale1}, %2; \n\t"
+      ".reg.f32 y0, y1; \n\t"
+      "fma.rn.f32.bf16 y0, x0, scale0, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, scale1, 0f00000000; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 %0, y1, y0; \n"
+      "}"
+      : "=h"(output)
+      : "r"(values), "r"(multipliers));
+#endif
+#else
+  NVTE_DEVICE_ERROR("Packed BF16 requantization requires Blackwell hardware.");
+#endif
+  return output;
+}
+
+template <typename IType, bool OUTPUT_SCALES_SWIZZLED>
+__global__ void __launch_bounds__(WARP_TILE_WARPS_PER_BLOCK *THREADS_PER_WARP)
+    group_requantize_mxfp8_warp_tile_kernel(const IType *const __restrict__ input,
+                                            fp8e4m3 *const __restrict__ output,
+                                            const size_t num_tensors,
+                                            const size_t first_logical_dim,
+                                            const size_t last_logical_dim,
+                                            const int64_t *const __restrict__ offsets_ptr,
+                                            const int64_t *const __restrict__ first_dims_ptr,
+                                            const e8m0_t *const __restrict__ input_scales,
+                                            e8m0_t *const __restrict__ output_rowwise_scales,
+                                            e8m0_t *const __restrict__ output_scales) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  using OType = fp8e4m3;
+  constexpr ShapeRepresentation shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
+  constexpr int scale_dim = MXFP8_SCALE_DIM;
+  constexpr int blocks_y = WARP_TILE_DIM / scale_dim;
+  constexpr int rows_per_lane = scale_dim / 2;
+  constexpr int cols_per_lane = sizeof(uint2) / sizeof(IType);
+  constexpr int col_pairs = cols_per_lane / 2;
+  constexpr float max_norm_rcp = Quantized_Limits<OType>::max_norm_rcp;
+
+  const size_t cols = last_logical_dim;
+  const int tiles_x = static_cast<int>(cols / WARP_TILE_DIM);
+  const int tile =
+      static_cast<int>(blockIdx.x * WARP_TILE_WARPS_PER_BLOCK + threadIdx.x / THREADS_PER_WARP);
+  const size_t global_block_y = static_cast<size_t>(tile / tiles_x) * WARP_TILE_DIM;
+  const size_t block_offset_x = static_cast<size_t>(tile % tiles_x) * WARP_TILE_DIM;
+  if (global_block_y >= first_logical_dim) return;
+  const int64_t global_element_offset = static_cast<int64_t>(global_block_y * cols);
+  if (global_element_offset >= offsets_ptr[num_tensors]) return;
+
+  // Rows and row scales are addressed from the start of the grouped tensor: each tensor starts at a
+  // multiple of 128 rows, so this matches the per-tensor layouts, the GEMM-swizzled one included.
+  const int lane = threadIdx.x % THREADS_PER_WARP;
+  const int lane_row = lane % 2;
+  const int lane_col = cols_per_lane * (lane / 2);
+  const int scale_shift = 8 * (lane_col / scale_dim);
+  const size_t scale_stride = cols / scale_dim;
+  const size_t scale_col = block_offset_x / scale_dim;
+  const size_t lane_offset = (global_block_y + lane_row) * cols + block_offset_x + lane_col;
+  const IType *const tile_input = input + lane_offset;
+  OType *const tile_output = output + lane_offset;
+  const e8m0_t *const tile_scales =
+      input_scales + (global_block_y + lane) * scale_stride + scale_col;
+
+  uint32_t column_scales[col_pairs] = {};
+#pragma unroll 1
+  for (int block = 0; block < blocks_y; ++block) {
+    const size_t block_offset = static_cast<size_t>(block * scale_dim) * cols;
+    uint2 data[rows_per_lane];  // NOLINT(runtime/arrays)
+#pragma unroll
+    for (int i = 0; i < rows_per_lane; ++i) {
+      data[i] = __ldg(reinterpret_cast<const uint2 *>(tile_input + block_offset +
+                                                      static_cast<size_t>(2 * i) * cols));
+    }
+    const uint32_t scale_word = __ldg(reinterpret_cast<const uint32_t *>(
+        tile_scales + static_cast<size_t>(block * scale_dim) * scale_stride));
+    if constexpr (OUTPUT_SCALES_SWIZZLED) {
+      if (output_rowwise_scales != nullptr) {
+        const size_t output_idx =
+            swizzle::gemm_swizzled_scale_idx(global_block_y + block * scale_dim + lane, scale_col,
+                                             scale_stride / scale_tensor_alignment_X_rowwise);
+        *reinterpret_cast<uint32_t *>(output_rowwise_scales + output_idx) = scale_word;
+      }
+    }
+    e8m0_t row_scales[rows_per_lane];  // NOLINT(runtime/arrays)
+#pragma unroll
+    for (int i = 0; i < rows_per_lane; ++i) {
+      row_scales[i] = static_cast<e8m0_t>(__shfl_sync(0xffffffffu, scale_word, 2 * i + lane_row) >>
+                                          scale_shift);
+    }
+
+#pragma unroll
+    for (int pair = 0; pair < col_pairs; ++pair) {
+      const int shift = 16 * (pair % 2);
+      uint32_t values[rows_per_lane];  // NOLINT(runtime/arrays)
+      uint32_t amax = 0;
+#pragma unroll
+      for (int i = 0; i < rows_per_lane; ++i) {
+        const uint16_t codes = static_cast<uint16_t>((pair < 2 ? data[i].x : data[i].y) >> shift);
+        const ptx::bf16x2 decoded =
+            dequantize_mxfp8_2x(reinterpret_cast<const ptx::FPx2<IType> &>(codes), row_scales[i]);
+        values[i] = reinterpret_cast<const uint32_t &>(decoded);
+        ptx::abs_max_2x(reinterpret_cast<ptx::bf16x2 &>(amax),
+                        reinterpret_cast<const ptx::bf16x2 &>(amax), decoded);
+      }
+      const uint32_t other = __shfl_xor_sync(0xffffffffu, amax, 1);
+      ptx::abs_max_2x(reinterpret_cast<ptx::bf16x2 &>(amax),
+                      reinterpret_cast<const ptx::bf16x2 &>(amax),
+                      reinterpret_cast<const ptx::bf16x2 &>(other));
+      // abs_max_2x keeps the largest magnitude, not its sign.
+      const uint32_t amax_bits = amax & 0x7FFF7FFFu;
+      const e8m0_t scale_lo = ptx::float_to_e8m0(__uint_as_float(amax_bits << 16) * max_norm_rcp);
+      const e8m0_t scale_hi =
+          ptx::float_to_e8m0(__uint_as_float(amax_bits & 0xFFFF0000u) * max_norm_rcp);
+      const bf16 multiplier_lo = ptx::exp2f_rcp<bf16>(scale_lo);
+      const bf16 multiplier_hi = ptx::exp2f_rcp<bf16>(scale_hi);
+      const uint32_t multipliers =
+          static_cast<uint32_t>(reinterpret_cast<const uint16_t &>(multiplier_lo)) |
+          (static_cast<uint32_t>(reinterpret_cast<const uint16_t &>(multiplier_hi)) << 16);
+#pragma unroll
+      for (int i = 0; i < rows_per_lane; ++i) {
+        const uint32_t codes = requantize_bf16_2x(values[i], multipliers);
+        uint32_t &word = pair < 2 ? data[i].x : data[i].y;
+        word = (word & ~(0xFFFFu << shift)) | (codes << shift);
+      }
+      column_scales[pair] |= static_cast<uint32_t>(lane_row ? scale_hi : scale_lo) << (8 * block);
+    }
+
+#pragma unroll
+    for (int i = 0; i < rows_per_lane; ++i) {
+      *reinterpret_cast<uint2 *>(tile_output + block_offset + static_cast<size_t>(2 * i) * cols) =
+          data[i];
+    }
+  }
+
+  // Tensor of this row tile: the number of tensors after the first that start at or before it.
+  size_t tensor_id = 0;
+  for (size_t first = 1; first < num_tensors; first += THREADS_PER_WARP) {
+    const size_t i = first + lane;
+    const bool started = i < num_tensors && offsets_ptr[i] <= global_element_offset;
+    const unsigned started_mask = __ballot_sync(0xffffffffu, started);
+    tensor_id += __popc(started_mask);
+    if (started_mask != 0xffffffffu) break;
+  }
+  const size_t rows =
+      get_tensor_rows_num<shape_rep>(tensor_id, first_logical_dim, first_dims_ptr, num_tensors);
+  const size_t tensor_start_row = static_cast<size_t>(offsets_ptr[tensor_id]) / cols;
+  const size_t output_scale_base = tensor_start_row / scale_dim * cols;
+  const size_t output_scale_row = (global_block_y - tensor_start_row) / scale_dim;
+#pragma unroll
+  for (int pair = 0; pair < col_pairs; ++pair) {
+    const size_t col = block_offset_x + lane_col + 2 * pair + lane_row;
+    if constexpr (OUTPUT_SCALES_SWIZZLED) {
+      const size_t output_scale_tiles_x =
+          DIVUP(rows, static_cast<size_t>(scale_tensor_alignment_Y_rowwise));
+      const size_t output_idx =
+          output_scale_base +
+          swizzle::gemm_swizzled_scale_idx(col, output_scale_row, output_scale_tiles_x);
+      *reinterpret_cast<uint32_t *>(output_scales + output_idx) = column_scales[pair];
+    } else {
+#pragma unroll
+      for (int block = 0; block < blocks_y; ++block) {
+        output_scales[output_scale_base + (output_scale_row + block) * cols + col] =
+            static_cast<e8m0_t>(column_scales[pair] >> (8 * block));
+      }
+    }
+  }
+#else
+  NVTE_DEVICE_THREAD0_ERROR("Grouped MXFP8 requantization requires Blackwell (SM100+) hardware.");
+#endif
+}
+
+template <typename IType, bool OUTPUT_SCALES_SWIZZLED>
+void launch_group_requantize_warp_tiles(const GroupedTensor &input, GroupedTensor *output,
+                                        const size_t num_tensors, const size_t first_logical_dim,
+                                        const size_t last_logical_dim,
+                                        const int64_t *const offsets_ptr,
+                                        const int64_t *const first_dims_ptr, cudaStream_t stream) {
+  NVTE_CHECK(first_logical_dim % WARP_TILE_DIM == 0,
+             "The grouped logical row capacity must be divisible by ", WARP_TILE_DIM, ".");
+  const size_t tiles = first_logical_dim / WARP_TILE_DIM * (last_logical_dim / WARP_TILE_DIM);
+  NVTE_CHECK(tiles > 0, "VARYING_FIRST_DIM requires a non-empty logical tensor.");
+  const dim3 grid(DIVUP(tiles, WARP_TILE_WARPS_PER_BLOCK));
+  group_requantize_mxfp8_warp_tile_kernel<IType, OUTPUT_SCALES_SWIZZLED>
+      <<<grid, WARP_TILE_WARPS_PER_BLOCK * THREADS_PER_WARP, 0, stream>>>(
+          reinterpret_cast<const IType *>(input.data.dptr),
+          reinterpret_cast<fp8e4m3 *>(output->columnwise_data.dptr), num_tensors, first_logical_dim,
+          last_logical_dim, offsets_ptr, first_dims_ptr,
+          reinterpret_cast<const e8m0_t *>(input.scale_inv.dptr),
+          output->scale_inv.dptr == input.scale_inv.dptr
+              ? nullptr
+              : reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
+          reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr));
+}
+
 template <typename Traits, typename IType, bool OUTPUT_SCALES_SWIZZLED, bool RETURN_DEQUANTIZED>
 void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor *dequantized,
                              const size_t num_tensors, const size_t first_logical_dim,
@@ -894,6 +1112,23 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
     return;
   }
 #endif
+
+  const bool use_warp_tiles = shape_rep == ShapeRepresentation::VARYING_FIRST_DIM &&
+                              !return_dequantized && last_logical_dim % WARP_TILE_DIM == 0 &&
+                              is_aligned_ptr(input.scale_inv.dptr, sizeof(uint32_t)) &&
+                              is_aligned_ptr(output->scale_inv.dptr, sizeof(uint32_t)) &&
+                              is_aligned_ptr(output->columnwise_scale_inv.dptr, sizeof(uint32_t));
+  if (use_warp_tiles) {
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+        input.data.dtype, IType,
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(
+            output->with_gemm_swizzled_scales, OUTPUT_SCALES_SWIZZLED,
+            launch_group_requantize_warp_tiles<IType, OUTPUT_SCALES_SWIZZLED>(
+                input, output, input.num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
+                first_dims_ptr, stream);););  // NOLINT(*)
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    return;
+  }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
       input.data.dtype, IType,
