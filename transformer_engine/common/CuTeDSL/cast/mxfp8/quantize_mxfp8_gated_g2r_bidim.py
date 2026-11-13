@@ -63,7 +63,8 @@ def _row_tile(
 
 class MXFP8GatedQuantizeG2RKernel:
     """Register-resident gated MXFP8 cast: BF16 [M, 2N] -> E4M3 or E5M2, both directions or
-    columnwise only, any M, N % 32 == 0 (the C++ dispatcher's requirement)."""
+    columnwise only, any M, N % 32 == 0 (the C++ dispatcher's requirement, N % 128 == 0 for the
+    backward with GEMM-swizzled scales)."""
 
     _CTA_THREADS_Y = 8
     _CTA_THREADS_X = 32
@@ -73,13 +74,8 @@ class MXFP8GatedQuantizeG2RKernel:
 
     @staticmethod
     def supports(cfg: MXFP8GatedQuantizeConfig) -> bool:
-        """BF16 with columnwise output (rowwise optional); GEMM-swizzled scales in the forward
-        only, like the shared-memory port."""
-        return (
-            cfg.DTYPE is cutlass.BFloat16
-            and cfg.COLWISE
-            and not (cfg.IS_BWD and cfg.WITH_GEMM_SWIZZLED_SCALES)
-        )
+        """BF16 with columnwise output (rowwise optional)."""
+        return cfg.DTYPE is cutlass.BFloat16 and cfg.COLWISE
 
     @staticmethod
     @cute.jit
@@ -132,7 +128,7 @@ class MXFP8GatedQuantizeG2RKernel:
         mO_row1 = mS_row1 = mO_col1 = mS_col1 = None
         if cutlass.const_expr(self.cfg.IS_BWD):
             mS_row0, mS_row1, mS_col0, mS_col1 = _split_gated_scales(
-                mS_row, mS_col, M, N, self.cfg.ROWWISE, True, False
+                mS_row, mS_col, M, N, self.cfg.ROWWISE, True, self.cfg.WITH_GEMM_SWIZZLED_SCALES
             )
             mO_row0 = None
             if cutlass.const_expr(self.cfg.ROWWISE):

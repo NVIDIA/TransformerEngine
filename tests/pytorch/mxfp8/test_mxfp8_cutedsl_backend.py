@@ -507,8 +507,11 @@ def run_gated_test_case(
     bit pattern in turn, specials included.
     """
     M, N = shape
-    if is_bwd and swizzled:
-        pytest.skip("CuTeDSL hands backward gated activations with GEMM-swizzled scales to CUDA")
+    if is_bwd and swizzled and N % 128 != 0:
+        pytest.skip(
+            "CuTeDSL hands backward gated activations with GEMM-swizzled scales to CUDA unless"
+            " each output half spans whole 128-column scale tiles"
+        )
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
     x, _ = generate_inputs(M, 2 * N, in_dtype)
@@ -560,6 +563,15 @@ def test_gated_sizes(swizzled, is_bwd, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_gated_dtypes(swizzled, is_bwd, act, fp8_dtype, in_dtype):
     run_gated_test_case(act, is_bwd, (256, 384), BOTH, in_dtype, fp8_dtype, swizzled)
+
+
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("act", GATED_ACTIVATIONS, ids=get_gated_id)
+def test_gated_swizzled_bwd_tails(act, block_size, in_dtype):
+    """Backward with GEMM-swizzled scales for every input dtype and output direction, on a row tail
+    and a 128-column tail."""
+    run_gated_test_case(act, True, (264, 384), block_size, in_dtype, tex.DType.kFloat8E4M3, True)
 
 
 # 264x288 has a row tail and a 32-column tail, and act values below the sigmoid's fast-reciprocal

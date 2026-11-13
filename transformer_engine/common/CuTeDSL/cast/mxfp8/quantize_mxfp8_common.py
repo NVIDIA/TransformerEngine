@@ -438,10 +438,6 @@ class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
                 f"unknown gated activation {activation!r}; expected one of"
                 f" {sorted(GATED_ACTIVATIONS)}"
             )
-        if is_bwd and with_gemm_swizzled_scales:
-            # TODO(kainingz): technically this is supported but I need to come up with a less disgusting way
-            # to implement it in CuTe
-            raise ValueError("backward gated activations with GEMM-swizzled scales")
         self.IS_BWD = is_bwd
         self.GATED_ACTIVATION = activation
 
