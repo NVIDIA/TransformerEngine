@@ -131,9 +131,10 @@ void nvte_multi_tensor_unswizzle_scaling_factors(const NVTETensor* inputs, NVTET
 
  *  Requirements:
  *  - input is an FP8 block scaling tensor
- *  - input has rowwise usage
+ *  - input has rowwise usage, or columnwise usage that is not stored transposed for 1D
+ *    columnwise output
  *  - output is an MXFP8 tensor
- *  - output has rowwise usage
+ *  - output has rowwise or columnwise usage
  *  - output.scale_inv has appropriate shape
  *  */
 void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input, NVTETensor output,
@@ -169,11 +170,12 @@ void nvte_multi_tensor_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTE
  *
  *  Requirements:
  *  - input is an FP8 block scaling (1D or 2D) grouped tensor with rowwise data and FP32 rowwise
- *    scale_inv in the compact per-tensor layout; per-tensor first dims or last dims (int64) may
- *    vary, but not both
+ *    scale_inv (columnwise for 1D columnwise output) in the compact per-tensor layout; per-tensor
+ *    first dims or last dims (int64) may vary, but not both
  *  - output is an MXFP8 grouped tensor with the same rowwise data pointer, dims and logical
- *    shape, with_gemm_swizzled_scales set, and E8M0 rowwise scale_inv. Tensor t with rowwise
- *    data [f, l] is written at the cumulative offset of
+ *    shape, with_gemm_swizzled_scales set, and E8M0 rowwise scale_inv, or the same with
+ *    columnwise data and scale_inv, as in nvte_swizzle_block_scaling_to_mxfp8_scaling_factors.
+ *    Tensor t with rowwise data [f, l] is written at the cumulative offset of
  *    roundup(f, 128) * ceil(l / 128) * 4 bytes.
  *  - output scale_inv holds at least
  *    nvte_get_grouped_block_scaling_to_mxfp8_scale_inv_size(input) bytes

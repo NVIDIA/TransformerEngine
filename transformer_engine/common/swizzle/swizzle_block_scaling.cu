@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <mutex>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "../common.h"
@@ -193,14 +194,16 @@ constexpr uint32_t WARPS_X_PER_TB = 2;  // configurable
 constexpr uint32_t WARPS_Y_PER_TB = 2;  // configurable
 
 // Converts the scaling factor of one 128x128 data tile. All lanes of the warp must call this
-// with the same tile coordinates.
+// with the same tile coordinates. With kTransposedScales, the input scales belong to the
+// transposed data.
+template <bool kTransposedScales>
 __device__ __forceinline__ void swizzle_tile(const void* __restrict__ const in,
                                              void* __restrict__ const out,
                                              const uint32_t out_tile_x, const uint32_t out_tile_y,
                                              const uint32_t in_y_stride,
                                              const uint32_t out_y_stride, const uint32_t lane) {
-  const uint32_t in_tile_y = out_tile_y;
-  const uint32_t in_tile_x = out_tile_x;
+  const uint32_t in_tile_y = kTransposedScales ? out_tile_x : out_tile_y;
+  const uint32_t in_tile_x = kTransposedScales ? out_tile_y : out_tile_x;
 
   // calculate this warp's input base pointer
   constexpr uint32_t in_x_stride = sizeof(float);
@@ -225,6 +228,7 @@ __device__ __forceinline__ void swizzle_tile(const void* __restrict__ const in,
   reinterpret_cast<uint4*>(warp_dst)[lane] = sf4;
 }
 
+template <bool kTransposedScales>
 void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
     swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(
         const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
@@ -246,11 +250,12 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
     return;
   }
 
-  swizzle_tile(in, out, out_tile_x, out_tile_y, in_y_stride, out_y_stride, lane);
+  swizzle_tile<kTransposedScales>(in, out, out_tile_x, out_tile_y, in_y_stride, out_y_stride, lane);
 }
 
+// With transposed_scales, `in` holds the 2D block scales of the transposed data.
 void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
-                   cudaStream_t stream) {
+                   const bool transposed_scales, cudaStream_t stream) {
   NVTE_CHECK(is_aligned_ptr(in, alignof(float)), "Input scaling factor pointer must be aligned to ",
              alignof(float), " bytes");
   NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
@@ -263,13 +268,18 @@ void launch_kernel(const void* const in, void* const out, uint32_t data_rows, ui
 
   // Each 128x128 tile in the data corresponds to a 1x1 tile in the input scales
   // and a 128x4 tile in the output scales.
-  const uint32_t input_scale_inv_cols = DIVUP(data_cols, 512u) * 4;
+  const uint32_t input_scale_inv_cols = DIVUP(transposed_scales ? data_rows : data_cols, 512u) * 4;
   const uint32_t output_scale_inv_cols = tiles_x * 128 * 4;
   const uint32_t in_y_stride = input_scale_inv_cols * sizeof(float);
   const uint32_t out_y_stride = output_scale_inv_cols * sizeof(uint8_t);
 
-  swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<<<grid_dim, block_dim, 0, stream>>>(
-      in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
+  if (transposed_scales) {
+    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<true>
+        <<<grid_dim, block_dim, 0, stream>>>(in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
+  } else {
+    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel<false>
+        <<<grid_dim, block_dim, 0, stream>>>(in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
+  }
 }
 }  // namespace swizzle_kernel_2d
 namespace swizzle_kernel_tiles {
@@ -280,8 +290,9 @@ constexpr int kBlockLen = 128;
 
 // Converts the scaling factors of data tile `tile` (row-major over the tensor's tiles) of a tensor
 // with rowwise data [rows, cols]. `in` and `out` point at the tensor's compact FP8 block scales and
-// its swizzled MXFP8 scales. All lanes of the warp must call this with the same tile.
-template <bool kIs2D>
+// its swizzled MXFP8 scales. All lanes of the warp must call this with the same tile. With
+// kTransposedScales, `in` holds the 2D block scales of the transposed data [cols, rows].
+template <bool kIs2D, bool kTransposedScales>
 __device__ __forceinline__ void convert_tile(const float* const in, uint8_t* const out,
                                              const size_t rows, const size_t cols,
                                              const uint32_t tile, const uint32_t lane) {
@@ -292,10 +303,12 @@ __device__ __forceinline__ void convert_tile(const float* const in, uint8_t* con
   const uint32_t out_y_stride = tiles_x * static_cast<uint32_t>(kBlockLen) * 4;
   if constexpr (kIs2D) {
     // Each data tile corresponds to a 1x1 tile in the input scales.
+    const size_t in_tiles_x =
+        kTransposedScales ? DIVUP(rows, static_cast<size_t>(kBlockLen)) : tiles_x;
     const uint32_t in_y_stride =
-        static_cast<uint32_t>(DIVUP_TO_MULTIPLE(tiles_x, 4) * sizeof(float));
-    swizzle_kernel_2d::swizzle_tile(in, out, out_tile_x, out_tile_y, in_y_stride, out_y_stride,
-                                    lane);
+        static_cast<uint32_t>(DIVUP_TO_MULTIPLE(in_tiles_x, 4) * sizeof(float));
+    swizzle_kernel_2d::swizzle_tile<kTransposedScales>(in, out, out_tile_x, out_tile_y, in_y_stride,
+                                                       out_y_stride, lane);
   } else {
     // Each data tile corresponds to a 128x1 tile in the input scales, which are in transposed
     // order.
@@ -341,12 +354,15 @@ constexpr size_t kTileOutputBytes = 512;
 // Per-tensor scale sizes for a tensor with rowwise data [rows, cols]. These must match
 // padded_block_{1d,2d}_scale_inv_floats(.., rowwise=true) and
 // padded_mxfp8_scale_inv_bytes(.., rowwise=true) in gemm/cublaslt_grouped_gemm.cu, which locate
-// each tensor's scales in the same grouped buffers.
-template <bool kIs2D>
+// each tensor's scales in the same grouped buffers. With kTransposedScales, the 2D scales belong
+// to the transposed data [cols, rows].
+template <bool kIs2D, bool kTransposedScales>
 __device__ __forceinline__ size_t input_scale_floats(const size_t rows, const size_t cols) {
   if constexpr (kIs2D) {
-    return DIVUP(rows, static_cast<size_t>(kBlockLen)) *
-           DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(kBlockLen)), 4);
+    const size_t scale_rows = kTransposedScales ? cols : rows;
+    const size_t scale_cols = kTransposedScales ? rows : cols;
+    return DIVUP(scale_rows, static_cast<size_t>(kBlockLen)) *
+           DIVUP_TO_MULTIPLE(DIVUP(scale_cols, static_cast<size_t>(kBlockLen)), 4);
   } else {
     return DIVUP(cols, static_cast<size_t>(kBlockLen)) * DIVUP_TO_MULTIPLE(rows, 4);
   }
@@ -366,7 +382,7 @@ __host__ __device__ __forceinline__ size_t table_smem_bytes(const size_t num_ten
 // memory, then its warps walk 128x128 data tiles across all tensors in the group and find each
 // tile's tensor by binary search. The per-tensor dims are read on the device, so a captured launch
 // stays correct when they change between CUDA graph replays.
-template <bool kIs2D>
+template <bool kIs2D, bool kTransposedScales>
 __global__ void __launch_bounds__(WARPS_PER_TB* WARP_SIZE)
     grouped_swizzle_block_scaling_to_mxfp8_kernel(
         const float* __restrict__ const in, uint8_t* __restrict__ const out,
@@ -401,7 +417,7 @@ __global__ void __launch_bounds__(WARPS_PER_TB* WARP_SIZE)
         const size_t cols = tensor_cols(t);
         tiles = DIVUP(rows, static_cast<size_t>(kBlockLen)) *
                 DIVUP(cols, static_cast<size_t>(kBlockLen));
-        in_size = input_scale_floats<kIs2D>(rows, cols);
+        in_size = input_scale_floats<kIs2D, kTransposedScales>(rows, cols);
         out_size = output_scale_bytes(rows, cols);
       }
       size_t tiles_sum = tiles;
@@ -438,16 +454,16 @@ __global__ void __launch_bounds__(WARPS_PER_TB* WARP_SIZE)
   for (size_t tile_id = static_cast<size_t>(blockIdx.x) * WARPS_PER_TB + threadIdx.x / WARP_SIZE;
        tile_id < total_tiles; tile_id += warp_stride) {
     const size_t t = swizzle_kernel_tiles::find_tensor(tile_start, num_tensors, tile_id);
-    swizzle_kernel_tiles::convert_tile<kIs2D>(in + in_start[t], out + out_start[t], tensor_rows(t),
-                                              tensor_cols(t),
-                                              static_cast<uint32_t>(tile_id - tile_start[t]), lane);
+    swizzle_kernel_tiles::convert_tile<kIs2D, kTransposedScales>(
+        in + in_start[t], out + out_start[t], tensor_rows(t), tensor_cols(t),
+        static_cast<uint32_t>(tile_id - tile_start[t]), lane);
   }
 }
 
 // Lets the kernel use more than the default 48 KiB of dynamic shared memory when its tables need
 // it. cudaFuncSetAttribute is a host-synchronous driver call, so the limit is raised to the device
 // maximum once per device.
-template <bool kIs2D>
+template <bool kIs2D, bool kTransposedScales>
 void enable_table_smem(const size_t smem_bytes, const size_t num_tensors) {
   constexpr size_t kDefaultMaxSmemBytes = 48 * 1024;
   if (smem_bytes <= kDefaultMaxSmemBytes) {
@@ -460,9 +476,9 @@ void enable_table_smem(const size_t smem_bytes, const size_t num_tensors) {
              " bytes of shared memory, but the device allows ", max_smem_bytes, ".");
   static std::vector<std::once_flag> flags(cuda::num_devices());
   std::call_once(flags[device], [&]() {
-    NVTE_CHECK_CUDA(cudaFuncSetAttribute(grouped_swizzle_block_scaling_to_mxfp8_kernel<kIs2D>,
-                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                         static_cast<int>(max_smem_bytes)));
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+        grouped_swizzle_block_scaling_to_mxfp8_kernel<kIs2D, kTransposedScales>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(max_smem_bytes)));
   });
 }
 
@@ -507,7 +523,7 @@ struct MultiConvertArgs {
 static_assert(sizeof(MultiConvertArgs) <= 4096, "Kernel arguments must fit in 4 KiB");
 
 // Each warp converts one 128x128 data tile of one of the tensors.
-template <bool kIs2D>
+template <bool kIs2D, bool kTransposedScales>
 __global__ void __launch_bounds__(WARPS_PER_TB* WARP_SIZE)
     multi_swizzle_block_scaling_to_mxfp8_kernel(const __grid_constant__ MultiConvertArgs args) {
   const uint32_t tile = blockIdx.x * WARPS_PER_TB + threadIdx.x / WARP_SIZE;
@@ -515,16 +531,32 @@ __global__ void __launch_bounds__(WARPS_PER_TB* WARP_SIZE)
     return;
   }
   const size_t t = swizzle_kernel_tiles::find_tensor(args.tile_start, args.num_tensors, tile);
-  swizzle_kernel_tiles::convert_tile<kIs2D>(args.input[t], args.output[t], args.rows[t],
-                                            args.cols[t], tile - args.tile_start[t],
-                                            threadIdx.x % WARP_SIZE);
+  swizzle_kernel_tiles::convert_tile<kIs2D, kTransposedScales>(
+      args.input[t], args.output[t], args.rows[t], args.cols[t], tile - args.tile_start[t],
+      threadIdx.x % WARP_SIZE);
 }
 }  // namespace swizzle_kernel_multi
 
 namespace {
 
+// Whether the output asks for MXFP8 columnwise scales instead of rowwise ones. These are the
+// rowwise MXFP8 scales of the transposed data, converted from the input's columnwise data and
+// scales, or from its rowwise ones with 2D block scaling.
+template <typename TensorT>
+bool columnwise_output(const TensorT& input, const TensorT& output) {
+  if (!output.has_columnwise_data()) {
+    return false;
+  }
+  NVTE_CHECK(!output.has_data(), "Output must have rowwise or columnwise data, not both");
+  NVTE_CHECK(input.scaling_mode == NVTE_BLOCK_SCALING_2D || !input.columnwise_transposed,
+             "MXFP8 columnwise scales require FP8 block-scaling columnwise data that is not stored "
+             "transposed");
+  return true;
+}
+
 // Checks one input/output pair of the non-grouped conversion.
-void check_block_scaling_to_mxfp8_tensors(const Tensor* input, const Tensor* output) {
+void check_block_scaling_to_mxfp8_tensors(const Tensor* input, const Tensor* output,
+                                          const bool columnwise) {
   CheckInputTensor(*input, "block_scaling_scaling_factor_input");
   CheckInputTensor(*output, "mxfp8_scaling_factor_output");
 
@@ -534,35 +566,41 @@ void check_block_scaling_to_mxfp8_tensors(const Tensor* input, const Tensor* out
   NVTE_CHECK(output->scaling_mode == NVTE_MXFP8_1D_SCALING,
              "Output tensor must be an mxfp8 tensor");
 
-  NVTE_CHECK(input->data.dtype == transformer_engine::DType::kFloat8E4M3 ||
-                 input->data.dtype == transformer_engine::DType::kFloat8E5M2,
+  const bool columnwise_input = columnwise && scaling_mode == NVTE_BLOCK_SCALING_1D;
+  const SimpleTensor& in_data = columnwise_input ? input->columnwise_data : input->data;
+  const SimpleTensor& in_scale_inv =
+      columnwise_input ? input->columnwise_scale_inv : input->scale_inv;
+  const SimpleTensor& out_data = columnwise ? output->columnwise_data : output->data;
+  const SimpleTensor& out_scale_inv = columnwise ? output->columnwise_scale_inv : output->scale_inv;
+
+  NVTE_CHECK(in_data.dtype == transformer_engine::DType::kFloat8E4M3 ||
+                 in_data.dtype == transformer_engine::DType::kFloat8E5M2,
              "Input data must have FP8E4M3 or FP8E5M2 dtype to be compatible with MXFP8");
-  NVTE_CHECK(output->data.dtype == input->data.dtype,
-             "Output data must have the same dtype as input data");
-  NVTE_CHECK(input->scale_inv.dtype == DType::kFloat32, "Input must have FP32 scaling factors");
-  NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E8M0,
-             "Output must have E8M0 scaling factors");
+  NVTE_CHECK(out_data.dtype == in_data.dtype, "Output data must have the same dtype as input data");
+  NVTE_CHECK(in_scale_inv.dtype == DType::kFloat32, "Input must have FP32 scaling factors");
+  NVTE_CHECK(out_scale_inv.dtype == DType::kFloat8E8M0, "Output must have E8M0 scaling factors");
 
   NVTE_CHECK(output->with_gemm_swizzled_scales,
              "Expected output tensor with scales in GEMM swizzled format.");
 
-  NVTE_CHECK(input->data.dptr != nullptr, "Input must have rowwise data");
-  NVTE_CHECK(output->data.dptr == input->data.dptr, "Output must share data with input");
-  NVTE_CHECK(input->scale_inv.dptr != nullptr, "Input must have rowwise scaling factors");
-  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Output must have rowwise scaling factors");
+  NVTE_CHECK(in_data.dptr != nullptr, "Input must have data");
+  NVTE_CHECK(out_data.dptr == in_data.dptr, "Output must share data with input");
+  NVTE_CHECK(in_scale_inv.dptr != nullptr, "Input must have scaling factors");
+  NVTE_CHECK(out_scale_inv.dptr != nullptr, "Output must have scaling factors");
 
-  NVTE_CHECK(input->data.shape.size() == 2, "Input data must be a matrix");
-  NVTE_CHECK(output->data.shape == input->data.shape,
-             "Output data must have the same shape as input data");
-  NVTE_CHECK(input->scale_inv.shape.size() == 2, "Input scaling factors must be a matrix");
-  NVTE_CHECK(output->scale_inv.shape.size() == 2, "Output scaling factors must be a matrix");
+  NVTE_CHECK(in_data.shape.size() == 2, "Input data must be a matrix");
+  NVTE_CHECK(out_data.shape == in_data.shape, "Output data must have the same shape as input data");
+  NVTE_CHECK(in_scale_inv.shape.size() == 2, "Input scaling factors must be a matrix");
+  NVTE_CHECK(out_scale_inv.shape.size() == 2, "Output scaling factors must be a matrix");
 
-  const size_t data_rows = input->data.shape[0];
-  const size_t data_cols = input->data.shape[1];
-  const size_t input_scale_inv_rows = input->scale_inv.shape[0];
-  const size_t input_scale_inv_cols = input->scale_inv.shape[1];
-  const size_t output_scale_inv_rows = output->scale_inv.shape[0];
-  const size_t output_scale_inv_cols = output->scale_inv.shape[1];
+  // Columnwise output is converted on the transposed data, whose rowwise MXFP8 scales have the
+  // same layout as the MXFP8 columnwise scales of the data
+  const size_t data_rows = in_data.shape[columnwise ? 1 : 0];
+  const size_t data_cols = in_data.shape[columnwise ? 0 : 1];
+  const size_t input_scale_inv_rows = in_scale_inv.shape[0];
+  const size_t input_scale_inv_cols = in_scale_inv.shape[1];
+  const size_t output_scale_inv_rows = out_scale_inv.shape[columnwise ? 1 : 0];
+  const size_t output_scale_inv_cols = out_scale_inv.shape[columnwise ? 0 : 1];
 
   NVTE_CHECK(output_scale_inv_rows == DIVUP<size_t>(data_rows, 128) * 128,
              "Expected the output scaling factor matrix to have ",
@@ -580,14 +618,15 @@ void check_block_scaling_to_mxfp8_tensors(const Tensor* input, const Tensor* out
     NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_rows, 4) * 4,
                "Expected the input scaling factor matrix to have ", DIVUP<size_t>(data_rows, 4) * 4,
                " columns, but it has ", input_scale_inv_cols, " columns instead.");
-  } else {  // scaling_mode == NVTE_BLOCK_SCALING_2D
-    NVTE_CHECK(input_scale_inv_rows == DIVUP<size_t>(data_rows, 128),
-               "Expected the input scaling factor matrix to have ", DIVUP<size_t>(data_rows, 128),
+  } else {  // scaling_mode == NVTE_BLOCK_SCALING_2D, scales of the rowwise data
+    const size_t rows = in_data.shape[0];
+    const size_t cols = in_data.shape[1];
+    NVTE_CHECK(input_scale_inv_rows == DIVUP<size_t>(rows, 128),
+               "Expected the input scaling factor matrix to have ", DIVUP<size_t>(rows, 128),
                " rows, but it has ", input_scale_inv_rows, " rows instead.");
-    NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_cols, 512) * 4,
-               "Expected the input scaling factor matrix to have ",
-               DIVUP<size_t>(data_cols, 512) * 4, " columns, but it has ", input_scale_inv_cols,
-               " columns instead.");
+    NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(cols, 512) * 4,
+               "Expected the input scaling factor matrix to have ", DIVUP<size_t>(cols, 512) * 4,
+               " columns, but it has ", input_scale_inv_cols, " columns instead.");
   }
 }
 
@@ -595,21 +634,24 @@ void check_block_scaling_to_mxfp8_tensors(const Tensor* input, const Tensor* out
 
 void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor* output,
                                                     cudaStream_t stream) {
+  const NVTEScalingMode scaling_mode = input->scaling_mode;
+  const bool columnwise = columnwise_output(*input, *output);
+  const bool columnwise_input = columnwise && scaling_mode == NVTE_BLOCK_SCALING_1D;
+  const SimpleTensor& data = columnwise_input ? input->columnwise_data : input->data;
   // Do nothing if tensor is empty
-  if (input->data.numel() == 0) {
+  if (data.numel() == 0) {
     return;
   }
 
-  check_block_scaling_to_mxfp8_tensors(input, output);
-  const NVTEScalingMode scaling_mode = input->scaling_mode;
-  const size_t data_rows = input->data.shape[0];
-  const size_t data_cols = input->data.shape[1];
+  check_block_scaling_to_mxfp8_tensors(input, output, columnwise);
+  const void* in = (columnwise_input ? input->columnwise_scale_inv : input->scale_inv).dptr;
+  void* out = (columnwise ? output->columnwise_scale_inv : output->scale_inv).dptr;
+  const size_t data_rows = data.shape[columnwise ? 1 : 0];
+  const size_t data_cols = data.shape[columnwise ? 0 : 1];
   if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
-    swizzle_kernel_1d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
-                                     data_cols, stream);
+    swizzle_kernel_1d::launch_kernel(in, out, data_rows, data_cols, stream);
   } else {  // scaling_mode == NVTE_BLOCK_SCALING_2D
-    swizzle_kernel_2d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
-                                     data_cols, stream);
+    swizzle_kernel_2d::launch_kernel(in, out, data_rows, data_cols, columnwise, stream);
   }
 }
 
@@ -621,19 +663,25 @@ void multi_tensor_swizzle_block_scaling_to_mxfp8_scaling_factors(
              "Expected the same number of input and output tensors");
 
   // Tensors are batched into launches of up to kMaxTensorsPerKernel tensors with the same
-  // scaling mode.
+  // scaling mode and output direction.
   MultiConvertArgs args{};
   bool is_2d = false;
+  bool columnwise = false;
   auto launch = [&]() {
     if (args.num_tensors == 0) {
       return;
     }
     const dim3 grid_dim{DIVUP(args.tile_start[args.num_tensors], WARPS_PER_TB)};
     const dim3 block_dim{WARPS_PER_TB * WARP_SIZE};
-    if (is_2d) {
-      multi_swizzle_block_scaling_to_mxfp8_kernel<true><<<grid_dim, block_dim, 0, stream>>>(args);
+    if (is_2d && columnwise) {
+      multi_swizzle_block_scaling_to_mxfp8_kernel<true, true>
+          <<<grid_dim, block_dim, 0, stream>>>(args);
+    } else if (is_2d) {
+      multi_swizzle_block_scaling_to_mxfp8_kernel<true, false>
+          <<<grid_dim, block_dim, 0, stream>>>(args);
     } else {
-      multi_swizzle_block_scaling_to_mxfp8_kernel<false><<<grid_dim, block_dim, 0, stream>>>(args);
+      multi_swizzle_block_scaling_to_mxfp8_kernel<false, false>
+          <<<grid_dim, block_dim, 0, stream>>>(args);
     }
     NVTE_CHECK_CUDA(cudaGetLastError());
     args.num_tensors = 0;
@@ -641,33 +689,41 @@ void multi_tensor_swizzle_block_scaling_to_mxfp8_scaling_factors(
   for (size_t i = 0; i < inputs.size(); ++i) {
     const Tensor* input = inputs[i];
     const Tensor* output = outputs[i];
+    const bool tensor_columnwise = columnwise_output(*input, *output);
+    const bool columnwise_input = tensor_columnwise && input->scaling_mode == NVTE_BLOCK_SCALING_1D;
+    const SimpleTensor& data = columnwise_input ? input->columnwise_data : input->data;
+    const SimpleTensor& in_scale_inv =
+        columnwise_input ? input->columnwise_scale_inv : input->scale_inv;
+    const SimpleTensor& out_scale_inv =
+        tensor_columnwise ? output->columnwise_scale_inv : output->scale_inv;
     // Skip empty tensors
-    if (input->data.numel() == 0) {
+    if (data.numel() == 0) {
       continue;
     }
-    check_block_scaling_to_mxfp8_tensors(input, output);
-    const size_t rows = input->data.shape[0];
-    const size_t cols = input->data.shape[1];
+    check_block_scaling_to_mxfp8_tensors(input, output, tensor_columnwise);
+    const size_t rows = data.shape[tensor_columnwise ? 1 : 0];
+    const size_t cols = data.shape[tensor_columnwise ? 0 : 1];
     NVTE_CHECK(rows <= UINT32_MAX && cols <= UINT32_MAX, "Input data is too large");
-    NVTE_CHECK(is_aligned_ptr(output->scale_inv.dptr, alignof(uint4)),
+    NVTE_CHECK(is_aligned_ptr(out_scale_inv.dptr, alignof(uint4)),
                "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
     if (input->scaling_mode == NVTE_BLOCK_SCALING_1D) {
-      NVTE_CHECK(is_aligned_ptr(input->scale_inv.dptr, alignof(uint4)),
+      NVTE_CHECK(is_aligned_ptr(in_scale_inv.dptr, alignof(uint4)),
                  "Input scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
       NVTE_CHECK(rows % 4 == 0, "Input tensor must not have any padding scaling factors");
     } else {
-      NVTE_CHECK(is_aligned_ptr(input->scale_inv.dptr, alignof(float)),
+      NVTE_CHECK(is_aligned_ptr(in_scale_inv.dptr, alignof(float)),
                  "Input scaling factor pointer must be aligned to ", alignof(float), " bytes");
     }
     const bool tensor_is_2d = input->scaling_mode == NVTE_BLOCK_SCALING_2D;
     if (args.num_tensors == kMaxTensorsPerKernel ||
-        (args.num_tensors > 0 && tensor_is_2d != is_2d)) {
+        (args.num_tensors > 0 && (tensor_is_2d != is_2d || tensor_columnwise != columnwise))) {
       launch();
     }
     is_2d = tensor_is_2d;
+    columnwise = tensor_columnwise;
     const size_t n = args.num_tensors;
-    args.input[n] = reinterpret_cast<const float*>(input->scale_inv.dptr);
-    args.output[n] = reinterpret_cast<uint8_t*>(output->scale_inv.dptr);
+    args.input[n] = reinterpret_cast<const float*>(in_scale_inv.dptr);
+    args.output[n] = reinterpret_cast<uint8_t*>(out_scale_inv.dptr);
     args.rows[n] = static_cast<uint32_t>(rows);
     args.cols[n] = static_cast<uint32_t>(cols);
     args.tile_start[n + 1] = args.tile_start[n] + static_cast<uint32_t>(DIVUP<size_t>(rows, 128) *
@@ -699,54 +755,72 @@ void swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(const GroupedTensor*
   NVTE_CHECK(!varying_last || input->last_dims.dtype == DType::kInt64,
              "Grouped tensor last_dims must have int64 dtype");
 
+  // The output bytes of each tensor are the same in either direction
   const size_t bound = grouped_mxfp8_scale_bytes_upper_bound(*input);
   if (bound == 0) {
     return;
   }
 
-  NVTE_CHECK(input->data.dptr != nullptr, "Input must have rowwise data");
-  NVTE_CHECK(output->data.dptr == input->data.dptr, "Output must share data with input");
-  NVTE_CHECK(input->data.dtype == DType::kFloat8E4M3 || input->data.dtype == DType::kFloat8E5M2,
+  const bool columnwise = columnwise_output(*input, *output);
+  const bool columnwise_input = columnwise && scaling_mode == NVTE_BLOCK_SCALING_1D;
+  const SimpleTensor& in_data = columnwise_input ? input->columnwise_data : input->data;
+  const SimpleTensor& in_scale_inv =
+      columnwise_input ? input->columnwise_scale_inv : input->scale_inv;
+  const SimpleTensor& out_data = columnwise ? output->columnwise_data : output->data;
+  const SimpleTensor& out_scale_inv = columnwise ? output->columnwise_scale_inv : output->scale_inv;
+
+  NVTE_CHECK(in_data.dptr != nullptr, "Input must have data");
+  NVTE_CHECK(out_data.dptr == in_data.dptr, "Output must share data with input");
+  NVTE_CHECK(in_data.dtype == DType::kFloat8E4M3 || in_data.dtype == DType::kFloat8E5M2,
              "Input data must have FP8E4M3 or FP8E5M2 dtype to be compatible with MXFP8");
-  NVTE_CHECK(output->data.dtype == input->data.dtype,
-             "Output data must have the same dtype as input data");
-  NVTE_CHECK(input->scale_inv.dptr != nullptr && input->scale_inv.dtype == DType::kFloat32,
-             "Input must have FP32 rowwise scaling factors");
-  NVTE_CHECK(output->scale_inv.dptr != nullptr && output->scale_inv.dtype == DType::kFloat8E8M0,
-             "Output must have E8M0 rowwise scaling factors");
-  NVTE_CHECK(output->scale_inv.numel() >= bound, "Output scaling factor buffer holds ",
-             output->scale_inv.numel(), " bytes, but the conversion may write up to ", bound,
+  NVTE_CHECK(out_data.dtype == in_data.dtype, "Output data must have the same dtype as input data");
+  NVTE_CHECK(in_scale_inv.dptr != nullptr && in_scale_inv.dtype == DType::kFloat32,
+             "Input must have FP32 scaling factors");
+  NVTE_CHECK(out_scale_inv.dptr != nullptr && out_scale_inv.dtype == DType::kFloat8E8M0,
+             "Output must have E8M0 scaling factors");
+  NVTE_CHECK(out_scale_inv.numel() >= bound, "Output scaling factor buffer holds ",
+             out_scale_inv.numel(), " bytes, but the conversion may write up to ", bound,
              " bytes.");
-  NVTE_CHECK(is_aligned_ptr(input->scale_inv.dptr, alignof(uint4)),
+  NVTE_CHECK(is_aligned_ptr(in_scale_inv.dptr, alignof(uint4)),
              "Input scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
-  NVTE_CHECK(is_aligned_ptr(output->scale_inv.dptr, alignof(uint4)),
+  NVTE_CHECK(is_aligned_ptr(out_scale_inv.dptr, alignof(uint4)),
              "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
 
-  const size_t uniform_first = varying_first ? 0 : input->get_common_first_dim();
-  const size_t uniform_last = varying_last ? 0 : input->get_common_last_dim();
-  if (scaling_mode == NVTE_BLOCK_SCALING_1D && !varying_first) {
-    NVTE_CHECK(uniform_first % 4 == 0, "Input tensor must not have any padding scaling factors");
-  }
+  size_t uniform_first = varying_first ? 0 : input->get_common_first_dim();
+  size_t uniform_last = varying_last ? 0 : input->get_common_last_dim();
   const auto* first_dims =
       varying_first ? reinterpret_cast<const int64_t*>(input->first_dims.dptr) : nullptr;
   const auto* last_dims =
       varying_last ? reinterpret_cast<const int64_t*>(input->last_dims.dptr) : nullptr;
+  // Columnwise output is converted on the transposed per-tensor data
+  if (columnwise) {
+    std::swap(uniform_first, uniform_last);
+    std::swap(first_dims, last_dims);
+  }
+  if (scaling_mode == NVTE_BLOCK_SCALING_1D && first_dims == nullptr) {
+    NVTE_CHECK(uniform_first % 4 == 0, "Input tensor must not have any padding scaling factors");
+  }
 
   const size_t max_blocks = DIVUP(DIVUP(bound, kTileOutputBytes), size_t{WARPS_PER_TB});
   const size_t sm_count = static_cast<size_t>(cuda::sm_count(cuda::current_device()));
   const dim3 grid_dim{static_cast<uint32_t>(std::min(max_blocks, sm_count * kMaxBlocksPerSM))};
   const dim3 block_dim{WARPS_PER_TB * WARP_SIZE};
-  const auto* in = reinterpret_cast<const float*>(input->scale_inv.dptr);
-  auto* out = reinterpret_cast<uint8_t*>(output->scale_inv.dptr);
+  const auto* in = reinterpret_cast<const float*>(in_scale_inv.dptr);
+  auto* out = reinterpret_cast<uint8_t*>(out_scale_inv.dptr);
   const size_t smem_bytes = table_smem_bytes(input->num_tensors);
-  if (scaling_mode == NVTE_BLOCK_SCALING_2D) {
-    enable_table_smem<true>(smem_bytes, input->num_tensors);
-    grouped_swizzle_block_scaling_to_mxfp8_kernel<true>
+  if (scaling_mode == NVTE_BLOCK_SCALING_2D && columnwise) {
+    enable_table_smem<true, true>(smem_bytes, input->num_tensors);
+    grouped_swizzle_block_scaling_to_mxfp8_kernel<true, true>
+        <<<grid_dim, block_dim, smem_bytes, stream>>>(in, out, first_dims, last_dims, uniform_first,
+                                                      uniform_last, input->num_tensors);
+  } else if (scaling_mode == NVTE_BLOCK_SCALING_2D) {
+    enable_table_smem<true, false>(smem_bytes, input->num_tensors);
+    grouped_swizzle_block_scaling_to_mxfp8_kernel<true, false>
         <<<grid_dim, block_dim, smem_bytes, stream>>>(in, out, first_dims, last_dims, uniform_first,
                                                       uniform_last, input->num_tensors);
   } else {
-    enable_table_smem<false>(smem_bytes, input->num_tensors);
-    grouped_swizzle_block_scaling_to_mxfp8_kernel<false>
+    enable_table_smem<false, false>(smem_bytes, input->num_tensors);
+    grouped_swizzle_block_scaling_to_mxfp8_kernel<false, false>
         <<<grid_dim, block_dim, smem_bytes, stream>>>(in, out, first_dims, last_dims, uniform_first,
                                                       uniform_last, input->num_tensors);
   }
