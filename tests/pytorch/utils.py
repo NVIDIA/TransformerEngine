@@ -399,8 +399,13 @@ def get_available_attention_backends(
     cp_size_a2a: int = 1,
     num_tokens_q: Optional[int] = None,
     num_tokens_kv: Optional[int] = None,
+    requires_backward: Optional[bool] = None,
 ) -> Tuple[List, List]:
-    """Check for all available attention backends that support a model configuration"""
+    """Check which backends support a model configuration.
+
+    By default, only training requires backward support. Override requires_backward
+    to query evaluation with autograd or training without backward.
+    """
 
     _, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
     if num_tokens_q is None:
@@ -480,6 +485,7 @@ def get_available_attention_backends(
             fp8=fp8,
             fp8_meta=fp8_meta,
             is_training=is_training,
+            requires_backward=is_training if requires_backward is None else requires_backward,
             inference_params=inference_params,
             softmax_type=config.softmax_type,
             return_max_logit=config.return_max_logit,

@@ -3329,7 +3329,8 @@ def run_dot_product_attention(
     )
     if forward_kwargs is not None:
         dpa_forward_kwargs.update(forward_kwargs)
-    out = block(q, k, v, **packed_kwargs, **dpa_forward_kwargs)
+    with torch.set_grad_enabled(is_training):
+        out = block(q, k, v, **packed_kwargs, **dpa_forward_kwargs)
     max_logit = None
     if config.return_max_logit:
         out, max_logit = out
@@ -3769,21 +3770,22 @@ def _run_transformer_layer(
         alibi_slopes = torch.randn(config.num_heads).abs().to(dtype=torch.float32, device="cuda")
 
     # Run a forward and backward pass
-    out = block(
-        inp,
-        self_attn_mask_type=config.attn_mask_type,
-        encoder_output=inp_enc if config.attn_type == "cross" else None,
-        enc_dec_attn_mask_type=config.attn_mask_type if config.attn_type == "cross" else None,
-        checkpoint_core_attention=False,
-        rotary_pos_emb=rotary_pos_emb,
-        core_attention_bias_type=config.attn_bias_type,
-        core_attention_bias=bias,
-        alibi_slopes=alibi_slopes,
-        max_seqlen_q=config.max_seqlen_q,
-        max_seqlen_kv=config.max_seqlen_kv,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_kv=cu_seqlens_kv,
-    )
+    with torch.set_grad_enabled(is_training):
+        out = block(
+            inp,
+            self_attn_mask_type=config.attn_mask_type,
+            encoder_output=inp_enc if config.attn_type == "cross" else None,
+            enc_dec_attn_mask_type=config.attn_mask_type if config.attn_type == "cross" else None,
+            checkpoint_core_attention=False,
+            rotary_pos_emb=rotary_pos_emb,
+            core_attention_bias_type=config.attn_bias_type,
+            core_attention_bias=bias,
+            alibi_slopes=alibi_slopes,
+            max_seqlen_q=config.max_seqlen_q,
+            max_seqlen_kv=config.max_seqlen_kv,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+        )
     if is_training:
         loss = out.sum()
         loss.backward()
@@ -4300,7 +4302,7 @@ def _run_mha_fp8_vs_f16(
     tensor = 0.01 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
     out_grad = tensor.view(*tensor.shape[:-2], -1)
 
-    with autocast(enabled=fp8_mha, recipe=fp8_recipe):
+    with torch.set_grad_enabled(is_training), autocast(enabled=fp8_mha, recipe=fp8_recipe):
         out = mha(
             hidden_states,
             attn_mask_type=config.attn_mask_type,
@@ -4626,7 +4628,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
 
-    with autocast(enabled=fp8_dpa, recipe=fp8_recipe):
+    with torch.set_grad_enabled(is_training), autocast(enabled=fp8_dpa, recipe=fp8_recipe):
         out = dpa(
             inp[0],
             inp[1],
@@ -4693,7 +4695,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model, monkeypatch):
         fp8_dpa=True,
     )
     fp8_meta["recipe"] = fp8_recipe
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    _, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         nominal_dtype=dtype,
@@ -4703,9 +4705,17 @@ def test_custom_mha_fp8_vs_f16(dtype, model, monkeypatch):
         is_training=is_training,
         deterministic=_deterministic,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    if not (fused_attn_backends and unfused_attn_supported):
-        pytest.skip("Not enough backends to run this test with.")
+    if not fused_attn_backends:
+        pytest.skip("FusedAttention is unavailable for this FP8 configuration.")
+    reference_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout="bs3hd",
+        is_training=is_training,
+        deterministic=_deterministic,
+    )
+    if not reference_backends[2]:
+        pytest.skip("UnfusedDotProductAttention is unavailable for the model-precision reference.")
 
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
     unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(
