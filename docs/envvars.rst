@@ -353,6 +353,18 @@ Kernel Configuration
    :Default: ``0``
    :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. NVFP4 4over6 quantization, fused softmax, and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_NVFP4``, ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX``, or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
 
+.. envvar:: NVTE_ACTIVATION_TABLE
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Experimental. When set to ``1``, read GeLU, SiLU and their derivatives from lookup tables when BF16 inputs are quantized to MXFP8. Each table is built on its first use and kept, once per device and process (under 64 KB per device in total), outside the framework's memory allocator. Results match the computed activations, except that GeLU and SiLU of ``-inf`` give ``-0`` instead of NaN, and derivatives of inputs with ``|x| < 2^-12`` (GeLU) or ``|x| < 2^-9`` (SiLU) are within 1 ulp (GeLU) or 2 ulp (SiLU) of the computed ones. When set to ``0``, the activations are computed. Read on every call.
+
+.. envvar:: NVTE_ACTIVATION_TABLE_EXACT_DSILU
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Experimental. Choose the SiLU-derivative lookup table (see :envvar:`NVTE_ACTIVATION_TABLE`). By default the 16 KB table covers ``|x| >= 2^-9`` and smaller inputs use the linear term ``0.5 + x/2``, which is within 2 ulp of the computed derivative. When set to ``1``, a 32 KB table covers ``|x| >= 2^-25``, and the derivative matches the computed one for every input. Read once per process, when the table is built.
+
 .. envvar:: NVTE_USE_CUTLASS_GROUPED_GEMM
 
    :Type: ``int`` (0 or 1)
