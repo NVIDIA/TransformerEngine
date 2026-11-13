@@ -37,7 +37,6 @@ from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ...tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ...triton.grouped_dbias_dscales import compute_grouped_dbias, compute_grouped_dbias_dscales
-from ...triton.round_through_dtype import round_through_dtype
 from ...utils import (
     ceil_div,
     clear_tensor_data,
@@ -494,27 +493,16 @@ def _nvfp4_global_scale(
 
 
 def _cast_scales_grad(
-    grad_scales: torch.Tensor,
-    *,
-    compute_dtype: torch.dtype,
-    scales_dtype: Optional[torch.dtype],
+    grad_scales: torch.Tensor, *, scales_dtype: Optional[torch.dtype]
 ) -> torch.Tensor:
-    """Round the FP32 scale (router probability) gradient to the compute dtype.
+    """Return the scale (router probability) gradient in the dtype of the scales input.
 
-    The gradient is rounded to ``compute_dtype``. When the scales input is FP32
-    while the compute dtype is BF16/FP16 (e.g. FP32 router probabilities from an
-    expert-parallel dispatcher), the rounded values are returned directly in FP32
-    by one kernel. Casting to ``compute_dtype`` here would make autograd cast the
-    gradient back to the FP32 scales dtype, i.e. two cast kernels that produce
-    exactly the same values.
+    The fused kernels compute it in FP32. FP32 scales get it unchanged (no rounding, no cast);
+    lower-precision scales get one cast, as the BF16 fused grouped MLP path does.
     """
-    if (
-        scales_dtype == torch.float32
-        and grad_scales.dtype == torch.float32
-        and compute_dtype in (torch.bfloat16, torch.float16)
-    ):
-        return round_through_dtype(grad_scales, compute_dtype)
-    return grad_scales.to(dtype=compute_dtype)
+    if scales_dtype is None or grad_scales.dtype == scales_dtype:
+        return grad_scales
+    return grad_scales.to(dtype=scales_dtype)
 
 
 def _single_quantized_tensor_from_grouped(
@@ -2915,9 +2903,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         if grad_scales is not None:
             grad_scales = _cast_scales_grad(
-                grad_scales,
-                compute_dtype=dtype,
-                scales_dtype=None if scales is None else scales.dtype,
+                grad_scales, scales_dtype=None if scales is None else scales.dtype
             )
 
         fc1_bias_grads: Optional[list[Optional[torch.Tensor]]] = None

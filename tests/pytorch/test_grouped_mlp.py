@@ -48,7 +48,6 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
-from transformer_engine.pytorch.triton.round_through_dtype import round_through_dtype
 from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
@@ -5066,38 +5065,13 @@ class TestGroupedMLPBf16FusedOp:
             )
 
 
-class TestScalesGradRounding:
-    """FP32 scale (router probability) gradient of the block-scaled fused grouped MLP.
+class TestScalesGradDtype:
+    """Scale (router probability) gradient of the block-scaled fused grouped MLP.
 
-    The backward rounds the FP32 scale gradient to the compute dtype. For FP32
-    scales it returns the rounded values in FP32 from one kernel; this must be
-    bitwise equal to the previous ``.to(compute_dtype)`` followed by autograd's
-    cast back to FP32.
+    The fused kernels compute it in FP32. It is returned in the dtype of the scales input:
+    unchanged for FP32 scales (no rounding through the compute dtype, no cast), cast once
+    for BF16 scales.
     """
-
-    _special_values = (
-        0.0,
-        -0.0,
-        float("inf"),
-        -float("inf"),
-        1e-45,
-        -1e-45,
-        1e-40,
-        -3e-39,
-        1.17549435e-38,
-        3.3895314e38,
-        -3.3895314e38,
-        3.4028235e38,
-        1.0 + 2**-8,
-        1.0 + 3 * 2**-9,
-        1.0 + 2**-11,
-        1.0 + 3 * 2**-12,
-        65504.0,
-        65520.0,
-        -65520.0,
-        6e-8,
-        3e-8,
-    )
 
     @staticmethod
     def _assert_bitwise_equal_or_both_nan(out: torch.Tensor, ref: torch.Tensor) -> None:
@@ -5106,50 +5080,6 @@ class TestScalesGradRounding:
         nan = torch.isnan(ref)
         assert torch.equal(torch.isnan(out), nan)
         assert torch.equal(out[~nan].view(torch.int32), ref[~nan].view(torch.int32))
-
-    @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
-    @pytest.mark.parametrize("numel", (0, 1, 4093, 131072))
-    @pytest.mark.parametrize("scale", (1e-38, 1e-3, 1.0, 1e30))
-    def test_round_through_dtype_matches_two_casts(
-        self, dtype: torch.dtype, numel: int, scale: float
-    ) -> None:
-        """Kernel equals ``x.to(dtype).to(float32)`` bitwise, incl. special values."""
-        x = torch.randn(numel, device="cuda", dtype=torch.float32) * scale
-        special = torch.tensor(self._special_values, device="cuda", dtype=torch.float32)
-        k = min(numel, special.numel())
-        x[:k] = special[:k]
-        out = round_through_dtype(x, dtype)
-        self._assert_bitwise_equal_or_both_nan(out, x.to(dtype).to(torch.float32))
-
-    @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
-    def test_round_through_dtype_random_bit_patterns(self, dtype: torch.dtype) -> None:
-        """Random FP32 bit patterns (normals, denormals, inf, NaN payloads)."""
-        bits = torch.randint(-(2**31), 2**31 - 1, (1 << 22,), device="cuda", dtype=torch.int64)
-        bits = bits.to(torch.int32)
-        x = bits.view(torch.float32)
-        out = round_through_dtype(x, dtype)
-        self._assert_bitwise_equal_or_both_nan(out, x.to(dtype).to(torch.float32))
-
-    def test_round_through_dtype_non_contiguous_and_shape(self) -> None:
-        """Non-contiguous inputs are handled and the input shape is kept."""
-        x = torch.randn(64, 96, device="cuda", dtype=torch.float32).t()
-        out = round_through_dtype(x, torch.bfloat16)
-        assert out.shape == x.shape
-        self._assert_bitwise_equal_or_both_nan(out, x.to(torch.bfloat16).to(torch.float32))
-
-    def test_round_through_dtype_cuda_graph(self) -> None:
-        """The kernel can be captured in a CUDA graph and replays on new data."""
-        x = torch.randn(32768, device="cuda", dtype=torch.float32)
-        round_through_dtype(x, torch.bfloat16)  # compile outside capture
-        torch.cuda.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            out = round_through_dtype(x, torch.bfloat16)
-        for scale in (1.0, 1e-20, 1e20):
-            x.copy_(torch.randn_like(x) * scale)
-            graph.replay()
-            torch.cuda.synchronize()
-            self._assert_bitwise_equal_or_both_nan(out, x.to(torch.bfloat16).to(torch.float32))
 
     @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
     @pytest.mark.parametrize("scales_dtype", (torch.float32, torch.bfloat16))
@@ -5161,13 +5091,11 @@ class TestScalesGradRounding:
         scales_dtype: torch.dtype,
         bias: bool,
     ) -> None:
-        """Scale gradient of the fused op equals the old cast path bitwise.
+        """The scale gradient keeps the kernels' FP32 values.
 
-        The FP32 gradient produced by the fused kernels is recorded right before
-        it is rounded. For FP32 scales the gradient seen by the caller must be
-        ``fp32_grad.to(bf16).to(fp32)`` (what the old ``.to(bf16)`` plus autograd's
-        cast back produced) and no cast of the scale gradient may run in the
-        backward; for BF16 scales it must be ``fp32_grad.to(bf16)`` as before.
+        The FP32 gradient produced by the fused kernels is recorded before it is returned.
+        For FP32 scales the caller must get exactly those values and no cast of the scale
+        gradient may run in the backward; for BF16 scales it must be ``fp32_grad.to(bf16)``.
         """
         if quantization == "mxfp8" and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
@@ -5264,8 +5192,7 @@ class TestScalesGradRounding:
         assert grad_fp32.dtype == torch.float32
         assert probs.grad.dtype == scales_dtype
         if scales_dtype == torch.float32:
-            expected = grad_fp32.to(dtype).to(torch.float32)
-            self._assert_bitwise_equal_or_both_nan(probs.grad, expected)
+            self._assert_bitwise_equal_or_both_nan(probs.grad, grad_fp32)
             assert returned.dtype == torch.float32
             assert cast_counter.count == 0
         else:
