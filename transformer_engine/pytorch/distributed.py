@@ -31,7 +31,7 @@ except ImportError:
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.triton.pad import pad_columnwise_scale_inv
-from .torch_version import torch_version
+from transformer_engine.pytorch.device import te_device_type
 from .utils import (
     is_non_tn_fp8_gemm_supported,
     safely_set_viewless_tensor_data,
@@ -81,22 +81,25 @@ def set_all_rng_states(states: List) -> None:
 
 
 def graph_safe_rng_available() -> bool:
-    """Returns whether cuda graph safe RNG state manipulation is supported."""
-    return (
-        hasattr(torch.cuda.CUDAGraph, "register_generator_state")
-        and hasattr(torch.Generator, "graphsafe_set_state")
-        and hasattr(torch.Generator, "graphsafe_get_state")
-        and hasattr(torch.Generator, "clone_state")
+    """Returns whether cuda graph safe RNG state manipulation is supported.
+
+    Deprecated: always True, since all supported PyTorch versions provide the graph-safe RNG APIs.
+    """
+    warnings.warn(
+        "graph_safe_rng_available() is deprecated and always returns True.",
+        DeprecationWarning,
+        stacklevel=2,
     )
+    return True
 
 
 def is_graph_safe_rng_state(state: Union[torch.Tensor, torch.Generator]) -> bool:
     """Returns whether the rng state is a graph safe version."""
-    return graph_safe_rng_available() and isinstance(state, torch.Generator)
+    return isinstance(state, torch.Generator)
 
 
 def _get_cuda_rng_state(
-    device: Union[int, str, torch.device] = "cuda",
+    device: Union[int, str, torch.device] = te_device_type(),
     clone: bool = False,
     graph_safe: bool = True,
 ) -> torch.Tensor:
@@ -106,12 +109,12 @@ def _get_cuda_rng_state(
     if isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device("cuda", device)
+        device = torch.device(te_device_type(), device)
     idx = device.index
     if idx is None:
         idx = torch.cuda.current_device()
     default_generator = torch.cuda.default_generators[idx]
-    if graph_safe_rng_available() and graph_safe:
+    if graph_safe:
         if clone:
             # Reference to the cloned generator state
             return default_generator.clone_state()
@@ -128,18 +131,18 @@ def _set_cuda_rng_state(
     """Sets the random number generator state of the current GPU."""
 
     if device == -1:
-        device = torch.device("cuda")
+        device = torch.device(te_device_type())
     elif isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device("cuda", device)
+        device = torch.device(te_device_type(), device)
 
     def cb() -> None:
         idx = device.index
         if idx is None:
             idx = torch.cuda.current_device()
         default_generator = torch.cuda.default_generators[idx]
-        if graph_safe_rng_available() and graph_safe:
+        if graph_safe:
             default_generator.graphsafe_set_state(new_state)
             return
         default_generator.set_state(new_state)
@@ -293,36 +296,23 @@ def _get_active_autocast_contexts():
     """
     autocast_cached = torch.is_autocast_cache_enabled()
 
-    if torch_version() >= (2, 4, 0):
-        gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
-        gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
-        gpu_autocast_ctx = torch.amp.autocast(
-            "cuda",
-            enabled=gpu_autocast_enabled,
-            dtype=gpu_autocast_dtype,
-            cache_enabled=autocast_cached,
-        )
+    gpu_autocast_enabled = torch.is_autocast_enabled(te_device_type())
+    gpu_autocast_dtype = torch.get_autocast_dtype(te_device_type())
+    gpu_autocast_ctx = torch.amp.autocast(
+        te_device_type(),
+        enabled=gpu_autocast_enabled,
+        dtype=gpu_autocast_dtype,
+        cache_enabled=autocast_cached,
+    )
 
-        cpu_autocast_enabled = torch.is_autocast_enabled("cpu")
-        cpu_autocast_dtype = torch.get_autocast_dtype("cpu")
-        cpu_autocast_ctx = torch.amp.autocast(
-            "cpu",
-            enabled=cpu_autocast_enabled,
-            dtype=cpu_autocast_dtype,
-            cache_enabled=autocast_cached,
-        )
-    else:
-        gpu_autocast_enabled = torch.is_autocast_enabled()
-        gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-        gpu_autocast_ctx = torch.cuda.amp.autocast(
-            gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
-        )
-
-        cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
-        cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
-        cpu_autocast_ctx = torch.cpu.amp.autocast(
-            cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
-        )
+    cpu_autocast_enabled = torch.is_autocast_enabled("cpu")
+    cpu_autocast_dtype = torch.get_autocast_dtype("cpu")
+    cpu_autocast_ctx = torch.amp.autocast(
+        "cpu",
+        enabled=cpu_autocast_enabled,
+        dtype=cpu_autocast_dtype,
+        cache_enabled=autocast_cached,
+    )
 
     return gpu_autocast_ctx, cpu_autocast_ctx
 
@@ -896,22 +886,11 @@ class CudaRNGStatesTracker:
         if name in self.states_:
             raise RuntimeError(f"cuda rng state {name} already exists")
 
-        if graph_safe_rng_available():
-            new_state = _get_cuda_rng_state(clone=True)
-            new_state.manual_seed(seed)
-            self.states_[name] = new_state
-            # Update global states.
-            set_all_rng_states(self.states_)
-        else:
-            # Get the current rng state.
-            orig_rng_state = _get_cuda_rng_state()
-            # Set the new state and store it.
-            torch.cuda.manual_seed(seed)
-            self.states_[name] = _get_cuda_rng_state(clone=True)
-            # Reset rng state to what it was.
-            _set_cuda_rng_state(orig_rng_state)
-            # Update global states.
-            set_all_rng_states(self.states_)
+        new_state = _get_cuda_rng_state(clone=True)
+        new_state.manual_seed(seed)
+        self.states_[name] = new_state
+        # Update global states.
+        set_all_rng_states(self.states_)
 
     @contextmanager
     def fork(self, name: str = "model-parallel-rng"):
@@ -935,10 +914,9 @@ class CudaRNGStatesTracker:
         try:
             yield
         finally:
-            # this is redundant with graph-safe API
-            if not graph_safe_rng_available():
-                self.states_[name] = _get_cuda_rng_state()
-            # And set the state to the original state we started with.
+            # The default generator shared its state with `self.states_[name]`,
+            # so that state already reflects any RNG consumed in this region.
+            # Set the state to the original state we started with.
             _set_cuda_rng_state(orig_cuda_rng_state)
 
 
@@ -1047,7 +1025,7 @@ def _all_gather_fp8(
     out: Float8TensorStorage
     if quantizer is not None:
         dtype = torch.float32
-        device = "cuda"
+        device = te_device_type()
         if isinstance(inp, Float8Tensor):
             dtype = inp.dtype
             device = inp.device
@@ -1145,7 +1123,7 @@ def _start_all_gather_fp8_blockwise(
         raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
 
     # Fall back to high-precision all-gather if FP8 is not supported
-    if not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
+    if not quantizer.supports_quantized_allgather(inp) or quantizer.block_scaling_dim != 1:
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):
             inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
@@ -1365,9 +1343,10 @@ def _all_gather_nvfp4(
     if isinstance(inp, torch.Tensor) and not isinstance(inp, NVFP4TensorStorage):
         # High-precision tensor.
         in_shape = NVFP4Quantizer.convert_shape_for_fp4(inp.size())
-        in_shape_t = NVFP4Quantizer.convert_shape_for_fp4(
-            NVFP4Quantizer.get_columnwise_shape(inp.size())
-        )
+        if quantizer.columnwise_usage:
+            in_shape_t = NVFP4Quantizer.convert_shape_for_fp4(
+                NVFP4Quantizer.get_columnwise_shape(inp.size())
+            )
         device = inp.device
         dtype = inp.dtype
     elif isinstance(inp, NVFP4TensorStorage):
@@ -1400,7 +1379,7 @@ def _all_gather_nvfp4(
     if (
         not isinstance(inp, NVFP4TensorStorage)
         and quantizer is not None
-        and not quantizer.is_quantizable(inp)
+        and not quantizer.supports_quantized_allgather(inp)
     ):
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):
@@ -1579,13 +1558,9 @@ def _all_gather_mxfp8(
     if out_shape is None:
         out_shape = [in_shape[0] * world_size] + in_shape[1:]
 
-    # For cases where inp has dimensions that cannot be quantized,
-    # we gather in high precision followed by a cast to FP8.
-    if (
-        not isinstance(inp, MXFP8TensorStorage)
-        and quantizer is not None
-        and not quantizer.is_quantizable(inp)
-    ):
+    # For shapes that cannot be gathered in MXFP8, gather in high precision
+    # followed by a cast to FP8.
+    if quantizer is not None and not quantizer.supports_quantized_allgather(inp):
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):
             inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
@@ -1987,7 +1962,7 @@ def symm_mem_alloc(
     be a shared static buffer. ``backend`` selects the symm-mem backend (default NCCL; for the pool it
     is captured at pool creation)."""
     if device is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     if not HAS_TORCH_SYMMETRIC:
         raise RuntimeError(
             "torch.distributed._symmetric_memory is unavailable; symm_mem_alloc "
