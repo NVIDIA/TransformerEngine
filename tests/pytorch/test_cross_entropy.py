@@ -2,12 +2,18 @@
 #
 # See LICENSE for license information.
 
+import math
 import random
 import pytest
 import torch
-from transformer_engine.pytorch import parallel_cross_entropy
+import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
+from transformer_engine.common.recipe import Format, MXFP8BlockScaling
+from transformer_engine.pytorch import is_mxfp8_available, parallel_cross_entropy
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
+import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
 
-from utils import dtype_tols
+from utils import KernelLaunchCounter, dtype_tols
 
 
 class TestParallelCrossEntropy:
@@ -433,17 +439,20 @@ def test_parallel_cross_entropy_deprecated_input_alias():
 
 
 def _logits_with_argmax_cases(shape, dtype):
-    """BF16-representable logits whose rows exercise ties within and across 32K-wide blocks."""
+    """BF16-representable logits whose rows exercise ties within and across the blocks of the
+    single-rank forward kernel."""
 
     torch.manual_seed(7)
     values = torch.randn(shape, dtype=torch.bfloat16, device="cuda").to(dtype)
     vocab = shape[-1]
+    block = triton_cross_entropy._FWD_BLOCK_SIZE
     peak = 8.0
     values[0, 0, [5, vocab - 30000]] = peak  # equal maxima in different blocks
     values[0, 1, [vocab - 30000, vocab - 4]] = peak  # equal maxima in later blocks
     values[0, 2, [100, 7]] = peak  # equal maxima in the same block
     values[0, 3, vocab - 1] = peak  # a strictly larger maximum in the last block
     values[0, 4] = 0.5  # a constant row
+    values[1, 0, [block - 1, block]] = peak  # equal maxima on both sides of a block boundary
     return values
 
 
@@ -523,3 +532,397 @@ def test_parallel_cross_entropy_return_argmax_nan():
             target = torch.zeros(logits.shape[:-1], dtype=torch.long, device="cuda")
             _, argmax = parallel_cross_entropy(logits, target, return_argmax=True)
             torch.testing.assert_close(argmax, torch.argmax(logits, dim=-1), rtol=0, atol=0)
+
+
+def _masked_logits(n_rows, vocab, dtype, seed):
+    """Logits with masked (-inf) entries and a finite maximum in every row, and targets that are
+    unmasked. The masks are laid out against the blocks of the single-rank forward kernel: rows
+    whose first or last block is masked entirely, rows that keep only one or a few logits, and
+    rows masked elsewhere. Row patterns repeat every eight rows."""
+
+    block = triton_cross_entropy._FWD_BLOCK_SIZE
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    values = torch.randn((n_rows, vocab), device="cuda", generator=generator)
+    values[0::8, :block] = -math.inf  # the first block is masked
+    values[1::8, : vocab // 2] = -math.inf  # the first half is masked
+    values[2::8, :-1] = -math.inf  # only the last logit is unmasked
+    values[3::8, :] = -math.inf
+    values[3::8, block + 4] = 0.0  # only one logit in the second block is unmasked
+    values[4::8, ::2] = -math.inf  # no block is masked entirely
+    values[5::8, -block:] = -math.inf  # the last block is masked
+    values[6::8, :-100] = -math.inf  # only the last 100 logits are unmasked
+    values = values.to(dtype)
+    target = torch.multinomial(values.isfinite().float(), 1, generator=generator).squeeze(-1)
+    return values, target
+
+
+def _masked_reference(values, target, label_smoothing, reduce_loss, loss_grad):
+    """Loss and gradient of torch.nn.functional.cross_entropy in FP64."""
+    logits = values.double().reshape(-1, values.shape[-1]).requires_grad_()
+    loss = torch.nn.functional.cross_entropy(
+        logits,
+        target.reshape(-1),
+        label_smoothing=label_smoothing,
+        reduction="mean" if reduce_loss else "none",
+    ).reshape(loss_grad.shape)
+    loss.backward(loss_grad.double())
+    return loss.detach(), logits.grad.reshape(values.shape)
+
+
+@pytest.mark.parametrize("vocab", [8192, 12288, 70000, 129280])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("reduce_loss", [False, True], ids=["none", "mean"])
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
+@pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
+def test_parallel_cross_entropy_masked_logits(
+    vocab, dtype, reduce_loss, label_smoothing, overwrite_input
+):
+    """Masked (-inf) logits give the loss and gradient of PyTorch, including rows whose first
+    blocks are masked entirely. With label smoothing the loss of a row with masked logits is
+    +inf, as in PyTorch, and its gradient is finite."""
+
+    values, target = _masked_logits(16, vocab, dtype, seed=vocab)
+    values, target = values.reshape(2, 8, vocab), target.reshape(2, 8)
+    target[1, 7] = -100
+    loss_grad = (
+        torch.full((1,), 0.37, device="cuda")
+        if reduce_loss
+        else torch.linspace(0.5, 1.5, target.numel(), device="cuda").reshape(target.shape)
+    )
+    ref_loss, ref_grad = _masked_reference(values, target, label_smoothing, reduce_loss, loss_grad)
+
+    results = []
+    for return_argmax in (False, True):
+        logits = values.clone().requires_grad_()
+        out = parallel_cross_entropy(
+            logits,
+            target,
+            label_smoothing,
+            reduce_loss,
+            overwrite_input=overwrite_input,
+            return_argmax=return_argmax,
+        )
+        loss, argmax = out if return_argmax else (out, None)
+        loss.backward(loss_grad)
+        results.append((loss.detach(), logits.grad, argmax))
+    (loss, grad, _), (argmax_loss, argmax_grad, argmax) = results
+
+    assert grad.isfinite().all()
+    torch.testing.assert_close(loss, ref_loss.float(), **dtype_tols(torch.float32))
+    torch.testing.assert_close(grad, ref_grad.to(dtype), **dtype_tols(dtype))
+    torch.testing.assert_close(argmax, torch.argmax(values, dim=-1), rtol=0, atol=0)
+    torch.testing.assert_close(argmax_loss, loss, rtol=0, atol=0)
+    torch.testing.assert_close(argmax_grad, grad, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("vocab", [4096, 8192, 70000])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_parallel_cross_entropy_fully_masked_row(vocab, dtype):
+    """A row whose logits are all -inf gets a NaN loss and gradient, as in PyTorch, without
+    affecting the other rows. Its argmax is 0, and an ignored one gets a zero loss and
+    gradient."""
+
+    values = torch.randn((1, 4, vocab), device="cuda").to(dtype)
+    values[0, 1:3] = -math.inf
+    target = torch.tensor([[1, 2, -100, 3]], device="cuda")
+    for return_argmax in (False, True):
+        logits = values.clone().requires_grad_()
+        out = parallel_cross_entropy(logits, target, return_argmax=return_argmax)
+        loss, argmax = out if return_argmax else (out, None)
+        loss.backward(torch.ones_like(loss))
+        ref_loss = torch.nn.functional.cross_entropy(
+            values[0].double(), target[0], reduction="none"
+        )
+        assert ref_loss[1].isnan()
+        assert loss[0, 1].isnan() and logits.grad[0, 1].isnan().all()
+        assert loss[0, 2] == 0 and (logits.grad[0, 2] == 0).all()
+        assert loss[0, [0, 3]].isfinite().all() and logits.grad[0, [0, 3]].isfinite().all()
+        if return_argmax:
+            torch.testing.assert_close(argmax, torch.argmax(values, dim=-1), rtol=0, atol=0)
+
+
+mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
+_MXFP8_DTYPES = {"e4m3": tex.DType.kFloat8E4M3, "e5m2": tex.DType.kFloat8E5M2}
+_MXFP8_BUFFERS = (
+    "_rowwise_data",
+    "_rowwise_scale_inv",
+    "_columnwise_data",
+    "_columnwise_scale_inv",
+)
+
+
+@pytest.fixture
+def mxfp8_kernel_launches(monkeypatch):
+    """Counts the launches of the fused MXFP8 backward kernel, so that tests can tell the fused
+    path from the fallback, which writes the same bytes."""
+    counter = KernelLaunchCounter(triton_cross_entropy.cross_entropy_backward_mxfp8_kernel)
+    monkeypatch.setattr(triton_cross_entropy, "cross_entropy_backward_mxfp8_kernel", counter)
+    return counter
+
+
+def _heavy_tailed_logits(shape, seed):
+    """BF16 logits whose MXFP8 block scales vary across the row."""
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    logits = torch.randn(shape, device="cuda", generator=generator) * 3
+    logits[..., :64] *= 8
+    return logits.to(torch.bfloat16)
+
+
+def _assert_same_mxfp8_bytes(grad, ref):
+    """Same data and scale inverses. Only the valid part of the scale inverses is compared,
+    since the quantizer leaves the padding of its scale layout uninitialized."""
+    assert isinstance(grad, MXFP8Tensor), type(grad)
+    rows = math.prod(grad.shape[:-1])
+    cols = grad.shape[-1]
+    valid = {
+        "_rowwise_scale_inv": (rows, math.ceil(cols / 32)),
+        "_columnwise_scale_inv": (math.ceil(rows / 32), cols),
+    }
+    for name in _MXFP8_BUFFERS:
+        a, b = getattr(grad, name), getattr(ref, name)
+        assert (a is None) == (b is None), name
+        if a is None:
+            continue
+        assert a.shape == b.shape, (name, a.shape, b.shape)
+        if name in valid:
+            a, b = a[: valid[name][0], : valid[name][1]], b[: valid[name][0], : valid[name][1]]
+        torch.testing.assert_close(a.view(torch.uint8), b.view(torch.uint8), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (2, 64, 4096),
+        (512, 1, 129280),
+        (128, 2, 32000),
+        (128, 1, 50304),
+        (96, 1, 4096),
+        (128, 1, 4000),
+    ],
+    # 50304 is a multiple of 128 but not of 256: 128-column tiles.
+    ids=["v4096", "v129280", "v32000", "v50304_cols128", "rows96_fallback", "v4000_fallback"],
+)
+@pytest.mark.parametrize("fp8_dtype", ["e4m3", "e5m2"])
+@pytest.mark.parametrize("usage", ["both", "rowwise", "columnwise"])
+@pytest.mark.parametrize("reduce_loss", [False, True], ids=["none", "mean"])
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
+@pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
+def test_parallel_cross_entropy_mxfp8_grad(
+    shape, fp8_dtype, usage, reduce_loss, label_smoothing, overwrite_input, mxfp8_kernel_launches
+):
+    """The MXFP8 gradient has the bytes of the BF16 gradient quantized by the quantizer, and
+    the loss is unchanged. Shapes the fused kernel supports are written by it."""
+
+    values = _heavy_tailed_logits(shape, seed=sum(shape))
+    target = torch.randint(0, shape[-1], shape[:-1], device="cuda")
+    target.view(-1)[:3] = -100
+
+    def run(grad_quantizer):
+        logits = values.clone().requires_grad_()
+        loss = parallel_cross_entropy(
+            logits,
+            target,
+            label_smoothing,
+            reduce_loss,
+            overwrite_input=overwrite_input,
+            grad_quantizer=grad_quantizer,
+        )
+        external_grad = (
+            torch.full_like(loss, 0.37)
+            if reduce_loss
+            else torch.linspace(0.5, 1.5, loss.numel(), device="cuda").reshape(loss.shape)
+        )
+        loss.backward(external_grad)
+        return loss.detach(), logits.grad
+
+    quantizer = MXFP8Quantizer(
+        _MXFP8_DTYPES[fp8_dtype],
+        rowwise=usage != "columnwise",
+        columnwise=usage != "rowwise",
+    )
+    ref_loss, ref_grad = run(None)
+    loss, grad = run(quantizer)
+
+    fused = math.prod(shape[:-1]) % 128 == 0 and shape[-1] % 128 == 0
+    assert mxfp8_kernel_launches.launches == int(fused)
+    torch.testing.assert_close(loss, ref_loss, rtol=0, atol=0)
+    _assert_same_mxfp8_bytes(grad, quantizer(ref_grad))
+    # The dequantized gradient is the BF16 gradient up to the MXFP8 rounding error: relative
+    # for normal FP8 values, and absolute (below 2^-16 of the largest magnitude) for values
+    # that are subnormal or flushed to zero in FP8.
+    rel_err = 2.0**-3 if fp8_dtype == "e4m3" else 2.0**-2
+    abs_err = ref_grad.abs().max().item() * 2.0**-16
+    torch.testing.assert_close(grad.dequantize(), ref_grad, rtol=rel_err, atol=abs_err)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("vocab", [8192, 129280])
+@pytest.mark.parametrize("fp8_dtype", ["e4m3", "e5m2"])
+@pytest.mark.parametrize("reduce_loss", [False, True], ids=["none", "mean"])
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
+@pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
+def test_parallel_cross_entropy_mxfp8_grad_masked_logits(
+    vocab, fp8_dtype, reduce_loss, label_smoothing, overwrite_input, mxfp8_kernel_launches
+):
+    """With masked (-inf) logits, the MXFP8 gradient has the bytes of the BF16 gradient
+    quantized by the quantizer, and both match PyTorch."""
+
+    values, target = _masked_logits(128, vocab, torch.bfloat16, seed=vocab + 1)
+    values, target = values.reshape(128, 1, vocab), target.reshape(128, 1)
+    target[:3] = -100
+    loss_grad = (
+        torch.full((1,), 0.37, device="cuda")
+        if reduce_loss
+        else torch.linspace(0.5, 1.5, target.numel(), device="cuda").reshape(target.shape)
+    )
+
+    def run(grad_quantizer):
+        logits = values.clone().requires_grad_()
+        loss = parallel_cross_entropy(
+            logits,
+            target,
+            label_smoothing,
+            reduce_loss,
+            overwrite_input=overwrite_input,
+            grad_quantizer=grad_quantizer,
+        )
+        loss.backward(loss_grad)
+        return loss.detach(), logits.grad
+
+    quantizer = MXFP8Quantizer(_MXFP8_DTYPES[fp8_dtype])
+    ref_loss, ref_grad = run(None)
+    loss, grad = run(quantizer)
+
+    assert mxfp8_kernel_launches.launches == 1
+    torch.testing.assert_close(loss, ref_loss, rtol=0, atol=0)
+    _assert_same_mxfp8_bytes(grad, quantizer(ref_grad))
+    assert grad.dequantize().isfinite().all()
+    torch_loss, torch_grad = _masked_reference(
+        values, target, label_smoothing, reduce_loss, loss_grad
+    )
+    torch.testing.assert_close(loss, torch_loss.float(), **dtype_tols(torch.float32))
+    torch.testing.assert_close(
+        ref_grad, torch_grad.to(torch.bfloat16), **dtype_tols(torch.bfloat16)
+    )
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+def test_parallel_cross_entropy_mxfp8_grad_dispatch(mxfp8_kernel_launches):
+    """Inputs the fused kernel does not write still return the quantized gradient, and a
+    non-contiguous BF16 input is fused, since forward saves a contiguous copy of it."""
+
+    values = torch.randn(2, 64, 4096, device="cuda")
+    target = torch.randint(0, 4096, (2, 64), device="cuda")
+    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    # An FP32 input falls back; a non-contiguous BF16 input is fused. torch.autograd.grad
+    # returns the gradient as the loss returns it (AccumulateGrad would re-layout it for the
+    # non-contiguous leaf).
+    for logits_values, fused in (
+        (values, False),
+        (values.to(torch.bfloat16).transpose(0, 1), True),
+    ):
+        assert logits_values.is_contiguous() == (not fused)
+        logits_target = target.reshape(logits_values.shape[:-1])
+        logits = logits_values.clone().requires_grad_()
+        (ref_grad,) = torch.autograd.grad(
+            parallel_cross_entropy(logits, logits_target).sum(), logits
+        )
+        launches = mxfp8_kernel_launches.launches
+        (grad,) = torch.autograd.grad(
+            parallel_cross_entropy(logits, logits_target, grad_quantizer=quantizer).sum(), logits
+        )
+        assert mxfp8_kernel_launches.launches - launches == int(fused)
+        _assert_same_mxfp8_bytes(grad, quantizer(ref_grad))
+
+    # GEMM-swizzled scales fall back to the quantizer.
+    swizzled = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    swizzled.optimize_for_gemm = True
+    logits = values.to(torch.bfloat16).requires_grad_()
+    launches = mxfp8_kernel_launches.launches
+    parallel_cross_entropy(logits, target, grad_quantizer=swizzled).sum().backward()
+    assert mxfp8_kernel_launches.launches == launches
+    assert isinstance(logits.grad, MXFP8Tensor) and logits.grad._with_gemm_swizzled_scales
+
+    internal = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    internal.internal = True
+    with pytest.raises(ValueError, match="internal"):
+        parallel_cross_entropy(values, target, grad_quantizer=internal)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
+def test_parallel_cross_entropy_mxfp8_grad_lm_head(overwrite_input, mxfp8_kernel_launches):
+    """An MXFP8 linear layer followed by the loss gets the same input and weight gradients when
+    the loss returns the MXFP8 gradient of the logits."""
+
+    tokens, hidden, vocab = 512, 1024, 32768
+    torch.manual_seed(0)
+    linear = te.Linear(hidden, vocab, bias=False, params_dtype=torch.bfloat16, device="cuda")
+    inp = torch.randn(tokens, 1, hidden, device="cuda", dtype=torch.bfloat16)
+    target = torch.randint(0, vocab, (tokens, 1), device="cuda")
+    recipe = MXFP8BlockScaling(fp8_format=Format.E4M3)
+
+    def run(grad_quantizer):
+        linear.weight.grad = None
+        x = inp.clone().requires_grad_()
+        with te.autocast(enabled=True, recipe=recipe):
+            logits = linear(x)
+        loss = parallel_cross_entropy(
+            logits,
+            target,
+            overwrite_input=overwrite_input,
+            grad_quantizer=grad_quantizer,
+        )
+        loss.sum().backward()
+        return loss.detach(), x.grad, linear.weight.grad.clone()
+
+    ref = run(None)
+    out = run(MXFP8Quantizer(tex.DType.kFloat8E4M3))
+    assert mxfp8_kernel_launches.launches == 1
+    for a, b in zip(out, ref):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("masked", [False, True], ids=["dense", "masked"])
+def test_parallel_cross_entropy_mxfp8_grad_cuda_graph(masked):
+    """The MXFP8 backward is CUDA graph capturable, also when the replayed logits are masked."""
+
+    shape = (256, 1, 8192)
+    static_values = _heavy_tailed_logits(shape, seed=4)
+    static_target = torch.randint(0, shape[-1], shape[:-1], device="cuda")
+    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    buffer = torch.empty_like(static_values)
+    outputs = {}
+
+    def step():
+        buffer.copy_(static_values)
+        logits = buffer.detach().requires_grad_()
+        loss = parallel_cross_entropy(
+            logits, static_target, overwrite_input=True, grad_quantizer=quantizer
+        )
+        outputs["grad"] = torch.autograd.grad(loss.sum(), logits)[0]
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(2):
+            step()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        step()
+
+    if masked:
+        values, target = _masked_logits(shape[0], shape[-1], torch.bfloat16, seed=5)
+        static_values.copy_(values.reshape(shape))
+        static_target.copy_(target.reshape(shape[:-1]))
+    else:
+        static_values.copy_(_heavy_tailed_logits(shape, seed=5))
+        static_target.copy_(torch.randint(0, shape[-1], shape[:-1], device="cuda"))
+    graph.replay()
+    logits = static_values.clone().requires_grad_()
+    parallel_cross_entropy(logits, static_target).sum().backward()
+    _assert_same_mxfp8_bytes(outputs["grad"], quantizer(logits.grad))
+    assert outputs["grad"].dequantize().isfinite().all()
