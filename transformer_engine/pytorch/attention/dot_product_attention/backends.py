@@ -19,6 +19,7 @@ from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 from transformer_engine.common.cudnn.graph import uses_ragged_attention_graph
+from transformer_engine.common.cudnn.mxfp8_utils import OWN_BLOCK as MXFP8_OWN_BLOCK
 
 from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.utils import (
@@ -1635,6 +1636,9 @@ class FusedAttnBwdArgs:
     rng_state: Optional[torch.Tensor] = None
     aux_bias: Optional[torch.Tensor] = None
     aux_softmax_offset: Optional[torch.Tensor] = None
+    # MXFP8 causal own-block attention: per-token-scaled V (E4M3) and its exponents.
+    v_token_values: Optional[torch.Tensor] = None
+    v_token_exponents: Optional[torch.Tensor] = None
 
     # --- Attention config ---
     max_seqlen_q: Optional[int] = None
@@ -1657,6 +1661,7 @@ class FusedAttnBwdArgs:
 
     # --- FP8 ---
     fp8: Optional[bool] = None
+    causal_own_block: Optional[bool] = None
     is_input_fp8: Optional[bool] = None
     bf16_backward: Optional[bool] = None
     qkv_type: Optional[str] = None
@@ -1690,6 +1695,8 @@ class FusedAttnBwdArgs:
             self.aux_softmax_offset,
             self.packed_qkv,
             self.packed_kv,
+            self.v_token_values,
+            self.v_token_exponents,
         ) = restore_from_func_ctx(
             ctx
         )  # pylint: disable=unbalanced-tuple-unpacking
@@ -1774,6 +1781,15 @@ def _fused_attn_forward_impl(
     # without depending on `fp8_recipe.<predicate>()`.
     qkv_type = _qkv_quantizer_type(QKV_quantizer) if fp8 else None
 
+    # MXFP8BlockScaling.fp8_dpa_causal_own_block: completed 32-token blocks in cuDNN MXFP8,
+    # each query's own block in Triton with per-token V scales, backward in high precision
+    # on the decoded operands (see transformer_engine/common/triton/mxfp8_causal_attention.py).
+    own_block = qkv_type == "mxfp8" and getattr(fp8_recipe, "fp8_dpa_causal_own_block", False)
+    v_token_values = v_token_exponents = None
+    if own_block:
+        assert not is_input_fp8, "MXFP8 causal own-block attention requires high-precision Q/K/V."
+        is_bwd_fp8 = False
+
     # get nominal data type for out
     # FP16/BF16 attention: torch.float16 or torch.bfloat16
     # FP8 attention:       torch.float16 or torch.bfloat16
@@ -1800,7 +1816,7 @@ def _fused_attn_forward_impl(
                 k,
                 v,
                 QKV_quantizer,
-                used_in_backward=is_training,
+                used_in_backward=is_training and not own_block,
                 combined_qkv=args.packed_qkv,
                 combined_kv=args.packed_kv,
             )
@@ -1854,7 +1870,28 @@ def _fused_attn_forward_impl(
             args.rng_gen,
             args.softmax_offset,
             cuda_graph=is_graph_capturing(),
+            causal_exclude_own_block=MXFP8_OWN_BLOCK if own_block else 0,
         )
+        if own_block:
+            # pylint: disable=import-outside-toplevel
+            from transformer_engine.pytorch.triton.mxfp8_causal_attention import (
+                own_block_attention,
+                token_values,
+            )
+
+            _, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout)
+            v_token_values, v_token_exponents = token_values(v, kv_format)
+            own_block_attention(
+                q_fp8,
+                k_fp8,
+                v_token_values,
+                v_token_exponents,
+                out_,
+                aux_ctx_tensors[0],
+                args.attn_scale,
+                q_format,
+                o_format,
+            )
 
         # out_fp8: Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16
         #                        fp8_dtype = tex.DType.kFloat8E4M3
@@ -1898,7 +1935,11 @@ def _fused_attn_forward_impl(
         # save q, k, v, o tensors
         fp8_tensors = (None, None, None, None)
         f16_tensors = (None, None, None, None, None, None)
-        if is_bwd_fp8:
+        if own_block:
+            # Backward decodes Q/K from these and V from the per-token-scaled copy.
+            fp8_tensors = (q_fp8, k_fp8, None, None)
+            f16_tensors = (None, None, None, out_f16, None, None)
+        elif is_bwd_fp8:
             if (qkv_type == "current" and _dpa_fp8_cs_o_in_f16) or qkv_type == "mxfp8":
                 fp8_tensors = (q_fp8, k_fp8, v_fp8, None)
                 f16_tensors = (None, None, None, out_f16, None, None)
@@ -1960,7 +2001,9 @@ def _fused_attn_forward_impl(
     nvtx_range_pop(f"{nvtx_label}")
 
     if is_cpu_offload_enabled() and NVTE_CPU_OFFLOAD_V1:
-        if is_bwd_fp8:
+        if own_block:
+            tensor_list = [q_fp8, k_fp8, v_token_values, v_token_exponents, out_f16]
+        elif is_bwd_fp8:
             tensor_list = fp8_tensors
         else:
             tensor_list = [q, k, v, out_f16]
@@ -1988,6 +2031,8 @@ def _fused_attn_forward_impl(
         None,
         "attn_bias" if has_bias else None,
         "softmax_offset" if has_softmax_offset else None,
+        None,
+        None,
     )
     tensors_to_save = (
         *fp8_tensors,
@@ -1996,6 +2041,8 @@ def _fused_attn_forward_impl(
         rng_state,
         None,
         None,
+        v_token_values,
+        v_token_exponents,
     )
     tensors_to_save = tuple(
         None if src else t for t, src in zip(tensors_to_save, saved_from, strict=True)
@@ -2007,6 +2054,7 @@ def _fused_attn_forward_impl(
 
     ctx_attrs = {
         "fp8": is_bwd_fp8,
+        "causal_own_block": own_block,
         "is_input_fp8": is_input_fp8,
         "saved_from": saved_from,
         "fused_attention_backend": fused_attention_backend,
@@ -2057,6 +2105,7 @@ def _fused_attn_setup_ctx(
     fp8 = ctx_attrs["fp8"]
 
     bwd_args.fp8 = fp8
+    bwd_args.causal_own_block = ctx_attrs["causal_own_block"]
     bwd_args.is_input_fp8 = ctx_attrs["is_input_fp8"]
     # assume fwd and bwd always use the same high precision, i.e. torch.float16 or torch.bfloat16
     # used when some tensors are base tensors and loose the "dtype" attribute
@@ -2132,6 +2181,8 @@ def _fused_attn_setup_ctx(
         rng_state,
         aux_bias,
         aux_softmax_offset,
+        v_token_values,
+        v_token_exponents,
     ) = (
         sources[src] if src else saved
         for saved, src in zip(tensors_to_save_from_forward, ctx_attrs["saved_from"], strict=True)
@@ -2155,6 +2206,8 @@ def _fused_attn_setup_ctx(
         aux_softmax_offset,
         packed_qkv,
         packed_kv,
+        v_token_values,
+        v_token_exponents,
     )
 
 
@@ -2182,6 +2235,18 @@ def _fused_attn_backward_impl(
         else:
             d_out_fp8 = args.dO_quantizer(d_out)
     q_fp8, k_fp8, v_fp8, out_fp8 = args.q_fp8, args.k_fp8, args.v_fp8, args.out_fp8
+    if args.causal_own_block:
+        # pylint: disable=import-outside-toplevel
+        from transformer_engine.pytorch.triton.mxfp8_causal_attention import decode_operands
+
+        args.q, args.k, args.v = decode_operands(
+            q_fp8,
+            k_fp8,
+            args.v_token_values,
+            args.v_token_exponents,
+            args.nominal_dtype,
+            dpa_utils.get_qkv_format(args.qkv_layout)[1],
+        )
     q, k, v = _fused_attn_qkv(args)
     out = args.out
     cu_seqlens_q, cu_seqlens_kv = args.cu_seqlens_q, args.cu_seqlens_kv
@@ -2487,7 +2552,7 @@ def _fused_attn_forward_fake(
     rng_state = TensorSpec(shape=(2,), dtype=torch.int64, device=q.device)
     has_bias = args.attn_bias_type not in ["no_bias", "alibi"] and args.attn_bias is not None
     has_softmax_offset = args.softmax_type != "vanilla" and args.softmax_offset is not None
-    tensors_to_save = (*(None,) * 10, softmax_stats, rng_state, None, None)
+    tensors_to_save = (*(None,) * 10, softmax_stats, rng_state, None, None, None, None)
     saved_from = (
         *(None,) * 4,
         "q",
@@ -2500,9 +2565,12 @@ def _fused_attn_forward_fake(
         None,
         "attn_bias" if has_bias else None,
         "softmax_offset" if has_softmax_offset else None,
+        None,
+        None,
     )
     ctx_attrs = {
         "fp8": False,
+        "causal_own_block": False,
         "is_input_fp8": False,
         "saved_from": saved_from,
         "fused_attention_backend": args.fused_attention_backend,

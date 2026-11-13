@@ -29,6 +29,7 @@ class AttentionOptions:
     paged_max_seqlen_kv: int = 0
     max_total_seqlen_q: int = 0
     max_total_seqlen_kv: int = 0
+    causal_exclude_own_block: int = 0
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,10 @@ def build_attention_graph(cudnn, graph, spec, *, score_mod=None, score_mod_bprop
             kwargs["max_total_seq_len_kv"] = options.max_total_seqlen_kv
     else:
         kwargs["generate_stats"] = options.generate_stats
+        if options.causal_exclude_own_block:
+            # MXFP8 forward only: the causal mask also drops each query's own aligned block of
+            # keys, so every columnwise V scale read covers visible tokens only.
+            kwargs["causal_exclude_own_block"] = options.causal_exclude_own_block
         if "max" in specs:
             kwargs["score_max"] = tensor("max")
         if options.paged_max_seqlen_kv:
@@ -202,7 +207,15 @@ def build_attention_graph(cudnn, graph, spec, *, score_mod=None, score_mod_bprop
     else:
         if not options.backward:
             scales = [tensor(name) for name in ("descale_q", "descale_k", "descale_v")]
-            outputs = graph.sdpa_mxfp8(q, k, v, *scales, **kwargs)
+            try:
+                outputs = graph.sdpa_mxfp8(q, k, v, *scales, **kwargs)
+            except TypeError as exc:
+                if options.causal_exclude_own_block and "causal_exclude_own_block" in str(exc):
+                    raise ValueError(
+                        "MXFP8 causal attention without future-token scale leakage requires a"
+                        " cuDNN Frontend whose sdpa_mxfp8 accepts causal_exclude_own_block."
+                    ) from exc
+                raise
             names = ("o", "stats", "amax_o")
         else:
             outputs = graph.sdpa_mxfp8_backward(

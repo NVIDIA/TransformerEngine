@@ -45,6 +45,8 @@ from transformer_engine.common.cudnn.mxfp8_utils import (
     scale_reordering as mxfp8_scale_reordering,
     shape_error as mxfp8_shape_error,
     support_error as mxfp8_support_error,
+    causal_own_block_error as mxfp8_causal_own_block_error,
+    OWN_BLOCK as MXFP8_OWN_BLOCK,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
@@ -399,6 +401,9 @@ class FusedAttentionParams:
     scaling_mode: tex.NVTEScalingMode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
     dropout: float = 0.0
     attn_scale: float = 1.0
+    # MXFP8 causal own-block attention (MXFP8BlockScaling.fp8_dpa_causal_own_block): the forward
+    # excludes each query's own block of this many keys and the backward runs in model precision.
+    causal_exclude_own_block: int = 0
 
     # tensor types
     qkv_dtype: DType = DType.kBFloat16
@@ -749,10 +754,14 @@ def get_attention_backend(
             use_fused_attention = False
 
     # Filter: Execution type
+    causal_own_block = False
     if fp8 and fp8_meta["recipe"].fp8_dpa:
         fp8_recipe = fp8_meta["recipe"]
         if fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        causal_own_block = fp8_recipe.mxfp8() and getattr(
+            fp8_recipe, "fp8_dpa_causal_own_block", False
+        )
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for FP8 attention")
             use_flash_attention_2 = False
@@ -776,6 +785,13 @@ def get_attention_backend(
             )
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
+                use_unfused_attention = False
+            elif causal_own_block:
+                # Emulation would quantize V with shared columnwise scales and reintroduce the
+                # future-token dependence the option removes.
+                logger.debug(
+                    "Disabling UnfusedDotProductAttention for MXFP8 causal own-block attention"
+                )
                 use_unfused_attention = False
         if use_fused_attention and fp8_recipe.delayed():
             if (
@@ -813,6 +829,26 @@ def get_attention_backend(
             )
             if fp8_recipe.fp8_mha:
                 reason = "MXFP8 attention does not support fp8_mha=True."
+            if not reason and causal_own_block:
+                reason = mxfp8_causal_own_block_error(
+                    10 * device_compute_capability[0] + device_compute_capability[1],
+                    qkv_layout,
+                    attn_mask_type,
+                    window_size,
+                    head_dim_qk,
+                    head_dim_v,
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    attention_dropout,
+                    core_attention_bias_type,
+                    softmax_type,
+                )
+                if not reason and issubclass(qkv_type, QuantizedTensorStorage):
+                    reason = "MXFP8 causal own-block attention requires high-precision Q, K, V."
+                if not reason and context_parallel:
+                    reason = (
+                        "MXFP8 causal own-block attention does not support context parallelism."
+                    )
             if reason:
                 logger.debug("Disabling FusedAttention: %s", reason)
                 use_fused_attention = False
@@ -1710,6 +1746,7 @@ def get_attention_backend(
                 if not context_parallel and fu_core_attention_bias_type == core_attention_bias_type
                 else None
             ),
+            "causal_exclude_own_block": MXFP8_OWN_BLOCK if causal_own_block else 0,
         }
         # Context-parallel per-step configs
         if context_parallel:

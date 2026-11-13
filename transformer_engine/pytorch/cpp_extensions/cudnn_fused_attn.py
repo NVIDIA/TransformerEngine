@@ -265,8 +265,11 @@ class _AttentionGraph:
         if not causal and (left, right) == (-1, -1):
             bottom_right = False
         bounded_backward = self.backward and not self.fp8 and self.ragged_graph
+        # The SM100 MXFP8 engine that serves causal_exclude_own_block takes a constant scale.
+        own_block = 0 if self.backward else p.get("causal_exclude_own_block", 0)
         return AttentionOptions(
             backward=self.backward,
+            attn_scale=float(p["attn_scale"]) if own_block else "attn_scale",
             fp8=self.fp8,
             mxfp8=self.mxfp8,
             bottom_right=bottom_right,
@@ -282,6 +285,7 @@ class _AttentionGraph:
             # Bound cuDNN's backward scratch buffers by those same capacities.
             max_total_seqlen_q=self.sq if bounded_backward and self.q_format == "thd" else 0,
             max_total_seqlen_kv=self.skv if bounded_backward and self.kv_format == "thd" else 0,
+            causal_exclude_own_block=own_block,
         )
 
     def description(self):
@@ -339,7 +343,11 @@ def _prepare_inputs(attn):
         if attn.fp8:
             scale_fmt = p.get("qkv_scale_inv_format") or fmt
             attn.scale("descale_" + name, _descale(p[name], col), name, scale_fmt, col)
-    attn.scalar("attn_scale", torch.tensor([p["attn_scale"]], dtype=torch.float32), by_value=True)
+    if not p.get("causal_exclude_own_block"):
+        # The own-block graph takes the scale as a graph constant (AttentionOptions.attn_scale).
+        attn.scalar(
+            "attn_scale", torch.tensor([p["attn_scale"]], dtype=torch.float32), by_value=True
+        )
     if "padding" in p["attn_mask_type"]:
         lengths = (p["cu_seqlens_q"], p["cu_seqlens_kv"])
         if not attn.use_cu_seqlens:
@@ -430,10 +438,11 @@ def _normalize(params):
 
 def _backward_config(config):
     """Match the precision and layout saved by FusedAttnFunc for backward."""
-    if DType.cast(config.qkv_dtype) in (DType.kFloat8E4M3, DType.kFloat8E5M2) and not int(
-        os.getenv("NVTE_FP8_DPA_BWD", "1")
+    if DType.cast(config.qkv_dtype) in (DType.kFloat8E4M3, DType.kFloat8E5M2) and (
+        config.causal_exclude_own_block or not int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
     ):
-        # FusedAttnFunc saves model-precision Q/K/V and O for this backward.
+        # FusedAttnFunc saves model-precision Q/K/V and O for this backward (MXFP8 causal
+        # own-block attention decodes them from its MXFP8 operands).
         # The gradient layout records the inputs' layout before FP8 quantization.
         dtype = config.nominal_dtype
         if dtype is None:
@@ -494,6 +503,8 @@ def _query_graph(config, backward):
         "return_max_logit": config.return_max_logit if not backward else False,
         "max_seqlen_kv": config.max_seqlen_kv,
         "page_table_k": True if layout.startswith("paged_kv_") else None,
+        "attn_scale": config.attn_scale,
+        "causal_exclude_own_block": 0 if backward else config.causal_exclude_own_block,
     }
     params.update(qkv_layout=layout, max_seqlen_q=config.max_seqlen_q)
     attn = _AttentionGraph(
@@ -566,7 +577,9 @@ def _query_graph(config, backward):
         if attn.fp8:
             scale_fmt = name(QKVFormat, config.qkv_scale_inv_format) or fmt
             scale("descale_" + n, n, scale_fmt, attn.mxfp8 and n == "v" and not backward)
-    spec("attn_scale", by_value=True)
+    if not attn.params["causal_exclude_own_block"]:
+        # The own-block graph takes the scale as a graph constant (AttentionOptions.attn_scale).
+        spec("attn_scale", by_value=True)
     if "padding" in attn.params["attn_mask_type"]:
         for n in ("seq_q", "seq_kv"):
             spec(n, (attn.graph_b + int(attn.use_cu_seqlens), 1, 1, 1), dtype="INT32")
@@ -809,8 +822,15 @@ def fused_attn_fwd(
     softmax_offset: torch.Tensor = None,
     return_max_logit: bool = False,
     cuda_graph: bool = False,
+    causal_exclude_own_block: int = 0,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
-    """Execute forward, returning output, backward auxiliaries, and optional max logits."""
+    """Execute forward, returning output, backward auxiliaries, and optional max logits.
+
+    ``causal_exclude_own_block`` (MXFP8 only): if nonzero, the causal mask also excludes each
+    query's own aligned block of this many keys, so query ``i`` reads keys
+    ``j < B * floor(i / B)`` and rows ``0 .. B-1`` return zero output and ``-inf`` statistics.
+    With ``B = 32`` no columnwise V scale the kernel reads covers a token the query cannot see.
+    """
     if bottom_right_diagonal is None:
         bottom_right_diagonal = attn_mask_type in {
             "causal_bottom_right",
@@ -885,6 +905,7 @@ def fused_attn_fwd(
             "softmax_offset": softmax_offset,
             "return_max_logit": return_max_logit,
             "cuda_graph": cuda_graph,
+            "causal_exclude_own_block": causal_exclude_own_block,
             "rng_elts_per_thread": rng_elts_per_thread,
         }
     )
