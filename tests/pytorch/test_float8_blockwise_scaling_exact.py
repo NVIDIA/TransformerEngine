@@ -15,6 +15,7 @@ from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     get_device_compute_capability,
 )
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 from references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,
     QuantizeResult,
@@ -170,12 +171,23 @@ def check_quantization_block_tiling_versus_reference(
     sx = sx * scale_mask
     torch.testing.assert_close(sx, sx_ref, atol=0.0, rtol=0.0)
 
-    if return_transpose:
+    non_tn = is_non_tn_fp8_gemm_supported()
+    if return_transpose and non_tn and block_scaling_dim == 2:
+        # Rowwise data and scales serve columnwise usage
+        assert qx_t is None and sx_t is None
+    elif return_transpose:
         assert qx_t is not None
         qx_t = qx_t.view(dtype=quant_dtype)
         assert qx_t_ref is not None
         assert sx_t is not None
         assert sx_t_ref is not None
+        # The reference columnwise data is transposed. 1D columnwise data is
+        # not transposed where FP8 GEMM supports non-TN layouts.
+        if non_tn:
+            assert qx_t.shape == (M, N)
+            qx_t_ref = qx_t_ref.t()
+        else:
+            assert qx_t.shape == (N, M)
         scale_mask = torch.ones(
             (math.ceil(N / tile_size[0]), math.ceil(M / tile_size[1])),
             device=sx_t.device,

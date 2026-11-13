@@ -1739,6 +1739,7 @@ class GroupedLinear(BasicOperation):
                 ctx.dtype,
                 layout="NN",
                 m_splits=split_sizes_int,
+                grad=True,
                 use_split_accumulator=_2X_ACC_DGRAD,
                 single_output=True,
             )
@@ -1757,6 +1758,7 @@ class GroupedLinear(BasicOperation):
                     out_dtype=ctx.dtype,
                     layout="NT",
                     m_splits=split_sizes_int,
+                    grad=True,
                     use_split_accumulator=_2X_ACC_WGRAD,
                     accumulate=accumulate_into_main_grad,
                 )
@@ -1770,6 +1772,7 @@ class GroupedLinear(BasicOperation):
                     ctx.dtype,
                     layout="NT",
                     m_splits=split_sizes_int,
+                    grad=True,
                     use_split_accumulator=_2X_ACC_WGRAD,
                     accumulate=accumulate_into_main_grad,
                 )
@@ -1963,6 +1966,7 @@ class GroupedLinear(BasicOperation):
                 grouped_grad_input,
                 layout="NN",
                 use_split_accumulator=_2X_ACC_DGRAD,
+                grad=True,
             )
 
         # params init for wgrad GEMM
@@ -2031,6 +2035,7 @@ class GroupedLinear(BasicOperation):
                 layout="NT",
                 accumulate=accumulate_into_main_grad,
                 use_split_accumulator=_2X_ACC_WGRAD,
+                grad=True,
             )
             if delay_wgrad:
                 self.wgrad_store.put([grouped_x, grouped_dy, wgrad_output], wgrad_gemm)

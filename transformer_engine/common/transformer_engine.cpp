@@ -929,6 +929,9 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
     case kNVTERowScaledNVFP4:
       t.row_scaled_nvfp4 = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+    case kNVTEColumnwiseTransposed:
+      t.columnwise_transposed = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
     case kNVTENVFP4E4M3Max:
       std::memcpy(&t.nvfp4_e4m3_max, buf, attr_size);
       // Need to rename this to nvfp4_scale_type_max
@@ -1018,6 +1021,9 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
       break;
     case kNVTERowScaledNVFP4:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
+      break;
+    case kNVTEColumnwiseTransposed:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->columnwise_transposed);
       break;
     case kNVTENVFP4E4M3Max: {
       int val = t->get_nvfp4_scale_max();
@@ -1333,6 +1339,9 @@ void nvte_set_grouped_tensor_param(NVTEGroupedTensor tensor, NVTEGroupedTensorPa
     case kNVTEGroupedRowScaledNVFP4:
       t.row_scaled_nvfp4 = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+    case kNVTEGroupedColumnwiseTransposed:
+      t.columnwise_transposed = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
     default:
       NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");
   }
@@ -1430,6 +1439,9 @@ void nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor, NVTEGroupedTe
       break;
     case kNVTEGroupedRowScaledNVFP4:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
+      break;
+    case kNVTEGroupedColumnwiseTransposed:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->columnwise_transposed);
       break;
     default:
       NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");

@@ -5,7 +5,7 @@
 import os
 import random
 from unittest.mock import Mock
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pytest
 import torch
@@ -43,6 +43,9 @@ from transformer_engine.pytorch.quantization import (
     get_align_size_for_quantization,
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage import (
+    Float8BlockwiseQTensorStorage,
+)
 import transformer_engine_torch as tex
 from utils import (
     ModelConfig,
@@ -1138,13 +1141,8 @@ def _apply_grouped_bias_ref(
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("use_bias_scale", [False, True])
 def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_bias_scale) -> None:
-    if torch.cuda.get_device_capability() < (9, 0):
-        pytest.skip("Grouped GEMM requires Hopper (SM90) or newer.")
-    if torch.cuda.get_device_capability() < (10, 0):
-        if tex.get_cublasLt_version() < 130400:
-            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
-    if tex.get_cublasLt_version() < 130300:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+    if not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
+        pytest.skip("Grouped GEMM is not supported on this system.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
@@ -1547,10 +1545,8 @@ def _per_tensor_quantize_mxfp8(
 def test_grouped_gemm_grouped_tensor_mxfp8(
     shape, accumulate, layout: str, case: str, dtype: torch.dtype
 ) -> None:
-    if tex.get_cublasLt_version() < 130300:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if not is_module_grouped_tensor_path_supported(recipe.MXFP8BlockScaling(), dtype):
+        pytest.skip("MXFP8 grouped GEMM is not supported on this system.")
     if dtype == torch.bfloat16 and not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
@@ -1655,6 +1651,21 @@ def _tile_scaled_randn(shape, dtype) -> torch.Tensor:
     return (torch.randn(shape, device="cuda") * factors[:rows, :cols]).to(dtype)
 
 
+def _exact_gemm_reference(a: torch.Tensor, b: torch.Tensor) -> Tuple[torch.Tensor, float]:
+    """Reference for the GEMM ``b @ a`` of exactly representable operands
+
+    Returns the float64 product and an absolute tolerance for accumulating it in FP32: the
+    worst-case summation error, K * 2^-24 times the largest sum of absolute products.
+
+    """
+    a, b = a.double(), b.double()
+    ref = b @ a
+    if ref.numel() == 0:
+        return ref, 0.0
+    abs_sum = (b.abs() @ a.abs()).max().item()
+    return ref, a.size(0) * 2.0**-24 * abs_sum
+
+
 def _quantize_fp8bs(tensors, *, rowwise, columnwise, block_scaling_dim, grouped, is_weight):
     quantizer = Float8BlockQuantizer(
         fp8_dtype=tex.DType.kFloat8E4M3,
@@ -1674,6 +1685,24 @@ def _quantize_fp8bs(tensors, *, rowwise, columnwise, block_scaling_dim, grouped,
     return tex.group_quantize(torch.cat(tensors, dim=0), quantizer, len(tensors), first_dims)
 
 
+def _dequantize_fp8bs_usage(tensor, columnwise) -> torch.Tensor:
+    """Dequantize the values an FP8 block-scaling tensor provides for one usage, in float64."""
+    # Dequantizing reads row-wise data when present, so keep only the column-wise buffers when
+    # they hold the column-wise usage. 2D tensors may serve it with their row-wise data.
+    if columnwise and tensor._columnwise_data is not None:
+        tensor = Float8BlockwiseQTensorStorage(
+            rowwise_data=None,
+            rowwise_scale_inv=None,
+            columnwise_data=tensor._columnwise_data,
+            columnwise_scale_inv=tensor._columnwise_scale_inv,
+            fp8_dtype=tensor._fp8_dtype,
+            quantizer=None,
+            is_2D_scaled=tensor._is_2D_scaled,
+            columnwise_transposed=tensor._columnwise_transposed,
+        )
+    return tensor.dequantize(dtype=torch.float64)
+
+
 def _run_fp8bs_grouped_gemm(
     z, m_sizes, k, n, layout, case, weight_block_dim, accumulate, dtype
 ) -> None:
@@ -1690,6 +1719,7 @@ def _run_fp8bs_grouped_gemm(
         B = [_tile_scaled_randn((ms, n), dtype) for ms in m_sizes]  # grad_output
         out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
 
+    out_init = [o.clone() for o in out]
     out_ref = [o.clone() for o in out]
 
     transa = layout[0] == "T"
@@ -1740,12 +1770,33 @@ def _run_fp8bs_grouped_gemm(
         out if case == "discrete_out" else grouped_out,
         layout=layout,
         accumulate=accumulate,
+        grad=layout != "TN",
     )
     results = out if case == "discrete_out" else grouped_out.split_into_quantized_tensors()
 
     tols = dict(rtol=0.125, atol=0.0675)  # same as the MXFP8 test
     for o, o_ref in zip(results, out_ref):
         torch.testing.assert_close(o, o_ref, **tols)
+
+    # Compare both against the GEMMs on the dequantized operands. These are exactly representable,
+    # so only FP32 accumulation and output rounding differ. When accumulating, the GEMM rounds the
+    # product to the output dtype before adding the initial output, and FP32 accumulation error
+    # can move that rounding by one ulp of the product (at most eps * (|ref| + |initial output|)).
+    rtol = dtype_tols(dtype)["rtol"]
+    eps = torch.finfo(dtype).eps
+    for a_fp8, b_fp8, o_init, o_discrete, o_grouped in zip(
+        A_fp8, B_fp8, out_init, out_ref, results
+    ):
+        a = _dequantize_fp8bs_usage(a_fp8, columnwise=not transa)
+        b = _dequantize_fp8bs_usage(b_fp8, columnwise=transb)
+        o_ref, atol = _exact_gemm_reference(a.T if transa else a, b.T if transb else b)
+        ref_tols = dict(rtol=rtol, atol=atol)
+        if accumulate:
+            o_ref = o_ref.to(dtype).double() + o_init.double()
+            o_init_max = o_init.abs().max().item() if o_init.numel() > 0 else 0.0
+            ref_tols = dict(rtol=rtol + eps, atol=atol + eps * o_init_max)
+        torch.testing.assert_close(o_discrete.double(), o_ref, **ref_tols)
+        torch.testing.assert_close(o_grouped.double(), o_ref, **ref_tols)
 
 
 @pytest.mark.parametrize(
@@ -2143,10 +2194,26 @@ def test_single_grouped_weight_rejects_host_m_splits(m_splits, exception):
             ),
             id="fp8-block-scaling",
         ),
+        pytest.param(
+            recipe.Float8BlockScaling(w_block_scaling_dim=1),
+            marks=pytest.mark.skipif(
+                not _fp8_block_scaling_available,
+                reason=_reason_for_no_fp8_block_scaling,
+            ),
+            id="fp8-block-scaling-w1D",
+        ),
     ],
 )
-def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
+@pytest.mark.parametrize(
+    "in_features,out_features", [(256, 256), (256, 384)], ids=("square", "non-square")
+)
+@pytest.mark.parametrize("quantized_weights", (False, True), ids=("bf16-weights", "fp8-weights"))
+def test_single_grouped_weight_matches_discrete_grouped_tensor_path(
+    fp8_recipe, in_features, out_features, quantized_weights
+):
     """Match single and discrete weights while both use CUDA m_splits and grouped GEMM."""
+    if quantized_weights and fp8_recipe is None:
+        pytest.skip("Quantized weights require a quantization recipe.")
     if not is_module_grouped_tensor_path_supported(
         fp8_recipe,
         torch.bfloat16,
@@ -2156,41 +2223,38 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
     FP8GlobalStateManager.reset()
 
     num_gemms = 3
-    in_features = 256
-    out_features = 256
     m_splits = torch.tensor([256, 512, 256], dtype=torch.int64, device="cuda")
     total_tokens = int(m_splits.sum())
-    weights = torch.randn(
-        num_gemms,
-        out_features,
-        in_features,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
 
-    discrete = GroupedLinear(
-        num_gemms,
-        in_features,
-        out_features,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        device="cuda",
-        use_grouped_tensor=True,
-    )
-    single = GroupedLinear(
-        num_gemms,
-        in_features,
-        out_features,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        device="cuda",
-        single_grouped_weight=True,
-        use_grouped_tensor=True,
-    )
-    with torch.no_grad():
-        for idx in range(num_gemms):
-            getattr(discrete, f"weight{idx}").copy_(weights[idx])
-        single.weight.rowwise_data.view_as(weights).copy_(weights)
+    def make_linear(single_grouped_weight):
+        # Both modules draw the same initial weights
+        torch.manual_seed(1234)
+        with quantized_model_init(enabled=quantized_weights, recipe=fp8_recipe):
+            return GroupedLinear(
+                num_gemms,
+                in_features,
+                out_features,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                device="cuda",
+                single_grouped_weight=single_grouped_weight,
+                use_grouped_tensor=True,
+            )
+
+    discrete = make_linear(single_grouped_weight=False)
+    single = make_linear(single_grouped_weight=True)
+    if not quantized_weights:
+        weights = torch.randn(
+            num_gemms,
+            out_features,
+            in_features,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        with torch.no_grad():
+            for idx in range(num_gemms):
+                getattr(discrete, f"weight{idx}").copy_(weights[idx])
+            single.weight.rowwise_data.view_as(weights).copy_(weights)
 
     x = torch.randn(total_tokens, in_features, dtype=torch.bfloat16, device="cuda")
     dy = torch.randn(total_tokens, out_features, dtype=torch.bfloat16, device="cuda")
@@ -2212,15 +2276,50 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(fp8_recipe):
     torch.testing.assert_close(single.weight.grad.float(), discrete_wgrad.float(), **tolerances)
 
 
-@pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
-def test_single_grouped_weight_mxfp8_workspace_cache():
-    """BF16 primary weights update one persistent MXFP8 grouped workspace per iteration."""
-    mxfp8_recipe = recipe.MXFP8BlockScaling()
+_SINGLE_GROUPED_WEIGHT_WORKSPACE_RECIPES = [
+    pytest.param(
+        recipe.MXFP8BlockScaling(),
+        marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
+        id="mxfp8",
+    ),
+    pytest.param(
+        recipe.Float8BlockScaling(w_block_scaling_dim=1),
+        marks=pytest.mark.skipif(
+            not _fp8_block_scaling_available,
+            reason=_reason_for_no_fp8_block_scaling,
+        ),
+        id="fp8-block-scaling-w1D",
+    ),
+    pytest.param(
+        recipe.Float8BlockScaling(w_block_scaling_dim=2),
+        marks=pytest.mark.skipif(
+            not _fp8_block_scaling_available,
+            reason=_reason_for_no_fp8_block_scaling,
+        ),
+        id="fp8-block-scaling-w2D",
+    ),
+]
+
+
+def _grouped_buffer_pointers(grouped):
+    """Data pointers of a grouped tensor's data and scale buffers."""
+    buffers = (
+        grouped.rowwise_data,
+        grouped.columnwise_data,
+        grouped.scale_inv,
+        grouped.columnwise_scale_inv,
+    )
+    return tuple(None if buffer is None else buffer.data_ptr() for buffer in buffers)
+
+
+@pytest.mark.parametrize("fp8_recipe", _SINGLE_GROUPED_WEIGHT_WORKSPACE_RECIPES)
+def test_single_grouped_weight_workspace_cache(fp8_recipe):
+    """BF16 primary weights update one persistent quantized grouped workspace per iteration."""
     if not is_module_grouped_tensor_path_supported(
-        mxfp8_recipe,
+        fp8_recipe,
         torch.bfloat16,
     ):
-        pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
+        pytest.skip("Recipe is not supported with a single grouped weight on this system.")
     FP8GlobalStateManager.reset()
     grouped_linear = GroupedLinear(
         2,
@@ -2234,33 +2333,47 @@ def test_single_grouped_weight_mxfp8_workspace_cache():
     )
 
     x = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    dy = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda")
     m_splits = torch.tensor([256, 256], dtype=torch.int64, device="cuda")
 
-    with autocast(enabled=True, recipe=mxfp8_recipe):
-        grouped_linear(x, m_splits, is_first_microbatch=True)
+    def cached_workspace():
         workspace = grouped_linear._fp8_workspaces["weight"]
         assert isinstance(workspace, GroupedTensor)
-        pointers = (
-            workspace.rowwise_data.data_ptr(),
-            workspace.columnwise_data.data_ptr(),
-            workspace.scale_inv.data_ptr(),
-            workspace.columnwise_scale_inv.data_ptr(),
-        )
-        old_data = workspace.rowwise_data.clone()
+        return workspace
+
+    tolerances = dict(rtol=1e-2, atol=5e-3)
+
+    # A workspace cached in inference, without columnwise buffers, serves a training step
+    with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+        grouped_linear(x, m_splits, is_first_microbatch=True)
+    results = []
+    for is_first_microbatch in (False, None):
+        x.grad = None
+        grouped_linear.weight.grad = None
+        with autocast(enabled=True, recipe=fp8_recipe):
+            y = grouped_linear(x, m_splits, is_first_microbatch=is_first_microbatch)
+        y.backward(dy)
+        results.append((y, x.grad, grouped_linear.weight.grad))
+    for cached, uncached in zip(*results):
+        torch.testing.assert_close(cached.float(), uncached.float(), **tolerances)
+
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y_first = grouped_linear(x, m_splits, is_first_microbatch=True)
+        first_workspace = cached_workspace()
+        pointers = _grouped_buffer_pointers(first_workspace)
+        old_data = first_workspace.rowwise_data.clone()
 
         with torch.no_grad():
             grouped_linear.weight.rowwise_data.add_(1)
-        grouped_linear(x, m_splits, is_first_microbatch=False)
-        assert torch.equal(workspace.rowwise_data, old_data)
+        y_cached = grouped_linear(x, m_splits, is_first_microbatch=False)
+        assert _grouped_buffer_pointers(cached_workspace()) == pointers
+        assert torch.equal(cached_workspace().rowwise_data, old_data)
+        torch.testing.assert_close(y_cached, y_first, **tolerances)
 
-        grouped_linear(x, m_splits, is_first_microbatch=True)
-        assert pointers == (
-            workspace.rowwise_data.data_ptr(),
-            workspace.columnwise_data.data_ptr(),
-            workspace.scale_inv.data_ptr(),
-            workspace.columnwise_scale_inv.data_ptr(),
-        )
-        assert not torch.equal(workspace.rowwise_data, old_data)
+        y_updated = grouped_linear(x, m_splits, is_first_microbatch=True)
+        assert _grouped_buffer_pointers(cached_workspace()) == pointers
+        assert not torch.equal(cached_workspace().rowwise_data, old_data)
+        torch.testing.assert_close(y_updated, grouped_linear(x, m_splits), **tolerances)
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)

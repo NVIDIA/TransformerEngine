@@ -1433,6 +1433,15 @@ def _blockwise(force_pow_2_scales=True):
     )
 
 
+def _blockwise_1d():
+    return Float8BlockQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        block_scaling_dim=1,
+    )
+
+
 def _current_scaling(amax_epsilon=0.0):
     return Float8CurrentScalingQuantizer(
         fp8_dtype=tex.DType.kFloat8E4M3,
@@ -1469,6 +1478,7 @@ def _hw_available(quantizer):
 _VALUE_QUANTIZERS = [
     pytest.param(_mxfp8, id="mxfp8"),
     pytest.param(_blockwise, id="float8_blockwise"),
+    pytest.param(_blockwise_1d, id="float8_blockwise_1d"),
     pytest.param(_current_scaling, id="float8_current_scaling"),
     pytest.param(
         _nvfp4,
@@ -1596,6 +1606,7 @@ _SPEC_QUANTIZERS = [
     pytest.param(_current_scaling, (4, 8), id="fp8_current_scaling"),
     pytest.param(_mxfp8, (64, 128), id="mxfp8"),
     pytest.param(_blockwise, (128, 256), id="fp8_blockwise"),
+    pytest.param(_blockwise_1d, (128, 256), id="fp8_blockwise_1d"),
     pytest.param(_nvfp4, (64, 128), id="nvfp4"),
 ]
 
@@ -1805,9 +1816,14 @@ def test_python_alloc_matches_cpp_make_empty(factory, shape, rowwise, columnwise
     # TN-capable archs: there is no rowwise data buffer and
     # nvte_compute_scale_from_amax asserts on it). Parity then means the
     # Python-allocated tensor is rejected the same way -- not a silent skip.
+    # FP8 block scaling supports every usage combination, so it must take
+    # neither this escape nor the dequantize one below.
+    strict = isinstance(q_ref, Float8BlockQuantizer)
     try:
         _quantize_into(q_ref, ref)
     except RuntimeError:
+        if strict:
+            raise
         with pytest.raises(RuntimeError):
             _quantize_into(q_py, py)
         return
@@ -1824,6 +1840,8 @@ def test_python_alloc_matches_cpp_make_empty(factory, shape, rowwise, columnwise
     try:
         expected = ref.dequantize()
     except NotImplementedError:
+        if strict:
+            raise
         expected = None
     if expected is not None:
         torch.testing.assert_close(py.dequantize(), expected, rtol=0.0, atol=0.0)

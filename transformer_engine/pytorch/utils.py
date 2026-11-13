@@ -378,7 +378,8 @@ def mark_grouped_tensor(*tensors: List[Any]):
     Plain tensors are saved directly. Grouped tensors are decomposed by
     `prepare_for_saving`: unquantized BF16/FP16 activations save their
     rowwise data, while quantized activations save their columnwise data
-    and scale metadata.
+    and scale metadata (rowwise data and scales where they serve columnwise
+    usage, as in 2D FP8 block scaling).
     """
     for tensor in tensors:
         if tensor is None:
@@ -391,7 +392,11 @@ def mark_grouped_tensor(*tensors: List[Any]):
 
         # Grouped tensor: mark the underlying tensors that `prepare_for_saving`
         # will pass to `save_for_backward`, rather than the storage wrapper.
-        if tensor.columnwise_data is None:
+        if getattr(tensor, "_rowwise_serves_columnwise", lambda: False)():
+            # 2D FP8 block-scaled grouped tensor
+            saved_activation = tensor.rowwise_data
+            saved_scale_inv = tensor.scale_inv
+        elif tensor.columnwise_data is None:
             # Unquantized BF16/FP16 grouped tensor.
             saved_activation = tensor.rowwise_data
             saved_scale_inv = None

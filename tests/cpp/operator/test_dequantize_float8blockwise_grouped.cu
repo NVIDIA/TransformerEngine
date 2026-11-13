@@ -77,7 +77,7 @@ inline size_t per_expert_scale_floats(BlockDim block_dim, bool columnwise, size_
 // scale sub-block, feed it to a per-tensor (direction-only) dequantize, and compare.
 template <typename InputType, typename OutputType>
 void performTest(ShapeRep shape_rep, BlockDim block_dim, bool rowwise,
-                 const std::vector<size_t>& first_dims_h, size_t K) {
+                 const std::vector<size_t>& first_dims_h, size_t K, bool columnwise_transposed) {
   // Grouped FP8 block-scaling kernels need TMA (SM90+).
   if (getDeviceComputeCapability() < hopperComputeCapability) {
     GTEST_SKIP();
@@ -98,8 +98,8 @@ void performTest(ShapeRep shape_rep, BlockDim block_dim, bool rowwise,
   const NVTEScalingMode mode =
       (block_dim == BlockDim::ONE_D) ? NVTE_BLOCK_SCALING_1D : NVTE_BLOCK_SCALING_2D;
 
-  // Element offsets (both data and, for columnwise, the transposed (K, M_t) block are contiguous
-  // per expert at element offset row_offset * K).
+  // Element offsets (both data and, for columnwise, the transposed (K, M_t) or non-transposed
+  // (M_t, K) block are contiguous per expert at element offset row_offset * K).
   std::vector<int64_t> offsets_h(num_tensors + 1, 0);
   for (size_t t = 0; t < num_tensors; ++t)
     offsets_h[t + 1] = offsets_h[t] + static_cast<int64_t>(first_dims_h[t] * K);
@@ -178,6 +178,9 @@ void performTest(ShapeRep shape_rep, BlockDim block_dim, bool rowwise,
   };
 
   NVTEGroupedTensor in_gt = nvte_create_grouped_tensor(mode, num_tensors, logical_shape);
+  const uint8_t columnwise_transposed_u8 = columnwise_transposed;
+  nvte_set_grouped_tensor_param(in_gt, kNVTEGroupedColumnwiseTransposed,
+                                &columnwise_transposed_u8, sizeof(columnwise_transposed_u8));
   NVTEBasicTensor in_data_bt = {data_d, static_cast<NVTEDType>(itype), data_shape};
   NVTEBasicTensor in_scale_bt = {scales_d, kNVTEFloat32, scale_shape};
   if (rowwise) {
@@ -219,7 +222,7 @@ void performTest(ShapeRep shape_rep, BlockDim block_dim, bool rowwise,
   //   1D colwise : scale[by * roundup(K,4) + c]       (by = r/128)
   //   2D rowwise : scale[by * roundup(blocks_X,4) + bx]
   //   2D colwise : scale[bx * roundup(blocks_y,4) + by]
-  // Data is contiguous (M,K) for rowwise and transposed (K,M) for columnwise.
+  // Data is contiguous (M,K) for rowwise and transposed (K,M) or (M,K) for columnwise.
   auto scale_index = [&](size_t r, size_t c, size_t M) -> size_t {
     const size_t blocks_X = (K + kBlock - 1) / kBlock;
     const size_t blocks_y = (M + kBlock - 1) / kBlock;
@@ -238,7 +241,7 @@ void performTest(ShapeRep shape_rep, BlockDim block_dim, bool rowwise,
     const size_t s_off = scale_off[t];
     for (size_t r = 0; r < M; ++r) {
       for (size_t c = 0; c < K; ++c) {
-        const size_t d_idx = columnwise ? (c * M + r) : (r * K + c);
+        const size_t d_idx = (columnwise && columnwise_transposed) ? (c * M + r) : (r * K + c);
         const float fp8v = static_cast<float>(data_h[data_off + d_idx]);
         const float sc = scales_h[s_off + scale_index(r, c, M)];
         const float ref = fp8v * sc;
@@ -266,6 +269,7 @@ struct TestConfig {
   bool rowwise;
   std::vector<size_t> first_dims;
   size_t K;
+  bool columnwise_transposed;
 };
 
 std::vector<TestConfig> make_configs() {
@@ -275,11 +279,16 @@ std::vector<TestConfig> make_configs() {
   std::vector<size_t> Ks = {128, 256, 512};
   for (auto bd : {BlockDim::ONE_D, BlockDim::TWO_D}) {
     for (bool rowwise : {true, false}) {
-      for (size_t K : Ks) {
-        for (const auto& v : uniform)
-          configs.push_back({ShapeRep::SAME_BOTH_DIMS, bd, rowwise, v, K});
-        for (const auto& v : jagged)
-          configs.push_back({ShapeRep::VARYING_FIRST_DIM, bd, rowwise, v, K});
+      for (bool transposed : {true, false}) {
+        // The layout applies to 1D columnwise data. 2D rowwise data and scales serve columnwise
+        // usage unless columnwise data is stored transposed.
+        if (!transposed && (rowwise || bd == BlockDim::TWO_D)) continue;
+        for (size_t K : Ks) {
+          for (const auto& v : uniform)
+            configs.push_back({ShapeRep::SAME_BOTH_DIMS, bd, rowwise, v, K, transposed});
+          for (const auto& v : jagged)
+            configs.push_back({ShapeRep::VARYING_FIRST_DIM, bd, rowwise, v, K, transposed});
+        }
       }
     }
   }
@@ -298,7 +307,7 @@ TEST_P(GroupedDequantizeFP8BlockwiseTestSuite, Test) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(
       output_type, OutputType,
       performTest<fp8e4m3, OutputType>(cfg.shape_rep, cfg.block_dim, cfg.rowwise, cfg.first_dims,
-                                       cfg.K););
+                                       cfg.K, cfg.columnwise_transposed););
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -310,6 +319,7 @@ INSTANTIATE_TEST_SUITE_P(
       std::string s = (c.shape_rep == ShapeRep::SAME_BOTH_DIMS ? "SAME" : "VARYFIRST");
       s += "_BD" + std::to_string(static_cast<int>(c.block_dim));
       s += (c.rowwise ? "_RW" : "_CW");
+      s += (c.columnwise_transposed ? "" : "_NT");
       s += "_K" + std::to_string(c.K) + "_N" + std::to_string(c.first_dims.size());
       s += "_" + test::typeName(std::get<1>(info.param));
       return s;

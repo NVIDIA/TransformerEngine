@@ -73,7 +73,7 @@ inline size_t per_expert_scale_offset(const std::vector<size_t>& first_dims, siz
 template <typename InputType, typename OutputType>
 void perform_test(ShapeRep shape_rep, BlockDim block_dim, ScalingDir dir,
                   const std::vector<size_t>& first_dims_h, size_t K,
-                  bool force_pow_2_scales, float epsilon) {
+                  bool force_pow_2_scales, float epsilon, bool columnwise_transposed) {
   if (getDeviceComputeCapability() < hopperComputeCapability) {
     GTEST_SKIP();
   }
@@ -107,8 +107,12 @@ void perform_test(ShapeRep shape_rep, BlockDim block_dim, ScalingDir dir,
   std::vector<int64_t> first_dims_i64(num_tensors);
   for (size_t t = 0; t < num_tensors; ++t) first_dims_i64[t] = static_cast<int64_t>(first_dims_h[t]);
 
-  const bool use_rowwise = (dir == ScalingDir::ROWWISE || dir == ScalingDir::BOTH);
-  const bool use_colwise = (dir == ScalingDir::COLWISE || dir == ScalingDir::BOTH);
+  // 2D rowwise data and scales serve columnwise usage unless columnwise data is stored transposed
+  const bool rowwise_serves_columnwise = block_dim == BlockDim::TWO_D && !columnwise_transposed;
+  const bool use_rowwise =
+      dir == ScalingDir::ROWWISE || dir == ScalingDir::BOTH || rowwise_serves_columnwise;
+  const bool use_colwise =
+      (dir == ScalingDir::COLWISE || dir == ScalingDir::BOTH) && !rowwise_serves_columnwise;
 
   const NVTEScalingMode mode =
       (block_dim == BlockDim::ONE_D) ? NVTE_BLOCK_SCALING_1D : NVTE_BLOCK_SCALING_2D;
@@ -169,6 +173,9 @@ void perform_test(ShapeRep shape_rep, BlockDim block_dim, ScalingDir dir,
   NVTEGroupedTensor in_gt = nvte_create_grouped_tensor(NVTE_DELAYED_TENSOR_SCALING, num_tensors,
                                                        logical_shape);
   NVTEGroupedTensor out_gt = nvte_create_grouped_tensor(mode, num_tensors, logical_shape);
+  const uint8_t columnwise_transposed_u8 = columnwise_transposed;
+  nvte_set_grouped_tensor_param(out_gt, kNVTEGroupedColumnwiseTransposed,
+                                &columnwise_transposed_u8, sizeof(columnwise_transposed_u8));
 
   NVTEBasicTensor in_data = {input_d, static_cast<NVTEDType>(itype), logical_shape};
   nvte_set_grouped_tensor_param(in_gt, kNVTEGroupedRowwiseData, &in_data, sizeof(in_data));
@@ -237,6 +244,7 @@ void perform_test(ShapeRep shape_rep, BlockDim block_dim, ScalingDir dir,
   // Run split-quantize reference per tensor and compare element-wise.
   for (size_t t = 0; t < num_tensors; ++t) {
     const size_t M = first_dims_h[t];
+    if (M == 0) continue;  // Nothing to compare for an empty expert
     const size_t row_offset = static_cast<size_t>(offsets_h[t]) / K;
 
     std::vector<size_t> tshape = {M, K};
@@ -246,6 +254,7 @@ void perform_test(ShapeRep shape_rep, BlockDim block_dim, ScalingDir dir,
     const bool ref_rowwise = (block_dim == BlockDim::TWO_D) ? true : use_rowwise;
     const bool ref_colwise = use_colwise;
     Tensor ref_out("ref_out_" + std::to_string(t), tshape, otype, ref_rowwise, ref_colwise, mode);
+    ref_out.set_columnwise_transposed(columnwise_transposed);
 
     // Copy this tensor's input slice into ref_in.
     {
@@ -275,13 +284,14 @@ void perform_test(ShapeRep shape_rep, BlockDim block_dim, ScalingDir dir,
     }
     if (use_colwise) {
       const OutputType* ref_data_t = ref_out.columnwise_cpu_dptr<OutputType>();
-      // Per-expert columnwise data: contiguous (K, M_t) block at element offset
-      // K * row_offset, matching cuBLAS grouped GEMM's per-expert data pointer.
+      // Per-expert columnwise data: contiguous (K, M_t) block, or (M_t, K) if not transposed, at
+      // element offset K * row_offset, matching cuBLAS grouped GEMM's per-expert data pointer.
       const size_t expert_data_off = static_cast<size_t>(row_offset) * K;
       for (size_t c = 0; c < K; ++c) {
         for (size_t r = 0; r < M; ++r) {
-          const uint8_t got = output_t_h[expert_data_off + c * M + r];
-          const uint8_t exp = reinterpret_cast<const uint8_t*>(ref_data_t)[c * M + r];
+          const size_t idx = columnwise_transposed ? c * M + r : r * K + c;
+          const uint8_t got = output_t_h[expert_data_off + idx];
+          const uint8_t exp = reinterpret_cast<const uint8_t*>(ref_data_t)[idx];
           ASSERT_EQ(got, exp) << "colwise data mismatch t=" << t << " c=" << c << " r=" << r;
         }
       }
@@ -372,6 +382,7 @@ struct TestConfig {
   std::vector<size_t> first_dims;
   size_t K;
   bool force_pow_2_scales;
+  bool columnwise_transposed;
 };
 
 class GroupedFP8BlockwiseTestSuite : public ::testing::TestWithParam<TestConfig> {};
@@ -379,7 +390,7 @@ class GroupedFP8BlockwiseTestSuite : public ::testing::TestWithParam<TestConfig>
 TEST_P(GroupedFP8BlockwiseTestSuite, Test) {
   const TestConfig& cfg = GetParam();
   perform_test<bf16, fp8e4m3>(cfg.shape_rep, cfg.block_dim, cfg.dir, cfg.first_dims, cfg.K,
-                              cfg.force_pow_2_scales, /*epsilon=*/0.0f);
+                              cfg.force_pow_2_scales, /*epsilon=*/0.0f, cfg.columnwise_transposed);
 }
 
 std::vector<TestConfig> make_configs() {
@@ -387,19 +398,37 @@ std::vector<TestConfig> make_configs() {
   std::vector<std::vector<size_t>> uniform = {{128, 128}, {256, 256, 256, 256}};
   std::vector<std::vector<size_t>> jagged = {
       {128, 256, 384, 512}, {256, 128, 512, 384, 1024}};
+  // Empty first, middle and last experts
+  std::vector<std::vector<size_t>> zero_row = {{0, 128, 256}, {256, 0, 384, 0, 128}, {128, 256, 0}};
+  auto add_configs = [&](BlockDim bd, ScalingDir dir, size_t K, bool with_zero_row) {
+    for (bool pow2 : {false, true}) {
+      for (bool transposed : {true, false}) {
+        for (const auto& v : uniform) {
+          configs.push_back({ShapeRep::SAME_BOTH_DIMS, bd, dir, v, K, pow2, transposed});
+        }
+        for (const auto& v : jagged) {
+          configs.push_back({ShapeRep::VARYING_FIRST_DIM, bd, dir, v, K, pow2, transposed});
+        }
+        if (with_zero_row) {
+          for (const auto& v : zero_row) {
+            configs.push_back({ShapeRep::VARYING_FIRST_DIM, bd, dir, v, K, pow2, transposed});
+          }
+        }
+      }
+    }
+  };
   std::vector<size_t> Ks = {128, 256, 512};
   for (auto bd : {BlockDim::ONE_D, BlockDim::TWO_D}) {
     for (auto dir : {ScalingDir::ROWWISE, ScalingDir::COLWISE, ScalingDir::BOTH}) {
       for (size_t K : Ks) {
-        for (bool pow2 : {false, true}) {
-          for (const auto& v : uniform) {
-            configs.push_back({ShapeRep::SAME_BOTH_DIMS, bd, dir, v, K, pow2});
-          }
-          for (const auto& v : jagged) {
-            configs.push_back({ShapeRep::VARYING_FIRST_DIM, bd, dir, v, K, pow2});
-          }
-        }
+        add_configs(bd, dir, K, false);
       }
+    }
+  }
+  // 1D columnwise output with a partial last 128-column block, and with empty experts
+  for (auto dir : {ScalingDir::COLWISE, ScalingDir::BOTH}) {
+    for (size_t K : {208, 272}) {
+      add_configs(BlockDim::ONE_D, dir, K, true);
     }
   }
   return configs;
@@ -415,6 +444,7 @@ std::string make_name(const ::testing::TestParamInfo<TestConfig>& info) {
   s += "_M";
   for (size_t m : c.first_dims) s += "_" + std::to_string(m);
   s += (c.force_pow_2_scales ? "_POW2" : "_FP32SC");
+  s += (c.columnwise_transposed ? "_T" : "_NT");
   return s;
 }
 

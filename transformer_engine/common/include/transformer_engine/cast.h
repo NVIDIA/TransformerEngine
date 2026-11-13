@@ -69,7 +69,9 @@ extern "C" {
  *          - Scale factors which are computed for either 1D 1x128 or 2D 128x128 blocks.
  *      b) Columnwise scaling yields output data:
  *          - the scaled output tensor in fp8 coefficients with a shape equivalent to
- *            the transpose of the input tensor.
+ *            the transpose of the input tensor, or to the input tensor if the output's
+ *            kNVTEColumnwiseTransposed parameter is false. In that case, with 2D blocks, the
+ *            rowwise data and scales serve columnwise usage and there is no columnwise output.
  *          - Scale factors which are calculated for either 1D 128x1 or 2D 128x128 blocks
  *            of the input tensor.
  *      c) Both: In which both tensors and both scales are calculated.
@@ -422,6 +424,7 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
 /*! \brief Casts input grouped tensor from reduced to higher precision.
  *         In case of the MXFP8 dequantization, the dequantized values are stored to the rowwise
  *         data of the output tensor, regardless of whether the row- or columnwise scaling is used.
+ *         FP8 block-scaling 2D columnwise input must be stored transposed.
  *
  *  \param[in]     input     Input grouped FP8/MXFP8 tensor to be cast.
  *  \param[in,out] output    Output grouped tensor.

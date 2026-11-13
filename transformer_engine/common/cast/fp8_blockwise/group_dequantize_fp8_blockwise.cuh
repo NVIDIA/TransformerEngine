@@ -29,8 +29,8 @@ namespace fp8_blockwise {
 namespace group_dequantize_kernel {
 
 // Resolve which expert a tile (blocks_X x total_row_blocks grid) belongs to and its row range.
-// tensor_M (the expert's first-dim length) addresses the per-expert (K, M_t) transposed block
-// in the columnwise modes.
+// tensor_M (the expert's first-dim length) addresses the per-expert (K, M_t) block of the
+// transposed columnwise layout.
 struct TileExpertInfo {
   size_t tensor_id;
   size_t tensor_block_y_base;
@@ -140,11 +140,14 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 }
 
 // ===== 1D columnwise =====
-// Data layout per-expert: (K, M_t) transposed -- element (r, c) is at
-//   input[tensor_row_base * K + c * tensor_M + r_local].
-// Scale layout GLOBAL: (total_row_blocks, roundup(K, 4)) floats.
+// Data layout per-expert, at element offset tensor_row_base * K:
+//   kColwiseTransposed:  (K, M_t) -- element (r, c) is at
+//     input[tensor_row_base * K + c * tensor_M + r_local].
+//   !kColwiseTransposed: (M_t, K) -- element (r, c) is at input[r_global * K + c], as in rowwise.
+// Scale layout GLOBAL (both data layouts): (total_row_blocks, roundup(K, 4)) floats.
 //   scale_inv[tile_y_global * scale_t_stride_aligned_K + c]
-template <bool kSameBothDims, typename IType, typename OType, typename CType>
+template <bool kSameBothDims, bool kColwiseTransposed, typename IType, typename OType,
+          typename CType>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     group_dequantize_blockwise_1d_cw_kernel(const IType* __restrict__ input_base,
                                             OType* __restrict__ output_base,
@@ -161,7 +164,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       tile_y_global, num_tensors, common_first_dim_blocks, K, total_row_blocks, tensor_offsets_ptr);
   if (!info.in_bounds) return;
 
-  const size_t expert_data_off = info.tensor_row_base * K;
   const CType* const tile_scale_base = scale_inv_base + tile_y_global * scale_t_stride_aligned_K;
 
   const size_t global_row_base = tile_y_global * kTileDim;
@@ -190,17 +192,28 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     const size_t r_global = global_row_base + row_local;
     if (r_global >= R_total) continue;
 
-    const size_t r_local = r_global - info.tensor_row_base;
-
-    // Per-expert (K, M_t) transposed input: strided by M_t per column (no vector load).
-    // K % 128 == 0 so c+e < K always holds; the explicit else just keeps correctness
-    // independent of that invariant.
     Vec<IType, kVec> in_vec;
+    if constexpr (kColwiseTransposed) {
+      const size_t expert_data_off = info.tensor_row_base * K;
+      const size_t r_local = r_global - info.tensor_row_base;
+
+      // Per-expert (K, M_t) transposed input: strided by M_t per column (no vector load).
+      // K % 128 == 0 so c+e < K always holds; the explicit else just keeps correctness
+      // independent of that invariant.
 #pragma unroll
-    for (int e = 0; e < kVec; ++e) {
-      in_vec.data.elt[e] = (c + e < K)
-                               ? input_base[expert_data_off + (c + e) * info.tensor_M + r_local]
-                               : static_cast<IType>(0);
+      for (int e = 0; e < kVec; ++e) {
+        in_vec.data.elt[e] = (c + e < K)
+                                 ? input_base[expert_data_off + (c + e) * info.tensor_M + r_local]
+                                 : static_cast<IType>(0);
+      }
+    } else {
+      if (c + kVec <= K) {
+        in_vec.load_from(input_base + r_global * K + c);
+      } else if (c < K) {
+        in_vec.load_from_elts(input_base + r_global * K + c, 0, K - c);
+      } else {
+        continue;
+      }
     }
 
     Vec<OType, kVec> out_vec;
@@ -286,7 +299,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 }
 
 // ===== 2D columnwise =====
-// Data layout per-expert: (K, M_t) transposed.
+// Only in the transposed columnwise layout. Data layout per-expert: (K, M_t) transposed.
 // Scale layout per-expert: (blocks_X, roundup(blocks_y_t, 4)) floats.
 //   scale[expert_off + tile_x * roundup(blocks_y_t, 4) + local_tile_y]
 template <bool kSameBothDims, typename IType, typename OType, typename CType>
@@ -375,7 +388,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // scaling x {rowwise, columnwise} data, matching the layouts written by
 // ``group_quantize_fp8_blockwise``. The input GroupedTensor must have exactly
 // one of rowwise / columnwise data populated (the dequantize API rejects
-// both).
+// both). Columnwise input has the arch default layout, since there is no
+// quantization config here: transposed unless non-TN FP8 GEMM is supported.
+// In the non-transposed layout, 2D columnwise input is rejected because the
+// rowwise data and scales serve columnwise usage.
 inline void group_dequantize(const GroupedTensor* input, GroupedTensor* output,
                              cudaStream_t stream) {
   using namespace group_dequantize_kernel;
@@ -402,6 +418,14 @@ inline void group_dequantize(const GroupedTensor* input, GroupedTensor* output,
              "time (not both rowwise and columnwise simultaneously).");
   NVTE_CHECK(!input->with_gemm_swizzled_scales,
              "Grouped FP8 block-scaling dequantize requires compact (un-swizzled) scales.");
+  const bool is_1d = (input->scaling_mode == NVTE_BLOCK_SCALING_1D);
+  const bool columnwise_transposed = input->columnwise_transposed;
+  if (!is_1d && use_colwise && !columnwise_transposed) {
+    NVTE_ERROR(
+        "Grouped 2D FP8 block-scaling dequantize got columnwise input, but with the "
+        "non-transposed columnwise layout of this architecture, rowwise data and scales serve "
+        "columnwise usage. Dequantize the rowwise data instead.");
+  }
 
   const size_t first_logical_dim = input->logical_shape.data[0];
   const size_t last_logical_dim = input->logical_shape.data[1];
@@ -437,7 +461,6 @@ inline void group_dequantize(const GroupedTensor* input, GroupedTensor* output,
 
   const dim3 grid(blocks_X, total_row_blocks);
   const dim3 block(kThreadsPerBlock);
-  const bool is_1d = (input->scaling_mode == NVTE_BLOCK_SCALING_1D);
 
   // Pick the populated direction's data + scale buffer. The global-layout strides (1D cw, 2D rw)
   // are derived from K / blocks_X exactly as the quantize launcher does.
@@ -468,19 +491,21 @@ inline void group_dequantize(const GroupedTensor* input, GroupedTensor* output,
                       common_first_dim_blocks, K, total_row_blocks, first_logical_dim);
             }
           } else if (is_1d && use_colwise) {
-            if (same_both_dims) {
-              group_dequantize_blockwise_1d_cw_kernel<true, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(input_dptr, output_dptr, scale_inv_dptr,
-                                               scale_t_stride_aligned_K, tensor_offsets_ptr,
-                                               num_tensors, common_first_dim_blocks, K,
-                                               total_row_blocks, first_logical_dim);
-            } else {
-              group_dequantize_blockwise_1d_cw_kernel<false, IType, OType, CType>
-                  <<<grid, block, 0, stream>>>(input_dptr, output_dptr, scale_inv_dptr,
-                                               scale_t_stride_aligned_K, tensor_offsets_ptr,
-                                               num_tensors, common_first_dim_blocks, K,
-                                               total_row_blocks, first_logical_dim);
-            }
+            TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                columnwise_transposed, kColwiseTransposed,
+                if (same_both_dims) {
+                  group_dequantize_blockwise_1d_cw_kernel<true, kColwiseTransposed, IType, OType,
+                                                          CType><<<grid, block, 0, stream>>>(
+                      input_dptr, output_dptr, scale_inv_dptr, scale_t_stride_aligned_K,
+                      tensor_offsets_ptr, num_tensors, common_first_dim_blocks, K, total_row_blocks,
+                      first_logical_dim);
+                } else {
+                  group_dequantize_blockwise_1d_cw_kernel<false, kColwiseTransposed, IType, OType,
+                                                          CType><<<grid, block, 0, stream>>>(
+                      input_dptr, output_dptr, scale_inv_dptr, scale_t_stride_aligned_K,
+                      tensor_offsets_ptr, num_tensors, common_first_dim_blocks, K, total_row_blocks,
+                      first_logical_dim);
+                });
           } else if (!is_1d && use_rowwise) {
             if (same_both_dims) {
               group_dequantize_blockwise_2d_rw_kernel<true, IType, OType, CType>

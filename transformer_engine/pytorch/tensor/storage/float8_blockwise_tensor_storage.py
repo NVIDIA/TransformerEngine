@@ -126,6 +126,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _quantizer: Quantizer
     _fp8_dtype: DType
     _is_2D_scaled: bool
+    _columnwise_transposed: bool
 
     def __new__(
         cls,
@@ -138,6 +139,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         is_2D_scaled: bool,
         *args,
         fake_dtype: Optional[torch.dtype] = None,
+        columnwise_transposed: bool = True,
         **kwargs,
     ):
         if cls is Float8BlockwiseQTensorStorage:
@@ -152,6 +154,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
+        instance._columnwise_transposed = columnwise_transposed
 
         return instance
 
@@ -174,6 +177,8 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             raise RuntimeError("FP8 dtype mismatch in copy_from_storage")
         if self._is_2D_scaled != src._is_2D_scaled:
             raise RuntimeError("Scale layout mismatch in copy_from_storage")
+        if self._columnwise_transposed != src._columnwise_transposed:
+            raise RuntimeError("Column-wise data layout mismatch in copy_from_storage")
 
         def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
             if dst is not None and src_tensor is not None:
@@ -194,6 +199,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "is_2D_scaled": self._is_2D_scaled,
+            "columnwise_transposed": self._columnwise_transposed,
             "fake_dtype": self._dtype,
         }
 
@@ -232,6 +238,9 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         if rowwise_data:
             return self._rowwise_data
         if columnwise_data:
+            if self._is_2D_scaled and not self._columnwise_transposed:
+                # Row-wise data also serves column-wise usage
+                return self._rowwise_data
             return self._columnwise_data
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
@@ -264,12 +273,19 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
             scales_tiled_dim, scales_untiled_dim = scale_inv.shape
-            inner_q_dimension_tiled = True
-            transpose_output = True
-            if len(q.shape) >= 1:
-                q_M = q.shape[0]
-            for i in range(1, len(q.shape)):
-                q_K *= q.shape[i]
+            # Transposed data has 1x128 blocks, and data with the logical shape has 128x1 blocks
+            inner_q_dimension_tiled = self._columnwise_transposed
+            transpose_output = self._columnwise_transposed
+            if self._columnwise_transposed:
+                if len(q.shape) >= 1:
+                    q_M = q.shape[0]
+                for i in range(1, len(q.shape)):
+                    q_K *= q.shape[i]
+            else:
+                if len(q.shape) >= 1:
+                    q_K = q.shape[-1]
+                for i in range(len(q.shape) - 1):
+                    q_M *= q.shape[i]
 
         orig_shape = q.shape
         q = q.reshape(q_M, q_K)
@@ -289,10 +305,13 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
                 ).contiguous()
             padded_M, padded_K = q.shape
             q_tiled = q.reshape(scales_tiled_dim, block_len, q_K)
-        if scales_untiled_dim > q_M:
-            # untiled scale dimension is 4 element aligned.
-            scale_inv = scale_inv[:, :q_M].contiguous()
-        dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(q_M, scales_tiled_dim, 1)
+        if inner_q_dimension_tiled:
+            if scales_untiled_dim > q_M:
+                # untiled scale dimension is 4 element aligned.
+                scale_inv = scale_inv[:, :q_M].contiguous()
+            dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(q_M, scales_tiled_dim, 1)
+        else:
+            dq_scale = scale_inv[:, :q_K].reshape(scales_tiled_dim, 1, q_K)
         torch_q_dtype = TE_DType_To_Torch[self._fp8_dtype]
         result = q_tiled.view(torch_q_dtype).to(torch.float32) * dq_scale
         if padded_M != q_M or padded_K != q_K:
@@ -317,6 +336,8 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         # pylint: disable=missing-function-docstring
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
+        if not self._columnwise_transposed:
+            return self._columnwise_data.size(*args, **kwargs)
         # Columnwise data is stored transposed, so a dim argument cannot be
         # forwarded to it: rebuild the logical shape first, then index into it.
         dims = self._columnwise_data.shape
@@ -331,8 +352,8 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         """Reshape the leading (token) dims without dequantizing.
 
         Mirrors ``MXFP8TensorStorage.view``. Only leading dims may change: block tiling fixes
-        the inner dim (1D) or inner two (2D), so scale-inv stays valid. Columnwise data is
-        stored transposed, viewed as ``[inner, *leading]``.
+        the inner dim (1D) or inner two (2D), so scale-inv stays valid. Columnwise data
+        stored transposed is viewed as ``[inner, *leading]``.
         """
         cur_shape = self.size()
         if shape is None or shape == cur_shape:
@@ -369,7 +390,8 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             new_rowwise_data = self._rowwise_data.view(*shape)
         new_columnwise_data = None
         if self._columnwise_data is not None:
-            new_columnwise_data = self._columnwise_data.view([shape[-1], *shape[:-1]])
+            columnwise_shape = [shape[-1], *shape[:-1]] if self._columnwise_transposed else shape
+            new_columnwise_data = self._columnwise_data.view(columnwise_shape)
 
         return Float8BlockwiseQTensorStorage(
             new_rowwise_data,
@@ -380,6 +402,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             self._quantizer,
             self._is_2D_scaled,
             fake_dtype=self._dtype,
+            columnwise_transposed=self._columnwise_transposed,
         )
 
     @property
@@ -396,6 +419,9 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
         """
         assert self._is_2D_scaled, "Cannot create columnwise data when not using 2D scaling."
+        if not self._columnwise_transposed:
+            # Row-wise data and scales also serve column-wise usage
+            return
 
         rowwise_data = self._rowwise_data
         if not rowwise_data.is_contiguous():
@@ -470,6 +496,9 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         assert (
             columnwise_usage or rowwise_usage
         ), "Must retain some data either columnwise or rowwise"
+        if self._is_2D_scaled and not self._columnwise_transposed:
+            # Row-wise data and scales also serve column-wise usage
+            rowwise_usage, columnwise_usage = True, False
 
         if columnwise_usage and rowwise_usage:
             if not self._is_2D_scaled:

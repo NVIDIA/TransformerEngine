@@ -18,6 +18,11 @@ from transformer_engine.pytorch import (
 )
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import DType
+from transformer_engine.pytorch.constants import TE_DType_To_Torch
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+    _make_float8_blockwise_tensor_in_reduce_ex,
+)
+from references.blockwise_quantizer_reference import BlockwiseQuantizerReference
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
@@ -149,8 +154,11 @@ class TestFloat8BlockwiseTensor:
         atol: float = 0.0,
         dequant_columnwise: bool = False,
         use_cpp_allocation: bool = False,
-    ) -> None:
-        """Check numerical error when casting to FP8 and back"""
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Check numerical error when casting to FP8 and back
+
+        Returns the dequantized tensor and the reference, both on CPU.
+        """
         dims = _to_list(dims)
 
         # Initialize random data
@@ -181,6 +189,8 @@ class TestFloat8BlockwiseTensor:
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8, -x_ref, rtol=rtol, atol=atol)
 
+        return x_fp8, x_ref
+
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
@@ -199,9 +209,10 @@ class TestFloat8BlockwiseTensor:
 
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("block_scaling_dim", [1])
+    @pytest.mark.parametrize("block_scaling_dim", [1, 2])
+    @pytest.mark.parametrize("dims", [[], 311, [23, 128], [250, 500], [7, 5, 3]])
     def test_quantize_dequantize_columnwise_only(
-        self, fp8_dtype: DType, dtype: torch.dtype, block_scaling_dim: int
+        self, fp8_dtype: DType, dtype: torch.dtype, block_scaling_dim: int, dims: DimsType
     ) -> None:
         atol = _tols[fp8_dtype]["atol"]
         rtol = _tols[fp8_dtype]["rtol"]
@@ -211,9 +222,25 @@ class TestFloat8BlockwiseTensor:
             columnwise=True,
             block_scaling_dim=block_scaling_dim,
         )
-        self._test_quantize_dequantize(
-            quantizer=quantizer, dtype=dtype, atol=atol, rtol=rtol, use_cpp_allocation=True
+        x_dq, x_ref = self._test_quantize_dequantize(
+            quantizer=quantizer,
+            dtype=dtype,
+            dims=dims,
+            atol=atol,
+            rtol=rtol,
+            use_cpp_allocation=True,
         )
+
+        # Columnwise-only dequantization matches rowwise dequantization
+        rowwise_quantizer = Float8BlockQuantizer(
+            fp8_dtype=fp8_dtype,
+            rowwise=True,
+            columnwise=False,
+            block_scaling_dim=block_scaling_dim,
+        )
+        x_rowwise = tex.quantize(x_ref.to("cuda"), rowwise_quantizer, None, None)
+        x_rowwise_dq = x_rowwise.dequantize(dtype=dtype).cpu()
+        torch.testing.assert_close(x_dq, x_rowwise_dq, rtol=rtol, atol=atol)
 
     @pytest.mark.parametrize(
         "dims", [[], 256, 311, [264], [256, 512], [250, 500], [7, 5, 3], [2, 3, 5, 3]]
@@ -364,6 +391,104 @@ class TestFloat8BlockwiseTensor:
         x_fp8_dequant = x_fp8.dequantize()
         x_fp8_loaded_dequant = x_fp8_loaded.dequantize()
         torch.testing.assert_close(x_fp8_loaded_dequant, x_fp8_dequant)
+
+    @staticmethod
+    def _dequantize_transposed_payload(
+        data: torch.Tensor,
+        scale_inv: torch.Tensor,
+        fp8_dtype: DType,
+        dtype: torch.dtype,
+        is_2D_scaled: bool,
+        columnwise: bool,
+    ) -> torch.Tensor:
+        """Dequantize pickled data, reading columnwise data in the transposed layout"""
+        if data.numel() == 0:
+            # Like TE, return an empty tensor without reading the scales
+            shape = (*data.shape[1:], data.shape[0]) if columnwise else data.shape
+            return torch.empty(shape, dtype=dtype, device=data.device)
+        if columnwise:
+            q = data.reshape(data.shape[0], math.prod(data.shape[1:]))
+        else:
+            q = data.reshape(math.prod(data.shape[:-1]), data.shape[-1])
+        # Transposed columnwise data and its scales are the rowwise quantization of a [K, M] tensor.
+        # Dequantizing in FP32 and casting afterwards matches TE bitwise.
+        out = BlockwiseQuantizerReference().ref_dequantize_rowwise(
+            q.view(TE_DType_To_Torch[fp8_dtype]),
+            (128, 128) if is_2D_scaled else (1, 128),
+            scale_inv,
+            torch.float32,
+        )
+        out = out.to(dtype).reshape(data.shape)
+        if columnwise and data.dim() >= 2:
+            out = out.permute(*range(1, data.dim()), 0)
+        return out
+
+    @pytest.mark.parametrize("shape", [(384,), (256, 256), (250, 500), (2, 128, 384), (0, 256)])
+    @pytest.mark.parametrize("block_scaling_dim", [1, 2])
+    def test_pickle_compatibility(
+        self, block_scaling_dim: int, shape: Tuple[int, ...], monkeypatch
+    ) -> None:
+        """Pickles keep columnwise data transposed, as older TE versions read it, and payloads
+        in that layout load through every pickle reconstructor"""
+        quantizer = Float8BlockQuantizer(
+            DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=block_scaling_dim,
+        )
+        x = quantizer(torch.randn(shape, dtype=torch.bfloat16, device="cuda"))
+
+        # Pickle with both usages, then with columnwise usage only
+        buffers = [io.BytesIO(), io.BytesIO()]
+        expected_rowwise = x.dequantize()
+        torch.save(x, buffers[0])
+        x.update_usage(rowwise_usage=False, columnwise_usage=True)
+        expected_columnwise = x.dequantize()
+        torch.save(x, buffers[1])
+
+        # Older TE versions rebuild the tensor from the payload as is and ignore data_format
+        with monkeypatch.context() as m:
+            m.setattr(
+                "transformer_engine.pytorch.tensor.float8_blockwise_tensor."
+                "_make_float8_blockwise_tensor_in_reduce_ex",
+                lambda *payload: payload,
+            )
+            payloads = []
+            for buffer in buffers:
+                buffer.seek(0)
+                payloads.append(torch.load(buffer, weights_only=False))
+
+        for payload in payloads:
+            saved_shape, rowwise_data, rowwise_scale_inv, columnwise_data = payload[:4]
+            columnwise_scale_inv, fp8_dtype, dtype, _, is_2D_scaled, _ = payload[4:]
+            assert saved_shape == shape
+            if rowwise_data is not None:
+                assert rowwise_data.shape == shape
+                dq = self._dequantize_transposed_payload(
+                    rowwise_data, rowwise_scale_inv, fp8_dtype, dtype, is_2D_scaled, False
+                )
+                torch.testing.assert_close(dq, expected_rowwise, rtol=0, atol=0)
+
+            # Both tensors have columnwise usage, which older TE versions serve from columnwise data
+            assert (*columnwise_data.shape[1:], columnwise_data.shape[0]) == shape
+            dq = self._dequantize_transposed_payload(
+                columnwise_data, columnwise_scale_inv, fp8_dtype, dtype, is_2D_scaled, True
+            )
+            torch.testing.assert_close(dq, expected_columnwise, rtol=0, atol=0)
+
+            # Reconstructors of current and older pickles
+            expected = expected_rowwise if rowwise_data is not None else expected_columnwise
+            for make_in_reduce_ex, data_format in (
+                (_make_float8_blockwise_tensor_in_reduce_ex, None),
+                (Float8BlockwiseQTensor._make_in_reduce_ex, None),
+                (
+                    Float8BlockwiseQTensor._make_in_reduce_ex,
+                    tex.Float8BlockScaleTensorFormat.GEMM_READY,
+                ),
+            ):
+                y = make_in_reduce_ex(*payload[:9], data_format)
+                assert y.shape == shape
+                torch.testing.assert_close(y.dequantize(), expected, rtol=0, atol=0)
 
     @pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)

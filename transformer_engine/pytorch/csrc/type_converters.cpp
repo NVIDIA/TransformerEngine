@@ -133,6 +133,7 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
 
   // Quantizer state
   quantizer->set_quantization_params(&ret);
+  ret.set_columnwise_transposed(tensor.attr("_columnwise_transposed").cast<bool>());
 
   return ret;
 }
@@ -337,6 +338,7 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   if (py::hasattr(tensor, "_row_scaled_nvfp4")) {
     ret.set_row_scaled_nvfp4(tensor.attr("_row_scaled_nvfp4").cast<bool>());
   }
+  ret.set_columnwise_transposed(tensor.attr("_columnwise_transposed").cast<bool>());
 
   return ret;
 }

@@ -282,6 +282,10 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
       chunk.set_nvfp4_e4m3_max(source.get_nvfp4_e4m3_max());
       continue;
     }
+    if (param_type == NVTETensorParam::kNVTEColumnwiseTransposed) {
+      chunk.set_columnwise_transposed(source.get_columnwise_transposed());
+      continue;
+    }
     auto param = source.get_parameter(param_type);
     auto param_dptr = reinterpret_cast<char *>(param.data_ptr);
     auto param_dtype = static_cast<DType>(param.dtype);
