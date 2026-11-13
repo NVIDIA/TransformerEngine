@@ -242,13 +242,13 @@ def gated_quantize_colwise_only(
     TILE_X: cutlass.Constexpr[int],
     THREADS_PER_MXFP8_BLOCK: cutlass.Constexpr[int],
 ):
-    """ 
+    """
     `THREADS_PER_MXFP8_BLOCK` threads cooperate to quantize a single MXFP8 block of `MXFP8_BLOCK_SCALING_SIZE` elements.
     128 threads in a CTA process a (32, 64) tile, where each thread handles a columnwise partial MXFP8 block.
     When THREADS_PER_MXFP8_BLOCK is 2, each thread handles a (16, 1) fragments
     The threads of a column combine their partial amaxes through sAmax.
     """
-    
+
     tidx, _, _ = cute.arch.thread_idx()
     tx = tidx % TILE_X
     ty = tidx // TILE_X
@@ -319,7 +319,7 @@ def gated_quantize_colwise_only(
     cvt_x2 = get_cvt_f32x2_to_fp8x2_func(FP8_DTYPE, False)
 
     for o in cutlass.range_constexpr(NUM_OUT):
-        # Exchange the partial amaxes between threads 
+        # Exchange the partial amaxes between threads
         block_amax = sAmax[o, 0, tx]
         for t in cutlass.range_constexpr(1, THREADS_PER_MXFP8_BLOCK):
             block_amax = cute.arch.fmax(block_amax, sAmax[o, t, tx])
@@ -363,11 +363,11 @@ def gated_quantize_rowwise_only(
     FP8_DTYPE: cutlass.Constexpr[type],
     MAX_NORM_RCP: cutlass.Constexpr[float],
     SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
-    TILE_X: cutlass.Constexpr[int], # 64
-    TILE_Y: cutlass.Constexpr[int], # 32
+    TILE_X: cutlass.Constexpr[int],  # 64
+    TILE_Y: cutlass.Constexpr[int],  # 32
 ):
     """64 threads in a CTA processes the (32, 64) tile, where each thread handles a rowwise 32 element MXFP8 block."""
-    
+
     THREADS_X = TILE_X // MXFP8_BLOCK_SCALING_SIZE
     THREADS_Y = TILE_Y
 
@@ -584,7 +584,7 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         self.THREADS_PER_MXFP8_BLOCK = 1
         if self.COLWISE_ONLY:
             self.THREADS_PER_MXFP8_BLOCK = 2
-            self._THREADS_PER_CTA = self.THREADS_PER_MXFP8_BLOCK * self._TILE_COLS # 2 * 64 = 128
+            self._THREADS_PER_CTA = self.THREADS_PER_MXFP8_BLOCK * self._TILE_COLS  # 2 * 64 = 128
             self._NUM_WARPS = self._THREADS_PER_CTA // 32
         # Every pipeline stage has its own SMEM buffers, so a CTA with fewer tiles than stages
         # would allocate buffers it never fills
