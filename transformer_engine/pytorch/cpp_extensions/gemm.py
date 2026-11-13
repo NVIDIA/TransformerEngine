@@ -19,6 +19,7 @@ from ..utils import (
     get_cached_ones_tensor,
     get_device_compute_capability,
     get_sm_count,
+    is_non_tn_fp8_gemm_supported,
     _empty_tensor,
 )
 
@@ -844,8 +845,9 @@ def general_gemm(
     if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
         if ub is not None:
             raise NotImplementedError("Comm+GEMM overlap does not support FP8 block scaling.")
-        # FP8 block-scaling requires split accumulator
-        use_split_accumulator = True
+        # FP8 block-scaling requires split accumulator, except in forward GEMMs where FP8 GEMMs
+        # support non-TN layouts and run as MXFP8 GEMMs
+        use_split_accumulator = grad or not is_non_tn_fp8_gemm_supported()
 
     args = (
         A,
@@ -1142,6 +1144,13 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
+    if is_non_tn_fp8_gemm_supported() and (
+        isinstance(A[0], Float8BlockwiseQTensorStorage)
+        or isinstance(B[0], Float8BlockwiseQTensorStorage)
+    ):
+        # FP8 block-scaling GEMMs run as MXFP8 GEMMs here, with split accumulation in backward only
+        use_split_accumulator = grad
+
     bias = tex.te_general_grouped_gemm(
         A,
         transa,
@@ -1230,8 +1239,8 @@ def general_grouped_gemm_for_grouped_tensor(
     underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
     """
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
-    if grad:
-        raise NotImplementedError("grad is not supported for grouped_tensor GEMM yet.")
+    if grad and bias is not None:
+        raise NotImplementedError("grad with bias is not supported for grouped_tensor GEMM yet.")
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     is_discrete_out = isinstance(out, list)
@@ -1258,8 +1267,9 @@ def general_grouped_gemm_for_grouped_tensor(
         # matches the Float8BlockScaling recipe, which fixes use_split_accumulator=True
         # for all of fprop/dgrad/wgrad, so no user-configurable setting is discarded.
         # On Blackwell and newer the binding emulates this GEMM with MXFP8 (as for
-        # non-grouped GEMM); the setting is passed through unchanged.
-        use_split_accumulator = True
+        # non-grouped GEMM); where FP8 GEMMs support non-TN layouts, forward GEMMs use fast
+        # accumulation, as MXFP8 does.
+        use_split_accumulator = grad or not is_non_tn_fp8_gemm_supported()
 
     if is_discrete_out:
         # wgrad case.

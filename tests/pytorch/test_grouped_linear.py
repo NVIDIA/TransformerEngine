@@ -5,7 +5,7 @@
 import os
 import random
 from unittest.mock import Mock
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pytest
 import torch
@@ -43,6 +43,9 @@ from transformer_engine.pytorch.quantization import (
     get_align_size_for_quantization,
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage import (
+    Float8BlockwiseQTensorStorage,
+)
 import transformer_engine_torch as tex
 from utils import (
     ModelConfig,
@@ -1648,6 +1651,21 @@ def _tile_scaled_randn(shape, dtype) -> torch.Tensor:
     return (torch.randn(shape, device="cuda") * factors[:rows, :cols]).to(dtype)
 
 
+def _exact_gemm_reference(a: torch.Tensor, b: torch.Tensor) -> Tuple[torch.Tensor, float]:
+    """Reference for the GEMM ``b @ a`` of exactly representable operands
+
+    Returns the float64 product and an absolute tolerance for accumulating it in FP32: the
+    worst-case summation error, K * 2^-24 times the largest sum of absolute products.
+
+    """
+    a, b = a.double(), b.double()
+    ref = b @ a
+    if ref.numel() == 0:
+        return ref, 0.0
+    abs_sum = (b.abs() @ a.abs()).max().item()
+    return ref, a.size(0) * 2.0**-24 * abs_sum
+
+
 def _quantize_fp8bs(tensors, *, rowwise, columnwise, block_scaling_dim, grouped, is_weight):
     quantizer = Float8BlockQuantizer(
         fp8_dtype=tex.DType.kFloat8E4M3,
@@ -1667,6 +1685,24 @@ def _quantize_fp8bs(tensors, *, rowwise, columnwise, block_scaling_dim, grouped,
     return tex.group_quantize(torch.cat(tensors, dim=0), quantizer, len(tensors), first_dims)
 
 
+def _dequantize_fp8bs_usage(tensor, columnwise) -> torch.Tensor:
+    """Dequantize the values an FP8 block-scaling tensor provides for one usage, in float64."""
+    # Dequantizing reads row-wise data when present, so keep only the column-wise buffers when
+    # they hold the column-wise usage. 2D tensors may serve it with their row-wise data.
+    if columnwise and tensor._columnwise_data is not None:
+        tensor = Float8BlockwiseQTensorStorage(
+            rowwise_data=None,
+            rowwise_scale_inv=None,
+            columnwise_data=tensor._columnwise_data,
+            columnwise_scale_inv=tensor._columnwise_scale_inv,
+            fp8_dtype=tensor._fp8_dtype,
+            quantizer=None,
+            is_2D_scaled=tensor._is_2D_scaled,
+            columnwise_transposed=tensor._columnwise_transposed,
+        )
+    return tensor.dequantize(dtype=torch.float64)
+
+
 def _run_fp8bs_grouped_gemm(
     z, m_sizes, k, n, layout, case, weight_block_dim, accumulate, dtype
 ) -> None:
@@ -1683,6 +1719,7 @@ def _run_fp8bs_grouped_gemm(
         B = [_tile_scaled_randn((ms, n), dtype) for ms in m_sizes]  # grad_output
         out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
 
+    out_init = [o.clone() for o in out]
     out_ref = [o.clone() for o in out]
 
     transa = layout[0] == "T"
@@ -1733,12 +1770,33 @@ def _run_fp8bs_grouped_gemm(
         out if case == "discrete_out" else grouped_out,
         layout=layout,
         accumulate=accumulate,
+        grad=layout != "TN",
     )
     results = out if case == "discrete_out" else grouped_out.split_into_quantized_tensors()
 
     tols = dict(rtol=0.125, atol=0.0675)  # same as the MXFP8 test
     for o, o_ref in zip(results, out_ref):
         torch.testing.assert_close(o, o_ref, **tols)
+
+    # Compare both against the GEMMs on the dequantized operands. These are exactly representable,
+    # so only FP32 accumulation and output rounding differ. When accumulating, the GEMM rounds the
+    # product to the output dtype before adding the initial output, and FP32 accumulation error
+    # can move that rounding by one ulp of the product (at most eps * (|ref| + |initial output|)).
+    rtol = dtype_tols(dtype)["rtol"]
+    eps = torch.finfo(dtype).eps
+    for a_fp8, b_fp8, o_init, o_discrete, o_grouped in zip(
+        A_fp8, B_fp8, out_init, out_ref, results
+    ):
+        a = _dequantize_fp8bs_usage(a_fp8, columnwise=not transa)
+        b = _dequantize_fp8bs_usage(b_fp8, columnwise=transb)
+        o_ref, atol = _exact_gemm_reference(a.T if transa else a, b.T if transb else b)
+        ref_tols = dict(rtol=rtol, atol=atol)
+        if accumulate:
+            o_ref = o_ref.to(dtype).double() + o_init.double()
+            o_init_max = o_init.abs().max().item() if o_init.numel() > 0 else 0.0
+            ref_tols = dict(rtol=rtol + eps, atol=atol + eps * o_init_max)
+        torch.testing.assert_close(o_discrete.double(), o_ref, **ref_tols)
+        torch.testing.assert_close(o_grouped.double(), o_ref, **ref_tols)
 
 
 @pytest.mark.parametrize(

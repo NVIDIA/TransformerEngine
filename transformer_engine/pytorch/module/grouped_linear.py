@@ -1206,6 +1206,7 @@ def _grouped_linear_graph_safe_backward(
             grouped_dgrad,
             layout="NN",
             use_split_accumulator=dgrad_use_split_accumulator,
+            grad=True,
         )
 
     if is_dist_weight:
@@ -1282,6 +1283,7 @@ def _grouped_linear_graph_safe_backward(
                 layout="NT",
                 use_split_accumulator=wgrad_use_split_accumulator,
                 accumulate=accumulate,
+                grad=True,
             )
             return None, (), None
 

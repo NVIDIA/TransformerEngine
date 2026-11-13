@@ -445,11 +445,11 @@ class Float8BlockScaling(Recipe):
     NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it for the recipe defaults.
     This is only supported on Hopper; Blackwell and newer require power-of-2 scales.
 
-    NOTE: FP8 block scaling requires split accumulation for numerical accuracy, so
-    ``fp8_gemm_fprop``/``fp8_gemm_dgrad``/``fp8_gemm_wgrad`` all fix
-    ``use_split_accumulator=True`` (enforced in ``__post_init__``). The fused grouped
-    GEMM path (GroupedLinear) always uses split accumulation for FP8 block scaling and
-    ignores any caller- or recipe-supplied ``use_split_accumulator`` value.
+    NOTE: ``fp8_gemm_fprop``/``fp8_gemm_dgrad``/``fp8_gemm_wgrad`` all fix
+    ``use_split_accumulator=True`` (enforced in ``__post_init__``). FP8 block-scaling GEMMs use
+    this setting where FP8 GEMMs support only the TN layout (Hopper, SM 12.x). On other GPUs,
+    they use MXFP8's split-accumulator settings (off for forward GEMMs, on for backward GEMMs)
+    regardless of these values.
 
     Parameters
     ----------
