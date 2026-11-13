@@ -4,7 +4,7 @@
 
 """Register-resident gated-activation MXFP8 cast in CuTeDSL.
 
-A CTA covers 256 output columns and walks 32-row bands. Each thread loads its rows of the act and
+A CTA covers 256 output columns of one 32-row band. Each thread loads its rows of the act and
 gate halves (and of the incoming gradient, in backward) into registers, computes the gated op
 there with the elementwise math of the shared-memory port (quantize_mxfp8_gated_g2s.py, which
 mirrors gated_mxfp8.cuh), rounds it to BF16 as the CUDA kernels do, and quantizes the band in
@@ -17,7 +17,6 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass.utils import HardwareInfo
 from cutlass import Boolean, Float32, Int32, Int64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
@@ -69,11 +68,6 @@ class MXFP8GatedQuantizeG2RKernel:
     _ELEMENTS_Y_PER_THREAD = 4  # 8 warps x 4 rows = one 32-row band
     _ELEMENTS_X_PER_THREAD = 8  # 32 lanes x 8 columns = 256 columns
     _ROWS_IN_FLIGHT = 4  # input rows loaded at a time
-    # Row bands per CTA: halve the grid while it holds more than _WALK_TARGET_CTAS CTAs, walk at
-    # least _MIN_WALK bands unless that leaves fewer than two CTAs per SM, and at most _MAX_WALK.
-    _WALK_TARGET_CTAS = 16384
-    _MIN_WALK = 2
-    _MAX_WALK = 64
 
     @staticmethod
     def supports(cfg: MXFP8GatedQuantizeConfig) -> bool:
@@ -92,8 +86,7 @@ class MXFP8GatedQuantizeG2RKernel:
         mS_col: cute.Tensor,
     ) -> Boolean:
         """Whether the request fits this kernel. The C++ dispatcher checks 16-byte alignment of
-        the data pointers. Columnwise scales are stored eight bytes per thread, and grid.y stays
-        within limits."""
+        the data pointers. Columnwise scales are 8-byte aligned, and grid.y stays within limits."""
         M = mGatedInput.shape[0]
         return (M + 31) // 32 <= 65535 and mS_col.iterator.toint() % 8 == 0
 
@@ -102,11 +95,6 @@ class MXFP8GatedQuantizeG2RKernel:
         self.cfg = cfg
         # 4 resident CTAs per SM: 64 registers per thread, enough to load all 4 input rows at once.
         self._MIN_BLOCKS_PER_MP = 4
-        from cuda.bindings import runtime as cudart  # pylint: disable=no-name-in-module
-
-        err, device_id = cudart.cudaGetDevice()
-        assert err == cudart.cudaError_t.cudaSuccess, f"CUDA runtime error {err}"
-        self._sm_count = HardwareInfo(device_id).get_device_multiprocessor_count()
 
     @cute.jit
     def __call__(
@@ -133,7 +121,7 @@ class MXFP8GatedQuantizeG2RKernel:
         TILE_ROWS = self._CTA_THREADS_Y * self._ELEMENTS_Y_PER_THREAD
         TILE_COLS = self._CTA_THREADS_X * self._ELEMENTS_X_PER_THREAD
 
-        # eligible_to_dispatch checks this alignment: each thread stores eight columnwise scales.
+        # eligible_to_dispatch checks this alignment.
         mS_col = cute.make_tensor(mS_col.iterator.align(8), mS_col.layout)
         mAct = cute.local_tile(mGatedInput, (M, N), (0, 0))
         mGate = cute.local_tile(mGatedInput, (M, N), (0, 1))
@@ -158,18 +146,10 @@ class MXFP8GatedQuantizeG2RKernel:
                     M, N, self.cfg.ROWWISE, True, mS_row, mS_col
                 )
 
+        # One band per CTA: the kernel has no per-CTA setup to amortize over a walk (no table,
+        # unlike the bidimensional kernel).
         grid_cols = (N + TILE_COLS - 1) // TILE_COLS
         bands = (M + TILE_ROWS - 1) // TILE_ROWS
-        min_walk = Int32(self._MIN_WALK)
-        if grid_cols * (bands // self._MIN_WALK) < 2 * self._sm_count:
-            min_walk = Int32(1)
-        walk = Int32(1)
-        while (bands // walk) % 2 == 0 and grid_cols * (bands // walk) > self._WALK_TARGET_CTAS:
-            walk *= 2
-        if walk < min_walk and bands % min_walk == 0:
-            walk = min_walk
-        if walk > self._MAX_WALK:
-            walk = Int32(self._MAX_WALK)
 
         # A tensor with a row or column tail takes the kernel whose tiles are predicated.
         if M % TILE_ROWS != 0 or N % TILE_COLS != 0:
@@ -190,10 +170,9 @@ class MXFP8GatedQuantizeG2RKernel:
                 glu_linear_offset,
                 beta1,
                 beta2,
-                walk,
                 TAILS=True,
             ).launch(
-                grid=[grid_cols, bands // walk],
+                grid=[grid_cols, bands],
                 block=[self._CTA_THREADS_Y * self._CTA_THREADS_X],
                 min_blocks_per_mp=self._MIN_BLOCKS_PER_MP,
                 stream=stream,
@@ -216,10 +195,9 @@ class MXFP8GatedQuantizeG2RKernel:
                 glu_linear_offset,
                 beta1,
                 beta2,
-                walk,
                 TAILS=False,
             ).launch(
-                grid=[grid_cols, bands // walk],
+                grid=[grid_cols, bands],
                 block=[self._CTA_THREADS_Y * self._CTA_THREADS_X],
                 min_blocks_per_mp=self._MIN_BLOCKS_PER_MP,
                 stream=stream,
@@ -244,68 +222,40 @@ class MXFP8GatedQuantizeG2RKernel:
         glu_linear_offset: Optional[Float32],
         beta1: Optional[Float32],
         beta2: Optional[Float32],
-        walk: Int32,
         TAILS: cutlass.Constexpr[bool],
     ):
-        """Quantize the CTA's row bands: blockIdx.y and every gridDim.y-th band after it, walk
-        bands in all."""
-        cta_col, first_cta_row, _ = cute.arch.block_idx()
-        _, grid_rows, _ = cute.arch.grid_dim()
+        """Quantize the CTA's row band, blockIdx.y."""
+        cta_col, row_tile, _ = cute.arch.block_idx()
         cache_policy = create_l2_policy(True)
         TILE_ROWS = self._CTA_THREADS_Y * self._ELEMENTS_Y_PER_THREAD
         TILE_COLS = self._CTA_THREADS_X * self._ELEMENTS_X_PER_THREAD
-        for step in cutlass.range(walk, unroll=1):
-            row_tile = step * grid_rows + first_cta_row
-            # With TAILS, only the bands that cross the tensor's edge take the predicated body.
-            if cutlass.const_expr(TAILS):
-                if (row_tile + 1) * TILE_ROWS > mAct.shape[0] or (
-                    cta_col + 1
-                ) * TILE_COLS > mAct.shape[1]:
-                    self._gated_row_tile(
-                        mAct,
-                        mGate,
-                        mGrad,
-                        mO_row0,
-                        mS_row0,
-                        mO_col0,
-                        mS_col0,
-                        mO_row1,
-                        mS_row1,
-                        mO_col1,
-                        mS_col1,
-                        limit,
-                        alpha,
-                        glu_linear_offset,
-                        beta1,
-                        beta2,
-                        row_tile,
-                        cta_col,
-                        cache_policy,
-                        TAILS=True,
-                    )
-                else:
-                    self._gated_row_tile(
-                        mAct,
-                        mGate,
-                        mGrad,
-                        mO_row0,
-                        mS_row0,
-                        mO_col0,
-                        mS_col0,
-                        mO_row1,
-                        mS_row1,
-                        mO_col1,
-                        mS_col1,
-                        limit,
-                        alpha,
-                        glu_linear_offset,
-                        beta1,
-                        beta2,
-                        row_tile,
-                        cta_col,
-                        cache_policy,
-                        TAILS=False,
-                    )
+        # With TAILS, only the bands that cross the tensor's edge take the predicated body.
+        if cutlass.const_expr(TAILS):
+            if (row_tile + 1) * TILE_ROWS > mAct.shape[0] or (cta_col + 1) * TILE_COLS > mAct.shape[
+                1
+            ]:
+                self._gated_row_tile(
+                    mAct,
+                    mGate,
+                    mGrad,
+                    mO_row0,
+                    mS_row0,
+                    mO_col0,
+                    mS_col0,
+                    mO_row1,
+                    mS_row1,
+                    mO_col1,
+                    mS_col1,
+                    limit,
+                    alpha,
+                    glu_linear_offset,
+                    beta1,
+                    beta2,
+                    row_tile,
+                    cta_col,
+                    cache_policy,
+                    TAILS=True,
+                )
             else:
                 self._gated_row_tile(
                     mAct,
@@ -329,6 +279,29 @@ class MXFP8GatedQuantizeG2RKernel:
                     cache_policy,
                     TAILS=False,
                 )
+        else:
+            self._gated_row_tile(
+                mAct,
+                mGate,
+                mGrad,
+                mO_row0,
+                mS_row0,
+                mO_col0,
+                mS_col0,
+                mO_row1,
+                mS_row1,
+                mO_col1,
+                mS_col1,
+                limit,
+                alpha,
+                glu_linear_offset,
+                beta1,
+                beta2,
+                row_tile,
+                cta_col,
+                cache_policy,
+                TAILS=False,
+            )
 
     @cute.jit
     def _quantize_part(
@@ -369,6 +342,7 @@ class MXFP8GatedQuantizeG2RKernel:
             EDGE=TAILS,
             rows_left=rows_left,
             cols_ok=cols_ok,
+            cols_valid=mO_col.shape[1] - cta_col * TILE_COLS,
             DTYPE=self.cfg.DTYPE,
             FP8_DTYPE=self.cfg.FP8_DTYPE,
             MAX_NORM_RCP=self.cfg.MAX_NORM_RCP,
@@ -547,7 +521,7 @@ class MXFP8GatedQuantizeG2RKernel:
 
         # The gated op in FP32, rounded to BF16 as gated_mxfp8.cuh does before taking amaxes:
         # rX0 is the forward output or the act half's gradient, rX1 the gate half's gradient.
-        # Inputs are loaded _ROWS_IN_FLIGHT rows at a time, which keeps fewer of them live.
+        # Inputs are loaded _ROWS_IN_FLIGHT rows at a time.
         rX0 = cute.make_rmem_tensor((ELEMENTS_X, ELEMENTS_Y), DTYPE)
         rX1 = None
         if cutlass.const_expr(IS_BWD):
