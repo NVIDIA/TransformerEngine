@@ -2206,9 +2206,18 @@ def test_fused_topk_with_aux_loss_scores(dtype, num_tokens, grouped, with_bias, 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("index_dtype", [torch.int64, torch.int32])
 @pytest.mark.parametrize("aux_grad", ["aux_loss", "none"])
-def test_fused_topk_with_aux_loss_scores_fp32_probs(dtype, index_dtype, aux_grad):
+def test_fused_topk_with_aux_loss_scores_fp32_probs(monkeypatch, dtype, index_dtype, aux_grad):
     """probs_dtype=float32 equals probs.float() of the separate kernels, gradient included,
-    and with the gradient that fused_moe_aux_loss produces (or no aux-score gradient)."""
+    and with the gradient that fused_moe_aux_loss produces (or no aux-score gradient, which
+    must reach the backward kernel as None rather than a materialized zero tensor)."""
+    bwd = te_router.tex.fused_topk_with_aux_loss_scores_bwd
+    seen_aux_grads = []
+
+    def spy_bwd(logits, topk_indices, grad_probs, grad_aux_scores, *args):
+        seen_aux_grads.append(grad_aux_scores)
+        return bwd(logits, topk_indices, grad_probs, grad_aux_scores, *args)
+
+    monkeypatch.setattr(te_router.tex, "fused_topk_with_aux_loss_scores_bwd", spy_bwd)
     num_tokens, num_experts, topk, scaling_factor = 4096, 256, 8, 2.5
     generator = torch.Generator(device="cuda").manual_seed(7)
     logits = _router_logits(num_tokens, num_experts, dtype, "randn", generator)
@@ -2243,6 +2252,8 @@ def test_fused_topk_with_aux_loss_scores_fp32_probs(dtype, index_dtype, aux_grad
         return probs, indices, x.grad
 
     ref, out = run(False), run(True)
+    assert len(seen_aux_grads) == 1
+    assert (seen_aux_grads[0] is None) == (aux_grad == "none")
     assert out[0].dtype == torch.float32 and out[1].dtype == index_dtype
     assert torch.equal(_bits(out[0]), _bits(ref[0]))
     assert torch.equal(out[1], ref[1])

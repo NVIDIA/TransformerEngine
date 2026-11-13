@@ -622,6 +622,10 @@ class FusedTopkWithAuxLossScores(torch.autograd.Function):
         ctx.save_for_backward(logits, topk_indices)
         ctx.scaling_factor = scaling_factor
         ctx.score_function = score_function
+        # An output that gets no gradient (aux_scores when the caller only backpropagates
+        # through probs, or the reverse) reaches backward as None instead of a zero tensor,
+        # so the kernel skips its auxiliary-score gradient term.
+        ctx.set_materialize_grads(False)
         return probs, topk_indices, aux_scores, aux_tokens_per_expert
 
     @staticmethod
