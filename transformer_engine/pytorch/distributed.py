@@ -1203,23 +1203,31 @@ def _start_all_gather_fp8_blockwise(
 
         # Column-wise data
         if quantizer.columnwise_usage:
-            data_shape = list(inp._columnwise_data.size())
-            data_shape[0] *= world_size
-            interleaved_columnwise_data = torch.empty(
-                data_shape,
-                dtype=inp._columnwise_data.dtype,
-                device=device,
-            )
             torch.distributed.all_gather_into_tensor(
                 out._columnwise_scale_inv,
                 inp._columnwise_scale_inv,
                 group=process_group,
             )
-            torch.distributed.all_gather_into_tensor(
-                interleaved_columnwise_data,
-                inp._columnwise_data,
-                group=process_group,
-            )
+            if not out._columnwise_transposed:
+                # Column-wise data has the logical shape, so it gathers along dim 0
+                torch.distributed.all_gather_into_tensor(
+                    out._columnwise_data,
+                    inp._columnwise_data,
+                    group=process_group,
+                )
+            else:
+                data_shape = list(inp._columnwise_data.size())
+                data_shape[0] *= world_size
+                interleaved_columnwise_data = torch.empty(
+                    data_shape,
+                    dtype=inp._columnwise_data.dtype,
+                    device=device,
+                )
+                torch.distributed.all_gather_into_tensor(
+                    interleaved_columnwise_data,
+                    inp._columnwise_data,
+                    group=process_group,
+                )
 
     # Finalize communication if needed
     async_handle = None

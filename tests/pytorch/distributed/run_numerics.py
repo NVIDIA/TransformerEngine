@@ -10,6 +10,7 @@ import os
 import sys
 from functools import wraps
 import math
+from pathlib import Path
 
 import transformer_engine.pytorch as te
 import torch
@@ -25,10 +26,20 @@ from transformer_engine.common.recipe import (
     Recipe,
     QParams,
 )
-from transformer_engine.pytorch import Float8CurrentScalingQuantizer, NVFP4Quantizer
+from transformer_engine.pytorch import (
+    Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
+    NVFP4Quantizer,
+)
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.distributed import gather_along_first_dim
 from run_layer_with_overlap import _compare_tensors
+
+# This file is launched directly with torchrun, so add tests/pytorch for the shared test utilities
+_TEST_ROOT = str(Path(__file__).resolve().parent.parent)
+if _TEST_ROOT not in sys.path:
+    sys.path.append(_TEST_ROOT)
+from utils import fp8_block_scaling_valid_scale_shape
 
 SEQ_LEN, BATCH_SIZE = 16, 16
 HIDDEN_SIZE = 64
@@ -401,6 +412,16 @@ def _construct_quantizer(quantizer_class, low_precision_dtype, device, tp_group,
             amax_reduction_group=None,
         )
         return quantizer, quantizer_dist
+    elif quantizer_class == Float8BlockQuantizer:
+        # Block scales need no amax reduction, so both quantizers are the same.
+        # Only 1D block scaling supports quantized all-gather.
+        quantizer_dist = quantizer_class(
+            fp8_dtype=low_precision_dtype,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=1,
+        )
+        return quantizer_dist.copy(), quantizer_dist
     else:
         raise ValueError(f"Unsupported quantizer class: {quantizer_class}")
 
@@ -476,7 +497,7 @@ def test_quantizer():
 ############################################
 
 
-def _ref_zero_padding_scale_inv(scale_inv, unpadded_shape):
+def _ref_zero_padding_scale_inv(scale_inv, unpadded_shape, quantizer_cls):
     """
     Zero padding the scale_inv.
     scale_inv shape is the padded shape, but not zero padded
@@ -484,7 +505,9 @@ def _ref_zero_padding_scale_inv(scale_inv, unpadded_shape):
     """
     dim0, dim1 = scale_inv.shape
     unpadded_dim0, unpadded_dim1 = unpadded_shape
-    pad_dim0 = (128 - unpadded_dim0 % 128) % 128
+    # FP8 block-scaling scales are only padded along dim 1
+    dim0_alignment = 1 if quantizer_cls == Float8BlockQuantizer else 128
+    pad_dim0 = (dim0_alignment - unpadded_dim0 % dim0_alignment) % dim0_alignment
     pad_dim1 = (4 - unpadded_dim1 % 4) % 4
     new_dim0 = unpadded_dim0 + pad_dim0
     new_dim1 = unpadded_dim1 + pad_dim1
@@ -525,6 +548,8 @@ def _get_unpadded_scale_inv_shape(input_shape, quantizer_cls, columnwise):
             outer = M
             inner = math.ceil(K / NVFP4_BLOCK_SCALING_SIZE)
             return (outer, inner)
+    elif quantizer_cls == Float8BlockQuantizer:
+        return fp8_block_scaling_valid_scale_shape((M, K), 1, columnwise)
     else:
         raise ValueError(f"Unsupported quantizer class: {quantizer_cls}")
 
@@ -539,6 +564,9 @@ def _test_quantized_all_gather(input_dtype, low_precision_dtype, quantizer_cls):
     """
 
     M, N = WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE // 2
+    if quantizer_cls == Float8BlockQuantizer:
+        # Two 128-row blocks per rank, so the gather order of the columnwise scale rows matters
+        M, N = 2 * WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE
 
     # high precision input
     x_hp_cpu = torch.randn((M, N), device="cpu").to(input_dtype)
@@ -594,10 +622,14 @@ def _test_quantized_all_gather(input_dtype, low_precision_dtype, quantizer_cls):
         )
         torch.testing.assert_close(
             _ref_zero_padding_scale_inv(
-                x_low_precision_single._rowwise_scale_inv, unpadded_rowwise_scale_inv_shape
+                x_low_precision_single._rowwise_scale_inv,
+                unpadded_rowwise_scale_inv_shape,
+                quantizer_cls,
             ),
             _ref_zero_padding_scale_inv(
-                x_low_precision_total._rowwise_scale_inv, unpadded_rowwise_scale_inv_shape
+                x_low_precision_total._rowwise_scale_inv,
+                unpadded_rowwise_scale_inv_shape,
+                quantizer_cls,
             ),
             rtol=0.0,
             atol=0.0,
@@ -623,10 +655,14 @@ def _test_quantized_all_gather(input_dtype, low_precision_dtype, quantizer_cls):
         )
         torch.testing.assert_close(
             _ref_zero_padding_scale_inv(
-                x_low_precision_single._columnwise_scale_inv, unpadded_columnwise_scale_inv_shape
+                x_low_precision_single._columnwise_scale_inv,
+                unpadded_columnwise_scale_inv_shape,
+                quantizer_cls,
             ),
             _ref_zero_padding_scale_inv(
-                x_low_precision_total._columnwise_scale_inv, unpadded_columnwise_scale_inv_shape
+                x_low_precision_total._columnwise_scale_inv,
+                unpadded_columnwise_scale_inv_shape,
+                quantizer_cls,
             ),
             rtol=0.0,
             atol=0.0,
@@ -640,7 +676,7 @@ def test_quantized_all_gather():
     # skip this test for other quantization schemes
     is_nvfp4 = QUANTIZATION == "nvfp4"
     # add other recipes for testing if needed
-    if not is_nvfp4:
+    if not is_nvfp4 and QUANTIZATION != "fp8_block_scaling":
         return
 
     input_dtypes = [torch.bfloat16]
@@ -648,7 +684,7 @@ def test_quantized_all_gather():
     fp8_dtype = [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2]
     quantizer_cls_nvfp4 = [NVFP4Quantizer]
     # add FP8 quantizers if needed
-    quantizer_cls_fp8 = []
+    quantizer_cls_fp8 = [Float8BlockQuantizer]
 
     low_precisio_dtypes = fp4_dtype if is_nvfp4 else fp8_dtype
     quantizer_cls_list = quantizer_cls_nvfp4 if is_nvfp4 else quantizer_cls_fp8
