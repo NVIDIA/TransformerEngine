@@ -152,9 +152,7 @@ def cross_entropy_forward(
     return loss, saved_input, stats, target, n_non_ignore, rank, world_size, argmax
 
 
-def _mxfp8_backward_block_cols(
-    saved_input: torch.Tensor, world_size: int, grad_quantizer
-) -> Optional[int]:
+def _mxfp8_backward_block_cols(saved_input: torch.Tensor, grad_quantizer) -> Optional[int]:
     """Tile width of the fused MXFP8 backward, or None if it cannot write this gradient."""
     # pylint: disable=import-outside-toplevel
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
@@ -169,11 +167,14 @@ def _mxfp8_backward_block_cols(
         return None
     if not (grad_quantizer.rowwise_usage or grad_quantizer.columnwise_usage):
         return None
-    if world_size != 1 or saved_input.dtype != torch.bfloat16 or not saved_input.is_contiguous():
+    # saved_input is always contiguous: overwrite_input requires a contiguous input, and
+    # otherwise forward copies the input into a new buffer.
+    if saved_input.dtype != torch.bfloat16:
         return None
     B, SQ, V = saved_input.shape
     # Unpadded scale-inverse layouts: 128 rows x 4 blocks of the row-wise scales and
-    # 4 x 128 columns of the column-wise scales.
+    # 4 x 128 columns of the column-wise scales. With tensor parallelism, V is this rank's
+    # vocabulary shard.
     if (B * SQ) % 128 != 0 or V % 128 != 0:
         return None
     return _MXFP8_BWD_BLOCK_COLS if V % _MXFP8_BWD_BLOCK_COLS == 0 else 128
@@ -206,7 +207,7 @@ def cross_entropy_backward(
     grad_output = grad_output.contiguous()
 
     if grad_quantizer is not None:
-        block_cols = _mxfp8_backward_block_cols(saved_input, world_size, grad_quantizer)
+        block_cols = _mxfp8_backward_block_cols(saved_input, grad_quantizer)
         if block_cols is not None:
             import transformer_engine_torch as tex  # pylint: disable=import-outside-toplevel
 
@@ -232,6 +233,8 @@ def cross_entropy_backward(
                 columnwise_data_ptr=(grad_input._columnwise_data if columnwise else saved_input),
                 columnwise_scale_ptr=columnwise_scale if columnwise else saved_input,
                 columnwise_scale_stride=columnwise_scale.shape[-1] if columnwise else 0,
+                rank=rank,
+                world_size=world_size,
                 n_cols=V,
                 ignore_idx=ignore_idx,
                 reduce_loss=reduce_loss,

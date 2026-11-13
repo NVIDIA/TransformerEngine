@@ -228,9 +228,9 @@ def parallel_cross_entropy(
     grad_quantizer : Quantizer, default = None
         Return the gradient of ``inp`` quantized with this quantizer, for a following
         quantized linear layer (for example an MXFP8 LM head) that would otherwise quantize
-        it itself. With an ``MXFP8Quantizer`` (E4M3 or E5M2, compact scales), a BF16 ``inp``
-        without ``dist_process_group`` (or with a single rank), a row count that is a multiple
-        of 128 and a vocabulary that is a multiple of 128, backward writes the MXFP8 gradient
+        it itself. With an ``MXFP8Quantizer`` (E4M3 or E5M2, compact scales), a BF16 ``inp``,
+        a row count that is a multiple of 128 and a vocabulary (per rank, with
+        ``dist_process_group``) that is a multiple of 128, backward writes the MXFP8 gradient
         directly, bit-identical to quantizing the BF16 gradient with ``grad_quantizer``
         (for finite gradients). In all other cases the gradient is computed as usual and
         then quantized.

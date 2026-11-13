@@ -360,6 +360,8 @@ def cross_entropy_backward_mxfp8_kernel(
     columnwise_data_ptr,
     columnwise_scale_ptr,
     columnwise_scale_stride,
+    rank,
+    world_size,
     n_cols,
     ignore_idx,
     reduce_loss: tl.constexpr,
@@ -369,7 +371,8 @@ def cross_entropy_backward_mxfp8_kernel(
     FP8_E5M2: tl.constexpr,
     BLOCK_COLS: tl.constexpr,
 ):
-    """Single-rank derivative of a 32-row x BLOCK_COLS tile, written as MXFP8.
+    """Derivative of a 32-row x BLOCK_COLS tile of this rank's vocabulary shard, written as
+    MXFP8.
 
     The derivative is computed as cross_entropy_backward_kernel computes it and rounded to the
     input dtype (BF16), then quantized as TE's MXFP8 cast quantizes it: row-wise with 1x32
@@ -387,10 +390,12 @@ def cross_entropy_backward_mxfp8_kernel(
     if reduce_loss:
         grad_output = grad_output / tl.load(n_non_ignore_ptr)
 
-    eps = label_smoothing / n_cols
+    eps = label_smoothing / (n_cols * world_size)
+    # Local column of the target; outside [0, n_cols) if another rank holds it.
+    target_col = y - rank * n_cols
     x = tl.load(saved_input_ptr + offsets).to(tl.float32)
     grad = tl.exp(x - m[:, None]) / d[:, None] - eps
-    grad -= tl.where(cols[None, :] == y[:, None], 1 - label_smoothing, 0.0)
+    grad -= tl.where(cols[None, :] == target_col[:, None], 1 - label_smoothing, 0.0)
     grad = grad * grad_output[:, None]
     grad = tl.where((y == ignore_idx)[:, None], 0.0, grad)
     grad = grad.to(saved_input_ptr.dtype.element_ty).to(tl.float32)

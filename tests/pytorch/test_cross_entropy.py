@@ -11,6 +11,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Format, MXFP8BlockScaling
 from transformer_engine.pytorch import is_mxfp8_available, parallel_cross_entropy
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
+import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
 
 from utils import dtype_tols
 
@@ -646,6 +647,32 @@ _MXFP8_BUFFERS = (
 )
 
 
+class _KernelLaunchCounter:
+    """Stands in for a Triton kernel, counting its launches and forwarding them."""
+
+    def __init__(self, kernel):
+        self.kernel = kernel
+        self.launches = 0
+
+    def __getitem__(self, grid):
+        launch = self.kernel[grid]
+
+        def counted_launch(*args, **kwargs):
+            self.launches += 1
+            return launch(*args, **kwargs)
+
+        return counted_launch
+
+
+@pytest.fixture
+def mxfp8_kernel_launches(monkeypatch):
+    """Counts the launches of the fused MXFP8 backward kernel, so that tests can tell the fused
+    path from the fallback, which writes the same bytes."""
+    counter = _KernelLaunchCounter(triton_cross_entropy.cross_entropy_backward_mxfp8_kernel)
+    monkeypatch.setattr(triton_cross_entropy, "cross_entropy_backward_mxfp8_kernel", counter)
+    return counter
+
+
 def _heavy_tailed_logits(shape, seed):
     """BF16 logits whose MXFP8 block scales vary across the row."""
     generator = torch.Generator(device="cuda").manual_seed(seed)
@@ -678,8 +705,16 @@ def _assert_same_mxfp8_bytes(grad, ref):
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 @pytest.mark.parametrize(
     "shape",
-    [(2, 64, 4096), (512, 1, 129280), (128, 2, 32000), (96, 1, 4096), (128, 1, 4000)],
-    ids=["v4096", "v129280", "v32000", "rows96_fallback", "v4000_fallback"],
+    [
+        (2, 64, 4096),
+        (512, 1, 129280),
+        (128, 2, 32000),
+        (128, 1, 50304),
+        (96, 1, 4096),
+        (128, 1, 4000),
+    ],
+    # 50304 is a multiple of 128 but not of 256: 128-column tiles.
+    ids=["v4096", "v129280", "v32000", "v50304_cols128", "rows96_fallback", "v4000_fallback"],
 )
 @pytest.mark.parametrize("fp8_dtype", ["e4m3", "e5m2"])
 @pytest.mark.parametrize("usage", ["both", "rowwise", "columnwise"])
@@ -687,10 +722,10 @@ def _assert_same_mxfp8_bytes(grad, ref):
 @pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
 @pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
 def test_parallel_cross_entropy_mxfp8_grad(
-    shape, fp8_dtype, usage, reduce_loss, label_smoothing, overwrite_input
+    shape, fp8_dtype, usage, reduce_loss, label_smoothing, overwrite_input, mxfp8_kernel_launches
 ):
     """The MXFP8 gradient has the bytes of the BF16 gradient quantized by the quantizer, and
-    the loss is unchanged."""
+    the loss is unchanged. Shapes the fused kernel supports are written by it."""
 
     values = _heavy_tailed_logits(shape, seed=sum(shape))
     target = torch.randint(0, shape[-1], shape[:-1], device="cuda")
@@ -722,6 +757,8 @@ def test_parallel_cross_entropy_mxfp8_grad(
     ref_loss, ref_grad = run(None)
     loss, grad = run(quantizer)
 
+    fused = math.prod(shape[:-1]) % 128 == 0 and shape[-1] % 128 == 0
+    assert mxfp8_kernel_launches.launches == int(fused)
     torch.testing.assert_close(loss, ref_loss, rtol=0, atol=0)
     _assert_same_mxfp8_bytes(grad, quantizer(ref_grad))
     # The dequantized gradient is the BF16 gradient up to the MXFP8 rounding error: relative
@@ -739,7 +776,7 @@ def test_parallel_cross_entropy_mxfp8_grad(
 @pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
 @pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
 def test_parallel_cross_entropy_mxfp8_grad_masked_logits(
-    vocab, fp8_dtype, reduce_loss, label_smoothing, overwrite_input
+    vocab, fp8_dtype, reduce_loss, label_smoothing, overwrite_input, mxfp8_kernel_launches
 ):
     """With masked (-inf) logits, the MXFP8 gradient has the bytes of the BF16 gradient
     quantized by the quantizer, and both match PyTorch."""
@@ -770,6 +807,7 @@ def test_parallel_cross_entropy_mxfp8_grad_masked_logits(
     ref_loss, ref_grad = run(None)
     loss, grad = run(quantizer)
 
+    assert mxfp8_kernel_launches.launches == 1
     torch.testing.assert_close(loss, ref_loss, rtol=0, atol=0)
     _assert_same_mxfp8_bytes(grad, quantizer(ref_grad))
     assert grad.dequantize().isfinite().all()
@@ -783,29 +821,40 @@ def test_parallel_cross_entropy_mxfp8_grad_masked_logits(
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-def test_parallel_cross_entropy_mxfp8_grad_unfused_cases():
-    """Inputs the fused kernel does not write still return the quantized gradient."""
+def test_parallel_cross_entropy_mxfp8_grad_dispatch(mxfp8_kernel_launches):
+    """Inputs the fused kernel does not write still return the quantized gradient, and a
+    non-contiguous BF16 input is fused, since forward saves a contiguous copy of it."""
 
     values = torch.randn(2, 64, 4096, device="cuda")
     target = torch.randint(0, 4096, (2, 64), device="cuda")
     quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
-    # FP32 input, and a non-contiguous BF16 input. torch.autograd.grad returns the gradient as
-    # the loss returns it (AccumulateGrad would re-layout it for the non-contiguous leaf).
-    for logits_values in (values, values.to(torch.bfloat16).transpose(0, 1)):
+    # An FP32 input falls back; a non-contiguous BF16 input is fused. torch.autograd.grad
+    # returns the gradient as the loss returns it (AccumulateGrad would re-layout it for the
+    # non-contiguous leaf).
+    for logits_values, fused in (
+        (values, False),
+        (values.to(torch.bfloat16).transpose(0, 1), True),
+    ):
+        assert logits_values.is_contiguous() == (not fused)
         logits_target = target.reshape(logits_values.shape[:-1])
         logits = logits_values.clone().requires_grad_()
         (ref_grad,) = torch.autograd.grad(
             parallel_cross_entropy(logits, logits_target).sum(), logits
         )
+        launches = mxfp8_kernel_launches.launches
         (grad,) = torch.autograd.grad(
             parallel_cross_entropy(logits, logits_target, grad_quantizer=quantizer).sum(), logits
         )
+        assert mxfp8_kernel_launches.launches - launches == int(fused)
         _assert_same_mxfp8_bytes(grad, quantizer(ref_grad))
 
+    # GEMM-swizzled scales fall back to the quantizer.
     swizzled = MXFP8Quantizer(tex.DType.kFloat8E4M3)
     swizzled.optimize_for_gemm = True
     logits = values.to(torch.bfloat16).requires_grad_()
+    launches = mxfp8_kernel_launches.launches
     parallel_cross_entropy(logits, target, grad_quantizer=swizzled).sum().backward()
+    assert mxfp8_kernel_launches.launches == launches
     assert isinstance(logits.grad, MXFP8Tensor) and logits.grad._with_gemm_swizzled_scales
 
     internal = MXFP8Quantizer(tex.DType.kFloat8E4M3)
@@ -816,7 +865,7 @@ def test_parallel_cross_entropy_mxfp8_grad_unfused_cases():
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 @pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
-def test_parallel_cross_entropy_mxfp8_grad_lm_head(overwrite_input):
+def test_parallel_cross_entropy_mxfp8_grad_lm_head(overwrite_input, mxfp8_kernel_launches):
     """An MXFP8 linear layer followed by the loss gets the same input and weight gradients when
     the loss returns the MXFP8 gradient of the logits."""
 
@@ -843,6 +892,7 @@ def test_parallel_cross_entropy_mxfp8_grad_lm_head(overwrite_input):
 
     ref = run(None)
     out = run(MXFP8Quantizer(tex.DType.kFloat8E4M3))
+    assert mxfp8_kernel_launches.launches == 1
     for a, b in zip(out, ref):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
 
