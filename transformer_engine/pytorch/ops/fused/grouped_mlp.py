@@ -36,6 +36,9 @@ from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ...tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ...triton.grouped_dbias_dscales import compute_grouped_dbias, compute_grouped_dbias_dscales
+from ...tensor.utils import (
+    swizzle_scales_and_pack_ptrs_for_discrete_weights as _swizzle_pack_discrete,
+)
 from ...utils import (
     ceil_div,
     clear_tensor_data,
@@ -1762,13 +1765,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_activation_kwargs["sfb_tensor"] = fc1_w_scales
             else:
                 # Discrete-weight kernel: per-expert data/scale pointers
-                fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sfb_buffer = (
-                    tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
-                        [w._rowwise_data for w in grouped_fc1_weight],
-                        [w._rowwise_scale_inv for w in grouped_fc1_weight],
-                        "nvfp4" if use_nvfp4 else "mxfp8_rowwise",
-                        device,
-                    )
+                fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sfb_buffer = _swizzle_pack_discrete(
+                    grouped_fc1_weight,
+                    "nvfp4" if use_nvfp4 else "mxfp8_rowwise",
+                    device,
+                    columnwise=False,
                 )
                 fc1_activation_kwargs["b_ptrs"] = fc1_b_ptrs
                 fc1_activation_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
@@ -2044,13 +2045,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_quant_kwargs["b_tensor"] = fc2_w_data
                     fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
                 else:
-                    fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
-                        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
-                            [w._rowwise_data for w in grouped_fc2_weight],
-                            [w._rowwise_scale_inv for w in grouped_fc2_weight],
-                            "mxfp8_rowwise",
-                            device,
-                        )
+                    fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = _swizzle_pack_discrete(
+                        grouped_fc2_weight,
+                        "mxfp8_rowwise",
+                        device,
+                        columnwise=False,
                     )
                     fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
                     fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
@@ -2576,13 +2575,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_dactivation_kwargs["b_tensor"] = fc2_w_data
                 fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
             else:
-                fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
-                    tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
-                        [w._columnwise_data for w in grouped_fc2_weight],
-                        [w._columnwise_scale_inv for w in grouped_fc2_weight],
-                        "nvfp4" if use_nvfp4 else "mxfp8_columnwise",
-                        device,
-                    )
+                fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = _swizzle_pack_discrete(
+                    grouped_fc2_weight,
+                    "nvfp4" if use_nvfp4 else "mxfp8_columnwise",
+                    device,
+                    columnwise=True,
                 )
                 fc2_dactivation_kwargs["b_ptrs"] = fc2_b_ptrs
                 fc2_dactivation_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
@@ -2883,13 +2880,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_dgrad_kwargs["b_tensor"] = fc1_w_data
                     fc1_dgrad_kwargs["sfb_tensor"] = fc1_w_scales
                 else:
-                    fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sfb_buffer = (
-                        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
-                            [w._columnwise_data for w in grouped_fc1_weight],
-                            [w._columnwise_scale_inv for w in grouped_fc1_weight],
-                            "nvfp4" if use_nvfp4 else "mxfp8_columnwise",
-                            device,
-                        )
+                    fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sfb_buffer = _swizzle_pack_discrete(
+                        grouped_fc1_weight,
+                        "nvfp4" if use_nvfp4 else "mxfp8_columnwise",
+                        device,
+                        columnwise=True,
                     )
 
                     fc1_dgrad_kwargs["b_ptrs"] = fc1_b_ptrs
