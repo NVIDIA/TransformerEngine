@@ -152,7 +152,7 @@ inline cudaStream_t captureStreamForCurrentDevice() {
     ~Streams() {
       int current = 0;
       if (cudaGetDevice(&current) != cudaSuccess) return;  // the runtime is already torn down
-      for (auto &[device, stream] : by_device) {
+      for (auto& [device, stream] : by_device) {
         if (cudaSetDevice(device) == cudaSuccess) cudaStreamDestroy(stream);
       }
       cudaSetDevice(current);
