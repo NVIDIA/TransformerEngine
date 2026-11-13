@@ -300,6 +300,7 @@ list(APPEND transformer_engine_cuda_sources
      transpose/swap_first_dims.cu
      dropout/dropout.cu
      fused_attn/context_parallel.cu
+     linear_attention/affine_prefix.cu
      fused_attn/kv_cache.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
