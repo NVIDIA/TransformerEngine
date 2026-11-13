@@ -7,7 +7,7 @@
 import torch
 import transformer_engine_torch as tex
 
-from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
+from transformer_engine.pytorch.constants import QKVFormat
 
 # The ops take the format's value rather than the pybind enum: converting the
 # enum inside a traced region makes dynamo recurse until it gives up.

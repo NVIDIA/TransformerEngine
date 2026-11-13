@@ -17,6 +17,11 @@ Prerequisites
 4. `cuDNN 9.12 <https://developer.nvidia.com/cudnn>`__ or later.
 5. `cuDNN Frontend 1.31.0 <https://pypi.org/project/nvidia-cudnn-frontend/>`__ or later.
 
+PyTorch and JAX cuDNN attention require ``nvidia-cudnn-frontend`` version
+1.31.0 or later. JAX builds pin the runtime dependency to the frontend version
+used for the build headers. The JAX extension and frontend Python package must
+use matching versions; rebuild the extension after upgrading that package.
+
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set
 `NVTE_CUDA_INCLUDE_PATH` in the environment.

@@ -106,7 +106,8 @@ void FusedAttnConfig::derive() {
 
   // Use ragged (TH1) or dense (BHS1) graphs and stats
   const int sm_arch = cuda::sm_arch(cuda::current_device());
-  uses_ragged_graph = sm_arch >= 90 && sm_arch != 120;
+  const bool is_sm12x = sm_arch >= 120 && sm_arch < 130;
+  uses_ragged_graph = sm_arch >= 90 && !is_sm12x;
   uses_ragged_stats = is_ragged_q && uses_ragged_graph;
   const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_ragged_graph;
   graph_batch_size_fwd =

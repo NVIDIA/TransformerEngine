@@ -629,7 +629,7 @@ class TestIdentityQuantizerUnit:
 
     def test_fp8_dpa_rejects_identity_quantizer_with_type_error(self):
         from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
-        from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+        from transformer_engine.pytorch.constants import (
             META_DO,
             META_DP,
             META_DQKV,

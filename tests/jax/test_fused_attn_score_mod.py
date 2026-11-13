@@ -2,7 +2,11 @@
 #
 # See LICENSE for license information.
 """Tests for cuDNN frontend score_mod fused attention."""
+
 from math import sqrt
+from collections import Counter
+from types import FunctionType, SimpleNamespace
+from unittest.mock import Mock, call
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +14,9 @@ import numpy as np
 import pytest
 
 import transformer_engine.jax.cpp_extensions.flex_attention as tex_attention
+import transformer_engine.jax.cpp_extensions.cudnn_graph as tex_cudnn_graph
 from transformer_engine.jax.attention import (
+    FusedAttnBackend,
     AttnBiasType,
     AttnMaskType,
     AttnSoftmaxType,
@@ -18,9 +24,8 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_config
 from transformer_engine.jax.flax import transformer as flax_transformer
-from transformer_engine_jax import get_device_compute_capability, NVTE_Fused_Attn_Backend
+from transformer_engine_jax import get_device_compute_capability
 from test_fused_attn import FusedAttnRunner, SeqDescFormat
-
 
 _CONFIG_TEST_HEAD_DIM = 128
 _CONFIG_TEST_SCALING_FACTOR = 1.0 / sqrt(_CONFIG_TEST_HEAD_DIM)
@@ -403,9 +408,9 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
 
         def get_fused_attn_backend(self):
             if kernel_available:
-                return NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen, ""
+                return FusedAttnBackend.F16_arbitrary_seqlen, ""
             return (
-                NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+                FusedAttnBackend.No_Backend,
                 "fake FusedAttnHelper: no fused attention backend available for this configuration",
             )
 
@@ -652,6 +657,153 @@ def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
     assert len(config.score_mod_scalars[0].value) == np.dtype(np.float32).itemsize
 
 
+@pytest.mark.parametrize("selected_engine", (None, "sdpa_fwd", "sdpa_bwd"))
+def test_fused_attn_score_mod_backend_guard(monkeypatch, selected_engine):
+    """Score-mod graphs must use cuDNN while retaining JAX's serialization exclusions."""
+    cudnn = Mock(__version__="1.31.0", cudnnGraphNotSupportedError=NotImplementedError)
+    graph = Mock(selected_engine=selected_engine)
+    graph.get_execution_plan_count.return_value = 2
+    graph.get_plan_name_at_index.side_effect = lambda index: ("sdpa_fwd_frost", "cudnn_plan")[index]
+    graph.get_workspace_size.return_value = 0
+    graph.serialize.return_value = b"graph"
+    monkeypatch.setattr(tex_cudnn_graph, "check_frontend_version", lambda _cudnn: 13100)
+
+    if selected_engine is not None:
+        with pytest.raises(RuntimeError, match="Only the cuDNN backend implements score_mod"):
+            tex_attention._finalize_score_mod_graph(cudnn, graph, has_score_mod=True)
+        graph.serialize.assert_not_called()
+    else:
+        assert tex_attention._finalize_score_mod_graph(cudnn, graph, has_score_mod=True) == (
+            1,
+            b"graph",
+            13100,
+        )
+
+    assert graph.deselect_engines.call_args_list == [
+        call(["sdpa_fwd", "sdpa_bwd"]),
+        call(["sdpa_fwd_", "sdpa_bwd_"]),
+    ]
+
+
+@pytest.mark.parametrize("has_score_mod", (False, True))
+@pytest.mark.parametrize(
+    "plans,backend_supported",
+    (
+        (("sdpa_fwd_frost",), True),
+        (("sdpa_bwd_frost", "cudnn_plan"), True),
+        (("sdpa_fwd_frost", "cudnn_plan"), False),
+        (("cudnn_plan", "sdpa_bwd_frost"), False),
+        (("cudnn_plan",), True),
+    ),
+)
+def test_cudnn_graph_support_requires_serializable_plan(plans, backend_supported, has_score_mod):
+    """Excluded Python plans must not hide missing or unsupported backend plans."""
+    from transformer_engine.common.cudnn.graph import UnsupportedGraph
+
+    cudnn = Mock(cudnnGraphNotSupportedError=NotImplementedError)
+    graph = Mock()
+    graph.get_execution_plan_count.return_value = len(plans)
+    graph.get_plan_name_at_index.side_effect = lambda index: plans[index]
+    selected = []
+    graph.select_plan.side_effect = lambda index: selected.append(index)
+
+    def check_support():
+        # Match the frontend's behavior: an unpinned query may accept a Python
+        # plan even when the backend cannot execute the graph.
+        if not selected or plans[selected[-1]].startswith("sdpa_"):
+            return
+        if not backend_supported:
+            raise NotImplementedError("Backend rejected graph")
+
+    graph.check_support.side_effect = check_support
+    if backend_supported and "cudnn_plan" in plans:
+        tex_cudnn_graph.check_graph_support(cudnn, graph, has_score_mod=has_score_mod)
+        assert plans[selected[-1]] == "cudnn_plan"
+    else:
+        with pytest.raises(UnsupportedGraph):
+            tex_cudnn_graph.check_graph_support(cudnn, graph, has_score_mod=has_score_mod)
+    graph.build_plans.assert_not_called()
+    graph.serialize.assert_not_called()
+
+
+def test_cudnn_graph_compilation_retains_backend_fallback():
+    """Pinning support to the backend must not discard its later execution plans."""
+    cudnn = Mock(cudnnGraphNotSupportedError=NotImplementedError)
+    graph = Mock()
+    plans = ("sdpa_fwd_frost", "cudnn_first", "cudnn_fallback")
+    graph.get_execution_plan_count.return_value = len(plans)
+    graph.get_plan_name_at_index.side_effect = lambda index: plans[index]
+    graph.build_plans.side_effect = [NotImplementedError("First plan failed"), None]
+    graph.get_workspace_size.return_value = 64
+
+    assert tex_cudnn_graph.compile_graph(cudnn, graph) == 64
+    assert graph.select_plan.call_args_list == [call(1), call(2)]
+
+
+@pytest.mark.parametrize("level", (0, 1, 2))
+@pytest.mark.parametrize("cacheable", (False, True))
+def test_fused_attn_score_mod_cache_diagnostics(monkeypatch, capsys, level, cacheable):
+    """Tracing reports real graph/cache stages, never executions of the FFI call."""
+    diagnostics = tex_cudnn_graph._diagnostics
+    assert diagnostics is tex_attention._diagnostics
+    monkeypatch.setattr(diagnostics, "_level", level)
+    monkeypatch.setattr(diagnostics, "events", Counter())
+    monkeypatch.setattr(diagnostics, "times", Counter())
+    monkeypatch.setattr(tex_cudnn_graph._graph_cache, "entries", {})
+    devices = Mock(return_value=[SimpleNamespace(compute_capability="10.0")])
+    monkeypatch.setattr(jax, "local_devices", devices)
+
+    cudnn = Mock(__version__="1.31.0", cudnnGraphNotSupportedError=NotImplementedError)
+    cudnn.data_type = SimpleNamespace(
+        HALF=SimpleNamespace(name="HALF"), FLOAT=SimpleNamespace(name="FLOAT")
+    )
+    graph = Mock(selected_engine=None)
+    graph.sdpa.return_value = (Mock(), Mock())
+    graph.sdpa_backward.return_value = (Mock(), Mock(), Mock())
+    graph.get_execution_plan_count.return_value = 1
+    graph.get_plan_name_at_index.return_value = "cudnn_plan"
+    graph.get_workspace_size.return_value = 64
+    graph.serialize.return_value = b"graph"
+    monkeypatch.setattr(tex_attention, "_import_cudnn_for_score_mod", lambda: cudnn)
+    monkeypatch.setattr(tex_attention, "create_graph", lambda *_args: graph)
+    monkeypatch.setattr(tex_cudnn_graph, "check_frontend_version", lambda _cudnn: 13100)
+    monkeypatch.setattr(
+        tex_attention.ffi, "ffi_call", lambda _target, outputs: lambda *_args, **_kwargs: outputs
+    )
+
+    class UnkeyedScoreMod:
+        def forward(self, _graph, score, _tensors):
+            return score
+
+    callback = _identity_score_mod if cacheable else UnkeyedScoreMod().forward
+    config, _, _ = make_fused_attn_score_mod_config(callback, callback, None, None, 0.125, True)
+    qkv = (jax.ShapeDtypeStruct((2, 16, 4, 64), jnp.float16),) * 3
+    for _ in range(2):
+        out, stats = tex_attention.fused_attn_score_mod_fwd(qkv, (), config)
+        tex_attention.fused_attn_score_mod_bwd(qkv, out, out, stats, (), (), config)
+
+    assert len(tex_cudnn_graph._graph_cache.entries) == (2 if cacheable else 0)
+    for direction in ("fwd", "bwd"):
+        expected = {"CREATE_GRAPH": 1 if cacheable else 2, "BUILD_PLANS": 1 if cacheable else 2}
+        if cacheable:
+            expected.update(MISS=1, HIT=1, CACHE_GRAPH=1)
+        assert {
+            event: count
+            for (backend, event_direction, event), count in diagnostics.events.items()
+            if backend == "f16" and event_direction == direction
+        } == (expected if level else {})
+        assert diagnostics.times[("f16", direction, "build_plans", "calls")] == (
+            expected["BUILD_PLANS"] if level else 0
+        )
+    if not level:
+        devices.assert_not_called()
+    diagnostics.summary()
+    stderr = capsys.readouterr().err
+    assert ("JAX Python frontend summary" in stderr) == bool(level)
+    assert (" f16 fwd CREATE_GRAPH\n" in stderr) == (level == 2)
+    assert "EXECUTE" not in stderr
+
+
 def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
     """cuDNN frontend Python and C++ versions must match."""
 
@@ -659,19 +811,58 @@ def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
         __version__ = "1.22.0"
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        tex_cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12200,
     )
     assert tex_attention._check_cudnn_frontend_version_match(FakeCudnn) == 12200
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        tex_cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12100,
     )
     with pytest.raises(RuntimeError, match="Python/C\\+\\+ version mismatch"):
         tex_attention._check_cudnn_frontend_version_match(FakeCudnn)
+
+
+def test_fused_attn_score_mod_module_lambda_keys_do_not_collide():
+    """Different anonymous functions cannot share a serialized attention graph."""
+    first = lambda graph, score, tensors: score  # noqa: E731
+    second = lambda graph, score, tensors: graph.tanh(score)  # noqa: E731
+    first.__qualname__ = second.__qualname__ = "<lambda>"
+    assert first.__qualname__ == second.__qualname__ == "<lambda>"
+    assert tex_attention._score_mod_callback_cache_key(first) != (
+        tex_attention._score_mod_callback_cache_key(second)
+    )
+
+
+@pytest.mark.parametrize("keyword", (False, True))
+def test_fused_attn_score_mod_config_separates_function_defaults(keyword):
+    """Defaults must participate in both the static config and serialized-graph cache key."""
+    first = FunctionType(_default_mode_score_mod.__code__, globals(), argdefs=(False,))
+    second = FunctionType(_default_mode_score_mod.__code__, globals(), argdefs=(False,))
+    first.__kwdefaults__ = second.__kwdefaults__ = {"keyword_mode": False}
+    if keyword:
+        second.__kwdefaults__ = {"keyword_mode": True}
+    else:
+        first.__defaults__ = (False,)
+        second.__defaults__ = (True,)
+    configs = [
+        make_fused_attn_score_mod_config(
+            callback, None, None, None, _CONFIG_TEST_SCALING_FACTOR, True
+        )[0]
+        for callback in (first, first, second)
+    ]
+    assert configs[0] == configs[1]
+    assert configs[0] != configs[2]
+    assert tex_attention._graph_cache_key("fwd", configs[0], ()) != (
+        tex_attention._graph_cache_key("fwd", configs[2], ())
+    )
+
+
+def _default_mode_score_mod(graph, score, _tensors, mode=False, *, keyword_mode=False):
+    return graph.tanh(input=score) if mode or keyword_mode else score
 
 
 def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():

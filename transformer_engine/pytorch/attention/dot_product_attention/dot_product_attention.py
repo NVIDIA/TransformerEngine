@@ -2189,6 +2189,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             and is mutually exclusive with masks, bias, ALiBi, sink attention, dropout, FP8,
             context parallelism, THD format, KV caching, and return_max_logit. The callback
             signature is ``score_mod(graph, score, tensors) -> score``.
+            For stateful callbacks, provide ``score_mod_graph_cache_key`` on the callable
+            or bound-method owner to enable graph caching. The key must describe the graph
+            structure and change when that structure changes; it must not contain tensors.
+            Pass runtime data through ``score_mod_tensors`` and ``score_mod_bprop_tensors``.
         score_mod_bprop: Optional[Callable], default = None
             Optional cuDNN frontend callback for the backward pass of score_mod. The callback
             signature is ``score_mod_bprop(graph, dP, tensors) -> dP``.
@@ -2794,6 +2798,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ),
                 "core_attention_bias_type": core_attention_bias_type,
                 "core_attention_bias_shape": core_attention_bias_shape,
+                "core_attention_bias_stride": (
+                    tuple(core_attention_bias.stride())
+                    if core_attention_bias_type != "no_bias" and core_attention_bias is not None
+                    else None
+                ),
                 "core_attention_bias_requires_grad": (
                     core_attention_bias.requires_grad
                     if core_attention_bias_type != "no_bias" and core_attention_bias is not None
@@ -2808,7 +2817,16 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "is_training": self.training,
                 "device": query_layer.device,
                 "requires_backward": torch.is_grad_enabled()
-                and any(t.requires_grad for t in (query_layer, key_layer, value_layer)),
+                and any(
+                    t is not None and t.requires_grad
+                    for t in (
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        core_attention_bias,
+                        self.softmax_offset,
+                    )
+                ),
                 "fp8": self.fp8,
                 "fp8_meta": self.fp8_meta,
                 "inference_params": inference_params,

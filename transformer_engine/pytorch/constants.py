@@ -192,3 +192,141 @@ dist_group_type = torch.distributed.ProcessGroup
 MXFP8_BLOCK_SCALING_SIZE = 32
 
 NVFP4_BLOCK_SCALING_SIZE = 16
+
+
+QKVFormat = {
+    None: tex.NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+    "bshd": tex.NVTE_QKV_Format.NVTE_BSHD,
+    "sbhd": tex.NVTE_QKV_Format.NVTE_SBHD,
+    "thd": tex.NVTE_QKV_Format.NVTE_THD,
+    "sbhd_2bshd": tex.NVTE_QKV_Format.NVTE_SBHD_2BSHD,
+    "bshd_2sbhd": tex.NVTE_QKV_Format.NVTE_BSHD_2SBHD,
+    "thd_2bshd": tex.NVTE_QKV_Format.NVTE_THD_2BSHD,
+    "thd_2sbhd": tex.NVTE_QKV_Format.NVTE_THD_2SBHD,
+    "bhsd": tex.NVTE_QKV_Format.NVTE_BHSD,
+}
+
+QKVLayout = {
+    "sb3hd": tex.NVTE_QKV_Layout.NVTE_SB3HD,
+    "sbh3d": tex.NVTE_QKV_Layout.NVTE_SBH3D,
+    "sbhd_sb2hd": tex.NVTE_QKV_Layout.NVTE_SBHD_SB2HD,
+    "sbhd_sbh2d": tex.NVTE_QKV_Layout.NVTE_SBHD_SBH2D,
+    "sbhd_sbhd_sbhd": tex.NVTE_QKV_Layout.NVTE_SBHD_SBHD_SBHD,
+    "bs3hd": tex.NVTE_QKV_Layout.NVTE_BS3HD,
+    "bsh3d": tex.NVTE_QKV_Layout.NVTE_BSH3D,
+    "bshd_bs2hd": tex.NVTE_QKV_Layout.NVTE_BSHD_BS2HD,
+    "bshd_bsh2d": tex.NVTE_QKV_Layout.NVTE_BSHD_BSH2D,
+    "bshd_bshd_bshd": tex.NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD,
+    "t3hd": tex.NVTE_QKV_Layout.NVTE_T3HD,
+    "th3d": tex.NVTE_QKV_Layout.NVTE_TH3D,
+    "thd_t2hd": tex.NVTE_QKV_Layout.NVTE_THD_T2HD,
+    "thd_th2d": tex.NVTE_QKV_Layout.NVTE_THD_TH2D,
+    "thd_thd_thd": tex.NVTE_QKV_Layout.NVTE_THD_THD_THD,
+    "sbhd_bshd_bshd": tex.NVTE_QKV_Layout.NVTE_SBHD_BSHD_BSHD,
+    "bshd_sbhd_sbhd": tex.NVTE_QKV_Layout.NVTE_BSHD_SBHD_SBHD,
+    "thd_bshd_bshd": tex.NVTE_QKV_Layout.NVTE_THD_BSHD_BSHD,
+    "thd_sbhd_sbhd": tex.NVTE_QKV_Layout.NVTE_THD_SBHD_SBHD,
+    "paged_kv_bshd_bshd_bshd": tex.NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_BSHD_BSHD,
+    "paged_kv_bshd_sbhd_sbhd": tex.NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_SBHD_SBHD,
+    "paged_kv_sbhd_bshd_bshd": tex.NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_BSHD_BSHD,
+    "paged_kv_sbhd_sbhd_sbhd": tex.NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_SBHD_SBHD,
+    "paged_kv_thd_bshd_bshd": tex.NVTE_QKV_Layout.NVTE_Paged_KV_THD_BSHD_BSHD,
+    "paged_kv_thd_sbhd_sbhd": tex.NVTE_QKV_Layout.NVTE_Paged_KV_THD_SBHD_SBHD,
+    "bhsd_bhsd_bhsd": tex.NVTE_QKV_Layout.NVTE_BHSD_BHSD_BHSD,
+}
+
+AttnBiasType = {
+    "no_bias": tex.NVTE_Bias_Type.NVTE_NO_BIAS,
+    "pre_scale_bias": tex.NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS,
+    "post_scale_bias": tex.NVTE_Bias_Type.NVTE_POST_SCALE_BIAS,
+    "alibi": tex.NVTE_Bias_Type.NVTE_ALIBI,
+}
+
+AttnMaskType = {
+    "no_mask": tex.NVTE_Mask_Type.NVTE_NO_MASK,
+    "padding": tex.NVTE_Mask_Type.NVTE_PADDING_MASK,
+    "causal": tex.NVTE_Mask_Type.NVTE_CAUSAL_MASK,
+    "padding_causal": tex.NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK,
+    "causal_bottom_right": tex.NVTE_Mask_Type.NVTE_CAUSAL_BOTTOM_RIGHT_MASK,
+    "padding_causal_bottom_right": tex.NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+}
+
+SoftmaxType = {
+    "vanilla": tex.NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX,
+    "off-by-one": tex.NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX,
+    "learnable": tex.NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
+}
+
+
+class FusedAttnBackend(enum.IntEnum):
+    """Fused attention sub-backends.
+
+    This is the canonical fused-attention backend enum for
+    ``transformer_engine.pytorch``. The F16 and FP8 labels describe the precision
+    of the Python cuDNN attention path and do not select the deprecated C API.
+    It mirrors the backend
+    ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
+    value-for-value, and instances of the two enums compare equal when they
+    share the same integer value. Unlike the pybind enum, a plain-python
+    ``IntEnum`` is traceable by ``torch.compile``: comparisons against a member
+    constant-fold cleanly. Lookup by name (``FusedAttnBackend["FP8"]``) works
+    the same way as with the dict this used to be.
+
+    Members do not survive a graph break, though, so ``get_attention_backend``
+    returns the sub-backend as a plain int and ``cast`` turns it back into a
+    member.
+    """
+
+    No_Backend = int(tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend)
+    F16_arbitrary_seqlen = int(tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
+    FP8 = int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)
+
+    @classmethod
+    def cast(
+        cls, backend: "Union[FusedAttnBackend, tex.NVTE_Fused_Attn_Backend]"
+    ) -> "FusedAttnBackend":
+        """Normalize a backend value to the canonical ``FusedAttnBackend`` member.
+
+        The pybind ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` enum is
+        accepted as input for backward compatibility and mapped to the matching
+        ``FusedAttnBackend`` member.
+        """
+        if isinstance(backend, cls):
+            return backend
+        return cls(int(backend))
+
+    def __eq__(self, other: object) -> bool:
+        # ``FusedAttnBackend`` is an ``IntEnum`` while ``tex.NVTE_Fused_Attn_Backend``
+        # is a pybind11 enum. Compare by integer value so the two enums stay
+        # equivalent regardless of the pybind11 version (the pybind ``__eq__``
+        # handles the reverse order).
+        if isinstance(other, tex.NVTE_Fused_Attn_Backend):
+            return int(self) == int(other)
+        return int.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self) -> int:
+        return int.__hash__(self)
+
+
+# Fail fast at import time if a new enumerator is added on the C++ side
+# without being mirrored above.
+assert {f"NVTE_{m.name}" for m in FusedAttnBackend} == set(
+    tex.NVTE_Fused_Attn_Backend.__members__
+), (
+    "FusedAttnBackend in python is out of sync with"
+    " transformer_engine_torch.NVTE_Fused_Attn_Backend defined on the C++ side."
+    " Please make sure TE C++ and python are in sync."
+)
+
+META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
+META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
+META_O = FP8FwdTensorIdx.GEMM2_INPUT
+META_DO = FP8BwdTensorIdx.GRAD_INPUT2
+META_S = FP8FwdTensorIdx.GEMM3_OUTPUT
+META_DP = FP8BwdTensorIdx.GRAD_INPUT3

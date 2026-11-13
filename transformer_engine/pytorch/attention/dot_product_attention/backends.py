@@ -18,6 +18,7 @@ from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
+from transformer_engine.common.cudnn.graph import uses_ragged_attention_graph
 
 from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.utils import (
@@ -45,13 +46,13 @@ from transformer_engine.pytorch.constants import (
     CPLoadBalancingStrategy,
     QKVLayouts,
     dist_group_type,
-)
-from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    fused_attn_fwd,
-    fused_attn_bwd,
     FusedAttnBackend,
     META_O,
     META_QKV,
+)
+from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import (
+    fused_attn_fwd,
+    fused_attn_bwd,
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import get_distributed_world_size
@@ -2455,7 +2456,7 @@ def _fused_attn_stats_shape(
     if q_format == "thd":
         num_heads = q_shape[1]
         sm = get_device_compute_capability()
-        if sm >= (9, 0) and sm != (12, 0):
+        if uses_ragged_attention_graph(10 * sm[0] + sm[1]):
             return (q_shape[0], num_heads, 1)
         batch_size = args.cu_seqlens_q.shape[0] - 1
         return (batch_size, num_heads, args.max_seqlen_q, 1)
@@ -2613,13 +2614,16 @@ def _needs_eager_fused_attention(call: Dict[str, Any]) -> Optional[str]:
 class FusedAttention(torch.nn.Module):
     """Dot product attention using `cuDNN attention <https://github.com/NVIDIA/cudnn-frontend>`_:
 
+    PyTorch constructs and executes attention graphs through the cuDNN frontend Python API.
+    Standard attention and experimental score modification share graph lifecycle helpers.
+    Plans are cached per device and tensor metadata; support queries do not compile plans.
+
     FusedAttnBackend["F16_arbitrary_seqlen"]
        cuDNN attention for FP16/BF16 with any sequence length.
     FusedAttnBackend["FP8"]
        cuDNN attention for FP8 with any sequence length. It supports the following recipes, where
        "Inputs", "Intermediates" and "Outputs" are in the format of "tensor: quantizer". The recipes
-       are implemented in transformer_engine.pytorch.cpp_extension.fused_attn.fused_attn_fwd and
-       transformer_engine.pytorch.cpp_extension.fused_attn.fused_attn_bwd.
+       are implemented in transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn.
 
                                     Direction   Inputs                                       Intermediates  Outputs
        DelayedScaling (DS)          forward     Q/K/V: DS                                    S: DS          O: DS
