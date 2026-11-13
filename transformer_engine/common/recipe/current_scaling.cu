@@ -12,14 +12,13 @@
 
 #include "../cast/fp8/group_amax_fp8.cuh"
 #include "../common.h"
+#include "../util/cuda_runtime.h"
 #include "../util/logging.h"
-#include "../util/vectorized_pointwise.h"
+#include "../util/ptx.cuh"
 #include "recipe_common.cuh"
 
 namespace transformer_engine {
 namespace {
-
-constexpr int amax_kernel_threads = 512;
 
 __launch_bounds__(1) __global__ void zero_amax_kernel(float *amax_ptr, const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
@@ -28,48 +27,121 @@ __launch_bounds__(1) __global__ void zero_amax_kernel(float *amax_ptr, const flo
   *amax_ptr = 0;
 }
 
-template <int nvec, bool aligned, typename InputType>
+// Amax is a pure streaming reduction, so the kernel is built to keep as many
+// loads in flight as possible: a persistent grid sized to fill the GPU once
+// strides over the tensor in 32-byte chunks, each lane issuing amax_kernel_loads
+// independent chunk loads per iteration before folding any of them, and every
+// CTA reduces and commits to the output once.  The maximum of |x| is exact and
+// order-independent, so the result does not depend on the launch shape.
+constexpr int amax_kernel_threads = 256;
+constexpr int amax_kernel_loads = 4;
+constexpr int amax_chunk_bytes = 32;
+constexpr int amax_chunk_words = amax_chunk_bytes / sizeof(uint32_t);
+
+__device__ __forceinline__ void load_amax_chunk(uint32_t (&words)[amax_chunk_words],
+                                                const uint32_t *src) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  ptx::ld_global_nc_b32x8(words, src);
+#else
+  const uint4 lo = __ldg(reinterpret_cast<const uint4 *>(src));
+  const uint4 hi = __ldg(reinterpret_cast<const uint4 *>(src) + 1);
+  words[0] = lo.x, words[1] = lo.y, words[2] = lo.z, words[3] = lo.w;
+  words[4] = hi.x, words[5] = hi.y, words[6] = hi.z, words[7] = hi.w;
+#endif
+}
+
+/*! \brief Atomically fold max(|input|) into *amax.
+ *
+ * input + head must be 32-byte aligned.  The head elements before it and the tail
+ * elements after its num_chunks whole chunks are read one at a time.
+ */
+template <typename InputType>
 __launch_bounds__(amax_kernel_threads) __global__
-    void amax_kernel(const InputType *input, float *amax, const size_t N,
-                     const size_t num_aligned_elements, const float *noop_ptr) {
+    void amax_kernel(const InputType *__restrict__ input, float *__restrict__ amax, const int head,
+                     const int64_t num_chunks, const int tail, const float *__restrict__ noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
   }
-
-  VectorizedLoader<InputType, nvec, aligned> loader(input, N);
-  InputType max = 0.f;
-  const int warp_id = threadIdx.x / THREADS_PER_WARP;
-  const size_t M = num_aligned_elements;
-
-  for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < M; tid += gridDim.x * blockDim.x) {
-    loader.load(tid, N);
-#pragma unroll
-    for (int i = 0; i < nvec; ++i) {
-      const InputType val = static_cast<InputType>(loader.separate()[i]);
-      __builtin_assume(max >= InputType{0.f});
-      if constexpr (std::is_same_v<InputType, __nv_bfloat16>) {
-#if __CUDA_ARCH__ >= 800
-        max = __hmax(__habs(val), max);
-#else  // Turing
-        max = static_cast<__nv_bfloat16>(
-            fmaxf(fabsf(static_cast<float>(val)), static_cast<float>(max)));
+  constexpr int kElemsPerChunk = amax_chunk_bytes / sizeof(InputType);
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+  constexpr bool kPacked =
+      std::is_same_v<InputType, __nv_bfloat16> || std::is_same_v<InputType, __half>;
+#else
+  constexpr bool kPacked = false;
 #endif
-      } else if constexpr (std::is_same_v<InputType, __half>) {
-        max = __hmax(__habs(val), max);
-      } else {
-        max = fmaxf(fabsf(val), max);
+  using Pair =
+      std::conditional_t<std::is_same_v<InputType, __nv_bfloat16>, ptx::bf16x2, ptx::fp16x2>;
+
+  const int64_t stride = static_cast<int64_t>(gridDim.x) * amax_kernel_threads;
+  const int64_t tid = static_cast<int64_t>(blockIdx.x) * amax_kernel_threads + threadIdx.x;
+  const uint32_t *chunks = reinterpret_cast<const uint32_t *>(input + head);
+
+  float max = 0.f;
+  Pair max_pair;
+  reinterpret_cast<uint32_t &>(max_pair) = 0;
+  auto fold = [&](const uint32_t(&words)[amax_chunk_words]) {
+    if constexpr (kPacked) {
+      // Packed abs-max tree over the chunk's 8 element pairs.
+      const Pair *pairs = reinterpret_cast<const Pair *>(words);
+      Pair level[amax_chunk_words / 2];
+#pragma unroll
+      for (int i = 0; i < amax_chunk_words / 2; ++i) {
+        ptx::abs_max_2x(level[i], pairs[2 * i], pairs[2 * i + 1]);
+      }
+      ptx::abs_max_2x(level[0], level[0], level[1]);
+      ptx::abs_max_2x(level[2], level[2], level[3]);
+      ptx::abs_max_2x(level[0], level[0], level[2]);
+      ptx::abs_max_2x(max_pair, max_pair, level[0]);
+    } else {
+      const InputType *elems = reinterpret_cast<const InputType *>(words);
+#pragma unroll
+      for (int i = 0; i < kElemsPerChunk; ++i) {
+        max = fmaxf(fabsf(static_cast<float>(elems[i])), max);
       }
     }
+  };
+
+  // Fewer than 2 chunks' worth of elements, so the first CTA covers them in one pass.
+  // Read before the chunks so their latency overlaps the main loop's.
+  if (tid < head) {
+    max = fmaxf(fabsf(static_cast<float>(input[tid])), max);
+  }
+  if (tid < tail) {
+    const InputType *tail_ptr = input + head + num_chunks * kElemsPerChunk;
+    max = fmaxf(fabsf(static_cast<float>(tail_ptr[tid])), max);
   }
 
-  // Reduce amax over block
-  max = reduce_max<amax_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+  int64_t chunk = tid;
+  for (; chunk + (amax_kernel_loads - 1) * stride < num_chunks;
+       chunk += amax_kernel_loads * stride) {
+    uint32_t words[amax_kernel_loads][amax_chunk_words];
+#pragma unroll
+    for (int u = 0; u < amax_kernel_loads; ++u) {
+      load_amax_chunk(words[u], chunks + (chunk + u * stride) * amax_chunk_words);
+    }
+#pragma unroll
+    for (int u = 0; u < amax_kernel_loads; ++u) {
+      fold(words[u]);
+    }
+  }
+  for (; chunk < num_chunks; chunk += stride) {
+    uint32_t words[amax_chunk_words];
+    load_amax_chunk(words, chunks + chunk * amax_chunk_words);
+    fold(words);
+  }
+
+  if constexpr (kPacked) {
+    // max.xorsign.abs may leave a sign behind; only the magnitude is wanted.
+    max = fmaxf(
+        max, fmaxf(fabsf(static_cast<float>(max_pair.x)), fabsf(static_cast<float>(max_pair.y))));
+  }
+  max = reduce_max<amax_kernel_threads / THREADS_PER_WARP>(max, threadIdx.x / THREADS_PER_WARP);
   if (threadIdx.x == 0) {
     atomicMaxFloat(amax, max);
   }
 }
 
-template <int nvec, typename InputType>
+template <typename InputType>
 void launch_amax_kernel(const InputType *input, float *amax, const size_t N, const float *noop_ptr,
                         cudaStream_t stream) {
   // Zero out amax so we can update with atomic max
@@ -81,36 +153,29 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, con
     return;
   }
 
-  // Figure out alignment
-  auto align = CheckAlignment(N, nvec, input);
-  size_t num_aligned_elements = get_num_aligned_elements(input, N, nvec, sizeof(InputType));
+  // Split the tensor at its first and last 32-byte boundaries.
+  constexpr size_t elems_per_chunk = amax_chunk_bytes / sizeof(InputType);
+  NVTE_CHECK(is_aligned_ptr(input, sizeof(InputType)), "Amax input is not aligned to its dtype.");
+  const size_t misalignment = reinterpret_cast<uintptr_t>(input) % amax_chunk_bytes;
+  const size_t head =
+      std::min(N, misalignment == 0 ? 0 : (amax_chunk_bytes - misalignment) / sizeof(InputType));
+  const int64_t num_chunks = static_cast<int64_t>((N - head) / elems_per_chunk);
+  const size_t tail = N - head - static_cast<size_t>(num_chunks) * elems_per_chunk;
 
-  // Figure out CUDA blocks
-  constexpr size_t threads = amax_kernel_threads;
-  size_t num_blocks = DIVUP(num_aligned_elements, threads);
-  constexpr size_t max_blocks = 65535;
-  num_blocks = std::min(num_blocks, max_blocks);
-
-  // Launch kernel
-  switch (align) {
-    case Alignment::SAME_ALIGNED:
-      amax_kernel<nvec, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements, noop_ptr);
-      break;
-    case Alignment::SAME_UNALIGNED:
-      amax_kernel<nvec, false, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements, noop_ptr);
-      break;
-    case Alignment::DIFFERENT: {
-      // This case is a logic error, since there is only one pointer (input)
-      // in the alignment check. Still safe to process without vectorization.
-      amax_kernel<1, true, InputType>
-          <<<num_blocks, threads, 0, stream>>>(input, amax, N, N, noop_ptr);
-      break;
-    }
-  }
-
-  // Check results
+  // Persistent grid: never more CTAs than the GPU holds at once.
+  static const int ctas_per_sm = [] {
+    int n = 0;
+    NVTE_CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n, amax_kernel<InputType>,
+                                                                  amax_kernel_threads, 0));
+    return n;
+  }();
+  const int64_t max_ctas = static_cast<int64_t>(ctas_per_sm) * cuda::sm_count();
+  // Below that, one chunk per lane: spreading a small tensor over more CTAs
+  // beats giving fewer lanes several chunks each.
+  const int64_t needed_ctas = DIVUP(num_chunks, static_cast<int64_t>(amax_kernel_threads));
+  const int64_t grid = std::max<int64_t>(1, std::min(max_ctas, needed_ctas));
+  amax_kernel<InputType><<<grid, amax_kernel_threads, 0, stream>>>(
+      input, amax, static_cast<int>(head), num_chunks, static_cast<int>(tail), noop_ptr);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -171,9 +236,9 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
   float *amax_ptr = reinterpret_cast<float *>(
       (output.amax.dptr != nullptr) ? output.amax.dptr : output.columnwise_amax.dptr);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType); launch_amax_kernel<nvec>(
-          reinterpret_cast<const IType *>(input.data.dptr), amax_ptr, input.data.numel(), noop_ptr,
-          stream););  // NOLINT(*)
+      input.data.dtype, IType,
+      launch_amax_kernel(reinterpret_cast<const IType *>(input.data.dptr), amax_ptr,
+                         input.data.numel(), noop_ptr, stream););  // NOLINT(*)
 }
 
 void group_compute_amax_impl(const NVTEGroupedTensor input_, NVTEGroupedTensor output_,

@@ -510,6 +510,62 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
   return out_8x;
 }
 
+// Eight already-scaled FP32 values -> eight E2M1 codes in one word, rounding to
+// nearest even; element 2i goes to the low nibble of byte i.
+__device__ __forceinline__ uint32_t cvt_f32x8_to_fp4x8_rn(const float (&f)[8]) {
+  uint32_t out_8x = 0;
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell) {
+    asm("{\n\t"
+        ".reg .b8 b0, b1, b2, b3;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 b0, %2, %1;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 b1, %4, %3;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 b2, %6, %5;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 b3, %8, %7;\n\t"
+        "mov.b32 %0, {b0, b1, b2, b3};\n\t"
+        "}"
+        : "=r"(out_8x)
+        : "f"(f[0]), "f"(f[1]), "f"(f[2]), "f"(f[3]), "f"(f[4]), "f"(f[5]), "f"(f[6]), "f"(f[7]));
+  } else {
+    NVTE_DEVICE_ERROR(
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
+  return out_8x;
+}
+
+// As cvt_f32x8_to_fp4x8_rn, with stochastic rounding: rbits03 supplies 8
+// random bits for each of elements 0-3, rbits47 for elements 4-7.
+__device__ __forceinline__ uint32_t cvt_f32x8_to_fp4x8_rs(const float (&f)[8],
+                                                          const uint32_t rbits03,
+                                                          const uint32_t rbits47) {
+  uint32_t out_8x = 0;
+  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+  if constexpr (has_rs) {
+    asm("{\n\t"
+        ".reg .b16 h0, h1;\n\t"
+        "cvt.rs.satfinite.e2m1x4.f32 h0, {%4, %3, %2, %1}, %9;\n\t"
+        "cvt.rs.satfinite.e2m1x4.f32 h1, {%8, %7, %6, %5}, %10;\n\t"
+        "mov.b32 %0, {h0, h1};\n\t"
+        "}"
+        : "=r"(out_8x)
+        : "f"(f[0]), "f"(f[1]), "f"(f[2]), "f"(f[3]), "f"(f[4]), "f"(f[5]), "f"(f[6]), "f"(f[7]),
+          "r"(rbits03), "r"(rbits47));
+  } else {
+    float q[8];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      q[i] = stochastic_round_fp4_e2m1(f[i], rbits03 >> (8 * i));
+      q[i + 4] = stochastic_round_fp4_e2m1(f[i + 4], rbits47 >> (8 * i));
+    }
+    const fp4e2m1x4 lo(make_float4(q[0], q[1], q[2], q[3]));
+    const fp4e2m1x4 hi(make_float4(q[4], q[5], q[6], q[7]));
+    out_8x = static_cast<uint32_t>(*reinterpret_cast<const uint16_t *>(&lo)) |
+             (static_cast<uint32_t>(*reinterpret_cast<const uint16_t *>(&hi)) << 16);
+  }
+  return out_8x;
+}
+
 #endif  // FP4_TYPE_SUPPORTED
 
 }  // namespace ptx
