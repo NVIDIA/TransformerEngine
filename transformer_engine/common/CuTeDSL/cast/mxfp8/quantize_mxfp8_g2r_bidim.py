@@ -194,18 +194,88 @@ def _gather_partial_colwise_amaxes(
 
 
 @cute.jit
+def _reduce_column_pairs(
+    sAmaxs_col_frags_i32: cute.Tensor,
+    sS_col_i32: cute.Tensor,
+    gS_col_tile: Optional[cute.Tensor],
+    col_scale_atom: Optional[cute.CopyAtom],
+    cache_policy: Int64,
+    cols_valid: Int32,
+    # Constexprs
+    REDUCTION_THREADS_NUM: cutlass.Constexpr[int],
+    REDUCTION_i32_PAIRS: cutlass.Constexpr[int],
+    CTA_THREADS_Y: cutlass.Constexpr[int],
+    MAX_EXPONENT: cutlass.Constexpr[int],
+    SCALE_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    EDGE: cutlass.Constexpr[bool],
+):
+    """The calling reducer's part of _reduce_partial_colwise_amaxes: the reciprocals of its column
+    pairs to sS_col_i32 and, with gS_col_tile, their scales to gS_col_tile."""
+    tidx, _, _ = cute.arch.thread_idx()
+    WRITE_SCALES = gS_col_tile is not None
+    sAmaxs_col_frag_i32 = sAmaxs_col_frags_i32[tidx, None]
+    # Expose the thread's value mode as (partial rows, column pairs).
+    sAmaxs_col_frag_i32 = cute.composition(
+        sAmaxs_col_frag_i32,
+        cute.make_layout((CTA_THREADS_Y, REDUCTION_i32_PAIRS), stride=(REDUCTION_i32_PAIRS, 1)),
+    )
+    # The reducer's scales: its 2 * REDUCTION_i32_PAIRS adjacent columns of the scale tile.
+    REDUCER_COLS = 2 * REDUCTION_i32_PAIRS
+    if cutlass.const_expr(WRITE_SCALES):
+        rS_col = cute.make_rmem_tensor((REDUCER_COLS,), SCALE_DTYPE)
+        rS_col_u16 = cute.recast_tensor(rS_col, Uint16)
+
+    # Iterative over all column pairs
+    for pair_idx in cutlass.range_constexpr(REDUCTION_i32_PAIRS):
+        # Select the pair column
+        sAmaxs_col_frag_i32_rows = sAmaxs_col_frag_i32[None, pair_idx]
+
+        # Reduce across all rows' partial amaxes to obtain the columnwise amax for this column pair
+        amaxX2 = sAmaxs_col_frag_i32_rows[0]
+        for scratch_row_idx in cutlass.range_constexpr(1, CTA_THREADS_Y):
+            amaxX2 = abs_max_x2_bf16(amaxX2, sAmaxs_col_frag_i32_rows[scratch_row_idx])
+
+        # Obtain the columnwise scale reciprocal for this column pair
+        reciprocal = bf16_mx_scale_reciprocal_pair(amaxX2, MAX_EXPONENT)
+        sS_col_i32[tidx, pair_idx] = reciprocal
+        if cutlass.const_expr(WRITE_SCALES):
+            rS_col_u16[pair_idx] = Uint16(bf16_mx_scale_bytes_pair(reciprocal))
+    if cutlass.const_expr(WRITE_SCALES):
+        gS_col_reducer = cute.composition(
+            gS_col_tile,
+            cute.make_layout((REDUCTION_THREADS_NUM, REDUCER_COLS), stride=(REDUCER_COLS, 1)),
+        )[tidx, None]
+        if cutlass.const_expr(EDGE):
+            if tidx * REDUCER_COLS < cols_valid:
+                cute.copy(col_scale_atom, rS_col, gS_col_reducer, cache_policy=cache_policy)
+        else:
+            cute.copy(col_scale_atom, rS_col, gS_col_reducer, cache_policy=cache_policy)
+
+
+@cute.jit
 def _reduce_partial_colwise_amaxes(
     sAmaxs_col_scratch: cute.Tensor,
+    gS_col_tile: Optional[cute.Tensor],
+    # Atoms
+    col_scale_atom: Optional[cute.CopyAtom],
+    # Miscellaneous
+    cache_policy: Int64,
     # Constexprs
     CTA_THREADS_Y: cutlass.Constexpr[int],
     CTA_THREADS_X: cutlass.Constexpr[int],
     ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
+    SCALE_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    EDGE: cutlass.Constexpr[bool] = False,
+    cols_valid: Int32 = 0,
 ) -> cute.Tensor:
     """
     sAmaxs_col_scratch: the SMEM buffer of layout (ELEMENTS_X_PER_THREAD, (CTA_THREADS_Y, CTA_THREADS_X))
         that contains each threads' own columnwise amax of its ELEMENTS_X_PER_THREAD columns
+    gS_col_tile: None, or the (1, TILE_COLS) columnwise scales of the tile in GMEM, which each
+        reducer then writes for its own columns. With EDGE, only the tile's first cols_valid
+        columns are inside the tensor and written.
 
     This function reduces the partial amax buffer of layout (ELEMENTS_X_PER_THREAD, (CTA_THREADS_Y, CTA_THREADS_X))
     along the Y axis, to a single columnwise scale SMEM buffer of layout (ELEMENTS_X_PER_THREAD * CTA_THREADS_X),
@@ -258,28 +328,47 @@ def _reduce_partial_colwise_amaxes(
     # to extract the amax of that column
     sAmaxs_col_scratch_i32 = cute.recast_tensor(sAmaxs_col_scratch, Int32)
     MAX_EXPONENT = 8 if FP8_DTYPE is cutlass.Float8E4M3FN else 15
-    if is_reduction_thread:
-        sAmaxs_col_frag_i32 = cute.composition(sAmaxs_col_scratch_i32, tv_col_amaxes_layout)[
-            tidx, None
-        ]
-        # Expose the thread's value mode as (partial rows, column pairs).
-        sAmaxs_col_frag_i32 = cute.composition(
-            sAmaxs_col_frag_i32,
-            cute.make_layout((CTA_THREADS_Y, REDUCTION_i32_PAIRS), stride=(REDUCTION_i32_PAIRS, 1)),
-        )
 
-        # Iterative over all column pairs
-        for pair_idx in cutlass.range_constexpr(REDUCTION_i32_PAIRS):
-            # Select the pair column
-            sAmaxs_col_frag_i32_rows = sAmaxs_col_frag_i32[None, pair_idx]
-
-            # Reduce across all rows' partial amaxes to obtain the columnwise amax for this column pair
-            amaxX2 = sAmaxs_col_frag_i32_rows[0]
-            for scratch_row_idx in cutlass.range_constexpr(1, CTA_THREADS_Y):
-                amaxX2 = abs_max_x2_bf16(amaxX2, sAmaxs_col_frag_i32_rows[scratch_row_idx])
-
-            # Obtain the columnwise scale reciprocal for this column pair
-            sS_col_i32[tidx, pair_idx] = bf16_mx_scale_reciprocal_pair(amaxX2, MAX_EXPONENT)
+    sAmaxs_col_frags_i32 = cute.composition(sAmaxs_col_scratch_i32, tv_col_amaxes_layout)
+    if cutlass.const_expr(REDUCTION_THREADS_NUM == CTA_THREADS_Y * CTA_THREADS_X):
+        if is_reduction_thread:
+            _reduce_column_pairs(
+                sAmaxs_col_frags_i32,
+                sS_col_i32,
+                gS_col_tile,
+                col_scale_atom,
+                cache_policy,
+                cols_valid,
+                REDUCTION_THREADS_NUM=REDUCTION_THREADS_NUM,
+                REDUCTION_i32_PAIRS=REDUCTION_i32_PAIRS,
+                CTA_THREADS_Y=CTA_THREADS_Y,
+                MAX_EXPONENT=MAX_EXPONENT,
+                SCALE_DTYPE=SCALE_DTYPE,
+                EDGE=EDGE,
+            )
+    else:
+        # The reducers fill whole warps. Each runs the body once and the other warps skip it: a
+        # loop of one trip or none, because ptxas predicates the body of an `if` in every warp.
+        for _ in cutlass.range(
+            cute.arch.make_warp_uniform(cute.arch.warp_idx()),
+            REDUCTION_THREADS_NUM // 32,
+            CTA_THREADS_Y * CTA_THREADS_X // 32,
+            unroll=1,
+        ):
+            _reduce_column_pairs(
+                sAmaxs_col_frags_i32,
+                sS_col_i32,
+                gS_col_tile,
+                col_scale_atom,
+                cache_policy,
+                cols_valid,
+                REDUCTION_THREADS_NUM=REDUCTION_THREADS_NUM,
+                REDUCTION_i32_PAIRS=REDUCTION_i32_PAIRS,
+                CTA_THREADS_Y=CTA_THREADS_Y,
+                MAX_EXPONENT=MAX_EXPONENT,
+                SCALE_DTYPE=SCALE_DTYPE,
+                EDGE=EDGE,
+            )
     cute.arch.sync_threads()
 
     return sS_col
@@ -387,6 +476,7 @@ def _quantize_colwise(
     rX: cute.Tensor,
     gO_col_thread: cute.Tensor,
     gS_col_thread: cute.Tensor,
+    gS_col_tile: cute.Tensor,
     # Atoms
     output_store_atom: cute.CopyAtom,
     col_scale_store_atom: cute.CopyAtom,
@@ -401,11 +491,15 @@ def _quantize_colwise(
     SCALE_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    WITH_GEMM_SWIZZLED_SCALES: cutlass.Constexpr[bool],
     EDGE: cutlass.Constexpr[bool] = False,
     rows_left: Int32 = 0,
     cols_ok: Boolean = True,
+    cols_valid: Int32 = 0,
 ):
-    """Reduce columnwise amaxes across the CTA, write the columnwise scales, and quantize rX with them."""
+    """Reduce columnwise amaxes across the CTA, write the columnwise scales, and quantize rX with them.
+    The scales go to gS_col_thread (the thread's columns, written by the first warp row) or
+    gS_col_tile; with EDGE, the tile's columns from cols_valid on are past the tensor."""
     tidx, _, _ = cute.arch.thread_idx()
 
     sAmaxs_col_scratch = _gather_partial_colwise_amaxes(
@@ -417,13 +511,34 @@ def _quantize_colwise(
         DTYPE=DTYPE,
     )
 
+    # The reducers write the scales of their own columns when the scales are GEMM-swizzled outside
+    # the predicated (EDGE) tiles (a byte at a time, spread over all reducer warps) or the column
+    # pairs are fewer than the threads (the reducers then fill only some warps, and the other warps
+    # skip both). Otherwise, as on 512-column EDGE tiles, the first warp row writes the scales.
+    REDUCERS_WRITE_SCALES = (WITH_GEMM_SWIZZLED_SCALES and not EDGE) or (
+        CTA_THREADS_X * ELEMENTS_X_PER_THREAD // 2 < CTA_THREADS_Y * CTA_THREADS_X
+    )
+    gS_col_reducers = reducer_scale_atom = None
+    if cutlass.const_expr(REDUCERS_WRITE_SCALES):
+        gS_col_reducers = gS_col_tile
+        reducer_scale_atom = cute.make_copy_atom(
+            cute.nvgpu.CopyR2GOp(),
+            SCALE_DTYPE,
+            num_bits_per_copy=8,  # byte stores: 16-bit compact stores slow the tile's row loads
+        )
     sS_col = _reduce_partial_colwise_amaxes(
         sAmaxs_col_scratch,
+        gS_col_reducers,
+        col_scale_atom=reducer_scale_atom,
+        cache_policy=cache_policy,
         CTA_THREADS_Y=CTA_THREADS_Y,
         CTA_THREADS_X=CTA_THREADS_X,
         ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+        SCALE_DTYPE=SCALE_DTYPE,
         DTYPE=DTYPE,
         FP8_DTYPE=FP8_DTYPE,
+        EDGE=EDGE,
+        cols_valid=cols_valid,
     )
 
     # Copy the reduced columnwise scale reciprocals to RMEM.
@@ -431,17 +546,18 @@ def _quantize_colwise(
     rS_col_rcp = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), DTYPE)
     cute.autovec_copy(sS_col[None, tidx % CTA_THREADS_X], rS_col_rcp)
 
-    _write_colwise_scale(
-        rS_col_rcp,
-        gS_col_thread,
-        col_scale_atom=col_scale_store_atom,
-        cache_policy=cache_policy,
-        CTA_THREADS_X=CTA_THREADS_X,
-        ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
-        SCALE_DTYPE=SCALE_DTYPE,
-        EDGE=EDGE,
-        cols_ok=cols_ok,
-    )
+    if cutlass.const_expr(not REDUCERS_WRITE_SCALES):
+        _write_colwise_scale(
+            rS_col_rcp,
+            gS_col_thread,
+            col_scale_atom=col_scale_store_atom,
+            cache_policy=cache_policy,
+            CTA_THREADS_X=CTA_THREADS_X,
+            ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+            SCALE_DTYPE=SCALE_DTYPE,
+            EDGE=EDGE,
+            cols_ok=cols_ok,
+        )
 
     _apply_colwise_scales(
         rX,
@@ -974,6 +1090,7 @@ def quantize_mxfp8_gmem_tile_bidimensional(
                 rX,
                 gO_col_thread,
                 gS_col_thread,
+                gS_col_tile,
                 output_store_atom=store_atom,
                 col_scale_store_atom=col_scale_atom,
                 cache_policy=cache_policy,
@@ -985,9 +1102,11 @@ def quantize_mxfp8_gmem_tile_bidimensional(
                 SCALE_DTYPE=SCALE_DTYPE,
                 DTYPE=DTYPE,
                 FP8_DTYPE=FP8_DTYPE,
+                WITH_GEMM_SWIZZLED_SCALES=WITH_GEMM_SWIZZLED_SCALES,
                 EDGE=EDGE,
                 rows_left=rows_left,
                 cols_ok=cols_ok,
+                cols_valid=cols_valid,
             )
 
     return thread_amax
