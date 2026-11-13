@@ -20,10 +20,12 @@ from cutlass import cute
 from cutlass import Boolean, Float32, Int32, Int64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
+from transformer_engine.common.CuTeDSL.activations import SIGMOID_FAST_RCP_MIN
 from transformer_engine.common.CuTeDSL.utils import (
     create_l2_policy,
     cvt_f32x2_to_bf16x2,
     max_num_bits_per_copy_ld_global,
+    min_nan_bf16x2,
     x2_hi_to_f32_bf16,
     x2_lo_to_f32_bf16,
 )
@@ -423,6 +425,7 @@ class MXFP8GatedQuantizeG2RKernel:
         glu_linear_offset: Optional[Float32],
         beta1: Optional[Float32],
         beta2: Optional[Float32],
+        FAST_RCP: cutlass.Constexpr[bool],
     ):
         """The gated op of one row of the thread's values, a BF16 pair at a time."""
         IS_BWD = self.cfg.IS_BWD
@@ -448,6 +451,7 @@ class MXFP8GatedQuantizeG2RKernel:
                 beta2,
                 ACTIVATION=self.cfg.GATED_ACTIVATION,
                 IS_BWD=IS_BWD,
+                FAST_RCP=FAST_RCP,
             )
             out_hi, gate_out_hi = gated_elementwise_op(
                 x2_hi_to_f32_bf16(rA_i32[i]),
@@ -460,10 +464,23 @@ class MXFP8GatedQuantizeG2RKernel:
                 beta2,
                 ACTIVATION=self.cfg.GATED_ACTIVATION,
                 IS_BWD=IS_BWD,
+                FAST_RCP=FAST_RCP,
             )
             rX0_i32[i] = cvt_f32x2_to_bf16x2(out_lo, out_hi)
             if cutlass.const_expr(IS_BWD):
                 rX1_i32[i] = cvt_f32x2_to_bf16x2(gate_out_lo, gate_out_hi)
+
+    @cute.jit
+    def _row_takes_fast_rcp(self, rAct_row: cute.Tensor) -> Int32:
+        """1 if every act value of the row is at least SIGMOID_FAST_RCP_MIN (so none is NaN),
+        else 0."""
+        rA_i32 = cute.recast_tensor(rAct_row, Int32)
+        act_min = rA_i32[0]
+        for i in cutlass.range_constexpr(1, self._ELEMENTS_X_PER_THREAD // 2):
+            act_min = min_nan_bf16x2(act_min, rA_i32[i])
+        return Int32(x2_lo_to_f32_bf16(act_min) >= Float32(SIGMOID_FAST_RCP_MIN)) & Int32(
+            x2_hi_to_f32_bf16(act_min) >= Float32(SIGMOID_FAST_RCP_MIN)
+        )
 
     @cute.jit
     def _gated_row_tile(
@@ -537,7 +554,7 @@ class MXFP8GatedQuantizeG2RKernel:
                 if cutlass.const_expr(IS_BWD):
                     rGrad_row = rGrad[None, t]
                     rX1_row = rX1[None, first_row + t]
-                self._gated_row(
+                row = (
                     rAct[None, t],
                     rGate[None, t],
                     rGrad_row,
@@ -549,6 +566,17 @@ class MXFP8GatedQuantizeG2RKernel:
                     beta1,
                     beta2,
                 )
+                # SwiGLU's sigmoid takes its fast reciprocal on rows whose act values allow it.
+                # Each path is a loop of one trip or none, so a warp whose rows all take one path
+                # skips the other.
+                if cutlass.const_expr(self.cfg.GATED_ACTIVATION == "swiglu"):
+                    fast = self._row_takes_fast_rcp(rAct[None, t])
+                    for _ in cutlass.range(fast, unroll=1):
+                        self._gated_row(*row, FAST_RCP=True)
+                    for _ in cutlass.range(Int32(1) - fast, unroll=1):
+                        self._gated_row(*row, FAST_RCP=False)
+                else:
+                    self._gated_row(*row, FAST_RCP=False)
 
         self._quantize_part(
             rX0,

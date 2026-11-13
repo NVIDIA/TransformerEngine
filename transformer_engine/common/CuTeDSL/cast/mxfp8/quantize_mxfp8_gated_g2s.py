@@ -78,11 +78,14 @@ def gated_elementwise_op(
     beta2: Optional[Float32],  # SiTU-GLU only
     ACTIVATION: cutlass.Constexpr[str],
     IS_BWD: cutlass.Constexpr[bool],
+    FAST_RCP: cutlass.Constexpr[bool] = False,
 ):
     """
     FWD: (y, None)                y = act(a) * gate(g)
     BWD: (act_grad, gate_grad)    act_grad = y_grad * gate(g) * dact(a),
                                   gate_grad = y_grad * act(a) * dgate(g)
+    FAST_RCP (SwiGLU): act_element >= SIGMOID_FAST_RCP_MIN, so the sigmoid takes its fast
+    reciprocal (sigmoid's fast_rcp).
     """
 
     if cutlass.const_expr(ACTIVATION == "clamped_swiglu"):
@@ -107,6 +110,8 @@ def gated_elementwise_op(
             act = act_clamped_silu(act_element, limit, alpha)
         elif cutlass.const_expr(ACTIVATION == "situglu"):
             act = act_situ_gate(act_element, beta1)
+        elif cutlass.const_expr(ACTIVATION == "swiglu"):
+            act = act_silu(act_element, sigmoid(act_element, fast_rcp=FAST_RCP))
         else:
             act = act_fn(act_element)
         y = act * gate
@@ -125,7 +130,7 @@ def gated_elementwise_op(
             dact = dact_dsitu_gate(act_element, beta1)
         elif cutlass.const_expr(ACTIVATION == "swiglu"):
             # Match CUDA implementation's behavior too
-            s = sigmoid(act_element, fast_math=True)
+            s = sigmoid(act_element, fast_math=True, fast_rcp=FAST_RCP)
             act = act_silu(act_element, s)
             dact = dact_dsilu(act_element, s)
         else:

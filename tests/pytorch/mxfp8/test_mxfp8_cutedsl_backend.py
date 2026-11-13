@@ -499,9 +499,12 @@ def get_gated_cfg_key(act, in_dtype, fp8_dtype, rowwise, colwise, swizzled, is_b
     )
 
 
-def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swizzled=False):
+def run_gated_test_case(
+    act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swizzled=False, all_bf16_act=False
+):
     """Assert the CuTeDSL and CUDA backends produce bit-identical gated activation outputs.
-    shape is (M, N): the gated input is [M, 2N].
+    shape is (M, N): the gated input is [M, 2N]. all_bf16_act fills the act half with every BF16
+    bit pattern in turn, specials included.
     """
     M, N = shape
     if is_bwd and swizzled:
@@ -509,6 +512,9 @@ def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swi
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
     x, _ = generate_inputs(M, 2 * N, in_dtype)
+    if all_bf16_act:
+        bits = torch.arange(M * N, dtype=torch.int32, device="cuda") % 65536 - 32768
+        x[:, :N] = bits.to(torch.int16).view(torch.bfloat16).view(M, N)
     grad, _ = generate_inputs(M, N, in_dtype, seed=1)
 
     def run():
@@ -554,3 +560,24 @@ def test_gated_sizes(swizzled, is_bwd, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_gated_dtypes(swizzled, is_bwd, act, fp8_dtype, in_dtype):
     run_gated_test_case(act, is_bwd, (256, 384), BOTH, in_dtype, fp8_dtype, swizzled)
+
+
+# 264x288 has a row tail and a 32-column tail, and act values below the sigmoid's fast-reciprocal
+# bound in the tail columns.
+@pytest.mark.parametrize("shape", [(256, 256), (264, 288)], ids=get_shape_id)
+@pytest.mark.parametrize("is_bwd", GATED_DIRECTIONS, ids=get_direction_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_gated_swiglu_all_bf16_act_values(swizzled, is_bwd, shape):
+    """SwiGLU of every BF16 act value, including those (below the sigmoid's fast-reciprocal
+    bound, -inf, NaN) whose sigmoid needs the precise reciprocal."""
+    swiglu = next(a for a in GATED_ACTIVATIONS if a["name"] == "SwiGLU")
+    run_gated_test_case(
+        swiglu,
+        is_bwd,
+        shape,
+        BOTH,
+        torch.bfloat16,
+        tex.DType.kFloat8E4M3,
+        swizzled,
+        all_bf16_act=True,
+    )
