@@ -1030,6 +1030,7 @@ def _ep_prepare_and_dispatch_nvfp4_fwd(
         tokens_T_flat=tokens_2d.shape[0],
         topk_T_flat=topk_weights.numel() // topk_weights.shape[-1],
         top_k=topk_weights.shape[-1],
+        layer_args=(buffer.top_k, buffer.alignment, topk_idx.dtype),
         hidden_dim=hidden,
         eager=buffer.eager,
         # The GroupedTensor is returned like the MXFP8 one (not detached).
@@ -1295,10 +1296,22 @@ def _ep_combine_bwd_nvfp4(state: "_CombineState", g_result: torch.Tensor):
         buffer=None if gemm_recipe is not None else state.nvfp4_buffer,
     )
     if state.eager:
-        tex.ep_combine_bwd(state.handle_mem, packed.view(torch.bfloat16), ge_packed, None, None)
+        tex.ep_combine_bwd(
+            state.handle_mem,
+            packed.view(torch.bfloat16),
+            ge_packed,
+            *state.layer_args,
+            None,
+            None,
+        )
     else:
         torch.ops.transformer_engine_ep.combine_bwd(
-            state.handle_mem, packed.view(torch.bfloat16), ge_packed
+            state.handle_mem,
+            packed.view(torch.bfloat16),
+            ge_packed,
+            *state.layer_args,
+            None,
+            None,
         )
     if gemm_recipe is not None:
         return _nvfp4_direct_receive(
