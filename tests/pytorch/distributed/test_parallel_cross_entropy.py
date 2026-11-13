@@ -12,7 +12,10 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from transformer_engine.pytorch import parallel_cross_entropy
+import transformer_engine_torch as tex
+from transformer_engine.pytorch import is_mxfp8_available, parallel_cross_entropy
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
 
 # Prepend so installed packages with a top-level utils module cannot shadow the test helpers.
 sys.path = [str(pathlib.Path(__file__).resolve().parent.parent)] + sys.path
@@ -42,10 +45,16 @@ def _run_tensor_parallel(rank, world_size, init_file, label_smoothing):
             generator=generator,
         ).to(device)
         target[0, 2] = -100
+        mask_rank_0 = label_smoothing == 0.0  # with smoothing, -inf logits give an infinite loss
+        if mask_rank_0:
+            target[0, 1] = local_vocab + 1
         external_grad = torch.randn(shape[:-1], generator=generator).to(device)
 
         for dtype in (torch.float32, torch.bfloat16):
             global_values = torch.randn(shape, generator=generator).to(device=device, dtype=dtype)
+            if mask_rank_0:
+                # Rank 0's whole shard is -inf in one row: it must contribute nothing, not NaN.
+                global_values[0, 1, :local_vocab] = float("-inf")
             vocab_start = rank * local_vocab
             local_values = global_values[..., vocab_start : vocab_start + local_vocab]
             for reduce_loss in (False, True):
@@ -153,6 +162,89 @@ def _run_tensor_parallel_argmax(rank, world_size, init_file, label_smoothing):
         dist.destroy_process_group()
 
 
+class _KernelLaunchCounter:
+    """Stands in for a Triton kernel, counting its launches and forwarding them."""
+
+    def __init__(self, kernel):
+        self.kernel = kernel
+        self.launches = 0
+
+    def __getitem__(self, grid):
+        launch = self.kernel[grid]
+
+        def counted_launch(*args, **kwargs):
+            self.launches += 1
+            return launch(*args, **kwargs)
+
+        return counted_launch
+
+
+def _run_tensor_parallel_mxfp8_grad(rank, world_size, init_file, label_smoothing):
+    """Two-rank worker: each rank's MXFP8 gradient is written by the fused kernel and has the
+    bytes of its BF16 gradient shard quantized by the quantizer."""
+
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+        device_id=device,
+    )
+    counter = _KernelLaunchCounter(triton_cross_entropy.cross_entropy_backward_mxfp8_kernel)
+    triton_cross_entropy.cross_entropy_backward_mxfp8_kernel = counter
+    try:
+        generator = torch.Generator().manual_seed(2027)
+        # Shards of 384 and 4096 columns: 128- and 256-column tiles.
+        for local_vocab in (384, 4096):
+            vocab = local_vocab * world_size
+            shape = (2, 64, vocab)
+            target = torch.randint(0, vocab, shape[:-1], generator=generator).to(device)
+            target[0, :3] = -100
+            values = (torch.randn(shape, generator=generator) * 3).to(
+                device=device, dtype=torch.bfloat16
+            )
+            vocab_start = rank * local_vocab
+            local_values = values[..., vocab_start : vocab_start + local_vocab]
+            for fp8_dtype in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2):
+                for reduce_loss in (False, True):
+                    quantizer = MXFP8Quantizer(fp8_dtype)
+                    grads = []
+                    for grad_quantizer in (None, quantizer):
+                        logits = local_values.clone().requires_grad_()
+                        loss = parallel_cross_entropy(
+                            logits,
+                            target,
+                            label_smoothing=label_smoothing,
+                            reduce_loss=reduce_loss,
+                            dist_process_group=dist.group.WORLD,
+                            grad_quantizer=grad_quantizer,
+                        )
+                        launches = counter.launches
+                        (grad,) = torch.autograd.grad(loss, logits, torch.full_like(loss, 0.37))
+                        assert counter.launches - launches == int(grad_quantizer is not None)
+                        grads.append(grad)
+                    ref_grad, grad = grads
+                    ref = quantizer(ref_grad)
+                    # 128 rows and a shard that is a multiple of 128: no scale padding.
+                    for name in (
+                        "_rowwise_data",
+                        "_rowwise_scale_inv",
+                        "_columnwise_data",
+                        "_columnwise_scale_inv",
+                    ):
+                        torch.testing.assert_close(
+                            getattr(grad, name).view(torch.uint8),
+                            getattr(ref, name).view(torch.uint8),
+                            rtol=0,
+                            atol=0,
+                        )
+    finally:
+        triton_cross_entropy.cross_entropy_backward_mxfp8_kernel = counter.kernel
+        dist.destroy_process_group()
+
+
 @pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
 def test_parallel_cross_entropy_tensor_parallel(label_smoothing):
     """Validate tensor-parallel loss and gradients on two ranks."""
@@ -181,6 +273,26 @@ def test_parallel_cross_entropy_tensor_parallel_argmax(label_smoothing):
         init_file = os.path.join(temp_dir, "distributed_init")
         mp.spawn(
             _run_tensor_parallel_argmax,
+            args=(world_size, init_file, label_smoothing),
+            nprocs=world_size,
+            join=True,
+        )
+
+
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
+def test_parallel_cross_entropy_tensor_parallel_mxfp8_grad(label_smoothing):
+    """Validate the fused MXFP8 gradient of each vocabulary shard on two ranks."""
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("tensor-parallel cross entropy test requires two CUDA devices")
+    mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    world_size = 2
+    with tempfile.TemporaryDirectory() as temp_dir:
+        init_file = os.path.join(temp_dir, "distributed_init")
+        mp.spawn(
+            _run_tensor_parallel_mxfp8_grad,
             args=(world_size, init_file, label_smoothing),
             nprocs=world_size,
             join=True,

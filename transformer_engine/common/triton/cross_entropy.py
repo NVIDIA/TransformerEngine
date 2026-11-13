@@ -90,9 +90,10 @@ def cross_entropy_forward_kernel(
             argmax_max, argmax, argmax_nan = _fold_block_argmax(
                 x, offsets, n_cols, argmax_max, argmax, argmax_nan
             )
-        block_max = tl.max(x)
-        m_new = tl.maximum(m, block_max)
-        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
+        m_new = tl.maximum(m, tl.max(x))
+        # While every logit so far is -inf, m_new is -inf too, and -inf - -inf would be NaN.
+        m_safe = tl.where(m_new == float("-inf"), 0.0, m_new)
+        d = d * tl.exp(m - m_safe) + tl.sum(tl.exp(x - m_safe))
         m = m_new
         if label_smoothing > 0:
             x_sum += tl.sum(tl.where(mask, x, 0.0))
@@ -176,9 +177,10 @@ def cross_entropy_tp_pre_kernel(
             argmax_max, argmax, argmax_nan = _fold_block_argmax(
                 x, offsets, n_cols, argmax_max, argmax, argmax_nan
             )
-        block_max = tl.max(x)
-        m_new = tl.maximum(m, block_max)
-        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
+        m_new = tl.maximum(m, tl.max(x))
+        # While every logit so far is -inf, m_new is -inf too, and -inf - -inf would be NaN.
+        m_safe = tl.where(m_new == float("-inf"), 0.0, m_new)
+        d = d * tl.exp(m - m_safe) + tl.sum(tl.exp(x - m_safe))
         m = m_new
         if COMPUTE_X_SUM:
             x_sum += tl.sum(tl.where(mask, x, 0.0))
@@ -241,7 +243,9 @@ def cross_entropy_tp_post_kernel(
                     argmax = rank_idx.to(tl.int64) * n_cols + local_argmax.to(tl.int64)
                     argmax_max = rank_argmax_max
         global_m = tl.maximum(m, m_new)
-        d = d * tl.exp(m - global_m) + d_new * tl.exp(m_new - global_m)
+        # Shards whose logits are all -inf have m = -inf and d = 0 and must not give NaN.
+        safe_m = tl.where(global_m == float("-inf"), 0.0, global_m)
+        d = d * tl.exp(m - safe_m) + d_new * tl.exp(m_new - safe_m)
         m = global_m
         x_y = tl.maximum(x_y, tl.load(rank_data_ptr + 2))
         if label_smoothing > 0:
@@ -348,6 +352,8 @@ def cross_entropy_backward_mxfp8_kernel(
     columnwise_data_ptr,
     columnwise_scale_ptr,
     columnwise_scale_stride,
+    rank,
+    world_size,
     n_cols,
     ignore_idx,
     reduce_loss: tl.constexpr,
@@ -357,7 +363,8 @@ def cross_entropy_backward_mxfp8_kernel(
     FP8_E5M2: tl.constexpr,
     BLOCK_COLS: tl.constexpr,
 ):
-    """Single-rank derivative of a 32-row x BLOCK_COLS tile, written as MXFP8.
+    """Derivative of a 32-row x BLOCK_COLS tile of this rank's vocabulary shard, written as
+    MXFP8.
 
     The derivative is computed as cross_entropy_backward_kernel computes it and rounded to the
     input dtype (BF16), then quantized as TE's MXFP8 cast quantizes it: row-wise with 1x32
@@ -375,10 +382,12 @@ def cross_entropy_backward_mxfp8_kernel(
     if reduce_loss:
         grad_output = grad_output / tl.load(n_non_ignore_ptr)
 
-    eps = label_smoothing / n_cols
+    eps = label_smoothing / (n_cols * world_size)
+    # Local column of the target; outside [0, n_cols) if another rank holds it.
+    target_col = y - rank * n_cols
     x = tl.load(saved_input_ptr + offsets).to(tl.float32)
     grad = tl.exp(x - m[:, None]) / d[:, None] - eps
-    grad -= tl.where(cols[None, :] == y[:, None], 1 - label_smoothing, 0.0)
+    grad -= tl.where(cols[None, :] == target_col[:, None], 1 - label_smoothing, 0.0)
     grad = grad * grad_output[:, None]
     grad = tl.where((y == ignore_idx)[:, None], 0.0, grad)
     grad = grad.to(saved_input_ptr.dtype.element_ty).to(tl.float32)
