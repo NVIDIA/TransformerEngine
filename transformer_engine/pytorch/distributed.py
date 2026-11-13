@@ -81,6 +81,24 @@ def set_all_rng_states(states: List) -> None:
     _ALL_ACTIVE_RNG_STATES = states
 
 
+def graph_safe_rng_available() -> bool:
+    """Returns whether cuda graph safe RNG state manipulation is supported.
+
+    Deprecated: always True, since all supported PyTorch versions provide the graph-safe RNG APIs.
+    """
+    warnings.warn(
+        "graph_safe_rng_available() is deprecated and always returns True.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return True
+
+
+def is_graph_safe_rng_state(state: Union[torch.Tensor, torch.Generator]) -> bool:
+    """Returns whether the rng state is a graph safe version."""
+    return isinstance(state, torch.Generator)
+
+
 def _get_cuda_rng_state(
     device: Union[int, str, torch.device] = te_device_type(),
     clone: bool = False,
