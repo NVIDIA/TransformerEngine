@@ -56,7 +56,27 @@ void warn_initialization_failed() {
       "registration failed. Using CUDA backend as fallback.");
 }
 
+// Global counter to keep track of how many need to pause GC. We can only resume GC when no one is pausing it.
+int num_gc_pauses = 0;
+int gc_was_enabled = 0;
+
 }  // namespace
+
+// Definition of PythonGCPause's methods declared in tvm_ffi_bridge.h.
+// They are defined here because only this file includes Python.h and can use the CPython API
+PythonGCPause::PythonGCPause() : active_(Py_IsInitialized()) {
+  if (!active_) return;
+  const PyGILState_STATE gil = PyGILState_Ensure();
+  if (num_gc_pauses++ == 0) gc_was_enabled = PyGC_Disable();
+  PyGILState_Release(gil);
+}
+
+PythonGCPause::~PythonGCPause() {
+  if (!active_) return;
+  const PyGILState_STATE gil = PyGILState_Ensure();
+  if (--num_gc_pauses == 0 && gc_was_enabled) PyGC_Enable();
+  PyGILState_Release(gil);
+}
 
 // Initialize the Python interpreter and import the CuTeDSL backend module. This is only compiled
 // with NVTE_WITH_CUTEDSL=ON in CMake and will be ignored otherwise

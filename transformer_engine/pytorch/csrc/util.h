@@ -18,6 +18,10 @@
 namespace transformer_engine {
 namespace pytorch {
 
+/*! \brief Borrow one data/amax orientation and substitute caller-owned compact scales. */
+void set_compact_tensor_data(TensorWrapper& view, const TensorWrapper& tensor, bool rowwise,
+                             void* scales);
+
 /*! \brief Convert tensor block scales into GEMM swizzled format.
  *
  *  The returned swizzled scales should be kept alive during the GEMM.
