@@ -8,7 +8,9 @@ Each rank owns an uneven, contiguous slice of the concatenated weights, as a dis
 optimizer does. The slice boundaries cut tensors in the middle of rows and of 16x16 tiles.
 The FP32 masters are not BF16-representable and include all-zero tiles and outliers. For
 several update steps, quantize_master_weights with the option must write the same rowwise FP4
-data, scale-inverses and amaxes as without it, on every rank.
+data, scale-inverses and amaxes as without it, on every rank. With an odd slice boundary,
+the rank whose shard starts at the odd offset runs the per-tensor kernels for its own shards
+while the others run the multi-tensor ones, under the same collectives (no hang).
 """
 
 import argparse
@@ -74,11 +76,14 @@ def _masters(shapes):
     return masters
 
 
-def _rank_slices(numels, rank, world, seed):
-    """Uneven contiguous slices of the flat space, cut at even offsets."""
+def _rank_slices(numels, rank, world, seed, odd_cut=False):
+    """Uneven contiguous slices of the flat space, cut at even offsets (the first cut at an odd
+    offset with odd_cut)."""
     total = sum(numels)
     g = torch.Generator().manual_seed(seed)
     cuts = sorted({int(x) // 2 * 2 for x in (torch.rand(world - 1, generator=g) * total).tolist()})
+    if odd_cut and cuts:
+        cuts[0] += 1
     bounds = [0] + cuts + [total] * (world + 1 - len(cuts) - 1)
     return bounds[rank], bounds[rank + 1]
 
@@ -123,14 +128,14 @@ def _compare(ref, new, tag):
     assert flag.item() == 0, "\n".join(bad) or "mismatch on another rank"
 
 
-def _check_bit_identity(params_dtype, master_dtype, expect_fused, seed):
+def _check_bit_identity(params_dtype, master_dtype, expect_fused, seed, odd_cut=False):
     rank, world = dist.get_rank(), dist.get_world_size()
     group = dist.new_group(ranks=list(range(world)))
     shapes = SHAPES
     ref = _make_weights(shapes, params_dtype)
     new = [w.detach().clone() for w in ref]
     masters = _masters(shapes)
-    lo, hi = _rank_slices([h * w for h, w in shapes], rank, world, seed)
+    lo, hi = _rank_slices([h * w for h, w in shapes], rank, world, seed, odd_cut)
     shards_ref, offsets = _shards(masters, lo, hi, master_dtype)
     shards_new, _ = _shards(masters, lo, hi, master_dtype)
 
@@ -211,6 +216,9 @@ def _worker():
         _check_bit_identity(torch.float32, torch.float32, expect_fused=True, seed=79)
         # BF16 masters.
         _check_bit_identity(torch.bfloat16, torch.bfloat16, expect_fused=True, seed=80)
+        # An odd slice boundary: one rank's shard starts at an odd offset, which only the
+        # per-tensor kernels take. Every rank must still take the fused path's collectives.
+        _check_bit_identity(torch.bfloat16, torch.float32, expect_fused=True, seed=83, odd_cut=True)
         # Mixed model dtypes in one call are left to the default path.
         _check_bit_identity("mixed", torch.float32, expect_fused=False, seed=82)
         _check_cuda_graph(seed=81)
