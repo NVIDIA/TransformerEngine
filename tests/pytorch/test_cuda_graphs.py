@@ -141,6 +141,61 @@ def reset_global_fp8_state():
     FP8GlobalStateManager.reset()
 
 
+def test_warmup_forward_failure_cleanup_and_retry():
+    """A failed warmup must leave the module reusable for capture and training."""
+    from transformer_engine.pytorch import graph as te_graph
+
+    class FailDuringWarmup(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(32, 32, dtype=torch.bfloat16, device="cuda")
+            self.dropout = torch.nn.Dropout(0.1)
+            self.fail = True
+
+        def forward(self, inp):
+            output = self.dropout(self.linear(inp))
+            if self.fail:
+                raise RuntimeError("controlled warmup forward failure")
+            return output
+
+    model = FailDuringWarmup()
+    inp = torch.randn(4, 32, device="cuda", dtype=torch.bfloat16)
+    original_call = type(model).__call__
+    hooks = [(module, dict(module._forward_hooks)) for module in model.modules()]
+    cpu_rng = torch.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state()
+    graphed = None
+    try:
+        with pytest.raises(RuntimeError, match="controlled warmup forward failure"):
+            make_graphed_callables(model, (inp,), num_warmup_iters=1)
+        for module, original_hooks in hooks:
+            assert module._forward_hooks == original_hooks
+        assert type(model).__call__ is original_call
+        assert not te_graph.is_graph_capturing()
+        torch.testing.assert_close(torch.get_rng_state(), cpu_rng, rtol=0, atol=0)
+        torch.testing.assert_close(torch.cuda.get_rng_state(), cuda_rng, rtol=0, atol=0)
+
+        model.fail = False
+        reference = copy.deepcopy(model)
+        reference_input = inp.clone()
+        rng = torch.cuda.get_rng_state()
+        expected = reference(reference_input)
+        expected.sum().backward()
+        expected_parameter_grads = [p.grad.clone() for p in reference.parameters()]
+        torch.cuda.set_rng_state(rng)
+        graphed = make_graphed_callables(model, (inp,), num_warmup_iters=1)
+        actual = graphed(inp)
+        actual.sum().backward()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for parameter, expected_grad in zip(model.parameters(), expected_parameter_grads):
+            torch.testing.assert_close(parameter.grad, expected_grad, rtol=0, atol=0)
+    finally:
+        if graphed is not None:
+            graphed.reset()
+        type(model).__call__ = original_call
+        te_graph.set_capture_end()
+
+
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
     """Check that two lists of tensors match exactly."""
     assert len(l1) == len(l2), "Unequal number of outputs."
