@@ -738,6 +738,41 @@ def general_grouped_gemm_for_grouped_tensor(
     if bias_scale is not None and bias is None:
         raise ValueError("bias_scale requires bias to be provided.")
 
+    if _is_unaligned_grouped_gemm_out(out):
+        # cuBLASLt grouped GEMM requires 16-byte aligned output pointers. A wgrad output can
+        # be a view into a larger buffer that is not, e.g. a Megatron-LM main_grad in an
+        # unpadded gradient buffer. Run the same GEMM on an aligned copy of the output and copy
+        # the result back, so accumulation and bias are applied exactly as on the direct path.
+        # The GEMM reads the output as C when it accumulates or is given a beta.
+        reads_out = accumulate or beta is not None
+
+        def stage(t: torch.Tensor) -> torch.Tensor:
+            if reads_out:
+                return t.clone(memory_format=torch.contiguous_format)
+            return torch.empty_like(t, memory_format=torch.contiguous_format)
+
+        if is_discrete_out:
+            staged = [stage(t) for t in out]
+            targets, results = out, staged
+        else:
+            staged = out.copy()
+            staged.rowwise_data = stage(out.rowwise_data)
+            targets, results = [out.rowwise_data], [staged.rowwise_data]
+        general_grouped_gemm_for_grouped_tensor(
+            A,
+            B,
+            staged,
+            layout=layout,
+            accumulate=accumulate,
+            use_split_accumulator=use_split_accumulator,
+            bias=bias,
+            bias_scale=bias_scale,
+            alpha=alpha,
+            beta=beta,
+        )
+        torch._foreach_copy_(targets, results)
+        return out
+
     num_tensors = B.num_tensors
     rowwise = B.rowwise_data
     device = rowwise.device if rowwise is not None else B.columnwise_data.device
@@ -782,6 +817,20 @@ def general_grouped_gemm_for_grouped_tensor(
         workspace_cublas,
         use_split_accumulator,
         sm_count,
+    )
+
+
+def _is_unaligned_grouped_gemm_out(out) -> bool:
+    """Whether an unquantized grouped GEMM output is not 16-byte aligned."""
+    if isinstance(out, list):
+        return any(t.data_ptr() % 16 != 0 for t in out)
+    data = out.rowwise_data
+    return (
+        out.quantizer is None
+        and out.columnwise_data is None
+        and data is not None
+        and data.numel() > 0
+        and data.data_ptr() % 16 != 0
     )
 
 
