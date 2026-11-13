@@ -453,6 +453,17 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             if start == 0 and length == tensor.size(dim):
                 return Float8BlockwiseQTensor.make_like(tensor)
 
+        # In-place copy between column-wise data layouts
+        if func == aten.copy_.default:
+            dst, src = args[0], args[1]
+            if (
+                isinstance(dst, Float8BlockwiseQTensor)
+                and isinstance(src, Float8BlockwiseQTensor)
+                and dst._columnwise_transposed != src._columnwise_transposed
+            ):
+                dst.quantize_(src.dequantize())
+                return None
+
         # record stream op
         if func == torch.ops.aten.record_stream.default:
             qt, stream = args
@@ -490,15 +501,36 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         raise ValueError("Float8BlockwiseQTensor does not support different memory formats!")
 
     def __reduce_ex__(self, protocol: int) -> tuple:
-        """Custom pickling to remove references to FP8 metadata objects"""
+        """Custom pickling to remove references to FP8 metadata objects
+
+        Column-wise data is pickled in the transposed layout.
+        """
+        shape = self.shape
+        columnwise_data = self._columnwise_data
+        columnwise_scale_inv = self._columnwise_scale_inv
+        if not self._columnwise_transposed:
+            if self._is_2D_scaled and self._rowwise_data is not None:
+                # Transpose the row-wise data and scales that serve column-wise usage
+                columnwise_data = self._rowwise_data
+                columnwise_scale_inv = self._rowwise_scale_inv.new_zeros(
+                    self._quantizer.get_scale_shape(shape, columnwise=True)
+                )
+                scale_inv_t = self._rowwise_scale_inv.t()
+                h = min(columnwise_scale_inv.shape[0], scale_inv_t.shape[0])
+                w = min(columnwise_scale_inv.shape[1], scale_inv_t.shape[1])
+                columnwise_scale_inv[:h, :w] = scale_inv_t[:h, :w]
+            if columnwise_data is not None and len(shape) > 1:
+                m, k = math.prod(shape[:-1]), shape[-1]
+                columnwise_data = columnwise_data.reshape(m, k).t().contiguous()
+                columnwise_data = columnwise_data.view(k, *shape[:-1])
         return (
             _make_float8_blockwise_tensor_in_reduce_ex,
             (
-                self.shape,
+                shape,
                 self._rowwise_data,
                 self._rowwise_scale_inv,
-                self._columnwise_data,
-                self._columnwise_scale_inv,
+                columnwise_data,
+                columnwise_scale_inv,
                 self._fp8_dtype,
                 self.dtype,
                 self._quantizer,
@@ -753,7 +785,23 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     is_2D_scaled: bool,
     data_format: Any = None,  # pylint: disable=unused-argument
 ) -> Float8BlockwiseQTensor:
-    """Reconstruct a ``Float8BlockwiseQTensor`` from its ``__reduce_ex__`` payload."""
+    """Reconstruct a ``Float8BlockwiseQTensor`` from its ``__reduce_ex__`` payload.
+
+    Column-wise data in the payload is transposed, and is converted to the local layout.
+    """
+    columnwise_transposed = not torch.cuda.is_available() or _columnwise_transposed()
+    if not columnwise_transposed and columnwise_data is not None:
+        if not is_2D_scaled:
+            if len(shape) > 1:
+                m, k = math.prod(shape[:-1]), shape[-1]
+                columnwise_data = columnwise_data.reshape(k, m).t().contiguous().view(shape)
+        elif rowwise_data is not None:
+            # Row-wise data and scales serve column-wise usage
+            columnwise_data, columnwise_scale_inv = None, None
+        else:
+            # Without row-wise data, 2D column-wise data stays transposed
+            columnwise_transposed = True
+
     # Infer device from inner buffers so the wrapper subclass stays
     # consistent with its data (e.g. CPU after DCP staging deserialize).
     device = None
@@ -771,6 +819,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
         dtype=dtype,
         quantizer=quantizer,
         is_2D_scaled=is_2D_scaled,
+        columnwise_transposed=columnwise_transposed,
         device=device,
     )
 
