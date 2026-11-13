@@ -1337,6 +1337,11 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
             grid_cols = (N + TILE_COLS - 1) // TILE_COLS
             grid_rows = (M + TILE_ROWS - 1) // TILE_ROWS
         cluster_cols = Int32(CLUSTER_WIDTH)
+        # Clusters of CTAs on adjacent column tiles speed up the memory reads that bound a cast.
+        # With a table, shared-memory lookups bound the tile instead and a cluster can leave CTA
+        # slots idle, so it launches unclustered.
+        if cutlass.const_expr(self.cfg.ACTIVATION_TABLE != "none"):
+            cluster_cols = Int32(1)
         # Adjust cluster size so that the CTAs in the column direction can be evenly divided into clusters.
         while cluster_cols > 1 and grid_cols % cluster_cols != 0:
             cluster_cols -= 1
