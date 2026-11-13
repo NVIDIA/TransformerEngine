@@ -302,15 +302,31 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_unchecked(
 
 namespace {
 
-// Views of a block scaling tensor's data (columnwise data is reinterpreted as rowwise data of the
-// transposed tensor) as a rowwise block scaling tensor and as an mxfp8 tensor without scaling
-// factors, along with the shape of the mxfp8 tensor's swizzled scaling factors.
+// Views of a block scaling tensor's data, as the block scaling tensor that the conversion to
+// MXFP8 reads and as the MXFP8 tensor without scaling factors that it writes, along with the
+// shape of the MXFP8 tensor's swizzled scaling factors.
 struct BlockScalingToMxfp8Views {
   TensorWrapper input;
   TensorWrapper output;
   std::vector<size_t> swizzled_scale_inv_shape;
+  bool columnwise_output;
+
+  void set_output_scale_inv(void *dptr) {
+    if (columnwise_output) {
+      output.set_columnwise_scale_inv(dptr, transformer_engine::DType::kFloat8E8M0,
+                                      swizzled_scale_inv_shape);
+    } else {
+      output.set_rowwise_scale_inv(dptr, transformer_engine::DType::kFloat8E8M0,
+                                   swizzled_scale_inv_shape);
+    }
+  }
 };
 
+// For columnwise usage of columnwise data that is not stored transposed, the MXFP8 tensor has
+// columnwise data with the logical shape. 1D tensors hold it in their columnwise buffers, and 2D
+// tensors serve it with their rowwise data and scales, since a 2D block scale covers a 128x128 tile
+// in either direction. Transposed columnwise data is reinterpreted as rowwise data of the
+// transposed tensor.
 BlockScalingToMxfp8Views make_block_scaling_to_mxfp8_views(TensorWrapper &input, bool rowwise) {
   // Check input tensor
   const NVTEScalingMode scaling_mode = input.scaling_mode();
@@ -318,26 +334,50 @@ BlockScalingToMxfp8Views make_block_scaling_to_mxfp8_views(TensorWrapper &input,
              "Input tensor must be a block scaling tensor");
 
   // Get tensor data
-  NVTEBasicTensor data = rowwise ? input.get_rowwise_data() : input.get_columnwise_data();
-  const auto [data_flat_first_dim, data_flat_last_dim] = get_2d_dims(data.shape, !rowwise);
+  const bool columnwise_transposed = input.get_columnwise_transposed();
+  const bool columnwise_output = !rowwise && !columnwise_transposed;
+  const bool rowwise_serves_columnwise =
+      scaling_mode == NVTE_BLOCK_SCALING_2D && !columnwise_transposed;
+  const bool read_columnwise = !rowwise && !rowwise_serves_columnwise;
+  const NVTEBasicTensor data =
+      read_columnwise ? input.get_columnwise_data() : input.get_rowwise_data();
+  const NVTEBasicTensor scale_inv =
+      read_columnwise ? input.get_columnwise_scale_inv() : input.get_rowwise_scale_inv();
+  const bool transposed_data = !rowwise && columnwise_transposed;
+  const auto [data_flat_first_dim, data_flat_last_dim] = get_2d_dims(data.shape, transposed_data);
   NVTEShape data_shape{};
   data_shape.data[0] = data_flat_first_dim;
   data_shape.data[1] = data_flat_last_dim;
   data_shape.ndim = 2;
+  const auto data_dtype = static_cast<transformer_engine::DType>(data.dtype);
+  const auto scale_inv_dtype = static_cast<transformer_engine::DType>(scale_inv.dtype);
 
-  // Recreate input tensor with rowwise usage
-  BlockScalingToMxfp8Views views{
-      TensorWrapper(scaling_mode),
-      TensorWrapper(NVTE_MXFP8_1D_SCALING),
-      {ceildiv(data_flat_first_dim, 128) * 128, ceildiv(data_flat_last_dim, 128) * 4}};
-  views.input.set_rowwise_data(data.data_ptr, input.dtype(), data_shape);
-  const NVTEBasicTensor scale_inv =
-      rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
-  views.input.set_rowwise_scale_inv(
-      scale_inv.data_ptr, static_cast<transformer_engine::DType>(scale_inv.dtype), scale_inv.shape);
+  // Swizzled MXFP8 scales of [rows, cols] data, one per 1x32 (rowwise) or 32x1 (columnwise) block
+  BlockScalingToMxfp8Views views{TensorWrapper(scaling_mode), TensorWrapper(NVTE_MXFP8_1D_SCALING),
+                                 columnwise_output
+                                     ? std::vector<size_t>{ceildiv(data_flat_first_dim, 128) * 4,
+                                                           ceildiv(data_flat_last_dim, 128) * 128}
+                                     : std::vector<size_t>{ceildiv(data_flat_first_dim, 128) * 128,
+                                                           ceildiv(data_flat_last_dim, 128) * 4},
+                                 columnwise_output};
+
+  // Create input tensor. The conversion reads 1D columnwise data from the columnwise slots and
+  // everything else from the rowwise slots.
+  if (columnwise_output && read_columnwise) {
+    views.input.set_columnwise_data(data.data_ptr, data_dtype, data_shape);
+    views.input.set_columnwise_scale_inv(scale_inv.data_ptr, scale_inv_dtype, scale_inv.shape);
+    views.input.set_columnwise_transposed(false);
+  } else {
+    views.input.set_rowwise_data(data.data_ptr, data_dtype, data_shape);
+    views.input.set_rowwise_scale_inv(scale_inv.data_ptr, scale_inv_dtype, scale_inv.shape);
+  }
 
   // Create output tensor
-  views.output.set_rowwise_data(data.data_ptr, input.dtype(), data_shape);
+  if (columnwise_output) {
+    views.output.set_columnwise_data(data.data_ptr, data_dtype, data_shape);
+  } else {
+    views.output.set_rowwise_data(data.data_ptr, data_dtype, data_shape);
+  }
   views.output.set_with_gemm_swizzled_scales(true);
   return views;
 }
@@ -351,9 +391,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   // Allocate memory for swizzled mxfp8 scaling factors
   at::Tensor swizzled_scale_inv =
       allocateSpace(views.swizzled_scale_inv_shape, transformer_engine::DType::kByte, false);
-  views.output.set_rowwise_scale_inv(getDataPtr(swizzled_scale_inv, 0),
-                                     transformer_engine::DType::kFloat8E8M0,
-                                     views.swizzled_scale_inv_shape);
+  views.set_output_scale_inv(getDataPtr(swizzled_scale_inv, 0));
 
   // Convert scaling factors from FP8 block scaling GEMM_READY format to mxfp8 swizzled format
   NVTE_SCOPED_GIL_RELEASE({
@@ -374,6 +412,8 @@ at::Tensor convert_block_scaling_to_mxfp8_tensors(std::vector<TensorWrapper> &in
   size_t swizzled_scale_inv_bytes = 0;
   for (auto &input : inputs) {
     views.emplace_back(make_block_scaling_to_mxfp8_views(input, rowwise));
+    NVTE_CHECK(views.back().columnwise_output == views.front().columnwise_output,
+               "FP8 block scaling tensors must share a column-wise data layout");
     swizzled_scale_inv_bytes += product(views.back().swizzled_scale_inv_shape);
   }
 
@@ -384,9 +424,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensors(std::vector<TensorWrapper> &in
   auto *swizzled_scale_inv_dptr = reinterpret_cast<uint8_t *>(getDataPtr(swizzled_scale_inv, 0));
   std::vector<NVTETensor> inputs_nvte, outputs_nvte;
   for (auto &view : views) {
-    view.output.set_rowwise_scale_inv(swizzled_scale_inv_dptr,
-                                      transformer_engine::DType::kFloat8E8M0,
-                                      view.swizzled_scale_inv_shape);
+    view.set_output_scale_inv(swizzled_scale_inv_dptr);
     swizzled_scale_inv_dptr += product(view.swizzled_scale_inv_shape);
     inputs_nvte.push_back(view.input.data());
     outputs_nvte.push_back(view.output.data());
@@ -410,19 +448,27 @@ at::Tensor convert_grouped_block_scaling_to_mxfp8_tensor(GroupedTensorWrapper &i
   NVTE_CHECK(scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D,
              "Input grouped tensor must be a block scaling tensor");
   const size_t num_tensors = input.num_tensors();
-  const NVTEBasicTensor data = rowwise ? input.get_rowwise_data() : input.get_columnwise_data();
+
+  // Layouts as in make_block_scaling_to_mxfp8_views; columnwise output keeps per-tensor dims.
+  const bool columnwise_transposed = input.get_columnwise_transposed();
+  const bool columnwise_output = !rowwise && !columnwise_transposed;
+  const bool rowwise_serves_columnwise =
+      scaling_mode == NVTE_BLOCK_SCALING_2D && !columnwise_transposed;
+  const bool read_columnwise = !rowwise && !rowwise_serves_columnwise;
+  const NVTEBasicTensor data =
+      read_columnwise ? input.get_columnwise_data() : input.get_rowwise_data();
   const NVTEBasicTensor scale_inv =
-      rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
+      read_columnwise ? input.get_columnwise_scale_inv() : input.get_rowwise_scale_inv();
   NVTEBasicTensor first_dims = input.get_first_dims();
   NVTEBasicTensor last_dims = input.get_last_dims();
   const NVTEBasicTensor tensor_offsets = input.get_tensor_offsets();
   const NVTEShape logical_shape = input.logical_shape();
   NVTE_CHECK(logical_shape.ndim == 2, "Grouped tensor must have a 2D logical shape");
 
-  // Columnwise FP8 block-scaling data is stored transposed, so view it as rowwise data of the
-  // transposed tensors: swap the per-tensor dims and the logical shape.
+  // Where FP8 GEMM is TN-only, columnwise FP8 block-scaling data is stored transposed, so view it
+  // as rowwise data of the transposed tensors: swap the per-tensor dims and the logical shape.
   std::vector<size_t> view_shape{logical_shape.data[0], logical_shape.data[1]};
-  if (!rowwise) {
+  if (!rowwise && columnwise_transposed) {
     std::swap(first_dims, last_dims);
     if (first_dims.data_ptr == nullptr && last_dims.data_ptr == nullptr) {
       view_shape = {num_tensors * logical_shape.data[1], logical_shape.data[0] / num_tensors};
@@ -433,9 +479,16 @@ at::Tensor convert_grouped_block_scaling_to_mxfp8_tensor(GroupedTensorWrapper &i
   const bool varying_first = first_dims.data_ptr != nullptr;
   const bool varying_last = last_dims.data_ptr != nullptr;
 
-  auto make_view = [&](NVTEScalingMode mode) {
+  // The conversion reads 1D columnwise data from the columnwise slots of its input and everything
+  // else from the rowwise slots, and writes the output slots of the GEMM usage.
+  const bool columnwise_input = columnwise_output && read_columnwise;
+  auto make_view = [&](NVTEScalingMode mode, bool columnwise) {
     GroupedTensorWrapper view(num_tensors, view_shape, mode);
-    view.set_rowwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape);
+    if (columnwise) {
+      view.set_columnwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape);
+    } else {
+      view.set_rowwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape);
+    }
     if (varying_first) {
       view.set_first_dims(first_dims.data_ptr, static_cast<DType>(first_dims.dtype),
                           first_dims.shape);
@@ -449,20 +502,32 @@ at::Tensor convert_grouped_block_scaling_to_mxfp8_tensor(GroupedTensorWrapper &i
     }
     return view;
   };
-  GroupedTensorWrapper input_cu = make_view(scaling_mode);
-  input_cu.set_rowwise_scale_inv(scale_inv.data_ptr, static_cast<DType>(scale_inv.dtype),
-                                 scale_inv.shape);
-  // Per-tensor dims live on the device, so this is an upper bound from the logical shape.
+  GroupedTensorWrapper input_cu = make_view(scaling_mode, columnwise_input);
+  if (columnwise_input) {
+    input_cu.set_columnwise_scale_inv(scale_inv.data_ptr, static_cast<DType>(scale_inv.dtype),
+                                      scale_inv.shape);
+    input_cu.set_columnwise_transposed(false);
+  } else {
+    input_cu.set_rowwise_scale_inv(scale_inv.data_ptr, static_cast<DType>(scale_inv.dtype),
+                                   scale_inv.shape);
+  }
+  // Per-tensor dims live on the device, so this is an upper bound from the logical shape. It
+  // covers rowwise and columnwise output alike.
   const size_t scale_bytes =
       nvte_get_grouped_block_scaling_to_mxfp8_scale_inv_size(input_cu.data());
   NVTE_CHECK(scale_bytes == 0 || data.data_ptr != nullptr,
-             "FP8 block scaling grouped tensor is missing ", rowwise ? "row-wise" : "column-wise",
-             " data required by this GEMM layout");
-  GroupedTensorWrapper output_cu = make_view(NVTE_MXFP8_1D_SCALING);
+             "FP8 block scaling grouped tensor is missing ",
+             read_columnwise ? "column-wise" : "row-wise", " data required by this GEMM layout");
+  GroupedTensorWrapper output_cu = make_view(NVTE_MXFP8_1D_SCALING, columnwise_output);
   at::Tensor swizzled_scale_inv =
       allocateSpace(std::vector<size_t>{scale_bytes}, DType::kByte, false);
-  output_cu.set_rowwise_scale_inv(getDataPtr(swizzled_scale_inv, 0), DType::kFloat8E8M0,
-                                  std::vector<size_t>{scale_bytes});
+  if (columnwise_output) {
+    output_cu.set_columnwise_scale_inv(getDataPtr(swizzled_scale_inv, 0), DType::kFloat8E8M0,
+                                       std::vector<size_t>{scale_bytes});
+  } else {
+    output_cu.set_rowwise_scale_inv(getDataPtr(swizzled_scale_inv, 0), DType::kFloat8E8M0,
+                                    std::vector<size_t>{scale_bytes});
+  }
   output_cu.set_with_gemm_swizzled_scales(true);
   if (scale_bytes > 0) {
     NVTE_SCOPED_GIL_RELEASE({

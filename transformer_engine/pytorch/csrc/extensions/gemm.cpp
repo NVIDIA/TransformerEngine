@@ -342,14 +342,16 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
     // as it is not natively supported by cublasLt
     if (fp8_block_scaling && transformer_engine::cuda::sm_arch() >= 100) {
+      const bool A_columnwise_transposed = A_tensor.get_columnwise_transposed();
+      const bool B_columnwise_transposed = B_tensor.get_columnwise_transposed();
       // Convert tensors to mxfp8 and swizzle their scaling factors
       swizzled_scale_inverses_list.emplace_back(
           std::move(convert_block_scaling_to_mxfp8_tensor(A_tensor, transa)));
       swizzled_scale_inverses_list.emplace_back(
           std::move(convert_block_scaling_to_mxfp8_tensor(B_tensor, !transb)));
-      // Use TN GEMM to avoid having to transpose data.
-      transa = true;
-      transb = false;
+      // Transposed columnwise data was converted as rowwise data of the transposed tensor.
+      transa = transa || A_columnwise_transposed;
+      transb = transb && !B_columnwise_transposed;
     }
 
     if (comm_overlap) {
@@ -830,14 +832,16 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     if (exists_tensor_using_fp8_block_scaling) {
       NVTE_CHECK(!exists_tensor_not_using_fp8_block_scaling,
                  "Either all tensors or no tensor must be FP8 block scaling tensors");
+      const bool A_columnwise_transposed = te_A_wrappers[0].get_columnwise_transposed();
+      const bool B_columnwise_transposed = te_B_wrappers[0].get_columnwise_transposed();
       // Convert tensors to mxfp8 and swizzle their scaling factors
       swizzled_scale_inverses_list.emplace_back(
           convert_block_scaling_to_mxfp8_tensors(te_A_wrappers, transa));
       swizzled_scale_inverses_list.emplace_back(
           convert_block_scaling_to_mxfp8_tensors(te_B_wrappers, !transb));
-      // Use TN GEMM to avoid having to transpose data.
-      transa = true;
-      transb = false;
+      // Transposed columnwise data was converted as rowwise data of the transposed tensors.
+      transa = transa || A_columnwise_transposed;
+      transb = transb && !B_columnwise_transposed;
     }
   }
 
@@ -908,13 +912,15 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
   // Keep the converted scaling factor tensors alive during the GEMM.
   std::vector<at::Tensor> mxfp8_emulation_scales;
   if (needs_fp8_block_scaling_emulation({grouped_A.scaling_mode(), grouped_B.scaling_mode()})) {
+    const bool A_columnwise_transposed = grouped_A.get_columnwise_transposed();
+    const bool B_columnwise_transposed = grouped_B.get_columnwise_transposed();
     mxfp8_emulation_scales.emplace_back(
         convert_grouped_block_scaling_to_mxfp8_tensor(grouped_A, transa));
     mxfp8_emulation_scales.emplace_back(
         convert_grouped_block_scaling_to_mxfp8_tensor(grouped_B, !transb));
-    // Use TN GEMM to avoid having to transpose data.
-    transa = true;
-    transb = false;
+    // Transposed columnwise data was converted as rowwise data of the transposed tensors.
+    transa = transa || A_columnwise_transposed;
+    transb = transb && !B_columnwise_transposed;
   }
 
   NVTE_SCOPED_GIL_RELEASE({
@@ -1002,6 +1008,8 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   // Keep the converted scaling factor tensors alive during the GEMM.
   std::vector<at::Tensor> mxfp8_emulation_scales;
   if (needs_fp8_block_scaling_emulation(operand_modes)) {
+    const bool A_columnwise_transposed = te_A_wrappers[0].get_columnwise_transposed();
+    const bool B_columnwise_transposed = grouped_B.get_columnwise_transposed();
     mxfp8_emulation_scales.emplace_back(
         convert_block_scaling_to_mxfp8_tensors(te_A_wrappers, transa));
     mxfp8_emulation_scales.emplace_back(
@@ -1010,9 +1018,9 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
     for (size_t i = 0; i < te_A_wrappers.size(); ++i) {
       te_A_vector[i] = te_A_wrappers[i].data();
     }
-    // Use TN GEMM to avoid having to transpose data.
-    transa = true;
-    transb = false;
+    // Transposed columnwise data was converted as rowwise data of the transposed tensors.
+    transa = transa || A_columnwise_transposed;
+    transb = transb && !B_columnwise_transposed;
   }
 
   NVTE_SCOPED_GIL_RELEASE({
@@ -1097,13 +1105,15 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
   // Keep the converted scaling factor tensors alive during the GEMM.
   std::vector<at::Tensor> mxfp8_emulation_scales;
   if (needs_fp8_block_scaling_emulation({grouped_A.scaling_mode(), grouped_B.scaling_mode()})) {
+    const bool A_columnwise_transposed = grouped_A.get_columnwise_transposed();
+    const bool B_columnwise_transposed = grouped_B.get_columnwise_transposed();
     mxfp8_emulation_scales.emplace_back(
         convert_grouped_block_scaling_to_mxfp8_tensor(grouped_A, transa));
     mxfp8_emulation_scales.emplace_back(
         convert_grouped_block_scaling_to_mxfp8_tensor(grouped_B, !transb));
-    // Use TN GEMM to avoid having to transpose data.
-    transa = true;
-    transb = false;
+    // Transposed columnwise data was converted as rowwise data of the transposed tensors.
+    transa = transa || A_columnwise_transposed;
+    transb = transb && !B_columnwise_transposed;
   }
 
   NVTE_SCOPED_GIL_RELEASE({
