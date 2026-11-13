@@ -45,6 +45,9 @@ def te_version() -> str:
 
     """
     raw_version = te_raw_version()
+    if raw_version[:1] in ("v", "V"):
+        # PEP 440 accepts and drops the prefix, but release tags already add a "v".
+        raise ValueError(f"Transformer Engine version {raw_version!r} must not start with 'v'.")
     try:
         parsed_version = Version(raw_version)
     except InvalidVersion as e:

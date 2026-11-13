@@ -44,10 +44,22 @@ def test_normalizes_semver(raw_version, raw, expected):
     assert te_version() == expected
 
 
-@pytest.mark.parametrize("raw", ["1.2.3-nightly.5", "1.2.3-rc.1.2", "1.2.3-1", "1.2.3-post.1"])
-def test_rejects_versions_without_pep440_equivalent(raw_version, raw):
+@pytest.mark.parametrize(
+    "raw,error",
+    [
+        ("", "has no PEP 440 equivalent"),
+        ("abc", "has no PEP 440 equivalent"),
+        ("1.2.3-nightly.5", "has no PEP 440 equivalent"),
+        ("1.2.3-rc.1.2", "has no PEP 440 equivalent"),
+        ("1.2.3-1", "is a post-release"),
+        ("1.2.3-post.1", "is a post-release"),
+        ("v1.2.3", "must not start with 'v'"),
+        ("V1.2.3-rc.1", "must not start with 'v'"),
+    ],
+)
+def test_rejects_invalid_versions(raw_version, raw, error):
     raw_version(raw)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=error):
         te_version()
 
 
