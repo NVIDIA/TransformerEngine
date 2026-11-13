@@ -1125,6 +1125,7 @@ class TestEP(_EpTestCase):
         ref = self._combine_bwd_bf16_ref(tokens, topk_idx, w, rows, decoded, alignment=256)
         self._assert_rows_match_per_expert(src.grad[:n], ref[:n], tc)
 
+    @_mxfp8_align_test
     def test_combine_bwd_nvfp4_direct_capture(self):
         """Combine fwd+bwd (direct NVFP4 grad, packed rows landing in the caller grad_out)
         captured in a CUDA graph: each replay matches a BF16 combine backward of that replay's
