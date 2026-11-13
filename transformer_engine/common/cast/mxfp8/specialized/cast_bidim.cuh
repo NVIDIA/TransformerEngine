@@ -571,7 +571,10 @@ void launch_tiled(const void *input, void *output_rowwise, void *scales_rowwise,
   // Keep the small cases; everything else takes the runtime path.  All column
   // counts work either way: `default` is the runtime instantiation, not a
   // rejection.
-  switch (cols) {
+  const bool has_padded_scale_strides =
+      scale_stride_rowwise == DIVUP_TO_MULTIPLE(cols / kBlockElems, 4) &&
+      scale_stride_colwise == DIVUP_TO_MULTIPLE(cols, 128);
+  switch (has_padded_scale_strides ? cols : 0) {
     case 2048:
       NVTE_LAUNCH_BIDIM(2048);
       break;
