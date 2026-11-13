@@ -322,6 +322,106 @@ def test_fused_attn_query_backward_precision(
         assert backward.mxfp8 == is_mxfp8
 
 
+def _own_block_query_config():
+    """FusedAttentionParams for MXFP8BlockScaling(fp8_dpa_causal_own_block=True) selection."""
+    own_block = recipe.MXFP8BlockScaling(fp8_dpa=True, fp8_dpa_causal_own_block=True)
+    spec = get_fused_attn_spec(own_block, torch.bfloat16, "bshd_bshd_bshd", cs_o_in_f16=True)
+    return FusedAttentionParams(
+        attn_mask_type=AttnMaskType["causal"],
+        scaling_mode=spec.scaling_mode,
+        attn_scale=128**-0.5,
+        qkv_dtype=spec.qkv,
+        o_dtype=spec.o,
+        do_dtype=spec.do,
+        dqkv_dtype=spec.dqkv,
+        nominal_dtype=DType.kBFloat16,
+        qkv_layout=QKVLayout[spec.qkv_layout],
+        o_format=QKVFormat[spec.o_format],
+        do_format=QKVFormat[spec.do_format],
+        dqkv_layout=QKVLayout[spec.dqkv_layout],
+        qkv_scale_inv_format=QKVFormat[spec.scale_inv_format],
+        do_scale_inv_format=QKVFormat[spec.scale_inv_format],
+        batch_size=2,
+        num_attn_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=128,
+        head_dim_v=128,
+        max_seqlen_q=256,
+        max_seqlen_kv=256,
+        causal_exclude_own_block=32,
+    )
+
+
+def _skip_unless_frontend_has_own_block():
+    """Skip when the installed cuDNN Frontend's sdpa_mxfp8 lacks causal_exclude_own_block."""
+    from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import get_fused_attn_backend
+
+    _, message = get_fused_attn_backend(_own_block_query_config())
+    if "causal_exclude_own_block" in message:
+        pytest.skip(message)
+
+
+@pytest.mark.parametrize("frontend_has_option", (True, False), ids=("frontend", "old_frontend"))
+def test_fused_attn_query_mxfp8_causal_own_block(monkeypatch, frontend_has_option):
+    """Selection for MXFP8BlockScaling(fp8_dpa_causal_own_block=True) checks the graphs that run:
+    the MXFP8 forward with causal_exclude_own_block and a constant scale, and the
+    model-precision backward. A cuDNN Frontend whose sdpa_mxfp8 lacks the option is rejected
+    at selection instead of failing in the first forward."""
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    monkeypatch.delenv("NVTE_FP8_DPA_BWD", raising=False)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (10, 0))
+    config = _own_block_query_config()
+
+    def sdpa_mxfp8(*_args, **kwargs):
+        if not frontend_has_option and "causal_exclude_own_block" in kwargs:
+            raise TypeError(
+                "sdpa_mxfp8() got an unexpected keyword argument 'causal_exclude_own_block'"
+            )
+        return Mock(), Mock(), Mock()
+
+    queries, graphs = [], []
+
+    def entry(attn):
+        queries.append(attn)
+        graph = Mock()
+        graph.sdpa_mxfp8.side_effect = sdpa_mxfp8
+        graph.sdpa_backward.return_value = (Mock(), Mock(), Mock())
+        graphs.append(graph)
+        implementation.build_attention_graph(cudnn, graph, attn.description())
+
+    monkeypatch.setattr(implementation._AttentionGraph, "entry", entry)
+    backend, message = implementation.get_fused_attn_backend(config)
+    if not frontend_has_option:
+        assert backend == FusedAttnBackend.No_Backend
+        assert "causal_exclude_own_block" in message
+        assert len(queries) == 1
+        return
+    assert backend == FusedAttnBackend.FP8
+    assert message == ""
+    forward, backward = queries
+    assert forward.mxfp8 and "attn_scale" not in forward.specs
+    assert forward.options().attn_scale == config.attn_scale
+    kwargs = graphs[0].sdpa_mxfp8.call_args.kwargs
+    assert kwargs["causal_exclude_own_block"] == 32 and kwargs["attn_scale"] == config.attn_scale
+    expected = implementation._query_graph(
+        replace(
+            config,
+            qkv_dtype=DType.kBFloat16,
+            o_dtype=DType.kBFloat16,
+            do_dtype=DType.kBFloat16,
+            dqkv_dtype=DType.kBFloat16,
+            causal_exclude_own_block=0,
+        ),
+        True,
+    )
+    assert backward.description() == expected.description()
+    assert not backward.fp8 and not any(name.startswith("descale_") for name in backward.specs)
+    graphs[1].sdpa_backward.assert_called_once()
+    graphs[1].sdpa_mxfp8_backward.assert_not_called()
+
+
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
 @pytest.mark.parametrize("qkv_format", ("bshd", "sbhd"))
 def test_fused_attn_inference_ignores_dropout(dtype, qkv_format):
@@ -4651,6 +4751,128 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
     if is_training:
         return out, (inp[0].grad, inp[1].grad, inp[2].grad, d_softmax_offset)
     return out, (None, None, None, d_softmax_offset)
+
+
+@pytest.mark.parametrize(
+    "change,reason",
+    [
+        ({}, ""),
+        ({"sm_arch": 90}, "SM100 or SM103"),
+        ({"sm_arch": 120}, "SM100 or SM103"),
+        ({"attn_mask_type": "padding_causal"}, "top-left causal"),
+        ({"attn_mask_type": "causal_bottom_right"}, "top-left causal"),
+        ({"window_size": (128, 0)}, "without window"),
+        ({"qkv_layout": "bs3hd"}, "separate BSHD or SBHD"),
+        ({"qkv_layout": "thd_thd_thd"}, "separate BSHD or SBHD"),
+        ({"head_dim_qk": 64, "head_dim_v": 64}, "head dimension 128"),
+        ({"seqlen_kv": 1024}, "equal query and key"),
+        ({"seqlen_q": 1000, "seqlen_kv": 1000}, "divisible by 128"),
+        ({"dropout": 0.1}, "dropout"),
+        ({"bias_type": "post_scale_bias"}, "bias"),
+        ({"softmax_type": "learnable"}, "softmax offset"),
+    ],
+)
+def test_mxfp8_causal_own_block_support_rules(change, reason):
+    """The configurations MXFP8BlockScaling(fp8_dpa_causal_own_block=True) serves."""
+    from transformer_engine.common.cudnn.mxfp8_utils import causal_own_block_error
+
+    config = dict(
+        sm_arch=100,
+        qkv_layout="bshd_bshd_bshd",
+        attn_mask_type="causal",
+        window_size=(-1, 0),
+        head_dim_qk=128,
+        head_dim_v=128,
+        seqlen_q=512,
+        seqlen_kv=512,
+        dropout=0.0,
+        bias_type="no_bias",
+        softmax_type="vanilla",
+    )
+    error = causal_own_block_error(**{**config, **change})
+    assert (reason in error) if reason else error == ""
+
+
+def _run_dpa_causal(inputs, out_grad, qkv_format, num_heads, num_gqa_groups, fp8_recipe):
+    """Causal DotProductAttention on fixed BF16 inputs; returns the output and dQ/dK/dV."""
+    q, k, v = (x.detach().clone().requires_grad_() for x in inputs)
+    _attention_backends["backend_selection_requires_update"] = True
+    dpa = DotProductAttention(
+        num_heads, 128, num_gqa_groups=num_gqa_groups, attention_type="self", qkv_format=qkv_format
+    ).cuda()
+    with autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+        out = dpa(q, k, v, qkv_format=qkv_format, attn_mask_type="causal")
+    out.backward(out_grad)
+    return out.detach(), (q.grad, k.grad, v.grad)
+
+
+@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
+@pytest.mark.skipif(
+    get_device_compute_capability() not in ((10, 0), (10, 3)),
+    reason="MXFP8 causal own-block attention requires SM100 or SM103.",
+)
+@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
+@pytest.mark.parametrize("num_gqa_groups", [8, 2], ids=["mha", "gqa"])
+def test_dpa_mxfp8_causal_own_block(qkv_format, num_gqa_groups, monkeypatch):
+    """MXFP8BlockScaling(fp8_dpa_causal_own_block=True): causal MXFP8 attention in which no
+    output or gradient of a token depends on a later token.
+
+    Checks the output and gradients against BF16 attention, then scales every token from
+    position ``cut`` on (mid-block, so the cut shares a 32-token V scale block with visible
+    tokens) by 2**10. Outputs and gradients before ``cut`` must stay bitwise identical, with
+    zero gradients after it under a prefix-only loss. The ordinary MXFP8 path must change
+    rows before ``cut`` under the same perturbation, which shows the check can see the leak.
+    """
+    _skip_unless_frontend_has_own_block()
+    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
+    b, s, h, cut = 2, 512, 8, 153
+    own_block = recipe.MXFP8BlockScaling(fp8_dpa=True, fp8_dpa_causal_own_block=True)
+    ordinary = recipe.MXFP8BlockScaling(fp8_dpa=True)
+    shape = (b, s, h, 128) if qkv_format == "bshd" else (s, b, h, 128)
+    kv_shape = (*shape[:2], num_gqa_groups, 128)
+    seq = 1 if qkv_format == "bshd" else 0
+    generator = torch.Generator(device="cuda").manual_seed(1234)
+    inputs = [
+        torch.randn(x, dtype=torch.bfloat16, device="cuda", generator=generator)
+        for x in (shape, kv_shape, kv_shape)
+    ]
+    out_grad = 0.1 * torch.randn(
+        (*shape[:2], h * 128), dtype=torch.bfloat16, device="cuda", generator=generator
+    )
+    run = lambda x, g, r: _run_dpa_causal(x, g, qkv_format, h, num_gqa_groups, r)  # noqa: E731
+
+    out, grads = run(inputs, out_grad, own_block)
+    out_ref, grads_ref = run(inputs, out_grad, None)
+    for name, got, want in zip(("out", "dq", "dk", "dv"), (out, *grads), (out_ref, *grads_ref)):
+        compare_and_assert(got, want, f"own_block {name}", f"bf16 {name}", 5e-1, 5e-2, 0.11, True)
+        # B200 measured ~0.046 (out), ~0.052 (dq, dk), ~0.033 (dv); the ordinary MXFP8 path
+        # measures ~0.046 (out) and ~0.066 / ~0.049 for the gradients on the same inputs.
+        error = (got.float() - want.float()).norm() / want.float().norm()
+        assert error < 0.08, f"{name}: relative L2 error {error:.4f} against BF16"
+
+    def prefix(x):
+        return x.narrow(seq, 0, cut)
+
+    def future(x):
+        return x.narrow(seq, cut, s - cut)
+
+    prefix_grad = out_grad.clone()
+    future(prefix_grad).zero_()
+    perturbed = [x.clone() for x in inputs]
+    for x in perturbed:
+        future(x).mul_(1024.0)
+    base_out, base_grads = run(inputs, prefix_grad, own_block)
+    new_out, new_grads = run(perturbed, prefix_grad, own_block)
+    assert torch.equal(prefix(base_out), prefix(new_out)), "an output read a future token"
+    for name, before, after in zip(("dq", "dk", "dv"), base_grads, new_grads):
+        assert torch.equal(prefix(before), prefix(after)), f"{name} read a future token"
+        assert future(after).count_nonzero() == 0, f"{name} is nonzero after the prefix"
+
+    leaky_out, _ = run(inputs, prefix_grad, ordinary)
+    leaky_new, _ = run(perturbed, prefix_grad, ordinary)
+    assert not torch.equal(prefix(leaky_out), prefix(leaky_new)), "the control path did not leak"
 
 
 model_configs_fp8 = {

@@ -284,6 +284,12 @@ FP8 Configuration
    :Default: ``1``
    :Description: When FP8 attention is enabled in PyTorch or JAX, control whether the backward pass also uses FP8. ``1`` = FP8 forward and backward, ``0`` = FP8 forward and FP16/BF16 backward.
 
+.. envvar:: NVTE_FP8_DPA_CAUSAL_OWN_BLOCK
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Default of ``MXFP8BlockScaling.fp8_dpa_causal_own_block`` in PyTorch. ``1`` = causal MXFP8 DotProductAttention keeps every output and gradient independent of later tokens: cuDNN runs MXFP8 attention over completed 32-token blocks, a Triton kernel adds each query's own block with V scaled per token, and the backward runs in FP16/BF16 on the decoded operands. Overrides ``NVTE_FP8_DPA_BWD`` for these calls. ``0`` = ordinary causal MXFP8 attention, whose 32-token columnwise V scales can carry a later token into an earlier output.
+
 .. envvar:: NVTE_DPA_FP8CS_O_in_F16
 
    :Type: ``int`` (0 or 1)

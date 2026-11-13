@@ -2929,10 +2929,22 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
+                fp8_recipe = self.fp8_meta["recipe"] if self.fp8 else None
+                own_block = (
+                    fp8_recipe is not None
+                    and fp8_recipe.fp8_dpa
+                    and getattr(fp8_recipe, "fp8_dpa_causal_own_block", False)
+                )
                 raise ValueError(
-                    "No dot product attention backend is available for the provided inputs. Please"
-                    " run with NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 to find out the reasons for"
-                    " disabling all backends."
+                    "No dot product attention backend is available for the provided inputs."
+                    + (
+                        " MXFP8BlockScaling(fp8_dpa_causal_own_block=True) runs only on"
+                        " FusedAttention and has no fallback backend."
+                        if own_block
+                        else ""
+                    )
+                    + " Please run with NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 to find out the reasons"
+                    " for disabling all backends."
                 )
 
             # run attention
