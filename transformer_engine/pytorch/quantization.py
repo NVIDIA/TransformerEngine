@@ -16,6 +16,8 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
+
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import (
     Recipe,
     DelayedScaling,
@@ -233,7 +235,9 @@ def check_fp8_ue5m3_support() -> Tuple[bool, str]:
             if get_device_compute_capability() != (10, 7):  # Rubin
                 return False, "Device compute capability 10.7 is required for FP8 UE5M3 support."
             if float(torch.version.cuda) < 13.4:
-                return False, "CUDA 13.4 is required for FP8 UE5M3 support."
+                return False, "CUDA 13.4+ is required for FP8 UE5M3 support."
+            if tex.get_cublasLt_version() < 131100:
+                return False, "cuBLAS 13.11+ is required for FP8 UE5M3 support."
             return True, ""
 
         _FP8_UE5M3_SUPPORT = _check_support()
@@ -242,7 +246,7 @@ def check_fp8_ue5m3_support() -> Tuple[bool, str]:
 
 def check_recipe_support(recipe: Recipe) -> None:
     """Check if the given recipe is supported."""
-    if torch.compiler.is_compiling() and isinstance(recipe, DelayedScaling):
+    if isinstance(recipe, DelayedScaling) and torch.compiler.is_compiling():
         raise RuntimeError(
             "DelayedScaling is not supported under torch.compile. Please use other recipes instead."
         )
@@ -271,6 +275,11 @@ def check_recipe_support(recipe: Recipe) -> None:
                 )
     elif isinstance(recipe, MXFP8BlockScaling):
         recipe_supported, unsupported_reason = check_mxfp8_support()
+    elif isinstance(recipe, NVFP4BlockScaling):
+        recipe_supported, unsupported_reason = check_nvfp4_support()
+    else:
+        # By default, check FP8 support.
+        recipe_supported, unsupported_reason = check_fp8_support()
     if not recipe_supported:
         raise RuntimeError(unsupported_reason)
 
@@ -480,7 +489,7 @@ class FP8GlobalStateManager:
         """Set the skip fp8 weight update tensor"""
         if cls.quantization_state.skip_fp8_weight_update_tensor is None:
             cls.quantization_state.skip_fp8_weight_update_tensor = torch.empty(
-                1, dtype=torch.float32, device="cuda"
+                1, dtype=torch.float32, device=te_device_type()
             )
         cls.quantization_state.skip_fp8_weight_update_tensor.fill_(skip)
 
@@ -794,12 +803,15 @@ class FP8GlobalStateManager:
         """Set state and tracking variables for entry into FP8 region."""
 
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
-        autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
+        if enabled:
+            check_recipe_support(fp8_recipe)
         qstate = cls.quantization_state
-        qstate.autocast_arguments[autocast_key] = (
-            fp8_recipe,
-            fp8_group,
-        )
+        if fp8_recipe.delayed():
+            autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
+            qstate.autocast_arguments[autocast_key] = (
+                fp8_recipe,
+                fp8_group,
+            )
 
         qstate.fp8_enabled = enabled
         qstate.fp8_calibration = calibrating
@@ -811,19 +823,6 @@ class FP8GlobalStateManager:
             qstate.is_first_fp8_module = True
         qstate.autocast_depth += 1
 
-        if enabled:
-            fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
-            assert fp8_available, reason_for_no_fp8
-            if isinstance(fp8_recipe, MXFP8BlockScaling):
-                mxfp8_available, reason_for_no_mxfp8 = cls.is_mxfp8_available()
-                assert mxfp8_available, reason_for_no_mxfp8
-            if isinstance(fp8_recipe, Float8BlockScaling):
-                fp8_block_available, reason_for_no_fp8_block = cls.is_fp8_block_scaling_available()
-                assert fp8_block_available, reason_for_no_fp8_block
-            if isinstance(fp8_recipe, NVFP4BlockScaling):
-                nvfp4_available, reason_for_no_nvfp4 = cls.is_nvfp4_available()
-                assert nvfp4_available, reason_for_no_nvfp4
-
     @classmethod
     def autocast_exit(cls, enabled: bool, _graph: bool) -> None:
         """Set state and tracking variables for exit from FP8 region."""
@@ -832,9 +831,13 @@ class FP8GlobalStateManager:
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
-            # delayed scaling only function, for other recipes (current scaling with any granularity),
-            # this is noop for other recipes because cls.global_amax_buffer is empty list
+        if (
+            enabled
+            and qstate.autocast_depth == 0
+            and not _graph
+            and qstate.global_amax_buffer  # Only delayed scaling needs this
+            and torch.is_grad_enabled()
+        ):
             cls.reduce_and_update_fp8_tensors(forward=True)
 
     @classmethod
@@ -1096,10 +1099,8 @@ class autocast:
             raise RuntimeError(
                 "autocast context manager cannot be entered more than once concurrently"
             )
-        if self._enabled:
-            check_recipe_support(self._recipe)
         # Save current state so we always restore it on exit.
-        self._fp8_state = FP8GlobalStateManager.get_autocast_state()
+        fp8_state = FP8GlobalStateManager.get_autocast_state()
         FP8GlobalStateManager.autocast_enter(
             enabled=self._enabled,
             calibrating=self._calibrating,
@@ -1107,6 +1108,7 @@ class autocast:
             fp8_group=self._amax_reduction_group,
             _graph=self._graph,
         )
+        self._fp8_state = fp8_state
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -1488,7 +1490,7 @@ class DelayedScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         self.scale = torch.ones(num_quantizers, dtype=torch.float32, device=device)
         self.amax_history = torch.zeros(
             recipe.amax_history_len,
@@ -1537,7 +1539,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         self.device = device
 
     def make_quantizers(self) -> list:
@@ -1580,7 +1582,7 @@ class MXFP8BlockScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
 
     def make_quantizers(self) -> list:
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
@@ -1638,7 +1640,7 @@ class Float8BlockScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         self.device = device
 
     def make_quantizers(self) -> list:
@@ -1721,7 +1723,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
 
         # Allocate buffers
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
 
     def make_quantizers(self) -> list:
         """Build one ``NVFP4Quantizer`` per slot, dispatched by tensor type.
@@ -1965,7 +1967,7 @@ class CustomRecipeState(RecipeState):
         self.num_quantizers = num_quantizers
         self.roles = roles
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         self.device = device
 
         # -- Stateful sub-state slots (initialized empty) --

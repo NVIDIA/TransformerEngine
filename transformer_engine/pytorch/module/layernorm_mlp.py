@@ -16,8 +16,8 @@ from torch.nn import init
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
+from transformer_engine.pytorch.device import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_cublasmp_all_gather_output,
@@ -37,7 +37,6 @@ from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
-    set_jit_fusion_options,
     warmup_jit_bias_gelu_all_dtypes,
 )
 from ..utils import (
@@ -45,7 +44,6 @@ from ..utils import (
     get_default_init_method,
     init_method_constant,
     cast_if_needed,
-    assert_dim_for_fp8_exec,
     clear_tensor_data,
     needs_quantized_gemm,
     get_nvtx_range_context,
@@ -535,8 +533,6 @@ def _layernorm_mlp_forward_impl(
     in_features, inp_shape = ln_weight.numel(), inp.shape
     assert inp_shape[-1] == in_features, "GEMM not possible"
     inputmat = inp
-    if fp8:
-        assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
 
     activation_func = _act_func(
         activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
@@ -1798,7 +1794,7 @@ def _layernorm_mlp_backward_impl(
         reduce_scatter_out = None
         if args.ub_overlap_rs_dgrad:
             reduce_scatter_out = torch.empty(
-                fc1_dgrad_shape, dtype=args.activation_dtype, device="cuda"
+                fc1_dgrad_shape, dtype=args.activation_dtype, device=te_device_type()
             )
         if ub_bulk_wgrad:
             gemm_out = ub_obj_fc1_wgrad.get_buffer(
@@ -1896,7 +1892,7 @@ def _layernorm_mlp_backward_impl(
             reduce_scatter_out = None
             if ub_bulk_wgrad and ub_obj_fc1_wgrad.is_fp8_ubuf():
                 reduce_scatter_out = torch.empty(
-                    fc1_dgrad_shape, dtype=args.activation_dtype, device="cuda"
+                    fc1_dgrad_shape, dtype=args.activation_dtype, device=te_device_type()
                 )
 
             # Arguments to include in wgrad GEMM closure
@@ -2222,7 +2218,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -2279,8 +2275,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
-                   Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
-                   is used.
+                   When set to ``None``, standard all-reduce is used.
     checkpoint : bool, default = False
                 whether to use selective activation checkpointing, where activations are not saved for bwd,
                 and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
@@ -2311,7 +2306,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
         zero_centered_gamma: bool = False,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         name: Optional[str] = None,
         ub_overlap_rs: bool = False,
@@ -2406,13 +2401,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.ub_bulk_dgrad = False
             self.ub_bulk_wgrad = False
 
-        if self.symmetric_ar_type is not None:
-            assert torch_version() >= (
-                2,
-                7,
-                0,
-            ), "Torch version must be at least 2.7 to use symmetric memory"
-
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
@@ -2495,12 +2483,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
-        if self.bias_gelu_nvfusion:
-            set_jit_fusion_options()
-            if seq_length and micro_batch_size:
-                warmup_jit_bias_gelu_all_dtypes(
-                    self.size_per_partition, seq_length, micro_batch_size
-                )
+        if self.bias_gelu_nvfusion and seq_length and micro_batch_size:
+            warmup_jit_bias_gelu_all_dtypes(self.size_per_partition, seq_length, micro_batch_size)
         if self.wgrad_store.delay_wgrad_compute():
             for name, param in self.named_parameters():
                 if name in ["fc1_weight", "fc2_weight", "fc1_bias", "fc2_bias"]:
@@ -3144,36 +3128,31 @@ class LayerNormMLP(TransformerEngineBaseModule):
         return [fc1_weight_quantizer, fc2_weight_quantizer]
 
     def backward_dw(self):
-        """
-        Execute the delayed weight gradient computation.
-        This method is called after the main backward pass to compute weight gradients.
-        """
+        """Execute delayed weight-gradient GEMMs and accumulate their contributions."""
         if not self.need_backward_dw():
             return
         with get_nvtx_range_context("_LayerNormMLP_wgrad"):
-            (fc2_wgrad, fc2_bias_grad_, *_), tensor_list_fc2 = self.wgrad_store.pop()
-            if self.use_bias and self.fc1_bias.grad is None:
-                (fc1_wgrad, fc1_bias_grad, *_), _ = self.wgrad_store.pop()
-            else:
-                (fc1_wgrad, *_), _ = self.wgrad_store.pop()
-                fc1_bias_grad = None
+            (fc2_wgrad, fc2_bias_grad_, *_), _ = self.wgrad_store.pop()
+            (fc1_wgrad, fc1_bias_grad, *_), _ = self.wgrad_store.pop()
             if self.use_bias:
-                if self.fc2_bias.grad is None:
-                    if (
-                        self.fp8
-                        and FP8GlobalStateManager.get_fp8_recipe().float8_block_scaling()
-                        and self.apply_bias
-                        and not self.gemm_bias_unfused_add
-                    ):
-                        act_out = tensor_list_fc2[0]
-                        # BGRAD not fused with GEMM for float8 blockwise gemm.
-                        fc2_bias_grad_ = sum_bias_grad(act_out)
-                    self.fc2_bias.grad = fc2_bias_grad_.to(self.fc2_bias.dtype)
-                if self.fc1_bias.grad is None:
-                    self.fc1_bias.grad = fc1_bias_grad.to(self.fc1_bias.dtype)
+                # Unfused bias gradients are already returned by the main backward.
+                for bias, bgrad in (
+                    (self.fc2_bias, fc2_bias_grad_),
+                    (self.fc1_bias, fc1_bias_grad),
+                ):
+                    if bgrad is not None and bgrad.numel() != 0:
+                        bgrad = bgrad.to(bias.dtype)
+                        if bias.grad is None:
+                            bias.grad = bgrad
+                        else:
+                            bias.grad.add_(bgrad)
             if not self.fuse_wgrad_accumulation:
-                self.fc2_weight.grad = fc2_wgrad.to(self.fc2_weight.dtype)
-                self.fc1_weight.grad = fc1_wgrad.to(self.fc1_weight.dtype)
+                for weight, wgrad in ((self.fc2_weight, fc2_wgrad), (self.fc1_weight, fc1_wgrad)):
+                    wgrad = wgrad.to(weight.dtype)
+                    if weight.grad is None:
+                        weight.grad = wgrad
+                    else:
+                        weight.grad.add_(wgrad)
             del fc2_bias_grad_
             del fc2_wgrad
             del fc1_wgrad

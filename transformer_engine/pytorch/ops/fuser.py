@@ -51,7 +51,7 @@ OperationFusionFunction: TypeAlias = (
     "Callable[tuple[list[FusibleOperation], ...], list[FusibleOperation]]"
 )
 _FusedOpList: TypeAlias = list[tuple[FusibleOperation, list[int]]]
-_FusionParams: TypeAlias = tuple[type, int, Optional[str]]
+_FusionParams: TypeAlias = tuple[str, int]
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -669,8 +669,7 @@ class OperationFuser:
         # paths that reuse a cached fused operation configuration.
         self.first_op_requiring_backward = first_op_requiring_backward
 
-        # Check if recipe parameters don't match cached values. In this case,
-        # the recipe state in the basic ops might be invalid, so reset it.
+        # Check for changes in recipe parameters that might have invalidated recipe state in basic ops
         recipe_type = type(recipe)
         need_to_reset_recipe_state = self.recipe_type != recipe_type
 
@@ -702,7 +701,10 @@ class OperationFuser:
         # backward boundary in the key, but pay construction cost only once for
         # each configuration. Full recompute therefore builds at most one
         # no-grad plan and one grad-enabled plan for a stable recipe.
-        fusion_params = (recipe_type, first_op_requiring_backward, backward_override)
+        fusion_params: _FusionParams = (
+            str(recipe) if recipe is not None else "",
+            first_op_requiring_backward,
+        )
         cached_ops = self._fused_ops_cache.get(fusion_params)
         if cached_ops is not None:
             self._forward_ops, self._backward_ops = cached_ops
