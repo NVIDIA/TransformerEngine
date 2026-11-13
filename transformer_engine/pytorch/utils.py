@@ -687,14 +687,14 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return tensor.to(dtype=dtype)
 
 
-def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor) -> None:
+def check_gemm_dims(inp_shape: Sequence[int], weight_shape: Sequence[int]) -> None:
     """Check contracting dimensions at trace time for ``torch.compile``.
 
     Recipe-specific alignment requirements are checked by the runtime implementation.
     """
     # pylint: disable=protected-access
     torch._check(
-        inp.shape[-1] == weight.shape[-1],
+        inp_shape[-1] == weight_shape[-1],
         lambda: "GEMM not possible: input last dim must equal in_features",
     )
 
