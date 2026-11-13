@@ -51,7 +51,6 @@ from transformer_engine.pytorch.distributed import (
     checkpoint,
     set_all_rng_states,
     CudaRNGStatesTracker,
-    graph_safe_rng_available,
 )
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.utils import SplitAlongDim
@@ -2342,9 +2341,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert isinstance(
                     self.rng_states_tracker, CudaRNGStatesTracker
                 ), "Unsupported RNG states tracker."
-                assert (
-                    graph_safe_rng_available()
-                ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
 
             # checks for FP8
             if self.fp8:
