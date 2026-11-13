@@ -18,6 +18,7 @@ import functools
 import os
 import warnings
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -29,7 +30,10 @@ import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 from .misc import TEDType, jax_dtype_to_te_dtype
 from ..sharding import global_mesh_resource, get_mesh_axis_size
-from ..version_utils import is_collective_stream_supported, is_xla_ffi_collectives_supported
+from ..version_utils import (
+    is_collective_stream_supported,
+    is_xla_ffi_collectives_supported,
+)
 
 
 def _on_collective_stream(func):
@@ -224,7 +228,9 @@ def _leading_axis_ok(spec, resource_axes=None):
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
     if ep_axis not in elts:
-        return False, ep_axis, outer_axes
+        # JAX canonicalizes size-one mesh axes out of PartitionSpec.
+        if get_ep_config().ep_size != 1:
+            return False, ep_axis, outer_axes
     allowed = set(outer_axes) | {ep_axis}
     return all(a in allowed for a in elts), ep_axis, outer_axes
 
@@ -412,7 +418,12 @@ class EpPreparePrimitive(BasePrimitive):
                 resource_axes=resource_axes,
             )
 
-        return mesh, sharded_impl, (tc_sharding, trt_sharding, hm_sharding), arg_shardings
+        return (
+            mesh,
+            sharded_impl,
+            (tc_sharding, trt_sharding, hm_sharding),
+            arg_shardings,
+        )
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -435,7 +446,14 @@ class EpDispatchPrimitive(BasePrimitive):
 
     name = "te_ep_dispatch_ffi"
     multiple_results = True
-    impl_static_args = (4, 5, 6, 7, 8, 9)  # top_k, dispatch_output_per_expert_alignment,
+    impl_static_args = (
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+    )  # top_k, dispatch_output_per_expert_alignment,
     #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer, resource_axes
     inner_primitive = None
     outer_primitive = None
@@ -457,7 +475,12 @@ class EpDispatchPrimitive(BasePrimitive):
         # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
         # False: per-shard = (1,).
         del resource_axes
-        del topk_idx_aval, topk_weights_aval, top_k, dispatch_output_per_expert_alignment
+        del (
+            topk_idx_aval,
+            topk_weights_aval,
+            top_k,
+            dispatch_output_per_expert_alignment,
+        )
         del topk_idx_dtype
         assert (
             len(tokens_aval.shape) >= 2
@@ -628,7 +651,14 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
 
     name = "te_ep_prepare_and_dispatch_ffi"
     multiple_results = True
-    impl_static_args = (3, 4, 5, 6, 7, 8)  # top_k, dispatch_output_per_expert_alignment,
+    impl_static_args = (
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+    )  # top_k, dispatch_output_per_expert_alignment,
     #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer,
     #                                     resource_axes
     inner_primitive = None
@@ -851,7 +881,14 @@ class EpCombinePrimitive(BasePrimitive):
 
     name = "te_ep_combine_ffi"
     multiple_results = False
-    impl_static_args = (2, 3, 4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
+    impl_static_args = (
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+    )  # top_k, dispatch_output_per_expert_alignment,
     #                                     topk_idx_dtype, out_leading_shape, out_partition_spec, resource_axes
     inner_primitive = None
     outer_primitive = None
@@ -1003,7 +1040,14 @@ class EpDispatchBwdPrimitive(BasePrimitive):
 
     name = "te_ep_dispatch_bwd_ffi"
     multiple_results = True
-    impl_static_args = (3, 4, 5, 6, 7, 8)  # top_k, dispatch_output_per_expert_alignment,
+    impl_static_args = (
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+    )  # top_k, dispatch_output_per_expert_alignment,
     #                                     topk_idx_dtype, out_leading_shape, out_partition_spec, resource_axes
     inner_primitive = None
     outer_primitive = None
@@ -1177,7 +1221,14 @@ class EpCombineBwdPrimitive(BasePrimitive):
 
     name = "te_ep_combine_bwd_ffi"
     multiple_results = False
-    impl_static_args = (2, 3, 4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
+    impl_static_args = (
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+    )  # top_k, dispatch_output_per_expert_alignment,
     #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer, resource_axes
     inner_primitive = None
     outer_primitive = None
@@ -1339,7 +1390,12 @@ def _ep_prepare(cfg: EpLayerConfig, topk_idx):
 
 @_on_collective_stream
 def _ep_dispatch_fwd(
-    cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig,
+    handle_mem,
+    topk_idx,
+    tokens,
+    topk_weights,
+    recv_capacity_per_rank,
 ):
     """Scatter tokens and weights to expert ranks; returns
     ``(recv_tokens, recv_topk_weights, handle_mem)``."""
@@ -1369,7 +1425,12 @@ def ep_prepare(cfg: EpLayerConfig, topk_idx):
 
 
 def ep_dispatch_fwd(
-    cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig,
+    handle_mem,
+    topk_idx,
+    tokens,
+    topk_weights,
+    recv_capacity_per_rank,
 ):
     """Deprecated: use ``ep_prepare_and_dispatch_fwd``. Planned for removal in January 2027."""
     warnings.warn(
@@ -1379,6 +1440,171 @@ def ep_dispatch_fwd(
         stacklevel=2,
     )
     return _ep_dispatch_fwd(cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
+
+
+class _EpLocalPermuteHandle(NamedTuple):
+    """JAX-array state carried between the EP=1 dispatch/combine calls."""
+
+    sorted_indices: jax.Array
+    selected_experts: jax.Array
+    padded_positions: jax.Array
+
+
+def _ep1_local_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
+    """Dispatch independently within every outer DP/FSDP shard for EP=1."""
+    # Import lazily: permutation.py depends on cpp_extensions and importing it
+    # at module initialization would create a cycle.
+    from ..permutation import pure_jax_token_dispatch
+
+    ep_cfg = get_ep_config()
+    num_groups = ep_cfg.num_ep_groups
+    hidden_size = tokens.shape[-1]
+    grouped_tokens = tokens.reshape(num_groups, -1, hidden_size)
+    grouped_experts = topk_idx.reshape(num_groups, -1, cfg.top_k)
+    grouped_weights = topk_weights.reshape(num_groups, -1, cfg.top_k)
+
+    def dispatch_one(local_tokens, local_experts, local_weights):
+        permuted, state, group_sizes = pure_jax_token_dispatch(
+            local_tokens,
+            local_experts,
+            num_experts=ep_cfg.num_experts,
+            num_experts_per_tok=cfg.top_k,
+            align_size=0,
+        )
+        alignment = max(cfg.dispatch_output_per_expert_alignment, 1)
+        aligned_group_sizes = ((group_sizes + alignment - 1) // alignment) * alignment
+        source_offsets = jnp.concatenate(
+            [jnp.zeros((1,), dtype=group_sizes.dtype), jnp.cumsum(group_sizes)[:-1]]
+        )
+        target_offsets = jnp.concatenate(
+            [
+                jnp.zeros((1,), dtype=aligned_group_sizes.dtype),
+                jnp.cumsum(aligned_group_sizes)[:-1],
+            ]
+        )
+        flat_experts = local_experts.reshape(-1)
+        sorted_experts = flat_experts[state.sorted_indices]
+        padded_positions = (
+            target_offsets[sorted_experts]
+            + jnp.arange(state.num_real_tokens, dtype=target_offsets.dtype)
+            - source_offsets[sorted_experts]
+        )
+        recv_tokens = (
+            jnp.zeros(
+                (recv_capacity_per_rank, local_tokens.shape[-1]),
+                dtype=local_tokens.dtype,
+            )
+            .at[padded_positions]
+            .set(permuted)
+        )
+        permuted_weights = local_weights.reshape(-1)[state.sorted_indices]
+        recv_weights = (
+            jnp.zeros((recv_capacity_per_rank,), dtype=local_weights.dtype)
+            .at[padded_positions]
+            .set(permuted_weights)
+        )
+        return (
+            recv_tokens,
+            recv_weights,
+            aligned_group_sizes,
+            state.sorted_indices,
+            padded_positions,
+        )
+
+    recv_tokens, recv_weights, token_counts, sorted_indices, padded_positions = jax.vmap(
+        dispatch_one
+    )(grouped_tokens, grouped_experts, grouped_weights)
+    total_recv_tokens = jnp.full(
+        (num_groups, 1), grouped_experts.shape[1] * cfg.top_k, dtype=jnp.int32
+    )
+    handle = _EpLocalPermuteHandle(sorted_indices, grouped_experts, padded_positions)
+    return recv_tokens, recv_weights, token_counts, total_recv_tokens, handle
+
+
+def _ep1_local_combine(cfg, handle, expert_out, num_local_tokens):
+    """Undo an EP=1 local dispatch and sum the already-weighted top-k rows."""
+    from ..permutation import PureJaxPermState, pure_jax_token_combine
+
+    num_groups = get_ep_config().num_ep_groups
+    output_leading = _normalize_leading_shape(num_local_tokens)
+    local_tokens = int(np.prod(output_leading)) // num_groups
+    num_real_tokens = local_tokens * cfg.top_k
+    grouped_output = expert_out.reshape(num_groups, expert_out.shape[-2], expert_out.shape[-1])
+    weights = jnp.ones((local_tokens, cfg.top_k), dtype=expert_out.dtype)
+
+    def combine_one(local_output, sorted_indices, padded_positions):
+        state = PureJaxPermState(sorted_indices, num_real_tokens, 0)
+        return pure_jax_token_combine(
+            local_output[padded_positions],
+            state,
+            weights,
+            num_experts_per_tok=cfg.top_k,
+            batch_size=local_tokens,
+            sequence_length=1,
+        ).reshape(local_tokens, expert_out.shape[-1])
+
+    output = jax.vmap(combine_one)(grouped_output, handle.sorted_indices, handle.padded_positions)
+    return output.reshape(*output_leading, expert_out.shape[-1])
+
+
+def _ep1_local_combine_bwd(cfg, handle, grad, recv_capacity_per_rank):
+    """The combine transpose is the same local permutation as dispatch."""
+    from ..permutation import pure_jax_token_dispatch
+
+    num_groups = get_ep_config().num_ep_groups
+    grouped_grad = grad.reshape(num_groups, -1, grad.shape[-1])
+
+    def dispatch_one(local_grad, local_experts):
+        permuted, _state, _group_sizes = pure_jax_token_dispatch(
+            local_grad,
+            local_experts,
+            num_experts=get_ep_config().num_experts,
+            num_experts_per_tok=cfg.top_k,
+            align_size=0,
+        )
+        return permuted
+
+    compact = jax.vmap(dispatch_one)(grouped_grad, handle.selected_experts)
+    output = jnp.zeros((num_groups, recv_capacity_per_rank, grad.shape[-1]), dtype=grad.dtype)
+    return output.at[jnp.arange(num_groups)[:, None], handle.padded_positions].set(compact)
+
+
+def _ep1_local_dispatch_bwd(cfg, handle, grad, grad_weights, num_local_tokens):
+    """Undo the two local dispatch permutations."""
+    from ..permutation import PureJaxPermState, pure_jax_token_combine
+
+    num_groups = get_ep_config().num_ep_groups
+    output_leading = _normalize_leading_shape(num_local_tokens)
+    local_tokens = int(np.prod(output_leading)) // num_groups
+    num_real_tokens = local_tokens * cfg.top_k
+    grouped_grad = grad.reshape(num_groups, grad.shape[-2], grad.shape[-1])
+    grouped_weight_grad = grad_weights.reshape(num_groups, grad_weights.shape[-1])
+    weights = jnp.ones((local_tokens, cfg.top_k), dtype=grad.dtype)
+
+    def combine_one(local_grad, local_weight_grad, sorted_indices, padded_positions):
+        state = PureJaxPermState(sorted_indices, num_real_tokens, 0)
+        grad_tokens = pure_jax_token_combine(
+            local_grad[padded_positions],
+            state,
+            weights,
+            num_experts_per_tok=cfg.top_k,
+            batch_size=local_tokens,
+            sequence_length=1,
+        ).reshape(local_tokens, grad.shape[-1])
+        inverse = jnp.argsort(sorted_indices)
+        grad_topk = local_weight_grad[padded_positions][inverse]
+        return grad_tokens, grad_topk.reshape(local_tokens, cfg.top_k)
+
+    grad_tokens, grad_topk = jax.vmap(combine_one)(
+        grouped_grad,
+        grouped_weight_grad,
+        handle.sorted_indices,
+        handle.padded_positions,
+    )
+    return (
+        grad_tokens.reshape(*output_leading, grad.shape[-1]),
+        grad_topk.reshape(*output_leading, cfg.top_k),
+    )
 
 
 _fused_prepare_dispatch = None
@@ -1401,7 +1627,8 @@ def _ep_fused_prepare_and_dispatch_fwd(
     cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
 ):
     """Fused prepare + dispatch; returns
-    ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``."""
+    ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``.
+    """
     return EpPrepareAndDispatchPrimitive.outer_primitive.bind(
         topk_idx,
         tokens,
@@ -1423,6 +1650,8 @@ def ep_prepare_and_dispatch_fwd(
 
     Fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH.
     """
+    if get_ep_config().ep_size == 1:
+        return _ep1_local_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
     if _fused_prepare_dispatch_enabled():
         return _ep_fused_prepare_and_dispatch_fwd(
             cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
@@ -1434,11 +1663,27 @@ def ep_prepare_and_dispatch_fwd(
     return recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem
 
 
-@_on_collective_stream
 def ep_combine_fwd(
-    cfg: EpLayerConfig, handle_mem, expert_out, num_local_tokens, out_partition_spec=None
+    cfg: EpLayerConfig,
+    handle_mem,
+    expert_out,
+    num_local_tokens,
+    out_partition_spec=None,
 ):
     """Gather expert outputs back to home ranks. expert_out is pre-weighted."""
+    if get_ep_config().ep_size == 1:
+        return _ep1_local_combine(cfg, handle_mem, expert_out, num_local_tokens)
+    return _ep_combine_fwd_nccl(cfg, handle_mem, expert_out, num_local_tokens, out_partition_spec)
+
+
+@_on_collective_stream
+def _ep_combine_fwd_nccl(
+    cfg: EpLayerConfig,
+    handle_mem,
+    expert_out,
+    num_local_tokens,
+    out_partition_spec=None,
+):
     out_leading = _normalize_leading_shape(num_local_tokens)
     return EpCombinePrimitive.outer_primitive.bind(
         handle_mem,
@@ -1452,7 +1697,6 @@ def ep_combine_fwd(
     )
 
 
-@_on_collective_stream
 def ep_dispatch_bwd(
     cfg: EpLayerConfig,
     handle_mem,
@@ -1462,6 +1706,27 @@ def ep_dispatch_bwd(
     out_partition_spec=None,
 ):
     """Backward of dispatch; returns (grad_tokens, grad_topk_weights)."""
+    if get_ep_config().ep_size == 1:
+        return _ep1_local_dispatch_bwd(cfg, handle_mem, grad, g_recv_topk_weights, num_local_tokens)
+    return _ep_dispatch_bwd_nccl(
+        cfg,
+        handle_mem,
+        grad,
+        g_recv_topk_weights,
+        num_local_tokens,
+        out_partition_spec,
+    )
+
+
+@_on_collective_stream
+def _ep_dispatch_bwd_nccl(
+    cfg,
+    handle_mem,
+    grad,
+    g_recv_topk_weights,
+    num_local_tokens,
+    out_partition_spec=None,
+):
     out_leading = _normalize_leading_shape(num_local_tokens)
     return EpDispatchBwdPrimitive.outer_primitive.bind(
         handle_mem,
@@ -1476,9 +1741,15 @@ def ep_dispatch_bwd(
     )
 
 
-@_on_collective_stream
 def ep_combine_bwd(cfg: EpLayerConfig, handle_mem, grad, recv_capacity_per_rank):
     """Backward of combine; returns grad_expert_out [num_procs, recv_capacity_per_rank, H]."""
+    if get_ep_config().ep_size == 1:
+        return _ep1_local_combine_bwd(cfg, handle_mem, grad, recv_capacity_per_rank)
+    return _ep_combine_bwd_nccl(cfg, handle_mem, grad, recv_capacity_per_rank)
+
+
+@_on_collective_stream
+def _ep_combine_bwd_nccl(cfg, handle_mem, grad, recv_capacity_per_rank):
     return EpCombineBwdPrimitive.outer_primitive.bind(
         handle_mem,
         grad,
