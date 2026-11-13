@@ -28,6 +28,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 from .misc import TEDType, jax_dtype_to_te_dtype
+from ..quantize.tensor import ScaledTensor1x, ScaledTensorFactory
 from ..sharding import global_mesh_resource, get_mesh_axis_size
 from ..version_utils import is_collective_stream_supported, is_xla_ffi_collectives_supported
 
@@ -199,6 +200,39 @@ def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
             int(cfg.top_k), int(cfg.dispatch_output_per_expert_alignment)
         )
     )
+
+
+_MXFP8_BLOCK = 32
+
+
+def _is_mxfp8_tokens(tokens_aval):
+    """True when dispatch tokens are MXFP8 data (E4M3 payload with E8M0 scales)."""
+    return dtypes.canonicalize_dtype(tokens_aval.dtype) == jnp.float8_e4m3fn
+
+
+def _recv_scale_aval(tokens_aval, leading, recv_pr):
+    """Aval of the dispatched compact scales; zero columns when tokens are not MXFP8."""
+    cols = tokens_aval.shape[-1] // _MXFP8_BLOCK if _is_mxfp8_tokens(tokens_aval) else 0
+    return jax.core.ShapedArray(leading + (recv_pr, cols), jnp.float8_e8m0fnu)
+
+
+def _check_token_scale_aval(tokens_aval, scale_aval):
+    """Validate the send-side scale operand against the tokens operand."""
+    if _is_mxfp8_tokens(tokens_aval):
+        expected = tokens_aval.shape[:-1] + (tokens_aval.shape[-1] // _MXFP8_BLOCK,)
+        assert tokens_aval.shape[-1] % _MXFP8_BLOCK == 0, (
+            f"MXFP8 dispatch requires hidden dim divisible by {_MXFP8_BLOCK},"
+            f" got {tokens_aval.shape}"
+        )
+        assert scale_aval.dtype == jnp.float8_e8m0fnu and scale_aval.shape == expected, (
+            f"tokens_scale_inv must be float8_e8m0fnu {expected}, got"
+            f" {scale_aval.dtype} {scale_aval.shape}"
+        )
+
+
+def empty_token_scale(tokens):
+    """Placeholder ``tokens_scale_inv`` for non-MXFP8 dispatch."""
+    return jnp.zeros(tokens.shape[:-1] + (0,), jnp.float8_e8m0fnu)
 
 
 def _capture_ep_resource_axes():
@@ -435,7 +469,7 @@ class EpDispatchPrimitive(BasePrimitive):
 
     name = "te_ep_dispatch_ffi"
     multiple_results = True
-    impl_static_args = (4, 5, 6, 7, 8, 9)  # top_k, dispatch_output_per_expert_alignment,
+    impl_static_args = (5, 6, 7, 8, 9, 10)  # top_k, dispatch_output_per_expert_alignment,
     #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer, resource_axes
     inner_primitive = None
     outer_primitive = None
@@ -445,6 +479,7 @@ class EpDispatchPrimitive(BasePrimitive):
         handle_mem_aval,
         topk_idx_aval,
         tokens_aval,
+        tokens_scale_inv_aval,
         topk_weights_aval,
         *,
         top_k,
@@ -462,13 +497,15 @@ class EpDispatchPrimitive(BasePrimitive):
         assert (
             len(tokens_aval.shape) >= 2
         ), f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
+        _check_token_scale_aval(tokens_aval, tokens_scale_inv_aval)
         recv_pr = recv_capacity_per_rank
         tok_dtype = dtypes.canonicalize_dtype(tokens_aval.dtype)
         hidden_dim = tokens_aval.shape[-1]
         leading = _ep_leading_dims(is_outer)
         recv_tokens_aval = jax.core.ShapedArray(leading + (recv_pr, hidden_dim), tok_dtype)
+        recv_scale_inv_aval = _recv_scale_aval(tokens_aval, leading, recv_pr)
         recv_topk_weights_aval = jax.core.ShapedArray(leading + (recv_pr,), jnp.float32)
-        return (recv_tokens_aval, recv_topk_weights_aval, handle_mem_aval)
+        return (recv_tokens_aval, recv_scale_inv_aval, recv_topk_weights_aval, handle_mem_aval)
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
@@ -481,6 +518,7 @@ class EpDispatchPrimitive(BasePrimitive):
         handle_mem,
         topk_idx,
         tokens,
+        tokens_scale_inv,
         topk_weights,
         *,
         top_k,
@@ -494,12 +532,13 @@ class EpDispatchPrimitive(BasePrimitive):
         del recv_capacity_per_rank, is_outer
         return ffi.ffi_lowering(
             EpDispatchPrimitive.name,
-            operand_output_aliases={0: 2},  # handle_mem aliased to out_handle_mem
+            operand_output_aliases={0: 3},  # handle_mem aliased to out_handle_mem
         )(
             ctx,
             handle_mem,
             topk_idx,
             tokens,
+            tokens_scale_inv,
             topk_weights,
             top_k=int(top_k),
             dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
@@ -511,6 +550,7 @@ class EpDispatchPrimitive(BasePrimitive):
         handle_mem,
         topk_idx,
         tokens,
+        tokens_scale_inv,
         topk_weights,
         top_k,
         dispatch_output_per_expert_alignment,
@@ -520,10 +560,16 @@ class EpDispatchPrimitive(BasePrimitive):
         resource_axes,
     ):
         assert EpDispatchPrimitive.inner_primitive is not None
-        recv_tokens, recv_topk_weights, handle_mem_out = EpDispatchPrimitive.inner_primitive.bind(
+        (
+            recv_tokens,
+            recv_scale_inv,
+            recv_topk_weights,
+            handle_mem_out,
+        ) = EpDispatchPrimitive.inner_primitive.bind(
             handle_mem,
             topk_idx,
             tokens,
+            tokens_scale_inv,
             topk_weights,
             top_k=top_k,
             dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
@@ -532,7 +578,7 @@ class EpDispatchPrimitive(BasePrimitive):
             is_outer=is_outer,
             resource_axes=resource_axes,
         )
-        return recv_tokens, recv_topk_weights, handle_mem_out
+        return recv_tokens, recv_scale_inv, recv_topk_weights, handle_mem_out
 
     @staticmethod
     def batcher(
@@ -570,7 +616,7 @@ class EpDispatchPrimitive(BasePrimitive):
                 f" hidden dim replicated; got spec={tokens_spec}."
             )
         idx_spec = arg_infos[1].sharding.spec
-        tw_spec = arg_infos[3].sharding.spec
+        tw_spec = arg_infos[4].sharding.spec
         if idx_spec[0] != tokens_spec[0] or tw_spec[0] != tokens_spec[0]:
             raise NotImplementedError(
                 "EpDispatch: topk_idx, tokens, topk_weights must share the leading"
@@ -578,18 +624,22 @@ class EpDispatchPrimitive(BasePrimitive):
             )
         # Recv outputs share the tokens leading-only spec (trailing dims auto-pad to None).
         leading_spec = PartitionSpec(tokens_spec[0])
-        arg_shardings = tuple(a.sharding for a in arg_infos)
+        arg_shardings = list(a.sharding for a in arg_infos)
+        arg_shardings[3] = NamedSharding(mesh, leading_spec)  # tokens_scale_inv follows tokens
+        arg_shardings = tuple(arg_shardings)
         out_shardings = (
+            NamedSharding(mesh, leading_spec),
             NamedSharding(mesh, leading_spec),
             NamedSharding(mesh, leading_spec),
             arg_infos[0].sharding,  # out_handle_mem: same sharding as input handle_mem
         )
 
-        def sharded_impl(handle_mem, topk_idx, tokens, topk_weights):
+        def sharded_impl(handle_mem, topk_idx, tokens, tokens_scale_inv, topk_weights):
             return EpDispatchPrimitive.impl(
                 handle_mem,
                 topk_idx,
                 tokens,
+                tokens_scale_inv,
                 topk_weights,
                 top_k,
                 dispatch_output_per_expert_alignment,
@@ -607,14 +657,18 @@ class EpDispatchPrimitive(BasePrimitive):
         # for this primitive are (top_k, dispatch_alignment, topk_idx_dtype,
         # recv_capacity_per_rank, is_outer).
         value_types = args[-2]
-        # Inputs: handle_mem, topk_idx, tokens, topk_weights.
+        # Inputs: handle_mem, topk_idx, tokens, tokens_scale_inv, topk_weights.
         idx_rank = len(value_types[1].shape)
         tok_rank = len(value_types[2].shape)
-        tw_rank = len(value_types[3].shape)
+        tw_rank = len(value_types[4].shape)
         idx_axes = " ".join(f"I{i}" for i in range(idx_rank - 1)) + " topk_in"
         tok_axes = " ".join(f"T{i}" for i in range(tok_rank - 1)) + " H"
+        sc_axes = " ".join(f"T{i}" for i in range(tok_rank - 1)) + " Hs"
         tw_axes = " ".join(f"W{i}" for i in range(tw_rank - 1)) + " topk"
-        return f"EPL hm, {idx_axes}, {tok_axes}, {tw_axes} -> EPL recv_pr H, EPL recv_pr, EPL hm"
+        return (
+            f"EPL hm, {idx_axes}, {tok_axes}, {sc_axes}, {tw_axes} -> EPL recv_pr H, EPL recv_pr"
+            " Hs, EPL recv_pr, EPL hm"
+        )
 
 
 register_primitive(EpDispatchPrimitive)
@@ -628,7 +682,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
 
     name = "te_ep_prepare_and_dispatch_ffi"
     multiple_results = True
-    impl_static_args = (3, 4, 5, 6, 7, 8)  # top_k, dispatch_output_per_expert_alignment,
+    impl_static_args = (4, 5, 6, 7, 8, 9)  # top_k, dispatch_output_per_expert_alignment,
     #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer,
     #                                     resource_axes
     inner_primitive = None
@@ -638,6 +692,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
     def abstract(
         topk_idx_aval,
         tokens_aval,
+        tokens_scale_inv_aval,
         topk_weights_aval,
         *,
         top_k,
@@ -652,6 +707,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         assert (
             len(tokens_aval.shape) >= 2
         ), f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
+        _check_token_scale_aval(tokens_aval, tokens_scale_inv_aval)
         cfg = get_ep_config()
         handle_mem_size = int(
             transformer_engine_jax.ep_handle_mem_size(
@@ -663,6 +719,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         recv_tokens_aval = jax.core.ShapedArray(
             leading + (recv_capacity_per_rank, tokens_aval.shape[-1]), tok_dtype
         )
+        recv_scale_inv_aval = _recv_scale_aval(tokens_aval, leading, recv_capacity_per_rank)
         recv_topk_weights_aval = jax.core.ShapedArray(
             leading + (recv_capacity_per_rank,), jnp.float32
         )
@@ -671,6 +728,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         handle_mem_aval = jax.core.ShapedArray(leading + (handle_mem_size,), jnp.uint8)
         return (
             recv_tokens_aval,
+            recv_scale_inv_aval,
             recv_topk_weights_aval,
             token_counts_aval,
             total_recv_tokens_aval,
@@ -689,6 +747,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         ctx,
         topk_idx,
         tokens,
+        tokens_scale_inv,
         topk_weights,
         *,
         top_k,
@@ -704,6 +763,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
             ctx,
             topk_idx,
             tokens,
+            tokens_scale_inv,
             topk_weights,
             top_k=int(top_k),
             dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
@@ -714,6 +774,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
     def impl(
         topk_idx,
         tokens,
+        tokens_scale_inv,
         topk_weights,
         top_k,
         dispatch_output_per_expert_alignment,
@@ -727,6 +788,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
             EpPrepareAndDispatchPrimitive.inner_primitive.bind(
                 topk_idx,
                 tokens,
+                tokens_scale_inv,
                 topk_weights,
                 top_k=top_k,
                 dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
@@ -773,20 +835,23 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
                 f" hidden dim replicated; got spec={tokens_spec}."
             )
         idx_spec = arg_infos[0].sharding.spec
-        tw_spec = arg_infos[2].sharding.spec
+        tw_spec = arg_infos[3].sharding.spec
         if idx_spec[0] != tokens_spec[0] or tw_spec[0] != tokens_spec[0]:
             raise NotImplementedError(
                 "EpPrepareAndDispatch: topk_idx, tokens, topk_weights must share the leading"
                 f" axis; got topk_idx={idx_spec}, tokens={tokens_spec}, topk_weights={tw_spec}."
             )
         leading_sharding = NamedSharding(mesh, PartitionSpec(tokens_spec[0]))
-        arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_shardings = (leading_sharding,) * 5
+        arg_shardings = list(a.sharding for a in arg_infos)
+        arg_shardings[2] = leading_sharding  # tokens_scale_inv follows tokens
+        arg_shardings = tuple(arg_shardings)
+        out_shardings = (leading_sharding,) * 6
 
-        def sharded_impl(topk_idx, tokens, topk_weights):
+        def sharded_impl(topk_idx, tokens, tokens_scale_inv, topk_weights):
             return EpPrepareAndDispatchPrimitive.impl(
                 topk_idx,
                 tokens,
+                tokens_scale_inv,
                 topk_weights,
                 top_k,
                 dispatch_output_per_expert_alignment,
@@ -805,13 +870,14 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         value_types = args[-2]
         idx_rank = len(value_types[0].shape)
         tok_rank = len(value_types[1].shape)
-        tw_rank = len(value_types[2].shape)
+        tw_rank = len(value_types[3].shape)
         idx_axes = " ".join(f"I{i}" for i in range(idx_rank - 1)) + " topk_in"
         tok_axes = " ".join(f"T{i}" for i in range(tok_rank - 1)) + " H"
+        sc_axes = " ".join(f"T{i}" for i in range(tok_rank - 1)) + " Hs"
         tw_axes = " ".join(f"W{i}" for i in range(tw_rank - 1)) + " topk"
         return (
-            f"{idx_axes}, {tok_axes}, {tw_axes} -> EPL recv_pr H, EPL recv_pr, EPL nle, EPL trt,"
-            " EPL hm"
+            f"{idx_axes}, {tok_axes}, {sc_axes}, {tw_axes} -> EPL recv_pr H, EPL recv_pr Hs,"
+            " EPL recv_pr, EPL nle, EPL trt, EPL hm"
         )
 
 
@@ -1339,14 +1405,21 @@ def _ep_prepare(cfg: EpLayerConfig, topk_idx):
 
 @_on_collective_stream
 def _ep_dispatch_fwd(
-    cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig,
+    handle_mem,
+    topk_idx,
+    tokens,
+    tokens_scale_inv,
+    topk_weights,
+    recv_capacity_per_rank,
 ):
     """Scatter tokens and weights to expert ranks; returns
-    ``(recv_tokens, recv_topk_weights, handle_mem)``."""
+    ``(recv_tokens, recv_scale_inv, recv_topk_weights, handle_mem)``."""
     return EpDispatchPrimitive.outer_primitive.bind(
         handle_mem,
         topk_idx,
         tokens,
+        tokens_scale_inv,
         topk_weights,
         top_k=int(cfg.top_k),
         dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
@@ -1378,7 +1451,16 @@ def ep_dispatch_fwd(
         DeprecationWarning,
         stacklevel=2,
     )
-    return _ep_dispatch_fwd(cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
+    recv_tokens, _, recv_topk_weights, handle_mem = _ep_dispatch_fwd(
+        cfg,
+        handle_mem,
+        topk_idx,
+        tokens,
+        empty_token_scale(tokens),
+        topk_weights,
+        recv_capacity_per_rank,
+    )
+    return recv_tokens, recv_topk_weights, handle_mem
 
 
 _fused_prepare_dispatch = None
@@ -1398,13 +1480,15 @@ def _fused_prepare_dispatch_enabled():
 
 @_on_collective_stream
 def _ep_fused_prepare_and_dispatch_fwd(
-    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig, topk_idx, tokens, tokens_scale_inv, topk_weights, recv_capacity_per_rank
 ):
     """Fused prepare + dispatch; returns
-    ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``."""
+    ``(recv_tokens, recv_scale_inv, recv_topk_weights, token_counts, total_recv_tokens,
+    handle_mem)``."""
     return EpPrepareAndDispatchPrimitive.outer_primitive.bind(
         topk_idx,
         tokens,
+        tokens_scale_inv,
         topk_weights,
         top_k=int(cfg.top_k),
         dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
@@ -1416,22 +1500,72 @@ def _ep_fused_prepare_and_dispatch_fwd(
 
 
 def ep_prepare_and_dispatch_fwd(
-    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig,
+    topk_idx,
+    tokens,
+    topk_weights,
+    recv_capacity_per_rank,
 ):
     """Prepare + dispatch; returns
     ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``.
+
+    ``tokens`` is a high-precision array or a rowwise MXFP8 ``ScaledTensor1x`` with compact
+    (unswizzled) scales; ``recv_tokens`` has the same kind as ``tokens``.
+
+    Fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH.
+    """
+    tokens_in = tokens
+    if isinstance(tokens, ScaledTensor1x):
+        tokens, tokens_scale_inv = tokens.data, tokens.scale_inv
+    else:
+        tokens_scale_inv = empty_token_scale(tokens)
+    outputs = _ep_prepare_and_dispatch_fwd(
+        cfg, topk_idx, tokens, tokens_scale_inv, topk_weights, recv_capacity_per_rank
+    )
+    recv_tokens, recv_scale_inv, *rest = outputs
+    if isinstance(tokens_in, ScaledTensor1x):
+        recv_tokens = ScaledTensorFactory.create_1x(
+            recv_tokens,
+            recv_scale_inv,
+            scaling_mode=tokens_in.scaling_mode,
+            dq_dtype=tokens_in.dq_dtype,
+            data_layout=tokens_in.data_layout,
+            flatten_axis=tokens_in.flatten_axis,
+        )
+    return (recv_tokens, *rest)
+
+
+def _ep_prepare_and_dispatch_fwd(
+    cfg: EpLayerConfig, topk_idx, tokens, tokens_scale_inv, topk_weights, recv_capacity_per_rank
+):
+    """Prepare + dispatch on raw arrays; returns
+    ``(recv_tokens, recv_scale_inv, recv_topk_weights, token_counts, total_recv_tokens,
+    handle_mem)``.
 
     Fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH.
     """
     if _fused_prepare_dispatch_enabled():
         return _ep_fused_prepare_and_dispatch_fwd(
-            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+            cfg, topk_idx, tokens, tokens_scale_inv, topk_weights, recv_capacity_per_rank
         )
     token_counts, total_recv_tokens, handle_mem = _ep_prepare(cfg, topk_idx)
-    recv_tokens, recv_topk_weights, handle_mem = _ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    recv_tokens, recv_scale_inv, recv_topk_weights, handle_mem = _ep_dispatch_fwd(
+        cfg,
+        handle_mem,
+        topk_idx,
+        tokens,
+        tokens_scale_inv,
+        topk_weights,
+        recv_capacity_per_rank,
     )
-    return recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem
+    return (
+        recv_tokens,
+        recv_scale_inv,
+        recv_topk_weights,
+        token_counts,
+        total_recv_tokens,
+        handle_mem,
+    )
 
 
 @_on_collective_stream
