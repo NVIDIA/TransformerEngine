@@ -238,6 +238,7 @@ def gated_quantize_colwise_only(
     FP8_DTYPE: cutlass.Constexpr[type],
     MAX_NORM_RCP: cutlass.Constexpr[float],
     SWIZZLE: cutlass.Constexpr[bool],
+    SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     THREADS_PER_MXFP8_BLOCK: cutlass.Constexpr[int],
 ):
@@ -324,19 +325,20 @@ def gated_quantize_colwise_only(
             block_amax = cute.arch.fmax(block_amax, sAmax[o, t, tx])
 
         biased_exp = cvt_f32_to_fp8e8m0fnu(block_amax * MAX_NORM_RCP)
+        scale_coord = (0, tx % 32, tx // 32) if cutlass.const_expr(SWIZZLE) else (0, tx)
         if ty == 0:
-            if tile_row_start < M and tile_col_start + tx < N:
-                if cutlass.const_expr(SWIZZLE):
-                    mS_col_stages[o][(0, tx % 32, tx // 32)] = biased_exp
-                else:
-                    mS_col_stages[o][(0, tx)] = biased_exp
+            if cutlass.const_expr(SKIP_SCALE_BOUNDS):
+                mS_col_stages[o][scale_coord] = biased_exp
+            else:
+                if tile_row_start < M and tile_col_start + tx < N:
+                    mS_col_stages[o][scale_coord] = biased_exp
         inv_scale = exp2f_rcp(biased_exp)
         sO_frag = cute.composition(sO_col_tiles[o], tv_layout)[tidx, None]
         for j in cutlass.range_constexpr(FRAG_SIZE // 2):
             lo, hi = 2 * j, 2 * j + 1
             pair = cvt_x2(vals[o][hi] * inv_scale, vals[o][lo] * inv_scale)
-            sO_fp8[lo] = Uint8(pair & Uint16(0xFF)).bitcast(FP8_DTYPE)
-            sO_fp8[hi] = Uint8(pair >> Uint16(8)).bitcast(FP8_DTYPE)
+            sO_frag[lo] = Uint8(pair & Uint16(0xFF)).bitcast(FP8_DTYPE)
+            sO_frag[hi] = Uint8(pair >> Uint16(8)).bitcast(FP8_DTYPE)
 
 
 @cute.jit
@@ -360,6 +362,7 @@ def gated_quantize_rowwise_only(
     DTYPE: cutlass.Constexpr[type],
     FP8_DTYPE: cutlass.Constexpr[type],
     MAX_NORM_RCP: cutlass.Constexpr[float],
+    SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int], # 64
     TILE_Y: cutlass.Constexpr[int], # 32
 ):
@@ -441,8 +444,11 @@ def gated_quantize_rowwise_only(
     for o in cutlass.range_constexpr(NUM_OUT):
         biased_exp = cvt_f32_to_fp8e8m0fnu(amax[o] * MAX_NORM_RCP)
         # Write the scale to the SMEM stage for this tile, if it is in bounds
-        if tile_row_start + ty < M and tile_col_start + tx * MXFP8_BLOCK_SCALING_SIZE < N:
+        if cutlass.const_expr(SKIP_SCALE_BOUNDS):
             mS_row_stages[o][(ty, tx)] = biased_exp
+        else:
+            if tile_row_start + ty < M and tile_col_start + tx * MXFP8_BLOCK_SCALING_SIZE < N:
+                mS_row_stages[o][(ty, tx)] = biased_exp
         inv_scale = exp2f_rcp(biased_exp)
         scale_2x = pack_f32x2(inv_scale, inv_scale)
         sO_u32 = cute.make_tensor(
@@ -475,6 +481,7 @@ def quantize_mxfp8_smem_tile_general_partial(
     DTYPE: cutlass.Constexpr[type],
     FP8_DTYPE: cutlass.Constexpr[type],
     WITH_GEMM_SWIZZLED_SCALES: cutlass.Constexpr[bool],
+    SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],
 ):
@@ -505,7 +512,7 @@ def quantize_mxfp8_smem_tile_general_partial(
         TILE_Y=TILE_Y,
         # The gated op maps the zeros TMA fills out-of-bounds elements with to zero.
         SKIP_INPUT_MASKING=True,
-        SKIP_SCALE_BOUNDS=False,
+        SKIP_SCALE_BOUNDS=SKIP_SCALE_BOUNDS,
         CACHE_ACTIVATION=False,
         DBIAS_REDUCTION_IN_COLWISE=False,
         COLWISE_DBIAS_REDUCTION_ONLY=False,
@@ -567,8 +574,8 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
     (and y_grad in BWD) each stage and storing one (forward) or two (backward) quantized halves.
     """
 
-    def __init__(self, cfg: MXFP8GatedQuantizeConfig):
-        super().__init__(cfg)
+    def __init__(self, cfg: MXFP8GatedQuantizeConfig, SKIP_SCALE_BOUNDS: bool = False):
+        super().__init__(cfg, SKIP_SCALE_BOUNDS=SKIP_SCALE_BOUNDS)
         # Same occupancy hint as the general kernel with a fused activation
         self._MIN_BLOCKS_PER_MP = 1
         self.COLWISE_ONLY = cfg.COLWISE and not cfg.ROWWISE
@@ -1043,6 +1050,7 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                     FP8_DTYPE=cfg.FP8_DTYPE,
                     MAX_NORM_RCP=cfg.MAX_NORM_RCP,
                     SWIZZLE=cfg.WITH_GEMM_SWIZZLED_SCALES,
+                    SKIP_SCALE_BOUNDS=self.SKIP_SCALE_BOUNDS,
                     TILE_X=TILE_COLS,
                     THREADS_PER_MXFP8_BLOCK=self.THREADS_PER_MXFP8_BLOCK,
                 )
@@ -1075,6 +1083,7 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                     DTYPE=DTYPE,
                     FP8_DTYPE=cfg.FP8_DTYPE,
                     MAX_NORM_RCP=cfg.MAX_NORM_RCP,
+                    SKIP_SCALE_BOUNDS=self.SKIP_SCALE_BOUNDS,
                     TILE_X=TILE_COLS,
                     TILE_Y=TILE_ROWS,
                 )
@@ -1134,6 +1143,7 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                         DTYPE=DTYPE,
                         FP8_DTYPE=cfg.FP8_DTYPE,
                         WITH_GEMM_SWIZZLED_SCALES=cfg.WITH_GEMM_SWIZZLED_SCALES,
+                        SKIP_SCALE_BOUNDS=self.SKIP_SCALE_BOUNDS,
                         TILE_X=TILE_COLS,
                         TILE_Y=TILE_ROWS,
                     )
@@ -1173,3 +1183,65 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
 
         # Only wait until the in-flight TMA stores have read SMEM, so the CTA retires early
         cute.arch.cp_async_bulk_wait_group(0, read=True)
+
+
+class MXFP8GatedQuantizeEntry:
+    """Dispatch to the gated kernel variant without scale bounds checks when the shape tiles
+    exactly, and to the bounds-checked one otherwise."""
+
+    def __init__(self, cfg: MXFP8GatedQuantizeConfig):
+        self.kernel = MXFP8GatedQuantizeG2SKernel(cfg)
+        self.kernel_skip_scale_bounds = MXFP8GatedQuantizeG2SKernel(cfg, SKIP_SCALE_BOUNDS=True)
+
+    @cute.jit
+    def __call__(
+        self,
+        mGatedInput: cute.Tensor,
+        mYGrad: Optional[cute.Tensor],
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        limit: Optional[Float32],
+        alpha: Optional[Float32],
+        glu_linear_offset: Optional[Float32],
+        beta1: Optional[Float32],
+        beta2: Optional[Float32],
+        stream: CUstream,
+    ):
+        """Dispatch to the appropriate kernel based on the shape divisibility to skip unnecessary scale bounds checks."""
+        M = mGatedInput.shape[0]
+        N = mGatedInput.shape[1] // 2
+        k = self.kernel
+        # Each CTA always processes _NUM_TILES tiles, including OOB ones, so M must divide them all
+        shape_is_divisible = M % (k._TILE_ROWS * k._NUM_TILES) == 0 and N % k._TILE_COLS == 0
+        if shape_is_divisible:
+            self.kernel_skip_scale_bounds(
+                mGatedInput,
+                mYGrad,
+                mO_row,
+                mS_row,
+                mO_col,
+                mS_col,
+                limit,
+                alpha,
+                glu_linear_offset,
+                beta1,
+                beta2,
+                stream,
+            )
+        else:
+            self.kernel(
+                mGatedInput,
+                mYGrad,
+                mO_row,
+                mS_row,
+                mO_col,
+                mS_col,
+                limit,
+                alpha,
+                glu_linear_offset,
+                beta1,
+                beta2,
+                stream,
+            )

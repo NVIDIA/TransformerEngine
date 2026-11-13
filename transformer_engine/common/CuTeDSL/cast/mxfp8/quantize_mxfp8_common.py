@@ -413,7 +413,7 @@ class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
         """Return the compiled CuTeDSL function object for this config."""
         # The kernel module imports this one
         # pylint: disable-next=import-outside-toplevel
-        from .quantize_mxfp8_gated_g2s import MXFP8GatedQuantizeG2SKernel
+        from .quantize_mxfp8_gated_g2s import MXFP8GatedQuantizeEntry
 
         sym_M = cute.sym_int32()
         # The C++ dispatcher requires N % 32 == 0, like the CUDA kernel.
@@ -430,7 +430,7 @@ class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
         params = [Float32(0.0) if clamped else None] * 3  # limit, alpha, glu_linear_offset
         params += [Float32(0.0) if situ else None] * 2  # beta1, beta2
         return cute.compile(
-            MXFP8GatedQuantizeG2SKernel(self),
+            MXFP8GatedQuantizeEntry(self),
             _fake_gmem_tensor(self.DTYPE, (sym_M, sym_2N), 16),  # mGatedInput
             _fake_gmem_tensor(self.DTYPE, (sym_M, sym_N), 16) if self.IS_BWD else None,  # mYGrad
             # mO_row, mS_row
