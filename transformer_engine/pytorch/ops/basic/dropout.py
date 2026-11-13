@@ -46,7 +46,7 @@ class Dropout(BasicOperation):
 
         # Choose implementation
         impl = None
-        if not self.training or self.dropout_probability == 0:
+        if not self.training:
             impl = "evaluation"
         elif input_.numel() % 16 == 0 and dtype in (torch.float16, torch.bfloat16):
             impl = "fused"
