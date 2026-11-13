@@ -1122,7 +1122,7 @@ class TestEP(_EpTestCase):
         self.assertEqual(tuple(src.grad.shape), (rows, HIDDEN_DIM))
         decoded = tex.ep_nvfp4_unpack(rec.packed[0], HIDDEN_DIM)
         n = int(tc.sum().item())
-        ref = self._combine_bwd_bf16_ref(tokens, topk_idx, w, rows, decoded)
+        ref = self._combine_bwd_bf16_ref(tokens, topk_idx, w, rows, decoded, alignment=256)
         self._assert_rows_match_per_expert(src.grad[:n], ref[:n], tc)
 
     def test_combine_bwd_nvfp4_direct_capture(self):
