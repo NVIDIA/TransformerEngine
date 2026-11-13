@@ -9,6 +9,7 @@
 
 #include <numeric>
 #include <string>
+#include <unordered_map>
 
 #include "common/util/logging.h"
 
@@ -142,15 +143,41 @@ inline static size_t te_dtype_bytes(const DType& type) {
   }
 }
 
+// Captures on a TE-owned stream, never the one XLA passes: work other threads enqueue on XLA's
+// stream while the capture is open would otherwise be swallowed into the discarded graph.
+inline cudaStream_t captureStreamForCurrentDevice() {
+  // One stream per thread and device, destroyed when the thread exits.
+  struct Streams {
+    std::unordered_map<int, cudaStream_t> by_device;
+    ~Streams() {
+      int current = 0;
+      if (cudaGetDevice(&current) != cudaSuccess) return;  // the runtime is already torn down
+      for (auto &[device, stream] : by_device) {
+        if (cudaSetDevice(device) == cudaSuccess) cudaStreamDestroy(stream);
+      }
+      cudaSetDevice(current);
+    }
+  };
+  thread_local Streams streams;
+  int device = 0;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
+  auto [it, inserted] = streams.by_device.try_emplace(device, nullptr);
+  if (inserted) {
+    NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&it->second, cudaStreamNonBlocking));
+  }
+  return it->second;
+}
+
 template <typename... Args>
 Error_Type wrapInStreamCapture(std::function<Error_Type(cudaStream_t, Args...)> func,
-                               cudaStream_t stream, Args... args) {
+                               cudaStream_t /*stream*/, Args... args) {
+  cudaStream_t capture = captureStreamForCurrentDevice();
   cudaGraph_t graph{};
-  NVTE_CHECK_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed));
+  NVTE_CHECK_CUDA(cudaStreamBeginCapture(capture, cudaStreamCaptureModeRelaxed));
 
-  Error_Type error = func(stream, std::forward<Args>(args)...);
+  Error_Type error = func(capture, std::forward<Args>(args)...);
 
-  NVTE_CHECK_CUDA(cudaStreamEndCapture(stream, &graph));
+  NVTE_CHECK_CUDA(cudaStreamEndCapture(capture, &graph));
   NVTE_CHECK_CUDA(cudaGraphDestroy(graph));
 
   return error;
