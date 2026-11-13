@@ -156,4 +156,126 @@ void nvfp4_multi_tensor_compute_partial_amax(
   }
 }
 
+namespace {
+
+// TE tensors for a list of contiguous torch tensors; `wrappers` keeps them alive.
+std::vector<NVTETensor> make_te_tensors(const std::vector<at::Tensor>& tensors,
+                                        std::vector<TensorWrapper>* wrappers, const char* name) {
+  std::vector<NVTETensor> out;
+  out.reserve(tensors.size());
+  for (const auto& t : tensors) {
+    TORCH_CHECK(t.is_contiguous(), name, " tensors must be contiguous");
+    wrappers->emplace_back(makeTransformerEngineTensor(t));
+    out.push_back(wrappers->back().data());
+  }
+  return out;
+}
+
+std::vector<size_t> to_size_vector(const std::vector<int64_t>& v, size_t n, const char* name) {
+  TORCH_CHECK(v.size() == n, name, " size mismatch");
+  std::vector<size_t> out(n);
+  for (size_t i = 0; i < n; ++i) {
+    TORCH_CHECK(v[i] >= 0, name, " must not be negative");
+    out[i] = static_cast<size_t>(v[i]);
+  }
+  return out;
+}
+
+}  // namespace
+
+void nvfp4_2d_multi_tensor_partial_amax(const std::vector<at::Tensor>& inp_list,
+                                        const std::vector<at::Tensor>& amax_list,
+                                        const std::vector<int64_t>& h_list,
+                                        const std::vector<int64_t>& w_list,
+                                        const std::vector<int64_t>& start_offset_list,
+                                        int64_t block_len, const DType cast_dtype) {
+  const size_t n = inp_list.size();
+  TORCH_CHECK(amax_list.size() == n, "amax_list size mismatch");
+  if (n == 0) return;
+  const auto h = to_size_vector(h_list, n, "h_list");
+  const auto w = to_size_vector(w_list, n, "w_list");
+  const auto start = to_size_vector(start_offset_list, n, "start_offset_list");
+  std::vector<TensorWrapper> wrappers;
+  wrappers.reserve(2 * n);
+  auto inp = make_te_tensors(inp_list, &wrappers, "inp_list");
+  auto amax = make_te_tensors(amax_list, &wrappers, "amax_list");
+  nvte_nvfp4_2d_multi_tensor_partial_amax(
+      inp.data(), amax.data(), h.data(), w.data(), start.data(), n, static_cast<size_t>(block_len),
+      static_cast<NVTEDType>(cast_dtype), at::cuda::getCurrentCUDAStream());
+}
+
+void nvfp4_2d_multi_tensor_global_amax(const std::vector<at::Tensor>& block_amax_list,
+                                       const std::vector<at::Tensor>& global_amax_list) {
+  const size_t n = block_amax_list.size();
+  TORCH_CHECK(global_amax_list.size() == n, "global_amax_list size mismatch");
+  if (n == 0) return;
+  std::vector<TensorWrapper> wrappers;
+  wrappers.reserve(2 * n);
+  auto block_amax = make_te_tensors(block_amax_list, &wrappers, "block_amax_list");
+  auto global_amax = make_te_tensors(global_amax_list, &wrappers, "global_amax_list");
+  nvte_nvfp4_2d_multi_tensor_global_amax(block_amax.data(), global_amax.data(), n,
+                                         at::cuda::getCurrentCUDAStream());
+}
+
+void nvfp4_2d_multi_tensor_fused_scale(const std::vector<at::Tensor>& block_amax_list,
+                                       const std::vector<at::Tensor>& global_amax_list,
+                                       const std::vector<at::Tensor>& per_block_scale_list,
+                                       const std::vector<at::Tensor>& target_scale_list,
+                                       const std::vector<at::Tensor>& target_amax_list,
+                                       const std::vector<int64_t>& tile_rows_list,
+                                       const std::vector<int64_t>& tile_cols_list,
+                                       const std::vector<int64_t>& rows_padded_list,
+                                       int64_t block_len, const DType scale_dtype) {
+  const size_t n = block_amax_list.size();
+  TORCH_CHECK(global_amax_list.size() == n, "global_amax_list size mismatch");
+  TORCH_CHECK(per_block_scale_list.size() == n, "per_block_scale_list size mismatch");
+  TORCH_CHECK(target_scale_list.size() == n, "target_scale_list size mismatch");
+  TORCH_CHECK(target_amax_list.size() == n, "target_amax_list size mismatch");
+  if (n == 0) return;
+  const auto tile_rows = to_size_vector(tile_rows_list, n, "tile_rows_list");
+  const auto tile_cols = to_size_vector(tile_cols_list, n, "tile_cols_list");
+  const auto rows_padded = to_size_vector(rows_padded_list, n, "rows_padded_list");
+  for (const auto& t : target_scale_list) {
+    TORCH_CHECK(t.scalar_type() == at::kByte, "Target scale must be uint8 scale storage.");
+  }
+  std::vector<TensorWrapper> wrappers;
+  wrappers.reserve(5 * n);
+  auto block_amax = make_te_tensors(block_amax_list, &wrappers, "block_amax_list");
+  auto global_amax = make_te_tensors(global_amax_list, &wrappers, "global_amax_list");
+  auto per_block_scale = make_te_tensors(per_block_scale_list, &wrappers, "per_block_scale_list");
+  auto target_scale = make_te_tensors(target_scale_list, &wrappers, "target_scale_list");
+  auto target_amax = make_te_tensors(target_amax_list, &wrappers, "target_amax_list");
+  nvte_nvfp4_2d_multi_tensor_fused_scale(
+      block_amax.data(), global_amax.data(), per_block_scale.data(), target_scale.data(),
+      target_amax.data(), tile_rows.data(), tile_cols.data(), rows_padded.data(), n,
+      static_cast<size_t>(block_len), static_cast<NVTEDType>(scale_dtype),
+      at::cuda::getCurrentCUDAStream());
+}
+
+void nvfp4_2d_multi_tensor_partial_cast(
+    const std::vector<at::Tensor>& inp_list, const std::vector<at::Tensor>& out_list,
+    const std::vector<at::Tensor>& scale_list, const std::vector<at::Tensor>& global_scale_list,
+    const std::vector<int64_t>& h_list, const std::vector<int64_t>& w_list,
+    const std::vector<int64_t>& start_offset_list, int64_t block_len, const DType cast_dtype,
+    const DType scale_dtype) {
+  const size_t n = inp_list.size();
+  TORCH_CHECK(out_list.size() == n, "out_list size mismatch");
+  TORCH_CHECK(scale_list.size() == n, "scale_list size mismatch");
+  TORCH_CHECK(global_scale_list.size() == n, "global_scale_list size mismatch");
+  if (n == 0) return;
+  const auto h = to_size_vector(h_list, n, "h_list");
+  const auto w = to_size_vector(w_list, n, "w_list");
+  const auto start = to_size_vector(start_offset_list, n, "start_offset_list");
+  std::vector<TensorWrapper> wrappers;
+  wrappers.reserve(4 * n);
+  auto inp = make_te_tensors(inp_list, &wrappers, "inp_list");
+  auto out = make_te_tensors(out_list, &wrappers, "out_list");
+  auto scale = make_te_tensors(scale_list, &wrappers, "scale_list");
+  auto global_scale = make_te_tensors(global_scale_list, &wrappers, "global_scale_list");
+  nvte_nvfp4_2d_multi_tensor_partial_cast(
+      inp.data(), out.data(), scale.data(), global_scale.data(), h.data(), w.data(), start.data(),
+      n, static_cast<size_t>(block_len), static_cast<NVTEDType>(cast_dtype),
+      static_cast<NVTEDType>(scale_dtype), at::cuda::getCurrentCUDAStream());
+}
+
 }  // namespace transformer_engine::pytorch

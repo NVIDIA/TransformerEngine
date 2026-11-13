@@ -4,6 +4,7 @@
 
 """Helper functions for using fp8/nvfp4 tensors as weights"""
 
+import os
 from typing import Optional, Union, List
 import torch
 
@@ -248,6 +249,7 @@ def quantize_master_weights(
         fsdp_shard_model_weights = [None] * len(model_weights)
     else:
         use_fsdp_shard_model_weights = True
+    fused_nvfp4_cast = _use_fused_nvfp4_master_weight_cast() and not use_fsdp_shard_model_weights
     # Validate the entire batch before clearing initialization state or
     # populating any per-format work buckets.
     for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
@@ -283,14 +285,17 @@ def quantize_master_weights(
         if hasattr(model_weight, "clear_high_precision_init_val"):
             model_weight.clear_high_precision_init_val()
 
-        if master_weight is not None:
+        quantizer = model_weight._get_quantizer()
+
+        if master_weight is not None and not (
+            fused_nvfp4_cast and isinstance(quantizer, NVFP4Quantizer)
+        ):
             # When not using fp8/fp4_primary_weights, the master_weight (fp32) is first cast to
             # bf16/fp16, and then cast to fp8 during forward. Although it's not necessary when
             # fp8/fp4_primary_weights is enabled, we still keep this logic to keep numerical
             # consistency. So here we cast the master_weight to model_weight.dtype.
+            # The fused NVFP4 cast does this conversion in registers instead.
             master_weight = master_weight.to(model_weight.dtype)
-
-        quantizer = model_weight._get_quantizer()
 
         if isinstance(quantizer, NVFP4Quantizer):
             nvfp4_params.append(
@@ -763,6 +768,21 @@ def _cast_master_weights_to_nvfp4_2d(
     use_fsdp_shard_model_weights : bool, if True, it means that the model weights are sharded.
     """
 
+    if _use_fused_nvfp4_master_weight_cast() and not use_fsdp_shard_model_weights:
+        if _cast_master_weights_to_nvfp4_2d_fused(params, group, manual_post_all_gather_processing):
+            return
+        # Not eligible: cast the master weights to the model dtype here, as
+        # quantize_master_weights does without the fused cast.
+        params = [
+            (
+                model_weight,
+                master_weight.to(model_weight.dtype) if master_weight is not None else None,
+                start_offset,
+                fragment,
+            )
+            for model_weight, master_weight, start_offset, fragment in params
+        ]
+
     device = params[0][0].device
     block_len = NVFP4_BLOCK_SCALING_SIZE
 
@@ -975,6 +995,192 @@ def _cast_master_weights_to_nvfp4_2d(
             block_len,
             scale_dtype=scale_dtype,
         )
+
+
+def _use_fused_nvfp4_master_weight_cast() -> bool:
+    """Whether NVTE_NVFP4_FUSED_MASTER_WEIGHT_CAST=1 selects the multi-tensor NVFP4 2D cast."""
+    return os.getenv("NVTE_NVFP4_FUSED_MASTER_WEIGHT_CAST", "0") == "1"
+
+
+def _cast_master_weights_to_nvfp4_2d_fused(
+    params, group, manual_post_all_gather_processing=False
+) -> bool:
+    r"""Multi-tensor version of `_cast_master_weights_to_nvfp4_2d` (unsharded model weights).
+
+    Produces the same FP4 data, scale-inverses and amaxes as `_cast_master_weights_to_nvfp4_2d`
+    applied to the master weights cast to the model weights' dtype, with one launch per 24
+    tensors for each step:
+
+    1. tile amaxes, read from the master shards directly (FP32 masters are rounded to BF16 in
+       registers when the model weights are BF16);
+    2. max all-reduce of the tile amaxes (unchanged);
+    3. per-tensor global amaxes as the maximum of the reduced tile amaxes, which equals the
+       all-reduced amax of the tensor: this replaces the per-tensor amax kernels and the second
+       all-reduce;
+    4. global encode scales (unchanged), fused scale and partial cast.
+
+    Returns False without doing anything if the parameters are not eligible. Eligibility only
+    depends on the model weights, which every rank of ``group`` holds identically, so all ranks
+    make the same choice and run the same collectives. The master shards differ per rank: a rank
+    whose shards the multi-tensor kernels cannot read (non-contiguous, odd start offset, or a
+    master dtype other than a single FP32 or BF16) casts them to the model dtype and runs the
+    per-tensor kernels of `_cast_master_weights_to_nvfp4_2d` for its own tile amaxes and partial
+    cast instead, still within this function's collective schedule.
+    """
+    block_len = NVFP4_BLOCK_SCALING_SIZE
+    model_dtypes = set()
+    input_dtypes = set()
+    local_fused = True
+    for model_weight, master_weight, start_offset, _ in params:
+        quantizer = model_weight._get_quantizer()
+        if not isinstance(quantizer, NVFP4Quantizer) or not quantizer.with_2d_quantization:
+            return False
+        if len(model_weight.shape) != 2:
+            return False
+        data = model_weight._rowwise_data
+        scale_inv = model_weight._rowwise_scale_inv
+        if data is None or scale_inv is None or model_weight._amax_rowwise is None:
+            return False
+        if not data.is_contiguous() or not scale_inv.is_contiguous():
+            return False
+        if scale_inv.dim() != 2 or scale_inv.dtype != torch.uint8:
+            return False
+        model_dtypes.add(model_weight.dtype)
+        if master_weight is not None and master_weight.numel() > 0:
+            # Rank-local properties: never a reason to return False (see the docstring).
+            if not master_weight.is_contiguous() or start_offset % 2 != 0:
+                local_fused = False
+            input_dtypes.add(master_weight.dtype)
+    if len(model_dtypes) != 1:
+        return False
+    model_dtype = model_dtypes.pop()
+    if model_dtype not in (torch.float32, torch.bfloat16):
+        return False
+    if len(input_dtypes) > 1 or (
+        input_dtypes and next(iter(input_dtypes)) not in (torch.float32, torch.bfloat16)
+    ):
+        local_fused = False
+    scale_dtypes = {p[0]._get_quantizer().scale_dtype for p in params}
+    if len(scale_dtypes) != 1:
+        return False
+    scale_dtype = tex.DType(int(scale_dtypes.pop()))
+    cast_dtype = tex.DType.kBFloat16 if model_dtype == torch.bfloat16 else tex.DType.kFloat32
+
+    device = params[0][0].device
+    tile_shapes = []
+    cu_amax_sizes = [0]
+    for model_weight, _, _, _ in params:
+        h, w = model_weight.shape
+        tile_shapes.append(((h + block_len - 1) // block_len, (w + block_len - 1) // block_len))
+        cu_amax_sizes.append(cu_amax_sizes[-1] + tile_shapes[-1][0] * tile_shapes[-1][1])
+    packed_amaxes = torch.zeros(cu_amax_sizes[-1], dtype=torch.float32, device=device)
+    packed_scales = torch.zeros(cu_amax_sizes[-1], dtype=torch.float32, device=device)
+    global_amaxes = torch.empty(len(params), dtype=torch.float32, device=device)
+    global_scales = torch.empty(len(params), dtype=torch.float32, device=device)
+    amaxes = [
+        packed_amaxes[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].view(tile_shapes[i])
+        for i in range(len(params))
+    ]
+    scales = [
+        packed_scales[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].view(tile_shapes[i])
+        for i in range(len(params))
+    ]
+    global_amax_views = [global_amaxes[i : i + 1] for i in range(len(params))]
+    global_scale_views = [global_scales[i : i + 1] for i in range(len(params))]
+
+    # Shards owned by this rank
+    owned = [
+        i
+        for i, (_, master_weight, _, _) in enumerate(params)
+        if master_weight is not None and master_weight.numel() > 0
+    ]
+    shard_inputs = [params[i][1] for i in owned]
+    shard_h = [params[i][0].shape[0] for i in owned]
+    shard_w = [params[i][0].shape[1] for i in owned]
+    shard_starts = [params[i][2] for i in owned]
+
+    if local_fused:
+        tex.nvfp4_2d_multi_tensor_partial_amax(
+            shard_inputs,
+            [amaxes[i] for i in owned],
+            shard_h,
+            shard_w,
+            shard_starts,
+            block_len,
+            cast_dtype=cast_dtype,
+        )
+    elif owned:
+        # Per-tensor kernels on the master shards cast to the model dtype, as in
+        # _cast_master_weights_to_nvfp4_2d. Their per-rank global amaxes are not needed: the
+        # global amaxes come from the reduced tile amaxes below.
+        shard_inputs = [params[i][1].to(params[i][0].dtype) for i in owned]
+        unused_global_amaxes = torch.zeros(len(owned), dtype=torch.float32, device=device)
+        tex.nvfp4_multi_tensor_compute_partial_amax(
+            shard_inputs,
+            [amaxes[i] for i in owned],
+            [unused_global_amaxes[j : j + 1] for j in range(len(owned))],
+            shard_h,
+            shard_w,
+            shard_starts,
+            block_len,
+        )
+    if packed_amaxes.numel() > 0:
+        torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
+    tex.nvfp4_2d_multi_tensor_global_amax(amaxes, global_amax_views)
+    tex.nvfp4_compute_global_scale(global_amaxes, global_scales, scale_dtype=scale_dtype)
+
+    if not manual_post_all_gather_processing:
+        # See _cast_master_weights_to_nvfp4_2d: the transpose cache is rebuilt after the
+        # all-gather of the model weights.
+        for model_weight, _, _, _ in params:
+            model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
+
+    tex.nvfp4_2d_multi_tensor_fused_scale(
+        amaxes,
+        global_amax_views,
+        scales,
+        [p[0]._rowwise_scale_inv for p in params],
+        [p[0]._amax_rowwise for p in params],
+        [shape[0] for shape in tile_shapes],
+        [shape[1] for shape in tile_shapes],
+        [p[0]._rowwise_scale_inv.shape[0] for p in params],
+        block_len,
+        scale_dtype=scale_dtype,
+    )
+
+    outputs = []
+    for i in owned:
+        model_weight, master_weight, start_offset, _ = params[i]
+        rowwise_bytes = model_weight._rowwise_data.view(-1)
+        outputs.append(
+            rowwise_bytes[start_offset // 2 : (start_offset + master_weight.numel() + 1) // 2]
+        )
+    if local_fused:
+        tex.nvfp4_2d_multi_tensor_partial_cast(
+            shard_inputs,
+            outputs,
+            [scales[i] for i in owned],
+            [global_scale_views[i] for i in owned],
+            shard_h,
+            shard_w,
+            shard_starts,
+            block_len,
+            cast_dtype=cast_dtype,
+            scale_dtype=scale_dtype,
+        )
+    elif owned:
+        tex.nvfp4_multi_tensor_2d_partial_cast(
+            shard_inputs,
+            outputs,
+            [scales[i] for i in owned],
+            [global_scale_views[i] for i in owned],
+            shard_h,
+            shard_w,
+            shard_starts,
+            block_len,
+            scale_dtype=scale_dtype,
+        )
+    return True
 
 
 def _identity_storage_data(tensor):

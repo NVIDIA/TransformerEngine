@@ -40,7 +40,7 @@ extern "C" {
  */
 void nvte_delayed_scaling_recipe_amax_and_scale_update(
     const NVTETensor amax_history, const NVTETensor scale, NVTETensor updated_amax_history,
-    NVTETensor updated_scale, const char* amax_compute_algo, NVTEDType fp8_dtype, float margin,
+    NVTETensor updated_scale, const char *amax_compute_algo, NVTEDType fp8_dtype, float margin,
     cudaStream_t stream);
 
 /*! \brief Bulk-update FP8 scaling factors with delayed scaling recipe after amax reduction.
@@ -70,7 +70,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update(
  */
 void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
     const NVTETensor amax_reduction_buffer, std::vector<NVTETensor> amax_histories,
-    std::vector<NVTETensor> scales, const char* amax_compute_algo, NVTEDType fp8_dtype,
+    std::vector<NVTETensor> scales, const char *amax_compute_algo, NVTEDType fp8_dtype,
     float margin, cudaStream_t stream);
 
 /*! \brief Compute an FP8 tensor's amax.
@@ -538,6 +538,95 @@ void nvte_nvfp4_compute_global_scale(const NVTETensor global_amax, NVTETensor gl
  */
 void nvte_nvfp4_compute_global_scale_v2(const NVTETensor global_amax, NVTETensor global_scale,
                                         NVTEDType scale_dtype, cudaStream_t stream);
+
+/*! \brief Compute the 16x16 tile amaxes of the partial shards of several 2D tensors.
+ *
+ *  Multi-tensor version of nvte_nvfp4_2d_compute_partial_amax for contiguous amax buffers,
+ *  with one thread per tile. Each input shard may be FP32 or BF16 (one dtype per call). The
+ *  values are converted to `cast_dtype` before the amax is taken, so an FP32 master shard with
+ *  `cast_dtype` = BF16 gives the amaxes of the shard cast to BF16. Tiles that do not overlap a
+ *  shard are not written, so the amax buffers should be zero-initialized.
+ *
+ *  \param[in]     inp            Input shards, one per tensor (may be empty).
+ *  \param[out]    amax           Amax buffers [tile_rows, tile_cols], float32, contiguous.
+ *  \param[in]     h              Number of rows of each full 2D tensor.
+ *  \param[in]     w              Number of columns of each full 2D tensor.
+ *  \param[in]     start_offset   Element offset of each shard in its flattened tensor (even).
+ *  \param[in]     num_tensors    Number of tensors.
+ *  \param[in]     block_len      Tile dimension (must be 16).
+ *  \param[in]     cast_dtype     kNVTEFloat32 or kNVTEBFloat16.
+ *  \param[in]     stream         CUDA stream used for the operation.
+ */
+void nvte_nvfp4_2d_multi_tensor_partial_amax(const NVTETensor *inp, NVTETensor *amax,
+                                             const size_t *h, const size_t *w,
+                                             const size_t *start_offset, size_t num_tensors,
+                                             size_t block_len, NVTEDType cast_dtype,
+                                             cudaStream_t stream);
+
+/*! \brief Compute per-tensor global amaxes as the maximum of each tensor's tile amaxes.
+ *
+ *  After the tile amaxes have been max-reduced across the ranks that hold shards of a
+ *  tensor, this equals the reduced amax of the whole tensor.
+ *
+ *  \param[in]     block_amax     Tile amax buffers, float32, contiguous.
+ *  \param[out]    global_amax    Global amaxes [1], float32.
+ *  \param[in]     num_tensors    Number of tensors.
+ *  \param[in]     stream         CUDA stream used for the operation.
+ */
+void nvte_nvfp4_2d_multi_tensor_global_amax(const NVTETensor *block_amax, NVTETensor *global_amax,
+                                            size_t num_tensors, cudaStream_t stream);
+
+/*! \brief Multi-tensor version of nvte_nvfp4_fused_scale_v2.
+ *
+ *  Computes the same per-block decode scales, row-expanded target scales and target amaxes as
+ *  nvte_nvfp4_fused_scale_v2 for every tensor, in one launch per 24 tensors. All buffers are
+ *  contiguous.
+ *
+ *  \param[in]     block_amax       Tile amaxes [tile_rows, tile_cols], float32.
+ *  \param[in]     global_amax      Global amaxes [1], float32.
+ *  \param[out]    per_block_scale  Per-block decode scales [tile_rows, tile_cols], float32.
+ *  \param[out]    target_scale     Expanded scales [rows_padded, tile_cols], uint8.
+ *  \param[out]    target_amax      Copies of the global amaxes [1], float32.
+ *  \param[in]     tile_rows        Tile rows of each tensor.
+ *  \param[in]     tile_cols        Tile columns of each tensor.
+ *  \param[in]     rows_padded      Rows of each target scale.
+ *  \param[in]     num_tensors      Number of tensors.
+ *  \param[in]     block_len        Tile dimension (must be 16).
+ *  \param[in]     scale_dtype      NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_nvfp4_2d_multi_tensor_fused_scale(const NVTETensor *block_amax,
+                                            const NVTETensor *global_amax,
+                                            NVTETensor *per_block_scale, NVTETensor *target_scale,
+                                            NVTETensor *target_amax, const size_t *tile_rows,
+                                            const size_t *tile_cols, const size_t *rows_padded,
+                                            size_t num_tensors, size_t block_len,
+                                            NVTEDType scale_dtype, cudaStream_t stream);
+
+/*! \brief Cast the partial shards of several 2D tensors to NVFP4 with 16x16 tile scales.
+ *
+ *  Multi-tensor version of nvte_nvfp4_2d_partial_cast_v2 for contiguous scale buffers, with
+ *  one thread per tile. Gives the same bytes as nvte_nvfp4_2d_partial_cast_v2 applied to the
+ *  shards converted to `cast_dtype`.
+ *
+ *  \param[in]     inp            Input shards, one per tensor (may be empty).
+ *  \param[out]    out            Packed FP4 bytes of each shard (element i of the flattened
+ *                                 tensor at byte (i - start_offset) / 2).
+ *  \param[in]     scale          Per-tile decode scales [tile_rows, tile_cols], float32.
+ *  \param[in]     global_scale   Global encode scales [1], float32.
+ *  \param[in]     h              Number of rows of each full 2D tensor.
+ *  \param[in]     w              Number of columns of each full 2D tensor.
+ *  \param[in]     start_offset   Element offset of each shard in its flattened tensor (even).
+ *  \param[in]     num_tensors    Number of tensors.
+ *  \param[in]     block_len      Tile dimension (must be 16).
+ *  \param[in]     cast_dtype     kNVTEFloat32 or kNVTEBFloat16.
+ *  \param[in]     scale_dtype    NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream         CUDA stream used for the operation.
+ */
+void nvte_nvfp4_2d_multi_tensor_partial_cast(
+    const NVTETensor *inp, NVTETensor *out, const NVTETensor *scale, const NVTETensor *global_scale,
+    const size_t *h, const size_t *w, const size_t *start_offset, size_t num_tensors,
+    size_t block_len, NVTEDType cast_dtype, NVTEDType scale_dtype, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
