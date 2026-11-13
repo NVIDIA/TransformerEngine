@@ -1138,13 +1138,8 @@ def _apply_grouped_bias_ref(
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("use_bias_scale", [False, True])
 def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_bias_scale) -> None:
-    if torch.cuda.get_device_capability() < (9, 0):
-        pytest.skip("Grouped GEMM requires Hopper (SM90) or newer.")
-    if torch.cuda.get_device_capability() < (10, 0):
-        if tex.get_cublasLt_version() < 130400:
-            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
-    if tex.get_cublasLt_version() < 130300:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+    if not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
+        pytest.skip("Grouped GEMM is not supported on this system.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
@@ -1547,10 +1542,8 @@ def _per_tensor_quantize_mxfp8(
 def test_grouped_gemm_grouped_tensor_mxfp8(
     shape, accumulate, layout: str, case: str, dtype: torch.dtype
 ) -> None:
-    if tex.get_cublasLt_version() < 130300:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if not is_module_grouped_tensor_path_supported(recipe.MXFP8BlockScaling(), dtype):
+        pytest.skip("MXFP8 grouped GEMM is not supported on this system.")
     if dtype == torch.bfloat16 and not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
