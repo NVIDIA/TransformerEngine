@@ -3273,3 +3273,319 @@ def _check_linear_bias_compile(
         forward=case in ("bias", "unfused"),
         backward=case != "linear" and bool(targets),
     )
+
+
+def _ops_activation_reference(
+    name,
+    x,
+    *,
+    beta1=4.0,
+    beta2=25.0,
+    limit=7.0,
+    alpha=1.702,
+    glu_linear_offset=1.0,
+    interleave_size=None,
+):
+    gate = None
+    if name in ("GLU", "GEGLU", "QGEGLU", "ReGLU", "SReGLU", "SwiGLU", "SiTUGLU", "ClampedSwiGLU"):
+        if interleave_size is None:
+            x, gate = x.chunk(2, dim=-1)
+        else:
+            x, gate = x.reshape(*x.shape[:-1], -1, 2, interleave_size).unbind(-2)
+            x, gate = x.flatten(-2), gate.flatten(-2)
+    if name in ("GELU", "GEGLU"):
+        x = torch.nn.functional.gelu(x, approximate="tanh")
+    elif name in ("QGELU", "QGEGLU"):
+        x = x * torch.sigmoid(1.702 * x)
+    elif name in ("ReLU", "ReGLU"):
+        x = x.relu()
+    elif name in ("SReLU", "SReGLU"):
+        x = x.relu().square()
+    elif name in ("SiLU", "SwiGLU"):
+        x = torch.nn.functional.silu(x)
+    elif name == "SiTUGLU":
+        x = beta1 * torch.tanh(x / beta1) * x.sigmoid()
+        gate = beta2 * torch.tanh(gate / beta2)
+    elif name == "ClampedSwiGLU":
+        x = x.clamp(max=limit)
+        x = x * torch.sigmoid(alpha * x)
+        gate = gate.clamp(min=-limit, max=limit) + glu_linear_offset
+    elif name == "GLU":
+        x = x.sigmoid()
+    else:
+        raise ValueError(name)
+    return x if gate is None else x * gate
+
+
+def _check_te_ops_activation_compile(
+    activation,
+    *,
+    dtype=torch.float32,
+    layout="contiguous",
+    cache_input=False,
+    autocast=False,
+    training=True,
+    interleave_size=None,
+    dynamic=False,
+    activation_kwargs=None,
+):
+    if (layout == "fp8" or cache_input) and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    torch._dynamo.reset()
+    activation_kwargs = activation_kwargs or {}
+    kwargs = {"cache_quantized_input": cache_input, **activation_kwargs}
+    if interleave_size is not None:
+        kwargs["glu_interleave_size"] = interleave_size
+    model = te.ops.Sequential(getattr(te.ops, activation)(**kwargs))
+
+    def run(x):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+            return model(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    eager_reference = autocast or dynamic
+    tols = {} if eager_reference else dtype_tols(dtype)
+    for step, rows in enumerate((16, 16, 32, 48) if dynamic else (32,)):
+        shape = (rows, 64) if dynamic else (2, 16, 64)
+        x = torch.randn(shape, device="cuda", dtype=dtype)
+        if layout == "fp8" or (cache_input and not eager_reference):
+            quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+            x = quantizer(x)
+            if layout != "fp8":
+                x = x.dequantize()
+        if layout == "strided":
+            x = x.transpose(0, 1)
+        x = x.detach().requires_grad_(training)
+        if dynamic:
+            torch._dynamo.mark_dynamic(x, 0)
+        ref_x = (
+            x.detach().clone()
+            if eager_reference
+            else (x.dequantize() if layout == "fp8" else x).detach().double()
+        ).requires_grad_(training)
+        with torch.set_grad_enabled(training):
+            if layout == "strided":
+                with pytest.raises(
+                    Exception, match="requires contiguous inputs under torch.compile"
+                ):
+                    compiled(x)
+                actual = run(x)
+            else:
+                actual = compiled(x)
+            expected = (
+                run(ref_x)
+                if eager_reference
+                else _ops_activation_reference(
+                    activation, ref_x, interleave_size=interleave_size, **activation_kwargs
+                )
+            )
+            torch.testing.assert_close(actual.to(expected.dtype), expected, **tols)
+            if training:
+                dy = torch.randn_like(actual)
+                got = torch.autograd.grad(actual, x, dy)[0]
+                want = torch.autograd.grad(expected, ref_x, dy.to(expected.dtype))[0]
+                torch.testing.assert_close(got.to(want.dtype), want, **tols)
+        if autocast:
+            assert actual.dtype == torch.bfloat16
+            torch.testing.assert_close(x, ref_x)
+        if dynamic:
+            if step == 1:
+                graph_count = len(graphs)
+            elif step > 1:
+                assert len(graphs) == graph_count
+    if layout != "strided":
+        _assert_custom_ops(graphs, activation.lower(), backward=training)
+
+
+@pytest.mark.parametrize(
+    "activation",
+    [
+        "GELU",
+        "GEGLU",
+        "GLU",
+        "QGELU",
+        "QGEGLU",
+        "ReLU",
+        "ReGLU",
+        "SReLU",
+        "SReGLU",
+        "SiLU",
+        "SwiGLU",
+        "SiTUGLU",
+        "ClampedSwiGLU",
+    ],
+)
+def test_te_ops_activation_compile(activation):
+    _check_te_ops_activation_compile(activation, dtype=torch.bfloat16)
+
+
+@pytest.mark.parametrize("activation", ["GELU", "GEGLU", "SwiGLU"])
+@pytest.mark.parametrize(
+    "dtype,layout,cache_input",
+    [
+        (torch.float32, "contiguous", False),
+        (torch.float16, "contiguous", False),
+        (torch.bfloat16, "strided", False),
+        (torch.bfloat16, "fp8", False),
+        (torch.bfloat16, "contiguous", True),
+        (torch.bfloat16, "fp8", True),
+    ],
+)
+def test_te_ops_activation_variants_compile(activation, dtype, layout, cache_input):
+    _check_te_ops_activation_compile(
+        activation, dtype=dtype, layout=layout, cache_input=cache_input
+    )
+
+
+@pytest.mark.parametrize("activation", ["GELU", "SwiGLU", "SiTUGLU", "ClampedSwiGLU"])
+@pytest.mark.parametrize("cache_input", [False, True])
+@pytest.mark.parametrize("training", [False, True])
+def test_te_ops_activation_autocast_compile(activation, cache_input, training):
+    _check_te_ops_activation_compile(
+        activation, cache_input=cache_input, autocast=True, training=training
+    )
+
+
+@pytest.mark.parametrize("activation", ["SwiGLU", "SiTUGLU", "ClampedSwiGLU"])
+@pytest.mark.parametrize("cache_input", [False, True])
+@pytest.mark.parametrize("interleave_size", [None, 4])
+def test_te_ops_swiglu_dynamic_compile(activation, cache_input, interleave_size):
+    _check_te_ops_activation_compile(
+        activation, cache_input=cache_input, interleave_size=interleave_size, dynamic=True
+    )
+
+
+@pytest.mark.parametrize("beta1,beta2", [(0.75, 1.5), (3.0, 12.0)])
+def test_te_ops_situglu_parameters_compile(beta1, beta2):
+    _check_te_ops_activation_compile(
+        "SiTUGLU",
+        cache_input=True,
+        interleave_size=4,
+        activation_kwargs={"beta1": beta1, "beta2": beta2},
+    )
+
+
+@pytest.mark.parametrize("limit,alpha,glu_linear_offset", [(0.75, 1.3, 0.0), (1.25, 2.0, 0.5)])
+def test_te_ops_clamped_swiglu_parameters_compile(limit, alpha, glu_linear_offset):
+    _check_te_ops_activation_compile(
+        "ClampedSwiGLU",
+        cache_input=True,
+        interleave_size=4,
+        activation_kwargs={"limit": limit, "alpha": alpha, "glu_linear_offset": glu_linear_offset},
+    )
+
+
+@pytest.mark.parametrize("quantization", [None, "fp8", "nvfp4", "nvfp4_no_rht"])
+@pytest.mark.parametrize(
+    "activation,training,mode",
+    [
+        ("GELU", True, "default"),
+        ("ReLU", True, "default"),
+        ("GEGLU", True, "default"),
+        ("SwiGLU", True, "default"),
+        ("SiTUGLU", True, "default"),
+        ("ClampedSwiGLU", True, "default"),
+        ("GELU", False, "default"),
+        ("SwiGLU", False, "default"),
+        ("GELU", True, "reduce-overhead"),
+        ("SwiGLU", True, "reduce-overhead"),
+    ],
+)
+def test_te_ops_activation_mlp_compile(activation, quantization, training, mode, monkeypatch):
+    nvfp4 = quantization in ("nvfp4", "nvfp4_no_rht")
+    if nvfp4 and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    dtype = torch.float16 if quantization is None else torch.bfloat16
+    tols = {"rtol": 0, "atol": 0} if nvfp4 or not training else {}
+    torch._dynamo.reset()
+    counters.clear()
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    in_features, hidden = (128, 128) if nvfp4 else (32, 64)
+    gated = activation in ("GEGLU", "SwiGLU", "SiTUGLU", "ClampedSwiGLU")
+    cache_input = training and activation == "GELU" and quantization == "fp8"
+    rows = 64 if activation == "GELU" and quantization == "nvfp4" else 32
+    model = (
+        te.ops.Sequential(
+            te.ops.Linear(in_features, hidden * (2 if gated else 1), device="cuda", dtype=dtype),
+            getattr(te.ops, activation)(cache_quantized_input=cache_input),
+            te.ops.Linear(hidden, in_features, device="cuda", dtype=dtype),
+        )
+        .train(training)
+        .requires_grad_(training)
+    )
+    if training:
+        with torch.no_grad():
+            for param in model.parameters():
+                param.copy_(torch.randint(0, 3, param.shape, device=param.device) / 32)
+    eager_model = copy.deepcopy(model)
+    if nvfp4:
+        quant_recipe = recipe.NVFP4BlockScaling(
+            disable_rht=quantization == "nvfp4_no_rht", disable_stochastic_rounding=True
+        )
+    else:
+        quant_recipe = recipe.Float8CurrentScaling(backward_override=None) if quantization else None
+
+    def run(x, module=model):
+        if quant_recipe is None:
+            return module(x)
+        with te.autocast(recipe=quant_recipe):
+            return module(x)
+
+    if mode == "default":
+        compiled, graphs = _compile_with_graphs(run)
+    else:
+        compiled, graphs = torch.compile(run, fullgraph=True, mode=mode), []
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    eager_optimizer = torch.optim.SGD(eager_model.parameters(), lr=0.01)
+    for step in range(4 if training else 1):
+        torch.compiler.cudagraph_mark_step_begin()
+        shape = (2, rows // 2, in_features) if training else (rows, in_features)
+        x = torch.randn(shape, device="cuda", dtype=dtype, requires_grad=training)
+        if training and step == 0:
+            # Keep the independent reference reductions well-conditioned.
+            with torch.no_grad():
+                x.copy_(torch.randint(0, 9, x.shape, device=x.device) / 8)
+        eager_x = x.detach().clone().requires_grad_(training)
+        with torch.set_grad_enabled(training):
+            actual = compiled(x)
+            expected = run(eager_x, eager_model)
+        torch.testing.assert_close(actual, expected, **tols)
+        if not training:
+            continue
+        dy = torch.randn_like(actual)
+        if step == 0:
+            dy.copy_(torch.randint(0, 9, dy.shape, device=dy.device) / 8)
+        actual.backward(dy)
+        expected.backward(dy)
+        torch.testing.assert_close(x.grad, eager_x.grad, **tols)
+        for param, reference in zip(model.parameters(), eager_model.parameters()):
+            torch.testing.assert_close(param.grad, reference.grad, **tols)
+        if quantization is None and step == 0:
+            ref_x = x.detach().clone().requires_grad_()
+            params = [p.detach().clone().requires_grad_() for p in model.parameters()]
+            ref = torch.nn.functional.linear(ref_x.float(), *[p.float() for p in params[:2]])
+            ref = _ops_activation_reference(activation, ref.to(dtype).float()).to(dtype)
+            ref = torch.nn.functional.linear(ref.float(), *[p.float() for p in params[2:]])
+            ref = ref.to(dtype)
+            grads = torch.autograd.grad(ref, (ref_x, *params), dy)
+            torch.testing.assert_close(actual, ref, **dtype_tols(dtype))
+            for got, want in zip((x.grad, *(p.grad for p in model.parameters())), grads):
+                torch.testing.assert_close(got, want, **dtype_tols(dtype))
+        optimizer.step()
+        eager_optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        eager_optimizer.zero_grad(set_to_none=True)
+        if step == 1:
+            graph_count = len(graphs)
+        elif step > 1:
+            assert len(graphs) == graph_count
+        del actual, expected, x, eager_x
+    if mode == "default":
+        fused = training and quantization is not None and activation in ("GELU", "ReLU")
+        _assert_custom_ops(graphs, activation.lower(), backward=training and not fused)
+        _assert_custom_ops(graphs, "backwardactivationbias", forward=False, backward=fused)
+    else:
+        assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
+        assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0

@@ -15,6 +15,7 @@ from transformer_engine.pytorch.device import te_device_type
 from ...dynamo import TensorOrQuantized, TensorSpec
 from ...dynamo.fake import fake_bgrad
 from ...quantization import FP8GlobalStateManager
+from .._common import is_quantized_tensor
 from ..op import BasicOperation
 from ...utils import canonicalize_device, canonicalize_dtype
 from ...tensor import Quantizer
@@ -143,6 +144,13 @@ class Bias(BasicOperation):
     ) -> BiasFwdArgs:
         if basic_op_kwargs[0]:
             raise ValueError("Bias forward does not expect keyword arguments")
+        if torch.compiler.is_compiling() and (
+            (not is_quantized_tensor(input_) and not input_.is_contiguous())
+            or not self.bias.is_contiguous()
+        ):
+            raise RuntimeError(
+                "Bias forward requires contiguous inputs and bias under torch.compile"
+            )
         quantizer = prev_op_grad_output_quantizer
         if FP8GlobalStateManager.is_fp8_enabled():
             if FP8GlobalStateManager.get_fp8_recipe().backward_override is not None:
