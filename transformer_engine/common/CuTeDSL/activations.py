@@ -15,9 +15,13 @@ import cutlass
 from cutlass import cute
 from cutlass import Float32, Int32, Uint32
 
-from transformer_engine.common.CuTeDSL.utils import fma_f32
+from transformer_engine.common.CuTeDSL.utils import fma_f32, rcp_f32_in_range
 
 USE_FAST_MATH = os.environ.get("NVTE_USE_FAST_MATH", "0") == "1"
+
+# For x >= SIGMOID_FAST_RCP_MIN, 1 <= 1 + exp(-x) < 2^126 (also with fast_math), where
+# rcp_f32_in_range gives the same result as the division.
+SIGMOID_FAST_RCP_MIN = -80.0
 
 
 def tanh(x: Float32) -> Float32:
@@ -64,8 +68,13 @@ def dact_dsrelu(x: Float32) -> Float32:
     return cute.arch.fmax(Float32(2.0) * x, Float32(0.0))
 
 
-def sigmoid(x: Float32, fast_math: bool = False) -> Float32:
-    return Float32(1.0) / (Float32(1.0) + exp(-x, fast_math))
+def sigmoid(x: Float32, fast_math: bool = False, fast_rcp: bool = False) -> Float32:
+    """1 / (1 + exp(-x)); fast_rcp skips the reciprocal's range check and requires
+    x >= SIGMOID_FAST_RCP_MIN."""
+    y = Float32(1.0) + exp(-x, fast_math)
+    if fast_rcp:
+        return rcp_f32_in_range(y)
+    return Float32(1.0) / y
 
 
 def dsigmoid(x: Float32, fast_math: bool = False) -> Float32:
