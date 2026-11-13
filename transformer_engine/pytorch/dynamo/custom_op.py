@@ -475,6 +475,9 @@ def _is_simple_annot(annot: Any) -> bool:
     if get_origin(annot) in (tuple, list):
         inner = [a for a in get_args(annot) if a is not Ellipsis]
         return bool(inner) and all(_is_simple_annot(a) for a in inner)
+    if get_origin(annot) is dict:
+        args = get_args(annot)
+        return len(args) == 2 and args[0] is str and (args[1] is Any or _is_simple_annot(args[1]))
     return False
 
 
@@ -1069,7 +1072,9 @@ def _register_autograd_for_op(
         ctx.tensor_objects = None
         user_grads = _slice_user_grads(ctx.output_ranges, grad_outputs[0])
         ctx.output_ranges = None
-        if bwd_takes_grad_tuple:
+        if hasattr(bwd_obj, "setup_grad_outputs"):
+            bwd_obj.setup_grad_outputs(user_grads)
+        elif bwd_takes_grad_tuple:
             bwd_obj.grad_outputs = tuple(user_grads)
         else:
             bwd_obj.grad_output = user_grads[0]
@@ -1359,6 +1364,8 @@ def register_custom_op_with_autograd(
       non-differentiable input).
     * ``bwd_fake_impl(bwd_args)`` -- data-free twin of ``bwd_impl`` returning
       :class:`TensorSpec` grads.
+    * ``bwd_arg_type.setup_grad_outputs(grads)`` -- optional hook overriding
+      the default output-gradient assignment.
     * ``bwd_arg_type.setup_saved_tensors(ctx)`` -- optional hook; skipped if
       absent.
 
