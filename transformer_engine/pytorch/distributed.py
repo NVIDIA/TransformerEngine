@@ -909,7 +909,6 @@ class CudaRNGStatesTracker:
         """
         Get rng states. Copy the dictionary so we have direct pointers
         to the states, not just a pointer to the dictionary.
-
         """
         states = {}
         for name in self.states_:
@@ -952,6 +951,7 @@ class CudaRNGStatesTracker:
         new_state = _get_cuda_rng_state(clone=True)
         new_state.manual_seed(seed)
         self.states_[name] = new_state
+        # Update global states.
         set_all_rng_states(self.states_)
 
     @contextmanager
@@ -976,7 +976,9 @@ class CudaRNGStatesTracker:
         try:
             yield
         finally:
-            # And set the state to the original state we started with.
+            # The default generator shared its state with `self.states_[name]`,
+            # so that state already reflects any RNG consumed in this region.
+            # Set the state to the original state we started with.
             _set_cuda_rng_state(orig_cuda_rng_state)
 
 

@@ -486,7 +486,7 @@ def _make_graphed_callables(
         )
 
     # For cases with multiple active RNG states, e.g. TP.
-    for state in get_all_rng_states().values():
+    for _, state in get_all_rng_states().items():
         for fwd_graph, bwd_graph, bwd_dw_graph in zip(fwd_graphs, bwd_graphs, bwd_dw_graphs):
             fwd_graph.register_generator_state(state)
             bwd_graph.register_generator_state(state)
