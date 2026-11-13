@@ -1098,6 +1098,33 @@ class TestEP(_EpTestCase):
         self._assert_direct_grad_matches(src.grad, rec.packed[0], tokens, topk_idx, w, counts, rows)
 
     @_mxfp8_align_test
+    def test_combine_bwd_nvfp4_direct_receive_opt_out(self):
+        """With nvfp4_grad_direct_receive=False the NVFP4 combine backward returns the BF16
+        expert_out grad even under NVFP4 autocast, for consumers that need the decoded grad
+        (a grouped linear with a bias): it equals a BF16 combine backward of the sender-decoded
+        result-grad."""
+        self._require_nvfp4_shapes()
+        topk_idx, tokens, w = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
+        buf = self._make_buffer(combine_bwd_quant_recipe=NVFP4BlockScaling(), alignment=256)
+        recv, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
+        rows = recv.shape[0]
+        src = torch.zeros(rows, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        src.requires_grad_(True)
+        with self._RecordPack() as rec:
+            with te.autocast(enabled=True, recipe=NVFP4BlockScaling()):
+                out = ep_combine(buf, self._expert_out(src), nvfp4_grad_direct_receive=False)
+            grad = self._combine_grad(out.shape[0])
+            torch.autograd.backward(out, grad_tensors=grad)
+        torch.cuda.synchronize()
+        self.assertEqual(len(rec.packed), 1)
+        self.assertIsInstance(src.grad, torch.Tensor)
+        self.assertEqual(src.grad.dtype, torch.bfloat16)
+        self.assertEqual(tuple(src.grad.shape), (rows, HIDDEN_DIM))
+        decoded = tex.ep_nvfp4_unpack(rec.packed[0], HIDDEN_DIM)
+        n = int(tc.sum().item())
+        ref = self._combine_bwd_bf16_ref(tokens, topk_idx, w, rows, decoded)
+        self._assert_rows_match_per_expert(src.grad[:n], ref[:n], tc)
+
     def test_combine_bwd_nvfp4_direct_capture(self):
         """Combine fwd+bwd (direct NVFP4 grad, packed rows landing in the caller grad_out)
         captured in a CUDA graph: each replay matches a BF16 combine backward of that replay's

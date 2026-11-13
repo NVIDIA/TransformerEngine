@@ -1170,6 +1170,7 @@ def _ep_combine_fwd(
     buffer: "EpBuffer",
     num_local_tokens: int,
     bwd_quant_recipe,
+    nvfp4_grad_direct_receive: bool = True,
 ):
     """Run combine and return ``(result, _CombineState)``. Eager mode is not graph-capturable, so
     it calls the backend op directly and skips the torch.library dispatch. No autograd; the caller
@@ -1197,7 +1198,8 @@ def _ep_combine_fwd(
         zero_copy=buffer.zero_copy,
     )
     if _is_nvfp4_recipe(bwd_quant_recipe):
-        state.nvfp4_gemm_recipe = _nvfp4_gemm_recipe(buffer, expert_out.shape[0], grad=True)
+        if nvfp4_grad_direct_receive:
+            state.nvfp4_gemm_recipe = _nvfp4_gemm_recipe(buffer, expert_out.shape[0], grad=True)
         state.nvfp4_buffer = buffer
     return result, state
 
@@ -1337,11 +1339,17 @@ class _EpCombine(torch.autograd.Function):
         buffer: "EpBuffer",
         num_local_tokens: int,
         bwd_quant_recipe=None,
+        nvfp4_grad_direct_receive: bool = True,
     ):
         """Combine fwd; stashes the backward state on ctx. When ``bwd_quant_recipe`` is set, the
         backward sends the result-grad as MXFP8 or NVFP4."""
         result, ctx.state = _ep_combine_fwd(
-            expert_out, grad_out, buffer, num_local_tokens, bwd_quant_recipe
+            expert_out,
+            grad_out,
+            buffer,
+            num_local_tokens,
+            bwd_quant_recipe,
+            nvfp4_grad_direct_receive,
         )
         return result
 
@@ -1355,6 +1363,7 @@ class _EpCombine(torch.autograd.Function):
             None,  # buffer
             None,  # num_local_tokens
             None,  # bwd_quant_recipe
+            None,  # nvfp4_grad_direct_receive
         )
 
 
@@ -1586,6 +1595,7 @@ def ep_combine(
     *,
     num_local_tokens: Optional[int] = None,
     grad_out: Optional[torch.Tensor] = None,
+    nvfp4_grad_direct_receive: bool = True,
 ):
     """Combine with autograd; caller pre-applies topk weighting.
 
@@ -1595,7 +1605,10 @@ def ep_combine(
     ``recv_capacity_per_rank * (hidden + hidden/block)`` bytes (non-zero-copy only). For NVFP4 the
     backward returns FC2's grad_output as an NVFP4 ``GroupedTensor`` under NVFP4 autocast (see
     ``ep_dispatch``; the packed rows land in ``grad_out``), else a bfloat16 grad decoded into
-    ``grad_out``. Eager mode sizes the grad target per step and forbids a caller-supplied buffer. Under zero-copy, leaving it None
+    ``grad_out``. The NVFP4 ``GroupedTensor`` holds only GEMM operands (swizzled scales), so a
+    consumer that needs the decoded gradient, such as a grouped linear with a bias (bias gradient),
+    must pass ``nvfp4_grad_direct_receive=False`` to get the bfloat16 grad instead. Eager mode
+    sizes the grad target per step and forbids a caller-supplied buffer. Under zero-copy, leaving it None
     allocates from the symm-mem pool, which is not CUDA-graph capturable; pass a persistent buffer to
     capture a graph (the NVFP4 bfloat16 decode path also needs one step before capture, see
     ``ep_dispatch``). Result shape is (num_local_tokens, hidden_dim); num_local_tokens defaults to
@@ -1624,4 +1637,5 @@ def ep_combine(
         buffer,
         num_local_tokens,
         bwd_quant_recipe,
+        nvfp4_grad_direct_receive,
     )
