@@ -8,8 +8,13 @@ import torch
 import pytest
 import os
 import copy
+import ctypes
+import subprocess
+import sys
+import textwrap
 
 import transformer_engine
+import transformer_engine.common as te_common
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import (
@@ -1651,3 +1656,136 @@ def test_inference_mode(
         with autocast(enabled=with_quantization, recipe=quantization_recipe):
             y = module(x, **kwargs)
     check_weights()
+
+
+_SEARCH_LIB = "tesearchordertest"
+
+
+def _run_cuda_library_search(monkeypatch, tmp_path, ld_library_path, linker_finds_library=True):
+    """Run the CUDA library search with a fake loader. Return its result and the loaded names."""
+    loaded = []
+
+    def fake_cdll(name, mode=0):
+        missing = not os.path.exists(name) if "/" in name else not linker_finds_library
+        if missing:
+            raise OSError(f"{name}: cannot open shared object file")
+        loaded.append(name)
+        return object()
+
+    monkeypatch.setattr(ctypes, "CDLL", fake_cdll)
+    monkeypatch.setattr(te_common.sysconfig, "get_path", lambda _: str(tmp_path / "python"))
+    for variable in ("CUDA_HOME", "CUDA_PATH", f"{_SEARCH_LIB.upper()}_HOME"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", ld_library_path)
+    monkeypatch.setenv(f"{_SEARCH_LIB.upper()}_PATH", str(tmp_path / "lib_path"))
+
+    te_common._load_cuda_library_from_system.cache_clear()
+    te_common._load_cuda_library_from_python.cache_clear()
+    te_common._load_cuda_library_from_linker_default.cache_clear()
+    te_common._load_cuda_library.cache_clear()
+
+    found_in_system, _ = te_common._load_cuda_library(_SEARCH_LIB)
+    return found_in_system, loaded
+
+
+def _create_libraries(directory, *suffixes):
+    directory.mkdir(parents=True)
+    for suffix in suffixes:
+        (directory / f"lib{_SEARCH_LIB}.so{suffix}").touch()
+
+
+@pytest.mark.parametrize(
+    "available, expected",
+    [
+        (("linker",), "linker"),
+        (("linker", "python"), "python"),
+        (("linker", "python", "ld_library_path"), "ld_library_path"),
+        (("linker", "python", "ld_library_path", "lib_path"), "lib_path"),
+    ],
+)
+def test_cuda_library_search_order(monkeypatch, tmp_path, available, expected):
+    """Selected locations outrank the Python environment, which outranks a host-wide library."""
+    locations = {
+        "python": tmp_path / "python" / "nvidia" / _SEARCH_LIB / "lib",
+        "ld_library_path": tmp_path / "ld_library_path",
+        "lib_path": tmp_path / "lib_path" / "lib",
+    }
+    for name, location in locations.items():
+        if name in available:
+            _create_libraries(location, ".1")
+
+    found_in_system, loaded = _run_cuda_library_search(
+        monkeypatch,
+        tmp_path,
+        str(locations["ld_library_path"]),
+        linker_finds_library="linker" in available,
+    )
+
+    assert found_in_system == (expected != "python")
+    if expected == "linker":
+        assert loaded == [f"lib{_SEARCH_LIB}.so"]
+    else:
+        assert loaded == [str(locations[expected] / f"lib{_SEARCH_LIB}.so.1")]
+
+
+@pytest.mark.parametrize(
+    "suffixes, expected_suffix",
+    [(("", ".1", ".2"), ""), ((".1", ".2"), ".2")],
+)
+def test_cuda_library_ld_library_path_name_choice(monkeypatch, tmp_path, suffixes, expected_suffix):
+    """An LD_LIBRARY_PATH entry follows the unversioned name, then the newest versioned name."""
+    directory = tmp_path / "ld_library_path"
+    _create_libraries(directory, *suffixes)
+
+    _, loaded = _run_cuda_library_search(monkeypatch, tmp_path, str(directory))
+
+    assert loaded == [str(directory / f"lib{_SEARCH_LIB}.so{expected_suffix}")]
+
+
+@pytest.mark.parametrize("entry", ["$ORIGIN/lib", "${ORIGIN}/lib"])
+def test_cuda_library_ld_library_path_expands_origin(monkeypatch, tmp_path, entry):
+    """A $ORIGIN entry that has the library outranks the Python environment."""
+    _create_libraries(tmp_path / "python" / "nvidia" / _SEARCH_LIB / "lib", ".1")
+    _create_libraries(tmp_path / "bin" / "lib", "")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
+
+    found_in_system, loaded = _run_cuda_library_search(monkeypatch, tmp_path, entry)
+
+    assert found_in_system
+    assert loaded == [str(tmp_path / "bin" / "lib" / f"lib{_SEARCH_LIB}.so")]
+
+
+def test_cuda_library_token_entry_without_library_keeps_python_priority(monkeypatch, tmp_path):
+    """A token entry that lacks the library must not let a host-wide library win."""
+    location = tmp_path / "python" / "nvidia" / _SEARCH_LIB / "lib"
+    _create_libraries(location, ".1")
+
+    found_in_system, loaded = _run_cuda_library_search(
+        monkeypatch, tmp_path, "$ORIGIN/missing:$LIB/missing"
+    )
+
+    assert not found_in_system
+    assert loaded == [str(location / f"lib{_SEARCH_LIB}.so.1")]
+
+
+def test_import_does_not_require_curand_library():
+    """TE only uses cuRAND's device headers, and torch no longer always installs its library."""
+    probe = textwrap.dedent(
+        """
+        import ctypes
+
+        cdll = ctypes.CDLL
+
+
+        def cdll_without_curand(name, *args, **kwargs):
+            if name is not None and "curand" in str(name):
+                raise OSError(f"{name}: cannot open shared object file")
+            return cdll(name, *args, **kwargs)
+
+
+        ctypes.CDLL = cdll_without_curand
+
+        import transformer_engine.pytorch
+        """
+    )
+    subprocess.run([sys.executable, "-c", probe], check=True)
