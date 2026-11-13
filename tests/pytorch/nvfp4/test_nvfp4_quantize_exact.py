@@ -123,7 +123,7 @@ def check_quantization_nvfp4_versus_reference(
     nvfp4_4over6_err_mode: str = "MAE",
     nvfp4_4over6_err_use_fast_math: bool = False,
     scale_dtype: te.DType = te.DType.kFloat8E4M3,
-    reuse_output: bool = False,
+    check_amax_reset: bool = False,
 ) -> None:
     scale_dtype = te.DType.cast(scale_dtype)
     if nvfp4_e4m3_max not in NVFP4_SUPPORTED_SCALE_MAX_VALUES:
@@ -253,8 +253,7 @@ def check_quantization_nvfp4_versus_reference(
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
 
-    if reuse_output:
-        assert not use_cpp_allocator
+    if check_amax_reset:
         assert not row_scaled_nvfp4
         # Reusing an output whose maximum decreases verifies that every amax buffer is reset.
         for magnitude in (16.0, 0.5, 0.0, 2.0):
@@ -374,12 +373,7 @@ def test_quantization_block_tiling_versus_reference(
     row_scaled_nvfp4: bool,
     nvfp4_4over6_config: NVFP44Over6TestConfig,
 ) -> None:
-    reuse_output = (
-        not use_cpp_allocator
-        and not row_scaled_nvfp4
-        and not nvfp4_4over6_config.use_4over6
-        and (M, N) in ((128, 128), (256, 272))
-    )
+    check_amax_reset = not row_scaled_nvfp4 and not nvfp4_4over6_config.use_4over6
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
@@ -393,7 +387,7 @@ def test_quantization_block_tiling_versus_reference(
         nvfp4_e4m3_max=nvfp4_4over6_config.e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_config.err_mode,
         nvfp4_4over6_err_use_fast_math=nvfp4_4over6_config.err_use_fast_math,
-        reuse_output=reuse_output,
+        check_amax_reset=check_amax_reset,
     )
 
 
