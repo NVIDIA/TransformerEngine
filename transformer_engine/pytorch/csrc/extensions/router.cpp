@@ -322,6 +322,136 @@ void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor inter
   }
 }
 
+bool fused_topk_with_aux_loss_scores_is_supported(int num_experts, int topk,
+                                                  std::optional<int> num_groups,
+                                                  std::optional<int> group_topk,
+                                                  std::string score_function) {
+  auto it = score_function_map.find(score_function);
+  if (it == score_function_map.end()) return false;
+  return nvte_fused_topk_with_aux_loss_scores_is_supported(
+             num_experts, topk, num_groups.value_or(-1), group_topk.value_or(-1), it->second) != 0;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> fused_topk_with_aux_loss_scores_fwd(
+    at::Tensor logits, int topk, std::optional<int> num_groups, std::optional<int> group_topk,
+    std::optional<float> scaling_factor, std::string score_function,
+    std::optional<at::Tensor> expert_bias, std::optional<at::Tensor> tokens_per_expert,
+    bool fp32_probs, at::ScalarType index_dtype) {
+  TORCH_CHECK(logits.dim() >= 1, "logits must have at least 1 dim");
+  TORCH_CHECK(logits.is_cuda() && logits.is_contiguous(),
+              "logits must be a contiguous CUDA tensor");
+  TORCH_CHECK(index_dtype == at::kInt || index_dtype == at::kLong,
+              "index_dtype must be int32 or int64");
+  at::cuda::CUDAGuard device_guard(logits.device());
+  const auto sizes = logits.sizes();
+  const int64_t num_experts = sizes.back();
+  const int64_t num_tokens =
+      std::accumulate(sizes.begin(), sizes.end() - 1, int64_t{1}, std::multiplies<int64_t>());
+  const int score_function_value = get_score_function_value(score_function);
+  const int num_groups_value = num_groups.value_or(-1);
+  const int group_topk_value = group_topk.value_or(-1);
+  TORCH_CHECK(nvte_fused_topk_with_aux_loss_scores_is_supported(static_cast<int>(num_experts), topk,
+                                                                num_groups_value, group_topk_value,
+                                                                score_function_value),
+              "fused_topk_with_aux_loss_scores does not support num_experts=", num_experts,
+              ", topk=", topk, ", num_groups=", num_groups_value, ", group_topk=", group_topk_value,
+              ", score_function=", score_function);
+  const auto options = logits.options();
+  std::vector<int64_t> topk_sizes(sizes.begin(), sizes.end() - 1);
+  topk_sizes.push_back(topk);
+  at::Tensor probs =
+      at::empty(topk_sizes, options.dtype(fp32_probs ? at::kFloat : logits.scalar_type()));
+  at::Tensor topk_indices = at::empty(topk_sizes, options.dtype(index_dtype));
+  at::Tensor aux_scores = at::empty(sizes, options.dtype(at::kFloat));
+  at::Tensor aux_tokens_per_expert = at::empty({num_experts}, options.dtype(at::kLong));
+
+  const std::vector<size_t> dense_shape = {static_cast<size_t>(num_tokens),
+                                           static_cast<size_t>(num_experts)};
+  const std::vector<size_t> topk_shape = {static_cast<size_t>(num_tokens),
+                                          static_cast<size_t>(topk)};
+  auto logits_cu = makeTransformerEngineTensor(logits.data_ptr(), dense_shape,
+                                               GetTransformerEngineDType(logits.scalar_type()));
+  auto probs_cu = makeTransformerEngineTensor(probs.data_ptr(), topk_shape,
+                                              GetTransformerEngineDType(probs.scalar_type()));
+  auto topk_indices_cu = makeTransformerEngineTensor(
+      topk_indices.data_ptr(), topk_shape, GetTransformerEngineDType(topk_indices.scalar_type()));
+  auto aux_scores_cu =
+      makeTransformerEngineTensor(aux_scores.data_ptr(), dense_shape, DType::kFloat32);
+  auto aux_tokens_per_expert_cu = makeTransformerEngineTensor(aux_tokens_per_expert);
+  auto expert_bias_cu = TensorWrapper();
+  if (expert_bias.has_value()) {
+    const auto &bias = expert_bias.value();
+    TORCH_CHECK(bias.is_cuda() && bias.is_contiguous() && bias.device() == logits.device(),
+                "expert_bias must be a contiguous CUDA tensor on the logits device");
+    TORCH_CHECK(bias.scalar_type() == at::kFloat, "expert_bias must be a float32 tensor");
+    expert_bias_cu = makeTransformerEngineTensor(bias);
+  }
+  auto tokens_per_expert_cu = TensorWrapper();
+  if (tokens_per_expert.has_value()) {
+    const auto &counts = tokens_per_expert.value();
+    TORCH_CHECK(counts.is_cuda() && counts.is_contiguous() && counts.device() == logits.device(),
+                "tokens_per_expert must be a contiguous CUDA tensor on the logits device");
+    TORCH_CHECK(counts.scalar_type() == at::kLong && counts.numel() == num_experts,
+                "tokens_per_expert must be int64 with num_experts elements");
+    tokens_per_expert_cu = makeTransformerEngineTensor(
+        counts.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_experts)}, DType::kInt64);
+  }
+  nvte_fused_topk_with_aux_loss_scores_forward(
+      logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+      num_groups_value, group_topk_value, scaling_factor.value_or(1.0f), score_function_value,
+      expert_bias_cu.data(), probs_cu.data(), topk_indices_cu.data(), aux_scores_cu.data(),
+      aux_tokens_per_expert_cu.data(), tokens_per_expert_cu.data(),
+      at::cuda::getCurrentCUDAStream());
+  return std::make_tuple(probs, topk_indices, aux_scores, aux_tokens_per_expert);
+}
+
+at::Tensor fused_topk_with_aux_loss_scores_bwd(at::Tensor logits, at::Tensor topk_indices,
+                                               at::Tensor grad_probs,
+                                               std::optional<at::Tensor> grad_aux_scores,
+                                               std::optional<float> scaling_factor,
+                                               std::string score_function) {
+  TORCH_CHECK(logits.is_cuda() && logits.is_contiguous(),
+              "logits must be a contiguous CUDA tensor");
+  TORCH_CHECK(topk_indices.is_contiguous() && grad_probs.is_contiguous(),
+              "topk_indices and grad_probs must be contiguous");
+  at::cuda::CUDAGuard device_guard(logits.device());
+  const auto sizes = logits.sizes();
+  const int64_t num_experts = sizes.back();
+  const int64_t num_tokens =
+      std::accumulate(sizes.begin(), sizes.end() - 1, int64_t{1}, std::multiplies<int64_t>());
+  const int64_t topk = topk_indices.size(-1);
+  at::Tensor grad_logits = at::empty_like(logits);
+  const std::vector<size_t> dense_shape = {static_cast<size_t>(num_tokens),
+                                           static_cast<size_t>(num_experts)};
+  const std::vector<size_t> topk_shape = {static_cast<size_t>(num_tokens),
+                                          static_cast<size_t>(topk)};
+  TORCH_CHECK(topk_indices.numel() == num_tokens * topk && grad_probs.numel() == num_tokens * topk,
+              "topk_indices and grad_probs must have [num_tokens, topk] elements");
+  const auto logits_dtype = GetTransformerEngineDType(logits.scalar_type());
+  auto logits_cu = makeTransformerEngineTensor(logits.data_ptr(), dense_shape, logits_dtype);
+  auto grad_logits_cu =
+      makeTransformerEngineTensor(grad_logits.data_ptr(), dense_shape, logits_dtype);
+  auto topk_indices_cu = makeTransformerEngineTensor(
+      topk_indices.data_ptr(), topk_shape, GetTransformerEngineDType(topk_indices.scalar_type()));
+  auto grad_probs_cu = makeTransformerEngineTensor(
+      grad_probs.data_ptr(), topk_shape, GetTransformerEngineDType(grad_probs.scalar_type()));
+  auto grad_aux_scores_cu = TensorWrapper();
+  at::Tensor grad_aux;
+  if (grad_aux_scores.has_value()) {
+    grad_aux = grad_aux_scores.value().contiguous();
+    TORCH_CHECK(grad_aux.numel() == num_tokens * num_experts,
+                "grad_aux_scores must have [num_tokens, num_experts] elements");
+    grad_aux_scores_cu = makeTransformerEngineTensor(
+        grad_aux.data_ptr(), dense_shape, GetTransformerEngineDType(grad_aux.scalar_type()));
+  }
+  nvte_fused_topk_with_aux_loss_scores_backward(
+      logits_cu.data(), topk_indices_cu.data(), grad_probs_cu.data(), grad_aux_scores_cu.data(),
+      static_cast<int>(num_tokens), static_cast<int>(num_experts), static_cast<int>(topk),
+      scaling_factor.value_or(1.0f), get_score_function_value(score_function),
+      grad_logits_cu.data(), at::cuda::getCurrentCUDAStream());
+  return grad_logits;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
     at::Tensor logits, int topk, std::string score_function, int routing_map_format) {
   check_routing_map_format(routing_map_format);

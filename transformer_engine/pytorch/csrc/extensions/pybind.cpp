@@ -157,6 +157,19 @@ void init_router_bindings(pybind11::module &m) {
         py::arg("scaling_factor"), py::arg("score_function"), py::arg("use_dense_indices") = false,
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         "Fused topk with score function bwd");
+  m.def("fused_topk_with_aux_loss_scores_is_supported",
+        &fused_topk_with_aux_loss_scores_is_supported, py::arg("num_experts"), py::arg("topk"),
+        py::arg("num_groups"), py::arg("group_topk"), py::arg("score_function"),
+        "Whether the single-pass top-k with aux-loss scores supports a router configuration");
+  m.def("fused_topk_with_aux_loss_scores_fwd", &fused_topk_with_aux_loss_scores_fwd,
+        py::arg("logits"), py::arg("topk"), py::arg("num_groups"), py::arg("group_topk"),
+        py::arg("scaling_factor"), py::arg("score_function"), py::arg("expert_bias"),
+        py::arg("tokens_per_expert"), py::arg("fp32_probs"), py::arg("index_dtype"),
+        "Single-pass top-k routing with aux-loss scores fwd");
+  m.def("fused_topk_with_aux_loss_scores_bwd", &fused_topk_with_aux_loss_scores_bwd,
+        py::arg("logits"), py::arg("topk_indices"), py::arg("grad_probs"),
+        py::arg("grad_aux_scores"), py::arg("scaling_factor"), py::arg("score_function"),
+        "Single-pass top-k routing with aux-loss scores bwd");
   m.def("fused_score_for_moe_aux_loss_fwd", &fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
         py::arg("topk"), py::arg("score_function"),
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),

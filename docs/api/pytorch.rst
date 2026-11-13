@@ -119,6 +119,10 @@ expert layers) is documented above with the other modules.
 
 .. autoapifunction:: transformer_engine.pytorch.router.fused_compute_score_for_moe_aux_loss
 
+.. autoapifunction:: transformer_engine.pytorch.router.fused_topk_with_aux_loss_scores
+
+.. autoapifunction:: transformer_engine.pytorch.router.fused_topk_with_aux_loss_scores_is_supported
+
 .. autoapifunction:: transformer_engine.pytorch.router.fused_moe_aux_loss
 
 Expert parallelism

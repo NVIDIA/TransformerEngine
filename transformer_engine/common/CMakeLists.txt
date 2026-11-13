@@ -324,6 +324,7 @@ list(APPEND transformer_engine_cuda_sources
      fused_rope/fused_rope.cu
      fused_router/fused_moe_aux_loss.cu
      fused_router/fused_score_for_moe_aux_loss.cu
+     fused_router/fused_topk_with_aux_loss_scores.cu
      fused_router/fused_topk_with_score_function.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu

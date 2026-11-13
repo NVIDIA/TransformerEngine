@@ -231,6 +231,82 @@ void nvte_fused_topk_with_score_function_backward_with_indices(
     const NVTETensor grad_probs, int num_tokens, int num_experts, int topk, int use_pre_softmax,
     float scaling_factor, int score_function, NVTETensor grad_logits, cudaStream_t stream);
 
+/*! \brief Whether nvte_fused_topk_with_aux_loss_scores_forward/_backward support a router
+ *         configuration.
+ *
+ *  Supported: score_function 0 (sigmoid), num_experts 256, topk 8, and either no group limit
+ *  (group_topk <= 0) or num_groups 8 with group_topk 4; and topk below NVTE_RADIX_TOPK_THRESHOLD
+ *  (default 16), i.e. the separate top-k kernels use their naive selection, whose tie-breaking
+ *  this kernel reproduces.
+ *
+ *  \return 1 if supported, 0 otherwise.
+ */
+int nvte_fused_topk_with_aux_loss_scores_is_supported(int num_experts, int topk, int num_groups,
+                                                      int group_topk, int score_function);
+
+/*! \brief Single-pass router forward: top-k routing plus the auxiliary-loss scores and counts.
+ *
+ *  Computes in one kernel, bitwise identical for finite logits to the separate kernels:
+ *  - nvte_fused_topk_with_score_function_forward_with_indices: topk_indices, and the routing
+ *    probabilities gathered at topk_indices (probs[t, k] equals the dense probs[t, topk_indices[t, k]],
+ *    rounded to the logits dtype);
+ *  - nvte_fused_score_for_moe_aux_loss_forward: aux_scores (sigmoid scores normalised over all
+ *    experts), and the column sums of its routing map (aux_tokens_per_expert);
+ *  - the column sums of the selected routes, added to tokens_per_expert when it is given.
+ *  See nvte_fused_topk_with_aux_loss_scores_is_supported for the supported configurations.
+ *  No host synchronisation; safe to capture in a CUDA graph.
+ *
+ *  \param[in]     logits          Logits from the gating GEMM, [num_tokens, num_experts]
+ *                                 (fp32/bf16/fp16, 16-byte aligned).
+ *  \param[in]     num_tokens      Number of tokens.
+ *  \param[in]     num_experts     Number of experts.
+ *  \param[in]     topk            Topk value.
+ *  \param[in]     num_groups      Number of groups in grouped topk.
+ *  \param[in]     group_topk      Grouped topk value (<= 0: no group limit).
+ *  \param[in]     scaling_factor  Scaling factor.
+ *  \param[in]     score_function  Score function, 0: sigmoid.
+ *  \param[in]     expert_bias     Expert bias [num_experts] (optional, may be empty).
+ *  \param[out]    probs           Routing probabilities [num_tokens, topk], in the logits dtype or
+ *                                 float32 (then holding the logits-dtype values, widened).
+ *  \param[out]    topk_indices    Selected experts [num_tokens, topk], int32 or int64.
+ *  \param[out]    aux_scores      Scores for the auxiliary loss [num_tokens, num_experts], float32.
+ *  \param[out]    aux_tokens_per_expert  Tokens per expert of the aux-loss routing map,
+ *                                        [num_experts] int64; overwritten.
+ *  \param[in,out] tokens_per_expert  Optional [num_experts] int64; the selected routes are added.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
+void nvte_fused_topk_with_aux_loss_scores_forward(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, int num_groups,
+    int group_topk, float scaling_factor, int score_function, const NVTETensor expert_bias,
+    NVTETensor probs, NVTETensor topk_indices, NVTETensor aux_scores,
+    NVTETensor aux_tokens_per_expert, NVTETensor tokens_per_expert, cudaStream_t stream);
+
+/*! \brief Backward of nvte_fused_topk_with_aux_loss_scores_forward.
+ *
+ *  grad_logits is the sum, in the logits dtype, of what
+ *  nvte_fused_topk_with_score_function_backward_with_indices (for grad_probs scattered to
+ *  topk_indices) and nvte_fused_score_for_moe_aux_loss_backward (for grad_aux_scores) write,
+ *  i.e. what autograd accumulates from the two separate functions.
+ *
+ *  \param[in]     logits          Forward logits.
+ *  \param[in]     topk_indices    Forward topk_indices.
+ *  \param[in]     grad_probs      Gradient of probs [num_tokens, topk], logits dtype or float32
+ *                                 (float32 is first rounded to the logits dtype).
+ *  \param[in]     grad_aux_scores Gradient of aux_scores [num_tokens, num_experts] float32
+ *                                 (optional, may be empty).
+ *  \param[in]     num_tokens      Number of tokens.
+ *  \param[in]     num_experts     Number of experts.
+ *  \param[in]     topk            Topk value.
+ *  \param[in]     scaling_factor  Scaling factor.
+ *  \param[in]     score_function  Score function, 0: sigmoid.
+ *  \param[out]    grad_logits     Gradient of logits.
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
+void nvte_fused_topk_with_aux_loss_scores_backward(
+    const NVTETensor logits, const NVTETensor topk_indices, const NVTETensor grad_probs,
+    const NVTETensor grad_aux_scores, int num_tokens, int num_experts, int topk,
+    float scaling_factor, int score_function, NVTETensor grad_logits, cudaStream_t stream);
+
 /*! \brief Forward pass for computing scores/routing map for auxiliary loss (deprecated).
  *
  *  \deprecated This function has been deprecated in favor of
