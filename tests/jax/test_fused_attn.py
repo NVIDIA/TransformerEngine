@@ -26,6 +26,7 @@ from jax.typing import ArrayLike, DTypeLike
 from transformer_engine.jax import autocast
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
+    FusedAttnBackend,
     AttnBiasType,
     AttnMaskType,
     AttnSoftmaxType,
@@ -42,7 +43,6 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine_jax import (
-    NVTE_Fused_Attn_Backend,
     get_cudnn_version,
     get_device_compute_capability,
 )
@@ -142,6 +142,31 @@ def general_dot_product_attention(
     context_shape = query.shape[:-1] + (value.shape[-1],)
     context = jnp.reshape(context, context_shape)
     return context
+
+
+def attention_reference(
+    qkv, mask=None, sink=None, scaling_factor=0.125, return_max_logit=False, bias=None
+):
+    """FP32 unfused attention; mask marks valid query/key pairs in BQK order."""
+    result = general_dot_product_attention(
+        *qkv,
+        softmax_offset=sink,
+        bias=bias,
+        mask=None if mask is None else ~mask[:, None],
+        deterministic=True,
+        softmax_type=(
+            AttnSoftmaxType.VANILLA_SOFTMAX if sink is None else AttnSoftmaxType.LEARNABLE_SOFTMAX
+        ),
+        scale_factor=scaling_factor,
+        dropout_rate=0.0,
+        dropout_rng=None,
+        dtype=jnp.float32,
+        is_max_logit_enabled=return_max_logit,
+    )
+    if mask is not None and not return_max_logit:
+        # cuDNN returns zero for fully masked queries, including their gradients.
+        result = jnp.where(jnp.any(mask, axis=-1)[..., None, None], result, 0.0)
+    return result
 
 
 @jax.jit
@@ -412,20 +437,210 @@ def test_fused_attn_backend_message():
     backend, message = replace(
         baseline, attn_bias_type=AttnBiasType.PRE_SCALE_BIAS
     ).get_fused_attn_backend()
-    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert backend == FusedAttnBackend.No_Backend
     assert message == "Fused attention does not support pre-scale bias."
 
     # No error message if supported; otherwise skip the test
     backend, message = baseline.get_fused_attn_backend()
-    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+    if backend == FusedAttnBackend.No_Backend:
         pytest.skip(f"FusedAttention does not support the baseline config: {message}")
     assert message == ""
 
     # All TE rules have cleared; now gets rejected by cuDNN's support check
     # cuDNN's error message might change across cuDNN versions, so only verify the presence of the string
     backend, message = replace(baseline, head_dim_qk=1024, head_dim_v=1024).get_fused_attn_backend()
-    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert backend == FusedAttnBackend.No_Backend
     assert message != ""
+
+
+@pytest.mark.parametrize("setup_error", (None, RuntimeError("frontend version mismatch")))
+def test_fused_attn_support_query_defers_compilation(setup_error, monkeypatch):
+    """Support queries must avoid compilation and propagate unexpected setup failures."""
+    from transformer_engine.jax.cpp_extensions import cudnn_attention
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Support query compiled an execution plan")
+
+    monkeypatch.setattr(cudnn_attention, "compile_graph", forbidden)
+    monkeypatch.setattr(cudnn_attention._graph_cache, "entries", {})
+    if setup_error is not None:
+
+        def fail(*_args, **_kwargs):
+            raise setup_error
+
+        monkeypatch.setattr(cudnn_attention, "check_attention_support", fail)
+    helper = FusedAttnHelper(
+        is_training=True,
+        batch_size=2,
+        q_dtype=jnp.bfloat16,
+        kv_dtype=jnp.bfloat16,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=4,
+        kv_num_heads=4,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=64,
+        head_dim_v=64,
+        window_size=(-1, -1),
+        attn_scale=0.125,
+    )
+    if setup_error is not None:
+        with pytest.raises(RuntimeError, match=str(setup_error)):
+            helper.get_fused_attn_backend()
+    else:
+        backend, message = helper.get_fused_attn_backend()
+        if backend == FusedAttnBackend.No_Backend:
+            pytest.skip(f"Baseline attention is unsupported: {message}")
+
+
+@pytest.mark.parametrize(
+    "fp8,fp8_backward", ((False, True), (True, False), (True, True), ("mxfp8", True))
+)
+def test_cudnn_attention_backward_o_precision_cache(fp8, fp8_backward, monkeypatch):
+    """Support and execution share O precision, without duplicating unaffected graphs."""
+    from transformer_engine.jax.cpp_extensions import cudnn_attention
+    from transformer_engine.jax.cpp_extensions.attention import _FusedAttnConfig
+
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
+    q = jax.ShapeDtypeStruct((1, 128, 2, 64), jnp.bfloat16)
+    empty = jax.ShapeDtypeStruct((0,), q.dtype)
+    avals = (q, q, q, empty, jax.ShapeDtypeStruct((0,), jnp.float32))
+    _require_cudnn_attention(q, q, q, fp8=fp8)
+    config = _FusedAttnConfig(
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        scaling_factor=0.125,
+        dropout_probability=0.0,
+        is_training=True,
+        max_segments_per_seq=1,
+        window_size=(-1, -1),
+        bottom_right_diagonal=False,
+        context_parallel_load_balanced=False,
+        cp_axis="",
+        cp_striped_window_size=None,
+        stripe_size=None,
+        fp8=fp8,
+    )
+    backward, forward = [], []
+    for o_in_f16 in (True, False):
+        monkeypatch.setenv("NVTE_DPA_FP8CS_O_in_F16", "1" if o_in_f16 else "0")
+        cudnn_attention.check_attention_support("bwd", avals, config)
+        plan = cudnn_attention.get_graph("bwd", avals, config)
+        expected_fp8_o = fp8 is True and fp8_backward and not o_in_f16
+        assert plan.fp8_o == expected_fp8_o
+        assert ("descale_o" in plan.names) == expected_fp8_o
+        description = cudnn_attention._describe_graph(
+            *cudnn_attention._request("bwd", avals, config)
+        )
+        assert dict(description.spec.tensors)["o"].dtype == (
+            "FP8_E4M3" if expected_fp8_o else "BFLOAT16"
+        )
+        backward.append(plan)
+        forward.append(cudnn_attention.get_graph("fwd", avals, config))
+    assert forward[0] is forward[1]
+    if fp8 is True and fp8_backward:
+        assert backward[0].graph.graph_hash != backward[1].graph.graph_hash
+    else:
+        assert backward[0] is backward[1]
+
+
+def test_cudnn_attention_unbound_backward_outputs(monkeypatch):
+    """Unwritten dBias and packed-gradient dummy slots request zero initialization."""
+    from types import SimpleNamespace
+    from transformer_engine.jax.cpp_extensions import cudnn_attention
+
+    q = jnp.ones((1, 128, 2, 64), jnp.bfloat16)
+    empty = jnp.empty((0,), q.dtype)
+    operands = (jnp.stack((q, q, q), axis=-3), empty, empty)
+    plan = SimpleNamespace(
+        graph=SimpleNamespace(workspace_size=0),
+        names=(),
+        input_indices=(),
+        input_offsets=(),
+        output_indices=(0, 0, 0, 4),
+        output_offsets=(0, 0, 0, 0),
+        metadata_batch=1,
+        ragged_stats=False,
+        multipliers=(128, 128, 128, 128, 2),
+        fp8=False,
+        fp8_o=False,
+    )
+    monkeypatch.setattr(cudnn_attention, "get_graph", lambda *_args: plan)
+    monkeypatch.setattr(cudnn_attention, "graph_attributes", lambda _graph: {})
+    captured = {}
+
+    def ffi_call(_name, specs):
+        def execute(*_args, **attributes):
+            captured.update(attributes)
+            return tuple(jnp.empty(spec.shape, spec.dtype) for spec in specs)
+
+        return execute
+
+    monkeypatch.setattr(cudnn_attention.ffi, "ffi_call", ffi_call)
+    config = SimpleNamespace(qkv_layout=QKVLayout.BS3HD, fp8=False, return_max_logit=False)
+    stats = jnp.empty((1, 2, 128, 1), jnp.float32)
+    rng = jnp.zeros((4,), jnp.uint32)
+    cu_seqlens = jnp.array([0, 128], jnp.int32)
+    bias = jnp.zeros((1, 1, 1, 128), q.dtype)
+    sink = jnp.zeros((1, 2, 1, 1), jnp.float32)
+    args = (*operands, bias, sink, stats, rng, q, q, cu_seqlens, cu_seqlens, cu_seqlens, cu_seqlens)
+    cudnn_attention.execute("bwd", args, config, (*operands, bias, sink, empty))
+    np.testing.assert_array_equal(captured["output_fill_values"], [-1, 0, 0, 0, -1])
+
+
+@pytest.mark.parametrize("dtype", (jnp.float16, jnp.bfloat16))
+@pytest.mark.parametrize("layout", (QKVLayout.T3HD, QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD))
+def test_cudnn_attention_ragged_padding_outputs(dtype, layout):
+    """Real FFI execution must keep unused ragged outputs and packed gradients zero."""
+    if get_device_compute_capability(0) < 90:
+        pytest.skip("FP16/BF16 THD attention requires Hopper or newer.")
+    tensor = jnp.ones((1, 128, 2, 64), dtype)
+    if layout.is_qkvpacked():
+        operands = (jnp.stack((tensor, tensor, tensor), axis=-3),)
+    elif layout.is_kvpacked():
+        operands = (tensor, jnp.stack((tensor, tensor), axis=-3))
+    else:
+        operands = (tensor, tensor, tensor)
+    segment_ids = jnp.where(jnp.arange(128)[None, :] < 64, 1, 0).astype(jnp.int32)
+    positions = jnp.where(segment_ids > 0, jnp.arange(128)[None, :], 0).astype(jnp.int32)
+    descriptor = SequenceDescriptor.from_segment_ids_and_pos(segment_ids, positions)
+
+    def attention(arrays):
+        return fused_attn(
+            arrays,
+            None,
+            descriptor,
+            None,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=AttnMaskType.PADDING_MASK,
+            qkv_layout=layout,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=0.125,
+            dropout_probability=0.0,
+            is_training=True,
+            return_max_logit=True,
+        )
+
+    output, maximum = jax.jit(attention)(operands)
+    expected = jnp.zeros_like(tensor).at[:, :64].set(1)
+    np.testing.assert_array_equal(output, expected)
+    np.testing.assert_array_equal(maximum, jnp.full((2,), 8.0, jnp.float32))
+    gradients = jax.jit(jax.grad(lambda arrays: jnp.sum(attention(arrays)[0])))(operands)
+    zero = jnp.zeros_like(tensor)
+    if layout.is_qkvpacked():
+        expected_gradients = (jnp.stack((zero, zero, expected), axis=-3),)
+    elif layout.is_kvpacked():
+        expected_gradients = (zero, jnp.stack((zero, expected), axis=-3))
+    else:
+        expected_gradients = (zero, zero, expected)
+    for actual, reference in zip(gradients, expected_gradients):
+        np.testing.assert_allclose(actual, reference, rtol=1e-3, atol=1e-3)
 
 
 class BiasShape(Enum):
@@ -680,7 +895,7 @@ class FusedAttnRunner:
             bias_seqlen_kv=bias_seqlen_kv,
             max_segments_per_seq=self._get_max_segments_per_sequence(),
         ).get_fused_attn_backend()
-        if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+        if self.backend != FusedAttnBackend.F16_arbitrary_seqlen:
             pytest.skip(message)
 
         if (
@@ -2106,3 +2321,431 @@ class TestFusedAttnWithDeterminism:
             seq_desc_format,
             is_self_attention=None,
         )
+
+
+def _require_cudnn_attention(q, k, v, **overrides):
+    """Skip unsupported graphs with cuDNN's reason, including FP8 output restrictions."""
+    helper = FusedAttnHelper(
+        is_training=True,
+        batch_size=q.shape[0],
+        q_dtype=q.dtype,
+        kv_dtype=k.dtype,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=q.shape[-2],
+        kv_num_heads=k.shape[-2],
+        q_max_seqlen=q.shape[1],
+        kv_max_seqlen=k.shape[1],
+        head_dim_qk=q.shape[-1],
+        head_dim_v=v.shape[-1],
+        window_size=(-1, -1),
+        bottom_right_diagonal=False,
+        attn_scale=0.125,
+    )
+    backend, reason = replace(helper, **overrides).get_fused_attn_backend()
+    if backend == FusedAttnBackend.No_Backend:
+        pytest.skip(reason)
+
+
+@pytest.mark.parametrize("fp8_backward,o_in_f16", [(False, True), (True, True), (True, False)])
+@pytest.mark.parametrize("dtype", [jnp.float16, jnp.bfloat16])
+@pytest.mark.parametrize(
+    "layout",
+    [
+        QKVLayout.BS3HD,
+        QKVLayout.BSHD_BS2HD,
+        QKVLayout.BSHD_BSHD_BSHD,
+    ],
+)
+def test_cudnn_python_fp8_forward_backward(dtype, layout, fp8_backward, o_in_f16, monkeypatch):
+    """Exercise real FP8 SDPA with exactly representable operands and probabilities."""
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
+    monkeypatch.setenv("NVTE_DPA_FP8CS_O_in_F16", "1" if o_in_f16 else "0")
+    q = jnp.full((2, 128, 4, 64), 0.5, dtype)
+    k = jnp.full_like(q, 0.5)
+    v = jnp.zeros_like(q).at[:, ::2, :, 0].set(1.0)
+    if layout.is_qkvpacked():
+        operands = (jnp.stack((q, k, v), axis=-3),)
+    elif layout.is_kvpacked():
+        operands = (q, jnp.stack((k, v), axis=-3))
+    else:
+        operands = (q, k, v)
+
+    def unpack(operands):
+        if layout.is_qkvpacked():
+            return tuple(operands[0][:, :, index] for index in range(3))
+        if layout.is_kvpacked():
+            return operands[0], operands[1][:, :, 0], operands[1][:, :, 1]
+        return operands
+
+    def reference(operands):
+        return attention_reference(unpack(operands))
+
+    def attention(operands):
+        return fused_attn(
+            operands,
+            None,
+            SequenceDescriptor(),
+            None,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=AttnMaskType.NO_MASK,
+            qkv_layout=layout,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=0.125,
+            dropout_probability=0.0,
+            is_training=True,
+            fp8=True,
+        )
+
+    _require_cudnn_attention(q, k, v, qkv_layout=layout, fp8=True)
+    actual = jax.jit(attention)(operands)
+    expected = jax.jit(reference)(operands)
+    np.testing.assert_allclose(actual, expected, rtol=5e-3, atol=5e-3)
+    actual_grads = jax.jit(jax.grad(lambda arrays: jnp.sum(attention(arrays))))(operands)
+    expected_grads = jax.jit(jax.grad(lambda arrays: jnp.sum(reference(arrays))))(operands)
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        assert actual_grad.dtype == dtype
+        np.testing.assert_allclose(actual_grad, expected_grad, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize(
+    "fp8,fp8_backward,o_in_f16",
+    [
+        pytest.param(True, False, True, id="cs-f16-bwd"),
+        pytest.param(True, True, True, id="cs-fp8-bwd-f16-o"),
+        pytest.param(True, True, False, id="cs-fp8-bwd-fp8-o"),
+        pytest.param("mxfp8", False, True, id="mxfp8-f16-bwd"),
+        pytest.param("mxfp8", True, True, id="mxfp8-fp8-bwd"),
+    ],
+)
+@pytest.mark.parametrize(
+    "shape,input_scales,causal",
+    [
+        pytest.param((1, 512, 512, 16, 16, 64), (0.5, 1.0, 2.0), False, id="mha-512"),
+        pytest.param((2, 1024, 1024, 16, 4, 128), (1.0, 0.5, 4.0), True, id="gqa-1024"),
+    ]
+    + (
+        [
+            pytest.param((1, 2048, 2048, 32, 8, 128), (0.5, 2.0, 1.0), True, id="gqa-2048"),
+            pytest.param((2, 512, 2048, 16, 4, 64), (2.0, 0.25, 0.5), False, id="cross-2048"),
+        ]
+        if _TEST_LEVEL == "L2"
+        else []
+    ),
+)
+def test_cudnn_python_fp8_model_configs(
+    shape, input_scales, causal, fp8, fp8_backward, o_in_f16, monkeypatch
+):
+    """Representative CS/MXFP8 outputs and gradients agree with FP32 unfused attention."""
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
+    monkeypatch.setenv("NVTE_DPA_FP8CS_O_in_F16", "1" if o_in_f16 else "0")
+    batch, sq, sk, q_heads, kv_heads, dim = shape
+    keys = jax.random.split(jax.random.key(321), 4)
+    shapes = ((batch, sq, q_heads, dim), (batch, sk, kv_heads, dim), (batch, sk, kv_heads, dim))
+    arrays = []
+    for key, tensor_shape, scale in zip(keys, shapes, input_scales):
+        values = jnp.clip(jax.random.normal(key, tensor_shape), -7.0, 7.0)
+        values = values.astype(jnp.float8_e4m3fn).astype(jnp.bfloat16)
+        # Fix the maximum so CS scaling is a power of two. Both recipes then
+        # preserve these random operands exactly, isolating internal FP8 P/dP error.
+        arrays.append(values.at[0, 0, 0, 0].set(7.0) * scale)
+    arrays = tuple(arrays)
+    weight = jax.random.normal(keys[3], shapes[0])
+    scaling_factor = dim**-0.5
+    attn_mask = AttnMaskType.CAUSAL_MASK if causal else AttnMaskType.NO_MASK
+    mask = (jnp.arange(sq)[None, :, None] >= jnp.arange(sk)[None, None, :]) if causal else None
+    _require_cudnn_attention(*arrays, fp8=fp8, attn_mask_type=attn_mask, attn_scale=scaling_factor)
+
+    def attention(xs):
+        return fused_attn(
+            xs,
+            None,
+            SequenceDescriptor(),
+            None,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=attn_mask,
+            qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=scaling_factor,
+            dropout_probability=0.0,
+            is_training=True,
+            fp8=fp8,
+        )
+
+    reference = lambda xs: attention_reference(xs, mask, scaling_factor=scaling_factor)
+    actual, expected = jax.jit(attention)(arrays), jax.jit(reference)(arrays)
+    relative_error = lambda a, b: float(
+        jnp.linalg.norm(a.astype(jnp.float32) - b) / jnp.linalg.norm(b)
+    )
+    assert actual.dtype == jnp.bfloat16
+    assert relative_error(actual, expected) < (0.04 if fp8 == "mxfp8" else 0.06)
+    actual_grads = jax.jit(jax.grad(lambda xs: (attention(xs) * weight).sum()))(arrays)
+    expected_grads = jax.jit(jax.grad(lambda xs: (reference(xs) * weight).sum()))(arrays)
+    for name, grad, ref in zip(("dQ", "dK", "dV"), actual_grads, expected_grads):
+        assert grad.dtype == jnp.bfloat16
+        error = relative_error(grad, ref)
+        assert error < (0.08 if fp8 == "mxfp8" else 0.1), f"{name} relative error: {error}"
+
+
+@pytest.mark.parametrize("o_in_f16", [True, False])
+@pytest.mark.parametrize("scaling_factor", [0.125, 0.25])
+@pytest.mark.parametrize(
+    "kind,sm_arch",
+    [
+        ("dense", None),
+        ("causal", None),
+        ("padding", None),
+        ("window", None),
+        ("ragged", None),
+        ("ragged_dense_stats", 120),
+        ("ragged_dense_stats_f16", 120),
+    ],
+)
+def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, scaling_factor, o_in_f16, monkeypatch, request):
+    """Compare FP8 GQA against FP32, including cached plans with different scalar values."""
+    monkeypatch.setenv("NVTE_DPA_FP8CS_O_in_F16", "1" if o_in_f16 else "0")
+    ragged = kind.startswith("ragged")
+    fp8 = not kind.endswith("_f16")
+    if ragged and get_device_compute_capability(0) < 100:
+        pytest.skip("Ragged backward and emulated SM12x statistics require Blackwell.")
+    if sm_arch is not None:
+        from transformer_engine.jax.cpp_extensions import cudnn_attention
+
+        # Test the dense statistics conversion on the available GPU.
+        # Architecture is fixed in a real process, so discard JAX's abstract-value
+        # cache when mocking a different architecture's Max tensor layout.
+        jax.clear_caches()
+        request.addfinalizer(jax.clear_caches)
+        monkeypatch.setattr(cudnn_attention, "device_capabilities", lambda: (sm_arch,))
+    keys = jax.random.split(jax.random.PRNGKey(123), 4)
+    q = jax.random.choice(keys[0], jnp.array([-0.5, 0.5], jnp.bfloat16), (2, 128, 4, 64))
+    k = jax.random.choice(keys[1], jnp.array([-0.5, 0.5], jnp.bfloat16), (2, 128, 2, 64))
+    v = jax.random.choice(keys[2], jnp.array([-1.0, 1.0], jnp.bfloat16), (2, 128, 2, 64))
+    weight = jax.random.choice(keys[3], jnp.array([-1.0, 1.0], jnp.bfloat16), q.shape)
+    positions = jnp.arange(128)
+    mask = jnp.ones((2, 128, 128), jnp.bool_)
+    descriptor = SequenceDescriptor()
+    attn_mask = AttnMaskType.NO_MASK
+    layout = QKVLayout.BSHD_BSHD_BSHD
+    window = None
+    if kind in ("causal", "window") or ragged:
+        mask &= positions[None, :, None] >= positions[None, None, :]
+        attn_mask = AttnMaskType.CAUSAL_MASK
+    if kind == "window":
+        window = (15, 0)
+        mask &= positions[None, :, None] - positions[None, None, :] <= 15
+    if kind == "padding":
+        lengths = jnp.array([128, 91], jnp.int32)
+        descriptor = SequenceDescriptor.from_seqlens((lengths, lengths))
+        mask &= (positions[None, None, :] < lengths[:, None, None]) & (
+            positions[None, :, None] < lengths[:, None, None]
+        )
+        attn_mask = AttnMaskType.PADDING_MASK
+    if ragged:
+        ids = jnp.broadcast_to(positions // 64 + 1, (2, 128))
+        descriptor = SequenceDescriptor.from_segment_ids_and_pos(
+            ids, jnp.broadcast_to(positions % 64, ids.shape)
+        )
+        mask &= ids[:, :, None] == ids[:, None, :]
+        attn_mask = AttnMaskType.PADDING_CAUSAL_MASK
+        layout = QKVLayout.THD_THD_THD
+
+    _require_cudnn_attention(
+        q,
+        k,
+        v,
+        qkv_layout=layout,
+        attn_mask_type=attn_mask,
+        max_segments_per_seq=2 if ragged else 1,
+        window_size=window if window is not None else (-1, -1),
+        fp8=fp8,
+        attn_scale=scaling_factor,
+        return_max_logit=True,
+    )
+
+    def reference(arrays):
+        return attention_reference(arrays, mask, scaling_factor=scaling_factor)
+
+    def attention(arrays):
+        result = fused_attn(
+            arrays,
+            None,
+            descriptor,
+            None,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=attn_mask,
+            qkv_layout=layout,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=scaling_factor,
+            dropout_probability=0.0,
+            is_training=True,
+            max_segments_per_seq=2 if ragged else 1,
+            window_size=window,
+            fp8=fp8,
+            return_max_logit=True,
+        )
+        return result[0]
+
+    arrays = (q, k, v)
+    actual, expected = jax.jit(attention)(arrays), jax.jit(reference)(arrays)
+
+    # Operands are exactly representable. Error comes from FP8 softmax and dP,
+    # which use E4M3 and E5M2 internally, and the BF16 returned tensors.
+    def relative_error(actual, expected):
+        return float(
+            jnp.linalg.norm(actual.astype(jnp.float32) - expected.astype(jnp.float32))
+            / jnp.linalg.norm(expected.astype(jnp.float32))
+        )
+
+    assert relative_error(actual, expected) < (0.06 if fp8 else 0.01)
+    actual_grads = jax.jit(jax.grad(lambda xs: jnp.sum(attention(xs) * weight)))(arrays)
+    expected_grads = jax.jit(jax.grad(lambda xs: jnp.sum(reference(xs) * weight)))(arrays)
+    for name, actual_grad, expected_grad in zip(("dQ", "dK", "dV"), actual_grads, expected_grads):
+        error = relative_error(actual_grad, expected_grad)
+        assert error < (0.1 if fp8 else 0.01), f"{name} relative error: {error}"
+    _, max_logit = jax.jit(
+        lambda xs: fused_attn(
+            xs,
+            None,
+            descriptor,
+            None,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=attn_mask,
+            qkv_layout=layout,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=scaling_factor,
+            dropout_probability=0.0,
+            is_training=True,
+            max_segments_per_seq=2 if ragged else 1,
+            return_max_logit=True,
+            window_size=window,
+            fp8=fp8,
+        )
+    )(arrays)
+    expected_max = attention_reference(
+        arrays, mask, scaling_factor=scaling_factor, return_max_logit=True
+    )
+    np.testing.assert_allclose(max_logit, expected_max, rtol=1e-2, atol=1e-2)
+
+
+def test_cudnn_python_alibi_forward_backward():
+    """cuDNN ALiBi agrees with explicit slopes in native JAX attention."""
+    keys = jax.random.split(jax.random.PRNGKey(42), 3)
+    arrays = tuple(jax.random.normal(key, (1, 128, 4, 64), jnp.float16) * 0.1 for key in keys)
+    positions = jnp.arange(128)
+    causal = positions[:, None] >= positions[None, :]
+    slopes = 2.0 ** (-2.0 * jnp.arange(1, 5, dtype=jnp.float32))
+
+    def reference(arrays):
+        return attention_reference(
+            arrays,
+            causal[None],
+            bias=slopes[None, :, None, None] * positions[None, None, None, :],
+        )
+
+    def attention(arrays):
+        return fused_attn(
+            arrays,
+            None,
+            SequenceDescriptor(),
+            None,
+            attn_bias_type=AttnBiasType.ALIBI,
+            attn_mask_type=AttnMaskType.CAUSAL_MASK,
+            qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=0.125,
+            dropout_probability=0.0,
+            is_training=True,
+        )
+
+    np.testing.assert_allclose(
+        jax.jit(attention)(arrays), jax.jit(reference)(arrays), rtol=1e-2, atol=1e-3
+    )
+    actual_grads = jax.jit(jax.grad(lambda xs: jnp.sum(attention(xs))))(arrays)
+    expected_grads = jax.jit(jax.grad(lambda xs: jnp.sum(reference(xs))))(arrays)
+    for actual, expected in zip(actual_grads, expected_grads):
+        np.testing.assert_allclose(actual, expected, rtol=1e-2, atol=1e-3)
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+def test_cudnn_python_flax_sink_gradients(fp8, monkeypatch):
+    """The cuDNN Python backend returns gradients to Flax's learnable sink parameter."""
+    from transformer_engine.jax.flax import DotProductAttention
+
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    module = DotProductAttention(
+        head_dim=64,
+        num_attention_heads=2,
+        attn_mask_type="no_mask",
+        transpose_batch_sequence=False,
+        softmax_type="learnable",
+        fp8=fp8,
+    )
+    q = jnp.zeros((1, 128, 2, 64), jnp.bfloat16)
+    v = jnp.zeros_like(q).at[:, ::2, :, 0].set(1.0)
+    if fp8:
+        _require_cudnn_attention(
+            q,
+            q,
+            v,
+            fp8=True,
+            softmax_type=AttnSoftmaxType.LEARNABLE_SOFTMAX,
+        )
+    variables = module.init(jax.random.PRNGKey(0), q, q, v, deterministic=True)
+
+    def forward(variables, value):
+        return module.apply(variables, q, q, value, deterministic=True)
+
+    actual = jax.jit(forward)(variables, v)
+    denominator = 129
+    expected = jnp.zeros_like(q).at[:, :, :, 0].set(64 / denominator)
+    np.testing.assert_allclose(actual, expected, rtol=5e-3, atol=5e-3)
+    parameter_grad, value_grad = jax.jit(
+        jax.grad(
+            lambda params, value: jnp.sum(forward(params, value)),
+            argnums=(0, 1),
+        )
+    )(variables, v)
+    assert value_grad.dtype == jnp.bfloat16
+    np.testing.assert_allclose(value_grad, 128 / denominator, rtol=5e-2, atol=1e-2)
+    expected_sink_grad = -128 * 64 / denominator**2
+    leaves = jax.tree_util.tree_leaves(parameter_grad)
+    assert len(leaves) == 1
+    np.testing.assert_allclose(leaves[0], expected_sink_grad, rtol=0.1, atol=1e-2)
+
+
+@pytest.mark.parametrize("fp8,fp8_backward", [(False, False), (True, False), (True, True)])
+def test_cudnn_python_dropout_replay(fp8, fp8_backward, monkeypatch):
+    """Explicit keys replay dropout through JIT and forward recomputation."""
+    monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1" if fp8_backward else "0")
+    arrays = tuple(jnp.ones((1, 128, 2, 64), jnp.bfloat16) for _ in range(3))
+    _require_cudnn_attention(*arrays, dropout_probability=0.2, fp8=fp8)
+
+    def attention(arrays, seed):
+        return fused_attn(
+            arrays,
+            None,
+            None,
+            seed,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=AttnMaskType.NO_MASK,
+            qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            scaling_factor=0.125,
+            dropout_probability=0.2,
+            is_training=True,
+            fp8=fp8,
+        )
+
+    seed = jax.random.PRNGKey(123)
+    forward = jax.jit(attention)
+    actual = forward(arrays, seed)
+    np.testing.assert_array_equal(actual, forward(arrays, seed))
+    assert not np.array_equal(actual, forward(arrays, jax.random.PRNGKey(456)))
+    ordinary = jax.jit(jax.grad(lambda xs: jnp.sum(attention(xs, seed))))(arrays)
+    recomputed = jax.jit(jax.grad(lambda xs: jnp.sum(jax.checkpoint(attention)(xs, seed))))(arrays)
+    for expected, actual in zip(ordinary, recomputed):
+        np.testing.assert_array_equal(actual, expected)

@@ -60,7 +60,6 @@ Modules
 
 .. autoapifunction:: transformer_engine.jax.flax.extend_logical_axis_rules
 
-
 Mixture of Experts
 ------------------
 Router, routing kernels, and grouped dense for MoE layers. See

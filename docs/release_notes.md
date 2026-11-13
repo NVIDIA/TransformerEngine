@@ -6,7 +6,8 @@
 
 ## Fixed Issues
 
-- 
+- PyTorch fused-attention backend selection checks backward support when gradients are needed,
+  including in evaluation mode.
 
 ## Breaking Changes in This Release
 

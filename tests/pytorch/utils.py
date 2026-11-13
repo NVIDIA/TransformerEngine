@@ -33,7 +33,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging,
     check_set_window_size,
 )
-from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
+from transformer_engine.pytorch.constants import FusedAttnBackend
 from transformer_engine.pytorch.module.base import get_dummy_wgrad
 
 
