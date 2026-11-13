@@ -35,11 +35,14 @@ void reset_tensor_data(transformer_engine::TensorWrapper &tensor, bool rowwise, 
   }
 }
 
-bool is_empty_grouped_tensor_param(const NVTEBasicTensor &t) {
-  if (t.data_ptr == nullptr) {
-    return true;
+bool is_empty_grouped_tensor_param(const GroupedTensorWrapper &input) {
+  const auto logical_shape = input.logical_shape();
+  for (size_t dimension = 0; dimension < logical_shape.ndim; ++dimension) {
+    if (logical_shape.data[dimension] == 0) {
+      return true;
+    }
   }
-  return t.shape.ndim == 1 && t.shape.data[0] == 0;
+  return false;
 }
 
 }  // namespace
@@ -501,15 +504,18 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
     return std::nullopt;
   }
+  const auto row_scales = input.get_rowwise_scale_inv();
+  const auto col_scales = input.get_columnwise_scale_inv();
+  const bool empty_input = is_empty_grouped_tensor_param(input);
+  const bool swizzle_rowwise = rowwise_usage && !empty_input;
+  const bool swizzle_columnwise = columnwise_usage && !empty_input;
   if (input.get_with_gemm_swizzled_scales()) {
     return std::nullopt;
   }
-
-  const auto row_scales = input.get_rowwise_scale_inv();
-  const auto col_scales = input.get_columnwise_scale_inv();
-  const bool swizzle_rowwise = rowwise_usage && !is_empty_grouped_tensor_param(row_scales);
-  const bool swizzle_columnwise = columnwise_usage && !is_empty_grouped_tensor_param(col_scales);
   if (!swizzle_rowwise && !swizzle_columnwise) {
+    if (empty_input) {
+      input.set_with_gemm_swizzled_scales(true);
+    }
     return std::nullopt;
   }
 
@@ -643,8 +649,8 @@ void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise)
     } else {
       tensor.attr("columnwise_scale_inv") = py::none();
     }
-    tensor.attr("_with_gemm_swizzled_scales") = py::cast(true);
   }
+  tensor.attr("_with_gemm_swizzled_scales") = py::cast(tensor_nvte.get_with_gemm_swizzled_scales());
 }
 
 namespace {
