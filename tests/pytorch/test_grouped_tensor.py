@@ -764,12 +764,18 @@ class TestGroupedTensor:
     @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
     @pytest.mark.parametrize("optimize_for_gemm", [False, True])
     @pytest.mark.parametrize("output_dbias", [False, True])
+    @pytest.mark.parametrize("num_tensors", [3, 65])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_quantize_grouped_mxfp8(
-        self, shape_case: str, usage: str, optimize_for_gemm: bool, output_dbias: bool
+        self,
+        shape_case: str,
+        usage: str,
+        optimize_for_gemm: bool,
+        output_dbias: bool,
+        num_tensors: int,
     ) -> None:
         """Test grouped MXFP8 quantization against per-tensor quantization for
-        varying first/last/both dimensions and compact or GEMM-swizzled scales."""
+        varying dimensions and compact or GEMM-swizzled scales."""
         if output_dbias and shape_case != "varying_first":
             pytest.skip("bgrad_group_quantize requires constant last dimension")
 
@@ -785,7 +791,7 @@ class TestGroupedTensor:
         else:  # varying_both
             per_tensor_shapes = [(128, 256), (256, 512), (384, 384)]
 
-        num_tensors = len(per_tensor_shapes)
+        per_tensor_shapes = [per_tensor_shapes[i % 3] for i in range(num_tensors)]
 
         # Each tensor occupies a contiguous chunk of a flat buffer; the kernel
         # locates each chunk via tensor_offsets, so the 2D view below only needs
@@ -860,6 +866,120 @@ class TestGroupedTensor:
         if output_dbias:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
             torch.testing.assert_close(dbias, expected_dbias, rtol=1e-5, atol=4e-3)
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_group_quantize_multiple_streams(self, capture: bool) -> None:
+        """Framework allocations isolate the TMA storage used by independent streams."""
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=True)
+        streams = [torch.cuda.Stream() for _ in range(5)]
+        num_tensors = 65
+        inputs, metadata, expected = [], [], []
+        for index in range(len(streams)):
+            first = [128 * (1 + (i + index) % 3) for i in range(num_tensors)]
+            last = [128 * (1 + (i + index) % 2) for i in range(num_tensors)]
+            tensor = torch.randn(
+                (1, sum(m * n for m, n in zip(first, last))),
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            rows = torch.tensor(first, device="cuda", dtype=torch.int64)
+            cols = torch.tensor(last, device="cuda", dtype=torch.int64)
+            inputs.append(tensor)
+            metadata.append((rows, cols))
+            expected.append(tex.group_quantize(tensor, quantizer, num_tensors, rows, cols))
+        torch.cuda.synchronize()
+        outputs, graphs = [], []
+        # Each call allocates its TMA storage through the framework.
+        for index in reversed(range(len(streams))):
+            with torch.cuda.stream(streams[index]):
+                outputs.append(
+                    tex.group_quantize(
+                        inputs[index],
+                        quantizer,
+                        num_tensors,
+                        *metadata[index],
+                    )
+                )
+        for stream in streams:
+            stream.synchronize()
+        if capture:
+            outputs = [None] * len(streams)
+            for index, stream in enumerate(streams):
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    outputs[index] = tex.group_quantize(
+                        inputs[index],
+                        quantizer,
+                        num_tensors,
+                        *metadata[index],
+                    )
+                graphs.append(graph)
+        for _ in range(20):
+            for index, stream in enumerate(streams):
+                with torch.cuda.stream(stream):
+                    if capture:
+                        graphs[index].replay()
+                    else:
+                        outputs[index] = tex.group_quantize(
+                            inputs[index],
+                            quantizer,
+                            num_tensors,
+                            *metadata[index],
+                        )
+        for stream in streams:
+            stream.synchronize()
+        for actual, reference in zip(outputs, expected):
+            for name in ("rowwise_data", "columnwise_data", "scale_inv", "columnwise_scale_inv"):
+                assert torch.equal(getattr(actual, name), getattr(reference, name)), name
+
+    @pytest.mark.parametrize("capture", [False, True])
+    @pytest.mark.parametrize("rowwise", [False, True])
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_dequantize_concurrent_streams(self, capture: bool, rowwise: bool) -> None:
+        """Varying shapes above 64 groups keep dequantization descriptors private."""
+        count = 65
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=rowwise, columnwise=not rowwise)
+        streams = [torch.cuda.Stream() for _ in range(4)]
+        quantized, expected = [], []
+        for index in range(len(streams)):
+            rows = [128 * (1 + (i + index) % 2) for i in range(count)]
+            cols = [128 * (1 + (i + index) % 3) for i in range(count)]
+            source = torch.randn(
+                (1, sum(m * n for m, n in zip(rows, cols))),
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            result = tex.group_quantize(
+                source,
+                quantizer,
+                count,
+                torch.tensor(rows, dtype=torch.int64, device="cuda"),
+                torch.tensor(cols, dtype=torch.int64, device="cuda"),
+            )
+            quantized.append(result)
+            expected.append(tex.group_dequantize(result, tex.DType.kBFloat16).rowwise_data.clone())
+        torch.cuda.synchronize()
+        outputs, graphs = [None] * len(streams), []
+        if capture:
+            for index, stream in enumerate(streams):
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    outputs[index] = tex.group_dequantize(quantized[index], tex.DType.kBFloat16)
+                graphs.append(graph)
+        for _ in range(20):
+            for index, stream in enumerate(streams):
+                with torch.cuda.stream(stream):
+                    if capture:
+                        graphs[index].replay()
+                    else:
+                        outputs[index] = tex.group_dequantize(quantized[index], tex.DType.kBFloat16)
+        for stream in streams:
+            stream.synchronize()
+        for actual, reference in zip(outputs, expected):
+            assert torch.equal(actual.rowwise_data, reference)
 
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)

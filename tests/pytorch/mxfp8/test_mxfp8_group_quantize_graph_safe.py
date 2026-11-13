@@ -688,6 +688,53 @@ def check_prequantized_requantize_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("return_dequantized", [False, True])
+def test_prequantized_requantize_concurrent_streams(capture: bool, return_dequantized: bool):
+    """Independent framework workspaces and launch-local maps survive concurrent graph replay."""
+    streams = [torch.cuda.Stream() for _ in range(4)]
+    graphs = [torch.cuda.CUDAGraph() for _ in streams]
+    inputs, expected, actual = [], [], []
+
+    def launch(wire, splits):
+        decoded = tex.group_requantize_inplace(
+            wire,
+            make_op_quantizer(columnwise=True),
+            splits.numel(),
+            splits,
+            te.DType.kBFloat16,
+            return_dequantized=return_dequantized,
+        )
+        outputs = [wire.scale_inv, wire.columnwise_data, wire.columnwise_scale_inv]
+        return outputs + ([decoded] if return_dequantized else [])
+
+    for i in range(len(streams)):
+        rows, cols = 1024 + 256 * i, 256 * (1 + i % 2)
+        source = torch.randn(rows, cols, device="cuda", dtype=torch.bfloat16) + i
+        splits = torch.tensor([128, 256, rows - 384], device="cuda", dtype=torch.int64)
+        baseline = make_prequantized_wire_tensor(source, splits)
+        expected.append([tensor.clone() for tensor in launch(baseline, splits)])
+        inputs.append((make_prequantized_wire_tensor(source, splits), splits))
+
+    for i, stream in enumerate(streams):
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            if capture:
+                with torch.cuda.graph(graphs[i], stream=stream):
+                    actual.append(launch(*inputs[i]))
+            else:
+                actual.append(launch(*inputs[i]))
+    if capture:
+        for _ in range(20):
+            for graph in reversed(graphs):
+                graph.replay()
+    for stream, outputs, reference in zip(streams, actual, expected):
+        stream.synchronize()
+        for tensor, expected_tensor in zip(outputs, reference):
+            torch.testing.assert_close(tensor, expected_tensor, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, N, split_sections",
     [

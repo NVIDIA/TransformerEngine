@@ -22,29 +22,17 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <cstdint>
+
 #include "../../common.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "grouped_layout.cuh"
+#include "grouped_tma_workspace.h"
 
 namespace transformer_engine {
 namespace dispatch {
 namespace common {
-
-constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
-
-struct alignas(128) TensorMapStorage {
-  alignas(128) CUtensorMap input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  alignas(128) CUtensorMap act_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  alignas(128) CUtensorMap output_rowwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  alignas(128) CUtensorMap output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  size_t rows[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  size_t cols[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-  size_t offsets[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-};
-
-// Internal linkage avoids device-link ODR issues when this header is included by multiple .cu TUs.
-static __device__ TensorMapStorage g_tensor_maps;
 
 inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   const size_t cols = t->flat_last_dim();
@@ -104,9 +92,6 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
   }
 }
 
-// Must have internal linkage like g_tensor_maps. Otherwise, before CUDA 13.0 (nvcc
-// -static-global-template-stub=false), the host stubs from every TU are merged, so the launch
-// writes another TU's g_tensor_maps and the consumer kernel reads an empty table.
 template <typename IType, typename OType>
 static __global__ void __launch_bounds__(THREADS_PER_WARP)
     update_tma_descriptors(const __grid_constant__ CUtensorMap base_tensor_map_input,
@@ -122,17 +107,25 @@ static __global__ void __launch_bounds__(THREADS_PER_WARP)
                            const int64_t *const __restrict__ offsets_ptr,
                            const int64_t *const __restrict__ first_dims_ptr,
                            const int64_t *const __restrict__ last_dims_ptr, const bool rowwise,
-                           const bool colwise, const bool compute_dactivations) {
+                           const bool colwise, const bool compute_dactivations,
+                           const GroupedTmaStorageView storage) {
   const size_t tensor_id = blockIdx.x;
+  size_t *const rows_map = storage.rows;
+  size_t *const cols_map = storage.cols;
+  size_t *const offsets_map = storage.offsets;
+  CUtensorMap *const input_maps = storage.input;
+  CUtensorMap *const act_input_maps = storage.act_input;
+  CUtensorMap *const rowwise_maps = storage.output_rowwise;
+  CUtensorMap *const colwise_maps = storage.output_colwise;
   const size_t rows =
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
   const size_t offset_elts = offsets_ptr[tensor_id];
   if (threadIdx.x == 0) {
-    g_tensor_maps.rows[tensor_id] = rows;
-    g_tensor_maps.cols[tensor_id] = cols;
-    g_tensor_maps.offsets[tensor_id] = offset_elts;
+    rows_map[tensor_id] = rows;
+    cols_map[tensor_id] = cols;
+    offsets_map[tensor_id] = offset_elts;
   }
 
   // Zero-sized groups: skip TMA descriptor update. The main kernel already returns
@@ -144,27 +137,27 @@ static __global__ void __launch_bounds__(THREADS_PER_WARP)
 
   if (tensor_id < num_tensors) {
     {
-      CUtensorMap *modified_tensor_map_input = &g_tensor_maps.input[tensor_id];
+      CUtensorMap *modified_tensor_map_input = &input_maps[tensor_id];
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_input, modified_tensor_map_input, global_data_ptr,
                              rows, cols, sizeof(IType));
     }
     if (compute_dactivations) {
-      CUtensorMap *modified_tensor_map_act_input = &g_tensor_maps.act_input[tensor_id];
+      CUtensorMap *modified_tensor_map_act_input = &act_input_maps[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(act_input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_act_input, modified_tensor_map_act_input,
                              global_data_ptr, rows, cols, sizeof(IType));
     }
     if (rowwise) {
-      CUtensorMap *modified_tensor_map_output_rowwise = &g_tensor_maps.output_rowwise[tensor_id];
+      CUtensorMap *modified_tensor_map_output_rowwise = &rowwise_maps[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_rowwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_rowwise, modified_tensor_map_output_rowwise,
                              global_data_ptr, rows, cols, sizeof(OType));
     }
     if (colwise) {
-      CUtensorMap *modified_tensor_map_output_colwise = &g_tensor_maps.output_colwise[tensor_id];
+      CUtensorMap *modified_tensor_map_output_colwise = &colwise_maps[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_colwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_colwise, modified_tensor_map_output_colwise,

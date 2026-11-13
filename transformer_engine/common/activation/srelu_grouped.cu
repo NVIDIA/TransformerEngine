@@ -15,3 +15,12 @@ void nvte_group_srelu(const NVTEGroupedTensor input, NVTEGroupedTensor output,
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, srelu<fp32, fp32>>(input, output, nullptr,
                                                                         stream);
 }
+
+void nvte_group_srelu_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                         NVTETensor workspace, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_srelu_v2);
+  using namespace transformer_engine;
+  convertNVTETensorCheck(workspace);
+  dispatch::group_quantize_fwd_helper<true, Empty, srelu<fp32, fp32>>(input, output, nullptr,
+                                                                      stream, workspace);
+}

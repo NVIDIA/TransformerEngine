@@ -34,6 +34,17 @@ namespace pytorch {
 
 namespace {
 
+// The framework allocation stays alive through submission. The caching allocator
+// tracks its creating stream and retains graph-private allocations during capture.
+void quantize_grouped_with_workspace(NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                     NVTEQuantizationConfig config, cudaStream_t stream) {
+  TensorWrapper requirement;
+  nvte_group_quantize_v2(input, output, requirement.data(), config, stream);
+  auto storage = allocateSpace(requirement.shape(), requirement.dtype());
+  requirement.set_rowwise_data(storage.data_ptr(), requirement.dtype(), requirement.shape());
+  nvte_group_quantize_v2(input, output, requirement.data(), config, stream);
+}
+
 std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   const auto &shape = tensor.shape();
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
@@ -513,8 +524,9 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
       }
       quant_config_cpp.set_mxfp8_2d_quantization(mxfp8_quantizer_cpp->with_2d_quantization);
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+        const auto stream = at::cuda::getCurrentCUDAStream();
+        quantize_grouped_with_workspace(grouped_input_tensor.data(),
+                                        grouped_output_tensor_cpp.data(), quant_config_cpp, stream);
       });
       break;
     }
@@ -887,11 +899,9 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                               grouped_dbias.data(), workspace_nvte.data(), quant_config_cpp,
                               stream);
   });
-  if (workspace_nvte.ndim() > 0 && workspace_nvte.numel() > 0) {
-    at::Tensor workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
-    workspace_nvte = makeTransformerEngineTensor(workspace_torch.data_ptr(), workspace_nvte.shape(),
-                                                 workspace_nvte.dtype());
-  }
+  at::Tensor workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+  workspace_nvte.set_rowwise_data(workspace_torch.data_ptr(), workspace_nvte.dtype(),
+                                  workspace_nvte.shape());
   NVTE_SCOPED_GIL_RELEASE({
     nvte_group_quantize_dbias(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
                               grouped_dbias.data(), workspace_nvte.data(), quant_config_cpp,
@@ -1000,7 +1010,17 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
                               tensor_offsets, logical_first_dim, logical_last_dim);
 
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_dequantize(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());
+    const auto stream = at::cuda::getCurrentCUDAStream();
+    if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      TensorWrapper workspace_nvte;
+      nvte_group_dequantize_v2(input_cpp.data(), out_cpp.data(), workspace_nvte.data(), stream);
+      auto workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+      workspace_nvte.set_rowwise_data(workspace_torch.data_ptr(), workspace_nvte.dtype(),
+                                      workspace_nvte.shape());
+      nvte_group_dequantize_v2(input_cpp.data(), out_cpp.data(), workspace_nvte.data(), stream);
+    } else {
+      nvte_group_dequantize(input_cpp.data(), out_cpp.data(), stream);
+    }
   });
 
   return py::reinterpret_borrow<py::object>(out_py);
@@ -1144,10 +1164,19 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
       dequantized_nvte.set_rowwise_data(dequantized.data_ptr(), DType::kBFloat16, grouped_shape);
     }
 
+    TensorWrapper workspace_nvte;
+    const NVTETensor dequantized_output = return_dequantized ? dequantized_nvte.data() : nullptr;
+    const auto stream = at::cuda::getCurrentCUDAStream();
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_group_requantize(input_nvte.data(), output_nvte.data(),
-                            return_dequantized ? dequantized_nvte.data() : nullptr, nullptr,
-                            at::cuda::getCurrentCUDAStream());
+      nvte_group_requantize_v2(input_nvte.data(), output_nvte.data(), dequantized_output,
+                               workspace_nvte.data(), nullptr, stream);
+    });
+    auto workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+    workspace_nvte.set_rowwise_data(workspace_torch.data_ptr(), workspace_nvte.dtype(),
+                                    workspace_nvte.shape());
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_group_requantize_v2(input_nvte.data(), output_nvte.data(), dequantized_output,
+                               workspace_nvte.data(), nullptr, stream);
     });
 
     grouped_x.attr("scale_inv") = swizzled_rowwise_scale_inv;
