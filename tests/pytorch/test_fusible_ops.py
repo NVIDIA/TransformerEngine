@@ -1881,7 +1881,7 @@ class TestBasicOps:
                 pytest.skip("FP8 output is only supported with FP8 GEMMs")
             if quantized_grad_input and not quantized_compute:
                 pytest.skip("FP8 grad input is only supported with FP8 GEMMs")
-        if quantization not in (None, "fp8"):
+        if quantization not in (None, "fp8", "fp8_delayed_scaling"):
             if quantized_output or quantized_grad_input:
                 pytest.skip("Recipe does not support quantized GEMM output")
 

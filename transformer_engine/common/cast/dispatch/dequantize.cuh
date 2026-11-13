@@ -20,6 +20,10 @@
 #include "../mxfp8/group_dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
 
+#ifdef NVTE_WITH_CUTEDSL
+#include "../mxfp8/dequantize_mxfp8_cutedsl.cuh"
+#endif
+
 namespace transformer_engine {
 namespace dispatch {
 
@@ -41,7 +45,13 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
     }
     case NVTE_MXFP8_1D_SCALING: {
       if (is_supported_by_CC_100()) {
-        mxfp8::dequantize(input, output, stream);
+        bool dequantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+        dequantized_with_cutedsl = cutedsl_backend::mxfp8_dequantize_cutedsl(input, output, stream);
+#endif
+        if (!dequantized_with_cutedsl) {
+          mxfp8::dequantize(input, output, stream);
+        }
       } else {
         NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
       }
