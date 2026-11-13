@@ -123,6 +123,7 @@ def check_quantization_nvfp4_versus_reference(
     nvfp4_4over6_err_mode: str = "MAE",
     nvfp4_4over6_err_use_fast_math: bool = False,
     scale_dtype: te.DType = te.DType.kFloat8E4M3,
+    check_amax_reset: bool = False,
 ) -> None:
     scale_dtype = te.DType.cast(scale_dtype)
     if nvfp4_e4m3_max not in NVFP4_SUPPORTED_SCALE_MAX_VALUES:
@@ -252,6 +253,19 @@ def check_quantization_nvfp4_versus_reference(
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
 
+    if check_amax_reset:
+        assert not row_scaled_nvfp4
+        # Reusing an output whose maximum decreases verifies that every amax buffer is reset.
+        for magnitude in (16.0, 0.5, 0.0, 2.0):
+            x = torch.full((M, N), -magnitude, dtype=x_dtype, device=device)
+            nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
+            expected_amax = x.float().abs().amax().reshape(1)
+            torch.testing.assert_close(x_nvfp4_sut._amax_rowwise, expected_amax, atol=0.0, rtol=0.0)
+            if return_transpose:
+                torch.testing.assert_close(
+                    x_nvfp4_sut._amax_columnwise, expected_amax, atol=0.0, rtol=0.0
+                )
+
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("return_transpose", [False, True], ids=["rowwise", "with_columnwise"])
@@ -359,6 +373,7 @@ def test_quantization_block_tiling_versus_reference(
     row_scaled_nvfp4: bool,
     nvfp4_4over6_config: NVFP44Over6TestConfig,
 ) -> None:
+    check_amax_reset = not row_scaled_nvfp4 and not nvfp4_4over6_config.use_4over6
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
@@ -372,6 +387,7 @@ def test_quantization_block_tiling_versus_reference(
         nvfp4_e4m3_max=nvfp4_4over6_config.e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_config.err_mode,
         nvfp4_4over6_err_use_fast_math=nvfp4_4over6_config.err_use_fast_math,
+        check_amax_reset=check_amax_reset,
     )
 
 
@@ -807,29 +823,42 @@ def test_nvfp4_quantization_noncontiguous_inputs(
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
-    "M, N",
+    "with_2d_quantization, M, N",
     [
-        # Aligned tiles
-        (128, 128),
-        (256, 256),
-        (512, 512),
-        (2048, 2048),
-        # Padded tiles (non-multiple of kTileDim=128)
-        (256, 272),
-        (304, 304),
-        (320, 256),
+        # Existing 2D coverage: aligned and padded tiles.
+        (True, 128, 128),
+        (True, 256, 256),
+        (True, 512, 512),
+        (True, 2048, 2048),
+        (True, 256, 272),
+        (True, 304, 304),
+        (True, 320, 256),
+        # Focused 1D coverage for aligned and padded output reuse.
+        (False, 128, 128),
+        (False, 256, 272),
+    ],
+    ids=[
+        "2d-128x128",
+        "2d-256x256",
+        "2d-512x512",
+        "2d-2048x2048",
+        "2d-256x272",
+        "2d-304x304",
+        "2d-320x256",
+        "1d-128x128",
+        "1d-256x272",
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-def test_nvfp4_2d_columnwise_only_matches_both_directions(
+def test_nvfp4_columnwise_only_matches_both_directions(
     x_dtype: torch.dtype,
+    with_2d_quantization: bool,
     M: int,
     N: int,
 ):
-    """Bitwise check: 2D NVFP4 with columnwise-only must produce the same
-    columnwise data/scales as the columnwise half of (rowwise + columnwise) 2D.
+    """Columnwise-only NVFP4 must match the columnwise half of both-directions.
 
-    Covers both kernels depending on the (dtype, shape) routing:
+    The 2D cases cover both kernels depending on the (dtype, shape) routing:
     - bf16 with rows % 32 == 0 and cols % 32 == 0 routes to the optimized
       ``quantize_transpose_nvfp4_2D_kernel`` (instantiated with RETURN_ROWWISE=false),
       validating that gating the rowwise pass/store leaves the shared
@@ -853,7 +882,7 @@ def test_nvfp4_2d_columnwise_only_matches_both_directions(
             amax_reduction_group=None,
             with_rht=False,
             with_post_rht_amax=False,
-            with_2d_quantization=True,
+            with_2d_quantization=with_2d_quantization,
             row_scaled_nvfp4=False,
         )
 
@@ -861,7 +890,7 @@ def test_nvfp4_2d_columnwise_only_matches_both_directions(
     q_both = _make_quantizer(rowwise=True, columnwise=True)
     out_both = q_both(x)
 
-    # SUT: produce columnwise only (the path that hits the new amax-only pass).
+    # SUT: produce columnwise only.
     q_col_only = _make_quantizer(rowwise=False, columnwise=True)
     out_col_only = q_col_only(x)
 
@@ -900,6 +929,16 @@ def test_nvfp4_2d_columnwise_only_matches_both_directions(
     torch.testing.assert_close(
         out_col_only._amax_columnwise, out_both._amax_columnwise, atol=0, rtol=0
     )
+
+    if (M, N) in ((128, 128), (256, 272)):
+        # Reusing a columnwise-only output exercises the path where its amax is primary.
+        for magnitude in (16.0, 0.5, 0.0, 2.0):
+            x = torch.full((M, N), -magnitude, dtype=x_dtype, device=device)
+            q_col_only.update_quantized(x, out_col_only)
+            expected_amax = x.float().abs().amax().reshape(1)
+            torch.testing.assert_close(
+                out_col_only._amax_columnwise, expected_amax, atol=0.0, rtol=0.0
+            )
 
     # Sanity: column-only path must not allocate a rowwise output.
     assert out_col_only._rowwise_data is None
