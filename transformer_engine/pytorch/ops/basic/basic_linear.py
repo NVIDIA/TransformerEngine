@@ -992,6 +992,8 @@ class BasicLinear(BasicOperation):
                         "Attempting to generate quantized grad input tensor "
                         "with unsupported quantizer"
                     )
+                grad_input_quantizer = grad_input_quantizer.copy()
+                grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
             # Check if accumulating into grad input tensor
             if accumulate_into_grad_input:
@@ -1291,6 +1293,8 @@ class BasicLinear(BasicOperation):
                     else None
                 ),
             )
+            if dx.is_quantized:
+                dx.update_usage(rowwise_usage=True, columnwise_usage=False)
         dw = None
         if args.weight_requires_grad:
             dw = TensorSpec(

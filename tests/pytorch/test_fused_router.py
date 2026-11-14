@@ -2,10 +2,12 @@
 #
 # See LICENSE for license information.
 from copy import deepcopy
+from itertools import product
 from typing import Optional
 
 import pytest
 import torch
+from torch._dynamo.utils import counters
 
 from transformer_engine.pytorch.router import (
     QBHistogramMode,
@@ -100,9 +102,10 @@ def _get_tolerances(dtype: torch.dtype, num_experts: int):
     """
     # Default tolerances for torch.testing.assert_close
     base_atol, base_rtol = 1e-5, 1.3e-6
-    # TODO: account for fp16, bf16 as dtype
-    if dtype != torch.float32:
-        raise NotImplementedError("tolerances implemented for fp32 only")
+    if dtype == torch.float16:
+        return 2e-4, 2e-3
+    if dtype == torch.bfloat16:
+        return 2e-3, 2e-2
     eps = 2e-7
     # The worst-case rounding error from summing N values is O(N * eps).
     # Use 2 * num_experts * eps as the tolerance floor so tests pass for
@@ -110,6 +113,260 @@ def _get_tolerances(dtype: torch.dtype, num_experts: int):
     atol = max(base_atol, 2 * num_experts * eps)
     rtol = max(base_rtol, 2 * num_experts * eps)
     return atol, rtol
+
+
+def _router_function(fn, execution):
+    if execution == "eager":
+        return fn
+    torch._dynamo.reset()
+    return torch.compile(fn, fullgraph=True)
+
+
+def _make_logits(dtype):
+    logits = torch.linspace(-2, 2, 32, device="cuda")
+    logits = logits + torch.linspace(-0.1, 0.1, 64, device="cuda").unsqueeze(1)
+    return logits.reshape(2, 32, 32).to(dtype).requires_grad_(True)
+
+
+def _check_reference(actual, expected, dtype):
+    atol, rtol = {
+        torch.float32: (1e-6, 2e-5),
+        torch.float16: (2e-4, 2e-3),
+        torch.bfloat16: (2e-3, 2e-2),
+    }[dtype]
+    torch.testing.assert_close(actual.float(), expected.float(), atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize(
+    "histogram_mode,index_dtype",
+    [(None, torch.int32), ("two_kernel", None), ("fused_atomic", torch.int16)],
+)
+@pytest.mark.parametrize("deterministic", [False, True])
+def test_router_compile_replay(histogram_mode, index_dtype, deterministic):
+    torch._dynamo.reset()
+    counters.clear()
+    histogram = torch.full((32, 31), 7, device="cuda", dtype=torch.int32)
+    bounds = torch.tensor([-1.1, 1.2], device="cuda")
+    bias = torch.linspace(0.3, 0, 32, device="cuda")
+    counts = torch.arange(1, 33, device="cuda", dtype=torch.int32)
+    total = torch.tensor(64, device="cuda", dtype=torch.int64)
+    indices = (
+        torch.full((2, 32, 4), -1, device="cuda", dtype=index_dtype)
+        if index_dtype is not None
+        else None
+    )
+
+    def router(logits, bounds, total, indices, histogram):
+        outputs = fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            1.2,
+            "sigmoid",
+            bias,
+            routing_map_format="bitmap_u8" if indices is None else "bytemap",
+            topk_indices=indices,
+            qb_histogram=histogram if histogram_mode else None,
+            qb_bin_bounds=bounds if histogram_mode else None,
+            qb_histogram_mode=histogram_mode,
+        )
+        _, scores = fused_compute_score_for_moe_aux_loss(logits, 4, "sigmoid")
+        loss = fused_moe_aux_loss(
+            scores.reshape(-1, 32), counts, total, 32, 4, 0.01, deterministic=deterministic
+        )
+        return (outputs[0].float().square().sum() + loss, *outputs[1:])
+
+    reference_histogram = histogram.clone()
+    reference_indices = torch.empty_like(indices) if indices is not None else None
+    torch._dynamo.mark_static_address(histogram)
+    if indices is not None:
+        torch._dynamo.mark_static_address(indices)
+    compiled = torch.compile(router, fullgraph=True, mode="reduce-overhead")
+    for step, new_bounds in enumerate(([-1.1, 1.2], [-0.3, 0.7], [-0.8, 1.4])):
+        torch.compiler.cudagraph_mark_step_begin()
+        bounds.copy_(bounds.new_tensor(new_bounds))
+        total.fill_(64 + 17 * step)
+        logits = _make_logits(torch.bfloat16)
+        if step == 1:
+            logits = logits.flip(-1).detach().requires_grad_(True)
+        eager_logits = logits.detach().clone().requires_grad_(True)
+        actual = compiled(logits, bounds, total, indices, histogram)
+        expected = router(eager_logits, bounds, total, reference_indices, reference_histogram)
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(histogram, reference_histogram)
+        if indices is not None:
+            assert actual[1].data_ptr() == indices.data_ptr()
+            torch.testing.assert_close(indices, reference_indices)
+        histogram.add_(1)
+        reference_histogram.add_(1)
+        bounds.add_(0.1)
+        actual_grad = torch.autograd.grad(actual[0], logits)
+        expected_grad = torch.autograd.grad(expected[0], eager_logits)
+        torch.testing.assert_close(actual_grad, expected_grad)
+    for grad_context, inference_logits in (
+        (torch.no_grad, logits),
+        (torch.inference_mode, logits),
+        (torch.enable_grad, logits.detach()),
+    ):
+        with grad_context():
+            torch.compiler.cudagraph_mark_step_begin()
+            actual = compiled(inference_logits, bounds, total, indices, histogram)
+            expected = router(
+                inference_logits, bounds, total, reference_indices, reference_histogram
+            )
+            torch.testing.assert_close(actual, expected)
+            torch.testing.assert_close(histogram, reference_histogram)
+            assert not actual[0].requires_grad
+            if indices is not None:
+                assert actual[1].data_ptr() == indices.data_ptr()
+    assert not counters["inductor"]["cudagraph_skips"]
+
+
+@pytest.mark.parametrize(
+    "dtype,index_dtype",
+    [(torch.float32, None), (torch.float16, torch.int16), (torch.bfloat16, torch.int64)],
+)
+@pytest.mark.parametrize("deterministic", [False, True])
+def test_router_compile_dynamic(dtype, index_dtype, deterministic):
+    torch._dynamo.reset()
+    counters.clear()
+    counts = torch.arange(1, 131, device="cuda", dtype=torch.int32)
+
+    def router_loss(logits):
+        indices = (
+            torch.empty(logits.shape[0], 4, dtype=index_dtype, device=logits.device)
+            if index_dtype is not None
+            else None
+        )
+        probs, routing_map = fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            None,
+            "bytemap" if indices is not None else "bitmap_u8",
+            topk_indices=indices,
+        )
+        _, scores = fused_compute_score_for_moe_aux_loss(logits, 4, "sigmoid", 1)
+        aux_loss = fused_moe_aux_loss(
+            scores, counts, logits.shape[0], 130, 4, 0.01, deterministic=deterministic
+        )
+        return probs.float().square().sum() + aux_loss, routing_map
+
+    compiled = torch.compile(router_loss, fullgraph=True, dynamic=True)
+    for num_tokens in (16, 33, 64):
+        logits = torch.randn(num_tokens, 130, device="cuda", dtype=dtype, requires_grad=True)
+        eager_logits = logits.detach().clone().requires_grad_(True)
+        actual, routing_map = compiled(logits)
+        expected, eager_map = router_loss(eager_logits)
+        assert routing_map.shape == (num_tokens, 4 if index_dtype is not None else 17)
+        torch.testing.assert_close(routing_map, eager_map)
+        torch.testing.assert_close(actual, expected)
+        (actual_grad,) = torch.autograd.grad(actual, logits)
+        (eager_grad,) = torch.autograd.grad(expected, eager_logits)
+        _check_reference(actual_grad, eager_grad, dtype)
+        assert counters["stats"]["unique_graphs"] == 1
+
+
+@pytest.mark.parametrize(
+    "dtype,routing_map_format,index_dtype,histogram_mode",
+    [
+        (torch.float32, 0, None, None),
+        (torch.float16, 1, None, None),
+        (torch.bfloat16, 0, torch.int16, None),
+        (torch.float32, 0, torch.int32, None),
+        (torch.bfloat16, 0, torch.int64, None),
+        (torch.float32, 0, None, QBHistogramMode.TWO_KERNEL),
+        (torch.float16, 1, None, QBHistogramMode.FUSED_ATOMIC),
+        (torch.bfloat16, 0, torch.int16, QBHistogramMode.TWO_KERNEL),
+        (torch.float32, 0, torch.int32, QBHistogramMode.FUSED_ATOMIC),
+        (torch.bfloat16, 0, torch.int64, QBHistogramMode.FUSED_ATOMIC),
+    ],
+)
+def test_router_compile_opcheck(dtype, routing_map_format, index_dtype, histogram_mode):
+    from transformer_engine.pytorch import router
+
+    logits = torch.randn(16, 130, device="cuda", dtype=dtype, requires_grad=True)
+    indices = (
+        torch.full((16, 4), -1, device="cuda", dtype=index_dtype)
+        if index_dtype is not None
+        else None
+    )
+    forward_logits = logits.detach()
+    if histogram_mode is not None:
+        bias = torch.zeros(130, device="cuda")
+        histogram = torch.full((130, 64), 7, device="cuda", dtype=torch.int32)
+        bounds = torch.tensor([-1.0, 1.0], device="cuda")
+        forward = router._qb_indices_forward if indices is not None else router._qb_map_forward
+        forward_args = (
+            forward_logits,
+            4,
+            None,
+            bias,
+            routing_map_format,
+            *((indices,) if indices is not None else ()),
+            histogram,
+            bounds,
+            int(histogram_mode),
+        )
+    else:
+        forward = router._topk_indices_forward if indices is not None else router._topk_map_forward
+        forward_args = (
+            forward_logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            None,
+            routing_map_format,
+            *((indices,) if indices is not None else ()),
+        )
+    torch.library.opcheck(forward, forward_args)
+    outputs = forward(*forward_args)
+    torch.library.opcheck(
+        router._topk_backward,
+        (
+            indices if indices is not None else outputs[1],
+            outputs[-1],
+            torch.randn_like(outputs[0]),
+            4,
+            False,
+            None,
+            "sigmoid",
+            routing_map_format,
+            indices is not None,
+        ),
+    )
+
+    if histogram_mode is None and index_dtype in (None, torch.int16):
+        torch.library.opcheck(router._score_forward, (logits, 4, "softmax", routing_map_format))
+        scores, _, intermediate = router._score_forward(
+            forward_logits, 4, "softmax", routing_map_format
+        )
+        torch.library.opcheck(
+            router._score_backward,
+            (intermediate, torch.randn_like(scores), 4, "softmax", dtype),
+        )
+        counts = torch.ones(130, device="cuda", dtype=torch.int32)
+        count = torch.tensor(16, device="cuda", dtype=torch.int64)
+        for token_count, deterministic in product((None, count), (False, True)):
+            torch.library.opcheck(
+                router._aux_loss_forward,
+                (logits, counts, 16, token_count, 130, 4, 0.01, deterministic),
+            )
+            loss, const_buf = router._aux_loss_forward(
+                forward_logits, counts, 16, token_count, 130, 4, 0.01, deterministic
+            )
+            torch.library.opcheck(
+                router._aux_loss_backward, (const_buf, counts, 16, 130, torch.randn_like(loss))
+            )
 
 
 # Pytorch-based group topk
@@ -315,6 +572,7 @@ def run_comparison(
     enable_bias,
     topk_output_mode="sparse",
     topk_index_dtype=torch.int16,
+    execution="eager",
 ):
     if topk >= num_experts:
         pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
@@ -343,9 +601,12 @@ def run_comparison(
             * 1e-4
         )
         logits = logits.view(num_tokens, num_experts)
+    if dtype != torch.float32:
+        logits = torch.linspace(-2, 2, num_experts, device="cuda").repeat(num_tokens, 1)
+        logits = logits.to(dtype)
     logits.requires_grad = True
     if enable_bias and score_function in ("sigmoid", "sqrtsoftplus"):
-        expert_bias = torch.arange(num_experts, device="cuda", dtype=dtype) * 0.1
+        expert_bias = torch.arange(num_experts, device="cuda", dtype=torch.float32) * 0.1
         expert_bias = torch.flip(expert_bias, dims=[0])
         expert_bias.requires_grad = True
     else:
@@ -359,6 +620,8 @@ def run_comparison(
         expert_bias_clone.requires_grad = True
     else:
         expert_bias_clone = None
+
+    logits = logits.detach().float().requires_grad_(True)
 
     # Run the original implementation
     # We do not support the capacity factor case
@@ -375,10 +638,11 @@ def run_comparison(
 
     topk_indices = None
     if topk_output_mode == "dense":
-        topk_indices = torch.empty((num_tokens, topk), device="cuda", dtype=topk_index_dtype)
+        topk_indices = torch.full((num_tokens, topk), -1, device="cuda", dtype=topk_index_dtype)
 
     # Run the fused implementation
-    probs_fused, routing_output_fused = fused_topk_with_score_function(
+    router = _router_function(fused_topk_with_score_function, execution)
+    probs_fused, routing_output_fused = router(
         logits=logits_clone,
         topk=topk,
         use_pre_softmax=use_pre_softmax,
@@ -389,6 +653,7 @@ def run_comparison(
         expert_bias=expert_bias_clone,
         topk_indices=topk_indices,
     )
+    assert probs_fused.dtype == dtype and not routing_output_fused.requires_grad
     if topk_output_mode == "dense":
         assert routing_output_fused.data_ptr() == topk_indices.data_ptr()
         assert routing_output_fused.dtype == topk_index_dtype
@@ -397,29 +662,40 @@ def run_comparison(
         routing_map_fused = routing_output_fused
 
     atol, rtol = _get_tolerances(dtype, num_experts)
-    torch.testing.assert_close(probs, probs_fused, atol=atol, rtol=rtol)
+    torch.testing.assert_close(probs, probs_fused.float(), atol=atol, rtol=rtol)
     torch.testing.assert_close(routing_map, routing_map_fused)
 
-    # Fake the loss
-    loss = torch.sum(probs)
-    loss_fused = torch.sum(probs_fused)
-
-    # Backward the loss
-    loss.backward()
-    loss_fused.backward()
-
-    # Check the gradient
-    torch.testing.assert_close(logits.grad, logits_clone.grad, atol=atol, rtol=rtol)
+    grad = torch.randn((*probs_fused.shape, 2), device="cuda", dtype=dtype)[..., 0]
+    probs.backward(grad.float())
+    probs_fused.backward(grad)
+    torch.testing.assert_close(logits.grad, logits_clone.grad.float(), atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
-@pytest.mark.parametrize("num_experts", [1024, 128, 32])
-@pytest.mark.parametrize("topk", [4, 8, 16, 32])
-@pytest.mark.parametrize("group_topk", [None, 4])
-@pytest.mark.parametrize("scaling_factor", [None, 1.2])
-@pytest.mark.parametrize("enable_bias", [True, False])
-@pytest.mark.parametrize("topk_index_dtype", [None, torch.int16, torch.int32, torch.int64])
+_SIGMOID_TOPK_CASES = [
+    ("eager", *case)
+    for case in product(
+        [torch.float32],
+        [2048, 7168, 8992],
+        [1024, 128, 32],
+        [4, 8, 16, 32],
+        [None, 4],
+        [None, 1.2],
+        [True, False],
+        [None, torch.int16, torch.int32, torch.int64],
+    )
+] + [
+    ("compile", torch.float32, 64, 32, 4, None, None, False, None),
+    ("compile", torch.float16, 64, 32, 4, None, 1.2, True, torch.int16),
+    ("compile", torch.bfloat16, 64, 32, 4, 4, 1.2, True, torch.int32),
+    ("compile", torch.float32, 64, 130, 16, None, None, True, torch.int64),
+    ("compile", torch.bfloat16, 64, 32, 1, None, None, False, None),
+]
+
+
+@pytest.mark.parametrize(
+    "execution,dtype,num_tokens,num_experts,topk,group_topk,scaling_factor,enable_bias,topk_index_dtype",
+    _SIGMOID_TOPK_CASES,
+)
 def test_topk_sigmoid(
     dtype,
     num_tokens,
@@ -429,6 +705,7 @@ def test_topk_sigmoid(
     scaling_factor,
     enable_bias,
     topk_index_dtype,
+    execution,
 ):
     num_groups = 8 if group_topk else None
     run_comparison(
@@ -444,17 +721,14 @@ def test_topk_sigmoid(
         enable_bias=enable_bias,
         topk_output_mode="dense" if topk_index_dtype is not None else "sparse",
         topk_index_dtype=topk_index_dtype or torch.int16,
+        execution=execution,
     )
 
 
-@pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
-@pytest.mark.parametrize("num_experts", [1024, 128, 32])
-@pytest.mark.parametrize("topk", [4, 8, 16, 32])
-@pytest.mark.parametrize("group_topk", [None, 4])
-@pytest.mark.parametrize("scaling_factor", [None, 1.2])
-@pytest.mark.parametrize("enable_bias", [True, False])
-@pytest.mark.parametrize("topk_index_dtype", [None, torch.int16, torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "execution,dtype,num_tokens,num_experts,topk,group_topk,scaling_factor,enable_bias,topk_index_dtype",
+    _SIGMOID_TOPK_CASES,
+)
 def test_topk_sqrtsoftplus(
     dtype,
     num_tokens,
@@ -464,6 +738,7 @@ def test_topk_sqrtsoftplus(
     scaling_factor,
     enable_bias,
     topk_index_dtype,
+    execution,
 ):
     num_groups = 8 if group_topk else None
     run_comparison(
@@ -479,27 +754,47 @@ def test_topk_sqrtsoftplus(
         enable_bias=enable_bias,
         topk_output_mode="dense" if topk_index_dtype is not None else "sparse",
         topk_index_dtype=topk_index_dtype or torch.int16,
+        execution=execution,
     )
 
 
-@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-@pytest.mark.parametrize("topk", [8, 16])
 @pytest.mark.parametrize(
-    "routing_output_mode",
-    ["bytemap", "bitmap_u8", "dense_int16", "dense_int32", "dense_int64"],
+    "execution,dtype,histogram_mode,topk,routing_output_mode,shape",
+    [
+        ("eager", torch.float32, *case, (257, 896, 1000))
+        for case in product(
+            ["two_kernel", "fused_atomic"],
+            [8, 16],
+            ["bytemap", "bitmap_u8", "dense_int16", "dense_int32", "dense_int64"],
+        )
+    ]
+    + [
+        (execution, dtype, histogram_mode, topk, layout, (64, 32, 31))
+        for execution in ["eager", "compile"]
+        for dtype, histogram_mode, topk, layout in [
+            (torch.float32, "two_kernel", 1, "bytemap"),
+            (torch.float16, "fused_atomic", 4, "bitmap_u8"),
+            (torch.bfloat16, "two_kernel", 16, "dense_int16"),
+            (torch.float32, "fused_atomic", 16, "dense_int32"),
+            (torch.bfloat16, "fused_atomic", 4, "dense_int64"),
+            (torch.float16, "two_kernel", 4, "bytemap"),
+        ]
+    ],
 )
-def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode):
-    num_tokens = 257
-    num_experts = 896
-    num_bins = 1000
-    logits = torch.randn(
-        num_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
-    )
+def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode, execution, dtype, shape):
+    num_tokens, num_experts, num_bins = shape
+    small = num_tokens == 64
+    logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype, requires_grad=True)
+    if small:
+        logits = _make_logits(dtype).reshape(num_tokens, num_experts).detach().requires_grad_(True)
+    reference_logits = logits.detach().float().requires_grad_(True)
     expert_bias = torch.linspace(-0.2, 0.2, num_experts, device="cuda", dtype=torch.float32)
     bin_bounds = torch.stack((expert_bias.min() - 1.0, expert_bias.max() + 1.0))
-    reference_histogram = torch.zeros(num_experts, num_bins, device="cuda", dtype=torch.int32)
+    reference_histogram = torch.full(
+        (num_experts, num_bins), 7 if small else 0, device="cuda", dtype=torch.int32
+    )
     reference = qb_topk_score_function_pytorch(
-        logits,
+        reference_logits,
         topk,
         expert_bias,
         bin_bounds,
@@ -508,14 +803,15 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode):
     )
 
     fused_logits = logits.detach().clone().requires_grad_(True)
-    fused_histogram = torch.zeros_like(reference_histogram)
+    fused_histogram = torch.full_like(reference_histogram, 7 if small else 0)
+    histogram_version = fused_histogram._version
     dense_dtype = {
         "dense_int16": torch.int16,
         "dense_int32": torch.int32,
         "dense_int64": torch.int64,
     }.get(routing_output_mode)
     topk_indices = (
-        torch.empty(num_tokens, topk, device="cuda", dtype=dense_dtype)
+        torch.full((num_tokens, topk), -1, device="cuda", dtype=dense_dtype)
         if dense_dtype is not None
         else None
     )
@@ -524,7 +820,8 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode):
         if routing_output_mode == "bitmap_u8"
         else RoutingMapFormat.BYTEMAP
     )
-    fused_probs, fused_routing_output = fused_topk_with_score_function(
+    router = _router_function(fused_topk_with_score_function, execution)
+    outputs = router(
         logits=fused_logits,
         topk=topk,
         use_pre_softmax=False,
@@ -539,8 +836,19 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode):
         qb_bin_bounds=bin_bounds,
         qb_histogram_mode=histogram_mode,
     )
-    torch.testing.assert_close(fused_probs, reference["probs"])
+    fused_probs, fused_routing_output = outputs[:2]
+    if small:
+        _check_reference(fused_probs, reference["probs"], dtype)
+    else:
+        torch.testing.assert_close(fused_probs, reference["probs"])
+    assert not fused_routing_output.requires_grad
+    assert len(outputs) == 2
+    assert fused_histogram._version > histogram_version
+    torch.testing.assert_close(fused_histogram, reference["histogram"])
+    fused_histogram.add_(1)
+    bin_bounds.add_(0.1)
     if dense_dtype is not None:
+        assert fused_routing_output.data_ptr() == topk_indices.data_ptr()
         fused_routing_map = topk_indices_to_routing_map(fused_routing_output, num_experts)
         torch.testing.assert_close(fused_routing_map, reference["routing_map"])
     elif routing_output_mode == "bitmap_u8":
@@ -550,49 +858,90 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode):
         )
     else:
         torch.testing.assert_close(fused_routing_output, reference["routing_map"])
-    torch.testing.assert_close(fused_histogram, reference["histogram"])
 
-    grad = torch.randn_like(fused_probs)
-    reference["probs"].backward(grad)
+    grad = torch.randn((*fused_probs.shape, 2), device="cuda", dtype=dtype)[..., 0]
+    reference["probs"].backward(grad.float())
     fused_probs.backward(grad)
-    torch.testing.assert_close(fused_logits.grad, logits.grad, atol=1e-5, rtol=1e-5)
+    if small:
+        _check_reference(fused_logits.grad, reference_logits.grad, dtype)
+    else:
+        torch.testing.assert_close(fused_logits.grad, reference_logits.grad, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-def test_qb_histogram_accumulates_microbatches(histogram_mode):
-    num_experts = 64
-    topk = 8
-    num_bins = 1000
-    expert_bias = torch.linspace(-0.1, 0.1, num_experts, device="cuda", dtype=torch.float32)
-    bin_bounds = torch.stack((expert_bias.min() - 1.0, expert_bias.max() + 1.0))
-    reference_histogram = torch.zeros(num_experts, num_bins, device="cuda", dtype=torch.int32)
-    fused_histogram = torch.zeros_like(reference_histogram)
+@pytest.mark.parametrize(
+    "execution,dtype,histogram_mode",
+    [
+        ("eager", torch.float32, "two_kernel"),
+        ("eager", torch.float32, "fused_atomic"),
+        ("compile", torch.float32, "two_kernel"),
+        ("compile", torch.bfloat16, "fused_atomic"),
+    ],
+)
+def test_qb_histogram_accumulates_microbatches(execution, dtype, histogram_mode):
+    compiled = execution == "compile"
+    num_experts, num_bins = (130, 64) if compiled else (64, 1000)
+    expert_bias = torch.linspace(-0.1, 0.1, num_experts, device="cuda")
+    bounds = torch.stack((expert_bias.min() - 1.0, expert_bias.max() + 1.0))
+    histogram = torch.full(
+        (num_experts, num_bins), 7 if compiled else 0, device="cuda", dtype=torch.int32
+    )
+    reference_histogram = histogram.clone()
 
-    for num_tokens in (127, 193):
-        logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=torch.float32)
-        qb_topk_score_function_pytorch(
+    def route(logits, histogram, bounds, indices):
+        return fused_topk_with_score_function(
             logits,
-            topk,
+            8,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
             expert_bias,
-            bin_bounds,
-            num_bins,
-            reference_histogram,
-        )
-        fused_topk_with_score_function(
-            logits=logits,
-            topk=topk,
-            use_pre_softmax=False,
-            num_groups=None,
-            group_topk=None,
-            scaling_factor=None,
-            score_function="sigmoid",
-            expert_bias=expert_bias,
-            qb_histogram=fused_histogram,
-            qb_bin_bounds=bin_bounds,
+            routing_map_format="bitmap_u8" if compiled and indices is None else "bytemap",
+            topk_indices=indices,
+            qb_histogram=histogram,
+            qb_bin_bounds=bounds,
             qb_histogram_mode=histogram_mode,
         )
 
-    torch.testing.assert_close(fused_histogram, reference_histogram)
+    if compiled:
+        torch._dynamo.reset()
+        route = torch.compile(route, fullgraph=True, dynamic=True)
+    pending = []
+    for num_tokens in (17, 33, 64) if compiled else (127, 193):
+        logits = torch.randn(
+            num_tokens, num_experts, device="cuda", dtype=dtype, requires_grad=True
+        )
+        reference = qb_topk_score_function_pytorch(
+            logits, 8, expert_bias, bounds, num_bins, reference_histogram
+        )
+        indices = (
+            torch.empty(num_tokens, 8, device="cuda", dtype=torch.int32)
+            if histogram_mode == "fused_atomic"
+            else None
+        )
+        probs, routing = route(logits, histogram, bounds, indices)
+        torch.testing.assert_close(histogram, reference["histogram"])
+        _check_reference(probs, reference["probs"], dtype)
+        if indices is not None:
+            assert routing.data_ptr() == indices.data_ptr()
+            torch.testing.assert_close(
+                topk_indices_to_routing_map(routing, num_experts), reference["routing_map"]
+            )
+        else:
+            expected_map = (
+                _bytemap_to_bitmap_u8(reference["routing_map"])
+                if compiled
+                else reference["routing_map"]
+            )
+            torch.testing.assert_close(routing, expected_map)
+        pending.append((logits, probs, reference["probs"]))
+        if compiled:
+            bounds.add_(0.03)
+    for logits, probs, reference_probs in reversed(pending):
+        actual_grad = torch.autograd.grad(probs.float().square().sum(), logits)[0]
+        ref_grad = torch.autograd.grad(reference_probs.float().square().sum(), logits)[0]
+        _check_reference(actual_grad, ref_grad, dtype)
 
 
 def test_qb_topk_argument_validation():
@@ -874,14 +1223,29 @@ def test_qb_topk_plus_one_tie_and_bin_clamping(histogram_mode):
     assert routing_map[0, :3].tolist() == [True, True, False]
 
 
-@pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
-@pytest.mark.parametrize("num_experts", [1024, 128, 32])
-@pytest.mark.parametrize("topk", [4, 8, 16, 32])
-@pytest.mark.parametrize("use_pre_softmax", [True, False])
-@pytest.mark.parametrize("group_topk", [None, 4])
-@pytest.mark.parametrize("scaling_factor", [None, 1.2])
-@pytest.mark.parametrize("topk_index_dtype", [None, torch.int16, torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "execution,dtype,num_tokens,num_experts,topk,use_pre_softmax,group_topk,scaling_factor,topk_index_dtype",
+    [
+        ("eager", *case)
+        for case in product(
+            [torch.float32],
+            [2048, 7168, 14234],
+            [1024, 128, 32],
+            [4, 8, 16, 32],
+            [True, False],
+            [None, 4],
+            [None, 1.2],
+            [None, torch.int16, torch.int32, torch.int64],
+        )
+    ]
+    + [
+        ("compile", torch.float32, 64, 32, 4, True, None, None, None),
+        ("compile", torch.float16, 64, 32, 4, False, None, 1.2, torch.int16),
+        ("compile", torch.bfloat16, 64, 32, 4, False, 4, 1.2, torch.int32),
+        ("compile", torch.float32, 64, 130, 16, True, None, None, torch.int64),
+        ("compile", torch.bfloat16, 64, 32, 4, True, None, 1.2, None),
+    ],
+)
 def test_topk_softmax(
     dtype,
     num_tokens,
@@ -891,6 +1255,7 @@ def test_topk_softmax(
     group_topk,
     scaling_factor,
     topk_index_dtype,
+    execution,
 ):
     num_groups = 8 if group_topk else None
     run_comparison(
@@ -906,11 +1271,14 @@ def test_topk_softmax(
         enable_bias=False,
         topk_output_mode="dense" if topk_index_dtype is not None else "sparse",
         topk_index_dtype=topk_index_dtype or torch.int16,
+        execution=execution,
     )
 
 
-@pytest.mark.parametrize("topk_index_dtype", [None, torch.int16])
-def test_topk_preserves_leading_dims(topk_index_dtype):
+@pytest.mark.parametrize(
+    "execution,topk_index_dtype", product(["eager", "compile"], [None, torch.int16])
+)
+def test_topk_preserves_leading_dims(topk_index_dtype, execution):
     num_tokens = 128
     num_experts = 32
     topk = 4
@@ -919,7 +1287,8 @@ def test_topk_preserves_leading_dims(topk_index_dtype):
     if topk_index_dtype is not None:
         topk_indices = torch.empty(num_tokens, 2, topk, device="cuda", dtype=topk_index_dtype)
 
-    probs, routing_output = fused_topk_with_score_function(
+    router = _router_function(fused_topk_with_score_function, execution)
+    probs, routing_output = router(
         logits=logits,
         topk=topk,
         use_pre_softmax=False,
@@ -936,12 +1305,37 @@ def test_topk_preserves_leading_dims(topk_index_dtype):
     assert routing_output.shape == expected_routing_shape
 
 
-@pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168])
-@pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
-@pytest.mark.parametrize("topk", [1, 4, 8, 16, 32])
-@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
-def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
+@pytest.mark.parametrize(
+    "execution,dtype,num_tokens,num_experts,topk,score_function,routing_map_format",
+    [
+        ("eager", *case, "bytemap")
+        for case in product(
+            [torch.float32],
+            [2048, 7168],
+            [1024, 256, 128, 32],
+            [1, 4, 8, 16, 32],
+            ["softmax", "sigmoid", "sqrtsoftplus"],
+        )
+    ]
+    + [
+        ("compile", dtype, 64, 32, 4, score, "bitmap_u8" if i % 2 else "bytemap")
+        for i, (dtype, score) in enumerate(
+            product(
+                [torch.float32, torch.float16, torch.bfloat16],
+                ["softmax", "sigmoid", "sqrtsoftplus"],
+            )
+        )
+    ],
+)
+def test_fused_scores_for_aux_loss(
+    dtype,
+    num_tokens,
+    num_experts,
+    topk,
+    score_function,
+    execution,
+    routing_map_format,
+):
     if topk >= num_experts:
         pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
     if score_function in ("sigmoid", "sqrtsoftplus"):
@@ -962,41 +1356,62 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
             * 1e-4
         )
         logits = logits.view(num_tokens, num_experts)
+    if dtype != torch.float32:
+        logits = torch.linspace(-2, 2, num_experts, device="cuda").repeat(num_tokens, 1).to(dtype)
     logits.requires_grad = True
 
     logits_clone = deepcopy(logits)
     logits_clone.requires_grad = True
 
+    logits = logits.detach().float().requires_grad_(True)
     routing_map, scores = compute_scores_for_aux_loss_pytorch(
         logits=logits,
         topk=topk,
         score_function=score_function,
     )
 
-    routing_map_fused, scores_fused = fused_compute_score_for_moe_aux_loss(
+    scores_fn = _router_function(fused_compute_score_for_moe_aux_loss, execution)
+    routing_map_fused, scores_fused = scores_fn(
         logits=logits_clone,
         topk=topk,
         score_function=score_function,
+        routing_map_format=routing_map_format,
     )
 
-    atol, rtol = _get_tolerances(dtype, num_experts)
+    assert scores_fused.dtype == torch.float32
+    assert not routing_map_fused.requires_grad
+    if routing_map_format == "bitmap_u8":
+        routing_map = _bytemap_to_bitmap_u8(routing_map)
+    atol, rtol = _get_tolerances(torch.float32, num_experts)
     torch.testing.assert_close(scores, scores_fused, atol=atol, rtol=rtol)
     torch.testing.assert_close(routing_map, routing_map_fused)
 
-    loss = torch.sum(scores)
-    loss.backward()
-    loss_fused = torch.sum(scores_fused)
-    loss_fused.backward()
+    grad = torch.randn((*scores_fused.shape, 2), device="cuda")[..., 0]
+    scores.backward(grad)
+    scores_fused.backward(grad)
+    assert logits_clone.grad.dtype == dtype
+    atol, rtol = _get_tolerances(dtype, num_experts)
+    torch.testing.assert_close(logits.grad, logits_clone.grad.float(), atol=atol, rtol=rtol)
 
-    torch.testing.assert_close(logits.grad, logits_clone.grad, atol=atol, rtol=rtol)
 
-
-@pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
-@pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
-@pytest.mark.parametrize("topk", [4, 32])
-@pytest.mark.parametrize("expert_multiplier", [1, 2])
-def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multiplier):
+@pytest.mark.parametrize(
+    "execution,dtype,num_tokens,num_experts,topk,expert_multiplier,tensor_count",
+    [
+        ("eager", *case, False)
+        for case in product(
+            [torch.float32], [2048, 7168, 14234], [1024, 256, 128, 32], [4, 32], [1, 2]
+        )
+    ]
+    + [
+        ("compile", dtype, 64, 32, 4, 2 if tensor_count else 1, tensor_count)
+        for dtype, tensor_count in product(
+            [torch.float32, torch.float16, torch.bfloat16], [False, True]
+        )
+    ],
+)
+def test_fused_moe_aux_loss(
+    dtype, num_tokens, num_experts, topk, expert_multiplier, execution, tensor_count
+):
     if topk >= num_experts:
         pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
     # Sequence aux loss batches independent sequences along the expert dimension.
@@ -1014,6 +1429,7 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
     probs_clone = deepcopy(probs)
     probs_clone.requires_grad = True
 
+    probs = probs.detach().float().requires_grad_(True)
     aux_loss = aux_loss_pytorch(
         probs=probs,
         tokens_per_expert=tokens_per_expert,
@@ -1023,23 +1439,28 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
         moe_aux_loss_coeff=coeff,
     )
 
-    aux_loss_fused = fused_moe_aux_loss(
+    total = (
+        torch.tensor(num_tokens, device="cuda", dtype=torch.int64) if tensor_count else num_tokens
+    )
+    loss_fn = _router_function(fused_moe_aux_loss, execution)
+    aux_loss_fused = loss_fn(
         probs=probs_clone,
         tokens_per_expert=tokens_per_expert,
-        total_num_tokens=num_tokens,
+        total_num_tokens=total,
         num_experts=num_experts,
         topk=topk,
         coeff=coeff,
     )
 
+    assert aux_loss_fused.shape == () and aux_loss_fused.dtype == dtype
     atol, rtol = _get_tolerances(dtype, num_cols)
-    torch.testing.assert_close(aux_loss, aux_loss_fused, atol=atol, rtol=rtol)
+    torch.testing.assert_close(aux_loss, aux_loss_fused.float(), atol=atol, rtol=rtol)
 
     # Backward
     aux_loss.backward()
     aux_loss_fused.backward()
 
-    torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
+    torch.testing.assert_close(probs.grad, probs_clone.grad.float(), atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(
@@ -1291,7 +1712,8 @@ def test_fused_moe_aux_loss_invalid_workspace(device_total, workspace_kind, matc
         )
 
 
-def test_fused_moe_aux_loss_cuda_graph_workspace_isolation(monkeypatch):
+@pytest.mark.parametrize("execution", ["eager", "compile"])
+def test_fused_moe_aux_loss_cuda_graph_workspace_isolation(monkeypatch, execution):
     """Graphs captured on one stream need private scratch for concurrent replay."""
     num_tokens, num_experts, topk, coeff = 1025, 128, 4, 0.01
     probs_a, counts_a = _moe_aux_loss_determinism_inputs(
@@ -1306,8 +1728,10 @@ def test_fused_moe_aux_loss_cuda_graph_workspace_isolation(monkeypatch):
         ),
     ]
 
+    loss_fn = _router_function(fused_moe_aux_loss, execution)
+
     def run(probs, counts, total):
-        out = fused_moe_aux_loss(probs, counts, total, num_experts, topk, coeff, deterministic=True)
+        out = loss_fn(probs, counts, total, num_experts, topk, coeff, deterministic=True)
         (grad,) = torch.autograd.grad(out, probs)
         return out, grad
 
@@ -1327,8 +1751,8 @@ def test_fused_moe_aux_loss_cuda_graph_workspace_isolation(monkeypatch):
     captured_workspace_ptrs = []
     get_workspace = te_router._get_moe_aux_loss_workspace
 
-    def trace_workspace(device):
-        workspace = get_workspace(device)
+    def trace_workspace(device, *, cache=True):
+        workspace = get_workspace(device, cache=cache)
         if torch.cuda.is_current_stream_capturing():
             captured_workspace_ptrs.append(workspace.data_ptr())
         return workspace
@@ -1381,8 +1805,9 @@ def test_fused_moe_aux_loss_cuda_graph_workspace_isolation(monkeypatch):
         pytest.param(torch.bfloat16, 257, 128, 1, torch.bfloat16, id="bf16"),
     ],
 )
+@pytest.mark.parametrize("execution", ["eager", "compile"])
 def test_fused_moe_aux_loss_deterministic(
-    dtype, num_tokens, num_experts, expert_multiplier, token_count_dtype, device_total
+    dtype, num_tokens, num_experts, expert_multiplier, token_count_dtype, device_total, execution
 ):
     """Each launch must produce identical loss/gradient bits on the same GPU."""
     probs, tokens_per_expert = _moe_aux_loss_determinism_inputs(
@@ -1403,9 +1828,10 @@ def test_fused_moe_aux_loss_deterministic(
     finfo = torch.finfo(dtype)
     rtol = max(2e-5, 2 * finfo.eps)
     atol = finfo.tiny * finfo.eps
+    loss_fn = _router_function(fused_moe_aux_loss, execution)
     expected_out = expected_grad = None
     for _ in range(32):
-        out = fused_moe_aux_loss(
+        out = loss_fn(
             probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff, deterministic=True
         )
         (grad,) = torch.autograd.grad(out, probs, grad_outputs=grad_output)
@@ -1530,13 +1956,21 @@ def _bytemap_to_bitmap_u8(bytemap: torch.Tensor) -> torch.Tensor:
     return torch.from_numpy(np.packbits(flat, axis=-1, bitorder="little")).to(bytemap.device)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize(
-    "num_tokens,num_experts,topk",
-    [(128, 32, 4), (256, 128, 8), (256, 130, 8), (128, 1024, 16)],
+    "execution,dtype,num_tokens,num_experts,topk,score_function",
+    [
+        ("eager", torch.float32, *shape, score)
+        for shape, score in product(
+            [(128, 32, 4), (256, 128, 8), (256, 130, 8), (128, 1024, 16)],
+            ["softmax", "sigmoid", "sqrtsoftplus"],
+        )
+    ]
+    + [
+        ("compile", torch.float32, 64, 130, 4, score)
+        for score in ["softmax", "sigmoid", "sqrtsoftplus"]
+    ],
 )
-@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
-def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
+def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function, execution):
     """fused_topk_with_score_function should produce identical probs and an
     LSB-packed bitmap routing_map when routing_map_format=BITMAP_U8, and
     backward gradients should match the bytemap path exactly."""
@@ -1563,7 +1997,8 @@ def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_func
     logits_byte = logits.detach().clone().requires_grad_(True)
     logits_bit = logits.detach().clone().requires_grad_(True)
 
-    probs_byte, routing_map_byte = fused_topk_with_score_function(
+    router = _router_function(fused_topk_with_score_function, execution)
+    probs_byte, routing_map_byte = router(
         logits=logits_byte,
         topk=topk,
         use_pre_softmax=False,
@@ -1574,7 +2009,7 @@ def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_func
         expert_bias=None,
         routing_map_format=RoutingMapFormat.BYTEMAP,
     )
-    probs_bit, routing_map_bit = fused_topk_with_score_function(
+    probs_bit, routing_map_bit = router(
         logits=logits_bit,
         topk=topk,
         use_pre_softmax=False,
@@ -1599,19 +2034,29 @@ def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_func
     packed_expected = _bytemap_to_bitmap_u8(routing_map_byte)
     torch.testing.assert_close(routing_map_bit, packed_expected, atol=0, rtol=0)
 
-    # Backward parity: grad of probs.sum() must be bit-identical across formats.
-    probs_byte.sum().backward()
-    probs_bit.sum().backward()
+    # Backward must be bit-identical across formats.
+    grad = torch.randn_like(probs_byte)
+    probs_byte.backward(grad)
+    probs_bit.backward(grad)
     torch.testing.assert_close(logits_byte.grad, logits_bit.grad, atol=0.0, rtol=0.0)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize(
-    "num_tokens,num_experts,topk",
-    [(128, 32, 4), (256, 128, 8), (256, 130, 8)],
+    "execution,dtype,num_tokens,num_experts,topk,score_function",
+    [
+        ("eager", torch.float32, *shape, score)
+        for shape, score in product(
+            [(128, 32, 4), (256, 128, 8), (256, 130, 8)], ["softmax", "sigmoid", "sqrtsoftplus"]
+        )
+    ]
+    + [
+        ("compile", torch.float32, 64, 130, 4, score)
+        for score in ["softmax", "sigmoid", "sqrtsoftplus"]
+    ],
 )
-@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
-def test_score_for_aux_loss_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
+def test_score_for_aux_loss_bitmap_vs_bytemap(
+    dtype, num_tokens, num_experts, topk, score_function, execution
+):
     """fused_compute_score_for_moe_aux_loss: bitmap routing_map must equal
     LSB-packed bytemap; scores must be bit-identical across formats."""
     if topk >= num_experts:
@@ -1623,13 +2068,14 @@ def test_score_for_aux_loss_bitmap_vs_bytemap(dtype, num_tokens, num_experts, to
     logits_byte = logits.detach().clone().requires_grad_(True)
     logits_bit = logits.detach().clone().requires_grad_(True)
 
-    routing_map_byte, scores_byte = fused_compute_score_for_moe_aux_loss(
+    router = _router_function(fused_compute_score_for_moe_aux_loss, execution)
+    routing_map_byte, scores_byte = router(
         logits=logits_byte,
         topk=topk,
         score_function=score_function,
         routing_map_format="bytemap",
     )
-    routing_map_bit, scores_bit = fused_compute_score_for_moe_aux_loss(
+    routing_map_bit, scores_bit = router(
         logits=logits_bit,
         topk=topk,
         score_function=score_function,
@@ -1646,8 +2092,9 @@ def test_score_for_aux_loss_bitmap_vs_bytemap(dtype, num_tokens, num_experts, to
     torch.testing.assert_close(routing_map_bit, packed_expected, atol=0, rtol=0)
 
     # Backward parity through scores.
-    scores_byte.sum().backward()
-    scores_bit.sum().backward()
+    grad = torch.randn_like(scores_byte)
+    scores_byte.backward(grad)
+    scores_bit.backward(grad)
     torch.testing.assert_close(logits_byte.grad, logits_bit.grad, atol=0.0, rtol=0.0)
 
 

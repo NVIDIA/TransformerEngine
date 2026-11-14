@@ -12,6 +12,9 @@ mkdir -p "$XML_LOG_DIR"
 TE_LIB_PATH=$(pip3 show transformer-engine | grep -E "Location:|Editable project location:" | tail -n 1 | awk '{print $NF}')
 export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 
+# If CuTeDSL backend is not enabled, this will be ignored
+export NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN=ERROR
+
 # Set parallelization parameters
 NUM_PHYSICAL_CORES=$(nproc)
 NUM_PARALLEL_JOBS=4

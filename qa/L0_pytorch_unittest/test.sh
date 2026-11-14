@@ -27,6 +27,9 @@ export NVTE_FLASH_ATTN_V2=1
 export NVTE_FLASH_ATTN_V3=0
 export NVTE_FLASH_ATTN_V4=0
 
+# If CuTeDSL backend is not enabled, this will be ignored
+export NVTE_REPORT_IF_CUTEDSL_BACKEND_NOT_CHOSEN=ERROR
+
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_optional_flash_attn_import.xml $TE_PATH/tests/pytorch/test_optional_flash_attn_import.py || test_fail "test_optional_flash_attn_import.py"
@@ -41,6 +44,8 @@ python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_jit.xml $TE_PATH
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_fused_rope.xml $TE_PATH/tests/pytorch/test_fused_rope.py || test_fail "test_fused_rope.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_nvfp4.xml $TE_PATH/tests/pytorch/nvfp4 || test_fail "test_nvfp4"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_mxfp8.xml $TE_PATH/tests/pytorch/mxfp8 || test_fail "test_mxfp8"
+python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_strided_batched_gemm.xml $TE_PATH/tests/pytorch/test_strided_batched_gemm.py || test_fail "test_strided_batched_gemm.py"
+python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_batched_linear.xml $TE_PATH/tests/pytorch/test_batched_linear.py || test_fail "test_batched_linear.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_weight_swizzle_in_layers.xml $TE_PATH/tests/pytorch/test_weight_swizzle_in_layers.py || test_fail "test_weight_swizzle_in_layers.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_quantized_tensor.xml $TE_PATH/tests/pytorch/test_quantized_tensor.py || test_fail "test_quantized_tensor.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_torch_compile.xml $TE_PATH/tests/pytorch/test_torch_compile.py || test_fail "test_torch_compile.py"
