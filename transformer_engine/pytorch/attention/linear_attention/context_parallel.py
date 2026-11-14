@@ -6,6 +6,20 @@
 
 Flavor adapters supply local attention and affine summary operations. The shared
 CUDA operation composes states in document order.
+
+Adapter contract:
+* Positional tensors carry a real-token leading axis for fragment selection;
+  additional axes, such as GDP's Householder axis, remain intact until FE dispatch.
+* Forward hooks return FP32 H [fragments, heads, V, K] and T [fragments, heads, K, K]
+  satisfying X_end = X_start @ T + H. Reverse hooks provide the analogous
+  state-gradient recipe, with transitions already in backward orientation.
+* Local attention and summaries must use identical gate and normalization semantics.
+* Kernel options are configuration, not an autograd path for trainable parameters.
+  Future non-token parameters need explicit gradient inputs/returns, or a
+  differentiable token-gate transformation before the CP Function. Their gradient
+  reduction must match the caller's parameter-ownership contract.
+
+Only GDN supplies these hooks today; other flavors require adapter validation.
 """
 
 from collections import OrderedDict
