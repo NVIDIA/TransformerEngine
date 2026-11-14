@@ -1590,10 +1590,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc1_prob_tensor = None
         if not unit_activation_scale:
             fc1_prob_tensor = scales.detach().reshape((-1,) if canonical else (-1, 1, 1))
-
-        if use_nvfp4:
             # cuDNN NVFP4 kernel only accepts fp32 scales.
             fc1_prob_tensor = fc1_prob_tensor.to(torch.float32)
+
+        if use_nvfp4:
             # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
             # global scale factors, so alpha supplies the product of the two
             # operand global scales.
