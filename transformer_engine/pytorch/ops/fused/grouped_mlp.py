@@ -398,19 +398,6 @@ def _nvfp4_global_scale(
     return _nvfp4_amax(tensors, columnwise=columnwise).to(torch.float32) / denom
 
 
-def _cast_scales_grad(
-    grad_scales: torch.Tensor, *, scales_dtype: Optional[torch.dtype]
-) -> torch.Tensor:
-    """Return the scale (router probability) gradient in the dtype of the scales input.
-
-    The fused kernels compute it in FP32. FP32 scales get it unchanged (no rounding, no cast);
-    lower-precision scales get one cast, as the BF16 fused grouped MLP path does.
-    """
-    if scales_dtype is None or grad_scales.dtype == scales_dtype:
-        return grad_scales
-    return grad_scales.to(dtype=scales_dtype)
-
-
 def _single_quantized_tensor_from_grouped(
     grouped: GroupedTensor,
     quantizer: Optional[MXFP8Quantizer | NVFP4Quantizer] = None,
@@ -1603,9 +1590,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc1_prob_tensor = None
         if not unit_activation_scale:
             fc1_prob_tensor = (
-                scales.detach()
-                .to(dtype=torch.float32 if use_nvfp4 else dtype)
-                .reshape((-1,) if canonical else (-1, 1, 1))
+                scales.detach().to(dtype=torch.float32).reshape((-1,) if canonical else (-1, 1, 1))
             )
         if use_nvfp4:
             # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
@@ -2713,11 +2698,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_bias_grad_packed = fc2_dbias_packed
             else:
                 fc2_bias_grads = [fc2_dbias_packed[idx] for idx in range(num_groups)]
-
-        if grad_scales is not None:
-            grad_scales = _cast_scales_grad(
-                grad_scales, scales_dtype=None if scales is None else scales.dtype
-            )
 
         fc1_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
         fc1_bias_grad_packed: Optional[torch.Tensor] = None
