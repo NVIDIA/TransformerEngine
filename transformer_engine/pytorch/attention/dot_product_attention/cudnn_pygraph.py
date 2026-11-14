@@ -26,9 +26,8 @@ from transformer_engine.pytorch.device import te_device_type
 # The SM100 FROST SDPA plans in (forward, backward) order. frost pins one of these by name.
 FROST_PLAN_TOKENS = ("sdpa_fwd_prefill_sm100", "sdpa_bwd_sm100")
 
-# The default bar. deselect_engines matches a name substring, and every plan name in the two
-# FROST SDPA engine families carries one of these, so the bar reaches each architecture's plans
-# rather than only SM100's.
+# The default bar. deselect_engines matches a substring, and every FROST SDPA plan name, on
+# every architecture, begins with one of these.
 FROST_PLAN_BAR_TOKENS = ("sdpa_fwd", "sdpa_bwd")
 
 # Distinguishes "the caller said nothing" from "the caller asked for no exclusions at all".
@@ -65,7 +64,7 @@ def get_cudnn_handle(device: torch.device, *, backend_name: str = "cuDNN attenti
 
     Rebound per call, not per handle: the p2p context-parallel ring runs one cached plan from a
     different stream per ring step, and without this cuDNN is not ordered against the tensors.
-    Keyed per backend because a handle is not thread-safe and ``set_stream`` mutates it.
+    Keyed per backend so one backend's ``set_stream`` cannot retarget another's handle.
     """
     if device.type != te_device_type():
         raise ValueError(f"{backend_name} only supports CUDA tensors, got device {device}.")
@@ -83,10 +82,7 @@ def get_cudnn_handle(device: torch.device, *, backend_name: str = "cuDNN attenti
 
 
 def io_data_type(cudnn, dtype: torch.dtype, *, backend_name: str = "cuDNN attention"):
-    """Map a torch dtype to the cuDNN enum these SDPA graphs are declared with.
-
-    Takes ``cudnn`` rather than importing it, so a dtype lookup cannot flip the FROST switch.
-    """
+    """Map a torch dtype to the cuDNN enum these SDPA graphs are declared with."""
     if dtype == torch.float16:
         return cudnn.data_type.HALF
     if dtype == torch.bfloat16:
@@ -174,12 +170,9 @@ def bhsd_tensor_spec(
 ) -> Tuple[Any, ...]:
     """A tensor as the graph will see it: BHSD dims, BHSD strides, dtype.
 
-    Serves both roles this triple has: the descriptor :func:`build_fwd` and :func:`build_bwd`
-    declare a tensor from, and, being hashable, the per-tensor part of a plan cache key. Strides
-    belong in it because the graph is built for this exact layout, which is what lets bshd and
-    sbhd run without a transpose. The format name does not, provided every descriptor the graph
-    declares comes from a spec that is itself keyed: two formats giving the same description are
-    then the same graph.
+    Both the descriptor :func:`build_fwd` and :func:`build_bwd` declare a tensor from and, being
+    hashable, the per-tensor part of a plan cache key. Strides belong in it because the graph is
+    built for this exact layout, which is what lets bshd and sbhd run without a transpose.
     """
     dim, stride = bhsd_dim_stride(tensor, tensor_format, backend_name=backend_name)
     return (tuple(dim), tuple(stride), tensor.dtype)
@@ -259,19 +252,14 @@ def finalize_plans(
 ) -> Tuple[int, Optional[str]]:
     """Create plans, optionally pin one by name, build, and return (workspace size, plan name).
 
-    ``require_plan_token`` makes the choice strict: a plan whose name lacks the token raises.
-    Unpinned, ``build_plans`` finalizes the first plan in the ranked list that builds, so a graph
-    the intended engine declines runs on whatever cuDNN ranked next with nothing saying so.
-    Matched as a substring, since cuDNN collapses per-head-dim engine names into one row. The pin
-    must precede ``check_support``, which is only fatal once ``select_plan`` has run.
+    ``require_plan_token`` pins the first plan whose name contains it and makes a decline fatal.
+    Unpinned, ``build_plans`` takes the first ranked plan that builds, so a graph the intended
+    engine declines runs on whatever ranked next with nothing saying so.
 
-    ``exclude_plan_tokens`` is the opposite instruction, and defaults to barring the FROST SDPA
-    engines, which accept a score_mod graph and then compute without it. They are on offer
-    process-wide, so declining to ask is not enough. Drop the default once cuDNN declines these
-    graphs itself; the gate that should reads a key ``sdpa()`` never writes.
-
-    Unpinned, a successful build is then checked: a python engine served the graph means the bar
-    did not name it, so this raises rather than return a plan that may ignore the score_mod.
+    ``exclude_plan_tokens`` defaults to barring the FROST SDPA engines, which accept a score_mod
+    graph and then compute without it. cuDNN's own score_mod gate cannot catch this: its analyzer
+    reads a key ``sdpa()`` does not write, so it never sees one. Drop the default once that is
+    fixed upstream. Unpinned, the built plan is checked too, since the bar is only by name.
     """
     cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
 
@@ -309,9 +297,8 @@ def finalize_plans(
             raise RuntimeError(
                 f"cuDNN {backend_name} SDPA graph is not supported: {exc}{barred}"
             ) from exc
-        # A bar is by name, so an engine the tokens do not match survives it. An SDPA graph is
-        # offered to the FROST families alone, so a python engine here is one the bar missed.
-        # Unconditional: this is what still holds when a plan is renamed or a new one is added.
+        # A bar is by name, so an engine the tokens do not match survives it. cuDNN offers an
+        # SDPA graph to the FROST families alone, so a python engine here is one the bar missed.
         selected_engine = getattr(graph, "selected_engine", None)
         if selected_engine is not None:
             raise RuntimeError(

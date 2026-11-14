@@ -279,8 +279,8 @@ def test_frost_matches_reference(shape, mask, window, dtype):
         assert torch.isfinite(got).all(), "%s has non-finite values" % name
         assert got.shape == want.shape, "%s shape %s != %s" % (name, got.shape, want.shape)
         err = (got.double() - want).abs().max().item()
-        # Gradients accumulate over the sequence, so scale the bar with skv rather than reusing
-        # the forward's floor. This is a sanity bound on systematic error, not a tight check.
+        # Gradients accumulate over the sequence, so bound the error against the reference's
+        # own magnitude rather than the forward's floor. A sanity bound, not a tight check.
         assert err <= 0.05 * want.abs().max().item() + 1e-2, "%s max|err|=%.3e vs ref max %.3e" % (
             name,
             err,
@@ -423,8 +423,8 @@ def test_frost_declines_unsupported_configs():
             ),
             "an ambiguous diagonal anchor",
         ),
-        # The engine pads head_dim to a multiple of 8, so an in-range but unpadded dim has to be
-        # declined here rather than failing later at plan selection.
+        # The engine serves only head dims that are multiples of 8, so one in range but not a
+        # multiple is declined here rather than failing later at plan selection.
         (dict(head_dim_qk=260, head_dim_v=260), "head_dim not a multiple of 8"),
         # Each dim is checked on its own, so v has to be covered as well as q.
         (dict(head_dim_v=260), "head_dim_v not a multiple of 8"),

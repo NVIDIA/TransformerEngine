@@ -727,29 +727,26 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     torch.testing.assert_close(v.grad, v_ref.grad, **tols)
 
 
-# Every FROST SDPA plan name read out of the nvidia-cudnn-frontend wheels, 1.27.0 and 1.28.0
-# (cudnn/engines/manifest.py and cudnn/sdpa/{fwd,bwd}/engines.py), plus the two names
-# frost_attention pins. The bar is asserted against these rather than against the constant that
-# produces it, which would pass even if the tokens were narrowed back to the SM100 names.
+# The FROST SDPA engine names registered by nvidia-cudnn-frontend 1.27.0 (cudnn/sdpa/fwd/
+# engine.py, which has no backward family) and 1.28.0 (cudnn/engines/manifest.py). The bar is
+# asserted against these rather than against the constant that produces it, which would pass
+# even if the tokens were narrowed back to the SM100 names.
 _FROST_SDPA_PLAN_NAMES = (
     "sdpa_fwd_prefill_sm80",
     "sdpa_fwd_prefill_sm100",
     "sdpa_fwd_prefill_sm100_fp8",
     "sdpa_fwd_prefill_sm100_mxfp8",
     "sdpa_fwd_prefill_sm100_d128",
+    "sdpa_fwd_prefill_sm100_d128_fp8",
+    "sdpa_fwd_prefill_sm100_d128_mxfp8",
+    "sdpa_fwd_prefill_sm100_d192_d128",
     "sdpa_fwd_prefill_sm100_d256",
     "sdpa_fwd_prefill_sm100_d512",
     "sdpa_fwd_prefill_sm107_fp8",
     "sdpa_fwd_prefill_sm120",
     "sdpa_fwd_prefill_sm120_fp8",
-    "sdpa_fwd_sm120",
-    "sdpa_fwd_wrapper_dsl_sm100",
-    "sdpa_fwd_wrapper_sm100_d256",
-    "sdpa_bwd",
     "sdpa_bwd_sm80",
-    "sdpa_bwd_sm100",
     "sdpa_bwd_sm120",
-    "sdpa_bwd_wrapper_sm100_d256",
 )
 
 
@@ -767,9 +764,12 @@ def test_flex_bars_the_frost_engines(monkeypatch):
     No GPU: this checks the instruction is passed, not what cuDNN does with it.
     """
     barred = []
+    calls = []
 
     class FakeGraph:
-        """Records the engines barred, and stops at the first call it cannot serve."""
+        """Records what was barred and when, and reports no engine once the walk has run."""
+
+        selected_engine = None
 
         def validate(self):
             pass
@@ -778,16 +778,19 @@ def test_flex_bars_the_frost_engines(monkeypatch):
             pass
 
         def create_execution_plans(self, _heuristics):
-            pass
+            calls.append("create")
 
         def deselect_engines(self, names):
+            # cuDNN iterates these, so a bare string would bar every plan sharing a character.
+            assert isinstance(names, (list, tuple)), names
+            calls.append("deselect")
             barred.extend(names)
 
         def check_support(self):
-            pass
+            calls.append("check")
 
         def build_plans(self, _policy):
-            pass
+            calls.append("build")
 
         def get_workspace_size(self):
             return 4096
@@ -803,21 +806,55 @@ def test_flex_bars_the_frost_engines(monkeypatch):
     # deselect_engines matches a name substring, so a token covers a plan it is contained in.
     unmatched = [n for n in _FROST_SDPA_PLAN_NAMES if not any(t in n for t in barred)]
     assert not unmatched, unmatched
+    # The bar has to reach what frost pins, or the two would name different engines.
+    assert all(any(t in pin for t in barred) for pin in cudnn_pygraph.FROST_PLAN_TOKENS), barred
+    # build_plans resolves the barred set once, at the top of the walk, so a later bar steers
+    # nothing.
+    assert calls.index("deselect") < calls.index("build"), calls
 
     # The other half: flex must not pass exclude_plan_tokens of its own, which would replace the
     # default rather than add to it.
     passed = {}
 
-    def record(**kwargs):
+    def record_fwd(**kwargs):
         passed.update(kwargs)
         keys = ("graph", "q", "k", "v", "out", "stats", "workspace")
         return {**dict.fromkeys(keys), "aux": {"score_mod": None}}
 
-    monkeypatch.setattr(cudnn_pygraph, "build_fwd", record)
-    q, k, v, o, _ = _score_mod_cache_cpu_inputs()
+    def record_bwd(**kwargs):
+        passed.update(kwargs)
+        keys = ("graph", "q", "k", "v", "o", "do", "stats", "dq", "dk", "dv", "workspace")
+        return {**dict.fromkeys(keys), "aux": {"score_mod": None, "score_mod_bprop": None}}
+
+    q, k, v, o, stats = _score_mod_cache_cpu_inputs()
+
+    # Both directions: they carry the default separately, so one can drift from the other.
+    monkeypatch.setattr(cudnn_pygraph, "build_fwd", record_fwd)
     flex_attention._build_cudnn_score_mod_fwd_graph(
         False, q, k, v, "bshd", "bshd", 0.125, _score_mod_post_scale_bias, None, o, None
     )
+    assert passed, "the forward builder was not reached"
+    assert "exclude_plan_tokens" not in passed, passed["exclude_plan_tokens"]
+
+    passed.clear()
+    monkeypatch.setattr(cudnn_pygraph, "build_bwd", record_bwd)
+    flex_attention._build_cudnn_score_mod_bwd_graph(
+        q,
+        k,
+        v,
+        o,
+        o,
+        stats,
+        "bshd",
+        "bshd",
+        0.125,
+        _score_mod_post_scale_bias,
+        None,
+        None,
+        None,
+        False,
+    )
+    assert passed, "the backward builder was not reached"
     assert "exclude_plan_tokens" not in passed, passed["exclude_plan_tokens"]
 
 
@@ -832,10 +869,19 @@ def test_flex_rejects_a_graph_a_python_engine_served():
     """
 
     class FakeGraph:
-        """Builds successfully, having been served by a python engine."""
+        """Reports the engine behind the built plan, and a barred one before the walk runs.
 
-        def __init__(self, selected_engine):
-            self.selected_engine = selected_engine
+        cuDNN selects plan 0 at create_execution_plans and the python plans lead the list, so
+        reading the engine before build_plans names a plan the bar removed.
+        """
+
+        def __init__(self, built_engine):
+            self._built_engine = built_engine
+            self._built = False
+
+        @property
+        def selected_engine(self):
+            return self._built_engine if self._built else "sdpa_fwd_prefill_sm100"
 
         def validate(self):
             pass
@@ -853,7 +899,7 @@ def test_flex_rejects_a_graph_a_python_engine_served():
             pass
 
         def build_plans(self, _policy):
-            pass
+            self._built = True
 
         def get_workspace_size(self):
             return 4096

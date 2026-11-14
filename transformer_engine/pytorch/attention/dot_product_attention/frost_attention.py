@@ -33,10 +33,10 @@ __all__ = [
 ]
 
 
-# cudnn-frontend declares cutlass-dsl >= 4.6.2 but FROST enforces >= 4.7.0 at plan-build time.
-# Below that floor every FROST engine declines silently and backend plans come back instead, so
-# the selected plan is checked by name rather than trusted.
 _FROST_FWD_PLAN_TOKEN, _FROST_BWD_PLAN_TOKEN = cudnn_pygraph.FROST_PLAN_TOKENS
+
+# FROST enforces this at plan-build time. Below it every FROST engine declines silently and
+# backend plans come back instead, so the selected plan is checked by name rather than trusted.
 _MIN_CUTLASS_DSL = PkgVersion("4.7.0")
 
 # 1.29.0 is the first release carrying the head_dim=512 backward. 1.28.0 ships the forward only,
@@ -44,13 +44,12 @@ _MIN_CUTLASS_DSL = PkgVersion("4.7.0")
 _MIN_CUDNN_FRONTEND = PkgVersion("1.29.0")
 
 _SUPPORTED_ARCHS = ((10, 0), (10, 3))
-# These mirror sdpa_bwd_sm100's declared envelope: d_envelope_floor=256, d={512},
-# d_pad_multiple=8.
+# The backward engine's declared envelope.
 _MAX_HEAD_DIM = 512
 # Below this the existing cuDNN and flash backends already serve the shape.
 _MIN_HEAD_DIM = 257
-# The engine pads head_dim to a multiple of 8, so 260 is in range but not servable. Declined
-# here rather than failing later at plan selection.
+# The engine serves only head dims that are multiples of 8, so 260 is in range but not
+# servable. Declined here rather than failing later at plan selection.
 _HEAD_DIM_MULTIPLE = 8
 
 _BACKEND_NAME = "FrostAttention"
@@ -114,7 +113,7 @@ def _packages_available() -> Tuple[bool, str]:
     if cutlass is not None and cutlass < _MIN_CUTLASS_DSL:
         return _no(
             f"nvidia-cutlass-dsl {cutlass_raw} is below the FROST floor {_MIN_CUTLASS_DSL}; FROST"
-            " engines would be silently skipped in favour of ordinary cuDNN backend plans"
+            " engines would be silently skipped in favor of ordinary cuDNN backend plans"
         )
 
     _package_availability = (True, "")
@@ -130,10 +129,9 @@ _NO_WINDOW = (-1, -1)
 
 
 def _window_pair(window_size) -> Tuple[int, int]:
-    """Normalise window_size to a (left, right) pair, declining anything that is not one.
+    """Normalize window_size to a (left, right) pair, declining anything that is not one.
 
-    Guarded here and not in _mask_spec, since _te_mask_spec unpacks the window first. Raised as
-    NotImplementedError because that is the only exception is_frost_attention_supported catches;
+    Raised as NotImplementedError because that is the only exception is_frost_attention_supported catches;
     a TypeError would escape backend selection.
     """
     if window_size is None:
@@ -195,7 +193,7 @@ def _qkv_format_from_layout(qkv_layout: str) -> str:
 def _te_mask_spec(attn_mask_type: str, window_size, bottom_right_diagonal: bool):
     """Fold TE's (mask type, window, diagonal anchor) into the spec the plan is keyed on.
 
-    TE carries the anchor in its own flag, so normalise it into the mask type before building the
+    TE carries the anchor in its own flag, so normalize it into the mask type before building the
     band: the band reads the anchor off the name, and taking it from the name alone would quietly
     give a top-left band where the caller asked for bottom-right.
     """
@@ -271,8 +269,6 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     # backward on SM100/SM103 and leaves dqk_ge_dv unset, which cuDNN reads as requiring
     # d_qk == d_v at every head dim. The forward engine would serve 192/128, so only it binds.
     if params.head_dim_qk != params.head_dim_v:
-        # Declined for both directions: only the backward binds the rule, but a forward that
-        # the backward cannot follow is of no use here.
         return (
             no_backend,
             (
@@ -371,7 +367,7 @@ def _check_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
 def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
     """Require v to agree with k on batch, heads and sequence length.
 
-    head_dim is free: v has its own graph node and its own cache-key entry.
+    head_dim is free.
     """
     if tuple(k.shape[:3]) != tuple(v.shape[:3]):
         raise ValueError(
@@ -444,7 +440,7 @@ def _build_fwd(key, device) -> dict:
         k=(shk, ks),
         v=(shv, vs),
         out=(sho, o_stride),  # out: q's layout, v's head_dim
-        # the CP ring needs the LSE, and it is cheap
+        # The CP ring correction needs the LSE.
         stats=([b, hq, sq, 1], [hq * sq, sq, 1, 1], cudnn.data_type.FLOAT),
         attn_scale=scale,
         mask=mask,
@@ -482,8 +478,11 @@ def _build_bwd(key, device) -> dict:
 
 
 def _cached(key, device):
-    """Plan cache. Building dominates executing even once the JIT is cached, so this is
-    required rather than an optimisation."""
+    """Plan cache.
+
+    Building dominates executing even once the JIT is cached, so this is required rather than an
+    optimization.
+    """
     build = _build_fwd if key[0] == "fwd" else _build_bwd
     return cudnn_pygraph.cached_graph(_BACKEND_NAME, key, lambda: build(key, device), device=device)
 
