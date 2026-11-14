@@ -66,7 +66,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
     std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
     std::optional<at::Tensor> expert_bias, int routing_map_format,
-    std::optional<at::Tensor> topk_indices) {
+    std::optional<at::Tensor> topk_indices, bool bias_in_logit_space) {
   check_routing_map_format(routing_map_format);
   TORCH_CHECK(logits.dim() >= 1, "logits must have at least 1 dim");
   TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
@@ -99,6 +99,20 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     check_dense_topk_indices(topk_indices.value(), logits, sizes.slice(0, sizes.size() - 1), topk);
   }
 
+  if (bias_in_logit_space) {
+    TORCH_CHECK(score_function == "sigmoid" && expert_bias.has_value() && !num_groups.has_value() &&
+                    !group_topk.has_value(),
+                "Logit-space bias requires an ungrouped sigmoid router with expert bias");
+    TORCH_CHECK(logits.is_cuda(), "logits must be a CUDA tensor");
+    TORCH_CHECK(expert_bias->is_cuda() && expert_bias->is_contiguous() &&
+                    expert_bias->device() == logits.device(),
+                "expert_bias must be contiguous and on the logits device");
+    if (topk_indices.has_value()) {
+      check_dense_topk_indices(topk_indices.value(), logits, sizes.slice(0, sizes.size() - 1),
+                               topk);
+    }
+  }
+  at::cuda::CUDAGuard device_guard(logits.device());
   // Reformat the input to make it compatible with the kernel
   int group_topk_value = group_topk.has_value() ? group_topk.value() : -1;
   int num_groups_value = num_groups.has_value() ? num_groups.value() : -1;
@@ -136,7 +150,15 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     expert_bias_cu = makeTransformerEngineTensor(expert_bias.value());
   }
 
-  if (topk_indices.has_value()) {
+  if (bias_in_logit_space) {
+    auto empty = TensorWrapper();
+    nvte_fused_topk_with_logit_bias_forward(
+        logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+        scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_map_cu.data(),
+        static_cast<NVTERoutingMapFormat>(routing_map_format), topk_indices.has_value(),
+        intermediate_output_cu.data(), empty.data(), empty.data(), empty.data(),
+        NVTE_QB_HISTOGRAM_FUSED_ATOMIC, at::cuda::getCurrentCUDAStream());
+  } else if (topk_indices.has_value()) {
     nvte_fused_topk_with_score_function_forward_with_indices(
         logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
         use_pre_softmax, num_groups_value, group_topk_value, scaling_factor_value,
@@ -159,7 +181,8 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
                                       std::optional<float> scaling_factor, at::Tensor expert_bias,
                                       int routing_map_format,
                                       std::optional<at::Tensor> topk_indices, at::Tensor histogram,
-                                      at::Tensor bin_bounds, int histogram_mode) {
+                                      at::Tensor bin_bounds, int histogram_mode,
+                                      bool bias_in_logit_space) {
   check_routing_map_format(routing_map_format);
   TORCH_CHECK(logits.dim() >= 1, "logits must have at least 1 dim");
   TORCH_CHECK(logits.is_cuda() && logits.is_contiguous(),
@@ -237,7 +260,14 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
   const auto mode = static_cast<NVTEQBHistogramMode>(histogram_mode);
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  if (topk_indices.has_value()) {
+  if (bias_in_logit_space) {
+    nvte_fused_topk_with_logit_bias_forward(
+        logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+        scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
+        static_cast<NVTERoutingMapFormat>(routing_map_format), topk_indices.has_value(),
+        intermediate_output_cu.data(), cutoff_cu.data(), histogram_cu.data(), bin_bounds_cu.data(),
+        mode, stream);
+  } else if (topk_indices.has_value()) {
     nvte_fused_topk_with_score_function_forward_qb_with_indices(
         logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
         scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
@@ -251,8 +281,12 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
         cutoff_cu.data(), histogram_cu.data(), bin_bounds_cu.data(), mode, stream);
   }
   if (mode == NVTE_QB_HISTOGRAM_TWO_KERNEL) {
-    nvte_qb_histogram_accumulate(intermediate_output_cu.data(), cutoff_cu.data(),
-                                 bin_bounds_cu.data(), histogram_cu.data(), stream);
+    // Logit-space margins use raw FP32 logits; backward still saves sigmoid scores.
+    auto histogram_values = bias_in_logit_space ? logits.to(at::kFloat) : intermediate_output;
+    auto histogram_values_cu =
+        makeTransformerEngineTensor(histogram_values.data_ptr(), shape_2d, DType::kFloat32);
+    nvte_qb_histogram_accumulate(histogram_values_cu.data(), cutoff_cu.data(), bin_bounds_cu.data(),
+                                 histogram_cu.data(), stream);
   }
 
   return std::make_tuple(probs, routing_output, intermediate_output, cutoff, histogram);

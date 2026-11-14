@@ -39,6 +39,26 @@ typedef enum {
   NVTE_QB_HISTOGRAM_FUSED_ATOMIC = 1,
 } NVTEQBHistogramMode;
 
+/*! \brief Select top-k using logits + bias, with unbiased sigmoid contribution weights.
+ *
+ * Uses the simple forward kernel regardless of NVTE_RADIX_TOPK_THRESHOLD. No grouped Top-k.
+ * Output tensors and dtypes follow the score-function API; bias and intermediate_output are FP32.
+ * With use_dense_indices != 0, routing_output is [num_tokens, topk] int16/int32/int64 and
+ * routing_map_format must be BYTEMAP. Otherwise it is the requested bytemap or bitmap.
+ * Histogram collection is optional: pass empty tensor handles for cutoff, histogram and
+ * bin_bounds to disable it. Otherwise topk < num_experts and existing QB tensor contracts apply,
+ * with logit-space margins cutoff - logits. In TWO_KERNEL mode the caller must subsequently
+ * call nvte_qb_histogram_accumulate on FP32 logits (not intermediate_output).
+ * Bin bounds must be finite and strictly ordered; their values are not host-validated.
+ * Backward uses the existing sigmoid backward with intermediate_output and routing_output.
+ */
+void nvte_fused_topk_with_logit_bias_forward(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_output,
+    NVTERoutingMapFormat routing_map_format, int use_dense_indices, NVTETensor intermediate_output,
+    NVTETensor cutoff, NVTETensor histogram, NVTETensor bin_bounds,
+    NVTEQBHistogramMode histogram_mode, cudaStream_t stream);
+
 /*! \brief Apply topk + softmax/sigmoid to the input tensor. Grouped topk is supported (deprecated).
  *
  *  \deprecated This function has been deprecated in favor of
@@ -157,8 +177,9 @@ void nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked(
     NVTETensor intermediate_output, NVTETensor cutoff, NVTETensor histogram, NVTETensor bin_bounds,
     NVTEQBHistogramMode histogram_mode, cudaStream_t stream);
 
-/*! \brief Accumulate a QB histogram from raw sigmoid scores and Top-(k+1) cutoffs.
+/*! \brief Accumulate a QB histogram from FP32 values and Top-(k+1) cutoffs.
  *
+ *  Use raw sigmoid scores for score-space QB, or raw logits for logit-space QB.
  *  bin_bounds follows the same contract as in nvte_fused_topk_with_score_function_forward_qb_v2.
  */
 void nvte_qb_histogram_accumulate(const NVTETensor raw_scores, const NVTETensor cutoff,
