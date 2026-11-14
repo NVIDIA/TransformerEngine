@@ -128,7 +128,9 @@ void nvte_linear_attention_affine_prefix(const NVTETensor initial_states, const 
              "Inconsistent affine tensor shapes.");
   if (output_data.shape[0] == 0) return;
   const size_t value_tiles = output_data.shape[0] * heads * ((value_dim + kRows - 1) / kRows);
-  affine_prefix_kernel<<<value_tiles, 128, 2 * kRows * key_dim * sizeof(float), stream>>>(
+  // Extra threads have no key columns to process when K is at most 64.
+  const int threads = key_dim <= 64 ? 64 : 128;
+  affine_prefix_kernel<<<value_tiles, threads, 2 * kRows * key_dim * sizeof(float), stream>>>(
       static_cast<const float *>(initial_data.dptr), static_cast<const float *>(additive_data.dptr),
       static_cast<const float *>(transition_data.dptr),
       static_cast<const int *>(descriptor_data.dptr), static_cast<float *>(output_data.dptr),
