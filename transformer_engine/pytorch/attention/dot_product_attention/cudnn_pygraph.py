@@ -260,6 +260,9 @@ def finalize_plans(
     engines, which accept a score_mod graph and then compute without it. They are on offer
     process-wide, so declining to ask is not enough. Drop the default once cuDNN declines these
     graphs itself; the gate that should reads a key ``sdpa()`` never writes.
+
+    Unpinned, a successful build is then checked: a python engine served the graph means the bar
+    did not name it, so this raises rather than return a plan that may ignore the score_mod.
     """
     cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
 
@@ -280,6 +283,13 @@ def finalize_plans(
             if exclude_plan_tokens and deselect is not None:
                 deselect(list(exclude_plan_tokens))
             graph.check_support()
+            # Inside the try: cuDNN defers a backend decline to the walk, so barring the plans
+            # that would have served the graph surfaces here rather than at check_support.
+            graph.build_plans(
+                build_policy
+                if build_policy is not None
+                else cudnn.build_plan_policy.HEURISTICS_CHOICE
+            )
         except cudnn.cudnnGraphNotSupportedError as exc:
             # Name the bar: if it removed the only viable plan, the graph was not the problem.
             barred = (
@@ -288,9 +298,16 @@ def finalize_plans(
             raise RuntimeError(
                 f"cuDNN {backend_name} SDPA graph is not supported: {exc}{barred}"
             ) from exc
-        if build_policy is None:
-            build_policy = cudnn.build_plan_policy.HEURISTICS_CHOICE
-        graph.build_plans(build_policy)
+        # A bar is by name, so an engine the tokens do not match survives it. An SDPA graph is
+        # offered to the FROST families alone, so a python engine here is one the bar missed.
+        # Unconditional: this is what still holds when a plan is renamed or a new one is added.
+        selected_engine = getattr(graph, "selected_engine", None)
+        if selected_engine is not None:
+            raise RuntimeError(
+                f"cuDNN frontend {getattr(cudnn, '__version__', 'unknown')} selected"
+                f" {selected_engine} for a {backend_name} graph."
+                " Only the cuDNN backend implements score_mod."
+            )
         return max(graph.get_workspace_size(), 1), None
 
     graph.create_execution_plans(list(heuristics))

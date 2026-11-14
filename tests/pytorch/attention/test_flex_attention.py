@@ -821,6 +821,60 @@ def test_flex_bars_the_frost_engines(monkeypatch):
     assert "exclude_plan_tokens" not in passed, passed["exclude_plan_tokens"]
 
 
+def test_flex_rejects_a_graph_a_python_engine_served():
+    """The bar is by name, so the build is checked against what cuDNN actually selected.
+
+    A plan renamed or newly added upstream would survive the bar. cuDNN reports the engine behind
+    the built plan, and None for its own backend, so a python engine here means the bar missed
+    one -- and a FROST engine that serves this graph computes without the score_mod.
+
+    No GPU: this drives finalize_plans against a stub, as the bar test above does.
+    """
+
+    class FakeGraph:
+        """Builds successfully, having been served by a python engine."""
+
+        def __init__(self, selected_engine):
+            self.selected_engine = selected_engine
+
+        def validate(self):
+            pass
+
+        def build_operation_graph(self):
+            pass
+
+        def create_execution_plans(self, _heuristics):
+            pass
+
+        def deselect_engines(self, _names):
+            pass
+
+        def check_support(self):
+            pass
+
+        def build_plans(self, _policy):
+            pass
+
+        def get_workspace_size(self):
+            return 4096
+
+    try:
+        cudnn_pygraph.import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
+
+    with pytest.raises(RuntimeError, match="score_mod"):
+        cudnn_pygraph.finalize_plans(
+            FakeGraph("sdpa_fwd_prefill_sm100"), backend_name="FlexAttention"
+        )
+
+    # The cuDNN backend reports no engine, which is the case that must still build.
+    workspace_size, plan = cudnn_pygraph.finalize_plans(
+        FakeGraph(None), backend_name="FlexAttention"
+    )
+    assert (workspace_size, plan) == (4096, None)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
 def test_frost_switch_does_not_change_what_flex_computes():
     """Enabling the FROST engines must not change flex's output.
