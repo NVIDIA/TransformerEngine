@@ -219,7 +219,13 @@ class MXFP8QuantizeRowwise1LaneG2RKernel(MXFP8QuantizeKernelBase):
 
     @staticmethod
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
-        return cfg.is_plain_cast() and is_packed16(cfg.DTYPE) and cfg.ROWWISE and not cfg.COLWISE
+        return (
+            not cfg.USE_2D_QUANTIZATION
+            and cfg.is_plain_cast()
+            and is_packed16(cfg.DTYPE)
+            and cfg.ROWWISE
+            and not cfg.COLWISE
+        )
 
     @staticmethod
     @cute.jit
