@@ -784,7 +784,8 @@ def test_flex_bars_the_frost_engines(monkeypatch):
             pass
 
         def build_plans(self, _policy):
-            pass
+            # cuDNN resolves the barred set once, here, so a bar applied later steers nothing.
+            assert barred, "deselect_engines must run before build_plans"
 
         def get_workspace_size(self):
             return 4096
