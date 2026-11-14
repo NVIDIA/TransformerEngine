@@ -8,7 +8,9 @@ Flavor adapters supply local attention and affine summary operations. The shared
 CUDA operation composes states in document order.
 """
 
+from collections import OrderedDict
 from dataclasses import dataclass
+from threading import Lock
 
 import torch
 import torch.distributed as dist
@@ -20,6 +22,30 @@ from transformer_engine.common.linear_attention import (
     build_linear_attention_partition,
 )
 from .base import _to_thd
+
+
+_CP_METADATA_CACHE_SIZE = 8
+_cp_metadata_cache = OrderedDict()
+_cp_metadata_cache_lock = Lock()
+
+
+def _get_shared_cp_metadata(key):
+    """Look up a prepared partition shared by attention modules on one stream."""
+    with _cp_metadata_cache_lock:
+        entry = _cp_metadata_cache.get(key)
+        if entry is not None:
+            _cp_metadata_cache.move_to_end(key)
+        return entry
+
+
+def _cache_cp_metadata(entry):
+    """Retain at most eight shared partitions, including their input metadata."""
+    with _cp_metadata_cache_lock:
+        key = entry[0]
+        _cp_metadata_cache[key] = entry
+        _cp_metadata_cache.move_to_end(key)
+        if len(_cp_metadata_cache) > _CP_METADATA_CACHE_SIZE:
+            _cp_metadata_cache.popitem(last=False)
 
 
 @dataclass
@@ -341,6 +367,7 @@ def context_parallel_attention(
     """Derive local fragment boundaries from full-document metadata and run CP."""
     adapter._validate_inputs(q, k, v, gates, initial_state, qkv_format)
     cp_size, cp_rank = dist.get_world_size(group), dist.get_rank(group)
+    stream = torch.cuda.current_stream(q.device).cuda_stream
     tensors = tuple(_to_thd(t, qkv_format).contiguous() for t in (q, k, v, *gates.values()))
     dense = qkv_format != "thd"
     batch, length = None, None
@@ -362,14 +389,18 @@ def context_parallel_attention(
             q.device,
             cp_size,
             cp_rank,
+            stream,
         )
     else:
-        key, cacheable = (qkv_format, batch, length, q.device, cp_size, cp_rank), True
+        key, cacheable = (qkv_format, batch, length, q.device, cp_size, cp_rank, stream), True
     cache = getattr(adapter, "_cp_partition_cache", None)
     if not cacheable:
         # Inference tensors have no mutation counter, so revalidate their
         # metadata instead of silently reusing a stale partition.
         cache = None
+    elif cache is None or cache[0] != key:
+        # Layers using the same batch can share metadata without another host round trip.
+        cache = _get_shared_cp_metadata(key)
     # Build and upload metadata only when the cached partition no longer matches.
     if cache is None or cache[0] != key:
         document_cu_seqlens = (
@@ -385,9 +416,12 @@ def context_parallel_attention(
         metadata = _build_cp_metadata(partition, q.device)
         # Hold the metadata tensor to prevent object-ID reuse in the cache key.
         adapter._cp_partition_cache = (key, metadata, cu_seqlens)
+        if cacheable:
+            _cache_cp_metadata(adapter._cp_partition_cache)
     else:
         metadata = cache[1]
         partition = metadata.partition
+        adapter._cp_partition_cache = cache
     if tensors[0].shape[0] != partition.local_cu_seqlens[-1]:
         raise ValueError("Local token count does not match this CP rank's token interval.")
     adapter._validate_initial_state(

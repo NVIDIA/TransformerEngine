@@ -114,3 +114,17 @@ first-order gradients. Full-graph compilation and CUDA graph capture are
 outside this implementation's supported contract. Other LA flavors, direct
 dual-chunk ownership, headwise CP and whole-document redistribution are
 separate features.
+
+Metadata preparation
+--------------------
+
+TE prepares partitions on the host and uploads the derived indices to the GPU.
+CUDA ``cu_seqlens`` requires a synchronized host read on the first use. Pass CPU
+metadata when it is already available from the input pipeline to avoid that read.
+
+Each attention module caches its most recent partition. A bounded shared cache
+retains up to eight partitions per process so layers using the same metadata
+on the same CUDA stream can reuse that preparation. Cache keys include tensor
+identity and its mutation counter; changing the tensor in place invalidates
+the entry. Newly allocated metadata requires preparation again. Tensors created
+in inference mode bypass caching because they have no mutation counter.

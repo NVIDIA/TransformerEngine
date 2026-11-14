@@ -221,14 +221,18 @@ def _inference_and_deferred_group(group):
     v = torch.randn_like(q)
     g, beta = -torch.rand(35, 2, device=device) * 0.02, torch.rand(35, 2, device=device) * 0.7
     reference = GatedDeltaNetAttention(2, 64, qkv_format="thd")
-    module = GatedDeltaNetAttention(2, 64, qkv_format="thd")
-    module.set_context_parallel_group(group)
+    modules = [GatedDeltaNetAttention(2, 64, qkv_format="thd") for _ in range(2)]
+    for module in modules:
+        module.set_context_parallel_group(group)
     q, k, v, g, beta = (t.requires_grad_() for t in (q, k, v, g, beta))
-    for context in (torch.no_grad, torch.inference_mode):
+    for context, metadata_device in (
+        (torch.no_grad, "cpu"),
+        (torch.no_grad, device),
+        (torch.inference_mode, device),
+    ):
         with context():
             # CP accepts host metadata; inference tensors intentionally bypass
             # the partition cache because they have no mutation counter.
-            metadata_device = "cpu" if context is torch.no_grad else device
             global_cu = torch.tensor([0, 17, 35], device=metadata_device, dtype=torch.int32)
             for boundary in (17, 19):
                 global_cu[1] = boundary
@@ -236,18 +240,45 @@ def _inference_and_deferred_group(group):
                     q, k, v, g, beta, cu_seqlens=global_cu.to(device), output_final_state=True
                 )
                 lo, hi = rank * 35 // size, (rank + 1) * 35 // size
-                output, states = module(
-                    q[lo:hi],
-                    k[lo:hi],
-                    v[lo:hi],
-                    g[lo:hi],
-                    beta[lo:hi],
-                    cu_seqlens=global_cu,
-                    output_final_state=True,
-                )
-                assert not output.requires_grad and not states.requires_grad
-                _assert_rms_close(output, expected[lo:hi], _FWD_TOL[q.dtype], "inference output")
-                _assert_rms_close(states, expected_states, _STATE_TOL[q.dtype], "inference states")
+                # Reuse one batch across layers, then invalidate it in place.
+                for module in modules:
+                    output, states = module(
+                        q[lo:hi],
+                        k[lo:hi],
+                        v[lo:hi],
+                        g[lo:hi],
+                        beta[lo:hi],
+                        cu_seqlens=global_cu,
+                        output_final_state=True,
+                    )
+                    assert not output.requires_grad and not states.requires_grad
+                    _assert_rms_close(
+                        output, expected[lo:hi], _FWD_TOL[q.dtype], "inference output"
+                    )
+                    _assert_rms_close(
+                        states, expected_states, _STATE_TOL[q.dtype], "inference states"
+                    )
+    # Prepare a separate entry when the same modules run on another stream.
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.no_grad(), torch.cuda.stream(stream):
+        global_cu = torch.tensor([0, 19, 35], dtype=torch.int32)
+        results = [
+            module(
+                q[lo:hi],
+                k[lo:hi],
+                v[lo:hi],
+                g[lo:hi],
+                beta[lo:hi],
+                cu_seqlens=global_cu,
+                output_final_state=True,
+            )
+            for module in modules
+        ]
+    stream.synchronize()
+    for output, states in results:
+        _assert_rms_close(output, expected[lo:hi], _FWD_TOL[q.dtype], "stream output")
+        _assert_rms_close(states, expected_states, _STATE_TOL[q.dtype], "stream states")
     dist.barrier(group=group)
 
 
