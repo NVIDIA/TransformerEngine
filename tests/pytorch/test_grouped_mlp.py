@@ -1804,7 +1804,7 @@ class TestGroupedMLPFusedOp:
                 "a_dtype": torch.float8_e4m3fn,
                 "b_dtype": torch.float8_e4m3fn,
                 "alpha_dtype": torch.bfloat16,
-                "prob_dtype": torch.bfloat16,
+                "prob_dtype": torch.float32,
                 "c_dtype": torch.bfloat16,
                 "d_dtype": torch.float8_e4m3fn,
                 "act_func": act_func,
