@@ -251,7 +251,8 @@ __global__ void thd_read_half_tensor_kernel(void *half, void *tensor, int *cu_se
   int num_float4s_per_token = hidden_size_in_bytes / sizeof(float4);
 
   size_t offset = static_cast<size_t>(dim_size_of_token) * hidden_size_in_bytes;
-  half = reinterpret_cast<void *>(reinterpret_cast<char *>(half) + offset / 2 * blockIdx.y);
+  size_t half_offset = static_cast<size_t>(dim_size_of_token / 2) * hidden_size_in_bytes;
+  half = reinterpret_cast<void *>(reinterpret_cast<char *>(half) + half_offset * blockIdx.y);
   tensor = reinterpret_cast<void *>(reinterpret_cast<char *>(tensor) + offset * blockIdx.y);
 
   for (int token_id = warpid; token_id < num_total_tokens; token_id += num_warps) {
@@ -269,6 +270,18 @@ __global__ void thd_read_half_tensor_kernel(void *half, void *tensor, int *cu_se
 
     for (int idx = laneid; idx < num_float4s_per_token; idx += 32) {
       cur_half_token[idx] = cur_token[idx];
+    }
+  }
+
+  // The allocation follows the physical tensor size, which can extend beyond
+  // the last padded sequence boundary. Initialize those unused rows as well:
+  // stale NaNs in them can contaminate attention even when their weights are zero.
+  for (int token_id = num_total_tokens + warpid; token_id < dim_size_of_token / 2;
+       token_id += num_warps) {
+    float4 *cur_half_token = reinterpret_cast<float4 *>(
+        reinterpret_cast<char *>(half) + static_cast<size_t>(token_id) * hidden_size_in_bytes);
+    for (int idx = laneid; idx < num_float4s_per_token; idx += 32) {
+      cur_half_token[idx] = make_float4(0.f, 0.f, 0.f, 0.f);
     }
   }
 }
