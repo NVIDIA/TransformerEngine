@@ -84,7 +84,7 @@ Recurrent states and gradients
 The optional ``initial_state`` is FP32 with shape
 ``[global_documents, local_heads, value_dim, key_dim]`` and identical values
 on every CP rank. Requested final states have the same global shape and are
-replicated using a separate collective. Empty documents return their seed.
+replicated using a separate collective. Empty documents return their initial state.
 
 Each initial-state gradient is returned on its document's first owning rank,
 with zeros elsewhere. Sum these contributions over CP when inspecting a

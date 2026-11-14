@@ -96,7 +96,7 @@ def test_dense_partition_intersections(cp_size, length):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("key_dim", [3, 64, 128, 257])
 def test_common_affine_prefix(key_dim):
-    """Nonsymmetric transitions, reversed order, zero prefixes, and independent seeds."""
+    """Nonsymmetric transitions, reversed order, zero prefixes, and independent initial states."""
     torch.manual_seed(22)
     current = torch.cuda.current_device()
     # Also exercise the binding's device guard: allocating on another GPU must
@@ -104,7 +104,7 @@ def test_common_affine_prefix(key_dim):
     device = torch.device(
         "cuda", (current + 1) % torch.cuda.device_count() if key_dim == 3 else current
     )
-    seed = torch.randn(3, 2, 5, key_dim, device=device)
+    initial_states = torch.randn(3, 2, 5, key_dim, device=device)
     additive = torch.randn(6, 2, 5, key_dim, device=device)
     transitions = torch.randn(6, 2, key_dim, key_dim, device=device) / key_dim**0.5
     rows = [
@@ -116,14 +116,14 @@ def test_common_affine_prefix(key_dim):
         [-1, 5, 3, -2],
     ]
     descriptors = torch.tensor(rows, device=device, dtype=torch.int32)
-    actual = tex.linear_attention_affine_prefix(seed, additive, transitions, descriptors)
+    actual = tex.linear_attention_affine_prefix(initial_states, additive, transitions, descriptors)
     assert torch.cuda.current_device() == current
     expected = []
     for source, first, count, stride in rows:
         x = (
-            torch.zeros_like(seed[0], dtype=torch.float64)
+            torch.zeros_like(initial_states[0], dtype=torch.float64)
             if source == -1
-            else seed[source].double()
+            else initial_states[source].double()
         )
         for step in range(count):
             index = first + step * stride

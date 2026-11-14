@@ -136,7 +136,7 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
         except Exception as exc:  # pylint: disable=broad-exception-caught
             if type(exc).__name__ != "cudnnGraphNotSupportedError":
                 raise
-        # A zero seed gives H; an identity seed with zero values gives T.
+        # A zero initial state gives H; an identity initial state with zero values gives T.
         additive = self._call_op(
             k,
             k,
@@ -189,7 +189,7 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
                 raise
         values = torch.zeros_like(grad_output)
         with torch.enable_grad():
-            seed = torch.zeros(
+            initial_state = torch.zeros(
                 (cu_seqlens.numel() - 1, q.shape[1], grad_output.shape[-1], k.shape[-1]),
                 device=q.device,
                 dtype=torch.float32,
@@ -201,11 +201,11 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
                 values,
                 {"g": g.detach(), "beta": beta.detach()},
                 cu_seqlens,
-                initial_state=seed,
+                initial_state=initial_state,
                 output_final_state=False,
                 **kernel_kwargs,
             )[0]
-            (additive,) = torch.autograd.grad(output, seed, grad_output)
+            (additive,) = torch.autograd.grad(output, initial_state, grad_output)
         _, transition = self._cp_forward_summary(
             q, k, values, {"g": g, "beta": beta}, cu_seqlens, **kernel_kwargs
         )
@@ -396,7 +396,7 @@ class GatedDeltaNetAttention(LinearAttentionBase):
             If true, forward activations for this module are recomputed
             during the backward pass instead of saved.
         initial_state : Optional[torch.Tensor], default = `None`
-            Recurrent state to seed the Gated DeltaNet recurrence with, of shape
+            Initial recurrent state for Gated DeltaNet, of shape
             `[batch_size, num_attention_heads // tp_size, v_head_dim, qk_head_dim]`
             and dtype `torch.float32`.
         output_final_state : bool, default = `False`

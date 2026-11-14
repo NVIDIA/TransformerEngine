@@ -27,8 +27,8 @@ class CommOverlapP2P;
 
 namespace transformer_engine::pytorch {
 
-at::Tensor linear_attention_affine_prefix(const at::Tensor &seeds, const at::Tensor &additive,
-                                          const at::Tensor &transitions,
+at::Tensor linear_attention_affine_prefix(const at::Tensor &initial_states,
+                                          const at::Tensor &additive, const at::Tensor &transitions,
                                           const at::Tensor &descriptors);
 
 /***************************************************************************************************

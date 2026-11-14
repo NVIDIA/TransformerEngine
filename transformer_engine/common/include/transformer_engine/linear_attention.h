@@ -23,9 +23,9 @@ extern "C" {
  * serves both forward prefixes and backward suffixes; backward callers pass
  * the backward-oriented transitions and a negative record stride.
  *
- * All tensors are contiguous device tensors. Initial memories (``seeds``) and
- * additives are FP32 [initial_memories, heads, value_dim, key_dim] and
- * [records, heads, value_dim, key_dim], respectively.
+ * All tensors are contiguous device tensors. Initial states are FP32
+ * [initial_memories, heads, value_dim, key_dim]; additives are FP32
+ * [records, heads, value_dim, key_dim].
  * Transitions are FP32 [records, heads, key_dim, key_dim]. Descriptors are
  * INT32 [outputs, 4], with rows (initial_memory_index, first_record, count, stride).
  * Outputs are FP32 [outputs, heads, value_dim, key_dim]. Referenced initial-memory
@@ -33,7 +33,7 @@ extern "C" {
  * An initial_memory_index of -1 means an implicit zero state. Zero-count
  * descriptors copy their initial memory (or write zeros). No memory is allocated.
  */
-void nvte_linear_attention_affine_prefix(const NVTETensor seeds, const NVTETensor additive,
+void nvte_linear_attention_affine_prefix(const NVTETensor initial_states, const NVTETensor additive,
                                          const NVTETensor transitions, const NVTETensor descriptors,
                                          NVTETensor output, cudaStream_t stream);
 

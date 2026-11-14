@@ -39,7 +39,7 @@ class LinearAttentionCPPartition:
     outgoing: Tuple[int, ...]
     incoming: Tuple[int, ...]
     terminal: Tuple[int, ...]
-    seed_owners: Tuple[int, ...]
+    initial_state_owners: Tuple[int, ...]
     empty_owned: Tuple[int, ...]
     slots: int  # One per rank for packed inputs; one per document for dense inputs.
     communicates: bool
@@ -64,7 +64,7 @@ def build_linear_attention_partition(cu_seqlens, cp_size, cp_rank, *, dense=Fals
     total = cu_seqlens[-1]
     boundaries = tuple(r * total // cp_size for r in range(cp_size + 1))
     slots = len(cu_seqlens) - 1 if dense else 1
-    fragments, seeds, empty = [], [], []
+    fragments, initial_state_owners, empty = [], [], []
     communicates = False
     for doc, (start, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:])):
         if dense:
@@ -84,7 +84,7 @@ def build_linear_attention_partition(cu_seqlens, cp_size, cp_rank, *, dense=Fals
             )
             fragment_start = max(start, boundaries[cp_rank])
             fragment_end = min(end, boundaries[cp_rank + 1])
-        seeds.append(first_rank)
+        initial_state_owners.append(first_rank)
         communicates |= first_rank != last_rank
         if start == end and first_rank == cp_rank:
             empty.append(doc)
@@ -120,7 +120,7 @@ def build_linear_attention_partition(cu_seqlens, cp_size, cp_rank, *, dense=Fals
         tuple(outgoing),
         tuple(incoming),
         tuple(terminal),
-        tuple(seeds),
+        tuple(initial_state_owners),
         tuple(empty),
         slots,
         communicates,

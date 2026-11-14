@@ -27,20 +27,20 @@ class _CPMetadata:
     """Logical partition and device tensors used to execute linear-attention CP."""
 
     partition: LinearAttentionCPPartition
-    cu: torch.Tensor
-    forward: torch.Tensor
-    backward: torch.Tensor
-    forward_zero: torch.Tensor
-    backward_zero: torch.Tensor
-    docs: torch.Tensor
+    cu_seqlens: torch.Tensor
+    forward_descriptors: torch.Tensor
+    backward_descriptors: torch.Tensor
+    forward_zero_descriptors: torch.Tensor
+    backward_zero_descriptors: torch.Tensor
+    document_indices: torch.Tensor
     outgoing: torch.Tensor
     incoming: torch.Tensor
     terminal: torch.Tensor
     initial_state_fragments: torch.Tensor
-    initial_state_docs: torch.Tensor
-    empty_docs: torch.Tensor
-    outgoing_cu: torch.Tensor
-    incoming_cu: torch.Tensor
+    initial_state_documents: torch.Tensor
+    empty_documents: torch.Tensor
+    outgoing_cu_seqlens: torch.Tensor
+    incoming_cu_seqlens: torch.Tensor
 
 
 def _build_cp_metadata(partition, device):
@@ -57,22 +57,25 @@ def _build_cp_metadata(partition, device):
         return torch.tensor(offsets, device=device, dtype=torch.int32)
 
     first = [i for i, f in enumerate(partition.fragments) if f.first_rank == partition.cp_rank]
-    forward = torch.tensor(partition.forward_descriptors, device=device, dtype=torch.int32).reshape(
-        -1, 4
-    )
-    backward = torch.tensor(
+    forward_descriptors = torch.tensor(
+        partition.forward_descriptors, device=device, dtype=torch.int32
+    ).reshape(-1, 4)
+    backward_descriptors = torch.tensor(
         partition.backward_descriptors, device=device, dtype=torch.int32
     ).reshape(-1, 4)
-    forward_zero, backward_zero = forward.clone(), backward.clone()
-    forward_zero[:, 0] = -1
-    backward_zero[:, 0] = -1
+    forward_zero_descriptors, backward_zero_descriptors = (
+        forward_descriptors.clone(),
+        backward_descriptors.clone(),
+    )
+    forward_zero_descriptors[:, 0] = -1
+    backward_zero_descriptors[:, 0] = -1
     return _CPMetadata(
         partition,
         torch.tensor(partition.local_cu_seqlens, device=device, dtype=torch.int32),
-        forward,
-        backward,
-        forward_zero,
-        backward_zero,
+        forward_descriptors,
+        backward_descriptors,
+        forward_zero_descriptors,
+        backward_zero_descriptors,
         indices([f.document for f in partition.fragments]),
         indices(partition.outgoing),
         indices(partition.incoming),
@@ -110,25 +113,27 @@ def _summary_buffers(state_template, slots):
 
 def _selected_span(metadata, selected):
     """Selected spans are consecutive: all dense spans, or one packed edge span."""
-    cu = metadata.partition.local_cu_seqlens
-    return slice(cu[selected[0]], cu[selected[-1] + 1])
+    cu_seqlens = metadata.partition.local_cu_seqlens
+    return slice(cu_seqlens[selected[0]], cu_seqlens[selected[-1] + 1])
 
 
 def _slot_indices(metadata, indices):
     """Dense slots are document IDs; packed partitions have only one edge slot."""
     if metadata.partition.slots == 1:
         return torch.zeros_like(indices)
-    return metadata.docs.index_select(0, indices)
+    return metadata.document_indices.index_select(0, indices)
 
 
-def _local_attention(adapter, tensors, gate_names, cu, state, options, *, final=True):
+def _local_attention(
+    adapter, tensors, gate_names, cu_seqlens, state, options, *, output_final_state=True
+):
     """Call the flavor adapter with packed local inputs."""
     return adapter._call_op(
         *tensors[:3],
         dict(zip(gate_names, tensors[3:])),
-        cu,
+        cu_seqlens,
         initial_state=state,
-        output_final_state=final,
+        output_final_state=output_final_state,
         **options,
     )
 
@@ -148,7 +153,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
         metadata,
         group,
         options,
-        final,
+        output_final_state,
         gate_names,
         track_grad,
         initial_state,
@@ -179,7 +184,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
             h, t = adapter._cp_forward_summary(
                 *selected[:3],
                 dict(zip(gate_names, selected[3:])),
-                metadata.outgoing_cu,
+                metadata.outgoing_cu_seqlens,
                 **options,
             )
             slots = _slot_indices(metadata, metadata.outgoing)
@@ -187,44 +192,50 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
             transition.index_copy_(0, slots, t)
         if partition.communicates:
             additive, transition = _gather_summaries(additive, transition, group)
-        starting = tex.linear_attention_affine_prefix(
+        starting_states = tex.linear_attention_affine_prefix(
             initial_state_buffer.contiguous(),
             additive,
             transition,
-            (metadata.forward if initial_state is not None else metadata.forward_zero),
+            (
+                metadata.forward_descriptors
+                if initial_state is not None
+                else metadata.forward_zero_descriptors
+            ),
         )
         # Retain FE's local graph only for training. This Function owns the
         # distributed VJP and the outer state gradients.
         with torch.set_grad_enabled(track_grad):
-            inputs = tuple(t.detach().requires_grad_(track_grad) for t in (*tensors, starting))
+            inputs = tuple(
+                t.detach().requires_grad_(track_grad) for t in (*tensors, starting_states)
+            )
             if partition.fragments:
                 output, states = _local_attention(
-                    adapter, inputs[:-1], gate_names, metadata.cu, inputs[-1], options
+                    adapter, inputs[:-1], gate_names, metadata.cu_seqlens, inputs[-1], options
                 )
             else:
                 output = v.new_empty((q.shape[0], q.shape[1], v.shape[-1]))
-                states = starting
+                states = starting_states
         terminal = (
             initial_state_buffer.new_zeros(state_shape)
-            if final
+            if output_final_state
             else initial_state_buffer.new_empty((0,))
         )
-        if final:
+        if output_final_state:
             terminal.index_copy_(
                 0,
-                metadata.docs.index_select(0, metadata.terminal),
+                metadata.document_indices.index_select(0, metadata.terminal),
                 states.detach().index_select(0, metadata.terminal),
             )
             if initial_state is not None:
                 terminal.index_copy_(
                     0,
-                    metadata.empty_docs,
-                    initial_state_buffer.index_select(0, metadata.empty_docs),
+                    metadata.empty_documents,
+                    initial_state_buffer.index_select(0, metadata.empty_documents),
                 )
             dist.all_reduce(terminal, group=group)
         if track_grad:
             ctx.save_for_backward(*inputs, output, states)
-        ctx.cp_metadata, ctx.group, ctx.final = metadata, group, final
+        ctx.cp_metadata, ctx.group, ctx.output_final_state = metadata, group, output_final_state
         ctx.adapter, ctx.options, ctx.gate_names = adapter, options, gate_names
         ctx.has_initial_state = initial_state is not None
         return output.detach(), terminal
@@ -234,7 +245,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
     def backward(ctx, grad_output, grad_final):
         """Exchange reverse recipes and pass outgoing state adjoints to FE's VJP."""
         tensors = ctx.saved_tensors[:-3]
-        starting, output, states = ctx.saved_tensors[-3:]
+        starting_states, output, states = ctx.saved_tensors[-3:]
         q, k, v = tensors[:3]
         metadata, group = ctx.cp_metadata, ctx.group
         partition = metadata.partition
@@ -247,8 +258,10 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
             v.shape[-1],
             k.shape[-1],
         )
-        final_state_grad = starting.new_zeros(shape if ctx.final else (1, *shape[1:]))
-        if ctx.final:
+        final_state_grad = starting_states.new_zeros(
+            shape if ctx.output_final_state else (1, *shape[1:])
+        )
+        if ctx.output_final_state:
             if grad_final is not None:
                 final_state_grad.copy_(grad_final)
             # Final states are replicated outputs: sum losses consuming any replica.
@@ -261,7 +274,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
                 *selected[:3],
                 dict(zip(ctx.gate_names, selected[3:])),
                 grad_output[span],
-                metadata.incoming_cu,
+                metadata.incoming_cu_seqlens,
                 **ctx.options,
             )
             slots = _slot_indices(metadata, metadata.incoming)
@@ -269,36 +282,40 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
             transition.index_copy_(0, slots, t)
         if partition.communicates:
             additive, transition = _gather_summaries(additive, transition, group)
-        ending_grad = tex.linear_attention_affine_prefix(
+        ending_state_grad = tex.linear_attention_affine_prefix(
             final_state_grad,
             additive,
             transition,
-            metadata.backward if ctx.final else metadata.backward_zero,
+            (
+                metadata.backward_descriptors
+                if ctx.output_final_state
+                else metadata.backward_zero_descriptors
+            ),
         )
         if partition.fragments:
             with torch.enable_grad():
                 grads = torch.autograd.grad(
                     (output, states),
-                    (*tensors, starting),
-                    (grad_output, ending_grad),
+                    (*tensors, starting_states),
+                    (grad_output, ending_state_grad),
                     # The outer graph controls lifetime, including retain_graph=True.
                     retain_graph=True,
                 )
         else:
-            grads = tuple(torch.zeros_like(t) for t in (*tensors, starting))
+            grads = tuple(torch.zeros_like(t) for t in (*tensors, starting_states))
         initial_state_grad = None
         if ctx.has_initial_state:
             initial_state_grad = final_state_grad.new_zeros(shape)
             initial_state_grad.index_add_(
                 0,
-                metadata.initial_state_docs,
+                metadata.initial_state_documents,
                 grads[-1].index_select(0, metadata.initial_state_fragments),
             )
-            if ctx.final:
+            if ctx.output_final_state:
                 initial_state_grad.index_copy_(
                     0,
-                    metadata.empty_docs,
-                    final_state_grad.index_select(0, metadata.empty_docs),
+                    metadata.empty_documents,
+                    final_state_grad.index_select(0, metadata.empty_documents),
                 )
             # Each document's initial-state gradient belongs to its first rank. Do not
             # replicate it here: if initial_state came from a previous CP call,
@@ -390,7 +407,13 @@ def context_parallel_attention(
         and partition.fragments
     ):
         output, states = _local_attention(
-            adapter, tensors, tuple(gates), metadata.cu, None, kernel_kwargs, final=False
+            adapter,
+            tensors,
+            tuple(gates),
+            metadata.cu_seqlens,
+            None,
+            kernel_kwargs,
+            output_final_state=False,
         )
     else:
         track_grad = torch.is_grad_enabled() and any(

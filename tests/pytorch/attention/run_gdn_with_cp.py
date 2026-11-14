@@ -95,10 +95,10 @@ def _case(
     v = torch.randn(total, heads, value_dim, device=device, dtype=dtype)
     g = -torch.rand(total, heads, device=device) * 0.02
     beta = torch.rand(total, heads, device=device) * 0.7
-    seed = torch.randn(len(lengths), heads, value_dim, key_dim, device=device) * 0.1
+    initial_state = torch.randn(len(lengths), heads, value_dim, key_dim, device=device) * 0.1
     if not initial:
-        seed.zero_()
-    full = tuple(t.detach().requires_grad_(True) for t in (q, k, v, g, beta, seed))
+        initial_state.zero_()
+    full = tuple(t.detach().requires_grad_(True) for t in (q, k, v, g, beta, initial_state))
     global_cu = torch.tensor(cu, device=device, dtype=torch.int32)
     if independent or total == 0:
         ref_output, ref_states = _reference(full, cu, scale, norm)
@@ -117,7 +117,9 @@ def _case(
     grad_output = torch.randn_like(v)
     if last_loss:
         grad_output[: -max(1, total // size)] = 0
-    grad_states = torch.randn_like(seed) * 0.1 if final else torch.zeros_like(seed)
+    grad_states = (
+        torch.randn_like(initial_state) * 0.1 if final else torch.zeros_like(initial_state)
+    )
     loss = (ref_states * grad_states).sum()
     if not state_only:
         loss = loss + (ref_output * grad_output).sum()
@@ -267,19 +269,21 @@ def _state_chaining(group):
         g = -torch.rand(tokens, heads, device=device) * 0.02
         beta = torch.rand(tokens, heads, device=device) * 0.7
         full.extend(t.detach().requires_grad_(True) for t in (q, k, v, g, beta))
-    seed = (torch.randn(2, heads, dim, dim, device=device) * 0.1).requires_grad_(True)
+    initial_state = (torch.randn(2, heads, dim, dim, device=device) * 0.1).requires_grad_(True)
     cu = torch.tensor([0, 17, 35], device=device, dtype=torch.int32)
     reference = GatedDeltaNetAttention(heads, dim, qkv_format="thd")
-    first, state = reference(*full[:5], cu_seqlens=cu, initial_state=seed, output_final_state=True)
+    first, state = reference(
+        *full[:5], cu_seqlens=cu, initial_state=initial_state, output_final_state=True
+    )
     second = reference(*full[5:], cu_seqlens=cu, initial_state=state)
     grad_first, grad_second = torch.randn_like(first), torch.randn_like(second)
     ((first * grad_first).sum() * 0.3 + (second * grad_second).sum()).backward()
     lo, hi = rank * tokens // size, (rank + 1) * tokens // size
     inputs = tuple(t[lo:hi].detach().requires_grad_(True) for t in full)
-    local_seed = seed.detach().requires_grad_(True)
+    local_initial_state = initial_state.detach().requires_grad_(True)
     module = GatedDeltaNetAttention(heads, dim, qkv_format="thd", cp_group=group)
     local_first, state = module(
-        *inputs[:5], cu_seqlens=cu, initial_state=local_seed, output_final_state=True
+        *inputs[:5], cu_seqlens=cu, initial_state=local_initial_state, output_final_state=True
     )
     local_second = module(*inputs[5:], cu_seqlens=cu, initial_state=state)
     loss = (local_first * grad_first[lo:hi]).sum() * 0.3
@@ -293,12 +297,15 @@ def _state_chaining(group):
                 _BWD_TOL[torch.bfloat16],
                 "chained token gradient",
             )
-        initial_grad = local_seed.grad.clone()
+        initial_grad = local_initial_state.grad.clone()
         dist.all_reduce(initial_grad, group=group)
         _assert_rms_close(
-            initial_grad, seed.grad, _BWD_TOL[torch.bfloat16], "chained initial-state gradient"
+            initial_grad,
+            initial_state.grad,
+            _BWD_TOL[torch.bfloat16],
+            "chained initial-state gradient",
         )
-        for tensor in (*inputs, local_seed):
+        for tensor in (*inputs, local_initial_state):
             tensor.grad = None
     dist.barrier(group=group)
 
