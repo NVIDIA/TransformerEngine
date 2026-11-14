@@ -23,9 +23,13 @@ from packaging.version import InvalidVersion, Version as PkgVersion
 
 from transformer_engine.pytorch.device import te_device_type
 
-# The cuDNN FROST SDPA engines in (forward, backward) order, named once so that frost, which
-# pins one of them, and flex, which bars both, cannot drift apart.
+# The SM100 FROST SDPA plans in (forward, backward) order. frost pins one of these by name.
 FROST_PLAN_TOKENS = ("sdpa_fwd_prefill_sm100", "sdpa_bwd_sm100")
+
+# The default bar. deselect_engines matches a name substring, and every plan name in the two
+# FROST SDPA engine families carries one of these, so the bar reaches each architecture's plans
+# rather than only SM100's.
+FROST_PLAN_BAR_TOKENS = ("sdpa_fwd", "sdpa_bwd")
 
 # Distinguishes "the caller said nothing" from "the caller asked for no exclusions at all".
 _BAR_FROST_BY_DEFAULT = object()
@@ -252,7 +256,7 @@ def finalize_plans(
     Matched as a substring, since cuDNN collapses per-head-dim engine names into one row. The pin
     must precede ``check_support``, which is only fatal once ``select_plan`` has run.
 
-    ``exclude_plan_tokens`` is the opposite instruction, and defaults to barring the FROST
+    ``exclude_plan_tokens`` is the opposite instruction, and defaults to barring the FROST SDPA
     engines, which accept a score_mod graph and then compute without it. They are on offer
     process-wide, so declining to ask is not enough. Drop the default once cuDNN declines these
     graphs itself; the gate that should reads a key ``sdpa()`` never writes.
@@ -267,7 +271,7 @@ def finalize_plans(
 
     if require_plan_token is None:
         if exclude_plan_tokens is _BAR_FROST_BY_DEFAULT:
-            exclude_plan_tokens = FROST_PLAN_TOKENS
+            exclude_plan_tokens = FROST_PLAN_BAR_TOKENS
         try:
             graph.create_execution_plans(list(heuristics))
             # Bar before the walk, so build_plans falls through to the first unbarred, buildable

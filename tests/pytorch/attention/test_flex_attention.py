@@ -727,6 +727,32 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     torch.testing.assert_close(v.grad, v_ref.grad, **tols)
 
 
+# Every FROST SDPA plan name read out of the nvidia-cudnn-frontend wheels, 1.27.0 and 1.28.0
+# (cudnn/engines/manifest.py and cudnn/sdpa/{fwd,bwd}/engines.py), plus the two names
+# frost_attention pins. The bar is asserted against these rather than against the constant that
+# produces it, which would pass even if the tokens were narrowed back to the SM100 names.
+_FROST_SDPA_PLAN_NAMES = (
+    "sdpa_fwd_prefill_sm80",
+    "sdpa_fwd_prefill_sm100",
+    "sdpa_fwd_prefill_sm100_fp8",
+    "sdpa_fwd_prefill_sm100_mxfp8",
+    "sdpa_fwd_prefill_sm100_d128",
+    "sdpa_fwd_prefill_sm100_d256",
+    "sdpa_fwd_prefill_sm100_d512",
+    "sdpa_fwd_prefill_sm107_fp8",
+    "sdpa_fwd_prefill_sm120",
+    "sdpa_fwd_prefill_sm120_fp8",
+    "sdpa_fwd_sm120",
+    "sdpa_fwd_wrapper_dsl_sm100",
+    "sdpa_fwd_wrapper_sm100_d256",
+    "sdpa_bwd",
+    "sdpa_bwd_sm80",
+    "sdpa_bwd_sm100",
+    "sdpa_bwd_sm120",
+    "sdpa_bwd_wrapper_sm100_d256",
+)
+
+
 def test_flex_bars_the_frost_engines(monkeypatch):
     """flex must tell cuDNN not to use a FROST engine, not merely decline to ask for them.
 
@@ -774,7 +800,9 @@ def test_flex_bars_the_frost_engines(monkeypatch):
     workspace_size, _ = cudnn_pygraph.finalize_plans(FakeGraph(), backend_name="FlexAttention")
     assert workspace_size == 4096
     assert barred, "the shared default did not ask cuDNN to exclude any engine"
-    assert set(cudnn_pygraph.FROST_PLAN_TOKENS) <= set(barred), barred
+    # deselect_engines matches a name substring, so a token covers a plan it is contained in.
+    unmatched = [n for n in _FROST_SDPA_PLAN_NAMES if not any(t in n for t in barred)]
+    assert not unmatched, unmatched
 
     # The other half: flex must not pass exclude_plan_tokens of its own, which would replace the
     # default rather than add to it.
