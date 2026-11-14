@@ -1023,6 +1023,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta_tensors_initialized = False
         self.quantizers = {"scaling_fwd": [], "scaling_bwd": []}
         self.tp_group = None
+        self.tp_group_initialized = False
         self.tp_size = 1
         self.sequence_parallel = False
         self.param_init_meta = {}
