@@ -875,6 +875,55 @@ def test_flex_rejects_a_graph_a_python_engine_served():
     assert (workspace_size, plan) == (4096, None)
 
 
+@pytest.mark.parametrize("spelling", ["cudnn", "python"])
+def test_flex_reports_the_bar_when_nothing_is_left_to_build(spelling):
+    """Barring the only plans that could serve the graph must name the bar, not just cuDNN.
+
+    cuDNN defers a backend decline to the plan walk, so this surfaces at build_plans, and a
+    python engine spells a decline NotImplementedError rather than cuDNN's own error.
+    """
+    try:
+        cudnn = cudnn_pygraph.import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
+
+    exc = (
+        cudnn.cudnnGraphNotSupportedError("no plan in the list could be built")
+        if spelling == "cudnn"
+        else NotImplementedError("sdpa_fwd_prefill_sm100: declined")
+    )
+
+    class FakeGraph:
+        """Declines once every plan that could have served the graph has been barred."""
+
+        selected_engine = None
+
+        def validate(self):
+            pass
+
+        def build_operation_graph(self):
+            pass
+
+        def create_execution_plans(self, _heuristics):
+            pass
+
+        def deselect_engines(self, _names):
+            pass
+
+        def check_support(self):
+            pass
+
+        def build_plans(self, _policy):
+            raise exc
+
+        def get_workspace_size(self):
+            return 4096
+
+    with pytest.raises(RuntimeError, match="barred engines") as excinfo:
+        cudnn_pygraph.finalize_plans(FakeGraph(), backend_name="FlexAttention")
+    assert "sdpa_fwd" in str(excinfo.value), excinfo.value
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
 def test_frost_switch_does_not_change_what_flex_computes():
     """Enabling the FROST engines must not change flex's output.

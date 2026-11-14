@@ -643,7 +643,8 @@ def test_pinned_plan_decline_reports_the_engine_reason():
             pass
 
         def check_support(self):
-            raise cudnn.cudnnGraphNotSupportedError("head_dim 512 needs SM100; this is SM90")
+            # The FROST engines spell a decline NotImplementedError, not cuDNN's own error.
+            raise NotImplementedError("sdpa_fwd_prefill_sm100: head_dim 512 needs SM100")
 
     with pytest.raises(RuntimeError) as excinfo:
         cudnn_pygraph.finalize_plans(

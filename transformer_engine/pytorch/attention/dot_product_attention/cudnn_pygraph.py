@@ -238,6 +238,15 @@ def clear_graph_cache() -> None:
     _GRAPH_CACHE.clear()
 
 
+def _declined(cudnn) -> Tuple[type, ...]:
+    """How cuDNN spells "this engine does not serve this graph".
+
+    A backend plan raises cuDNN's own error; a python engine raises NotImplementedError, or
+    ImportError when its optional lowering dependency is absent.
+    """
+    return (cudnn.cudnnGraphNotSupportedError, NotImplementedError, ImportError)
+
+
 def finalize_plans(
     graph,
     *,
@@ -282,15 +291,17 @@ def finalize_plans(
             deselect = getattr(graph, "deselect_engines", None)
             if exclude_plan_tokens and deselect is not None:
                 deselect(list(exclude_plan_tokens))
+            # Asks whichever plan is selected, which is still index 0 and so may be one the bar
+            # just removed; its decline is not the graph's verdict.
             graph.check_support()
-            # Inside the try: cuDNN defers a backend decline to the walk, so barring the plans
-            # that would have served the graph surfaces here rather than at check_support.
+            # cuDNN defers a backend decline to the walk, so barring every plan that could have
+            # served the graph raises here rather than above.
             graph.build_plans(
                 build_policy
                 if build_policy is not None
                 else cudnn.build_plan_policy.HEURISTICS_CHOICE
             )
-        except cudnn.cudnnGraphNotSupportedError as exc:
+        except _declined(cudnn) as exc:
             # Name the bar: if it removed the only viable plan, the graph was not the problem.
             barred = (
                 f" (barred engines: {list(exclude_plan_tokens)})" if exclude_plan_tokens else ""
@@ -325,7 +336,7 @@ def finalize_plans(
     try:
         graph.check_support()
         graph.build_plans()
-    except cudnn.cudnnGraphNotSupportedError as exc:
+    except _declined(cudnn) as exc:
         hint = not_found_hint() if callable(not_found_hint) else not_found_hint
         raise RuntimeError(
             f"cuDNN engine {names[hits[0]]!r} was offered but declined this graph:"
