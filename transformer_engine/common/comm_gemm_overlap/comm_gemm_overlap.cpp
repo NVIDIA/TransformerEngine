@@ -517,8 +517,8 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
     // col-major GEMM compute overlapped with reduce-scatter on the output
     // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
     nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                             pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                             stream_main, _algo_type);
+                             pre_gelu_out.data(), transa, transb, grad, accumulate,
+                             use_split_accumulator, _num_comm_sm, stream_main, _algo_type);
     return;
   }
 
@@ -624,8 +624,8 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
     // col-major GEMM compute overlapped with reduce-scatter on the output
     // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
     nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                             pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                             stream_main, _algo_type);
+                             pre_gelu_out.data(), transa, transb, grad, accumulate,
+                             use_split_accumulator, _num_comm_sm, stream_main, _algo_type);
     return;
   }
 
@@ -946,8 +946,8 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
     // col-major GEMM compute overlapped with all-gather on input B
     // (M/P, K) x [(K, N/P) -(AG)-> (K, N)] = (M/P, N)
     nvte_all_gather_gemm(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                         pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                         stream_main, _algo_type);
+                         pre_gelu_out.data(), transa, transb, grad, accumulate,
+                         use_split_accumulator, _num_comm_sm, stream_main, _algo_type);
     return;
   }
 
@@ -1058,8 +1058,8 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
     // col-major GEMM compute overlapped with all-gather on input B
     // (M/P, K) x [(K, N/P) -(AG)-> (K, N)] = (M/P, N)
     nvte_all_gather_gemm(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                         pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                         stream_main, _algo_type);
+                         pre_gelu_out.data(), transa, transb, grad, accumulate,
+                         use_split_accumulator, _num_comm_sm, stream_main, _algo_type);
     return;
   }
 
@@ -1235,8 +1235,8 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
     // col-major GEMM compute overlapped with reduce-scatter on the output
     // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
     nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                             pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                             stream_main, _algo_type);
+                             pre_gelu_out.data(), transa, transb, grad, accumulate,
+                             use_split_accumulator, _num_comm_sm, stream_main, _algo_type);
     return;
   }
 
@@ -1309,8 +1309,8 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
     // col-major GEMM compute overlapped with reduce-scatter on the output
     // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
     nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                             pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                             stream_main, _algo_type);
+                             pre_gelu_out.data(), transa, transb, grad, accumulate,
+                             use_split_accumulator, _num_comm_sm, stream_main, _algo_type);
     return;
   }
 
