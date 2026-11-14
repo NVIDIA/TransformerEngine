@@ -4246,6 +4246,83 @@ class TestHybridGroupedLinearValidation:
     CustomRecipe compatibility is validated once per real quantizer generation.
     Built-in recipes skip that validation and steady-state generation processing."""
 
+    @requires_nvfp4
+    @pytest.mark.parametrize("source", ["original", "rowwise_dequantized"])
+    @pytest.mark.parametrize("usage", [(True, True), (True, False), (False, True)])
+    @pytest.mark.parametrize("m_splits", [(128, 256), (32, 0, 96)])
+    @pytest.mark.parametrize("offload", [False, True])
+    def test_batch_rowwise_hybrid_source_and_usage(
+        self, monkeypatch, source, usage, m_splits, offload
+    ):
+        """Batching must preserve hybrid source policies, dropped directions, and dbias."""
+        torch.manual_seed(319)
+        tensor = torch.randn(sum(m_splits), 128, dtype=torch.bfloat16, device="cuda")
+        quantizers = []
+        for _ in m_splits:
+            row = NVFP4Quantizer(row_scaled_nvfp4=True, columnwise=False)
+            row.internal = True
+            column = IdentityQuantizer(dtype=torch.bfloat16)
+            column.internal = True
+            quantizer = HybridQuantizer(
+                rowwise_quantizer=row, columnwise_quantizer=column, columnwise_source=source
+            )
+            quantizer.internal = True
+            quantizer.set_usage(rowwise=usage[0], columnwise=usage[1])
+            quantizers.append(quantizer)
+
+        batched_calls = []
+        batch = split_quantization._batch_nvfp4_rowwise
+
+        def record_batch(*args, **kwargs):
+            batched_calls.append(True)
+            return batch(*args, **kwargs)
+
+        monkeypatch.setattr(split_quantization, "_batch_nvfp4_rowwise", record_batch)
+        actual, actual_dbias = split_quantization._split_quantize(
+            tensor,
+            m_splits,
+            quantizers,
+            tensor.dtype,
+            compute_dbias=True,
+            disable_bulk_allocation=offload,
+        )
+        needs_row = usage[0] or (usage[1] and source == "rowwise_dequantized")
+        assert bool(batched_calls) == (needs_row and not offload)
+        with monkeypatch.context() as patch:
+            patch.setattr(split_quantization, "_can_batch_nvfp4_rowwise", lambda *_: False)
+            expected, expected_dbias = split_quantization._split_quantize(
+                tensor,
+                m_splits,
+                quantizers,
+                tensor.dtype,
+                compute_dbias=True,
+                disable_bulk_allocation=offload,
+            )
+        for actual_part, expected_part, rows, dbias, ref_dbias in zip(
+            actual, expected, m_splits, actual_dbias, expected_dbias
+        ):
+            torch.testing.assert_close(dbias, ref_dbias, atol=0, rtol=0)
+            for direction, enabled in zip(("rowwise", "columnwise"), usage):
+                got = getattr(actual_part, direction + "_sub_storage")
+                ref = getattr(expected_part, direction + "_sub_storage")
+                if not enabled:
+                    assert got is ref is None
+                elif direction == "rowwise":
+                    for name in ("_rowwise_data", "_amax_rowwise"):
+                        torch.testing.assert_close(
+                            getattr(got, name), getattr(ref, name), atol=0, rtol=0
+                        )
+                    torch.testing.assert_close(
+                        got._rowwise_scale_inv[:rows, : tensor.shape[1] // 16],
+                        ref._rowwise_scale_inv[:rows, : tensor.shape[1] // 16],
+                        atol=0,
+                        rtol=0,
+                    )
+                    assert got._with_gemm_swizzled_scales == ref._with_gemm_swizzled_scales
+                    torch.testing.assert_close(got.dequantize(), ref.dequantize(), atol=0, rtol=0)
+                else:
+                    _assert_storage_data_exact(got, ref, context="hybrid columnwise source")
+
     @pytest.mark.parametrize(
         "quantizers",
         [

@@ -230,3 +230,68 @@ def test_sanity_debug(model_key, fp8, config_key, feature_dirs):
     if not fp8 and config_key in fp8_required_configs:
         pytest.skip(f"Config '{config_key}' requires FP8")
     _run_test(model_key, fp8, configs[config_key], feature_dirs)
+
+
+@pytest.mark.skipif(not te.is_nvfp4_available(), reason="Requires NVFP4")
+def test_batch_rowwise_debug_dispatch(monkeypatch, feature_dirs):
+    """An enabled debug quantizer must retain inspection through grouped forward/backward."""
+    from pathlib import Path
+    from transformer_engine.common import recipe
+    from transformer_engine.pytorch.module import _split_quantization
+    from transformer_engine.pytorch.module.grouped_linear import _GroupedLinear
+    from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+
+    FP8GlobalStateManager.reset()
+    torch.manual_seed(319)
+    config = Path(__file__).parent / "test_configs/dummy_feature.yaml"
+    debug_api.initialize(config_file=str(config), feature_dirs=feature_dirs)
+    try:
+        fp4_recipe = recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+            row_scaled_activation=True,
+            backward_override="high_precision",
+        )
+        fp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+        fp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+        fp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+        models = [
+            te.GroupedLinear(2, 128, 128, bias=True, params_dtype=torch.bfloat16) for _ in range(2)
+        ]
+        models[1].load_state_dict(models[0].state_dict())
+        x = torch.randn(384, 128, device="cuda", dtype=torch.bfloat16)
+        dy = torch.randn_like(x)
+        seen_debug = []
+        forward = _GroupedLinear.forward
+
+        def record_forward(ctx, inp, args, *parameters):
+            seen_debug.append(args.debug)
+            return forward(ctx, inp, args, *parameters)
+
+        monkeypatch.setattr(_GroupedLinear, "forward", record_forward)
+        monkeypatch.setattr(
+            _split_quantization,
+            "_batch_nvfp4_rowwise",
+            lambda *_: pytest.fail("Debug quantization must not be bypassed"),
+            raising=False,
+        )
+        results, inputs = [], []
+        for model in models:
+            inp = x.clone().requires_grad_()
+            inputs.append(inp)
+            with te.autocast(recipe=fp4_recipe):
+                out = model(inp, [128, 256])
+            out.backward(dy)
+            results.append(out)
+        assert seen_debug == [True, True]
+        torch.testing.assert_close(results[0], results[1], atol=0, rtol=0)
+        for actual, expected in [
+            (inputs[0], inputs[1]),
+            *zip(models[0].parameters(), models[1].parameters()),
+        ]:
+            assert torch.isfinite(actual.grad).all()
+            torch.testing.assert_close(actual.grad, expected.grad, atol=0, rtol=0)
+    finally:
+        debug_api.end_debug()
+        FP8GlobalStateManager.reset()
