@@ -29,7 +29,7 @@ from typing import Optional, Type
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Float32, Int32, Int64, Uint16, Uint32, Uint8
+from cutlass import Boolean, Float32, Int32, Int64, Uint16, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
@@ -576,6 +576,7 @@ def quantize_mxfp8_smem_tile_general(
     DBIAS_REDUCTION_IN_COLWISE: cutlass.Constexpr[bool],
     COLWISE_DBIAS_REDUCTION_ONLY: cutlass.Constexpr[bool],
     DBIAS_REDUCTION_IN_ROWWISE: cutlass.Constexpr[bool],
+    smem: Optional[cutlass.memory.SmemAllocator] = None,  # pylint: disable=unused-argument
 ):
     """Quantize one SMEM tile in the directions enabled by ROWWISE / COLWISE; returns (amax, dbias).
 
@@ -665,6 +666,9 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
     """
 
     _NUM_STAGES = 2  # The pipeline depth is always 2
+    _quantize_smem_tile = staticmethod(
+        quantize_mxfp8_smem_tile_general
+    )  # Function to quantize one SMEM tile
 
     def __init__(
         self,
@@ -725,6 +729,38 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
             and (cfg.COLWISE or self.COLWISE_DBIAS_REDUCTION_ONLY)
             and cfg.ACTIVATION != "relu"
         )
+
+    @cute.jit
+    def eligible_to_dispatch(  # pylint: disable=arguments-differ,unused-argument
+        self,
+        cfg: cutlass.Constexpr[MXFP8QuantizeConfig],
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mNoop: cute.Pointer,
+        mDActInput: Optional[cute.Tensor],
+    ) -> Boolean:
+        """Runtime check: dropping the scale bounds checks, or the input masking an activation
+        with act(0) != 0 needs, is only safe when the CTAs tile the input exactly."""
+        eligible = True
+        # If we skip scale OOB check, or we skip input masking with an activation that doesn't satisfy act(0)=0,
+        # then it is required to have the input shape perfectly divisible
+        if cutlass.const_expr(
+            self.SKIP_SCALE_BOUNDS or (self.SKIP_INPUT_MASKING and cfg.act_needs_masking())
+        ):
+            M, N = mX.shape
+            # With _USE_STATIC_NUM_TILES, each CTA always processes _NUM_TILES tiles, including OOB ones,
+            # so the scale-bounds check can only be dropped if M divides TILE_ROWS * _NUM_TILES.
+            num_tiles_per_cta = self._NUM_TILES if self._USE_STATIC_NUM_TILES else 1
+            # If the input shape can be perfectly tiled by the general kernel's tile size, we can skip some boundary check because
+            # we know we will not touch any out-of-bounds region.
+            shape_is_divisible = (
+                M % (self._TILE_ROWS * num_tiles_per_cta) == 0 and N % self._TILE_COLS == 0
+            )
+            eligible = shape_is_divisible
+        return eligible
 
     @cute.jit
     def __call__(
@@ -1217,7 +1253,7 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
                 sO_col_tile = sO_col[(None, stage_idx)]
                 mS_col_stage = cute.flatten(mS_col[(None, (tile_idx_y, tile_idx_x))])
 
-            amax, dbias = quantize_mxfp8_smem_tile_general(
+            amax, dbias = self._quantize_smem_tile(
                 sX_tile,
                 sActInput_tile,
                 sO_row_tile,
@@ -1247,6 +1283,7 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
                 DBIAS_REDUCTION_IN_COLWISE=self.DBIAS_REDUCTION_IN_COLWISE,
                 COLWISE_DBIAS_REDUCTION_ONLY=self.COLWISE_DBIAS_REDUCTION_ONLY,
                 DBIAS_REDUCTION_IN_ROWWISE=self.DBIAS_REDUCTION_IN_ROWWISE,
+                smem=smem,
             )
             if cutlass.const_expr(cfg.WITH_AMAX):
                 per_thread_amax = cute.arch.fmax(per_thread_amax, amax)

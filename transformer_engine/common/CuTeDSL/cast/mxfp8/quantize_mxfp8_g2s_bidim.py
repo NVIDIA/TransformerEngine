@@ -255,7 +255,8 @@ class MXFP8QuantizeBidimensionalG2SKernel(MXFP8QuantizeKernelBase):
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
         # This kernel supports swizzled scales but we don't dispatch to it for now.
         return (
-            cfg.is_plain_cast()
+            not cfg.USE_2D_QUANTIZATION
+            and cfg.is_plain_cast()
             and is_packed16(cfg.DTYPE)
             and cfg.ROWWISE
             and cfg.COLWISE
