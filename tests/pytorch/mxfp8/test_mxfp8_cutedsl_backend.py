@@ -454,11 +454,18 @@ def group_dims(members):
     )
 
 
-def run_group_quantize(members, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, dbias):
+def run_group_quantize(
+    members, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, dbias, use_2d_quant
+):
     """Quantize the concatenated members; returns (grouped output, dbias or None)."""
     logical_shape, first_dims, last_dims = group_dims(members)
     x, _ = generate_inputs(*logical_shape, in_dtype)
-    q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+    q = MXFP8Quantizer(
+        fp8_dtype=fp8_dtype,
+        rowwise=rowwise,
+        columnwise=columnwise,
+        with_2d_quantization=use_2d_quant,
+    )
     q.optimize_for_gemm = swizzled
     if dbias:
         return tex.bgrad_group_quantize(x, q, len(members), first_dims, last_dims)
@@ -485,11 +492,14 @@ def extract_group_quantized_output(out, rowwise, columnwise):
     return parts
 
 
-def get_group_cfg_key(shape_rep, in_dtype, fp8_dtype, rowwise, colwise, swizzled, dbias):
+def get_group_cfg_key(
+    shape_rep, in_dtype, fp8_dtype, rowwise, colwise, swizzled, dbias, use_2d_quant=False
+):
     """Mirror of MXFP8GroupQuantConfig::to_key (group_quantize_mxfp8_cutedsl.cuh) for the
     configs reachable from PyTorch (no fused activation)."""
     major, minor = device_compute_capability()
-    flags = (swizzled, dbias, False, False)  # swizzled, with_dbias, with_dact, with_act
+    # swizzled, with_dbias, with_dact, with_act, use_2d_quantization
+    flags = (swizzled, dbias, False, False, use_2d_quant)
     return (
         f"cutedsl_group_mxfp8_sm{major * 10 + minor}_{DTYPE_TO_STR[in_dtype]}_"
         f"{FP8_TO_KEY[fp8_dtype]}_{int(rowwise)}_{int(colwise)}_{shape_rep}_"
@@ -508,13 +518,20 @@ def assert_group_cutedsl_registered(*key_args):
 
 
 def run_group_test_case(
-    members, shape_rep, block_size, in_dtype, fp8_dtype, swizzled=False, dbias=False
+    members,
+    shape_rep,
+    block_size,
+    in_dtype,
+    fp8_dtype,
+    swizzled=False,
+    dbias=False,
+    use_2d_quant=False,
 ):
     """Assert the CuTeDSL and CUDA grouped backends produce bit-identical outputs, including
     dbias, which both accumulate in the same order."""
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
-    args = (members, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, dbias)
+    args = (members, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, dbias, use_2d_quant)
 
     set_cutedsl_backend(False)
     out_cuda, dbias_cuda = run_group_quantize(*args)
@@ -528,7 +545,7 @@ def run_group_test_case(
         set_cutedsl_backend(False)
 
     assert_group_cutedsl_registered(
-        shape_rep, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, dbias
+        shape_rep, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, dbias, use_2d_quant
     )
     tag = f"group/{members}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}"
     for name, cuda_bytes in cuda_output.items():
@@ -607,27 +624,22 @@ def test_group_noop(cutedsl):
         assert torch.equal(quantized[name], expected[name]), f"{name} wrong under a clear flag"
 
 
-def test_group_2d_quantization_fallback():
-    """2D block scaling is left to the CUDA kernel, which must still be what runs."""
-    members = [(128, 256), (384, 256), (256, 256)]
-    logical_shape, first_dims, _ = group_dims(members)
-    x, _ = generate_inputs(*logical_shape, torch.bfloat16)
-    outputs = []
-    for cutedsl in (False, True):
-        q = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
-            rowwise=True,
-            columnwise=True,
-            with_2d_quantization=True,
-        )
-        set_cutedsl_backend(cutedsl)
-        try:
-            out = tex.group_quantize(x, q, len(members), first_dims)
-            outputs.append(extract_group_quantized_output(out, True, True))
-        finally:
-            set_cutedsl_backend(False)
-    for name, cuda_bytes in outputs[0].items():
-        assert torch.equal(outputs[1][name], cuda_bytes), f"{name} differ between backends"
+@pytest.mark.parametrize("case", GROUP_CASES, ids=get_group_case_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_group_2d_quantization(swizzled, in_dtype, block_size, case):
+    """2D block scaling (one scale per 32x32 block) through the general grouped kernel."""
+    _, shape_rep, members = case
+    run_group_test_case(
+        members,
+        shape_rep,
+        block_size,
+        in_dtype,
+        tex.DType.kFloat8E4M3,
+        swizzled=swizzled,
+        use_2d_quant=True,
+    )
 
 
 # Cover the specialized kernels' shapes

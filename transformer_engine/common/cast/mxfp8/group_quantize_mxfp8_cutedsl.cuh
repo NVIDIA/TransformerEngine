@@ -56,12 +56,13 @@ struct MXFP8GroupQuantConfig {
   bool with_dbias;                // If the partial dbias is computed (via the workspace tensor)
   bool with_dact;                 // If an activation derivative operation is fused
   bool with_act;                  // If an activation operation is fused
+  bool use_2d_quantization;       // If every 32x32 block shares one scale
   Activation activation = Activation::kNone;
   uint32_t sm_arch = static_cast<uint32_t>(cuda::sm_arch());
 
   // Bit layout: dtype [3:0] (4 used/reserved), fp8_dtype [7:4] (4 used/reserved),
   // flags [13:8] (6 used), shape_rep [15:14] (2 used), activation [21:16] (6 used/reserved),
-  // and SM architecture [30:22] (9 used/reserved). Bit 31 is unused.
+  // SM architecture [30:22] (9 used/reserved) and use_2d_quantization [31].
   uint32_t to_id() const {
     static_assert(static_cast<uint32_t>(DType::kNumTypes) <= 16,
                   "DType no longer fits in the 4 bits to_id() gives it.");
@@ -75,7 +76,7 @@ struct MXFP8GroupQuantConfig {
            (static_cast<uint32_t>(swizzled) << 10) | (static_cast<uint32_t>(with_dbias) << 11) |
            (static_cast<uint32_t>(with_dact) << 12) | (static_cast<uint32_t>(with_act) << 13) |
            (static_cast<uint32_t>(shape_rep) << 14) | (static_cast<uint32_t>(activation) << 16) |
-           (sm_arch << 22);
+           (sm_arch << 22) | (static_cast<uint32_t>(use_2d_quantization) << 31);
   }
 
   std::optional<tvm::ffi::Function> get_kernel() const {
@@ -87,7 +88,7 @@ struct MXFP8GroupQuantConfig {
   // compiled and registered on a cache miss.
   std::string to_key() const {
     std::string key;
-    // longest: cutedsl_group_mxfp8_smXXX_BFloat16_Float8E4M3_1_1_vfd_1_1_1_0_dqgelu
+    // longest: cutedsl_group_mxfp8_smXXX_BFloat16_Float8E4M3_1_1_vfd_1_1_1_0_0_dqgelu
     key.reserve(96);
     key.append("cutedsl_group_mxfp8_sm")
         .append(std::to_string(sm_arch))
@@ -110,6 +111,8 @@ struct MXFP8GroupQuantConfig {
         .append("_")
         .append(with_act ? "1" : "0")
         .append("_")
+        .append(use_2d_quantization ? "1" : "0")
+        .append("_")
         .append(activation_to_str(activation));
     return key;
   }
@@ -119,11 +122,11 @@ struct MXFP8GroupQuantConfig {
     if (!entrypoint.has_value()) {
       return false;
     }
-    tvm::ffi::Any result =
-        (*entrypoint)(tvm::ffi::String(fn_name), tvm::ffi::String(to_string(dtype)),
-                      tvm::ffi::String(to_string(fp8_dtype)), rowwise, colwise,
-                      tvm::ffi::String(shape_rep_to_str(shape_rep)), swizzled, with_dbias,
-                      with_dact, with_act, tvm::ffi::String(activation_to_str(activation)));
+    tvm::ffi::Any result = (*entrypoint)(
+        tvm::ffi::String(fn_name), tvm::ffi::String(to_string(dtype)),
+        tvm::ffi::String(to_string(fp8_dtype)), rowwise, colwise,
+        tvm::ffi::String(shape_rep_to_str(shape_rep)), swizzled, with_dbias, with_dact, with_act,
+        use_2d_quantization, tvm::ffi::String(activation_to_str(activation)));
     return result.try_cast<bool>().value_or(false);
   }
 };
@@ -318,11 +321,6 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
     report_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
     return false;
   }
-  // TODO(kainingz): port 2D quantization to CuTeDSL
-  if (quant_config != nullptr && quant_config->mxfp8_2d_quantization) {
-    report_cutedsl_not_chosen("2D quantization is not supported.");
-    return false;
-  }
   constexpr Activation activation = activation_func_to_enum<ParamOP, OP>();
   if constexpr (activation == Activation::kUnsupported) {
     report_cutedsl_not_chosen("the fused activation is not supported.");
@@ -409,16 +407,18 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
       NVTE_CHECK(workspace_tensor != nullptr, "Workspace must be a tensor.");
     }
 
-    const MXFP8GroupQuantConfig config{/*dtype=*/input_tensor->dtype(),
-                                       /*fp8_dtype=*/output_tensor->dtype(),
-                                       /*rowwise=*/rowwise,
-                                       /*colwise=*/colwise,
-                                       /*shape_rep=*/shape_rep,
-                                       /*swizzled=*/swizzled,
-                                       /*with_dbias=*/IS_DBIAS,
-                                       /*with_dact=*/IS_DACT,
-                                       /*with_act=*/IS_ACT,
-                                       /*activation=*/activation};
+    const MXFP8GroupQuantConfig config{
+        /*dtype=*/input_tensor->dtype(),
+        /*fp8_dtype=*/output_tensor->dtype(),
+        /*rowwise=*/rowwise,
+        /*colwise=*/colwise,
+        /*shape_rep=*/shape_rep,
+        /*swizzled=*/swizzled,
+        /*with_dbias=*/IS_DBIAS,
+        /*with_dact=*/IS_DACT,
+        /*with_act=*/IS_ACT,
+        /*use_2d_quantization=*/quant_config != nullptr && quant_config->mxfp8_2d_quantization,
+        /*activation=*/activation};
     return mxfp8_group_quantize_cutedsl(config, input_tensor, act_input_tensor, noop_tensor,
                                         output_tensor, dbias_tensor, workspace_tensor, stream);
   }

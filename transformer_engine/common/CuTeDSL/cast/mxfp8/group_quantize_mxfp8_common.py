@@ -84,6 +84,7 @@ class MXFP8GroupQuantizeConfig:
         with_dact: bool = False,
         with_act: bool = False,
         activation: str = "none",
+        use_2d_quantization: bool = False,
     ):
         if dtype not in ("Float32", "Float16", "BFloat16"):
             raise ValueError(f"unknown input dtype {dtype!r}; expected Float32|Float16|BFloat16")
@@ -139,6 +140,10 @@ class MXFP8GroupQuantizeConfig:
             self.ACTIVATION = None
         self.WITH_DACT = with_dact
         self.WITH_ACT = with_act
+        # Only plain casts carry a quantization config, so only they can ask for 32x32 blocks.
+        if use_2d_quantization and (with_dbias or with_dact or with_act):
+            raise ValueError("2D block scaling is only implemented for a plain cast")
+        self.USE_2D_QUANTIZATION = use_2d_quantization
 
     def __str__(self):
         return (
@@ -146,7 +151,7 @@ class MXFP8GroupQuantizeConfig:
             f"rowwise={self.ROWWISE}, colwise={self.COLWISE}, shape_rep={self.SHAPE_REP}, "
             f"swizzled={self.WITH_GEMM_SWIZZLED_SCALES}, with_dbias={self.WITH_DBIAS}, "
             f"with_dact={self.WITH_DACT}, with_act={self.WITH_ACT}, "
-            f"activation={self.ACTIVATION})"
+            f"use_2d_quantization={self.USE_2D_QUANTIZATION}, activation={self.ACTIVATION})"
         )
 
     __repr__ = __str__
@@ -453,6 +458,7 @@ def get_mxfp8_group_quantization_function(
     with_dbias: bool,
     with_dact: bool,
     with_act: bool,
+    use_2d_quantization: bool,
     activation: str,
 ) -> bool:
     """Compile the grouped MXFP8 quantize kernel for this config and register it in the TVM-FFI
@@ -488,6 +494,7 @@ def get_mxfp8_group_quantization_function(
                 with_dact=with_dact,
                 with_act=with_act,
                 activation=activation,
+                use_2d_quantization=use_2d_quantization,
             )
         except ValueError as e:
             logger.warning(

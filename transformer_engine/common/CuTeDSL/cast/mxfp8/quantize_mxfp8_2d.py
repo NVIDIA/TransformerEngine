@@ -24,7 +24,7 @@ from typing import Optional, Type
 
 import cutlass
 from cutlass import cute
-from cutlass import Float32, Int32, Int64, Uint16, Uint32, Uint8
+from cutlass import Float32, Float8E8M0FNU, Int32, Int64, Uint16, Uint32, Uint8
 
 from transformer_engine.common.CuTeDSL.utils import (
     device_compute_capability,
@@ -65,16 +65,17 @@ def quantize_colwise_mxfp8_2d(
     mS_col_stage: cute.Tensor,  # colwise scale tensor (1D swizzled, or 2D linear)
     sBlockAmax: cute.Tensor,  # receives the amax of block w at index w
     MAX_NORM_RCP: cutlass.Constexpr[float],
-    tile_row_start: Int32,
-    tile_col_start: Int32,
-    M: Int32,
-    N: Int32,
+    tile_row_start: Int32 | Int64,
+    tile_col_start: Int32 | Int64,
+    M: Int32 | Int64,
+    N: Int32 | Int64,
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     SWIZZLE: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],
     SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
+    ZERO_OOB_SCALES: cutlass.Constexpr[bool] = False,  # zero the scales of columns past N
 ):
     """Quantize one SMEM tile colwise with one scale per 32x32 block; returns the block amax."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -130,8 +131,12 @@ def quantize_colwise_mxfp8_2d(
         scale_coord = (0, tidx)
     if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         mS_col_stage[scale_coord] = biased_exp_c
-    elif tile_row_start < M and tile_col_start + tidx < N:
-        mS_col_stage[scale_coord] = biased_exp_c
+    else:
+        if tile_row_start < M and tile_col_start + tidx < N:
+            mS_col_stage[scale_coord] = biased_exp_c
+        if cutlass.const_expr(ZERO_OOB_SCALES):
+            if tile_row_start < M and tile_col_start + tidx >= N:
+                mS_col_stage[scale_coord] = Uint8(0).bitcast(Float8E8M0FNU)
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     cvt_x2_func = get_cvt_f32x2_to_fp8x2_func(FP8_DTYPE)
@@ -157,10 +162,10 @@ def quantize_rowwise_mxfp8_2d(
     mS_row_stage: cute.Tensor,  # rowwise scale tensor (1D swizzled, or 2D linear)
     sBlockAmax: cute.Tensor,  # block amaxes from the colwise pass, or scratch for the reduction
     MAX_NORM_RCP: cutlass.Constexpr[float],
-    tile_row_start: Int32,
-    tile_col_start: Int32,
-    M: Int32,
-    N: Int32,
+    tile_row_start: Int32 | Int64,
+    tile_col_start: Int32 | Int64,
+    M: Int32 | Int64,
+    N: Int32 | Int64,
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     TILE_X: cutlass.Constexpr[int],
@@ -169,6 +174,7 @@ def quantize_rowwise_mxfp8_2d(
     BLOCK_AMAX_IN_SMEM: cutlass.Constexpr[
         bool
     ],  # If colwise pass has already left the block amaxes in sBlockAmax
+    ZERO_OOB_SCALES: cutlass.Constexpr[bool] = False,  # zero the scales of blocks past N
 ):
     """Quantize one SMEM tile rowwise with one scale per 32x32 block; returns the block amax.
 
@@ -290,8 +296,14 @@ def quantize_rowwise_mxfp8_2d(
     biased_exp_r = cvt_f32_to_fp8e8m0fnu(block_amax * MAX_NORM_RCP)
     if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         mS_row_stage[(thread_y, thread_x)] = biased_exp_r
-    elif tile_row_start + thread_y < M and tile_col_start + thread_x * MXFP8_BLOCK_SCALING_SIZE < N:
-        mS_row_stage[(thread_y, thread_x)] = biased_exp_r
+    else:
+        row_in = tile_row_start + thread_y < M
+        col_in = tile_col_start + thread_x * MXFP8_BLOCK_SCALING_SIZE < N
+        if row_in and col_in:
+            mS_row_stage[(thread_y, thread_x)] = biased_exp_r
+        if cutlass.const_expr(ZERO_OOB_SCALES):
+            if row_in and not col_in:
+                mS_row_stage[(thread_y, thread_x)] = Uint8(0).bitcast(Float8E8M0FNU)
 
     inv_scale_r = exp2f_rcp(biased_exp_r)
     scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
@@ -320,10 +332,10 @@ def quantize_mxfp8_smem_tile_2d(  # pylint: disable=unused-argument
     sO_col_tile: Optional[cute.Tensor],
     mS_col_stage: Optional[cute.Tensor],
     rowwise_dbias_acc: Optional[cute.Tensor],
-    tile_row_start: Int32,
-    tile_col_start: Int32,
-    M: Int32,
-    N: Int32,
+    tile_row_start: Int32 | Int64,
+    tile_col_start: Int32 | Int64,
+    M: Int32 | Int64,
+    N: Int32 | Int64,
     ROWWISE: cutlass.Constexpr[bool],
     COLWISE: cutlass.Constexpr[bool],
     WITH_AMAX: cutlass.Constexpr[bool],

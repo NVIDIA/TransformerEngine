@@ -68,9 +68,9 @@ class MXFP8GroupQuantizeG2RKernel(MXFP8GroupQuantizeKernelBase):
 
     @staticmethod
     def supports(cfg: MXFP8GroupQuantizeConfig) -> bool:
-        """BF16 plain casts: no dbias and no fused (d)activation."""
+        """BF16 plain casts with 1D scaling: no dbias and no fused (d)activation."""
         plain_cast = not (cfg.WITH_DBIAS or cfg.WITH_ACT or cfg.WITH_DACT)
-        return plain_cast and cfg.DTYPE is cutlass.BFloat16
+        return plain_cast and not cfg.USE_2D_QUANTIZATION and cfg.DTYPE is cutlass.BFloat16
 
     @cute.jit
     def eligible_to_dispatch(
