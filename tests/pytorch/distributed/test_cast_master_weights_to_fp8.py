@@ -978,10 +978,10 @@ def _test_rowwise_master_cast(group, mixed, fragments):
     else:
         lo, hi = 0, 0  # No master shard on tail ranks.
     real_reduce = torch.distributed.all_reduce
-    reduced_sizes = []
+    reductions = []
 
     def record_reduce(tensor, *args, **kwargs):
-        reduced_sizes.append(tensor.numel())
+        reductions.append((tensor.numel(), tensor.dtype))
         return real_reduce(tensor, *args, **kwargs)
 
     for step in range(2):
@@ -997,7 +997,7 @@ def _test_rowwise_master_cast(group, mixed, fragments):
             )
             for i in range(len(weights))
         ]
-        reduced_sizes.clear()
+        reductions.clear()
         cast = quantize_master_weights if step == 0 else cast_master_weights_to_fp8
         with patch("torch.distributed.all_reduce", side_effect=record_reduce):
             cast(
@@ -1010,7 +1010,8 @@ def _test_rowwise_master_cast(group, mixed, fragments):
         expected_amax = sum(w._rowwise_scale_inv.numel() for w in weights)
         if mixed:
             expected_amax += weights[1]._columnwise_scale_inv.numel()
-        assert reduced_sizes == [expected_amax]
+        # One all-reduce of one-byte E8M0 scales for all weights.
+        assert reductions == [(expected_amax, torch.uint8)]
         for idx, (weight, quantizer) in enumerate(zip(weights, quantizers)):
             expected = quantizer(master.to(torch.bfloat16))
             for direction in ["rowwise", "columnwise"] if idx else ["rowwise"]:
@@ -1037,6 +1038,52 @@ def _test_rowwise_master_cast(group, mixed, fragments):
             )
         assert weights[0]._columnwise_data is None
         assert weights[0]._columnwise_scale_inv is None
+
+
+def _test_mxfp8_scale_reduce_exact(group):
+    """The scales reduced across ranks match quantizing the full weight, bit for bit.
+
+    Block amaxes span most of the E8M0 range, some blocks are all zeros, and the shards split
+    blocks so that a block's maximum is on either side of a rank boundary.
+    """
+    rank = dist.get_rank(group)
+    world_size = dist.get_world_size(group)
+    h, w = 256, 192
+    generator = torch.Generator(device="cuda").manual_seed(4321)
+    # Below about 2^-110, amax / 448 is an fp32 subnormal, which the one-shot quantize and the
+    # master-weight path do not encode the same way.
+    exponents = torch.randint(-100, 120, (h, w // 32), device="cuda", generator=generator)
+    full = torch.randn(h, w, device="cuda", generator=generator)
+    full = full * torch.exp2(exponents.float()).repeat_interleave(32, dim=1)
+    full[5] = 0  # All-zero rowwise blocks.
+    full[64:96, 32:64] = 0  # An all-zero columnwise tile.
+    cuts = [0] + [k * h * w // world_size + 13 * k for k in range(1, world_size)] + [h * w]
+    lo, hi = cuts[rank], cuts[rank + 1]
+    if world_size > 1:
+        # Blocks split by the first cut take their maximum from the lower rank (the element
+        # just below the cut) and, one row further down the same column tile, the upper rank.
+        cut_row, cut_col = divmod(cuts[1], w)
+        assert cut_col > 0 and cut_row % 32 != 31
+        full[cut_row, cut_col - 1] = 1e30
+        full[cut_row + 1, 0] = 1e30
+
+    quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    model_weight = quantizer.make_empty((h, w), dtype=torch.bfloat16, device="cuda")
+    quantizer.update_quantized(torch.zeros(h, w, dtype=torch.bfloat16, device="cuda"), model_weight)
+    shard = full.flatten()[lo:hi]
+    quantize_master_weights([model_weight], [shard], [lo], group)
+
+    expected = quantizer(full.to(torch.bfloat16))
+    for direction, (rows, cols) in (("rowwise", (h, w // 32)), ("columnwise", (h // 32, w))):
+        scale = getattr(model_weight, f"_{direction}_scale_inv")
+        ref = getattr(expected, f"_{direction}_scale_inv")
+        torch.testing.assert_close(scale[:rows, :cols], ref[:rows, :cols], rtol=0, atol=0)
+        data = torch.zeros(h * w, dtype=torch.uint8, device="cuda")
+        data[lo:hi] = getattr(model_weight, f"_{direction}_data").flatten()[lo:hi]
+        dist.all_reduce(data, op=dist.ReduceOp.MAX, group=group)
+        torch.testing.assert_close(
+            data.view(h, w), getattr(expected, f"_{direction}_data"), rtol=0, atol=0
+        )
 
 
 def run_parallel_tests() -> None:
@@ -1081,6 +1128,7 @@ def run_parallel_tests() -> None:
     if is_mxfp8_available():
         print("starting mxfp8 empty master shard test")
         _test_mxfp8_empty_master_shard(dp_group)
+        _test_mxfp8_scale_reduce_exact(dp_group)
         for mixed in (False, True):
             for fragments in (False, True):
                 _test_rowwise_master_cast(dp_group, mixed, fragments)
