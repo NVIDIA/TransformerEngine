@@ -71,7 +71,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.quantizer_types import QuantizerRole, DelayedScalingRequest
 from transformer_engine.pytorch.device import te_device_type
 from ..constants import DType
 from .quantizer_factories import mxfp8_factory, nvfp4_factory
@@ -403,7 +403,6 @@ def nvfp4_linear_fp8_dpa_factory(
             output = model(input)
     """
     from transformer_engine.common.recipe import Format
-    from transformer_engine.pytorch.quantization import DelayedScalingRequest
     from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 
     is_dpa = role is not None and role.module_type == "dpa"

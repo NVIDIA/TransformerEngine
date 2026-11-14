@@ -12,6 +12,7 @@ import torch
 from .storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from .storage.identity_tensor_storage import IdentityTensorStorage
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
+from ..quantizer_types import QuantizerRequest
 
 aten = torch.ops.aten
 
@@ -90,7 +91,6 @@ class HybridQuantizer(Quantizer):
         columnwise_source: Literal["original", "rowwise_dequantized"] = "original",
     ) -> None:
         super().__init__(rowwise=True, columnwise=True)
-        from transformer_engine.pytorch.quantization import QuantizerRequest  # local import
 
         for role, quantizer in (
             ("rowwise", rowwise_quantizer),
