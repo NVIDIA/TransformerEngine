@@ -297,8 +297,8 @@ def finalize_plans(
             raise RuntimeError(
                 f"cuDNN {backend_name} SDPA graph is not supported: {exc}{barred}"
             ) from exc
-        # A bar is by name, so an engine the tokens do not match survives it. cuDNN offers an
-        # SDPA graph to the FROST families alone, so a python engine here is one the bar missed.
+        # cuDNN offers an SDPA graph to the FROST families alone, so a python engine here is one
+        # the bar did not name.
         selected_engine = getattr(graph, "selected_engine", None)
         if selected_engine is not None:
             raise RuntimeError(
