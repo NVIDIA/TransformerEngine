@@ -382,6 +382,8 @@ def context_parallel_attention(
     adapter._validate_inputs(q, k, v, gates, initial_state, qkv_format)
     cp_size, cp_rank = dist.get_world_size(group), dist.get_rank(group)
     stream = torch.cuda.current_stream(q.device).cuda_stream
+    # Autograd cannot save metadata tensors created in inference mode.
+    inference_mode = torch.is_inference_mode_enabled()
     tensors = tuple(_to_thd(t, qkv_format).contiguous() for t in (q, k, v, *gates.values()))
     dense = qkv_format != "thd"
     batch, length = None, None
@@ -404,9 +406,11 @@ def context_parallel_attention(
             cp_size,
             cp_rank,
             stream,
+            inference_mode,
         )
     else:
-        key, cacheable = (qkv_format, batch, length, q.device, cp_size, cp_rank, stream), True
+        key = (qkv_format, batch, length, q.device, cp_size, cp_rank, stream, inference_mode)
+        cacheable = True
     cache = getattr(adapter, "_cp_partition_cache", None)
     if not cacheable:
         # Inference tensors have no mutation counter, so revalidate their

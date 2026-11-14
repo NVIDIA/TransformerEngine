@@ -70,6 +70,7 @@ def _case(
     independent=False,
     dense_global=False,
     state_only=False,
+    inference_warmup=False,
 ):
     """Compare each local output/gradient to the corresponding full-sequence result."""
     size, rank = dist.get_world_size(group), dist.get_rank(group)
@@ -78,7 +79,7 @@ def _case(
             f"GDN CP case: lengths={lengths}, dtype={dtype}, K={key_dim}, V={value_dim},"
             f" layout={layout}, norm={norm}, initial={initial}, final={final},"
             f" checkpoint={checkpoint}, last_loss={last_loss}, fallback={fallback},"
-            f" independent={independent}",
+            f" independent={independent}, inference_warmup={inference_warmup}",
             flush=True,
         )
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
@@ -137,14 +138,13 @@ def _case(
     inputs = tuple(local(t).detach().requires_grad_(True) for t in full[:5])
     state = full[5].detach().requires_grad_(True) if initial else None
     tp_size = 1 if tp_group is None else dist.get_world_size(tp_group)
-    module = GatedDeltaNetAttention(
-        heads * tp_size,
-        (key_dim, value_dim),
+    module_kwargs = dict(
         qkv_format=layout,
         scale=scale,
         cp_group=group,
         tp_group=tp_group,
     )
+    module = GatedDeltaNetAttention(heads * tp_size, (key_dim, value_dim), **module_kwargs)
     kwargs = dict(
         cu_seqlens=(
             (global_cu.cpu() if size == 1 else global_cu)
@@ -156,6 +156,11 @@ def _case(
         checkpoint_core_attention=checkpoint,
         use_qk_l2norm_in_kernel=norm,
     )
+    if inference_warmup:
+        with torch.inference_mode():
+            module(*inputs, **kwargs)
+        # A second layer must be able to train with the shared metadata.
+        module = GatedDeltaNetAttention(heads * tp_size, (key_dim, value_dim), **module_kwargs)
     summary_patch = (
         patch.object(
             module.gdn_attention, "_summary_op", side_effect=ImportError("Missing summary")
@@ -427,6 +432,9 @@ def main():
         cases += 1
         _state_chaining(group)
         cases += 1
+        for layout, lengths in (("thd", [17, 13]), ("bshd", [size * 4] * 2)):
+            _case(group, lengths, layout=layout, inference_warmup=True, independent=True)
+            cases += 1
         _invalid_metadata(group)
         cases += 1
         # Independent complete documents need no state exchange or prefix work.

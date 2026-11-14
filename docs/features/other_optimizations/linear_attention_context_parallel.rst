@@ -124,7 +124,9 @@ metadata when it is already available from the input pipeline to avoid that read
 
 Each attention module caches its most recent partition. A bounded shared cache
 retains up to eight partitions per process so layers using the same metadata
-on the same CUDA stream can reuse that preparation. Cache keys include tensor
-identity and its mutation counter; changing the tensor in place invalidates
-the entry. Newly allocated metadata requires preparation again. Tensors created
-in inference mode bypass caching because they have no mutation counter.
+on the same CUDA stream can reuse that preparation. Inference-mode entries are
+kept separate so autograd never saves inference tensors during training.
+Cache keys include tensor identity and its mutation counter; tracked in-place
+updates invalidate the entry. New ``cu_seqlens`` objects require preparation
+again. Input ``cu_seqlens`` tensors created in inference mode bypass caching
+because they have no mutation counter.
