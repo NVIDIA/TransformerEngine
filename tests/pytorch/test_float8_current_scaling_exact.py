@@ -945,3 +945,57 @@ class TestFP8CurrentScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBas
             recipe1_golden_tensors=None,
             recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2,
         )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+class TestFP8CurrentScalingTritonQuantize:
+    """The two-phase Triton quantization must be bitwise equal to the C++ kernels."""
+
+    @staticmethod
+    def _quantize(x, fp8_dtype, pow2, eps, use_triton):
+        import transformer_engine.pytorch.tensor.float8_tensor as f8
+
+        quantizer = te.Float8CurrentScalingQuantizer(
+            fp8_dtype=fp8_dtype,
+            device=torch.device("cuda"),
+            rowwise=True,
+            columnwise=False,
+            force_pow_2_scales=pow2,
+            amax_epsilon=eps,
+        )
+        old = f8._TRITON_CURRENT_SCALING, f8._TRITON_CURRENT_SCALING_MIN_NUMEL
+        f8._TRITON_CURRENT_SCALING, f8._TRITON_CURRENT_SCALING_MIN_NUMEL = use_triton, 1
+        try:
+            return quantizer(x)
+        finally:
+            f8._TRITON_CURRENT_SCALING, f8._TRITON_CURRENT_SCALING_MIN_NUMEL = old
+
+    @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+    @pytest.mark.parametrize("pow2", [False, True])
+    @pytest.mark.parametrize("eps", [0.0, 1e-2])
+    @pytest.mark.parametrize("numel", [1 << 20, (1 << 20) + 37, 3 * 8192 * 5 + 1])
+    @pytest.mark.parametrize("special", [None, "zeros", "inf", "nan"])
+    def test_triton_matches_cpp(self, fp8_dtype, pow2, eps, numel, special):
+        torch.manual_seed(0)
+        x = torch.randn(numel, dtype=torch.bfloat16, device="cuda") * 3
+        if special == "zeros":
+            x.zero_()
+        elif special == "inf":
+            x[numel // 2] = float("inf")
+        elif special == "nan":
+            x[numel // 3] = float("nan")
+        ref = self._quantize(x, fp8_dtype, pow2, eps, use_triton=False)
+        out = self._quantize(x, fp8_dtype, pow2, eps, use_triton=True)
+        torch.testing.assert_close(out._scale_inv, ref._scale_inv, rtol=0, atol=0)
+        assert torch.equal(out._data.view(torch.uint8), ref._data.view(torch.uint8))
+
+    def test_repeated_calls_reuse_workspace(self):
+        x = torch.randn(1 << 22, dtype=torch.bfloat16, device="cuda")
+        first = self._quantize(x, tex.DType.kFloat8E5M2, False, 0.0, True)
+        for scale in (1.0, 100.0, 0.01):
+            y = x * scale
+            ref = self._quantize(y, tex.DType.kFloat8E5M2, False, 0.0, False)
+            out = self._quantize(y, tex.DType.kFloat8E5M2, False, 0.0, True)
+            assert torch.equal(out._scale_inv, ref._scale_inv)
+            assert torch.equal(out._data.view(torch.uint8), ref._data.view(torch.uint8))
+        assert first._data is not None
