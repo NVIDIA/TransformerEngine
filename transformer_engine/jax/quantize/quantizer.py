@@ -64,9 +64,13 @@ def compute_scale_from_amax(
     fp8_max = jnp.astype(jnp.finfo(q_dtype).max, jnp.float32)
     if scale is None:
         scale = jnp.ones((1,))
-    sf = (fp8_max / amax) / (2**margin)
-    sf = jnp.where(amax > 0.0, sf, scale)
-    sf = jnp.where(jnp.isfinite(amax), sf, scale)
+    # Floor a positive amax at fp8_max * FLT_MIN so scale_inv is at least FLT_MIN.
+    guard = fp8_max * jnp.finfo(jnp.float32).tiny
+    usable = jnp.isfinite(amax) & (amax > 0)
+    floored = jnp.where(amax < guard, guard, amax)
+    safe_amax = jnp.where(usable, floored, jnp.ones_like(amax))
+    sf = (fp8_max / safe_amax) / (2**margin)
+    sf = jnp.where(usable, sf, scale)
     assert sf.shape == (1,), f"Expected sf.shape == (1,), but got {sf.shape}"
     return sf
 

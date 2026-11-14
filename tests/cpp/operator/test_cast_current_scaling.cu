@@ -4,6 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cfloat>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -58,10 +61,15 @@ void compute_amax_scale_ref(const InputType *data,
   float scale = 1.f;
   float scale_inv = 1.f;
 
-  if (isinf(clamp_amax) || clamp_amax == 0.f) {
+  if (isinf(clamp_amax) || isnan(clamp_amax) || clamp_amax == 0.f) {
       *scale_ptr = scale;
       *scale_inv_ptr = scale_inv;
       return;
+  }
+
+  const float amax_floor = max_fp8 * FLT_MIN;
+  if (clamp_amax < amax_floor) {
+    clamp_amax = amax_floor;
   }
 
   // use ieee_div in CPU
@@ -213,3 +221,65 @@ INSTANTIATE_TEST_SUITE_P(
     }
     return name;
   });
+
+namespace {
+
+using namespace test;
+
+uint32_t float_bits(float value) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+// Call the device scale kernel, then quantize so scale_inv is stored.
+void check_device_scale(DType otype, float amax, uint32_t expect_scale, uint32_t expect_inv,
+                        bool expect_nonzero_code) {
+  const std::vector<size_t> shape = {128, 128};
+  const size_t n = 128 * 128;
+  Tensor input("tiny_input", shape, DType::kFloat32);
+  Tensor output("tiny_output", shape, otype, true, false);
+  float *data = input.rowwise_cpu_dptr<float>();
+  for (size_t i = 0; i < n; ++i) {
+    data[i] = amax;
+  }
+  input.from_cpu();
+  output.set_amax(amax);
+
+  QuantizationConfigWrapper config;
+  nvte_compute_scale_from_amax(output.data(), config, 0);
+  nvte_quantize(input.data(), output.data(), 0);
+  cudaDeviceSynchronize();
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess) << cudaGetErrorString(cudaGetLastError());
+  EXPECT_EQ(float_bits(output.scale()), expect_scale);
+  EXPECT_EQ(float_bits(output.rowwise_scale_inv()), expect_inv);
+
+  output.to_cpu();
+  bool nonzero = false;
+  if (otype == DType::kFloat8E4M3) {
+    const auto *codes = output.rowwise_cpu_dptr<fp8e4m3>();
+    for (size_t i = 0; i < n; ++i) {
+      uint8_t raw = 0;
+      std::memcpy(&raw, codes + i, sizeof(raw));
+      nonzero = nonzero || raw != 0;
+    }
+  } else {
+    const auto *codes = output.rowwise_cpu_dptr<fp8e5m2>();
+    for (size_t i = 0; i < n; ++i) {
+      uint8_t raw = 0;
+      std::memcpy(&raw, codes + i, sizeof(raw));
+      nonzero = nonzero || raw != 0;
+    }
+  }
+  EXPECT_EQ(nonzero, expect_nonzero_code);
+}
+
+}  // namespace
+
+TEST(CastCSTinyAmax, DeviceScaleInvIsFltMin) {
+  const float tiny = 7.7e-37f;
+  for (DType otype : {DType::kFloat8E4M3, DType::kFloat8E5M2}) {
+    check_device_scale(otype, tiny, 0x7e800000u, 0x00800000u, true);
+    check_device_scale(otype, 0.f, 0x3f800000u, 0x3f800000u, false);
+  }
+}

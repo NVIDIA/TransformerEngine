@@ -171,13 +171,21 @@ def _scale_from_amax_tensor(
     - amax: Amax tensor with updates made for extrema values.
     """
     assert amax.dtype == torch.float, "amax must be a float tensor."
-    fp8_max = torch.finfo(quant_dtype).max
+    fp8_max = torch.tensor(torch.finfo(quant_dtype).max, dtype=torch.float32, device=amax.device)
 
     # Clamping amax to avoid division by small numbers
-    amax = torch.max(amax, torch.tensor(eps))
+    eps_tensor = torch.tensor(eps, dtype=amax.dtype, device=amax.device)
+    # `<` is false for NaN, matching the device function's epsilon floor.
+    amax = torch.where(amax < eps_tensor, eps_tensor, amax)
+
+    # Floor a positive amax at max_fp8 * FLT_MIN so scale_inv is at least FLT_MIN.
+    guard = fp8_max * torch.finfo(torch.float32).tiny
+    invalid = torch.isinf(amax) | torch.isnan(amax) | (amax == 0)
+    floored = torch.where(amax < guard, guard, amax)
+    safe_amax = torch.where(invalid, torch.ones_like(amax), floored)
 
     # Compute scale factor
-    scale = torch.div(fp8_max, amax)
+    scale = torch.div(fp8_max, safe_amax)
 
     # Take care of inf before pow_2_scales
     scale = torch.where(scale == torch.inf, torch.finfo(x_dtype).max, scale)
@@ -188,10 +196,8 @@ def _scale_from_amax_tensor(
         assert (exp > -127).all()
         unity = torch.tensor([1.0], device=exp.device)
         torch.ldexp(unity, exp, out=scale)
-        scale = torch.where(amax == float("inf"), 0.0, scale)
 
-    # Handle overflow cases for amax zero causing NaN
-    scale = torch.where(amax == 0, 1.0, scale)
+    scale = torch.where(invalid, torch.ones_like(scale), scale)
 
     # Compute scale_inv
     scale_inv = torch.reciprocal(scale)
