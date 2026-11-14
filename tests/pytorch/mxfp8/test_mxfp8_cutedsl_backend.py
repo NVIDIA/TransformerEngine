@@ -569,10 +569,12 @@ def test_group_cast_only(fp8_dtype, in_dtype, block_size, case):
 
 @pytest.mark.parametrize("case", GROUP_CASES, ids=get_group_case_id)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
-def test_group_swizzled(block_size, case):
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+def test_group_swizzled(in_dtype, block_size, case):
+    # FP16 / FP32 varying-last / varying-both groups reach the general kernel's swizzled path.
     _, shape_rep, members = case
     run_group_test_case(
-        members, shape_rep, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled=True
+        members, shape_rep, block_size, in_dtype, tex.DType.kFloat8E4M3, swizzled=True
     )
 
 
