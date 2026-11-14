@@ -727,8 +727,8 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     torch.testing.assert_close(v.grad, v_ref.grad, **tols)
 
 
-# The FROST SDPA engine names nvidia-cudnn-frontend registers, 1.27.0 and 1.28.0. Listed here
-# rather than read from the bar, which cannot measure itself.
+# The FROST SDPA engine names nvidia-cudnn-frontend registers, 1.27.0 through 1.29.0. Listed
+# here rather than read from the bar, which cannot measure itself.
 _FROST_SDPA_PLAN_NAMES = (
     "sdpa_fwd_prefill_sm80",
     "sdpa_fwd_prefill_sm100",
@@ -740,10 +740,14 @@ _FROST_SDPA_PLAN_NAMES = (
     "sdpa_fwd_prefill_sm100_d192_d128",
     "sdpa_fwd_prefill_sm100_d256",
     "sdpa_fwd_prefill_sm100_d512",
+    "sdpa_fwd_prefill_sm107",
     "sdpa_fwd_prefill_sm107_fp8",
+    "sdpa_fwd_prefill_sm107_mxfp8",
     "sdpa_fwd_prefill_sm120",
     "sdpa_fwd_prefill_sm120_fp8",
     "sdpa_bwd_sm80",
+    "sdpa_bwd_sm100",
+    "sdpa_bwd_sm100_mxfp8",
     "sdpa_bwd_sm120",
 )
 
