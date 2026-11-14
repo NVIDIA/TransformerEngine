@@ -147,7 +147,8 @@ def ep_bootstrap(
         recv_capacity_per_rank: Max tokens one rank receives per step; set to
             at least ep_size * max_tokens_per_rank * top_k to avoid drops.
         hidden_dim: Feature dimension of token tensors passed to ep_dispatch.
-        max_token_dtype: Widest dtype the group will dispatch (only bfloat16 supported).
+        max_token_dtype: Widest dtype the group will dispatch; sizes staging buffers.
+            Per-dispatch tensors may use any dtype with element size <= this.
         max_num_sms: SM budget for the dispatch/combine kernels; 0 = default (32).
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
@@ -155,11 +156,6 @@ def ep_bootstrap(
     """
     if rank is None:
         rank = jax.process_index()
-    if jnp.dtype(max_token_dtype) != jnp.bfloat16:
-        raise NotImplementedError(
-            "ep_bootstrap: only max_token_dtype=jnp.bfloat16 is supported today, got"
-            f" {jnp.dtype(max_token_dtype)}."
-        )
     if jax.local_device_count() != 1 and not tex.ep.use_nccl_comm_from_xla():
         raise RuntimeError(
             "ep_bootstrap: multiple local devices require the XLA-borrowed-comm EP path"
