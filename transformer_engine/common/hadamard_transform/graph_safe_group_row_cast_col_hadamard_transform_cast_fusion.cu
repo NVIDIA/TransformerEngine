@@ -520,8 +520,13 @@ __launch_bounds__(640, 1) __global__ static void group_row_col_rht_gemm_device_g
     }
     for (int i = threadIdx.x; i <= static_cast<int>(num_tensors); i += blockDim.x) {
       shared_storage.group_offsets[i] = __ldg(offsets + i);
-      if (i < static_cast<int>(num_tensors)) {
-        shared_storage.group_first_dims[i] = static_cast<int32_t>(__ldg(first_dims + i));
+      // first_dims is only consumed by the columnwise epilogue (per-group transposed output
+      // shape). It is optional for equal-shaped groups, so the rowwise-only kernel must not
+      // dereference it.
+      if constexpr (kEnableRHTColQuant) {
+        if (i < static_cast<int>(num_tensors)) {
+          shared_storage.group_first_dims[i] = static_cast<int32_t>(__ldg(first_dims + i));
+        }
       }
     }
     __syncthreads();
