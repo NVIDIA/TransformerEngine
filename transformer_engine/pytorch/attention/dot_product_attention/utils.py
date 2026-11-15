@@ -47,6 +47,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.float8_tensor import Float8TensorStorage
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+import transformer_engine.pytorch.triton.mxfp8_bhsd_swizzle as triton_mxfp8_bhsd_swizzle
 
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType, DType, MXFP8_BLOCK_SCALING_SIZE
@@ -3455,22 +3456,11 @@ def mxfp8_transpose_swizzle(fp8_tensors, src_format):
         "sbhd",
     ), f"mxfp8_transpose_swizzle only supports bshd/sbhd, got {src_format!r}."
 
-    fused = _fused_transpose_swizzle_module()
-    if fused is not None and fused.can_fuse_transpose_swizzle(fp8_tensors, src_format):
-        # One kernel per direction that writes the swizzled BHSD layout directly.
-        fused.fused_transpose_swizzle(fp8_tensors, src_format)
+    if triton_mxfp8_bhsd_swizzle.can_fuse_transpose_swizzle(fp8_tensors, src_format):
+        # One Triton kernel per direction that writes the swizzled BHSD layout directly.
+        triton_mxfp8_bhsd_swizzle.fused_transpose_swizzle(fp8_tensors, src_format)
         return
     _mxfp8_transpose_swizzle_unfused(fp8_tensors, src_format)
-
-
-@functools.lru_cache(maxsize=None)
-def _fused_transpose_swizzle_module():
-    """The Triton BHSD permute + swizzle of MXFP8 scales, or None without Triton."""
-    try:
-        from transformer_engine.pytorch.triton import mxfp8_bhsd_swizzle
-    except ImportError:
-        return None
-    return mxfp8_bhsd_swizzle
 
 
 def _mxfp8_transpose_swizzle_unfused(fp8_tensors, src_format):

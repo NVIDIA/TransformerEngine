@@ -6,6 +6,8 @@
 separate permute and swizzle kernels."""
 
 import copy
+import pathlib
+import sys
 
 import pytest
 import torch
@@ -14,17 +16,19 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch.attention.dot_product_attention import (
+    _attention_backends,
     utils as dpa_utils,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.triton import mxfp8_bhsd_swizzle as fused
+
+_current_file = pathlib.Path(__file__).resolve()
+sys.path = [str(_current_file.parent.parent)] + sys.path
+from utils import ModelConfig, get_available_attention_backends
 
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
-fused = dpa_utils._fused_transpose_swizzle_module()
-pytestmark = [
-    pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
-    pytest.mark.skipif(fused is None, reason="Triton is not available"),
-]
+pytestmark = pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 
 
 def _quantize(src_format, S, B, H, dims, rowwise=True, columnwise=True, seed=0):
@@ -121,6 +125,24 @@ def test_mxfp8_attention_fused_swizzle(monkeypatch, qkv_format):
     """MXFP8 DotProductAttention output and gradients do not change with the fused kernels."""
     S, B, H, D_QK, D_V = 512, 2, 16, 192, 128
     recipe = MXFP8BlockScaling(fp8_dpa=True)
+
+    # The gradients are compared bitwise, so the cuDNN backward must be deterministic: by default
+    # it may accumulate dQ with atomics. DotProductAttention reads this variable when constructed.
+    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+    config = ModelConfig(B, S, H, D_QK, head_dim_v=D_V, attn_mask_type="causal")
+    (_, fused_attn_supported, _), _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout="_".join([qkv_format] * 3),
+        fp8=True,
+        fp8_meta={"recipe": recipe},
+        is_training=True,
+        deterministic=True,
+    )
+    if not fused_attn_supported:
+        pytest.skip("No deterministic fused MXFP8 attention backend for this configuration.")
+    _attention_backends["backend_selection_requires_update"] = True
+
     torch.manual_seed(1234)
     dpa = te.DotProductAttention(
         num_attention_heads=H,
@@ -137,13 +159,6 @@ def test_mxfp8_attention_fused_swizzle(monkeypatch, qkv_format):
     v = torch.randn(shape(D_V), dtype=torch.bfloat16, device="cuda")
     dout = torch.randn(shape(D_V), dtype=torch.bfloat16, device="cuda").flatten(-2)
 
-    calls = []
-    fused_fn = fused.fused_transpose_swizzle
-
-    def spy(*args):
-        calls.append(1)
-        fused_fn(*args)
-
     def run():
         inputs = [t.clone().requires_grad_() for t in (q, k, v)]
         with te.autocast(enabled=True, recipe=recipe):
@@ -152,12 +167,20 @@ def test_mxfp8_attention_fused_swizzle(monkeypatch, qkv_format):
         FP8GlobalStateManager.reset()
         return [out] + [t.grad for t in inputs]
 
-    monkeypatch.setattr(dpa_utils, "_fused_transpose_swizzle_module", lambda: None)
-    ref = run()
-    monkeypatch.setattr(dpa_utils, "_fused_transpose_swizzle_module", lambda: fused)
+    # Reference: the separate permute and swizzle kernels.
+    with monkeypatch.context() as m:
+        m.setattr(fused, "can_fuse_transpose_swizzle", lambda *args: False)
+        ref = run()
+
+    calls = []
+    fused_fn = fused.fused_transpose_swizzle
+
+    def spy(*args):
+        calls.append(1)
+        fused_fn(*args)
+
     monkeypatch.setattr(fused, "fused_transpose_swizzle", spy)
     out = run()
-    if not calls:
-        pytest.skip("The selected attention backend does not use mxfp8_transpose_swizzle")
+    assert calls, "MXFP8 FusedAttention did not use the fused permute + swizzle"
     for name, a, b in zip(("out", "dq", "dk", "dv"), out, ref):
         torch.testing.assert_close(a, b, atol=0, rtol=0, msg=name)
