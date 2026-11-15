@@ -11,6 +11,7 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 from transformer_engine.pytorch import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -25,6 +26,8 @@ from transformer_engine.pytorch import (
     QuantizedTensor,
 )
 
+from transformer_engine.pytorch.cpp_extensions import general_gemm
+from transformer_engine.pytorch.quantized_tensor import prepare_for_saving, restore_from_saved
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
@@ -216,6 +219,24 @@ class TestFloat8Tensor:
         assert list(tensor.size()) == dims, "Incorrect dims"
         assert tensor.dtype == dtype, "Incorrect nominal dtype"
         assert tensor.is_cuda, "Incorrect device"
+
+    def test_gemm_output_without_quantizer(self):
+        quantizer = Float8Quantizer(
+            torch.ones(1, device="cuda"),
+            torch.zeros(1, device="cuda"),
+            te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+        )
+        weight = torch.randint(-4, 5, (64, 128), device="cuda").float() / 16
+        inp = torch.randint(-4, 5, (32, 128), device="cuda").float() / 16
+        out = quantizer(torch.zeros((32, 64), device="cuda"))
+        data_ptr = out._data.data_ptr()
+        result, *_ = general_gemm(quantizer(weight), quantizer(inp), out=out)
+        expected = quantizer(inp @ weight.T)
+        assert result is out
+        assert result._data.data_ptr() == data_ptr
+        torch.testing.assert_close(result.dequantize(), expected.dequantize(), atol=0, rtol=0)
 
     def _test_quantize_dequantize(
         self,
@@ -751,6 +772,45 @@ class TestQuantizedTensor:
         assert y_cpu.shape == ref_cpu.shape
         torch.testing.assert_close(y_cpu, ref_cpu, rtol=0, atol=0)
 
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_cpu_torch_ops(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (128, 128),
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        """Apply plain PyTorch ops to a CPU-resident QuantizedTensor.
+
+        Ops without a quantized implementation dequantize their arguments. For
+        a CPU tensor that dequantization may need to copy the buffers to CUDA,
+        which must not dispatch back through the quantized tensor.
+
+        """
+
+        # Construct a quantized tensor on CUDA and move it to CPU
+        _, x_cuda = make_reference_and_test_tensors(
+            shape=shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            requires_grad=False,
+        )
+        x_cpu = x_cuda.cpu()
+        ref_cpu = x_cuda.dequantize().to(device="cpu")
+
+        # Ops that are dispatched through the dequantizing fallback
+        torch.testing.assert_close(x_cpu + 0, ref_cpu, rtol=0, atol=0)
+        torch.testing.assert_close(x_cpu, ref_cpu, rtol=0, atol=0)
+        torch.testing.assert_close(
+            x_cpu.float(), x_cuda.dequantize(dtype=torch.float32).cpu(), rtol=0, atol=0
+        )
+
+        # Moving back to CUDA preserves the quantized tensor type
+        x_roundtrip = x_cpu.to(device="cuda")
+        assert isinstance(x_roundtrip, QuantizedTensor)
+        assert x_roundtrip.device.type == "cuda"
+        torch.testing.assert_close(x_roundtrip.dequantize(), x_cuda.dequantize(), rtol=0, atol=0)
+
     def test_mxfp8_fsdp_extract_keeps_partial_columnwise_scale_block(self) -> None:
         """FSDP extraction must retain the scale for a partial final 32-row block."""
         rows, cols = 48, 64
@@ -1013,6 +1073,28 @@ class TestQuantizedTensor:
         ), "Gradient did not flow back to the input through quantize -> dequantize"
 
 
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+class TestNVFP4Tensor:
+
+    def test_packing_requires_even_last_dimension(self) -> None:
+        """Reject odd packed dimensions while allowing partial columnwise blocks."""
+        quantizer = make_quantizer("nvfp4")
+
+        with pytest.raises(ValueError, match="even last dimension"):
+            quantizer.inner_tensor_specs((17, 32))
+        with pytest.raises(RuntimeError, match="even last dimension"):
+            quantizer.make_empty((17, 32), dtype=torch.bfloat16, device="cuda")
+        with pytest.raises(ValueError, match="even last dimension"):
+            quantizer.inner_tensor_specs((18, 31))
+        with pytest.raises(RuntimeError, match="divisible by 2"):
+            quantizer.make_empty((18, 31), dtype=torch.bfloat16, device="cuda")
+
+        specs = quantizer.inner_tensor_specs((18, 32))
+        assert specs["_columnwise_data"][0] == (32, 9)
+        empty = quantizer.make_empty((18, 32), dtype=torch.bfloat16, device="cuda")
+        assert empty._columnwise_data.shape == (32, 9)
+
+
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 class TestMXFP8Tensor:
 
@@ -1022,6 +1104,19 @@ class TestMXFP8Tensor:
         seed = 1234
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("shape", [(32, 16), (16, 16)])
+    def test_scale_shape_partial_block(self, shape: Tuple[int, int]) -> None:
+        """Partial rowwise and columnwise blocks each retain a scale."""
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=True)
+
+        assert quantizer.get_scale_shape(shape, columnwise=False) == (128, 4)
+        assert quantizer.get_scale_shape(shape, columnwise=True) == (4, 128)
+
+        empty = quantizer.make_empty(shape, dtype=torch.bfloat16, device="cuda")
+        assert empty._rowwise_scale_inv.shape == (128, 4)
+        assert empty._columnwise_scale_inv.shape == (4, 128)
 
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -1096,11 +1191,18 @@ class TestMXFP8Tensor:
             torch.testing.assert_close(x_deq, -x_ref, **_tols[fp8_dtype])
 
 
-@pytest.mark.parametrize("quantization", _quantization_list)
+@pytest.mark.parametrize(
+    "quantization,optimize_for_gemm",
+    [
+        (quantization, optimize_for_gemm)
+        for quantization in _quantization_list
+        for optimize_for_gemm in ([False, True] if quantization.startswith("nvfp4") else [False])
+    ],
+)
 @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
 @pytest.mark.parametrize("shape", [(256, 512), (128, 320)], ids=lambda s: f"{s[0]}x{s[1]}")
 def test_skip_quantization_with_noop_flag(
-    quantization: str, usage: str, shape: Tuple[int, int]
+    quantization: str, optimize_for_gemm: bool, usage: str, shape: Tuple[int, int]
 ) -> None:
     """
     Test if the quantization honors the noop flag and skips quantization.
@@ -1113,6 +1215,7 @@ def test_skip_quantization_with_noop_flag(
         pytest.skip("Row-scaled NVFP4 does not produce columnwise output")
 
     quantizer = make_quantizer(quantization)
+    quantizer.optimize_for_gemm = optimize_for_gemm
     quantizer.set_usage(
         rowwise=usage in ("rowwise", "both"),
         columnwise=usage in ("columnwise", "both"),
@@ -1159,13 +1262,15 @@ def test_skip_quantization_with_noop_flag(
         ):
             buf = getattr(quantized, attr, None)
             if buf is not None:
-                output_buffers[attr] = buf.clone()
+                output_buffers[attr] = (buf.clone(), buf.data_ptr())
         # Delayed scaling keeps its global amax on the quantizer rather than on the tensor.
         quantizer_amax = getattr(quantizer, "amax", None)
         if quantizer_amax is not None:
-            output_buffers["quantizer.amax"] = quantizer_amax.clone()
+            output_buffers["quantizer.amax"] = (quantizer_amax.clone(), quantizer_amax.data_ptr())
         assert output_buffers, f"{quantization}: quantized tensor exposes no data buffer"
         return output_buffers
+
+    initial_output = clone_quantized_output()
 
     # Obtain the quantized x by setting the noop flag to false (zero)
     noop.zero_()
@@ -1182,8 +1287,273 @@ def test_skip_quantization_with_noop_flag(
     quantized_with_noop = clone_quantized_output()
 
     for attr in quantized_without_noop:
-        buf_without_noop = quantized_without_noop[attr]
-        buf_with_noop = quantized_with_noop[attr]
+        buf_without_noop, ptr_without_noop = quantized_without_noop[attr]
+        buf_with_noop, ptr_with_noop = quantized_with_noop[attr]
+        assert initial_output[attr][1] == ptr_without_noop == ptr_with_noop
         assert torch.equal(
             buf_without_noop, buf_with_noop
         ), f"{quantization}/{usage}: noop flag fails to take effect because {attr} changed."
+    if quantization.startswith("nvfp4"):
+        assert quantized._with_gemm_swizzled_scales == optimize_for_gemm
+
+
+def test_saved_storage_protocol(monkeypatch):
+    """Preserve custom metadata, pass the full suffix, and use the returned remainder."""
+    value, tail, replacement = (torch.tensor(i) for i in range(3))
+    remainder = [replacement, tail]
+
+    class Storage:
+        __slots__ = ()
+
+        def prepare_for_saving(self):
+            return [value], self
+
+        def restore_from_saved(self, tensors):
+            assert isinstance(tensors, list)
+            assert len(tensors) == 2 and tensors[0] is value and tensors[1] is tail
+            return remainder
+
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
+    storage = Storage()
+    saved, objects = prepare_for_saving(value, storage)
+    restored, remaining = restore_from_saved(
+        objects + [None], saved + [tail], return_saved_tensors=True
+    )
+    assert restored[0] is value and restored[1] is storage and restored[2] is replacement
+    assert isinstance(remaining, list) and len(remaining) == 1 and remaining[0] is tail
+
+
+@pytest.mark.parametrize("compiled_metadata", [False, True])
+def test_restore_real_quantized_storage(monkeypatch, compiled_metadata):
+    """Restore actual MXFP8 buffers and None/plain tensor slots with either metadata form."""
+    if not te.is_mxfp8_available():
+        pytest.skip("MXFP8 is unavailable.")
+    q = MXFP8Quantizer(te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    q.internal = True
+    x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    quantized = q(x)
+    expected = quantized.dequantize().clone()
+    with monkeypatch.context() as context:
+        context.setattr(torch.compiler, "is_compiling", lambda: compiled_metadata)
+        saved, objects = prepare_for_saving(x, quantized, None)
+    restored, tail = restore_from_saved(objects, tuple(saved) + (x,), return_saved_tensors=True)
+    assert restored[0] is x and restored[2] is None
+    assert isinstance(tail, tuple) and tail[0] is x
+    torch.testing.assert_close(restored[1].dequantize(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "quantization,shape",
+    [
+        pytest.param(
+            "mxfp8",
+            (128, 128),
+            marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+        ),
+        *[
+            pytest.param(
+                name,
+                shape,
+                marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+            )
+            for name, shape in [
+                ("nvfp4", (32, 128)),
+                ("nvfp4-rht", (32, 128)),
+                ("nvfp4-rht", (128, 128)),
+                ("nvfp4-2d", (128, 128)),
+                ("nvfp4_row_scaled", (128, 128)),
+                ("nvfp4_4over6", (32, 128)),
+            ]
+        ],
+    ],
+)
+@pytest.mark.parametrize("optimize_for_gemm", [False, True])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "quantize",
+        "multi_tensor_quantize",
+        "split_quantize",
+        "gelu",
+        "dgelu",
+        "scaled_srelu",
+        "dbias_dgelu",
+        "bgrad",
+        "layernorm",
+        "rmsnorm",
+    ],
+)
+def test_native_quantization_scale_layout(
+    quantization, shape, optimize_for_gemm, operation, monkeypatch
+):
+    """Every producer honors the quantizer's requested scale layout."""
+    monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", "1")
+    if quantization in ("nvfp4-rht", "nvfp4-2d"):
+        quantizer = NVFP4Quantizer(
+            with_rht=quantization == "nvfp4-rht",
+            with_post_rht_amax=quantization == "nvfp4-rht",
+            with_2d_quantization=quantization == "nvfp4-2d",
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )
+    else:
+        quantizer = make_quantizer(quantization)
+    inp = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    grad = torch.randn_like(inp)
+    weight = torch.randn(shape[-1], dtype=inp.dtype, device=inp.device)
+    bias = torch.randn_like(weight)
+    scales = torch.rand(shape[0], dtype=torch.float32, device=inp.device)
+
+    def run(out=None):
+        if operation == "quantize":
+            return quantizer(inp)
+        if operation == "multi_tensor_quantize":
+            return tex.multi_tensor_quantize([inp], [quantizer])[0]
+        if operation == "split_quantize":
+            return tex.split_quantize(
+                inp,
+                [shape[0]],
+                [quantizer],
+                disable_bulk_allocation=shape[0] % 64 != 0 or quantization == "nvfp4-2d",
+            )[0]
+        if operation == "gelu":
+            return tex.gelu(inp, quantizer)
+        if operation == "dgelu":
+            return tex.dgelu(grad, inp, quantizer)
+        if operation == "scaled_srelu":
+            return tex.scaled_srelu(inp, scales, quantizer)
+        if operation == "dbias_dgelu":
+            return tex.dbias_dgelu(grad, inp, quantizer)[1]
+        if operation == "bgrad":
+            return tex.bgrad_quantize(inp, quantizer)[1]
+        if operation == "layernorm":
+            return tex.layernorm_fwd(
+                inp, weight, bias, 1e-5, out, quantizer, te.DType.kBFloat16, 0, False
+            )[0]
+        if operation == "rmsnorm":
+            return tex.rmsnorm_fwd(inp, weight, 1e-5, out, quantizer, te.DType.kBFloat16, 0, False)[
+                0
+            ]
+        raise AssertionError(operation)
+
+    quantizer.optimize_for_gemm = False
+    expected = run().dequantize()
+    quantizer.optimize_for_gemm = optimize_for_gemm
+    actual = run()
+    assert actual._with_gemm_swizzled_scales == optimize_for_gemm
+    torch.testing.assert_close(actual.dequantize(), expected, atol=0, rtol=0)
+    if operation in ("layernorm", "rmsnorm"):
+        assert run(actual) is actual
+        assert actual._with_gemm_swizzled_scales == optimize_for_gemm
+        torch.testing.assert_close(actual.dequantize(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("operation", ["multi_tensor_quantize", "split_quantize"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "all",
+        "compact",
+        "rowwise",
+        "mixed_usage",
+        "mixed_optimize",
+        "no_optimize",
+        "mixed_formats",
+        "already_swizzled",
+        "all_swizzled",
+        "empty",
+    ],
+)
+def test_multi_tensor_quantization_scale_layout(operation, case):
+    """Batched output finalization preserves each tensor's data, usage and layout."""
+    shapes = [(64, 128)] * 3
+    if case == "all_swizzled":
+        shapes = [(128, 128)] * 3
+    if case == "empty":
+        shapes[1] = (0, 128)
+    quantizers = []
+    for i in range(3):
+        if case == "mixed_formats" and i == 1:
+            quantizer = MXFP8Quantizer(te.DType.kFloat8E4M3)
+        else:
+            with_rht = case in ("all", "no_optimize", "all_swizzled")
+            with_rht |= case == "already_swizzled" and i != 1
+            quantizer = NVFP4Quantizer(
+                with_rht=with_rht,
+                with_post_rht_amax=with_rht,
+                stochastic_rounding=False,
+                with_random_sign_mask=False,
+            )
+        quantizer.optimize_for_gemm = case != "no_optimize" and not (
+            case == "mixed_optimize" and i == 1
+        )
+        if case == "rowwise":
+            quantizer.set_usage(rowwise=True, columnwise=False)
+        elif case == "mixed_usage":
+            quantizer.set_usage(rowwise=i != 2, columnwise=i != 0)
+        quantizers.append(quantizer)
+    inputs = [torch.randn(shape, dtype=torch.bfloat16, device="cuda") for shape in shapes]
+    references = [quantizer(inp) for quantizer, inp in zip(quantizers, inputs)]
+    if operation == "multi_tensor_quantize":
+        outputs = tex.multi_tensor_quantize(inputs, quantizers)
+    else:
+        outputs = tex.split_quantize(
+            torch.cat(inputs),
+            [shape[0] for shape in shapes],
+            quantizers,
+            disable_bulk_allocation=case
+            in (
+                "compact",
+                "rowwise",
+                "mixed_usage",
+                "mixed_optimize",
+                "mixed_formats",
+                "already_swizzled",
+                "empty",
+            ),
+        )
+    for actual, expected, quantizer in zip(outputs, references, quantizers):
+        assert actual._with_gemm_swizzled_scales == quantizer.optimize_for_gemm
+        assert actual.shape == expected.shape
+        for usage in ("rowwise", "columnwise"):
+            actual_data = getattr(actual, f"_{usage}_data")
+            expected_data = getattr(expected, f"_{usage}_data")
+            actual_scales = getattr(actual, f"_{usage}_scale_inv")
+            expected_scales = getattr(expected, f"_{usage}_scale_inv")
+            assert (actual_data is None) == (expected_data is None)
+            assert (actual_scales is None) == (expected_scales is None)
+            if actual_data is not None:
+                torch.testing.assert_close(actual_data, expected_data, atol=0, rtol=0)
+                assert actual_scales.shape == expected_scales.shape
+        if actual._rowwise_data is not None:
+            torch.testing.assert_close(
+                actual.dequantize(dtype=torch.float32),
+                expected.dequantize(dtype=torch.float32),
+                atol=0,
+                rtol=0,
+            )
+        if actual._columnwise_data is not None:
+
+            def columnwise_view(tensor):
+                return NVFP4Tensor(
+                    shape=(tensor.shape[-1], tensor.shape[0]),
+                    dtype=torch.float32,
+                    rowwise_data=tensor._columnwise_data,
+                    rowwise_scale_inv=tensor._columnwise_scale_inv,
+                    columnwise_data=None,
+                    columnwise_scale_inv=None,
+                    amax_rowwise=tensor._amax_columnwise,
+                    amax_columnwise=None,
+                    fp4_dtype=quantizer.dtype,
+                    quantizer=quantizer,
+                    with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                )
+
+            if not isinstance(quantizer, MXFP8Quantizer):
+                torch.testing.assert_close(
+                    columnwise_view(actual).dequantize(dtype=torch.float32),
+                    columnwise_view(expected).dequantize(dtype=torch.float32),
+                    atol=0,
+                    rtol=0,
+                )

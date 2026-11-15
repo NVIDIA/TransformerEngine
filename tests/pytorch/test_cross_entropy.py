@@ -417,7 +417,7 @@ def test_parallel_cross_entropy_validation_errors():
             target.transpose(0, 1),
             overwrite_input=True,
         )
-    with pytest.raises(ValueError, match="CUDA"):
+    with pytest.raises(ValueError, match="cuda"):
         parallel_cross_entropy(logits.cpu(), target.cpu())
 
 
