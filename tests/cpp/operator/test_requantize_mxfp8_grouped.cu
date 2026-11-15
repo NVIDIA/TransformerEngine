@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -24,6 +25,10 @@
 
 using namespace transformer_engine;
 using namespace test;
+
+// Exported by the TE library for tests, not declared in a public header.
+extern "C" void nvte_set_cutedsl_backend(int enabled);
+extern "C" int nvte_is_cutedsl_backend_built();
 
 namespace {
 
@@ -266,7 +271,7 @@ void fill_output_sentinel(OwnedGroupedTensor &tensor) {
 }
 
 void expect_bytes_equal(const std::string &name, const void *actual_dptr,
-                        const void *expected_dptr, size_t bytes) {
+                        const void *expected_dptr, size_t bytes, bool ignore_zero_sign = false) {
   std::vector<uint8_t> actual(bytes);
   std::vector<uint8_t> expected(bytes);
   NVTE_CHECK_CUDA(
@@ -275,11 +280,27 @@ void expect_bytes_equal(const std::string &name, const void *actual_dptr,
       cudaMemcpy(expected.data(), expected_dptr, bytes, cudaMemcpyDeviceToHost));
 
   for (size_t i = 0; i < bytes; ++i) {
+    if (ignore_zero_sign && ((actual[i] | expected[i]) & 0x7F) == 0) {
+      continue;
+    }
     ASSERT_EQ(actual[i], expected[i])
         << name << " mismatch at byte " << i << ": actual="
         << static_cast<int>(actual[i]) << ", expected=" << static_cast<int>(expected[i]);
   }
 }
+
+bool cutedsl_backend_env_enabled() {
+  const char *flag = std::getenv("NVTE_ENABLE_CUTEDSL_BACKEND");
+  return flag != nullptr && std::atoi(flag) != 0;
+}
+
+// Selects the CuTeDSL or CUDA kernels while in scope, then restores the
+// NVTE_ENABLE_CUTEDSL_BACKEND choice.
+class CuTeDSLBackendGuard {
+ public:
+  explicit CuTeDSLBackendGuard(bool enabled) { nvte_set_cutedsl_backend(enabled); }
+  ~CuTeDSLBackendGuard() { nvte_set_cutedsl_backend(cutedsl_backend_env_enabled()); }
+};
 
 using RequantizeParam = std::tuple<GroupShapeCase, DType, bool, bool>;
 
@@ -400,11 +421,14 @@ TEST(GroupedRequantizeTest, BF16IntermediateIgnoresFastMath) {
 }
 
 // Raw FP8 codes with NaN, Inf, -0, max-normal and subnormal values, and all-NaN and all -0
-// columns. Requesting the dequantized output selects the general kernel, so the faster kernel
-// for varying first dims is compared with it byte for byte.
+// columns. The CuTeDSL kernel for varying first dims is compared byte for byte with the general
+// CUDA kernel, which requesting the dequantized output selects.
 TEST(GroupedRequantizeTest, SpecialValuesMatchGeneralKernel) {
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP();
+  }
+  if (!nvte_is_cutedsl_backend_built() || !cutedsl_backend_env_enabled()) {
+    GTEST_SKIP() << "Needs the CuTeDSL backend (NVTE_ENABLE_CUTEDSL_BACKEND=1).";
   }
   // An odd number of live 128 x 128 tiles, an empty member and a capacity tail.
   const auto shape_info = make_shape_info({"Special", {{256, 384}, {0, 384}, {128, 384}}, 512});
@@ -464,6 +488,7 @@ TEST(GroupedRequantizeTest, SpecialValuesMatchGeneralKernel) {
             swizzled ? output.rowwise_scale_inv.get() : input.rowwise_scale_inv.get(),
             DType::kFloat8E8M0, std::vector<size_t>{shape_info.rowwise_scale_elements});
         fill_output_sentinel(output);
+        const CuTeDSLBackendGuard backend(!return_dequantized);
         nvte_group_requantize(input.data(), output.data(),
                               return_dequantized ? dequantized_nvte.data() : nullptr, nullptr, 0);
         outputs.push_back(std::move(output));
@@ -471,8 +496,14 @@ TEST(GroupedRequantizeTest, SpecialValuesMatchGeneralKernel) {
       NVTE_CHECK_CUDA(cudaDeviceSynchronize());
       const auto &fast = outputs[0];
       const auto &general = outputs[1];
+#if CUDA_VERSION < 13010
+      // Before CUDA 13.1 the general kernel writes +0 where CuTeDSL keeps -0.
+      constexpr bool ignore_zero_sign = true;
+#else
+      constexpr bool ignore_zero_sign = false;
+#endif
       expect_bytes_equal("columnwise data", fast.columnwise_data.get(),
-                         general.columnwise_data.get(), fast.data_bytes);
+                         general.columnwise_data.get(), fast.data_bytes, ignore_zero_sign);
       expect_bytes_equal("columnwise scales", fast.columnwise_scale_inv.get(),
                          general.columnwise_scale_inv.get(), fast.columnwise_scale_bytes);
       if (swizzled) {
