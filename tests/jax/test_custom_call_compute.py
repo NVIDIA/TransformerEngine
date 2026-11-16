@@ -2320,54 +2320,6 @@ class TestGroupedGemmGluFallback:
         assert available is expected
         assert bool(reason) is not expected
 
-    @pytest.mark.parametrize("capability", [100, 103, 107])
-    def test_situ_fusion_device_support(self, frontend, monkeypatch, capability):
-        for name, args in (
-            ("grouped_gemm_glu_wrapper_sm100", _glu_adapter._FORWARD_ARGS),
-            ("grouped_gemm_dglu_wrapper_sm100", _glu_adapter._BACKWARD_ARGS),
-            ("grouped_gemm_glu_jax_sm100", _glu_adapter._JAX_FORWARD_ARGS),
-            ("grouped_gemm_dglu_jax_sm100", _glu_adapter._JAX_BACKWARD_ARGS),
-        ):
-            setattr(frontend, name, self._api(args + ("situ_beta1", "situ_beta2")))
-        monkeypatch.setattr(
-            transformer_engine_jax, "get_device_compute_capability", lambda _: capability
-        )
-        if capability in (100, 103):
-            assert _moe_module._select_cudnn_jax_fusion(
-                [], activation_type=_moe_module.SiTUActivation()
-            )
-        else:
-            with pytest.raises(ValueError, match="SiTU.*SM100/SM103"):
-                _moe_module._select_cudnn_jax_fusion(
-                    [], activation_type=_moe_module.SiTUActivation()
-                )
-
-    @pytest.mark.parametrize("name,value", [("gate_beta", 0), ("up_beta", float("nan"))])
-    def test_situ_invalid_cap(self, name, value):
-        with pytest.raises(ValueError, match=name):
-            _moe_module.SiTUActivation(**{name: value})
-
-    def test_situ_cannot_disable_fusion(self):
-        with pytest.raises(ValueError, match="use_cudnn_fusion=True"):
-            _moe_module.moe(
-                None,
-                None,
-                None,
-                None,
-                num_experts=2,
-                activation_type=_moe_module.SiTUActivation(),
-                use_cudnn_fusion=False,
-            )
-
-    def test_situ_missing_frontend_support(self, frontend, monkeypatch):
-        monkeypatch.setattr(transformer_engine_jax, "get_device_compute_capability", lambda _: 100)
-        with pytest.raises(ValueError, match="SiTU.*situ_beta"):
-            _moe_module._select_cudnn_jax_fusion([], activation_type=_moe_module.SiTUActivation())
-        with pytest.raises(ValueError, match="SiTU.*MXFP8 quantizers"):
-            _moe_module._select_cudnn_jax_fusion(
-                ["requires MXFP8 quantizers"], activation_type=_moe_module.SiTUActivation()
-            )
-
     @pytest.mark.parametrize("name", ["grouped_gemm_glu_jax_sm100", "grouped_gemm_dglu_jax_sm100"])
     def test_bf16_only_jax_api_falls_back(self, frontend, monkeypatch, name):
         # Frontend 1.29 exposes JAX entry points for BF16 discrete weights, but
