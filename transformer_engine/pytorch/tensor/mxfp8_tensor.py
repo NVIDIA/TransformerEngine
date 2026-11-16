@@ -332,20 +332,12 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
-        # _rowwise_data may be None for columnwise-only sub-storages (hybrid quantization)
-        rowwise_data = (
-            self._rowwise_data.detach().clone() if self._rowwise_data is not None else None
-        )
-        columnwise_data = None
-        if self._columnwise_data is not None:
-            columnwise_data = self._columnwise_data.detach().clone()
-        return _IdentityFunc.apply(
-            self,
-            {
-                "rowwise_data": rowwise_data,
-                "columnwise_data": columnwise_data,
-            },
-        )
+        init_kwargs = {
+            name: value.detach().clone()
+            for name, value in self.get_metadata().items()
+            if isinstance(value, torch.Tensor)
+        }
+        return _IdentityFunc.apply(self, init_kwargs)
 
     def view(self, *shape: Tuple[int]) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring

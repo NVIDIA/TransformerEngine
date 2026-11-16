@@ -550,18 +550,12 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
 
     def clone(self) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
-        assert self._rowwise_data is not None
-        rowwise_data = self._rowwise_data.detach().clone()
-        columnwise_data = None
-        if self._columnwise_data is not None:
-            columnwise_data = self._columnwise_data.detach().clone()
-        return _IdentityFunc.apply(
-            self,
-            {
-                "rowwise_data": rowwise_data,
-                "columnwise_data": columnwise_data,
-            },
-        )
+        init_kwargs = {
+            name: value.detach().clone()
+            for name, value in self.get_metadata().items()
+            if isinstance(value, torch.Tensor)
+        }
+        return _IdentityFunc.apply(self, init_kwargs)
 
     def view(self, *shape: Tuple[int]) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
@@ -883,6 +877,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 nvfp4_use_4over6=tensor._nvfp4_use_4over6,
                 nvfp4_e4m3_max=tensor._nvfp4_e4m3_max,
             )
+
+        if func == torch.ops.aten.clone.default:
+            return cls.clone(args[0])
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
