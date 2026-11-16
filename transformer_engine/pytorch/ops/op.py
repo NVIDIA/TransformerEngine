@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Iterable, Sequence
 import dataclasses
+import functools
 import pickle
 from typing import Any, Callable, Optional
 
@@ -93,7 +94,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
                 register_custom_op(
                     op_name=op_name,
                     arg_type=arg_type,
-                    impl=getattr(cls, f"{mode}_compute"),
+                    impl=functools.partial(getattr(cls, f"{mode}_compute"), in_custom_op=True),
                     fake_impl=getattr(cls, f"{mode}_compute_fake"),
                 )
             )
@@ -120,8 +121,17 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         """Whether this op is the fusion of one or more basic ops"""
 
+    def reset_parameters(self) -> None:
+        """Initialize parameter buffers and values"""
+
     def pre_first_fuser_forward(self) -> None:
         """Preprocessing before first fuser forward pass"""
+        for name, param in self.named_parameters():
+            if param.device.type == "meta":
+                raise RuntimeError(
+                    f"{self.__class__.__name__} has parameter {name} on the meta device. "
+                    "Call reset_parameters() before the first forward pass."
+                )
 
     def pre_fuser_forward(
         self,
@@ -248,8 +258,12 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         return grad_input, grad_params, grad_extra_inputs
 
     @classmethod
-    def forward_compute(cls, args: Any) -> tuple:
-        """Return (output, extra_outputs per basic op, fresh aux tensors)."""
+    def forward_compute(cls, args: Any, *, in_custom_op: bool = False) -> tuple:
+        """Return (output, extra_outputs per basic op, fresh aux tensors).
+
+        The registered custom op passes in_custom_op=True; direct eager calls
+        use False. Inside a custom op, do not mutate tensors supplied in args.
+        """
         raise NotImplementedError
 
     @classmethod
@@ -258,10 +272,11 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @classmethod
-    def backward_compute(cls, args: Any) -> tuple:
+    def backward_compute(cls, args: Any, *, in_custom_op: bool = False) -> tuple:
         """Return (grad_input, grad_params per basic op, grad_extra_inputs per basic op).
 
         A None grad_input passes grad_output through unchanged.
+        in_custom_op has the same meaning as in forward_compute.
         """
         raise NotImplementedError
 
@@ -715,7 +730,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             )
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
             raise RuntimeError(
-                "{self.__class__.__name__} operation has "
+                f"{self.__class__.__name__} operation has "
                 f"{self.num_extra_inputs} extra tensor inputs "
                 f"and {self.num_extra_outputs} extra tensor outputs. "
                 "It should override `fuser_forward` instead of `op_forward`."
@@ -750,7 +765,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             )
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
             raise RuntimeError(
-                "{self.__class__.__name__} operation has "
+                f"{self.__class__.__name__} operation has "
                 f"{self.num_extra_inputs} extra tensor inputs "
                 f"and {self.num_extra_outputs} extra tensor outputs. "
                 "It should override `fuser_backward` instead of `op_backward`."
@@ -987,6 +1002,10 @@ class FusedOperation(FusibleOperation):
 
     def get_grad_output_quantizer(self) -> Optional[Quantizer]:
         return self.basic_ops[-1].get_grad_output_quantizer()
+
+    def reset_parameters(self) -> None:
+        for op in self.basic_ops:
+            op.reset_parameters()
 
     def pre_first_fuser_forward(self) -> None:
         for op in self.basic_ops:

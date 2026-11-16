@@ -8,13 +8,67 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
+from transformer_engine.pytorch.cpp_extensions import (
+    general_gemm,
+    general_grouped_gemm,
+    general_grouped_gemm_for_grouped_tensor,
+)
 from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import reference_utils
+from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "disable_x, disable_w",
+    [(True, False), (False, True), (True, True)],
+    ids=["x_unit_global_scale", "w_unit_global_scale", "both_unit_global_scale"],
+)
+def test_gemm_with_missing_nvfp4_amax(disable_x: bool, disable_w: bool) -> None:
+    """A null amax contributes a unit global scale to GEMM alpha."""
+    torch.manual_seed(0)
+    x = torch.randn((128, 128), dtype=torch.bfloat16, device="cuda")
+    w = torch.randn((128, 128), dtype=torch.bfloat16, device="cuda")
+    unit_scale_amax = 448.0 * 6.0
+    x[0, 0] = unit_scale_amax
+    w[0, 0] = unit_scale_amax
+
+    def quantize(tensor: torch.Tensor, disable_second_level_scale: bool):
+        return NVFP4Quantizer(
+            rowwise=True,
+            columnwise=True,
+            disable_second_level_scale=disable_second_level_scale,
+        )(tensor)
+
+    x_ref, w_ref = quantize(x, False), quantize(w, False)
+    x_test, w_test = quantize(x, disable_x), quantize(w, disable_w)
+
+    def gemm(w_q, x_q):
+        workspace = torch.empty(4, dtype=torch.uint8, device="cuda")
+        return tex.generic_gemm(
+            w_q,
+            True,
+            x_q,
+            False,
+            None,
+            None,
+            TE_DType[torch.bfloat16],
+            None,
+            TE_DType[torch.bfloat16],
+            False,
+            None,
+            False,
+            workspace,
+            workspace.numel(),
+            False,
+            False,
+        )[0]
+
+    torch.testing.assert_close(gemm(w_test, x_test), gemm(w_ref, x_ref), atol=0, rtol=0)
 
 
 def check_nvfp4_gemm_versus_reference(
@@ -641,3 +695,533 @@ def test_nvfp4_row_scaled_gemm_matches_emulated(
         use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
+
+
+def _check_ue5m3_gemm_versus_dequantized(
+    M, K, N, x_columnwise, w_columnwise, disable_second_level_scale
+):
+    """Run an NVFP4/UE5M3 GEMM and compare against a dequantized FP32 reference."""
+    torch.manual_seed(0)
+    device, dtype, out_dtype = "cuda", torch.bfloat16, torch.bfloat16
+    x_shape = (K, M) if x_columnwise else (M, K)
+    w_shape = (K, N) if w_columnwise else (N, K)
+    x = torch.randn(x_shape, dtype=dtype, device=device)
+    w = torch.randn(w_shape, dtype=dtype, device=device)
+
+    common = dict(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        scale_dtype=tex.DType.kFloat8UE5M3,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+    # disable_second_level_scale is given per operand, as (x, w).
+    xq = NVFP4Quantizer(**common, disable_second_level_scale=disable_second_level_scale[0])
+    wq = NVFP4Quantizer(**common, disable_second_level_scale=disable_second_level_scale[1])
+    x_q = xq.update_quantized(x, xq.make_empty(x_shape, dtype=dtype, device=device))
+    w_q = wq.update_quantized(w, wq.make_empty(w_shape, dtype=dtype, device=device))
+
+    if disable_second_level_scale[0]:
+        assert x_q._amax_rowwise is None, "disable_second_level_scale should drop the amax"
+    if disable_second_level_scale[1]:
+        assert w_q._amax_rowwise is None, "disable_second_level_scale should drop the amax"
+
+    # Reference: dequantize the orientation each operand is actually read in.
+    x_ref = _dequantize_nvfp4_usage(x_q, columnwise=x_columnwise)
+    w_ref = _dequantize_nvfp4_usage(w_q, columnwise=w_columnwise)
+    # _dequantize_nvfp4_usage returns each operand canonically as (rows, K), so
+    # the reference is the same expression for every layout.
+    ref = x_ref @ w_ref.t()
+
+    if x_columnwise:
+        x_q.update_usage(rowwise_usage=False)
+    if w_columnwise:
+        w_q.update_usage(rowwise_usage=False)
+    transa, transb = not w_columnwise, x_columnwise
+    layout = ("T" if transa else "N") + ("T" if transb else "N")
+    y = general_gemm(w_q, x_q, out_dtype=out_dtype, layout=layout)[0]
+
+    # Both sides see identically quantized operands, so quantization error cancels and
+    # only accumulation order and the bf16 output rounding differ. One bf16 ulp is
+    # already ~4e-3 relative, which no elementwise tolerance survives, so compare the
+    # whole result instead.
+    rel_err = (y.float() - ref).norm() / ref.norm()
+    assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"
+
+
+ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not ue5m3_available, reason=reason_for_no_ue5m3)
+@pytest.mark.parametrize(
+    "M, K, N",
+    [
+        (256, 128, 256),
+        (256, 256, 256),
+        (256, 1024, 256),
+        (1024, 1024, 1024),
+        (4096, 512, 3072),
+        (112, 128, 96),
+        (304, 640, 304),
+        (1008, 3072, 992),
+        (256, 64, 256),
+        (128, 128, 112),
+    ],
+)
+@pytest.mark.parametrize(
+    "x_columnwise, w_columnwise",
+    [
+        (False, False),  # TN -- w rowwise, x rowwise   (fprop)
+        (False, True),  # NN -- w colwise, x rowwise   (dgrad)
+        (True, True),  # NT -- w colwise, x colwise   (wgrad)
+    ],
+    ids=["FF", "FT", "TT"],
+)
+@pytest.mark.parametrize(
+    "disable_second_level_scale",
+    [
+        (True, False),
+    ],
+    ids=["TF"],
+)
+def test_nvfp4_ue5m3_gemm_versus_reference(
+    M: int,
+    K: int,
+    N: int,
+    x_columnwise: bool,
+    w_columnwise: bool,
+    disable_second_level_scale: bool,
+):
+    """NVFP4 GEMM with UE5M3 block scales, with and without second-level scaling.
+
+    UE5M3's wider range is what makes dropping the per-tensor global scale
+    viable, so both configurations must match the dequantized reference.
+    """
+    _check_ue5m3_gemm_versus_dequantized(
+        M, K, N, x_columnwise, w_columnwise, disable_second_level_scale
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not ue5m3_available, reason=reason_for_no_ue5m3)
+@pytest.mark.parametrize("M, K, N", [(256, 256, 256), (1024, 3072, 992)])
+def test_nvfp4_ue5m3_gemm_leaves_operands_unswizzled(M: int, K: int, N: int):
+    """The UE5M3 GEMM must not swizzle operand scales in place.
+
+    Weights are persistent: the master-weight cast rewrites their scales in
+    the unswizzled layout, so a swizzled mark left behind by a GEMM makes
+    every later GEMM and dequantize read the scales in the wrong layout.
+    """
+    torch.manual_seed(0)
+    device, dtype = "cuda", torch.bfloat16
+    x = torch.randn((M, K), dtype=dtype, device=device)
+    w = torch.randn((N, K), dtype=dtype, device=device)
+    quantizer = NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        scale_dtype=tex.DType.kFloat8UE5M3,
+        rowwise=True,
+        columnwise=True,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=True,
+    )
+    x_q = quantizer.update_quantized(x, quantizer.make_empty(x.shape, dtype=dtype, device=device))
+    w_q = quantizer.update_quantized(w, quantizer.make_empty(w.shape, dtype=dtype, device=device))
+    before = [(t._rowwise_scale_inv.clone(), t._columnwise_scale_inv.clone()) for t in (w_q, x_q)]
+    y1 = general_gemm(w_q, x_q, out_dtype=dtype, layout="TN")[0]
+    y2 = general_gemm(w_q, x_q, out_dtype=dtype, layout="TN")[0]
+    for t, (rowwise, columnwise) in zip((w_q, x_q), before):
+        assert not t._with_gemm_swizzled_scales, "GEMM marked its operand as swizzled"
+        assert torch.equal(t._rowwise_scale_inv, rowwise), "GEMM changed rowwise scales"
+        assert torch.equal(t._columnwise_scale_inv, columnwise), "GEMM changed columnwise scales"
+    assert torch.equal(y1, y2), "repeated GEMM on the same operands differs"
+    # The GEMM must still consume correctly swizzled scales.
+    ref = x_q.dequantize(dtype=torch.float32) @ w_q.dequantize(dtype=torch.float32).t()
+    rel_err = (y1.float() - ref).norm() / ref.norm()
+    assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"
+
+
+_grouped_tensor_gemm_supported = True
+_reason_for_no_grouped_tensor_gemm = ""
+if torch.cuda.get_device_capability() < (10, 0):
+    _grouped_tensor_gemm_supported = False
+    _reason_for_no_grouped_tensor_gemm = "NVFP4 grouped-tensor GEMM requires Blackwell+."
+elif tex.get_cublasLt_version() < 130400:
+    _grouped_tensor_gemm_supported = False
+    _reason_for_no_grouped_tensor_gemm = "NVFP4 grouped-tensor GEMM requires cuBLAS 13.4+."
+
+
+def _make_row_scaled_grouped_activation(
+    m_splits: list[int],
+    k: int,
+    *,
+    columnwise: bool,
+    tokens: torch.Tensor | None = None,
+) -> GroupedTensor:
+    """Cast tokens to a row-scaled NVFP4 GroupedTensor; splits and k must be multiples of 128."""
+    device = "cuda"
+    if tokens is None:
+        tokens = torch.randn(sum(m_splits), k, dtype=torch.bfloat16, device=device)
+    tokens_per_expert = torch.tensor(m_splits, dtype=torch.int64, device=device)
+    quantizer = NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=columnwise,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+        row_scaled_nvfp4=True,
+    )
+    quantizer.optimize_for_gemm = True
+    return tex.group_quantize(tokens, quantizer, len(m_splits), tokens_per_expert)
+
+
+def _make_output_grouped_tensor(
+    m_splits: list[int], last_dim: int, device: torch.device, dtype: torch.dtype
+) -> GroupedTensor:
+    return GroupedTensor.make_grouped_tensor(
+        num_tensors=len(m_splits),
+        first_dims=torch.tensor(m_splits, device=device, dtype=torch.int64),
+        last_dims=None,
+        logical_first_dim=sum(m_splits),
+        logical_last_dim=last_dim,
+        quantizer=None,
+        device=device,
+        dtype=dtype,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "m_splits, k, n",
+    [
+        ([128, 128], 128, 128),
+        ([128, 256, 128], 256, 256),
+        ([256, 128, 384], 512, 256),
+        ([128, 256, 384, 512], 256, 512),
+    ],
+)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
+def test_nvfp4_row_scaled_grouped_tensor_gemm_fprop(
+    m_splits: list[int], k: int, n: int, out_dtype: torch.dtype
+) -> None:
+    """Row-scaled grouped-tensor TN GEMM matches a per-expert dense GEMM."""
+    if not _grouped_tensor_gemm_supported:
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+
+    activation = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
+    activation_splits = activation.split_into_quantized_tensors()
+
+    w_quantizer = NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+    w_quantizer.optimize_for_gemm = True
+    weights = []
+    expected = []
+    for i in range(num_gemms):
+        w = torch.randn(n, k, dtype=torch.bfloat16, device=device)
+        w_nvfp4 = w_quantizer(w)
+        weights.append(w_nvfp4)
+        expected.append(
+            general_gemm(w_nvfp4, activation_splits[i], out_dtype=out_dtype, layout="TN")[0]
+        )
+
+    grouped_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
+    general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
+    actual = grouped_out.split_into_quantized_tensors()
+
+    if out_dtype == torch.bfloat16:
+        tols = dict(atol=0.0, rtol=7.8e-3)
+    else:
+        tols = dict(atol=1e-4, rtol=1e-4)
+    for got, ref in zip(actual, expected):
+        torch.testing.assert_close(got, ref, **tols)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_cudagraph(
+    m_splits: list[int], k: int, n: int
+) -> None:
+    """A captured row-scaled grouped-tensor GEMM replays correctly."""
+    if not _grouped_tensor_gemm_supported:
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(11)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+    out_dtype = torch.float32
+
+    static_tokens = torch.randn(sum(m_splits), k, dtype=torch.bfloat16, device=device)
+    activation = _make_row_scaled_grouped_activation(
+        m_splits, k, columnwise=False, tokens=static_tokens
+    )
+
+    w_quantizer = NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+    w_quantizer.optimize_for_gemm = True
+    weights = [
+        w_quantizer(torch.randn(n, k, dtype=torch.bfloat16, device=device))
+        for _ in range(num_gemms)
+    ]
+    grouped_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
+
+    def _run():
+        general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
+
+    torch.cuda.synchronize()
+    _run()
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _run()
+
+    fresh = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
+    activation.rowwise_data.copy_(fresh.rowwise_data)
+    activation.scale_inv.copy_(fresh.scale_inv)
+    activation.amax.copy_(fresh.amax)
+    graph.replay()
+    torch.cuda.synchronize()
+    replayed = [t.clone() for t in grouped_out.split_into_quantized_tensors()]
+
+    _run()
+    torch.cuda.synchronize()
+    expected = grouped_out.split_into_quantized_tensors()
+    for got, ref in zip(replayed, expected):
+        torch.testing.assert_close(got, ref, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "m_splits, k, n",
+    [
+        ([128, 128], 128, 128),
+        ([128, 256, 128], 256, 256),
+        ([256, 128, 384], 512, 256),
+        ([128, 256, 384, 512], 256, 512),
+    ],
+)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
+def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad(
+    m_splits: list[int], k: int, n: int, out_dtype: torch.dtype
+) -> None:
+    """Row-scaled grouped-tensor NT GEMM matches a per-expert dense GEMM."""
+    if not _grouped_tensor_gemm_supported:
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(13)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+
+    x = _make_row_scaled_grouped_activation(m_splits, k, columnwise=True)
+    dy = _make_row_scaled_grouped_activation(m_splits, n, columnwise=True)
+    x_splits = x.split_into_quantized_tensors()
+    dy_splits = dy.split_into_quantized_tensors()
+
+    expected = [
+        general_gemm(x_splits[i], dy_splits[i], out_dtype=out_dtype, layout="NT")[0]
+        for i in range(num_gemms)
+    ]
+
+    grouped_out = _make_output_grouped_tensor([n] * num_gemms, k, device, out_dtype)
+    general_grouped_gemm_for_grouped_tensor(x, dy, grouped_out, layout="NT")
+    actual = grouped_out.split_into_quantized_tensors()
+
+    if out_dtype == torch.bfloat16:
+        tols = dict(atol=0.0, rtol=7.8e-3)
+    else:
+        tols = dict(atol=1e-4, rtol=1e-4)
+    for got, ref in zip(actual, expected):
+        torch.testing.assert_close(got, ref, **tols)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("m_splits, k, n", [([256, 128, 384], 512, 256)])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad_discrete_out(
+    m_splits: list[int], k: int, n: int
+) -> None:
+    """Row-scaled NT GEMM into a list output matches a per-expert dense GEMM."""
+    if not _grouped_tensor_gemm_supported:
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(17)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+    out_dtype = torch.float32
+
+    x = _make_row_scaled_grouped_activation(m_splits, k, columnwise=True)
+    dy = _make_row_scaled_grouped_activation(m_splits, n, columnwise=True)
+    x_splits = x.split_into_quantized_tensors()
+    dy_splits = dy.split_into_quantized_tensors()
+
+    expected = [
+        general_gemm(x_splits[i], dy_splits[i], out_dtype=out_dtype, layout="NT")[0]
+        for i in range(num_gemms)
+    ]
+
+    out_list = [torch.empty(n, k, dtype=out_dtype, device=device) for _ in range(num_gemms)]
+    general_grouped_gemm_for_grouped_tensor(x, dy, out_list, layout="NT")
+
+    for got, ref in zip(out_list, expected):
+        torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_uneven_colscale(
+    m_splits: list[int], k: int, n: int
+) -> None:
+    """Column post-scale with uneven groups matches a per-expert dense GEMM."""
+    if not _grouped_tensor_gemm_supported:
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(23)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+    out_dtype = torch.float32
+
+    weights = _make_row_scaled_grouped_activation([n] * num_gemms, k, columnwise=False)
+    activation = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
+    w_splits = weights.split_into_quantized_tensors()
+    act_splits = activation.split_into_quantized_tensors()
+
+    expected = [
+        general_gemm(w_splits[i], act_splits[i], out_dtype=out_dtype, layout="TN")[0]
+        for i in range(num_gemms)
+    ]
+
+    grouped_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
+    general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
+    actual = grouped_out.split_into_quantized_tensors()
+
+    for got, ref in zip(actual, expected):
+        torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_colscale_cudagraph(
+    m_splits: list[int], k: int, n: int
+) -> None:
+    """A captured column post-scale with uneven groups replays correctly."""
+    if not _grouped_tensor_gemm_supported:
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(29)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+    out_dtype = torch.float32
+
+    static_w = torch.randn(n * num_gemms, k, dtype=torch.bfloat16, device=device)
+    static_act = torch.randn(sum(m_splits), k, dtype=torch.bfloat16, device=device)
+    weights = _make_row_scaled_grouped_activation(
+        [n] * num_gemms, k, columnwise=False, tokens=static_w
+    )
+    activation = _make_row_scaled_grouped_activation(
+        m_splits, k, columnwise=False, tokens=static_act
+    )
+    grouped_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
+
+    def _run():
+        general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
+
+    torch.cuda.synchronize()
+    _run()
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _run()
+
+    fresh_w = _make_row_scaled_grouped_activation([n] * num_gemms, k, columnwise=False)
+    fresh_act = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
+    for dst, src in ((weights, fresh_w), (activation, fresh_act)):
+        dst.rowwise_data.copy_(src.rowwise_data)
+        dst.scale_inv.copy_(src.scale_inv)
+        dst.amax.copy_(src.amax)
+    graph.replay()
+    torch.cuda.synchronize()
+    replayed = [t.clone() for t in grouped_out.split_into_quantized_tensors()]
+
+    _run()
+    torch.cuda.synchronize()
+    expected = grouped_out.split_into_quantized_tensors()
+    for got, ref in zip(replayed, expected):
+        torch.testing.assert_close(got, ref, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_output_capacity(
+    m_splits: list[int], k: int, n: int
+) -> None:
+    """Output capacity rows beyond the live region do not affect the result."""
+    if not _grouped_tensor_gemm_supported:
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(31)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+    out_dtype = torch.float32
+
+    activation = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
+    activation_splits = activation.split_into_quantized_tensors()
+
+    w_quantizer = NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+    w_quantizer.optimize_for_gemm = True
+    weights = []
+    expected = []
+    for i in range(num_gemms):
+        w_nvfp4 = w_quantizer(torch.randn(n, k, dtype=torch.bfloat16, device=device))
+        weights.append(w_nvfp4)
+        expected.append(
+            general_gemm(w_nvfp4, activation_splits[i], out_dtype=out_dtype, layout="TN")[0]
+        )
+
+    grouped_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
+    live_numel = grouped_out.rowwise_data.numel()
+    padded = torch.full(
+        (live_numel + 128 * n,),
+        float("nan"),
+        dtype=grouped_out.rowwise_data.dtype,
+        device=device,
+    )
+    padded[:live_numel].copy_(grouped_out.rowwise_data)
+    grouped_out.rowwise_data = padded
+
+    general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
+    actual = grouped_out.split_into_quantized_tensors()
+
+    for got, ref in zip(actual, expected):
+        torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)

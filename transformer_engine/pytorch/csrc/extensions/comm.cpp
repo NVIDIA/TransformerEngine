@@ -20,11 +20,12 @@
 
 namespace transformer_engine::pytorch {
 
+#ifdef NVTE_HAS_NCCL2_PG
 namespace {
 
-// ProcessGroupNCCL::getCommPtr() was added in torch 2.8; older backends do not
-// expose the raw communicator. Detect it so the borrow compiles on torch >= 2.1
-// and fails only at runtime when the backend cannot provide the communicator.
+// nccl2::ProcessGroupNCCL::getCommPtr() is not guaranteed on every torch release
+// that ships the NCCL2 backend. Detect it so the borrow compiles regardless and
+// fails only at runtime when the backend cannot provide the communicator.
 template <typename PG, typename = void>
 struct has_get_comm_ptr : std::false_type {};
 template <typename PG>
@@ -37,13 +38,14 @@ int64_t borrow_comm_ptr(PG* pg) {
     return pg->getCommPtr();
   } else {
     NVTE_ERROR(
-        "get_nccl_comm_ptr: this PyTorch version does not expose the raw NCCL communicator "
-        "(ProcessGroupNCCL::getCommPtr()); torch >= 2.8 is required to borrow it for EP or "
-        "cuSolverMp.");
+        "get_nccl_comm_ptr: the NCCL2 backend of this PyTorch version does not expose the raw "
+        "NCCL communicator (getCommPtr()), which EP and cuSolverMp need to borrow. Set "
+        "TORCH_DIST_USE_NCCL2=0 to use the classic NCCL backend instead.");
   }
 }
 
 }  // namespace
+#endif  // NVTE_HAS_NCCL2_PG
 
 int64_t get_nccl_comm_ptr(c10d::ProcessGroup* process_group) {
   NVTE_CHECK(process_group != nullptr, "get_nccl_comm_ptr: process_group must be non-null");
@@ -52,7 +54,7 @@ int64_t get_nccl_comm_ptr(c10d::ProcessGroup* process_group) {
 
   // Classic backend (ProcessGroupNCCL._comm_ptr() in Python).
   if (auto* nccl_pg = dynamic_cast<c10d::ProcessGroupNCCL*>(backend.get())) {
-    return borrow_comm_ptr(nccl_pg);
+    return nccl_pg->getCommPtr();
   }
   // NCCL2 backend, default on recent torch.
 #ifdef NVTE_HAS_NCCL2_PG

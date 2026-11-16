@@ -15,6 +15,7 @@ from .utils import (
     cuda_version,
     get_cuda_include_dirs,
     debug_build_enabled,
+    get_bolt_build_flags,
     nccl_ep_enabled,
     setup_mpi_flags,
 )
@@ -24,14 +25,14 @@ from typing import List
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
     return [
-        "torch>=2.1",
+        "torch>=2.8",
         "einops",
         "onnxscript",
         "onnx",
         "packaging",
         "pydantic",
         "nvdlfw-inspect",
-        "nvidia-cudnn-frontend>=1.29.0",
+        "nvidia-cudnn-frontend>=1.31.0",
     ]
 
 
@@ -75,6 +76,9 @@ def setup_pytorch_extension(
         cxx_flags.append("-UNDEBUG")
     else:
         cxx_flags.append("-g0")
+
+    bolt_cxx_flags, linker_flags = get_bolt_build_flags()
+    cxx_flags.extend(bolt_cxx_flags)
 
     # Version-dependent CUDA options
     try:
@@ -127,6 +131,7 @@ def setup_pytorch_extension(
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
         extra_compile_args={"cxx": cxx_flags},
+        extra_link_args=linker_flags,
         libraries=[str(lib) for lib in libraries],
         library_dirs=[str(lib_dir) for lib_dir in library_dirs],
     )

@@ -61,7 +61,7 @@ struct MXFP8QuantConfig {
            (static_cast<uint32_t>(activation) << 16) | (sm_arch << 22);
   }
 
-  std::optional<tvm_ffi_bridge::TVMFFIKernel> get_kernel() const {
+  std::optional<tvm::ffi::Function> get_kernel() const {
     static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
     return cache.get_or_load(*this);
   }
@@ -121,7 +121,7 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
   const size_t flat_n = input_tensor->flat_last_dim();
   if (flat_n % 16 != 0) {
     // Shape not supported because the last dimension of output is not 16 bytes aligned which is required by TMA.
-    maybe_warn_cutedsl_not_chosen("the last dimension of input is not 16 bytes aligned.");
+    report_cutedsl_not_chosen("the last dimension of input is not 16 bytes aligned.");
     return false;
   }
 
@@ -142,7 +142,7 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     return true;
   }
 
-  std::optional<tvm_ffi_bridge::TVMFFIKernel> mxfp8_quant_func_opt = config.get_kernel();
+  std::optional<tvm::ffi::Function> mxfp8_quant_func_opt = config.get_kernel();
   if (!mxfp8_quant_func_opt.has_value()) {
     return false;
   }
@@ -229,12 +229,6 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
                             Tensor *workspace_tensor, const bool use_2d_quantization,
                             cudaStream_t stream) {
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
-    maybe_warn_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
-    return false;
-  }
-  // TODO(kainingz): port 2D quantization to CuTeDSL
-  if (use_2d_quantization) {
-    maybe_warn_cutedsl_not_chosen("2D quantization is not supported.");
     return false;
   }
   checkCuDriverContext(stream);

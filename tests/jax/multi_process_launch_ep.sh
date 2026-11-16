@@ -10,9 +10,13 @@ TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-180}"
 # Each communicator mode needs a fresh process group.
 if [ -z "${NVTE_TEST_EP_CLASSES:-}" ]; then
   RET=0
-  NVTE_TEST_EP_CLASSES="TestEP,TestEPOverflowDrop,TestEpDomainGrouping" \
+  NVTE_TEST_EP_CLASSES="TestEP,TestEPOverflowDrop,TestEpScanHandleRelocation,TestEpDomainGrouping" \
     bash "${BASH_SOURCE[0]}" || RET=1
   NVTE_TEST_EP_CLASSES="TestEPBorrowedComm" \
+    bash "${BASH_SOURCE[0]}" || RET=1
+  NVTE_EP_FUSED_PREPARE_DISPATCH=1 NVTE_TEST_EP_CLASSES="TestEP,TestEPOverflowDrop" \
+    bash "${BASH_SOURCE[0]}" || RET=1
+  NVTE_EP_FUSED_PREPARE_DISPATCH=1 NVTE_TEST_EP_CLASSES="TestEPBorrowedComm" \
     bash "${BASH_SOURCE[0]}" || RET=1
   exit "$RET"
 fi

@@ -34,10 +34,10 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 from transformer_engine.common.recipe import Recipe
-from ..moe import moe
+from ..moe import RouterComputationInfo, _moe_mesh_axes, _resolve_moe_mesh_resource, moe
 from ..quantize import QuantizerSet
 from ..router import ScoreFunction
-from ..sharding import _get_mesh, get_active_resource_axis
+from ..sharding import MeshResource, _get_mesh, global_shard_guard
 from .module import TransformerEngineBase
 
 PRNGKey = Any
@@ -92,12 +92,19 @@ class _MoEBlock(TransformerEngineBase):
         Logical sharding axis tuples (consumed by Flax's
         :func:`with_logical_partitioning` and our internal
         :func:`with_sharding_constraint_by_logical_axes`).
-    data_parallelism_axes : tuple[str, ...]
-        FSDP axes over which the input *batch* dim is sharded IN
-        ADDITION to the EP axis. Empty (default) means activations are
-        replicated across non-EP axes within an EP group; set e.g.
-        ``("fsdp",)`` for true FSDP-of-batch where each device owns a
-        unique slice of the batch.
+    mesh_resource : Optional[MeshResource]
+        Physical DP, FSDP and EP mesh axes. ``None`` resolves the active global
+        MeshResource context. An explicit resource takes precedence; one of
+        these is required. Batch sharding uses DP and FSDP as outer axes and
+        EP innermost.
+    quant_before_fsdp_ag : bool
+        Quantize MXFP8 weight shards before their FSDP all-gather. Defaults to
+        ``False``; ``True`` requires ``mesh_resource.fsdp_resource``.
+    use_cudnn_fusion : bool
+        Defaults to ``True``: try shared cuDNN GLU/dGLU fusion on SM100+ GPUs.
+        Ineligible calls warn and use unfused TE grouped GEMM.
+        ``False`` selects unfused execution. Use the same value when calculating
+        EP bootstrap receive capacity with ``get_moe_recv_capacity_per_rank``.
     apply_topk_weights_early : bool
         If ``True``, multiply expert outputs by their top-k weights
         *inside* each shard before ``ep_combine`` (saves one global
@@ -105,11 +112,16 @@ class _MoEBlock(TransformerEngineBase):
     recv_capacity_per_rank : Optional[int]
         Exact aligned receive capacity per EP rank. ``None`` reserves the
         dropless worst case.
+    dispatch_checkpoint_name : Optional[str]
+        JAX rematerialization checkpoint name for the EP dispatch outputs.
+        ``None`` leaves them unnamed.
+    collect_expert_counts : bool
+        Compute global per-expert assignment counts. Set to ``False`` when
+        callers do not consume the counts to avoid the associated all-reduce;
+        the returned ``expert_counts`` is then a zero-filled array.
 
-    The per-expert dispatch-slot alignment is fixed internally at 128
-    tokens (see ``moe._ALIGN_SIZE``) -- the value required by NCCL EP
-    HT and satisfied by every current TE grouped-GEMM recipe -- and is
-    therefore not exposed as a per-instance knob.
+    Per-expert dispatch-slot alignment is 256 tokens when fusion is requested,
+    including fallbacks, and 128 tokens with ``use_cudnn_fusion=False``.
 
     dtype : jnp.dtype
         Compute / parameter dtype.
@@ -146,11 +158,15 @@ class _MoEBlock(TransformerEngineBase):
     input_axes: Tuple[Optional[str], ...] = ()
 
     # Parallelism
-    data_parallelism_axes: Tuple[str, ...] = ()
+    mesh_resource: Optional[MeshResource] = None
+    quant_before_fsdp_ag: bool = False
 
     # MoE knobs forwarded to ``moe()``
+    use_cudnn_fusion: bool = True
     apply_topk_weights_early: bool = False
     recv_capacity_per_rank: Optional[int] = None
+    dispatch_checkpoint_name: Optional[str] = None
+    collect_expert_counts: bool = True
 
     # Dtypes / init / misc
     dtype: DType = jnp.float32
@@ -172,7 +188,7 @@ class _MoEBlock(TransformerEngineBase):
         super().__post_init__()
 
     @nn.compact
-    def __call__(self, inputs: Array) -> Tuple[Array, Optional[Array], Array]:
+    def __call__(self, inputs: Array) -> Tuple[Array, Optional[Array], Array, Array]:
         """Run the MoE forward pass.
 
         Parameters
@@ -190,7 +206,14 @@ class _MoEBlock(TransformerEngineBase):
         total_recv_tokens : jnp.ndarray
             Non-differentiable per-rank pre-drop recv-slot total; flags
             overflow when ``drop_on_overflow`` is set at ep_bootstrap.
+        expert_counts : jnp.ndarray
+            Global assignment counts for each expert.
         """
+        mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
+            self.mesh_resource,
+            self.quant_before_fsdp_ag,
+        )
+        _, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
         assert (
             inputs.ndim == 3
         ), f"_MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
@@ -253,62 +276,70 @@ class _MoEBlock(TransformerEngineBase):
                 jnp.float32,
             )
 
-        ep_axis = get_active_resource_axis("ep_resource")
         mesh = _get_mesh()
         data_parallel_size = 1
-        for axis in self.data_parallelism_axes:
+        for axis in data_parallelism_axes:
             data_parallel_size *= mesh.shape[axis]
 
-        def make_grouped_quantizer_set(postfix):
-            # Dispatched token groups span every data-parallel replica,
-            # whereas expert kernels have one group per global expert.
-            token_set = self.generate_quantizer_set(
-                f"{postfix}_token",
-                fp8_recipe=self.quantization_recipe,
-                n_groups=data_parallel_size * self.num_experts,
-            )
-            expert_set = self.generate_quantizer_set(
-                f"{postfix}_expert",
-                fp8_recipe=self.quantization_recipe,
-                n_groups=self.num_experts,
-            )
-            return QuantizerSet(
-                x=token_set.x,
-                kernel=expert_set.kernel,
-                dgrad=token_set.dgrad,
+        with global_shard_guard(mesh_resource):
+
+            def make_grouped_quantizer_set(postfix):
+                # Dispatched token groups span every data-parallel replica,
+                # whereas expert kernels have one group per global expert.
+                token_set = self.generate_quantizer_set(
+                    f"{postfix}_token",
+                    fp8_recipe=self.quantization_recipe,
+                    n_groups=data_parallel_size * self.num_experts,
+                )
+                expert_set = self.generate_quantizer_set(
+                    f"{postfix}_expert",
+                    fp8_recipe=self.quantization_recipe,
+                    n_groups=self.num_experts,
+                )
+                return QuantizerSet(
+                    x=token_set.x,
+                    kernel=expert_set.kernel,
+                    dgrad=token_set.dgrad,
+                )
+
+            quantizer_sets = (
+                make_grouped_quantizer_set("_fc1"),
+                make_grouped_quantizer_set("_fc2"),
             )
 
-        quantizer_sets = (
-            make_grouped_quantizer_set("_fc1"),
-            make_grouped_quantizer_set("_fc2"),
-        )
-
-        return moe(
-            inputs,
-            gate_kernel,
-            wi,
-            wo,
-            wi_0_bias,
-            wi_1_bias,
-            wo_bias,
-            expert_bias,
-            num_experts=self.num_experts,
-            num_experts_per_tok=self.num_experts_per_tok,
-            activation_type=self.activation_type,
-            score_function=self.score_function,
-            use_pre_softmax=self.use_pre_softmax,
-            num_groups=self.num_groups,
-            group_topk=self.group_topk,
-            scaling_factor=self.scaling_factor,
-            aux_loss_coeff=self.aux_loss_coeff,
-            apply_topk_weights_early=self.apply_topk_weights_early,
-            quantizer_sets=quantizer_sets,
-            recv_capacity_per_rank=self.recv_capacity_per_rank,
-            ep_axis=ep_axis,
-            data_parallelism_axes=self.data_parallelism_axes,
-            input_axes=self.input_axes,
-            gate_kernel_axes=self.gate_kernel_axes,
-            wi_kernel_axes=self.wi_kernel_axes,
-            wo_kernel_axes=self.wo_kernel_axes,
-            dtype=self.dtype,
-        )
+            router_info = RouterComputationInfo(
+                gate_kernel=gate_kernel,
+                num_experts_per_tok=self.num_experts_per_tok,
+                expert_bias=expert_bias,
+                score_function=self.score_function,
+                use_pre_softmax=self.use_pre_softmax,
+                num_groups=self.num_groups,
+                group_topk=self.group_topk,
+                scaling_factor=self.scaling_factor,
+                aux_loss_coeff=self.aux_loss_coeff,
+                gate_kernel_axes=self.gate_kernel_axes,
+            )
+            return moe(
+                inputs,
+                router_info,
+                wi,
+                wo,
+                wi_0_bias,
+                wi_1_bias,
+                wo_bias,
+                num_experts=self.num_experts,
+                activation_type=self.activation_type,
+                use_cudnn_fusion=self.use_cudnn_fusion,
+                cudnn_native_weight_layout=False,
+                apply_topk_weights_early=self.apply_topk_weights_early,
+                quantizer_sets=quantizer_sets,
+                recv_capacity_per_rank=self.recv_capacity_per_rank,
+                collect_expert_counts=self.collect_expert_counts,
+                quant_before_fsdp_ag=quant_before_fsdp_ag,
+                mesh_resource=mesh_resource,
+                input_axes=self.input_axes,
+                wi_kernel_axes=self.wi_kernel_axes,
+                wo_kernel_axes=self.wo_kernel_axes,
+                dtype=self.dtype,
+                dispatch_checkpoint_name=self.dispatch_checkpoint_name,
+            )

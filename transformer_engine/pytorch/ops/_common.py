@@ -11,13 +11,14 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
+from transformer_engine.pytorch.device import te_device_type
+from ..dynamo.tensor_spec import TensorSpec
 from ..ep import (
     EpBuffer,
     EpConfig,
     get_ep_drop_on_overflow,
     get_ep_group,
 )
-from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor import (
@@ -156,8 +157,10 @@ def validate_or_alloc_output(
     return buffer
 
 
-def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
-    """Check if tensor is a quantized tensor"""
+def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage | TensorSpec) -> bool:
+    """Check whether a tensor or tensor spec represents quantized data."""
+    if isinstance(tensor, TensorSpec):
+        return tensor.is_quantized
     return isinstance(tensor, QuantizedTensorStorage)
 
 
@@ -176,17 +179,13 @@ def maybe_dequantize(
 
 def maybe_autocast_dtype(
     *,
-    device_type: str = "cuda",
+    device_type: str = te_device_type(),
     default_dtype: Optional[torch.dtype] = None,
 ) -> torch.dtype:
     """Get autocast dtype if enabled"""
 
-    if torch_version() >= (2, 4, 3):
-        if torch.is_autocast_enabled(device_type):
-            return torch.get_autocast_dtype(device_type)
-    else:
-        if torch.is_autocast_enabled():
-            return torch.get_autocast_gpu_dtype()
+    if torch.is_autocast_enabled(device_type):
+        return torch.get_autocast_dtype(device_type)
     return canonicalize_dtype(default_dtype)
 
 
@@ -282,7 +281,8 @@ def get_dummy_wgrads_for_params(
 
     For each parameter that exposes ``grad_added_to_main_grad``, set the flag
     to ``True`` and return a dummy wgrad tensor (zeroed if
-    ``zero_out_wgrad`` is also set on the parameter). For parameters without
+    ``zero_out_wgrad`` is also set on the parameter, otherwise a ZeroTensor if
+    ``zero_tensor_dummy_wgrad`` is set). For parameters without
     the flag, the corresponding entry is ``None``.
 
     The returned list has the same length and order as ``weight_params``.
@@ -298,6 +298,7 @@ def get_dummy_wgrads_for_params(
                     list(wp.size()),
                     wp.dtype,
                     zero=getattr(wp, "zero_out_wgrad", False),
+                    zero_tensor=getattr(wp, "zero_tensor_dummy_wgrad", False),
                 )
             )
         else:

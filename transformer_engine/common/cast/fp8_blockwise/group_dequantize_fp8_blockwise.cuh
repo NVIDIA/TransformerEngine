@@ -78,7 +78,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                             const size_t num_tensors,
                                             const size_t common_first_dim_blocks, const size_t K,
                                             const size_t total_row_blocks, const size_t R_total) {
-#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#if __CUDA_ARCH__ >= 900
   const size_t tile_x = blockIdx.x;
   const size_t tile_y_global = blockIdx.y;
   const auto info = resolve_tile_expert<kSameBothDims>(
@@ -154,7 +154,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                             const size_t num_tensors,
                                             const size_t common_first_dim_blocks, const size_t K,
                                             const size_t total_row_blocks, const size_t R_total) {
-#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#if __CUDA_ARCH__ >= 900
   const size_t tile_x = blockIdx.x;
   const size_t tile_y_global = blockIdx.y;
   const auto info = resolve_tile_expert<kSameBothDims>(
@@ -232,7 +232,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                             const size_t num_tensors,
                                             const size_t common_first_dim_blocks, const size_t K,
                                             const size_t total_row_blocks, const size_t R_total) {
-#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#if __CUDA_ARCH__ >= 900
   const size_t tile_x = blockIdx.x;
   const size_t tile_y_global = blockIdx.y;
   const auto info = resolve_tile_expert<kSameBothDims>(
@@ -298,7 +298,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                             const size_t num_tensors,
                                             const size_t common_first_dim_blocks, const size_t K,
                                             const size_t total_row_blocks, const size_t R_total) {
-#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#if __CUDA_ARCH__ >= 900
   const size_t tile_x = blockIdx.x;
   const size_t tile_y_global = blockIdx.y;
   const auto info = resolve_tile_expert<kSameBothDims>(
@@ -381,10 +381,8 @@ inline void group_dequantize(const GroupedTensor* input, GroupedTensor* output,
   using namespace group_dequantize_kernel;
 
   const int sm = transformer_engine::cuda::sm_arch();
-  NVTE_CHECK(sm >= 90 && sm < 100,
-             "Grouped FP8 block-scaling dequantize is only supported on Hopper (SM90-SM99); "
-             "got SM",
-             sm, ".");
+  NVTE_CHECK(sm >= 90, "Grouped FP8 block-scaling dequantize requires SM90 or newer. Got SM", sm,
+             ".");
   NVTE_CHECK(
       input->scaling_mode == NVTE_BLOCK_SCALING_1D || input->scaling_mode == NVTE_BLOCK_SCALING_2D,
       "Grouped FP8 block-scaling dequantize requires 1D or 2D block scaling "

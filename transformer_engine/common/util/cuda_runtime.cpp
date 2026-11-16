@@ -10,7 +10,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
+#include <utility>
 
 #include "../common.h"
 #include "../util/cuda_driver.h"
@@ -141,6 +143,37 @@ int sm_count(int device_id) {
   };
   std::call_once(flags[device_id], init);
   return cache[device_id];
+}
+
+size_t max_shared_memory_per_block_optin(int device_id) {
+  static std::vector<size_t> cache(num_devices(), 0);
+  static std::vector<std::once_flag> flags(num_devices());
+  if (device_id < 0) {
+    device_id = current_device();
+  }
+  NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
+  auto init = [&]() {
+    int value;
+    NVTE_CHECK_CUDA(
+        cudaDeviceGetAttribute(&value, cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
+    cache[device_id] = static_cast<size_t>(value);
+  };
+  std::call_once(flags[device_id], init);
+  return cache[device_id];
+}
+
+size_t static_shared_memory_size(const void *kernel) {
+  static std::map<std::pair<const void *, int>, size_t> cache;
+  static std::mutex mutex;
+  const auto key = std::make_pair(kernel, current_device());
+  const std::lock_guard<std::mutex> lock(mutex);
+  auto it = cache.find(key);
+  if (it == cache.end()) {
+    cudaFuncAttributes attr;
+    NVTE_CHECK_CUDA(cudaFuncGetAttributes(&attr, kernel));
+    it = cache.emplace(key, attr.sharedSizeBytes).first;
+  }
+  return it->second;
 }
 
 void stream_priority_range(int *low_priority, int *high_priority, int device_id) {

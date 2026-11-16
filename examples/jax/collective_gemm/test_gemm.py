@@ -20,6 +20,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec, NamedSharding
+from jax.experimental.multihost_utils import sync_global_devices
 
 from common import (
     assert_allclose,
@@ -154,29 +155,34 @@ def run_gemm_tests(args, mesh=None):
         jax.block_until_ready(gathered_ref_output)
         jax.block_until_ready(gathered_output)
 
-    if args.enable_result_check and args.process_id == 0:
-        if use_quantization:
-            # FP8 quantization noise on near-zero outputs can exceed the rtol
-            # gate; allow a small absolute tolerance.
-            rtol, atol = 0.125, 0.625
-        else:
-            rtol, atol = 0.02, 0.002
-        # Use NumPy (not JAX) for the result check to avoid triggering new XLA compilations
-        # on process 0 only, which would deadlock in multi-process JAX because XLA compilation
-        # of distributed arrays requires collective synchronization across all processes.
-        actual = np.asarray(gathered_output, dtype=np.float32)
-        desired = np.asarray(gathered_ref_output, dtype=np.float32)
-        diff = np.abs(actual - desired)
-        abs_desired = np.abs(desired)
-        failures = (diff > atol) & (diff > rtol * abs_desired)
-        num_failures = int(np.sum(failures))
-        assert num_failures == 0, (
-            f"NUMERICAL CHECK FAILED: {num_failures}/{diff.size} elements "
-            f"({100 * num_failures / diff.size:.4f}%) exceed tolerances "
-            f"(rtol={rtol}, atol={atol}). "
-            f"Max abs error: {float(np.max(diff)):.6f}, "
-            f"max rel error: {float(np.max(diff / np.maximum(abs_desired, 1e-5))):.6f}"
-        )
+    try:
+        if args.enable_result_check and args.process_id == 0:
+            if use_quantization:
+                # FP8 quantization noise on near-zero outputs can exceed the rtol
+                # gate; allow a small absolute tolerance.
+                rtol, atol = 0.125, 0.625
+            else:
+                rtol, atol = 0.02, 0.002
+            # Use NumPy (not JAX) for the result check to avoid triggering new XLA compilations
+            # on process 0 only, which would deadlock in multi-process JAX because XLA compilation
+            # of distributed arrays requires collective synchronization across all processes.
+            actual = np.asarray(gathered_output, dtype=np.float32)
+            desired = np.asarray(gathered_ref_output, dtype=np.float32)
+            diff = np.abs(actual - desired)
+            abs_desired = np.abs(desired)
+            failures = (diff > atol) & (diff > rtol * abs_desired)
+            num_failures = int(np.sum(failures))
+            assert num_failures == 0, (
+                f"NUMERICAL CHECK FAILED: {num_failures}/{diff.size} elements "
+                f"({100 * num_failures / diff.size:.4f}%) exceed tolerances "
+                f"(rtol={rtol}, atol={atol}). "
+                f"Max abs error: {float(np.max(diff)):.6f}, "
+                f"max rel error: {float(np.max(diff / np.maximum(abs_desired, 1e-5))):.6f}"
+            )
+    finally:
+        # Keep every worker alive until rank 0 finishes host-side validation,
+        # including when its numerical check raises an assertion.
+        sync_global_devices("collective_gemm_result_check")
 
 
 class TestCollectiveGemmWithDP(unittest.TestCase):

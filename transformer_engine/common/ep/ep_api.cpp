@@ -81,7 +81,19 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
                       NVTECommWindow recv_topk_weights_win, cudaStream_t stream) {
   EPBackend::get().dispatch(handle_mem, topk_idx, tokens, tokens_win, topk_weights,
                             topk_weights_win, recv_tokens, recv_tokens_win, recv_topk_weights,
-                            recv_topk_weights_win, stream);
+                            recv_topk_weights_win, /*layer_cfg=*/nullptr, stream);
+}
+
+void nvte_ep_dispatch_v2(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
+                         NVTECommWindow tokens_win, NVTETensor topk_weights,
+                         NVTECommWindow topk_weights_win, NVTETensor recv_tokens,
+                         NVTECommWindow recv_tokens_win, NVTETensor recv_topk_weights,
+                         NVTECommWindow recv_topk_weights_win, const NVTEEpLayerConfig* layer_cfg,
+                         cudaStream_t stream) {
+  NVTEEpLayerConfig cfg = normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
+  EPBackend::get().dispatch(handle_mem, topk_idx, tokens, tokens_win, topk_weights,
+                            topk_weights_win, recv_tokens, recv_tokens_win, recv_topk_weights,
+                            recv_topk_weights_win, &cfg, stream);
 }
 
 void nvte_ep_prepare_and_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
@@ -101,7 +113,15 @@ void nvte_ep_prepare_and_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NV
 
 void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTECommWindow expert_out_win,
                      NVTETensor result, cudaStream_t stream) {
-  EPBackend::get().combine(handle_mem, expert_out, expert_out_win, result, stream);
+  EPBackend::get().combine(handle_mem, expert_out, expert_out_win, result, /*layer_cfg=*/nullptr,
+                           stream);
+}
+
+void nvte_ep_combine_v2(NVTETensor handle_mem, NVTETensor expert_out, NVTECommWindow expert_out_win,
+                        NVTETensor result, const NVTEEpLayerConfig* layer_cfg,
+                        cudaStream_t stream) {
+  NVTEEpLayerConfig cfg = normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
+  EPBackend::get().combine(handle_mem, expert_out, expert_out_win, result, &cfg, stream);
 }
 
 void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
@@ -109,14 +129,33 @@ void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow
                           NVTETensor grad_tokens, NVTETensor grad_topk_weights,
                           cudaStream_t stream) {
   EPBackend::get().dispatch_bwd(handle_mem, grad, grad_win, g_recv_topk_weights,
-                                g_recv_topk_weights_win, grad_tokens, grad_topk_weights, stream);
+                                g_recv_topk_weights_win, grad_tokens, grad_topk_weights,
+                                /*layer_cfg=*/nullptr, stream);
+}
+
+void nvte_ep_dispatch_bwd_v2(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
+                             NVTETensor g_recv_topk_weights, NVTECommWindow g_recv_topk_weights_win,
+                             NVTETensor grad_tokens, NVTETensor grad_topk_weights,
+                             const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+  NVTEEpLayerConfig cfg = normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
+  EPBackend::get().dispatch_bwd(handle_mem, grad, grad_win, g_recv_topk_weights,
+                                g_recv_topk_weights_win, grad_tokens, grad_topk_weights, &cfg,
+                                stream);
 }
 
 void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
                          NVTETensor grad_expert_out, NVTECommWindow grad_expert_out_win,
                          cudaStream_t stream) {
   EPBackend::get().combine_bwd(handle_mem, grad, grad_win, grad_expert_out, grad_expert_out_win,
-                               stream);
+                               /*layer_cfg=*/nullptr, stream);
+}
+
+void nvte_ep_combine_bwd_v2(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
+                            NVTETensor grad_expert_out, NVTECommWindow grad_expert_out_win,
+                            const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+  NVTEEpLayerConfig cfg = normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
+  EPBackend::get().combine_bwd(handle_mem, grad, grad_win, grad_expert_out, grad_expert_out_win,
+                               &cfg, stream);
 }
 
 #else  // !NVTE_WITH_NCCL_EP - throwing stubs.
@@ -180,6 +219,36 @@ void nvte_ep_dispatch_bwd(NVTETensor /*handle_mem*/, NVTETensor /*grad*/,
 void nvte_ep_combine_bwd(NVTETensor /*handle_mem*/, NVTETensor /*grad*/,
                          NVTECommWindow /*grad_win*/, NVTETensor /*grad_expert_out*/,
                          NVTECommWindow /*grad_expert_out_win*/, cudaStream_t /*stream*/) {
+  ep_not_built();
+}
+
+void nvte_ep_dispatch_v2(NVTETensor /*handle_mem*/, NVTETensor /*topk_idx*/, NVTETensor /*tokens*/,
+                         NVTECommWindow /*tokens_win*/, NVTETensor /*topk_weights*/,
+                         NVTECommWindow /*topk_weights_win*/, NVTETensor /*recv_tokens*/,
+                         NVTECommWindow /*recv_tokens_win*/, NVTETensor /*recv_topk_weights*/,
+                         NVTECommWindow /*recv_topk_weights_win*/,
+                         const NVTEEpLayerConfig* /*layer_cfg*/, cudaStream_t /*stream*/) {
+  ep_not_built();
+}
+
+void nvte_ep_combine_v2(NVTETensor /*handle_mem*/, NVTETensor /*expert_out*/,
+                        NVTECommWindow /*expert_out_win*/, NVTETensor /*result*/,
+                        const NVTEEpLayerConfig* /*layer_cfg*/, cudaStream_t /*stream*/) {
+  ep_not_built();
+}
+
+void nvte_ep_dispatch_bwd_v2(NVTETensor /*handle_mem*/, NVTETensor /*grad*/,
+                             NVTECommWindow /*grad_win*/, NVTETensor /*g_recv_topk_weights*/,
+                             NVTECommWindow /*g_recv_topk_weights_win*/, NVTETensor /*grad_tokens*/,
+                             NVTETensor /*grad_topk_weights*/,
+                             const NVTEEpLayerConfig* /*layer_cfg*/, cudaStream_t /*stream*/) {
+  ep_not_built();
+}
+
+void nvte_ep_combine_bwd_v2(NVTETensor /*handle_mem*/, NVTETensor /*grad*/,
+                            NVTECommWindow /*grad_win*/, NVTETensor /*grad_expert_out*/,
+                            NVTECommWindow /*grad_expert_out_win*/,
+                            const NVTEEpLayerConfig* /*layer_cfg*/, cudaStream_t /*stream*/) {
   ep_not_built();
 }
 

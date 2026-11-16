@@ -17,22 +17,26 @@ from transformer_engine.common.recipe import NVFP4BlockScaling
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
+NVFP4_E4M3_AMAX_FOR_UNIT_GLOBAL_SCALE = 448.0 * 6.0
+NVFP4_SUPPORTED_SCALE_MAX_VALUES = (0, 256, 448, 114688)
 
 
 @dataclass(frozen=True)
 class NVFP44Over6TestConfig:
     id: str
     use_4over6: bool = True
-    e4m3_max: int = 448
+    e4m3_max: int = 0
     err_mode: str = "MAE"
     err_use_fast_math: bool = False
 
 
 NVFP4_4OVER6_CONFIGS = [
     NVFP44Over6TestConfig(id="nvfp4", use_4over6=False),
-    NVFP44Over6TestConfig(id="4over6-mae-e4m3-448-exact", err_mode="MAE"),
+    NVFP44Over6TestConfig(id="4over6-mae-e4m3-448-exact", e4m3_max=448, err_mode="MAE"),
     NVFP44Over6TestConfig(
         id="4over6-mae-e4m3-448-err-fast",
+        e4m3_max=448,
         err_mode="MAE",
         err_use_fast_math=True,
     ),
@@ -43,9 +47,10 @@ NVFP4_4OVER6_CONFIGS = [
         err_mode="MAE",
         err_use_fast_math=True,
     ),
-    NVFP44Over6TestConfig(id="4over6-mse-e4m3-448-exact", err_mode="MSE"),
+    NVFP44Over6TestConfig(id="4over6-mse-e4m3-448-exact", e4m3_max=448, err_mode="MSE"),
     NVFP44Over6TestConfig(
         id="4over6-mse-e4m3-448-err-fast",
+        e4m3_max=448,
         err_mode="MSE",
         err_use_fast_math=True,
     ),
@@ -114,12 +119,17 @@ def check_quantization_nvfp4_versus_reference(
     with_2d_quantization: bool,
     row_scaled_nvfp4: bool = False,
     use_4over6: bool = False,
-    nvfp4_e4m3_max: int = 448,
+    nvfp4_e4m3_max: int = 0,
     nvfp4_4over6_err_mode: str = "MAE",
     nvfp4_4over6_err_use_fast_math: bool = False,
+    scale_dtype: te.DType = te.DType.kFloat8E4M3,
+    check_amax_reset: bool = False,
 ) -> None:
-    if nvfp4_e4m3_max != 448 and not use_4over6:
-        pytest.skip("E4M3 max 256 is only meaningful for 4over6")
+    scale_dtype = te.DType.cast(scale_dtype)
+    if nvfp4_e4m3_max not in NVFP4_SUPPORTED_SCALE_MAX_VALUES:
+        raise ValueError("nvfp4_e4m3_max must be 0, 256, 448, or 114688.")
+    if use_4over6 and scale_dtype == te.DType.kFloat8UE5M3:
+        pytest.skip("NVFP4 4over6 is incompatible with UE5M3 scales")
     maybe_skip_row_scaled_unsupported_quantization(
         row_scaled_nvfp4, return_transpose, with_2d_quantization, use_4over6, x_dtype, M, N
     )
@@ -148,6 +158,7 @@ def check_quantization_nvfp4_versus_reference(
         nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
+        scale_dtype=scale_dtype,
     )
 
     if use_4over6:
@@ -167,6 +178,8 @@ def check_quantization_nvfp4_versus_reference(
                 (M, N), dtype=x_dtype, device=device, requires_grad=False
             )
             x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
+
+    assert x_nvfp4_sut._scale_dtype == scale_dtype
 
     # Extract data from NVFP4Tensor
     assert x_nvfp4_sut._rowwise_data is not None
@@ -196,6 +209,7 @@ def check_quantization_nvfp4_versus_reference(
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
         nvfp4_4over6_err_use_fast_math=nvfp4_4over6_err_use_fast_math,
+        scale_dtype=scale_dtype,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -238,6 +252,78 @@ def check_quantization_nvfp4_versus_reference(
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
+
+    if check_amax_reset:
+        assert not row_scaled_nvfp4
+        # Reusing an output whose maximum decreases verifies that every amax buffer is reset.
+        for magnitude in (16.0, 0.5, 0.0, 2.0):
+            x = torch.full((M, N), -magnitude, dtype=x_dtype, device=device)
+            nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
+            expected_amax = x.float().abs().amax().reshape(1)
+            torch.testing.assert_close(x_nvfp4_sut._amax_rowwise, expected_amax, atol=0.0, rtol=0.0)
+            if return_transpose:
+                torch.testing.assert_close(
+                    x_nvfp4_sut._amax_columnwise, expected_amax, atol=0.0, rtol=0.0
+                )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("return_transpose", [False, True], ids=["rowwise", "with_columnwise"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["standard", "4over6"])
+def test_disable_second_level_scale_uses_only_block_scale(
+    return_transpose: bool,
+    use_4over6: bool,
+) -> None:
+    """A missing amax makes the global NVFP4 encode scale exactly one."""
+    torch.manual_seed(0)
+    x = torch.randn((128, 128), dtype=torch.bfloat16, device="cuda")
+    x[0, 0] = NVFP4_E4M3_AMAX_FOR_UNIT_GLOBAL_SCALE
+
+    common_kwargs = {
+        "rowwise": True,
+        "columnwise": return_transpose,
+        "with_rht": False,
+        "nvfp4_use_4over6": use_4over6,
+    }
+    expected = NVFP4Quantizer(**common_kwargs)(x)
+    actual = NVFP4Quantizer(**common_kwargs, disable_second_level_scale=True)(x)
+
+    torch.testing.assert_close(actual._rowwise_data, expected._rowwise_data, atol=0, rtol=0)
+    torch.testing.assert_close(
+        actual._rowwise_scale_inv, expected._rowwise_scale_inv, atol=0, rtol=0
+    )
+    torch.testing.assert_close(actual.dequantize(), expected.dequantize(), atol=0, rtol=0)
+    assert actual._amax_rowwise is None
+    if return_transpose:
+        torch.testing.assert_close(
+            actual._columnwise_data, expected._columnwise_data, atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            actual._columnwise_scale_inv, expected._columnwise_scale_inv, atol=0, rtol=0
+        )
+        assert actual._amax_columnwise is None
+
+    # Reusing an output previously populated by two-level scaling must remove
+    # its amax buffers so common kernels select the unit-global-scale path.
+    NVFP4Quantizer(**common_kwargs, disable_second_level_scale=True).update_quantized(
+        x / 2, expected
+    )
+    assert expected._amax_rowwise is None
+    if return_transpose:
+        assert expected._amax_columnwise is None
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_disable_second_level_scale_disables_row_scaled_nvfp4() -> None:
+    """Row-scaled NVFP4 is incompatible with omitting second-level scales."""
+    with pytest.warns(UserWarning, match="Row-scaled NVFP4 requires second-level scaling"):
+        quantizer = NVFP4Quantizer(
+            row_scaled_nvfp4=True,
+            disable_second_level_scale=True,
+        )
+
+    assert not quantizer.row_scaled_nvfp4
+    assert quantizer.disable_second_level_scale
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -287,6 +373,7 @@ def test_quantization_block_tiling_versus_reference(
     row_scaled_nvfp4: bool,
     nvfp4_4over6_config: NVFP44Over6TestConfig,
 ) -> None:
+    check_amax_reset = not row_scaled_nvfp4 and not nvfp4_4over6_config.use_4over6
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
@@ -300,6 +387,7 @@ def test_quantization_block_tiling_versus_reference(
         nvfp4_e4m3_max=nvfp4_4over6_config.e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_config.err_mode,
         nvfp4_4over6_err_use_fast_math=nvfp4_4over6_config.err_use_fast_math,
+        check_amax_reset=check_amax_reset,
     )
 
 
@@ -433,6 +521,26 @@ def test_nvfp4_quantization_extrema_versus_reference(
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not ue5m3_available, reason=reason_for_no_ue5m3)
+@pytest.mark.parametrize(
+    "with_2d_quantization",
+    [False, True],
+    ids=["1d_quantization", "2d_quantization"],
+)
+def test_nvfp4_ue5m3_quantization_versus_reference(with_2d_quantization: bool) -> None:
+    check_quantization_nvfp4_versus_reference(
+        x_dtype=torch.bfloat16,
+        M=128,
+        N=128,
+        return_transpose=True,
+        swizzled_scale=False,
+        use_cpp_allocator=False,
+        with_2d_quantization=with_2d_quantization,
+        scale_dtype=te.DType.kFloat8UE5M3,
+    )
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -715,29 +823,42 @@ def test_nvfp4_quantization_noncontiguous_inputs(
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
-    "M, N",
+    "with_2d_quantization, M, N",
     [
-        # Aligned tiles
-        (128, 128),
-        (256, 256),
-        (512, 512),
-        (2048, 2048),
-        # Padded tiles (non-multiple of kTileDim=128)
-        (256, 272),
-        (304, 304),
-        (320, 256),
+        # Existing 2D coverage: aligned and padded tiles.
+        (True, 128, 128),
+        (True, 256, 256),
+        (True, 512, 512),
+        (True, 2048, 2048),
+        (True, 256, 272),
+        (True, 304, 304),
+        (True, 320, 256),
+        # Focused 1D coverage for aligned and padded output reuse.
+        (False, 128, 128),
+        (False, 256, 272),
+    ],
+    ids=[
+        "2d-128x128",
+        "2d-256x256",
+        "2d-512x512",
+        "2d-2048x2048",
+        "2d-256x272",
+        "2d-304x304",
+        "2d-320x256",
+        "1d-128x128",
+        "1d-256x272",
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-def test_nvfp4_2d_columnwise_only_matches_both_directions(
+def test_nvfp4_columnwise_only_matches_both_directions(
     x_dtype: torch.dtype,
+    with_2d_quantization: bool,
     M: int,
     N: int,
 ):
-    """Bitwise check: 2D NVFP4 with columnwise-only must produce the same
-    columnwise data/scales as the columnwise half of (rowwise + columnwise) 2D.
+    """Columnwise-only NVFP4 must match the columnwise half of both-directions.
 
-    Covers both kernels depending on the (dtype, shape) routing:
+    The 2D cases cover both kernels depending on the (dtype, shape) routing:
     - bf16 with rows % 32 == 0 and cols % 32 == 0 routes to the optimized
       ``quantize_transpose_nvfp4_2D_kernel`` (instantiated with RETURN_ROWWISE=false),
       validating that gating the rowwise pass/store leaves the shared
@@ -761,7 +882,7 @@ def test_nvfp4_2d_columnwise_only_matches_both_directions(
             amax_reduction_group=None,
             with_rht=False,
             with_post_rht_amax=False,
-            with_2d_quantization=True,
+            with_2d_quantization=with_2d_quantization,
             row_scaled_nvfp4=False,
         )
 
@@ -769,7 +890,7 @@ def test_nvfp4_2d_columnwise_only_matches_both_directions(
     q_both = _make_quantizer(rowwise=True, columnwise=True)
     out_both = q_both(x)
 
-    # SUT: produce columnwise only (the path that hits the new amax-only pass).
+    # SUT: produce columnwise only.
     q_col_only = _make_quantizer(rowwise=False, columnwise=True)
     out_col_only = q_col_only(x)
 
@@ -808,6 +929,16 @@ def test_nvfp4_2d_columnwise_only_matches_both_directions(
     torch.testing.assert_close(
         out_col_only._amax_columnwise, out_both._amax_columnwise, atol=0, rtol=0
     )
+
+    if (M, N) in ((128, 128), (256, 272)):
+        # Reusing a columnwise-only output exercises the path where its amax is primary.
+        for magnitude in (16.0, 0.5, 0.0, 2.0):
+            x = torch.full((M, N), -magnitude, dtype=x_dtype, device=device)
+            q_col_only.update_quantized(x, out_col_only)
+            expected_amax = x.float().abs().amax().reshape(1)
+            torch.testing.assert_close(
+                out_col_only._amax_columnwise, expected_amax, atol=0.0, rtol=0.0
+            )
 
     # Sanity: column-only path must not allocate a rowwise output.
     assert out_col_only._rowwise_data is None

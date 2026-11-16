@@ -174,7 +174,7 @@ def _reference_permute_impl(
     permuted_probs : jnp.ndarray
         Permuted probabilities if probs was provided, None otherwise.
     """
-    num_tokens, hidden_size = inp.shape
+    num_tokens = inp.shape[0]
     num_experts = (row_id_map.shape[1] - 1) // 2
 
     # Extract destination rows, expert indices, and n_routed from row_id_map
@@ -198,17 +198,16 @@ def _reference_permute_impl(
     # This avoids overwriting valid entries at index 0 with zeros
     flat_dest_rows_clamped = jnp.where(flat_valid_mask, flat_dest_rows, num_out_tokens)
 
-    # Gather input tokens and scatter to output
-    output = jnp.zeros((num_out_tokens, hidden_size), dtype=inp.dtype)
-    gathered_inp = inp[flat_token_indices]  # [num_tokens * num_experts, hidden_size]
-
-    # Use segment_sum-like operation via scatter
-    # For each valid (token, expert) pair, write inp[token] to output[dest_row]
-    # Invalid entries target num_out_tokens and get dropped by mode="drop"
-    output = output.at[flat_dest_rows_clamped].set(
-        gathered_inp,
-        mode="drop",
+    # Scatter token indices rather than token rows: gathering a row per (token, expert) slot
+    # would materialize [num_tokens * num_experts, hidden_size], exhausting GPU memory for large
+    # configs. Invalid entries target num_out_tokens and get dropped by mode="drop"; output rows
+    # no token maps to keep the out-of-bounds index num_tokens and are filled with zeros.
+    src_tokens = (
+        jnp.full((num_out_tokens,), num_tokens, dtype=flat_token_indices.dtype)
+        .at[flat_dest_rows_clamped]
+        .set(flat_token_indices, mode="drop")
     )
+    output = inp.at[src_tokens].get(mode="fill", fill_value=0)  # [num_out_tokens, hidden_size]
 
     permuted_probs = None
     if probs is not None:

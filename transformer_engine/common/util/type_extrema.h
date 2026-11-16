@@ -56,6 +56,14 @@ struct TypeExtrema<fp8e5m2> {
   static constexpr float max_inverse = 1.0 / max;
 };
 
+#if CUDA_VERSION >= 13040
+template <>
+struct TypeExtrema<fp8ue5m3> {
+  static constexpr float max = 114688.f;
+  static constexpr float max_inverse = 1.0 / max;
+};
+#endif
+
 template <>
 struct TypeExtrema<bf16> {
   // Hex float format of 1.(7 bits of 1) * 2 ^ 127

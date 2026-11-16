@@ -198,7 +198,7 @@ __device__ __forceinline__ void mbarrier_arrive_expect_tx_cta_relaxed_shared_cta
 
 __device__ __forceinline__ void fence_mbarrier_init_release_cluster() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  asm volatile("fence.mbarrier_init.release.cluster;");
+  asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("fence_mbarrier_init_release_cluster is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -237,11 +237,26 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
   // barrier condition:
   // - leader must arrive (i.e. 1 thread as set above)
   // - TMA hardware substracts bytes from expect_tx counter, must reach zero
+#if __CUDA_ARCH__ >= 1200
+  // sm_12x: use the .shared::cta destination. dst_shmem and mbar are always in the executing
+  // CTA, so both forms copy the same bytes. For .shared::cluster, ptxas emits a run-time branch
+  // whose remote-CTA side calls a driver syscall
+  // (__cuda_syscall_cp_async_bulk_tensor_2d_tile_unicast). The first launch of any kernel that
+  // contains it raises the per-thread stack limit from 1 KB to ~14.6 KB, and the driver keeps
+  // the matching local memory (~1.2 GiB on a 60-SM RTX 5080 Laptop GPU) reserved for the life
+  // of the context.
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cta.global.tile"
+      ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
+      "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
+      : "memory");
+#else
   asm volatile(
       "cp.async.bulk.tensor.2d.shared::cluster.global.tile"
       ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
       "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
       : "memory");
+#endif  // #if __CUDA_ARCH__ >= 1200
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_tensor_2d_global_to_shared is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -391,7 +406,7 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global(
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-wait-group
 __device__ __forceinline__ void cp_async_bulk_wait_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group 0;");
+  asm volatile("cp.async.bulk.wait_group 0;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -401,7 +416,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group() {
 template <size_t W>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 0;");
+  asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -410,7 +425,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<0>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 0;");
+  asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -418,7 +433,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<0>() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<1>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 1;");
+  asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -426,7 +441,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<1>() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<2>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 2;");
+  asm volatile("cp.async.bulk.wait_group.read 2;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -434,7 +449,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<2>() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 4;");
+  asm volatile("cp.async.bulk.wait_group.read 4;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -443,7 +458,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-commit-group
 __device__ __forceinline__ void cp_async_bulk_commit_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.commit_group;");
+  asm volatile("cp.async.bulk.commit_group;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_commit_group is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -452,7 +467,7 @@ __device__ __forceinline__ void cp_async_bulk_commit_group() {
 // Proxy fence (bi-directional):
 __device__ __forceinline__ void fence_proxy_async() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("fence.proxy.async;");
+  asm volatile("fence.proxy.async;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("fence_proxy_async is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -460,7 +475,7 @@ __device__ __forceinline__ void fence_proxy_async() {
 
 __device__ __forceinline__ void fence_proxy_async_shared_cta() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("fence.proxy.async.shared::cta;");
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("fence_proxy_async_shared_cta is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -561,6 +576,17 @@ __device__ __forceinline__ float stochastic_round_fp4_e2m1(const float x, const 
   const float inv_step_t = (t >= 4.0f) ? 0.5f : ((t >= 2.0f) ? 1.0f : 2.0f);
   const float q = fminf(floorf(t * inv_step_t) * step_t, max_norm);
   return copysignf(q, (x != x) ? 1.0f : x);
+}
+
+// Software equivalent of cvt.rs.satfinite.e2m1x4.f32 on four consecutive values:
+// value i uses bits [8i, 8i + 8) of rbits and lands in nibble i of the result.
+__device__ __forceinline__ uint16_t stochastic_round_fp4_e2m1x4(const float x0, const float x1,
+                                                                const float x2, const float x3,
+                                                                const uint32_t rbits) {
+  const fp4e2m1x4 packed(make_float4(
+      stochastic_round_fp4_e2m1(x0, rbits), stochastic_round_fp4_e2m1(x1, rbits >> 8),
+      stochastic_round_fp4_e2m1(x2, rbits >> 16), stochastic_round_fp4_e2m1(x3, rbits >> 24)));
+  return *reinterpret_cast<const uint16_t *>(&packed);
 }
 
 #endif  // FP4_TYPE_SUPPORTED
@@ -752,7 +778,7 @@ __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
 
 __device__ __forceinline__ void numbered_barrier_sync(uint32_t num_threads,
                                                       uint32_t barrier_id = 1u) {
-  asm volatile("bar.sync %0, %1;\n" ::"r"(barrier_id), "r"(num_threads));
+  asm volatile("bar.sync %0, %1;\n" ::"r"(barrier_id), "r"(num_threads) : "memory");
 }
 
 __device__ __forceinline__ void fma_f32_f16(float &out, uint16_t const &a, uint16_t const &b,
@@ -1802,7 +1828,8 @@ __device__ __forceinline__ void ld_global_nc_b32x8(uint32_t (&dst)[8], const voi
 
 // As above, but streaming the lines past L2 rather than letting them displace
 // resident data.  Equivalent to tagging the load with a `create_l2_policy_
-// evict_first(1.0)` hint, without needing to materialise the policy token.
+// evict_first(1.0)` hint; the 256-bit form does so without needing to
+// materialise the policy token.
 __device__ __forceinline__ void ld_global_nc_evict_first_b32x8(uint32_t (&dst)[8],
                                                                const void *src) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
@@ -1812,13 +1839,16 @@ __device__ __forceinline__ void ld_global_nc_evict_first_b32x8(uint32_t (&dst)[8
                  "=r"(dst[6]), "=r"(dst[7])
                : "l"(src));
 #elif (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  // The `.L2::evict_first` load qualifier is only valid on 256-bit accesses,
+  // so the 128-bit fallback expresses the same hint through an L2 policy.
+  const uint64_t policy = create_l2_policy_evict_first(1.0f);
   const uint8_t *bytes = reinterpret_cast<const uint8_t *>(src);
-  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
                : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
-               : "l"(bytes));
-  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "l"(bytes), "l"(policy));
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
                : "=r"(dst[4]), "=r"(dst[5]), "=r"(dst[6]), "=r"(dst[7])
-               : "l"(bytes + 16));
+               : "l"(bytes + 16), "l"(policy));
 #else
   NVTE_DEVICE_ERROR("ld_global_nc_evict_first_b32x8 is only supported on SM 8.0+.");
 #endif

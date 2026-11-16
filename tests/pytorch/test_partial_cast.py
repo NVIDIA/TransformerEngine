@@ -128,6 +128,7 @@ def run_one_case(n, h, w, start_offset):
 def test_mxfp8_scaling_partial_cast():
     torch.cuda.manual_seed(1234)
 
+    run_one_case(0, 64, 64, 0)
     run_one_case(3, 32, 64, 31)
     run_one_case(64 * 64 - 2, 64, 64, 1)
     run_one_case(16384 * 6144, 16384, 6144, 0)
@@ -135,3 +136,111 @@ def test_mxfp8_scaling_partial_cast():
     run_one_case(131072, 768, 256, 0)
     run_one_case(65536, 768, 256, 131072)
     run_one_case(98304, 128, 768, 0)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("with_columnwise", [False, True])
+@pytest.mark.parametrize(
+    "h,w,bounds",
+    [
+        # Shard boundaries inside a row, on a row, and on a 32-row tile.
+        (256, 384, [0, 5, 384 * 31 + 7, 384 * 64, 384 * 64 + 1, 384 * 200 + 100, 256 * 384]),
+        # Shards inside one row tile, an empty shard, and one shard across many tiles.
+        (128, 2048, [0, 0, 100, 2048 * 32, 2048 * 33 - 1, 128 * 2048]),
+        # Columns that do not fill a 128-column tile.
+        (64, 96, [0, 1000, 64 * 96]),
+    ],
+)
+def test_mxfp8_partial_kernels_sharded(h, w, bounds, with_columnwise):
+    """Each rank's shard writes the amaxes of every matrix row, zero outside the shard, and
+    leaves the padding and the output outside the shard untouched."""
+    torch.cuda.manual_seed(1234)
+    full = torch.randn(h * w, dtype=torch.bfloat16, device="cuda")
+    blocks_x = (w + 127) // 128
+    sentinel = 7.0
+
+    def _pad(x, padding):
+        return (x + padding - 1) // padding * padding
+
+    row_shape = [_pad(h, 128), _pad(w // 32, 4)]
+    col_shape = [_pad(h // 32, 4), _pad(w, 128)]
+    scales = torch.randint(110, 135, row_shape, dtype=torch.uint8, device="cuda")
+    col_scales = torch.randint(110, 135, col_shape, dtype=torch.uint8, device="cuda")
+    for start, end in zip(bounds[:-1], bounds[1:]):
+        inp = full[start:end]
+        row = torch.full(row_shape, sentinel, dtype=inp.dtype, device="cuda")
+        col = torch.full(col_shape, sentinel, dtype=inp.dtype, device="cuda")
+        omitted = col.flatten()[:0].view(0, 0)
+        tex.mxfp8_scaling_compute_partial_amax(
+            inp, row, col if with_columnwise else omitted, h, w, start
+        )
+
+        row_ref = torch.full_like(row, sentinel)
+        col_ref = torch.full_like(col, sentinel)
+        row_ref[:h, : blocks_x * 4] = 0
+        col_ref[: h // 32, : blocks_x * 128] = 0
+        compute_partial_amax_reference(inp, row_ref, col_ref, h, w, start)
+        torch.testing.assert_close(row, row_ref, atol=0, rtol=0)
+        if with_columnwise:
+            torch.testing.assert_close(col, col_ref, atol=0, rtol=0)
+        else:
+            assert (col == sentinel).all()
+
+        out_row_full = torch.full((h * w,), 0x5A, dtype=torch.uint8, device="cuda")
+        out_col_full = torch.full_like(out_row_full, 0x5A)
+        out_row, out_col = out_row_full[start:end], out_col_full[start:end]
+        tex.mxfp8_scaling_partial_cast(
+            inp,
+            out_row,
+            out_col if with_columnwise else out_col[:0],
+            scales,
+            col_scales if with_columnwise else omitted,
+            h,
+            w,
+            start,
+        )
+        out_row_ref, out_col_ref = torch.empty_like(out_row), torch.empty_like(out_col)
+        partial_cast_reference(inp, out_row_ref, out_col_ref, scales, col_scales, h, w, start)
+        torch.testing.assert_close(out_row, out_row_ref, atol=0, rtol=0)
+        if with_columnwise:
+            torch.testing.assert_close(out_col, out_col_ref, atol=0, rtol=0)
+        else:
+            assert (out_col == 0x5A).all()
+        for out_full in (out_row_full, out_col_full):
+            assert (out_full[:start] == 0x5A).all() and (out_full[end:] == 0x5A).all()
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("offset,length", [(0, 0), (31, 3), (1, 4094)])
+@pytest.mark.parametrize("with_columnwise_scales", [False, True])
+def test_rowwise_partial_kernels(offset, length, with_columnwise_scales):
+    inp = torch.randn(length, device="cuda", dtype=torch.bfloat16)
+    row = torch.zeros((128, 4), device="cuda", dtype=inp.dtype)
+    ref = torch.zeros_like(row)
+    col = torch.zeros((4, 128), device="cuda", dtype=inp.dtype)
+    # The PyTorch extension must normalize empty views with backing storage.
+    omitted = col.flatten()[:0].view(0, 0)
+    tex.mxfp8_scaling_compute_partial_amax(inp, row, omitted, 64, 64, offset)
+    tex.mxfp8_scaling_compute_partial_amax(inp, ref, col, 64, 64, offset)
+    torch.testing.assert_close(row, ref, rtol=0, atol=0)
+    scales = torch.full((128, 4), 127, dtype=torch.uint8, device="cuda")
+    columnwise_scales = (
+        torch.full((4, 128), 126, dtype=torch.uint8, device="cuda")
+        if with_columnwise_scales
+        else scales.flatten()[:0].view(0, 0)
+    )
+    out = torch.empty(length, dtype=torch.uint8, device="cuda")
+    tex.mxfp8_scaling_partial_cast(inp, out, out[:0], scales, columnwise_scales, 64, 64, offset)
+    torch.testing.assert_close(out, inp.to(torch.float8_e4m3fn).view(torch.uint8), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+def test_mxfp8_partial_cast_requires_columnwise_scales():
+    inp = torch.randn(3, device="cuda", dtype=torch.bfloat16)
+    row = torch.empty(3, device="cuda", dtype=torch.uint8)
+    col = torch.empty_like(row)
+    scales = torch.full((128, 4), 127, device="cuda", dtype=torch.uint8)
+    with pytest.raises(RuntimeError, match="Columnwise output requires columnwise scales"):
+        tex.mxfp8_scaling_partial_cast(
+            inp, row, col, scales, scales.flatten()[:0].view(0, 0), 64, 64, 31
+        )

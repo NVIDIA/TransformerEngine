@@ -183,6 +183,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   float block_amax = 0.0f;
 
+  // Initial amax as NaN, which loses all comparisons unless the other value is also NaN,
+  // so per-block amax will be NaN if all values in the block are NaN.
+  const float nan_float = __int_as_float(0x7FC00000);
+  const IType nan_itype = static_cast<IType>(nan_float);
+
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[STAGES];
@@ -206,11 +211,17 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const size_t next_stage = stage + 1;
     const size_t stage_offset_Y = stage * BUFF_DIM_Y;
 
-    if (next_stage < STAGES) {
-      // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<1>();
+    // S2G bulk async-groups are thread-local, so only the issuing thread can wait for the
+    // previous TMA read of this output buffer to complete. Hand that completion off to the
+    // rest of the CTA before any thread overwrites the reused buffer.
+    if (stage >= BUFFS_NUM) {
+      if (is_master_thread) {
+        ptx::cp_async_bulk_wait_group_read<BUFFS_NUM - 1>();
+      }
+      __syncthreads();
+    }
 
+    if (next_stage < STAGES) {
       const size_t next_buff = next_stage % BUFFS_NUM;
       const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
@@ -232,16 +243,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[stage], parity);
 
-    float thread_amax = 0.0f;
+    float thread_amax = nan_float;
     if constexpr (COLWISE_SCALING) {
       const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
-      thread_amax = 0.0f;
       float in_compute_colwise[BUFF_DIM_Y];
       IType in_colwise_IType[BUFF_DIM_Y];
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (USE_HALF_PRECISION) {
-        IType thread_amax_f16 = static_cast<IType>(0.0f);
+        IType thread_amax_f16 = nan_itype;
 #pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
           const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
@@ -280,6 +290,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
             if (!out_of_bounds) {
               thread_amax = fmaxf(thread_amax, fabsf(elt));
+            } else {
+              // If the element is OOB, it's seen as a 0 and we need to update thread_amax by comparing against it,
+              // so a all-NaN partial block's thread_amax is 0
+              thread_amax = fmaxf(thread_amax, 0.0f);
             }
           } else {
             // If no activation, elt is 0 so we can safely do this
@@ -359,7 +373,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (ROWWISE_SCALING) {
       const size_t shmem_offset_base_rowwise =
           buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
-      thread_amax = 0.0f;
+      thread_amax = nan_float;
       float in_compute_rowwise[SCALE_DIM_X];
       Vec<IType, PACK_SIZE> in_cached[WAVES];
 
@@ -368,7 +382,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (USE_HALF_PRECISION) {
-        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+        IType2 thread_amax_2x = {nan_itype, nan_itype};
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
@@ -386,7 +400,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       } else if constexpr (IS_CACHED_ACT_OP) {
         // ensures that all writes to cache made in the section above are visible to all threads
         __syncthreads();
-        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+        IType2 thread_amax_2x = {nan_itype, nan_itype};
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
@@ -414,6 +428,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                                              in_cached[w].data.elt[e + 1]};
                 ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
               }
+            }
+          } else {
+            // If the element is OOB, it's seen as a 0 and we need to update thread_amax by comparing against it,
+            // so a all-NaN partial block's thread_amax is 0
+            if constexpr (std::is_same_v<IType, float>) {
+              thread_amax = fmaxf(thread_amax, 0.0f);
+            } else {
+              ptx::abs_max_2x(thread_amax_2x, thread_amax_2x,
+                              {static_cast<IType>(0.0f), static_cast<IType>(0.0f)});
             }
           }
         }
@@ -463,6 +486,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
               if (!out_of_bounds) {
                 thread_amax = fmaxf(thread_amax, fabsf(elt));
+              } else {
+                // If the element is OOB, it's seen as a 0 and we need to update thread_amax by comparing against it,
+                // so a all-NaN partial block's thread_amax is 0
+                thread_amax = fmaxf(thread_amax, 0.0f);
               }
             } else {
               // If no activation, elt is 0 so we can safely do this
@@ -483,7 +510,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             static_cast<AMax2DType>(thread_amax);
         __syncthreads();
         if (tid_Y_rowwise == 0) {
-          AMax2DType amax_2d = static_cast<AMax2DType>(0.0f);
+          AMax2DType amax_2d = static_cast<AMax2DType>(nan_float);
 #pragma unroll
           for (int i = 0; i < THREADS_Y; ++i) {
             if constexpr (std::is_same_v<AMax2DType, float>) {
@@ -544,7 +571,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
 
     __builtin_assume(block_amax >= 0);
-    __builtin_assume(thread_amax >= 0);
+    // thread_max could be NaN, which loses all comparison with non-NaN values and returns false
+    __builtin_assume(!(thread_amax < 0));
     block_amax = fmaxf(block_amax, thread_amax);
 
     // Wait for shared memory writes to be visible to TMA engine.
@@ -632,6 +660,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   if (is_master_thread && amax_ptr != nullptr) {
     atomicMaxFloat(amax_ptr, block_amax);
   }
+
+  // Ensure all S2G operations issued by the master have completed before the CTA exits.
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
 
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
