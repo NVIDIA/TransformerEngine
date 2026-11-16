@@ -82,7 +82,7 @@ def test_distributed(quantization, batch_size, hidden_size, out_size):
     ],
 )
 def test_distributed_mxfp4_mxfp8(batch_size, hidden_size, out_size):
-    if not mxfp4_available: # mxfp4_available is True is sufficient condition.
+    if not mxfp4_available:  # mxfp4_available is True is sufficient condition.
         pytest.skip(reason_for_no_mxfp4)
 
     _run_test("mxfp4_mxfp8", batch_size, hidden_size, out_size)
