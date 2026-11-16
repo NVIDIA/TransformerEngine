@@ -195,7 +195,12 @@ void bind_quantize_with_amax_extensions(py::module_ &m) {
 
 #include "common/util/pybind_helper.h"
 
+namespace transformer_engine::pytorch {
+void register_vmm_mempool(pybind11::module_ &m);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  transformer_engine::pytorch::register_vmm_mempool(m);
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
 
   // Register __eq__/__ne__ on the pybind ``DType`` enum so it compares by integer.

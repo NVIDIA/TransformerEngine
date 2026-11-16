@@ -99,6 +99,25 @@ def setup_pytorch_extension(
 
     library_dirs = []
     libraries = []
+
+    # This prototype uses the logical-allocation/completed-free MemPool API.
+    # Keep regular TE builds compatible with PyTorch versions without that API.
+    if os.getenv("NVTE_WITH_VMM_MEMPOOL", "0") == "1":
+        from torch.utils.cpp_extension import include_paths, library_paths
+
+        managed_header = Path("torch/csrc/cuda/CUDAPluggableAllocator.h")
+        supported = any(
+            (Path(root) / managed_header).is_file()
+            and "createCustomManagedPoolAllocator" in (Path(root) / managed_header).read_text()
+            for root in include_paths()
+        )
+        if not supported:
+            raise RuntimeError(
+                "NVTE_WITH_VMM_MEMPOOL=1 requires PyTorch with allocator-managed MemPool support"
+            )
+        cxx_flags.append("-DNVTE_WITH_VMM_MEMPOOL")
+        library_dirs.extend(library_paths(device_type="cuda"))
+        libraries.extend(["c10_cuda", "torch_cuda", "cudart"])
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
         assert (
             os.getenv("NVSHMEM_HOME") is not None

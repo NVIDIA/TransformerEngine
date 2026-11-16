@@ -2,17 +2,18 @@
 #
 # See LICENSE for license information.
 
-"""Minimal CUDA VMM allocator for two-domain localization experiments.
+"""CUDA VMM row-split allocation with optional allocator-managed MemPool reuse.
 
-This module intentionally supports only allocations whose logical midpoint is
-already aligned to the CUDA VMM granularity. That restriction keeps the
-returned tensor truly contiguous: there is no hidden padding between its two
-row partitions.
+Logical tensors stay contiguous, with physical halves rounded to VMM granularity.
+Set NVTE_VMM_USE_MEMPOOL=1 for Storage-owned allocations and physical-block reuse.
 """
 
 from __future__ import annotations
 
 import ctypes
+import os
+import sys
+import threading
 import warnings
 from functools import reduce
 from operator import mul
@@ -28,6 +29,8 @@ _VMM_RANGES: Dict[int, Dict[int, int]] = {}
 _CAPTURED_VMM_ALLOCATORS: Dict[int, "VMMRowSplitAllocator"] = {}
 _VMM_CURRENT_MICROBATCH: Optional[int] = None
 _VMM_OOM_CACHE_RETRY_WARNED = False
+_VMM_MEMPOOLS = {}
+_VMM_MEMPOOL_LOCK = threading.RLock()
 
 
 def set_vmm_current_microbatch(microbatch_id: Optional[int]) -> None:
@@ -44,8 +47,14 @@ def is_vmm_tensor(tensor: torch.Tensor) -> bool:
     if device_index is None:
         device_index = torch.cuda.current_device()
     pointer = tensor.data_ptr()
-    return any(
+    if any(
         base <= pointer < base + size for base, size in _VMM_RANGES.get(device_index, {}).items()
+    ):
+        return True
+    # Avoid importing the optional backend for applications using manual VMM.
+    mempool_module = sys.modules.get(f"{__package__}.vmm_mempool")
+    return mempool_module is not None and mempool_module.is_vmm_mempool_pointer(
+        device_index, pointer
     )
 
 
@@ -83,18 +92,32 @@ def _set_memory_node(
 class VMMRowSplitAllocator:
     """Own VMM allocations split evenly across two GPU locality domains.
 
-    Allocations live until :meth:`close` is called. This explicit lifetime is
-    suitable for persistent CUDA-graph buffers and avoids relying on Python
-    finalization order for raw CUDA mappings.
+    By default allocations live until :meth:`close` is called. With
+    ``use_mem_pool=True`` (or ``NVTE_VMM_USE_MEMPOOL=1``), ordinary PyTorch
+    Storage lifetime replaces manual ownership, and reusable physical blocks
+    are mapped into a fresh virtual range per allocation.
     """
 
-    def __init__(self, device: Optional[torch.device | str | int] = None) -> None:
-        try:
-            from cuda.bindings import driver
-        except ImportError as exc:
-            raise RuntimeError(
-                "VMM localization requires the cuda.bindings Python package"
-            ) from exc
+    def __init__(
+        self,
+        device: Optional[torch.device | str | int] = None,
+        *,
+        use_mem_pool: Optional[bool] = None,
+    ) -> None:
+        self.use_mem_pool = (
+            os.getenv("NVTE_VMM_USE_MEMPOOL", "0") == "1"
+            if use_mem_pool is None
+            else use_mem_pool
+        )
+        self._closed = False
+        driver = None
+        if not self.use_mem_pool:
+            try:
+                from cuda.bindings import driver
+            except ImportError as exc:
+                raise RuntimeError(
+                    "VMM localization requires the cuda.bindings Python package"
+                ) from exc
 
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
@@ -106,7 +129,10 @@ class VMMRowSplitAllocator:
             raise ValueError(f"VMM localization requires a CUDA device, got {device}")
         self.device = device
         self.device_index = torch.cuda.current_device() if device.index is None else device.index
-        _check_cuda(driver.cuInit(0), "cuInit")
+        if self.use_mem_pool:
+            get_vmm_mem_pool(self.device_index)
+        else:
+            _check_cuda(driver.cuInit(0), "cuInit")
         self._driver = driver
         self._granularity: Optional[int] = None
         self._allocations: Dict[int, Tuple[int, Tuple[object, object]]] = {}
@@ -125,6 +151,8 @@ class VMMRowSplitAllocator:
     @property
     def granularity(self) -> int:
         """Minimum VMM mapping granularity required by both memory domains."""
+        if self.use_mem_pool:
+            return get_vmm_mem_pool(self.device_index).stats()["block_bytes"]
         if self._granularity is None:
             driver = self._driver
             granularities = []
@@ -167,6 +195,8 @@ class VMMRowSplitAllocator:
         half_bytes = total_bytes // 2
         if total_bytes == 0 or total_bytes % 2 != 0:
             raise ValueError(f"Allocation size must be positive and even, got {total_bytes}")
+        if self.use_mem_pool:
+            return self._allocate_from_pool(shape, dtype, -1)
         mapped_half_bytes = (
             (half_bytes + self.granularity - 1) // self.granularity
         ) * self.granularity
@@ -301,6 +331,8 @@ class VMMRowSplitAllocator:
         logical_bytes = reduce(mul, shape, 1) * element_size
         if logical_bytes <= 0:
             raise ValueError(f"Allocation size must be positive, got {logical_bytes}")
+        if self.use_mem_pool:
+            return self._allocate_from_pool(shape, dtype, domain)
         mapped_bytes = (
             (logical_bytes + self.granularity - 1) // self.granularity
         ) * self.granularity
@@ -366,13 +398,32 @@ class VMMRowSplitAllocator:
         tensor._nvte_vmm_allocator = self
         return tensor
 
+    def _allocate_from_pool(self, shape, dtype, domain):
+        if self._closed:
+            raise RuntimeError("Cannot allocate through a closed VMMRowSplitAllocator")
+        pool = get_vmm_mem_pool(self.device_index, domain=domain)
+        with pool.use():
+            tensor = torch.empty(
+                shape, dtype=dtype, device=torch.device("cuda", self.device_index)
+            )
+        tensor._nvte_vmm_allocator = self
+        return tensor
+
     def split(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return the two dim-0 views matching the physical VMM mappings."""
         midpoint = tensor.shape[0] // 2
         return tensor[:midpoint], tensor[midpoint:]
 
     def close(self) -> None:
-        """Synchronize and release all mappings owned by this allocator."""
+        """Release manual mappings, or stop allocation in MemPool mode.
+
+        MemPool tensors and their views own their storage independently of this
+        wrapper. Closing it cannot invalidate live tensors or captured addresses.
+        Use clear_vmm_mem_pool_caches() after graph reset to drain shared caches.
+        """
+        if self.use_mem_pool:
+            self._closed = True
+            return
         if not self._allocations:
             return
         torch.cuda.synchronize(self.device_index)
@@ -395,3 +446,36 @@ def clear_captured_vmm_allocations() -> None:
     for allocator in list(_CAPTURED_VMM_ALLOCATORS.values()):
         allocator.close()
     _CAPTURED_VMM_ALLOCATORS.clear()
+    clear_vmm_mem_pool_caches()
+
+
+def get_vmm_mem_pool(device=None, *, domain=-1):
+    """Shared per-device/layout physical-block pool; prepare before capture.
+
+    The returned object is a torch.cuda.MemPool and can also be passed directly
+    to torch.cuda.graph(pool=...). No complete mapped slots are reused.
+    """
+    if device is None:
+        device_index = torch.cuda.current_device()
+    elif isinstance(device, int):
+        device_index = device
+    else:
+        device = torch.device(device)
+        if device.type != "cuda":
+            raise ValueError(f"VMM MemPool requires a CUDA device, got {device}")
+        device_index = torch.cuda.current_device() if device.index is None else device.index
+    if domain not in (-1, 0, 1):
+        raise ValueError(f"Expected domain -1, 0, or 1, got {domain}")
+    key = (device_index, domain)
+    with _VMM_MEMPOOL_LOCK:
+        if key not in _VMM_MEMPOOLS:
+            from .vmm_mempool import VMMMemPool
+
+            _VMM_MEMPOOLS[key] = VMMMemPool(device_index, domain=domain)
+        return _VMM_MEMPOOLS[key]
+
+
+def clear_vmm_mem_pool_caches():
+    """Release reusable backing after every graph retaining each pool is reset."""
+    for pool in _VMM_MEMPOOLS.values():
+        pool.empty_cache()

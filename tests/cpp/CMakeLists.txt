@@ -45,3 +45,5 @@ include(${CMAKE_SOURCE_DIR}/../../transformer_engine/common/cmake/cuDNN.cmake)
 
 add_subdirectory(operator)
 add_subdirectory(util)
+
+add_subdirectory(vmm)
