@@ -14,8 +14,8 @@ from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
 from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
-pytestmark = pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+mxfp4_available, reason_for_no_mxfp4 = te.is_mxfp4_available(return_reason=True)
+pytestmark = pytest.mark.skipif(not mxfp4_available, reason=reason_for_no_mxfp4)
 
 RECIPE = CustomRecipe(qfactory=mxfp4_weight_mxfp8_activation_factory)
 

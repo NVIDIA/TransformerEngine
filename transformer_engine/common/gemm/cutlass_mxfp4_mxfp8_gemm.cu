@@ -4,6 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "cutlass_mxfp4_mxfp8_gemm.h"
+
+#if FP4_TYPE_SUPPORTED
 #include "../util/cuda_runtime.h"
 #include "../util/logging.h"
 #include "cute/tensor.hpp"
@@ -15,9 +18,10 @@
 #include "cutlass/gemm/dispatch_policy.hpp"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/util/packed_stride.hpp"
-#include "cutlass_mxfp4_mxfp8_gemm.h"
+#endif
 
 namespace transformer_engine {
+#if FP4_TYPE_SUPPORTED
 namespace {
 
 using namespace cute;
@@ -107,6 +111,7 @@ __global__ void broadcast_bias_kernel(OType *out, const BiasType *bias, size_t r
 }
 
 }  // namespace
+#endif
 
 bool is_mxfp4_mxfp8_gemm(const Tensor &A, const Tensor &B) {
   if (!is_mxfp_scaling(A.scaling_mode) || !is_mxfp_scaling(B.scaling_mode)) {
@@ -119,6 +124,7 @@ void cutlass_mxfp4_mxfp8_gemm(const Tensor *inputA, const Tensor *inputB, Tensor
                               const Tensor *inputBias, bool transa, bool transb, float alpha,
                               float beta, void *workspace, size_t workspace_size,
                               cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_CHECK(cuda::sm_arch() >= 100, "MXFP4 x MXFP8 GEMM requires Blackwell (SM 10.0+).");
   NVTE_CHECK(is_fp4_dtype(inputA->dtype()) && is_fp8_dtype(inputB->dtype()),
              "MXFP4 x MXFP8 GEMM requires A to be MXFP4 and B to be MXFP8.");
@@ -198,6 +204,9 @@ void cutlass_mxfp4_mxfp8_gemm(const Tensor *inputA, const Tensor *inputB, Tensor
                ".");
   }
 #undef NVTE_MXFP4_MXFP8_GEMM_LAUNCH
+#else
+  NVTE_ERROR("MXFP4 x MXFP8 GEMM requires CUDA 12.8 or newer.");
+#endif
 }
 
 }  // namespace transformer_engine
