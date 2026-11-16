@@ -34,6 +34,7 @@ from torch import nn as nn
 from typing import Optional, Union, Tuple, List
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
+from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.export import is_in_onnx_export_mode, te_translation_table
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import get_default_init_method
@@ -74,7 +75,8 @@ supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "clamped_sw
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
 
-# The ONNX reference evaluator matches these classes to graph nodes by domain and class name.
+# The ONNX reference evaluator matches these classes to graph nodes by domain and class name,
+# and passes every node attribute to `_run` as a keyword argument.
 class TRT_FP8QuantizeLinear(OpRun):
     """FP8 quantization for the ONNX reference evaluator."""
 
@@ -111,7 +113,8 @@ class TRT_MXFP8DynamicQuantize(OpRun):
 
     op_domain = "trt"
 
-    def _run(self, t):
+    def _run(self, t, axis, block_size):
+        assert (axis, block_size) == (-1, MXFP8_BLOCK_SCALING_SIZE)
         x = torch.tensor(t, device="cuda")
         q = te.tensor.mxfp8_tensor.MXFP8Quantizer(te.DType.kFloat8E4M3)
         return q(x)._rowwise_data.cpu().numpy(), q(x)._rowwise_scale_inv.cpu().numpy()
@@ -122,7 +125,8 @@ class TRT_MXFP8DequantizeLinear(OpRun):
 
     op_domain = "trt"
 
-    def _run(self, t, scale_inv):
+    def _run(self, t, scale_inv, axis, block_size):
+        assert (axis, block_size) == (-1, MXFP8_BLOCK_SCALING_SIZE)
         x = torch.tensor(t, device="cuda")
         scale_inv_tensor = torch.tensor(scale_inv, device="cuda")
         q = te.tensor.mxfp8_tensor.MXFP8Quantizer(te.DType.kFloat8E4M3)
