@@ -139,8 +139,6 @@ class MXFP8QuantizeConfig:
         use_2d_quantization: bool = False,
         activation: Optional[str] = None,
     ):
-        if use_2d_quantization:
-            raise ValueError("2D block scaling is not implemented by the CuTeDSL MXFP8 kernels")
         if dtype is None or dtype not in ("Float32", "Float16", "BFloat16"):
             raise ValueError(f"unknown input dtype {dtype!r}; expected Float32|Float16|BFloat16")
         self.DTYPE = str_to_cutlass_dtype(dtype)
@@ -193,6 +191,11 @@ class MXFP8QuantizeConfig:
         # uses a cross-thread smem reduction over THREADS_Y. Both mirror the CUDA
         # kernel's COLWISE_SCALING / rowwise dbias branches.
         self.WITH_DBIAS = with_dbias
+        # The C APIs that fuse dbias or an activation pass no quantization config, so 2D block
+        # scaling only reaches plain casts and fusion is not supported.
+        if use_2d_quantization and (with_dbias or with_dact or with_act):
+            raise ValueError("2D block scaling is only implemented for a plain cast")
+        self.USE_2D_QUANTIZATION = use_2d_quantization
         self.MAX_NORM_RCP = (
             FP8E4M3_MAX_NORM_RCP if fp8_dtype == "Float8E4M3" else FP8E5M2_MAX_NORM_RCP
         )
@@ -203,7 +206,8 @@ class MXFP8QuantizeConfig:
             f"rowwise={self.ROWWISE}, colwise={self.COLWISE}, "
             f"swizzled={self.WITH_GEMM_SWIZZLED_SCALES}, with_amax={self.WITH_AMAX}, "
             f"with_dbias={self.WITH_DBIAS}, with_dact={self.WITH_DACT}, "
-            f"with_act={self.WITH_ACT}, activation={self.ACTIVATION})"
+            f"with_act={self.WITH_ACT}, use_2d_quantization={self.USE_2D_QUANTIZATION}, "
+            f"activation={self.ACTIVATION})"
         )
 
     __repr__ = __str__
@@ -211,6 +215,14 @@ class MXFP8QuantizeConfig:
     def is_plain_cast(self) -> bool:
         """Whether cfg is a plain cast: no amax, dbias or (d)activation fused in."""
         return not (self.WITH_AMAX or self.WITH_DBIAS or self.WITH_DACT or self.WITH_ACT)
+
+    def act_needs_masking(self) -> bool:
+        """Whether TMA's zero padding must be masked after the activation, i.e. act(0) != 0.
+
+        All activations supported by MXFP8 satisfy act(0) == 0, so this is a precaution for
+        activations added in the future.
+        """
+        return self.WITH_ACT and self.ACTIVATION not in ("relu", "gelu", "silu", "qgelu", "srelu")
 
 
 class MXFP8QuantizeKernelBase(abc.ABC):
@@ -268,34 +280,20 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         from .quantize_mxfp8_g2s_bidim import MXFP8QuantizeBidimensionalG2SKernel
         from .quantize_mxfp8_g2r_rowwise_2lane import MXFP8QuantizeRowwise2LaneG2RKernel
         from .quantize_mxfp8_g2r_bidim import MXFP8QuantizeBidimensionalG2RKernel
+        from .quantize_mxfp8_2d import MXFP8Quantize2DKernel
 
         # pylint: enable=import-outside-toplevel
 
         self.cfg = cfg
-        # These activation functions satisfy f(0) = 0 so we don't need to mask with OOB regions
-        # (zeros filled by TMA are still zeros without applying activation to them)
-        # Note that as the time of writing, all activations supported by MXFP8 satisfy this property, so !ACT_NEED_MASKING is never reachable.
-        # This is only a precaution for future use cases if someone wants to add a new activation function.
-        self.ACT_NEED_MASKING = cfg.WITH_ACT and cfg.ACTIVATION not in (
-            "relu",
-            "gelu",
-            "silu",
-            "qgelu",
-            "srelu",
+        # 2D block scaling only swaps the general kernel's per-tile math.
+        general_cls = (
+            MXFP8Quantize2DKernel if cfg.USE_2D_QUANTIZATION else MXFP8QuantizeGeneralG2SKernel
         )
-        # Instantiate all possible kernels at compile time,
-        # and we will pick the right one at runtime based on the input shape and config.
-        self.general_skip_input_masking_kernel = MXFP8QuantizeGeneralG2SKernel(
-            cfg, SKIP_INPUT_MASKING=True
-        )
-        self.general_skip_input_masking_and_scale_bounds_kernel = MXFP8QuantizeGeneralG2SKernel(
-            cfg, SKIP_INPUT_MASKING=True, SKIP_SCALE_BOUNDS=True
-        )
-        # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
-        self.general_kernel = MXFP8QuantizeGeneralG2SKernel(cfg) if self.ACT_NEED_MASKING else None
-
-        # Specialized kernels in a specific dispatch priority order so we prefer to dispatch to kernels that come first in the list.
-        self.specialized_kernels = [
+        # Candidate kernels in dispatch priority order; the first one whose runtime
+        # eligible_to_dispatch check passes is launched. The specialized kernels come first,
+        # then the general kernel without and with boundary handling. The last one is always
+        # eligible.
+        self.preferred_kernels = [
             kernel_cls(cfg)
             for kernel_cls in (
                 MXFP8QuantizeRowwise2LaneG2RKernel,
@@ -304,6 +302,9 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                 MXFP8QuantizeBidimensionalG2SKernel,
             )
             if kernel_cls.supports(cfg)
+        ] + [
+            general_cls(cfg, SKIP_INPUT_MASKING=True, SKIP_SCALE_BOUNDS=True),
+            general_cls(cfg, SKIP_INPUT_MASKING=not cfg.act_needs_masking()),
         ]
 
     @cute.jit
@@ -320,77 +321,14 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
     ):
-        dispatched_to_specialized = False
-        for kernel in self.specialized_kernels:
-            if not dispatched_to_specialized:
+        dispatched = False
+        for kernel in self.preferred_kernels:
+            if not dispatched:
                 if kernel.eligible_to_dispatch(
                     self.cfg, mX, mO_row, mS_row, mO_col, mS_col, mNoop, mDActInput
                 ):
-                    dispatched_to_specialized = True
+                    dispatched = True
                     kernel(
-                        mX,
-                        mO_row,
-                        mS_row,
-                        mO_col,
-                        mS_col,
-                        mAmax,
-                        mNoop,
-                        mDActInput,
-                        mWorkspace,
-                        stream,
-                    )
-        # If not using a specialized kernel, fall back to the general kernel
-        if not dispatched_to_specialized:
-            # With _USE_STATIC_NUM_TILES, each CTA always processes _NUM_TILES tiles, including OOB ones,
-            # so the scale-bounds check can only be dropped if M divides TILE_ROWS * _NUM_TILES.
-            num_tiles_per_cta = (
-                self.general_skip_input_masking_kernel._NUM_TILES
-                if self.general_skip_input_masking_kernel._USE_STATIC_NUM_TILES
-                else 1
-            )
-            # If the input shape can be perfectly tiled by the general kernel's tile size, we can skip some boundary check because
-            # we know we will not touch any out-of-bounds region.
-            shape_is_divisible = (
-                mX.shape[0]
-                % (self.general_skip_input_masking_kernel._TILE_ROWS * num_tiles_per_cta)
-                == 0
-                and mX.shape[1] % self.general_skip_input_masking_kernel._TILE_COLS == 0
-            )
-            # If shape is divisible, then we won't access OOB regions regardless whatever
-            if shape_is_divisible:
-                self.general_skip_input_masking_and_scale_bounds_kernel(
-                    mX,
-                    mO_row,
-                    mS_row,
-                    mO_col,
-                    mS_col,
-                    mAmax,
-                    mNoop,
-                    mDActInput,
-                    mWorkspace,
-                    stream,
-                )
-            else:
-                # Otherwise we can't skip scale bound check, but we may still skip masking activation inputs with zero
-                if cutlass.const_expr(self.ACT_NEED_MASKING):
-                    # Masking and the scale guards now share one condition, so this is a plain
-                    # two-way choice: either the shape tiles exactly (drop both) or it does not.
-                    self.general_kernel(
-                        mX,
-                        mO_row,
-                        mS_row,
-                        mO_col,
-                        mS_col,
-                        mAmax,
-                        mNoop,
-                        mDActInput,
-                        mWorkspace,
-                        stream,
-                    )
-                else:
-                    # We still need to check the scale bounds, but we can skip some activations masking because their output is 0
-                    # for OOB regions where TMA fills with zeros
-                    self.general_skip_input_masking_kernel(
                         mX,
                         mO_row,
                         mS_row,
