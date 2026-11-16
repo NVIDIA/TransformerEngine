@@ -6,8 +6,6 @@
 PyTorch
 =======
 
-.. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
-
 General-purpose layers
 ----------------------
 
@@ -72,6 +70,8 @@ Other
 .. autoapiclass:: transformer_engine.pytorch.CudaRNGStatesTracker()
   :members: reset, get_states, set_states, add, fork
 
+.. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
+
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
@@ -93,11 +93,18 @@ Other
 MLA rotary position embeddings
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-These functions apply the decoupled RoPE used by multi-latent attention (MLA).
-The rotary input channels contain interleaved pairs; rotated outputs use
-NeoX half-split order. ``sbhd`` denotes sequence, batch, head and channel axes;
-``bshd`` exchanges the first two axes. Build the cosine/sine tables on the
-same device as the tensors, with one row per sequence position.
+These functions apply the decoupled RoPE of multi-latent attention (MLA) to the rotary
+channels of queries and keys. Each interleaved channel pair :math:`(x_{2i}, x_{2i+1})` at
+position :math:`p` is rotated by :math:`\theta_{p,i} = p \cdot \omega_i` and written
+in half-split (NeoX) order, where :math:`d` is the number of rotary channels:
+
+.. math::
+
+   y_i = x_{2i}\cos\theta_{p,i} - x_{2i+1}\sin\theta_{p,i}, \qquad
+   y_{i+d/2} = x_{2i+1}\cos\theta_{p,i} + x_{2i}\sin\theta_{p,i}
+
+The frequencies :math:`\omega_i` are :math:`\mathrm{base}^{-2i/d}`, optionally rescaled by YaRN.
+``build_rope_tables`` computes the :math:`\cos\theta` and :math:`\sin\theta` tables.
 
 .. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.build_rope_tables
 

@@ -3,48 +3,10 @@
 A forward + backward benchmark of one `DeepSeekV3Layer`: RMSNorm, multi-latent attention,
 and MoE with a shared expert. Routed experts are sharded across GPUs using NCCL EP.
 
-## Results
-
-GB200 and GB300 GPUs, 4096 tokens per rank, top-k 8, 8 local experts per GPU.
-Times cover one layer's forward + backward; throughput is global, in millions of tokens/s.
-Every number is the median of three independent runs (spread within 0.3 ms).
-See [benchmark configuration](#c-benchmark-configuration) for the full setup.
-
-### TE vs. plain PyTorch (`--dsv3`)
-
-Same layer and dimensions, BF16 unless noted.
-
-All variants run the router backward and clear parameter gradients before each step.
-
-| MoE implementation | 4 GB200 (32 experts) | 4 GB300 (32 experts) | 8 GB300 (64 experts) |
-|---|---:|---:|---:|
-| `naive`: all_to_all + loop over experts | 28.61 ms | 27.21 ms | 27.70 ms |
-| `naive_grouped`: all_to_all + TE grouped GEMM | 17.79 ms | 16.72 ms | 17.13 ms |
-| `te`: NCCL EP + grouped GEMM | 13.68 ms | 12.37 ms | 14.09 ms |
-| `te`, mxfp8 (unfused grouped GEMM) | 10.99 ms | 10.32 ms | 12.11 ms |
-| `te`, mxfp8 fused | 10.11 ms | 9.49 ms | 10.45 ms |
-
-### TE throughput (`--dsv3`)
-
-| Precision | 4 GB200 · Mtok/s | 4 GB300 · Mtok/s | 8 GB300 · Mtok/s |
-|---|---:|---:|---:|
-| BF16 | 1.20 | 1.33 | 2.32 |
-| MXFP8 | 1.49 | 1.59 | 2.71 |
-| MXFP8 fused | 1.62 | 1.73 | 3.14 |
-
-4 GPUs = 1 node / 32 experts; 8 GPUs = 2 nodes / 64 experts.
-Both nodes share one NVLink domain (MNNVL).
-
-“Fused” enables `NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`.
-
-Paired runs on the same hardware and software compared these results with the previous
-MoE alignment policy and its extra 1024-row EP tail margin. The full-layer TE medians
-decreased by 0.1–0.8% across the nine configurations, with no observed slowdown.
-
 ## Quick start
 
 Requires SM90+ GPUs with NVLink and an NCCL EP-enabled TE build;
-see [full requirements](#a-requirements). From this directory:
+see [requirements](#requirements). From this directory:
 
 ```bash
 bash run_deepseek_v3_layer_ep.sh --dsv3
@@ -56,27 +18,19 @@ For MXFP8 with the fused grouped MLP (SM100-class GPUs):
 NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 bash run_deepseek_v3_layer_ep.sh --dsv3 --recipe mxfp8
 ```
 
-## Appendix
-
-[Requirements](#a-requirements) · [Running](#b-running) ·
-[Configuration](#c-benchmark-configuration) · [Profiling](#d-profiling-with-nsys) ·
-[TE kernels](#e-te-kernel-breakdown) ·
-[Naive kernel profiles](#f-naive-kernel-profiles) ·
-[EP internals](#g-ep-implementation-notes)
-
-### A. Requirements
+## Requirements
 
 The following NCCL EP requirements apply to `--impl te`. The naive variants use
 ordinary NCCL collectives and can also run on older GPUs without NVLink.
 
-- SM90 or newer GPUs connected with NVLink (NCCL EP falls back to the network transport and
-  deadlocks on PCIe-only nodes).
-- NCCL >= 2.30.4, PyTorch >= 2.11 (symmetric memory), Transformer Engine built with the
-  `3rdparty/nccl-extensions` submodule.
+- SM90 or newer GPUs connected with NVLink.
+- NCCL >= 2.30.4, PyTorch >= 2.11 (symmetric memory), Transformer Engine built with NCCL EP
+  enabled (`NVTE_WITH_NCCL_EP`, on by default when an SM90+ architecture is targeted;
+  `NVTE_WITH_NCCL_EP=0` disables it).
 - `NVTE_CUTEDSL_FUSED_GROUPED_MLP=1` additionally needs SM100-class GPUs and the CuTe DSL
   (`nvidia-cutlass-dsl`) for the fused MXFP8 grouped MLP.
 
-### B. Running
+## Running
 
 Run these commands from this directory. Single node, all local GPUs:
 
@@ -115,7 +69,41 @@ Every rank owns `--num-local-experts` experts (default 8), so the expert count i
 `--warmup 0` is supported; `--iters` must be positive and `--tokens-per-rank` must be a
 positive multiple of four. MXFP8 requires `--impl te`.
 
-### C. Benchmark configuration
+## Results
+
+GB200 and GB300 GPUs, 4096 tokens per rank, top-k 8, 8 local experts per GPU.
+Times cover one layer's forward + backward; throughput is global, in millions of tokens/s.
+Every number is the median of three independent runs (spread within 0.3 ms).
+See [benchmark setup](#benchmark-setup) below for the full configuration.
+
+### TE vs. plain PyTorch (`--dsv3`)
+
+Same layer and dimensions, BF16 unless noted.
+
+All variants run the router backward and clear parameter gradients before each step.
+
+| MoE implementation | 4 GB200 (32 experts) | 4 GB300 (32 experts) | 8 GB300 (64 experts) |
+|---|---:|---:|---:|
+| `naive`: all_to_all + loop over experts | 28.61 ms | 27.21 ms | 27.70 ms |
+| `naive_grouped`: all_to_all + TE grouped GEMM | 17.79 ms | 16.72 ms | 17.13 ms |
+| `te`: NCCL EP + grouped GEMM | 13.68 ms | 12.37 ms | 14.09 ms |
+| `te`, mxfp8 (unfused grouped GEMM) | 10.99 ms | 10.32 ms | 12.11 ms |
+| `te`, mxfp8 fused | 10.11 ms | 9.49 ms | 10.45 ms |
+
+### TE throughput (`--dsv3`)
+
+| Precision | 4 GB200 · Mtok/s | 4 GB300 · Mtok/s | 8 GB300 · Mtok/s |
+|---|---:|---:|---:|
+| BF16 | 1.20 | 1.33 | 2.32 |
+| MXFP8 | 1.49 | 1.59 | 2.71 |
+| MXFP8 fused | 1.62 | 1.73 | 3.14 |
+
+4 GPUs = 1 node / 32 experts; 8 GPUs = 2 nodes / 64 experts.
+Both nodes share one NVLink domain (MNNVL).
+
+“Fused” enables `NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`.
+
+### Benchmark setup
 
 | Setting | Value |
 |---|---|
@@ -131,93 +119,6 @@ positive multiple of four. MXFP8 requires `--impl te`.
 Each run reuses a normally distributed random input and backpropagates an all-ones
 output gradient. Parameter and input gradients are cleared before each iteration.
 
-### D. Profiling with nsys
-
-The timed iterations run inside a `torch.cuda.profiler.start()` / `stop()` window, so
-`-c cudaProfilerApi` records only them, one NVTX range per iteration:
-
-```bash
-NSYS=1 NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 bash run_deepseek_v3_layer_ep.sh --dsv3 --recipe mxfp8
-# -> results/deepseek_v3_layer_ep_<hostname>.nsys-rep
-nsys stats --report cuda_gpu_kern_sum results/deepseek_v3_layer_ep_<hostname>.nsys-rep
-```
-
-The launcher wraps `torchrun`, so all local ranks land in one report. For multi-node runs put
-the same `nsys profile ... -o <path>_%q{SLURM_NODEID}` in front of `torchrun` on each node.
-
-Running under `nsys` adds about 1.5 ms per iteration to these numbers.
-
-### E. TE kernel breakdown
-
-The profiles in sections E and F predate the September 30 measurements and were not
-regenerated for the results above.
-
-8 GPUs, `--dsv3`, MXFP8 fused. Per GPU and iteration, from `nsys stats --report cuda_gpu_kern_sum`
-on one node (kernel time 10.8 ms; the iteration takes 10.5 ms without the profiler). Profiling adds
-skew between nodes, so the wait row is taken from the node that was not slowed down by nsys.
-
-| Group | ms | Kernels |
-|---|---:|---|
-| NCCL EP all-to-all | 2.3 | `nccl_ep_jit_ht_dispatch_kernel` (1.05), `nccl_ep_jit_ht_combine_kernel` (1.29), each twice per iteration (fwd + bwd) |
-| NCCL EP local permute | 0.6 | `local_permute_dup/reduce`: staging buffer to expert-major layout, zero-filled padding |
-| rank skew wait | 0.5 | `ncclDevKernel_AllGather_RING_LL` (routing-map all-gather in prepare, ~0.06 ms of transfer); the first collective of the layer absorbs load imbalance between ranks |
-| fused grouped MLP (cuDNN, MXFP8) | 2.4 | fc1+SwiGLU fwd (0.53), fc2 fwd (0.82), dGLU bwd (0.31), wgrad (0.78) |
-| MXFP8 quantization | 1.1 | `group_quantize_mxfp8` on the recv buffer (0.4), `quantize_mxfp8_kernel_cast_only` for dense GEMM inputs (0.7) |
-| dense MXFP8 GEMMs (MLA projections, shared expert) | 1.4 | `nvjet_sm103_qqtst_*` |
-| attention (cuDNN SDPA) | 0.9 | flash fprop (0.18) + bprop (0.51) + dq / dO helpers |
-| RMSNorm, RoPE, adds | 0.8 | `rmsnorm_fwd/bwd` (0.39), `rotary_*_kv` (0.18), residual adds (0.2) |
-
-Both nodes sit in one NVLink domain, so dispatch and combine move roughly 470 MB per GPU per
-call over NVLink at close to link bandwidth; on an InfiniBand-connected pair of nodes the
-all-to-all share would be much larger.
-
-### F. Naive kernel profiles
-
-Per GPU and iteration, the `naive` MoE spends (8 GPUs, kernel time 24.0 ms of a 27.5 ms
-iteration; the rest is host syncs and launch gaps):
-
-| Group | ms | Details |
-|---|---:|---|
-| expert and dense GEMMs (`nvjet_*`) | 6.5 | 8 separate GEMM pairs per rank instead of one grouped GEMM, plus the MLA projections |
-| elementwise adds | 3.6 | `index_add` and its backward, residuals |
-| `ncclDevKernel_SendRecv` | 3.4 | 8 all_to_all launches per iteration (tokens and probs fwd/bwd, results fwd/bwd, counts, indices) |
-| indexing kernels | 3.3 | `x[tok]`, `nonzero` masks, `index_copy`, `index_fill`, `indexing_backward`, sorts |
-| `FillFunctor` (zeros) | 2.5 | `zeros_like` for the per-expert output buffer and `index_add` targets |
-| device-to-device copies | 2.3 | `index_copy` and gathers materialising per-expert slices |
-| attention, norms | 1.1 | same as in the TE variant |
-
-#### Historical `naive_grouped` profile
-
-8 GPUs, kernel time 17.1 ms of a 17.2 ms iteration. This profile predates the
-router-gradient fix and omits probability-gradient communication. It is retained for
-reference, not for direct comparison with the other profiles or headline timings.
-
-| Group | ms | Details |
-|---|---:|---|
-| `ncclDevKernel_SendRecv` | 3.8 | 7 all_to_all launches in this historical run; the current implementation has 8 |
-| grouped GEMMs (`nvjet_*_ptrGroup_*`) | 4.1 | fc1 / fc2 forward, dgrad, wgrad as grouped GEMMs, same as in `te` |
-| sorting rows by expert and back | 2.6 | `argsort`, gathers (`x[tok]`, `x_recv[by_expert]`), `index_copy`, `indexing_backward` |
-| dense GEMMs (MLA projections, shared expert) | 2.4 | same as in `te` |
-| elementwise adds | 0.7 | `index_add`, residuals |
-| attention, norms | 1.1 | same as in `te` |
-
-#### Interpreting the current results
-
-In the headline GB300 BF16 timings, `naive` -> `naive_grouped` reduces iteration time by
-10.5 ms on 4 GPUs and 10.6 ms on 8 GPUs. `naive_grouped` -> `te` saves another
-4.4 ms and 3.0 ms, respectively. These are end-to-end differences between
-implementations, not isolated measurements of Python-loop or communication overhead.
-
-NCCL EP dispatch and combine write directly into the expert-major layout and zero-fill
-the padding. Both naive variants synchronise with the host to obtain the all_to_all
-split sizes; TE avoids those synchronizations. MXFP8 is only supported by `te`: the naive
-variants would need per-expert row counts padded to the MXFP8 block size.
-
-### G. EP implementation notes
-
-- `ep_bootstrap` must be given the same recv capacity the layer uses:
-  `DeepSeekV3MoE.ep_recv_capacity(ep_size, tokens_per_rank, topk, num_local_experts)`.
-- Per-expert zones in the recv buffer are aligned to 256 rows; the fused grouped MLP requires
-  that alignment.
-- The recv and grad buffers are allocated uninitialized: NCCL EP zero-fills the alignment
-  padding between experts itself.
+`ep_bootstrap` is given the recv capacity returned by
+`DeepSeekV3MoE.ep_recv_capacity(ep_size, tokens_per_rank, topk, num_local_experts)`, with
+per-expert zones aligned to 256 rows.
