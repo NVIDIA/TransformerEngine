@@ -104,8 +104,11 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
   }
 }
 
+// Must have internal linkage like g_tensor_maps. Otherwise, before CUDA 13.0 (nvcc
+// -static-global-template-stub=false), the host stubs from every TU are merged, so the launch
+// writes another TU's g_tensor_maps and the consumer kernel reads an empty table.
 template <typename IType, typename OType>
-__global__ void __launch_bounds__(THREADS_PER_WARP)
+static __global__ void __launch_bounds__(THREADS_PER_WARP)
     update_tma_descriptors(const __grid_constant__ CUtensorMap base_tensor_map_input,
                            const __grid_constant__ CUtensorMap base_tensor_map_act_input,
                            const __grid_constant__ CUtensorMap base_tensor_map_output_rowwise,

@@ -125,7 +125,8 @@ class EPBackend {
   std::mutex mutex_;
   std::list<HandleEntry> handles_;
   std::unordered_map<void*, std::list<HandleEntry>::iterator> index_;
-  size_t handle_cache_cap_{0};  // read lazily from NVTE_EP_HANDLE_CACHE_SIZE; 0 = cache disabled
+  size_t handle_cache_cap_{
+      0};  // read lazily from NVTE_EP_HANDLE_CACHE_SIZE; 0 (default) = cache disabled
   bool handle_cache_cap_set_{false};
 
   // Caller must hold mutex_.

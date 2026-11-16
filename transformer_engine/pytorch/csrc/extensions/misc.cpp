@@ -42,7 +42,7 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
 std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
     const at::Tensor &split_sizes, const c10::Device &device, const std::vector<int64_t> &strides,
     const std::vector<bool> &include_leading_zero, const std::vector<at::ScalarType> &dtypes,
-    bool bulk_allocate_outputs) {
+    bool bulk_allocate_outputs, size_t split_alignment) {
   const size_t num_outputs = strides.size();
   const size_t num_splits = static_cast<size_t>(split_sizes.numel());
 
@@ -51,6 +51,7 @@ std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
              "strides, include_leading_zero, and dtypes must have matching lengths, but got ",
              strides.size(), ", ", include_leading_zero.size(), ", and ", dtypes.size(), ".");
   NVTE_CHECK(device.is_cuda(), "device must be CUDA, but got ", device.str(), ".");
+  NVTE_CHECK(split_alignment > 0, "split_alignment must be positive.");
 
   // Convert split sizes to int64 GPU tensor.
   const at::Tensor split_sizes_i64 =
@@ -94,9 +95,9 @@ std::tuple<at::Tensor, std::vector<at::Tensor>> splits_to_offsets_multi(
 
   auto split_sizes_nvte = makeTransformerEngineTensor(split_sizes_out);
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_splits_to_offsets_multi(split_sizes_nvte.data(), outputs_nvte.data(), strides.data(),
-                                 include_leading_zero_int.data(), num_outputs,
-                                 at::cuda::getCurrentCUDAStream());
+    nvte_splits_to_offsets_multi_v2(split_sizes_nvte.data(), split_alignment, outputs_nvte.data(),
+                                    strides.data(), include_leading_zero_int.data(), num_outputs,
+                                    at::cuda::getCurrentCUDAStream());
   });
 
   return {split_sizes_out, std::move(outputs)};

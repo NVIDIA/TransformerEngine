@@ -5,17 +5,16 @@
 """Transformer."""
 import os
 import warnings
-from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
+
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.jit import (
-    set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
     get_bias_dropout_add,
     bias_dropout_add_fused_train,
@@ -25,6 +24,7 @@ from transformer_engine.pytorch.utils import (
     cast_if_needed,
     get_default_init_method,
     torch_get_autocast_gpu_dtype,
+    torch_is_autocast_gpu_enabled,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -199,7 +199,7 @@ class TransformerLayer(torch.nn.Module):
                         supports ``'limit'``, ``'alpha'``, and ``'glu_linear_offset'`` parameters.
                         You can set these as
                         ``activation_params={'limit': 7.0, 'alpha': 1.702, 'glu_linear_offset': 1.0}``.
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -352,7 +352,7 @@ class TransformerLayer(torch.nn.Module):
         activation: str = "gelu",
         activation_params: Optional[dict] = None,
         normalization: str = "LayerNorm",
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         attn_input_format: str = "sbhd",
         name: str = None,
         qk_norm_type: Optional[str] = None,
@@ -542,16 +542,10 @@ class TransformerLayer(torch.nn.Module):
         self.bias_dropout_fusion = bias_dropout_fusion
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
 
-        # Set bias+dropout+add fusion grad_enable execution handler.
-        use_nvfuser = torch_version() >= (1, 10, 0) and torch_version() < (2, 2, 0)
-        self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
-
-        if self.bias_dropout_fusion:
-            set_jit_fusion_options()
-            if seq_length and micro_batch_size:
-                if self.sequence_parallel:
-                    seq_length = seq_length // self.tp_size
-                warmup_jit_bias_dropout_add_all_dtypes(hidden_size, seq_length, micro_batch_size)
+        if self.bias_dropout_fusion and seq_length and micro_batch_size:
+            if self.sequence_parallel:
+                seq_length = seq_length // self.tp_size
+            warmup_jit_bias_dropout_add_all_dtypes(hidden_size, seq_length, micro_batch_size)
 
         norm_module = {
             "LayerNorm": LayerNorm,
@@ -907,7 +901,7 @@ class TransformerLayer(torch.nn.Module):
                 )
 
         # For AMP
-        if torch.is_autocast_enabled():
+        if torch_is_autocast_gpu_enabled():
             hidden_states = cast_if_needed(hidden_states, torch_get_autocast_gpu_dtype())
 
         # Self attention.
@@ -1020,7 +1014,7 @@ class TransformerLayer(torch.nn.Module):
             else:
                 bias_dropout_add_func = get_bias_dropout_add(self.training)
 
-            with self.bias_dropout_add_exec_handler():
+            with torch.enable_grad():
                 output = bias_dropout_add_func(hidden_state, bias, residual, self.hidden_dropout)
         else:
             if bias is not None and bias.numel() != 0:

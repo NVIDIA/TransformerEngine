@@ -208,60 +208,14 @@ def _make_swizzle_fusion_quantizer() -> NVFP4Quantizer:
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
-    "M, N, expected_swizzled",
-    [
-        # Eligible: rows%64==0 AND cols%128==0 -> the fused RHT cast-fusion
-        # kernel can bake the GEMM-swizzled SF in directly.
-        (64, 128, True),
-        (128, 256, True),
-        # Ineligible (cols%128 != 0) -> the fused kernel is gated off, so
-        # create_tensor reports swizzled=False (the fused kernel did not bake
-        # it in). This is the case hit in production at irregular shapes like
-        # (8192, 11328) where 11328%128==64.
-        (64, 144, False),
-        (128, 144, False),
-        # Ineligible (rows%64 != 0) -> same gating.
-        (48, 128, False),
-    ],
-)
-def test_nvfp4_rht_swizzle_fusion_shape_gate(M: int, N: int, expected_swizzled: bool) -> None:
-    """The fused-kernel shape gate must reflect cast-fusion eligibility.
-
-    Only ``row_cast_col_hadamard_transform_cast_fusion.cu`` can bake
-    GEMM-swizzled SF directly, and only for eligible shapes (rows%64==0 AND
-    cols%128==0 on SM 100/110). ``NVFP4Quantizer::create_tensor`` carries this
-    gate in ``_with_gemm_swizzled_scales``: it must be True only when the fused
-    kernel is selectable, and False on ineligible shapes so dispatch routes
-    them to the unfused path (which is what keeps the defense-in-depth
-    ``NVTE_CHECK`` in ``quantize_with_rht_unfused_helper`` from hard-aborting
-    on irregular production shapes such as ``(8192, 11328)``).
-
-    ``make_empty`` runs ``create_tensor`` only -- no quantize kernel, and in
-    particular no post-quantize ``inplace_swizzle_scale_for_gemm`` fallback --
-    so its ``_with_gemm_swizzled_scales`` observes the fused-kernel gate in
-    isolation. (End-to-end ``quantizer(x)`` differs: the fallback then swizzles
-    ineligible shapes too and flips the flag back to True; see
-    ``test_nvfp4_rht_swizzle_fusion_end_to_end_swizzled``.)
-    """
-    quantizer = _make_swizzle_fusion_quantizer()
-    out = quantizer.make_empty([M, N], dtype=torch.bfloat16)
-    assert out._with_gemm_swizzled_scales is expected_swizzled, (
-        f"Fused-kernel shape gate expected _with_gemm_swizzled_scales={expected_swizzled} "
-        f"for shape ({M}, {N}) with optimize_for_gemm=True + with_rht=True, "
-        f"got {out._with_gemm_swizzled_scales}"
-    )
-
-
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize(
     "M, N",
     [
         # Eligible shapes (fused cast-fusion kernel bakes swizzled SF in).
         (64, 128),
         (128, 256),
         # Ineligible shapes (cols%128 != 0 / rows%64 != 0): the fused kernel is
-        # gated off, so they take the unfused quantize path and rely on the
-        # post-quantize swizzle fallback. (8192, 11328)-class production shapes.
+        # gated off, so they take the unfused quantize path and their compact SF
+        # are swizzled afterwards. (8192, 11328)-class production shapes.
         (64, 144),
         (128, 144),
         (48, 128),
@@ -275,15 +229,15 @@ def test_nvfp4_rht_swizzle_fusion_end_to_end_swizzled(M: int, N: int) -> None:
     swizzle pass. Eligible shapes get this from the fused cast-fusion kernel in
     one pass; ineligible shapes are gated off the fused kernel (avoiding the
     ``NVTE_CHECK`` hard-abort in ``quantize_with_rht_unfused_helper``) and
-    instead get swizzled by the post-quantize ``inplace_swizzle_scale_for_gemm``
-    fallback added in mainline #3076. Either way ``quantizer(x)`` must not raise
-    and the final ``_with_gemm_swizzled_scales`` must be True.
+    instead write compact SF to scratch buffers, which are then swizzled into the
+    output. Either way ``quantizer(x)`` must not raise and the final
+    ``_with_gemm_swizzled_scales`` must be True.
     """
     quantizer = _make_swizzle_fusion_quantizer()
     x = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
 
     # Must not raise on ineligible shapes (gate keeps them off the fused
-    # kernel; the unfused path + swizzle fallback run cleanly).
+    # kernel; the unfused path + swizzle run cleanly).
     result = quantizer(x)
     assert result._with_gemm_swizzled_scales is True, (
         "End-to-end quantize expected _with_gemm_swizzled_scales=True for shape "

@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <type_traits>
 
 #include <cuda_bf16.h>
@@ -204,15 +205,164 @@ void performTestUnswizzle1D(const size_t M, const size_t K, bool rowwise, bool c
 // The buffer is stored in leading-dim-major order (row-major for rowwise,
 // column-major for colwise).  `padded_rows x padded_cols` is the full
 // (padded) shape; `orig_rows` / `orig_cols` are the unpadded extents.
-static void zero_scale_inv_padding(uint8_t *buf,
-                                   size_t padded_rows, size_t padded_cols,
-                                   size_t orig_rows, size_t orig_cols) {
+static void set_scale_inv_padding(uint8_t *buf,
+                                  size_t padded_rows, size_t padded_cols,
+                                  size_t orig_rows, size_t orig_cols,
+                                  uint8_t value) {
   for (size_t r = 0; r < padded_rows; ++r) {
     for (size_t c = 0; c < padded_cols; ++c) {
       if (r >= orig_rows || c >= orig_cols) {
-        buf[r * padded_cols + c] = 0;
+        buf[r * padded_cols + c] = value;
       }
     }
+  }
+}
+
+static void zero_scale_inv_padding(uint8_t *buf,
+                                   size_t padded_rows, size_t padded_cols,
+                                   size_t orig_rows, size_t orig_cols) {
+  set_scale_inv_padding(buf, padded_rows, padded_cols, orig_rows, orig_cols, 0);
+}
+
+void performTestSwizzleNVFP4(const size_t M, const size_t K, bool rowwise) {
+  using namespace test;
+  constexpr size_t BLOCK_SIZE = 16;
+
+  const std::vector<size_t> shape{M, K};
+  Tensor input("input", shape, DType::kFloat4E2M1, rowwise, !rowwise, NVTE_NVFP4_1D_SCALING);
+  Tensor output("output", shape, DType::kFloat4E2M1, rowwise, !rowwise, NVTE_NVFP4_1D_SCALING);
+  output.set_with_gemm_swizzled_scales(true);
+  if (rowwise) {
+    input.fill_uniform_rowwise_scale_inv();
+  } else {
+    input.fill_uniform_columnwise_scale_inv();
+  }
+
+  const NVTEShape scale_shape =
+      rowwise ? input.rowwise_scale_inv_shape() : input.columnwise_scale_inv_shape();
+  uint8_t *input_scales = rowwise ? input.rowwise_cpu_scale_inv_ptr<uint8_t>()
+                                  : input.columnwise_cpu_scale_inv_ptr<uint8_t>();
+  const size_t original_rows = rowwise ? M : K;
+  const size_t original_cols =
+      rowwise ? divide_round_up(K, BLOCK_SIZE) : divide_round_up(M, BLOCK_SIZE);
+  set_scale_inv_padding(input_scales, scale_shape.data[0], scale_shape.data[1], original_rows,
+                        original_cols, 0xFF);
+  std::vector<uint8_t> reference_input(
+      input_scales, input_scales + scale_shape.data[0] * scale_shape.data[1]);
+  zero_scale_inv_padding(reference_input.data(), scale_shape.data[0], scale_shape.data[1],
+                         original_rows, original_cols);
+  input.from_cpu();
+
+  std::vector<uint8_t> reference(scale_shape.data[0] * scale_shape.data[1]);
+  compute_ref_swizzle<128, 4, true>(reference_input.data(), reference.data(), scale_shape.data[0],
+                                    scale_shape.data[1]);
+  nvte_swizzle_scaling_factors(input.data(), output.data(), 0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  output.to_cpu();
+
+  const uint8_t *actual = rowwise ? output.rowwise_cpu_scale_inv_ptr<uint8_t>()
+                                  : output.columnwise_cpu_scale_inv_ptr<uint8_t>();
+  compareResults("nvfp4_swizzle", actual, reference.data(), reference.size());
+}
+
+TEST(SwizzleTest, NVFP4FullWidthChunkAndFallback) {
+  performTestSwizzleNVFP4(128, 128, true);
+  performTestSwizzleNVFP4(128, 128, false);
+  performTestSwizzleNVFP4(160, 96, true);      // Padding in both scale dimensions.
+  performTestSwizzleNVFP4(160, 96, false);     // Transposed padding in both scale dimensions.
+  performTestSwizzleNVFP4(128, 3584, true);    // 28.5 KiB, 1 tile: rowwise full-width kernel.
+  performTestSwizzleNVFP4(2048, 3584, true);   // 28.5 KiB, 16 tiles: rowwise full-width kernel.
+  performTestSwizzleNVFP4(2176, 3584, true);   // 28.5 KiB, 17 tiles: regular fallback.
+  performTestSwizzleNVFP4(128, 4032, true);    // 31.5 KiB: regular fallback.
+  performTestSwizzleNVFP4(128, 4096, true);    // 32.5 KiB: regular fallback.
+  performTestSwizzleNVFP4(3584, 128, false);   // 28.5 KiB, 1 tile: transposed full-width kernel.
+  performTestSwizzleNVFP4(3584, 2048, false);  // 28.5 KiB, 16 tiles: transposed full-width kernel.
+  performTestSwizzleNVFP4(3584, 2176, false);  // 28.5 KiB, 17 tiles: regular fallback.
+  performTestSwizzleNVFP4(4032, 128, false);   // 31.5 KiB: regular fallback.
+  performTestSwizzleNVFP4(4096, 128, false);   // 32.5 KiB: regular fallback.
+}
+
+constexpr size_t kAlignmentTestM = 128;
+constexpr size_t kAlignmentTestK = 128;
+constexpr size_t kAlignmentTestBlockSize = 32;
+constexpr size_t kAlignmentOffsetBytes = 4;
+
+void performTestRejectUnalignedMXFP8Scales(bool rowwise, bool offset_input) {
+  using namespace test;
+  constexpr size_t kDataSize = kAlignmentTestM * kAlignmentTestK;
+  constexpr size_t kScaleSize = kDataSize / kAlignmentTestBlockSize;
+  auto input_data = cuda_alloc<uint8_t>(kDataSize);
+  auto output_data = cuda_alloc<uint8_t>(kDataSize);
+  auto input_storage = cuda_alloc<uint8_t>(kScaleSize + kAlignmentOffsetBytes);
+  auto output_storage = cuda_alloc<uint8_t>(kScaleSize + kAlignmentOffsetBytes);
+  uint8_t* input_scales = input_storage.get() + (offset_input ? kAlignmentOffsetBytes : 0);
+  uint8_t* output_scales = output_storage.get() + (offset_input ? 0 : kAlignmentOffsetBytes);
+  TensorWrapper input(NVTE_MXFP8_1D_SCALING);
+  TensorWrapper output(NVTE_MXFP8_1D_SCALING);
+  const std::vector<size_t> data_shape{kAlignmentTestM, kAlignmentTestK};
+  const std::vector<size_t> scale_shape =
+      rowwise ? std::vector<size_t>{kAlignmentTestM, kAlignmentTestK / kAlignmentTestBlockSize}
+              : std::vector<size_t>{kAlignmentTestM / kAlignmentTestBlockSize, kAlignmentTestK};
+  if (rowwise) {
+    input.set_rowwise_data(input_data.get(), DType::kFloat8E4M3, data_shape);
+    input.set_rowwise_scale_inv(input_scales, DType::kFloat8E8M0, scale_shape);
+    output.set_rowwise_data(output_data.get(), DType::kFloat8E4M3, data_shape);
+    output.set_rowwise_scale_inv(output_scales, DType::kFloat8E8M0, scale_shape);
+  } else {
+    input.set_columnwise_data(input_data.get(), DType::kFloat8E4M3, data_shape);
+    input.set_columnwise_scale_inv(input_scales, DType::kFloat8E8M0, scale_shape);
+    output.set_columnwise_data(output_data.get(), DType::kFloat8E4M3, data_shape);
+    output.set_columnwise_scale_inv(output_scales, DType::kFloat8E8M0, scale_shape);
+  }
+  output.set_with_gemm_swizzled_scales(true);
+  EXPECT_THROW(nvte_swizzle_scaling_factors(input.data(), output.data(), 0), std::runtime_error);
+}
+
+TEST(SwizzleTest, RejectUnalignedMXFP8ScaleBuffers) {
+  for (bool rowwise : {true, false}) {
+    performTestRejectUnalignedMXFP8Scales(rowwise, true);
+    performTestRejectUnalignedMXFP8Scales(rowwise, false);
+  }
+}
+
+TEST(SwizzleTest, RejectUnalignedMultiMXFP8ScaleBuffers) {
+  using namespace test;
+  constexpr size_t kNumTensors = 2;
+  constexpr size_t kDataSize = kAlignmentTestM * kAlignmentTestK;
+  constexpr size_t kScaleSize = kDataSize / kAlignmentTestBlockSize;
+  const std::vector<size_t> data_shape{kAlignmentTestM, kAlignmentTestK};
+  const std::vector<size_t> scale_shape{kAlignmentTestM,
+                                        kAlignmentTestK / kAlignmentTestBlockSize};
+  for (bool offset_input : {true, false}) {
+    std::vector<CudaPtr<uint8_t>> input_data, output_data, input_storage, output_storage;
+    std::vector<TensorWrapper> input_tensors, output_tensors;
+    std::vector<NVTETensor> inputs, outputs;
+    input_tensors.reserve(kNumTensors);
+    output_tensors.reserve(kNumTensors);
+    for (size_t i = 0; i < kNumTensors; i++) {
+      input_data.push_back(cuda_alloc<uint8_t>(kDataSize));
+      output_data.push_back(cuda_alloc<uint8_t>(kDataSize));
+      input_storage.push_back(cuda_alloc<uint8_t>(kScaleSize + kAlignmentOffsetBytes));
+      output_storage.push_back(cuda_alloc<uint8_t>(kScaleSize + kAlignmentOffsetBytes));
+      uint8_t* input_scales =
+          input_storage.back().get() + (i == 0 && offset_input ? kAlignmentOffsetBytes : 0);
+      uint8_t* output_scales =
+          output_storage.back().get() + (i == 0 && !offset_input ? kAlignmentOffsetBytes : 0);
+      input_tensors.emplace_back(NVTE_MXFP8_1D_SCALING);
+      output_tensors.emplace_back(NVTE_MXFP8_1D_SCALING);
+      input_tensors.back().set_rowwise_data(input_data.back().get(), DType::kFloat8E4M3,
+                                            data_shape);
+      input_tensors.back().set_rowwise_scale_inv(input_scales, DType::kFloat8E8M0, scale_shape);
+      output_tensors.back().set_rowwise_data(output_data.back().get(), DType::kFloat8E4M3,
+                                             data_shape);
+      output_tensors.back().set_rowwise_scale_inv(output_scales, DType::kFloat8E8M0, scale_shape);
+      output_tensors.back().set_with_gemm_swizzled_scales(true);
+      inputs.push_back(input_tensors.back().data());
+      outputs.push_back(output_tensors.back().data());
+    }
+    EXPECT_THROW(
+        nvte_multi_tensor_swizzle_scaling_factors(inputs.data(), outputs.data(), inputs.size(), 0),
+        std::runtime_error);
   }
 }
 
@@ -308,17 +458,9 @@ void performTestGroupedSwizzleMXFP8(const int num_tensors, const size_t M, const
                  num_tensors * col_numel);
 }
 
-// Sets NVTE_MXFP8_PER_TILE_SWIZZLE while it lives, so that MXFP8 swizzles use the per-tile
-// kernels (enable) or the default ones.
-class PerTileSwizzle {
- public:
-  explicit PerTileSwizzle(bool enable) {
-    setenv("NVTE_MXFP8_PER_TILE_SWIZZLE", enable ? "1" : "0", 1);
-  }
-  ~PerTileSwizzle() { unsetenv("NVTE_MXFP8_PER_TILE_SWIZZLE"); }
-};
-
-class SwizzleTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool, bool>> {};
+class SwizzleTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool>> {};
 
 
 TEST_P(SwizzleTestSuite, TestSwizzle) {
@@ -328,7 +470,6 @@ TEST_P(SwizzleTestSuite, TestSwizzle) {
   const auto num_tiles = std::get<0>(GetParam());
   const auto scaling_mode = std::get<1>(GetParam());
   const auto transa = std::get<2>(GetParam());
-  const PerTileSwizzle per_tile_swizzle(std::get<3>(GetParam()));
 
   performTestSwizzle1D(num_tiles.first, num_tiles.second,
                        scaling_mode.first, scaling_mode.second,
@@ -1007,14 +1148,15 @@ std::vector<std::pair<int, int>> num_tiles = {
   {65, 257},
   {65, 258},
   {65, 259},
-  // Additional narrow-path coverage: narrow_k (row) when num_tiles_K < 32,
-  // narrow_m (col) when num_tiles_M < 32.
-  {1, 4},     // narrow_k with 4 K-tiles
-  {1, 8},     // narrow_k with 8 K-tiles
-  {4, 1},     // narrow_m with 4 M-tiles
-  {8, 1},     // narrow_m with 8 M-tiles
-  {31, 1},    // narrow_m at boundary (31 < TB_DIM=32)
-  {1, 31},    // narrow_k at boundary (31 < TB_DIM=32)
+  {1, 4},
+  {1, 8},
+  {4, 1},
+  {8, 1},
+  {31, 1},
+  {1, 31},
+  {2, 63},    // Above 30 KiB: regular fallback.
+  {2, 64},    // Above 32 KiB: regular fallback.
+  {16, 56},   // 28.5 KiB: rowwise full-width kernel.
   {1600, 1},  // MXFP8: more row-wise tiles than one CTA per tile allows
 };
 
@@ -1051,8 +1193,7 @@ INSTANTIATE_TEST_SUITE_P(
   ::testing::Combine(
     ::testing::ValuesIn(num_tiles),
     ::testing::ValuesIn(scaling_mode),
-    ::testing::ValuesIn(transa),
-    ::testing::Values(false, true)
+    ::testing::ValuesIn(transa)
   ),
   [](const testing::TestParamInfo<SwizzleTestSuite::ParamType>& info) {
     std::string name = "ntiles" +
@@ -1060,8 +1201,7 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<0>(info.param).second) + "smode" +
       std::to_string(std::get<1>(info.param).first) + "X"+
       std::to_string(std::get<1>(info.param).second) + "trans" +
-      std::to_string(std::get<2>(info.param)) +
-      (std::get<3>(info.param) ? "PerTile" : "");
+      std::to_string(std::get<2>(info.param));
     return name;
     });
 

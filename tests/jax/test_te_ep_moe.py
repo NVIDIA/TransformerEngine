@@ -122,6 +122,8 @@ if get_device_compute_capability(0) < 100:
 
 from transformer_engine.jax.flax import _MoEBlock as MoEBlock
 from transformer_engine.jax.moe import (
+    RouterComputationInfo,
+    RoutingMapInfo,
     get_moe_recv_capacity_per_rank,
     moe,
     record_ep_bootstrap_signature_for_moe,
@@ -288,11 +290,14 @@ def _pure_jax_moe_reference(
     wi,
     wo,
     expert_bias=None,
+    hash_input_ids=None,
+    hash_tid2eid=None,
     *,
     num_experts,
     num_experts_per_tok,
     aux_loss_coeff: float = 0.0,
     score_function: str = "softmax",
+    scaling_factor: float = 1.0,
 ):
     B, S, H = x.shape
     T = B * S
@@ -302,7 +307,14 @@ def _pure_jax_moe_reference(
     gate_kernel_cast = gate_kernel.astype(x.dtype)
     logits = (x_2d @ gate_kernel_cast).astype(jnp.float32)  # [T, E]
 
-    if score_function == "softmax":
+    if hash_input_ids is not None:
+        if score_function != "sqrtsoftplus" or hash_tid2eid is None:
+            raise ValueError("Hash reference requires sqrtsoftplus and hash_tid2eid.")
+        scores = jnp.sqrt(jax.nn.softplus(logits))
+        top_indices = hash_tid2eid.astype(jnp.int32)[hash_input_ids.reshape(-1)]
+        weights = jnp.take_along_axis(scores, top_indices, axis=-1)
+        weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
+    elif score_function == "softmax":
         # use_pre_softmax=False: topk on raw logits, then softmax over K.
         top_logits, top_indices = jax.lax.top_k(logits, k=K)
         weights = jax.nn.softmax(top_logits, axis=-1)  # [T, K], sums to 1
@@ -319,6 +331,7 @@ def _pure_jax_moe_reference(
             weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
     else:
         raise ValueError(f"Unsupported score_function={score_function!r}")
+    weights = weights * scaling_factor
 
     routing_weights_full = jnp.zeros((T, num_experts), dtype=jnp.float32)
     routing_weights_full = routing_weights_full.at[jnp.arange(T)[:, None], top_indices].set(weights)
@@ -338,6 +351,8 @@ def _pure_jax_moe_reference(
     output = output_2d.reshape(B, S, H).astype(x.dtype)
 
     if aux_loss_coeff > 0.0:
+        if hash_input_ids is not None:
+            raise ValueError("Hash routing does not use auxiliary loss.")
         # tex.fused_moe_aux_loss formula (matches the same
         # reference_aux_loss helper from test_fused_router.py). The
         # "aux scores" use the same score_function but always with
@@ -373,6 +388,7 @@ def _make_block(
     aux_loss_coeff=0.0,
     use_expert_routing_bias=False,
     score_function="softmax",
+    scaling_factor=1.0,
     expert_bias_init=None,
     input_axes=("batch", None, None),
     quantization_recipe=None,
@@ -390,6 +406,7 @@ def _make_block(
         aux_loss_coeff=aux_loss_coeff,
         use_expert_routing_bias=use_expert_routing_bias,
         score_function=score_function,
+        scaling_factor=scaling_factor,
         dtype=DTYPE,
         input_axes=input_axes,
         quantization_recipe=quantization_recipe,
@@ -455,9 +472,9 @@ def _init_apply(block, mesh, x, key):
         x_sh = _shard_inputs(x, mesh)
         variables = jax.jit(block.init)(key, x_sh)
         jax.block_until_ready(jax.tree_util.tree_leaves(variables)[0])
-        output, aux, _trt = jax.jit(block.apply)(variables, x_sh)
+        output, aux, _trt, expert_counts = jax.jit(block.apply)(variables, x_sh)
         jax.block_until_ready(output)
-    return variables, output, aux
+    return variables, output, aux, expert_counts
 
 
 def _grad_step(
@@ -478,7 +495,7 @@ def _grad_step(
         x_sh = _shard_inputs(x, mesh)
 
         def loss_fn(variables, x):
-            output, aux, _trt = block.apply(variables, x)
+            output, aux, _trt, _expert_counts = block.apply(variables, x)
             loss = jnp.mean(output.astype(jnp.float32) ** 2)
             if include_aux and aux is not None:
                 loss = loss + aux.astype(jnp.float32)
@@ -497,7 +514,7 @@ def _grad_aux_only(block, variables, mesh, x):
         x_sh = _shard_inputs(x, mesh)
 
         def aux_only(variables, x):
-            _, aux, _trt = block.apply(variables, x)
+            _, aux, _trt, _expert_counts = block.apply(variables, x)
             return aux.astype(jnp.float32)
 
         grads = jax.jit(jax.grad(aux_only))(variables, x_sh)
@@ -635,10 +652,10 @@ def test_quantized_weight_gather_matches_full_precision_gather(
     x = _make_inputs(jax.random.PRNGKey(41))
     baseline = make_block(quantization_recipe=MXFP8BlockScaling())
     quantized_ag = make_block(quantization_recipe=MXFP8BlockScaling(), quant_before_fsdp_ag=True)
-    variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(42))
+    variables, baseline_out, _, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(42))
     with _ctx(mesh):
         x_sh = _shard_inputs(x, mesh)
-        quantized_out, _, _ = jax.jit(quantized_ag.apply)(variables, x_sh)
+        quantized_out, _, _, _ = jax.jit(quantized_ag.apply)(variables, x_sh)
         quantized_out.block_until_ready()
     np.testing.assert_allclose(
         _to_global_numpy(quantized_out, mesh).astype(np.float32),
@@ -670,15 +687,15 @@ def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, make
         mesh_resource=MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
     )
     x = _make_inputs(jax.random.PRNGKey(51))
-    variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))
+    variables, baseline_out, _, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))
     baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(LOGICAL_AXIS_RULES):
         with global_shard_guard(None):
             x_sh = _shard_inputs(x, mesh)
-            candidate_out, _, _ = jax.jit(candidate.apply)(variables, x_sh)
+            candidate_out, _, _, _ = jax.jit(candidate.apply)(variables, x_sh)
 
             def loss_fn(variables, inputs):
-                output, _, _ = candidate.apply(variables, inputs)
+                output, _, _, _ = candidate.apply(variables, inputs)
                 return jnp.mean(output.astype(jnp.float32) ** 2)
 
             candidate_grads, candidate_dx = jax.jit(jax.grad(loss_fn, argnums=(0, 1)))(
@@ -728,7 +745,7 @@ class TestTeEpMoeForward:
     def test_forward(self, mesh, config, quantization, make_block):
         block = make_block(**config, quantization_recipe=_quantization_recipe(quantization))
         x = _make_inputs(jax.random.PRNGKey(0))
-        variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(1))
+        variables, output, aux, expert_counts = _init_apply(block, mesh, x, jax.random.PRNGKey(1))
 
         # Shape / dtype / finiteness (cheap; on the local shard).
         assert output.shape == x.shape
@@ -736,6 +753,10 @@ class TestTeEpMoeForward:
         out_local = np.asarray(jax.device_get(output.addressable_data(0)))
         assert np.all(np.isfinite(out_local)), "output has NaN/Inf"
         assert aux is None, "aux_loss should be None when aux_loss_coeff == 0"
+        counts_np = np.asarray(jax.device_get(expert_counts))
+        assert expert_counts.shape == (NUM_EXPERTS,)
+        assert expert_counts.dtype == jnp.int32
+        assert int(counts_np.sum()) == BATCH * SEQ * TOPK
 
         # Numerical parity (replicated global view -> single rank's numpy).
         params_np = _params_global_numpy(variables, mesh)
@@ -759,6 +780,263 @@ class TestTeEpMoeForward:
         )
 
 
+class TestTeEpMoeHashRouting:
+    """DeepSeek-V4 hash selection with differentiable gate weights."""
+
+    def test_hash_forward_and_backward(self, mesh, make_block, use_cudnn_fusion):
+        vocab_size = 64
+        scaling_factor = 1.5
+        token_ids = jnp.arange(BATCH * SEQ, dtype=jnp.int32).reshape(BATCH, SEQ) % vocab_size
+        vocab_ids = jnp.arange(vocab_size, dtype=jnp.int32)
+        tid2eid = jnp.stack(
+            [vocab_ids % NUM_EXPERTS, (vocab_ids + 3) % NUM_EXPERTS],
+            axis=-1,
+        )
+        block = make_block(
+            score_function="sqrtsoftplus",
+            scaling_factor=scaling_factor,
+        )
+        x = _make_inputs(jax.random.PRNGKey(30))
+
+        with _ctx(mesh):
+            x_sh = _shard_inputs(x, mesh)
+            ids_sh = jax.device_put(
+                token_ids,
+                NamedSharding(mesh, P((FSDP_AXIS, EP_AXIS), None)),
+            )
+            table_sh = jax.device_put(tid2eid, NamedSharding(mesh, P()))
+            variables = jax.jit(block.init)(jax.random.PRNGKey(31), x_sh)
+            params = {
+                name: _unwrap(variables["params"][name]) for name in ("gate_kernel", "wi", "wo")
+            }
+
+            def externally_routed_moe(params, activations, token_ids_arg, tid2eid_arg):
+                logits = jnp.einsum(
+                    "bsh,he->bse",
+                    activations,
+                    params["gate_kernel"].astype(activations.dtype),
+                ).astype(jnp.float32)
+                scores = jnp.sqrt(jax.nn.softplus(logits))
+                routing_indices = tid2eid_arg[token_ids_arg]
+                routing_weights = jnp.take_along_axis(scores, routing_indices, axis=-1)
+                routing_weights = routing_weights / (
+                    routing_weights.sum(axis=-1, keepdims=True) + 1e-20
+                )
+                routing_weights = routing_weights * scaling_factor
+                return moe(
+                    activations,
+                    RoutingMapInfo(
+                        routing_indices=routing_indices,
+                        routing_weights=routing_weights,
+                    ),
+                    params["wi"],
+                    params["wo"],
+                    num_experts=NUM_EXPERTS,
+                    input_axes=("batch", None, None),
+                    wi_kernel_axes=("exp", "embed", "mlp"),
+                    wo_kernel_axes=("exp", "mlp", "embed"),
+                    dtype=DTYPE,
+                    collect_expert_counts=True,
+                    use_cudnn_fusion=use_cudnn_fusion,
+                )
+
+            output, aux, _trt, expert_counts = jax.jit(externally_routed_moe)(
+                params, x_sh, ids_sh, table_sh
+            )
+            jax.block_until_ready(output)
+            assert aux is None, "aux_loss must be None for caller-supplied routing"
+
+            def te_loss(params, activations, token_ids_arg, tid2eid_arg):
+                out, _aux, _total_recv, _counts = externally_routed_moe(
+                    params, activations, token_ids_arg, tid2eid_arg
+                )
+                return jnp.mean(out.astype(jnp.float32) ** 2)
+
+            grads_te, grad_x_te = jax.jit(jax.grad(te_loss, argnums=(0, 1)))(
+                params, x_sh, ids_sh, table_sh
+            )
+
+        params_np = _params_global_numpy(variables, mesh)
+        x_np = np.asarray(jax.device_get(x))
+        ids_np = np.asarray(jax.device_get(token_ids))
+        table_np = np.asarray(jax.device_get(tid2eid))
+
+        def ref_loss(params, activations):
+            out, _ = _pure_jax_moe_reference(
+                activations,
+                params["gate_kernel"],
+                params["wi"],
+                params["wo"],
+                hash_input_ids=jnp.asarray(ids_np),
+                hash_tid2eid=jnp.asarray(table_np),
+                num_experts=NUM_EXPERTS,
+                num_experts_per_tok=TOPK,
+                score_function="sqrtsoftplus",
+                scaling_factor=scaling_factor,
+            )
+            return jnp.mean(out.astype(jnp.float32) ** 2)
+
+        ref_params = {name: jnp.asarray(params_np[name]) for name in ("gate_kernel", "wi", "wo")}
+        grads_ref, grad_x_ref = jax.jit(jax.grad(ref_loss, argnums=(0, 1)))(
+            ref_params, jnp.asarray(x_np)
+        )
+
+        np.testing.assert_allclose(
+            _to_global_numpy(output, mesh).astype(np.float32),
+            np.asarray(
+                _pure_jax_moe_reference(
+                    jnp.asarray(x_np),
+                    ref_params["gate_kernel"],
+                    ref_params["wi"],
+                    ref_params["wo"],
+                    hash_input_ids=jnp.asarray(ids_np),
+                    hash_tid2eid=jnp.asarray(table_np),
+                    num_experts=NUM_EXPERTS,
+                    num_experts_per_tok=TOPK,
+                    score_function="sqrtsoftplus",
+                    scaling_factor=scaling_factor,
+                )[0]
+            ).astype(np.float32),
+            **FWD_TOLERANCE["bf16"],
+        )
+        expected_counts = np.bincount(table_np[ids_np].reshape(-1), minlength=NUM_EXPERTS)
+        np.testing.assert_array_equal(np.asarray(jax.device_get(expert_counts)), expected_counts)
+
+        # Use a slightly larger tolerance as the numerical difference is just over 1e-7.
+        grad_ffn_tolerance_bf16 = {"atol": 2e-7, "rtol": 1e-7}
+
+        for name in ("gate_kernel", "wi", "wo"):
+            np.testing.assert_allclose(
+                _to_global_numpy(grads_te[name], mesh).astype(np.float32),
+                np.asarray(jax.device_get(grads_ref[name])).astype(np.float32),
+                **(
+                    GRAD_GATE_TOLERANCE["bf16"]
+                    if name == "gate_kernel"
+                    else grad_ffn_tolerance_bf16
+                ),
+            )
+        np.testing.assert_allclose(
+            _to_global_numpy(grad_x_te, mesh).astype(np.float32),
+            np.asarray(jax.device_get(grad_x_ref)).astype(np.float32),
+            **grad_ffn_tolerance_bf16,
+        )
+
+
+class TestTeEpMoeRouterInfo:
+    """Functional ``moe(router_info=...)`` API surface."""
+
+    def test_router_computation_matches_block(self, mesh, make_block, use_cudnn_fusion):
+        """Calling ``moe`` with a RouterComputationInfo reproduces _MoEBlock."""
+        scaling_factor = 1.5
+        aux_loss_coeff = 1e-2
+        block = make_block(
+            score_function="sigmoid",
+            use_expert_routing_bias=True,
+            expert_bias_init=_strong_expert_bias_init,
+            scaling_factor=scaling_factor,
+            aux_loss_coeff=aux_loss_coeff,
+        )
+        x = _make_inputs(jax.random.PRNGKey(40))
+        variables, out_block, aux_block, counts_block = _init_apply(
+            block, mesh, x, jax.random.PRNGKey(41)
+        )
+        params = {name: _unwrap(p) for name, p in variables["params"].items()}
+
+        def functional_moe(params, activations):
+            router_info = RouterComputationInfo(
+                gate_kernel=params["gate_kernel"],
+                num_experts_per_tok=TOPK,
+                expert_bias=params["expert_bias"],
+                score_function="sigmoid",
+                scaling_factor=scaling_factor,
+                aux_loss_coeff=aux_loss_coeff,
+            )
+            return moe(
+                activations,
+                router_info,
+                params["wi"],
+                params["wo"],
+                num_experts=NUM_EXPERTS,
+                input_axes=("batch", None, None),
+                dtype=DTYPE,
+                use_cudnn_fusion=use_cudnn_fusion,
+            )
+
+        with _ctx(mesh):
+            x_sh = _shard_inputs(x, mesh)
+            out_fn, aux_fn, _trt, counts_fn = jax.jit(functional_moe)(params, x_sh)
+            jax.block_until_ready(out_fn)
+
+        np.testing.assert_allclose(
+            _to_global_numpy(out_fn, mesh).astype(np.float32),
+            _to_global_numpy(out_block, mesh).astype(np.float32),
+            **FWD_TOLERANCE["bf16"],
+        )
+        assert aux_fn is not None and aux_block is not None
+        np.testing.assert_allclose(
+            float(_to_global_numpy(aux_fn, mesh)),
+            float(_to_global_numpy(aux_block, mesh)),
+            **AUX_TOLERANCE,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(jax.device_get(counts_fn)), np.asarray(jax.device_get(counts_block))
+        )
+
+    def test_router_info_pytree_leaves(self):
+        """Only arrays are pytree leaves; router settings stay static."""
+        gate_kernel = jnp.zeros((HIDDEN, NUM_EXPERTS), DTYPE)
+        expert_bias = jnp.zeros((NUM_EXPERTS,), jnp.float32)
+        router = RouterComputationInfo(
+            gate_kernel=gate_kernel,
+            num_experts_per_tok=TOPK,
+            expert_bias=expert_bias,
+            score_function="sigmoid",
+        )
+        leaves = jax.tree_util.tree_leaves(router)
+        assert len(leaves) == 2
+        assert leaves[0] is gate_kernel and leaves[1] is expert_bias
+
+        indices = jnp.zeros((BATCH, SEQ, TOPK), jnp.int32)
+        weights = jnp.ones((BATCH, SEQ, TOPK), jnp.float32)
+        leaves = jax.tree_util.tree_leaves(
+            RoutingMapInfo(routing_indices=indices, routing_weights=weights)
+        )
+        assert len(leaves) == 2
+        assert leaves[0] is indices and leaves[1] is weights
+
+    def test_rejects_unknown_router_info(self):
+        x = jnp.zeros((BATCH, SEQ, HIDDEN), DTYPE)
+        wi = jnp.zeros((NUM_EXPERTS, HIDDEN, 2 * INTER), DTYPE)
+        wo = jnp.zeros((NUM_EXPERTS, INTER, HIDDEN), DTYPE)
+        with pytest.raises(TypeError, match="router_info"):
+            moe(
+                x,
+                object(),
+                wi,
+                wo,
+                num_experts=NUM_EXPERTS,
+                mesh_resource=MeshResource(ep_resource=EP_AXIS),
+            )
+
+    def test_routing_map_shape_validation(self):
+        x = jnp.zeros((BATCH, SEQ, HIDDEN), DTYPE)
+        wi = jnp.zeros((NUM_EXPERTS, HIDDEN, 2 * INTER), DTYPE)
+        wo = jnp.zeros((NUM_EXPERTS, INTER, HIDDEN), DTYPE)
+        indices = jnp.zeros((BATCH, SEQ, TOPK), jnp.int32)
+        with pytest.raises(ValueError, match="routing_weights"):
+            moe(
+                x,
+                RoutingMapInfo(
+                    routing_indices=indices,
+                    routing_weights=jnp.ones((BATCH, SEQ, TOPK + 1), jnp.float32),
+                ),
+                wi,
+                wo,
+                num_experts=NUM_EXPERTS,
+                mesh_resource=MeshResource(ep_resource=EP_AXIS),
+            )
+
+
 class TestTeEpMoeBackward:
     """Per-config backward correctness in a single run: per-tensor
     grads finite, non-zero AND parity vs the pure-JAX reference."""
@@ -768,7 +1046,7 @@ class TestTeEpMoeBackward:
     def test_backward(self, mesh, config, quantization, make_block):
         block = make_block(**config, quantization_recipe=_quantization_recipe(quantization))
         x = _make_inputs(jax.random.PRNGKey(2))
-        variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(3))
+        variables, _, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(3))
         grads_te, grad_x_te = _grad_step(block, variables, mesh, x)
 
         # Reference grads via jax.grad over the pure-JAX MoE with the
@@ -850,7 +1128,7 @@ def test_ep_checkpoint_names(mesh, monkeypatch, make_block):
         dispatch_checkpoint_name="saved_dispatch",
     )
     inputs = _make_inputs(jax.random.PRNGKey(34))
-    variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(35))
+    variables, output, _, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(35))
     grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
 
     assert len(named_values["saved_dispatch"]) >= 2
@@ -877,7 +1155,7 @@ def test_explicitly_disabled_fusion_with_native_weights(
     monkeypatch.setattr(moe_module, "_select_cudnn_jax_fusion", unexpected_selection)
     block = make_block(quantization_recipe=MXFP8BlockScaling(), use_cudnn_fusion=False)
     x = _make_inputs(jax.random.PRNGKey(53))
-    variables, baseline_output, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(54))
+    variables, baseline_output, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(54))
     baseline_grads, baseline_dx = _grad_step(block, variables, mesh, x)
     flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
     original_moe = flax_moe.moe
@@ -892,7 +1170,7 @@ def test_explicitly_disabled_fusion_with_native_weights(
 
     monkeypatch.setattr(flax_moe, "moe", native_moe)
     with _ctx(mesh):
-        output, _, _ = jax.jit(block.apply)(variables, _shard_inputs(x, mesh))
+        output, _, _, _ = jax.jit(block.apply)(variables, _shard_inputs(x, mesh))
         output.block_until_ready()
     grads, dx = _grad_step(block, variables, mesh, x)
     np.testing.assert_array_equal(
@@ -942,7 +1220,9 @@ class TestTeEpMoeCudnnCutedslFusion:
         moe_module = importlib.import_module("transformer_engine.jax.moe")
         with monkeypatch.context() as baseline_patch:
             baseline_patch.setattr(moe_module, "_select_cudnn_jax_fusion", lambda _: False)
-            variables, baseline_output, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))
+            variables, baseline_output, _, _ = _init_apply(
+                baseline, mesh, x, jax.random.PRNGKey(52)
+            )
             baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
 
         if native_layout:
@@ -959,7 +1239,7 @@ class TestTeEpMoeCudnnCutedslFusion:
 
             monkeypatch.setattr(flax_moe, "moe", native_moe)
         with _ctx(mesh):
-            output, _, _ = jax.jit(block.apply)(variables, _shard_inputs(x, mesh))
+            output, _, _, _ = jax.jit(block.apply)(variables, _shard_inputs(x, mesh))
             output.block_until_ready()
         grads, dx = _grad_step(block, variables, mesh, x)
         np.testing.assert_array_equal(
@@ -1026,7 +1306,7 @@ class TestTeEpMoeCudnnCutedslFusion:
             quantization_recipe=MXFP8BlockScaling(),
         )
         x = _make_inputs(jax.random.PRNGKey(30))
-        variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(31))
+        variables, output, aux, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(31))
         assert "glu" in shared_calls, "MoE did not select the shared cuDNN GLU JAX API"
         grads, grad_x = _grad_step(block, variables, mesh, x)
         assert "dglu" in shared_calls, "MoE VJP did not select the shared cuDNN dGLU JAX API"
@@ -1139,7 +1419,7 @@ class TestTeEpMoeCudnnCutedslFusion:
             dispatch_checkpoint_name="saved_dispatch",
         )
         inputs = _make_inputs(jax.random.PRNGKey(32))
-        variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(33))
+        variables, output, _, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(33))
         grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
 
         assert selected_calls, f"{fused_op_name} was not selected"
@@ -1168,7 +1448,7 @@ class TestTeEpMoeAuxLoss:
         coeff = 1e-2
         block = make_block(aux_loss_coeff=coeff)
         x = _make_inputs(jax.random.PRNGKey(20))
-        variables, _, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(21))
+        variables, _, aux, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(21))
 
         # Shape / dtype / finiteness / magnitude.
         assert aux is not None, "aux_loss should be returned when coeff > 0"
@@ -1211,7 +1491,7 @@ class TestTeEpMoeAuxLoss:
         one pass."""
         block = make_block(aux_loss_coeff=1e-2)
         x = _make_inputs(jax.random.PRNGKey(22))
-        variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(23))
+        variables, _, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(23))
         grads, _ = _grad_step(block, variables, mesh, x, include_aux=True)
         for name in ("gate_kernel", "wi", "wo"):
             g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))

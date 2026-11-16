@@ -9,6 +9,7 @@ import tempfile
 import subprocess
 import sys
 import pathlib
+from unittest.mock import patch
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
 from utils import run_distributed
@@ -958,6 +959,86 @@ def _test_mxfp8_empty_master_shard(dp_group):
                 )
 
 
+def _test_rowwise_master_cast(group, mixed, fragments):
+    rank = torch.distributed.get_rank(group)
+    world = torch.distributed.get_world_size(group)
+    shape = (160, 96)  # Both scale padding and non-tile-aligned logical shapes.
+    full = torch.linspace(-4, 7, 160 * 96, device="cuda").reshape(shape)
+    quantizers = [te.MXFP8Quantizer(te.DType.kFloat8E4M3, rowwise=True, columnwise=False)]
+    if mixed:
+        quantizers.append(te.MXFP8Quantizer(te.DType.kFloat8E4M3, rowwise=True, columnwise=True))
+    weights = [q(full.to(torch.bfloat16)) for q in quantizers]
+    pointers = [(w._rowwise_data.data_ptr(), w._rowwise_scale_inv.data_ptr()) for w in weights]
+    if world == 1:
+        lo, hi = 0, full.numel()
+    elif rank == 0:
+        lo, hi = 0, 17  # Split inside a 32-value block.
+    elif rank == 1:
+        lo, hi = 17, full.numel()
+    else:
+        lo, hi = 0, 0  # No master shard on tail ranks.
+    real_reduce = torch.distributed.all_reduce
+    reduced_sizes = []
+
+    def record_reduce(tensor, *args, **kwargs):
+        reduced_sizes.append(tensor.numel())
+        return real_reduce(tensor, *args, **kwargs)
+
+    for step in range(2):
+        # Also exercise empty ranks in the existing two-rank CI launch.
+        if step == 1 and world > 1:
+            lo, hi = (0, full.numel()) if rank == 0 else (0, 0)
+        master = full + step * 0.25
+        shard = master.flatten()[lo:hi] if lo < hi else None
+        outputs = [
+            (
+                torch.empty(hi - lo, dtype=torch.uint8, device="cuda"),
+                torch.empty(hi - lo, dtype=torch.uint8, device="cuda") if i else None,
+            )
+            for i in range(len(weights))
+        ]
+        reduced_sizes.clear()
+        cast = quantize_master_weights if step == 0 else cast_master_weights_to_fp8
+        with patch("torch.distributed.all_reduce", side_effect=record_reduce):
+            cast(
+                weights,
+                [shard] * len(weights),
+                [lo if shard is not None else None] * len(weights),
+                group,
+                fsdp_shard_model_weights=outputs if fragments else None,
+            )
+        expected_amax = sum(w._rowwise_scale_inv.numel() for w in weights)
+        if mixed:
+            expected_amax += weights[1]._columnwise_scale_inv.numel()
+        assert reduced_sizes == [expected_amax]
+        for idx, (weight, quantizer) in enumerate(zip(weights, quantizers)):
+            expected = quantizer(master.to(torch.bfloat16))
+            for direction in ["rowwise", "columnwise"] if idx else ["rowwise"]:
+                data = getattr(weight, f"_{direction}_data")
+                actual = torch.zeros_like(data).flatten()
+                if lo < hi:
+                    src = (
+                        outputs[idx][direction == "columnwise"]
+                        if fragments
+                        else data.flatten()[lo:hi]
+                    )
+                    actual[lo:hi].copy_(src)
+                real_reduce(actual, op=torch.distributed.ReduceOp.MAX, group=group)
+                torch.testing.assert_close(
+                    actual.view(shape), getattr(expected, f"_{direction}_data"), rtol=0, atol=0
+                )
+                scale = getattr(weight, f"_{direction}_scale_inv")
+                ref = getattr(expected, f"_{direction}_scale_inv")
+                rows, cols = (160, 3) if direction == "rowwise" else (5, 96)
+                torch.testing.assert_close(scale[:rows, :cols], ref[:rows, :cols], rtol=0, atol=0)
+            assert pointers[idx] == (
+                weight._rowwise_data.data_ptr(),
+                weight._rowwise_scale_inv.data_ptr(),
+            )
+        assert weights[0]._columnwise_data is None
+        assert weights[0]._columnwise_scale_inv is None
+
+
 def run_parallel_tests() -> None:
     """Run parallel tests"""
 
@@ -1000,6 +1081,9 @@ def run_parallel_tests() -> None:
     if is_mxfp8_available():
         print("starting mxfp8 empty master shard test")
         _test_mxfp8_empty_master_shard(dp_group)
+        for mixed in (False, True):
+            for fragments in (False, True):
+                _test_rowwise_master_cast(dp_group, mixed, fragments)
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:
         print("starting cast master weights to nvfp4 test")

@@ -302,10 +302,12 @@ void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **
  *  This function is experimental and the API is not stable.
  *
  *  For each tensor split, compute the maximum absolute value (amax)
- *  and populate the amax of the corresponding output tensor.
+ *  and populate the amax buffers of the corresponding output tensor.
+ *  All output tensors must have the same tensor format, and the
+ *  tensor format determines which amaxes are computed.
  *
  *  \param[in]      input            Input tensor.
- *  \param[in,out]  outputs          Array of output tensors. Only the amax is updated.
+ *  \param[in,out]  outputs          Array of output tensors. Only amax buffers are updated.
  *  \param[in]      split_sections   Size of each tensor split along dimension 0.
  *  \param[in]      num_tensors      Number of tensor splits.
  *  \param[in]      stream           CUDA stream used for the operation.
@@ -313,9 +315,13 @@ void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **
 void nvte_group_amax(const NVTETensor input, NVTETensor *outputs, const size_t *split_sections,
                      size_t num_tensors, cudaStream_t stream);
 
-/*! \brief Grouped-tensor amax without doing hadamard transform.
+/*! \brief Graph-safe variant of nvte_group_amax for grouped tensors.
  *
  *  This function is experimental and the API is not stable.
+ *
+ *  Compute the amax for each tensor in the group and populate the amax
+ *  buffers of the output tensor. The output tensor format determines
+ *  which amaxes are computed.
  *
  *  \param[in]      input            NVTEGroupedTensor Input tensor.
  *  \param[in,out]  output           NVTEGroupedTensor Output tensor.
