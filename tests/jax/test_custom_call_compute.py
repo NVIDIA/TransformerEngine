@@ -851,6 +851,25 @@ class TestQuantize:
         )
 
 
+@pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16, jnp.float32])
+@pytest_parametrize_wrapper("input_shape", [(2, 16, 512), (8, 16, 256)])
+def test_mxfp8_rowwise_quantize_short_sequence(in_dtype, input_shape):
+    """Rowwise-only MXFP8 quantize must not require the colwise axis to be a multiple of 32."""
+    if not is_mxfp8_supported:
+        pytest.skip(mxfp8_unsupported_reason)
+
+    key = jax.random.PRNGKey(0)
+    x = jax.random.uniform(key, input_shape, in_dtype)
+    quantizer = QuantizerFactory.create(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        q_dtype=jnp.float8_e4m3fn,
+        q_layout=QuantizeLayout.ROWWISE,
+    )
+    out = tex.quantize(x, quantizer=quantizer)
+    assert isinstance(out, ScaledTensor1x) and not out.is_colwise
+    assert_dequantized_scaled_tensor(out, x)
+
+
 @pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16])
 @pytest_parametrize_wrapper("q_dtype", [jnp.float4_e2m1fn])
 @pytest_parametrize_wrapper("input_shape,flatten_axis", ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)

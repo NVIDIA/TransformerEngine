@@ -170,16 +170,24 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 and post_rht_amax_aval.size == 1
             ), "post_rht_amax must be of dtype float32"
 
-        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
-            scaling_mode
-        ).get_scale_shape_2x(
+        # Only compute the colwise scale shape when a colwise output is requested. The
+        # colwise shape check imposes alignment on an unused axis (e.g. MXFP8 requires the
+        # colwise axis to be a multiple of 32), which must not constrain rowwise-only quantize.
+        rowwise_scale_inv_shape = ScalingMode(scaling_mode).get_scale_shape(
             x_aval.shape,
+            is_colwise=False,
             is_padded=not is_outer,
             flatten_axis=flatten_axis,
             broadcast_2d_scale_shape_to_1d=True,
         )
 
         if QuantizeLayout(q_layout).has_colwise:
+            _, colwise_scale_inv_shape = ScalingMode(scaling_mode).get_scale_shape_2x(
+                x_aval.shape,
+                is_padded=not is_outer,
+                flatten_axis=flatten_axis,
+                broadcast_2d_scale_shape_to_1d=True,
+            )
             if ScalingMode(scaling_mode).is_colwise_transposed:
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=flatten_axis)
             else:
@@ -334,15 +342,25 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             stochastic_rounding=stochastic_rounding,
             use_rht=use_rht,
         )
-        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
-            scaling_mode
-        ).get_scale_shape_2x(
-            x.shape, is_padded=False, flatten_axis=flatten_axis, broadcast_2d_scale_shape_to_1d=True
+        # Compute the colwise scale shape only when a colwise output is requested so that a
+        # rowwise-only quantize does not inherit the colwise axis alignment constraint.
+        rowwise_scale_inv_shape = ScalingMode(scaling_mode).get_scale_shape(
+            x.shape,
+            is_colwise=False,
+            is_padded=False,
+            flatten_axis=flatten_axis,
+            broadcast_2d_scale_shape_to_1d=True,
         )
         scale_inv = jax.lax.slice(
             scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
         )
         if q_layout.has_colwise:
+            _, colwise_scale_inv_shape = ScalingMode(scaling_mode).get_scale_shape_2x(
+                x.shape,
+                is_padded=False,
+                flatten_axis=flatten_axis,
+                broadcast_2d_scale_shape_to_1d=True,
+            )
             colwise_scale_inv = jax.lax.slice(
                 colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
             )
@@ -1450,8 +1468,9 @@ def _grouped_requantize_supported(data, quantizer, dq_dtype):
         and dq_dtype == jnp.bfloat16
         and rows % 128 == 0
         and hidden % 128 == 0
-        # Kernel maps 32-row tiles to grid.y, so rows / 32 must fit the CUDA grid limit.
-        and rows // 32 <= 65535
+        # Fallback kernel maps 128-row tiles to grid.y; keep rows / 128 within the CUDA
+        # grid limit so large receive buffers fall back to grouped_quantize instead.
+        and rows // 128 <= 65535
     )
 
 
