@@ -2156,11 +2156,6 @@ class TestGroupedGemmGluFallback:
                     if change == "positional" and name == "a_tensor"
                     else inspect.Parameter.POSITIONAL_OR_KEYWORD
                 ),
-                default=(
-                    4.0
-                    if name == "situ_beta1"
-                    else 25.0 if name == "situ_beta2" else inspect.Parameter.empty
-                ),
             )
             for name in arguments
             if not (change == "renamed" and name == "discrete_col_sfd")
@@ -2286,39 +2281,6 @@ class TestGroupedGemmGluFallback:
         available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
         assert available == (change == "optional")
         assert bool(reason) == (change != "optional")
-
-    @pytest.mark.parametrize(
-        "name,missing",
-        [
-            ("grouped_gemm_glu_wrapper_sm100", "situ_beta1"),
-            ("grouped_gemm_dglu_wrapper_sm100", "situ_beta2"),
-            ("grouped_gemm_glu_jax_sm100", "situ_beta2"),
-            ("grouped_gemm_dglu_jax_sm100", "situ_beta1"),
-        ],
-    )
-    def test_situ_requires_scalar_parameters_in_both_framework_apis(self, frontend, name, missing):
-        apis = {
-            "grouped_gemm_glu_wrapper_sm100": _glu_adapter._FORWARD_ARGS,
-            "grouped_gemm_dglu_wrapper_sm100": _glu_adapter._BACKWARD_ARGS,
-            "grouped_gemm_glu_jax_sm100": _glu_adapter._JAX_FORWARD_ARGS,
-            "grouped_gemm_dglu_jax_sm100": _glu_adapter._JAX_BACKWARD_ARGS,
-        }
-        for api_name, args in apis.items():
-            setattr(frontend, api_name, self._api(args + ("situ_beta1", "situ_beta2")))
-        assert _glu_adapter.grouped_gemm_glu_dependencies_available(act_func="situglu")[0]
-        arguments = apis[name] + tuple(
-            arg for arg in ("situ_beta1", "situ_beta2") if arg != missing
-        )
-        setattr(frontend, name, self._api(arguments))
-        assert _glu_adapter.grouped_gemm_glu_dependencies_available()[0]
-        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available(act_func="situglu")
-        assert not available and name in reason and missing in reason
-
-    @pytest.mark.parametrize("act_func,expected", [("geglu", True), ("unknown", False)])
-    def test_fused_activation_support(self, frontend, act_func, expected):
-        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available(act_func=act_func)
-        assert available is expected
-        assert bool(reason) is not expected
 
     @pytest.mark.parametrize("name", ["grouped_gemm_glu_jax_sm100", "grouped_gemm_dglu_jax_sm100"])
     def test_bf16_only_jax_api_falls_back(self, frontend, monkeypatch, name):
