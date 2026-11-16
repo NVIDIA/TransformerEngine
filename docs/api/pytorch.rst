@@ -70,11 +70,13 @@ Other
 .. autoapiclass:: transformer_engine.pytorch.CudaRNGStatesTracker()
   :members: reset, get_states, set_states, add, fork
 
+
 .. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
 
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
+
 
 .. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
 
