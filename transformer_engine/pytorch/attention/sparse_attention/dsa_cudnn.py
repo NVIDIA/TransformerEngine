@@ -42,7 +42,8 @@ def _validate_tensors(reference, bf16, fp32, cu_seqlens, cu_seqlens_comp):
     """Check metadata without copying packed sequence offsets to the CPU.
 
     Callers own prefix contents: start at zero, monotonic, final offsets equal
-    valid row counts, and compressed lengths floor(length / ratio).
+    valid query/local KV and compressed KV token counts, respectively, and
+    compressed lengths floor(length / ratio).
     """
     if not reference.is_cuda or torch.cuda.get_device_capability(reference.device) not in (
         (10, 0),
@@ -133,10 +134,11 @@ def compress(
     bias added to gate scores before the compression softmax.
     coff is 2 for overlapping compression, 1 otherwise. Sequence prefixes are
     CUDA INT32 [B+1]; compressed segment lengths are floor(length / ratio).
-    Returns [total_comp, D]. Per-segment tails are dropped by cuDNN.
+    Returns [total_comp, D]. Trailing input tokens that do not fill a complete
+    block are excluded from compression.
 
-    total_comp specifies output capacity; only entries before
-    cu_seqlens_comp[-1] are valid.
+    total_comp specifies output capacity. Only outputs for compressed KV token
+    indices below cu_seqlens_comp[-1] are valid; the remaining output is padding.
     """
     if ratio <= 0 or total_comp < 0:
         raise ValueError("ratio must be positive and total_comp nonnegative.")
@@ -169,21 +171,22 @@ def select_indices(
     max_compressed_seqlen: int,
     scale: Optional[float] = None,
 ) -> torch.Tensor:
-    """Select compressed rows with cuDNN's combined index-score + Top-K operation.
+    """Select compressed KV tokens with cuDNN's combined index-score + Top-K operation.
 
     Inputs are the indexer's projected Q/K/head weights, after compression/RoPE.
     Unlike the Indexer module, this operation does not project or compress inputs.
     query [T,H,128], compressed_key [Tc,128], weights [T,H]; H=32 or 64.
     cu_seqlens/cu_seqlens_comp are CUDA INT32 [B+1] token/compressed prefixes.
     Full packed-sequence prefill only: causal timeline offsets start at zero.
-    Returns INT32 [T,top_k] indices into compressed_key's global packed rows;
-    -1 denotes an invalid slot. These are NOT IDs into local+compressed KV.
+    Returns INT32 [T,top_k] global compressed KV token indices into packed
+    compressed_key, with one list per query token; -1 denotes an invalid entry.
+    These indices address compressed KV only, not concatenated local + compressed KV.
 
     Selection is discrete. Scale defaults to 1/sqrt(index head dim). If the
     model also scales by 1/sqrt(index heads), fold that positive factor into
     scale and pass raw projected weights. Scaling in FP32 then rounding
     weights back to activation dtype can change close top-k boundaries. This helper does not
-    implement the separate indexer auxiliary loss or autograd through IDs.
+    implement the separate indexer auxiliary loss or autograd through token indices.
     max_compressed_seqlen is a compile bound and must cover the partial final
     ratio; use ceil(max_seqlen / ratio) even though prefixes count only complete
     compressed blocks.
@@ -326,12 +329,16 @@ def _prepare_sparse_indices(
     indices: Optional[torch.Tensor],
     max_compressed_seqlen: Optional[int],
 ) -> torch.Tensor:
-    """Build one KV-index row per original query token, using its shape/device.
+    """Build a list of KV token indices for each query token.
 
-    Query values are not read. Concatenate causal local-row IDs and compressed
-    IDs offset by T into [T, window_size + compressed_slots]; invalid slots
-    are -1. This prepares attention addresses, whereas select_indices chooses
-    compressed entries from indexer scores.
+    Use query only for its token count T and device; query values are not read.
+    Return INT32 [T, window_size + compressed_slots] indices into concatenated
+    [local_kv; compressed_kv], where local_kv also contains T tokens.
+
+    Combine causal local KV token indices with eligible compressed KV token
+    indices. Compressed indices are global within packed compressed KV, not
+    relative to each sequence, and are offset by T here. Invalid entries are -1.
+    select_indices chooses compressed KV token indices before this offset.
     """
     total_q = query.shape[0]
     device = query.device
@@ -383,10 +390,11 @@ def _prepare_sparse_indices(
 class _SparseAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, query, kv, indices, sink, scale):
-        """Attend query [T,64,D] to concatenated KV [T+Tc,D] using INT32 rows.
+        """Attend query [T,64,D] to concatenated KV [T+Tc,D] using INT32 KV token indices.
 
-        indices [T,window_size+compressed_slots] addresses that KV tensor, with
-        -1 for invalid slots. No compressed query is constructed.
+        indices [T,window_size+compressed_slots] contains one list per query token
+        addressing concatenated local + compressed KV, with -1 for invalid entries.
+        No compressed query is constructed.
         """
         result = _dsa_op("sparse_attention_forward_wrapper")(
             query,
@@ -438,16 +446,17 @@ def sparse_attention(
 
     Full packed-sequence prefill: query [T,H,D], local_kv [T,D], compressed_kv
     [Tc,D], sink [H]. Q/KV have already had the model's norm/RoPE applied.
-    The high-level layer repacks dense SBHD/BSHD inputs to these batch-major
-    packed rows; THD inputs already use packed rows. There is no compressed Q.
+    The high-level layer repacks dense SBHD/BSHD inputs into tokens packed in
+    batch-major order; THD inputs already use this token order. There is no compressed Q.
     cu_seqlens describes both query and local KV; cu_seqlens_comp describes
-    valid compressed rows, excluding capacity padding. Values are the first
-    512 channels of each shared KV row (Q/K width may also be 576).
+    valid compressed KV tokens, excluding output padding. Values are the first
+    512 channels of each shared KV token representation (Q/K width may also be 576).
 
     Local positions satisfy max(0,q-window_size+1) <= k <= q per sequence.
     Compressed block j is eligible when (j+1)*ratio <= q+1. With indices (CSA),
-    use its selected, valid, causal compressed rows; without indices (HCA),
-    use every eligible compressed row. IDs refer to compressed_kv only.
+    use its selected, valid, causal compressed KV tokens; without indices (HCA),
+    use every eligible compressed KV token. Input indices address packed compressed_kv
+    only, before adding the local KV offset.
 
     One cuDNN sparse-attention call normalizes the combined visible entries with
     the sink and provides the KV-only LSE consumed by cuDNN backward. Output is
@@ -465,7 +474,7 @@ def sparse_attention(
     if local_kv.shape[-1] != query.shape[-1] or compressed_kv.shape[-1] != query.shape[-1]:
         raise ValueError("Q and both KV tensors must have the same QK dimension.")
     if local_kv.shape[0] != query.shape[0]:
-        raise ValueError("Full-sequence attention requires one local KV row per query.")
+        raise ValueError("Full-sequence attention requires one local KV token per query token.")
     if sink.shape != (query.shape[1],):
         raise ValueError("sink must have shape [64].")
     if window_size <= 0 or ratio <= 0:

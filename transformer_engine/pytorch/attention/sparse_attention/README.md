@@ -64,13 +64,15 @@ output = dsa_cudnn.sparse_attention(
 output = ...  # Apply inverse RoPE and grouped output projection.
 ```
 
-Dense inputs are repacked to batch-major rows before these calls; packed THD
-inputs already have that layout. Attention uses the original query
+Dense inputs are repacked into tokens in batch-major order before these calls;
+packed THD inputs already have that layout. Attention uses the original query
 `[T,64,D]` and concatenated local/compressed KV `[T+Tc,D]`; there is no
-compressed query. `_prepare_sparse_indices` creates one row per query containing
-causal local IDs and compressed IDs offset by `T`, with invalid slots set to
-`-1`. This address preparation differs from `select_indices`, which scores
-the indexer's projected Q/K/head weights and returns compressed-row IDs.
+compressed query. `T` is the total query/local KV token count.
+`_prepare_sparse_indices` creates a list of KV token indices for each query token,
+combining causal local KV token indices with compressed KV token indices offset
+by `T`; invalid entries are `-1`. This differs from `select_indices`, which scores
+the indexer's projected Q/K/head weights and returns global compressed KV token
+indices addressing only packed compressed KV, before the offset is applied.
 
 `dsa_rope` supplies token/compressed-position embeddings and rotary application.
 A caller may override the default embeddings with a `rope` module returning

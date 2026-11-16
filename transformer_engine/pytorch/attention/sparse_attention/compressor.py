@@ -29,13 +29,13 @@ class Compressor(torch.nn.Module):
       ``[e f g h]``, ``[g h i j]``.
 
     The first overlapping entry masks the missing previous block. Both modes emit
-    ``floor(length / ratio)`` entries per sequence; incomplete trailing blocks
-    (``k`` here) are excluded from compression. In DSv4Attention, these tokens
-    remain available through local sliding-window attention.
+    ``floor(length / ratio)`` compressed KV tokens per sequence. Trailing tokens
+    that do not fill a complete block (``k`` here) are excluded from compression.
+    In DSv4Attention, they remain available through local sliding-window attention.
 
     Accept batch-major ``[B,S,D]`` or packed ``[T,D]`` hidden states with
-    token/compressed prefixes. Return ``[total_comp,width]`` rows before RoPE,
-    plus projected head weights when ``weight_width`` is nonzero.
+    token/compressed prefixes. Return ``[total_comp,width]`` compressed KV representations
+    before RoPE, plus projected head weights when ``weight_width`` is nonzero.
     """
 
     def __init__(
@@ -74,15 +74,18 @@ class Compressor(torch.nn.Module):
             Contiguous CUDA INT32 ``[B+1]`` token/compressed prefixes. Compressed
             segment lengths are ``floor(length / ratio)``.
         total_comp : int
-            Output row capacity. For dense input, use exactly ``B * (S // ratio)``;
-            packed input may reserve extra rows beyond ``cu_seqlens_comp[-1]``.
+            Allocated compressed output length. For dense input, use exactly
+            ``B * (S // ratio)``; packed output may include padding after the valid
+            compressed KV tokens.
 
         Returns
         -------
         torch.Tensor or tuple of torch.Tensor
-            Normalized ``[total_comp,width]`` KV rows. When ``weight_width > 0``,
-            also return head weights with shape ``hidden_states.shape[:-1] +
-            (weight_width,)``. Only rows below the final compressed prefix are valid.
+            Normalized ``[total_comp,width]`` compressed KV representations.
+            When ``weight_width > 0``, also return head weights with shape
+            ``hidden_states.shape[:-1] +
+            (weight_width,)``. Only outputs for compressed KV token indices below
+            ``cu_seqlens_comp[-1]`` are valid; the remaining output is padding.
         """
         projected = self.fused_proj(hidden_states)
         widths = (
@@ -104,8 +107,9 @@ class Compressor(torch.nn.Module):
             total_comp=total_comp,
         )
         if hidden_states.ndim == 2:
-            # cuDNN only guarantees valid rows below the final prefix. Clear
-            # unused capacity before RMSNorm so it cannot poison weight gradients.
+            # cuDNN guarantees valid output only before the final compressed prefix.
+            # Zero output from cu_seqlens_comp[-1] onward before RMSNorm so
+            # uninitialized values cannot affect weight gradients.
             valid = torch.arange(total_comp, device=hidden_states.device) < cu_seqlens_comp[-1]
             compressed_kv = compressed_kv.masked_fill(~valid[:, None], 0)
         compressed = self.kv_norm(compressed_kv)

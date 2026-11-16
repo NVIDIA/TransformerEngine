@@ -58,11 +58,11 @@ def _apply_rotary_eager(x, cos, sin, cu_seqlens=None):
     if x.ndim == 3:
         if cu_seqlens is None:
             raise ValueError("Packed RoPE requires cu_seqlens.")
-        rows = torch.arange(x.shape[0], device=x.device)
-        sequences = torch.bucketize(rows, cu_seqlens[1:], right=True)
-        positions = rows - cu_seqlens[sequences]
+        token_indices = torch.arange(x.shape[0], device=x.device)
+        sequences = torch.bucketize(token_indices, cu_seqlens[1:], right=True)
+        positions = token_indices - cu_seqlens[sequences]
         # Compressed tensors may have unused capacity past the final prefix.
-        positions = torch.where(rows < cu_seqlens[-1], positions, 0)
+        positions = torch.where(token_indices < cu_seqlens[-1], positions, 0)
         cos, sin = cos[0, positions], sin[0, positions]
     width = cos.shape[-1]
     tail = x[..., -width:]

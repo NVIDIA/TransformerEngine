@@ -40,7 +40,8 @@ def _packed_prefixes(hidden_states, cu_seqlens, max_seqlen, ratio):
         raise ValueError("THD requires integer max_seqlen_q >= compression_ratio.")
     # The sum of per-sequence floors can be smaller than floor(T / ratio).
     # Allocate that safe capacity without reading CUDA prefix contents on host;
-    # cuDNN uses the true device prefix to exclude unused trailing rows.
+    # cuDNN uses the compressed prefix to exclude output padding beyond the valid
+    # compressed KV tokens.
     lengths = cu_seqlens[1:] - cu_seqlens[:-1]
     cu_comp = torch.cat((cu_seqlens.new_zeros(1), (lengths // ratio).cumsum(0, dtype=torch.int32)))
     total_comp = hidden_states.shape[0] // ratio
@@ -200,7 +201,8 @@ class DSv4Attention(torch.nn.Module):
         torch.Tensor or tuple
             Output with the input shape, or ``(output, context)``. Context contains
             live ``index_q[T,H,128]``, ``index_k[Tc,128]``, ``index_w[T,H]`` and
-            discrete compressed-row ``indices[T,K]``; H is ``index_n_heads``.
+            discrete compressed KV token indices ``indices[T,K]``, before adding
+            the local KV offset; H is ``index_n_heads``.
             Teacher ``attn_q[T,64,512]``, ``local_kv[T,512]``,
             ``compressed_kv[Tc,512]`` and ``sink[64]`` are detached. Indexer inputs
             are detached from the shared hidden/query projections, so auxiliary
@@ -219,7 +221,7 @@ class DSv4Attention(torch.nn.Module):
         if return_indexer_context and not self.is_csa:
             raise ValueError("Only CSA has an indexer context.")
         if self.qkv_format == "sbhd":
-            # cuDNN consumes batch-major packed rows. B=1 needs only a view;
+            # cuDNN consumes tokens packed in batch-major order. B=1 needs only a view;
             # larger batches require a physical repack with the current core.
             hidden_states = hidden_states.transpose(0, 1).contiguous()
         if packed:

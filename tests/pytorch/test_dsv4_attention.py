@@ -60,8 +60,8 @@ def test_dsa_sparse_attention(variant, head_dim):
     reference_leaves = tuple(x.detach().float().requires_grad_() for x in leaves)
     indices = None
     if variant == "csa":
-        # Select alternating compressed entries; distinct global IDs expose
-        # mistakes at the second sequence's compressed offset.
+        # Select alternating compressed KV tokens; global compressed KV token indices
+        # expose mistakes at the second sequence's compressed token offset.
         indices = torch.full((total, 32), -1, device="cuda", dtype=torch.int32)
         start = comp_start = 0
         for length, count in zip(lengths, comp_lengths):
@@ -249,7 +249,7 @@ def test_common_rope_layout_inverse_packed(interleaved, inverse, cp_rank):
     import triton
 
     torch.manual_seed(53)
-    # CP2 local lengths are 4 and 6, plus one padded row. Each rank owns
+    # CP2 local lengths are 4 and 6, plus one padded token position. Each rank owns
     # the first/last chunks prescribed by the zig-zag CP mapping.
     positions = (
         [0, 1, 6, 7, 0, 1, 2, 9, 10, 11, 0] if cp_rank == 0 else [2, 3, 4, 5, 3, 4, 5, 6, 7, 8, 0]

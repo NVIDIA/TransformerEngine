@@ -17,7 +17,8 @@ class Indexer(torch.nn.Module):
     """Select compressed KV entries using the indexer's own Q/K/weight projections.
 
     Accept batch-major or packed hidden states and query residuals, sequence
-    prefixes, and caller-provided RoPE tables. Return global compressed-row IDs;
+    prefixes, and caller-provided RoPE tables. Return global compressed KV token
+    indices addressing compressed KV only;
     ``return_context=True`` also returns live Q/K/head weights for a separate loss.
     """
 
@@ -76,8 +77,9 @@ class Indexer(torch.nn.Module):
             FP32 cosine/sine pairs ``[1,max_positions,1,rotary_width]`` for
             token and compressed-window positions, respectively.
         total_comp : int
-            Compressed output capacity: exactly ``B * (S // ratio)`` for dense
-            input; packed input may reserve extra rows beyond ``cu_comp[-1]``.
+            Allocated compressed output length: exactly ``B * (S // ratio)`` for
+            dense input; packed output may include padding after the valid
+            compressed KV tokens.
         max_seqlen : int
             Maximum token sequence length used to bound selection. For dense
             input this must equal S; for packed input use the maximum segment length.
@@ -87,10 +89,11 @@ class Indexer(torch.nn.Module):
         Returns
         -------
         torch.Tensor or tuple of torch.Tensor
-            INT32 ``[T,min(top_k,max_seqlen // ratio)]`` global compressed-row
-            IDs, with invalid slots set to -1. With context, return
+            INT32 ``[T,min(top_k,max_seqlen // ratio)]`` global compressed KV token
+            indices addressing compressed KV only, with invalid entries set to -1.
+            With context, return
             ``(indices, query[T,n_heads,head_dim], key[total_comp,head_dim],
-            weights[T,n_heads])``. Selection IDs do not carry gradients.
+            weights[T,n_heads])``. Selected token indices do not carry gradients.
         """
         n_comp = max_seqlen // self.ratio
         comp_shape = (total_comp,) if hidden_states.ndim == 2 else (hidden_states.shape[0], n_comp)
@@ -115,7 +118,7 @@ class Indexer(torch.nn.Module):
             .reshape(-1, self.n_heads, self.head_dim)
             .contiguous()
         )
-        # Top-k IDs are discrete; training index projections needs a separate loss.
+        # Top-k token indices are discrete; training index projections needs a separate loss.
         weights = weights.reshape(-1, self.n_heads).contiguous()
         indices = select_indices(
             query,
