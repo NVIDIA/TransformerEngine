@@ -2237,8 +2237,8 @@ def moe(
         on SM100+ GPUs; cuDNN selects the architecture-specific kernels. ``False`` uses unfused TE grouped GEMM.
         Requires cuDNN Frontend >= 1.32.0 with compatible JAX APIs.
         SiTU additionally requires SM100/SM103 and JAX GLU/dGLU APIs exposing
-        ``situ_beta1`` and ``situ_beta2`` (Frontend 1.33.0 or a develop build
-        containing NVIDIA/cudnn-frontend#2540). Ineligible SiTU calls raise
+        ``situ_beta1`` and ``situ_beta2`` with Frontend >= 1.33.0.
+        Ineligible SiTU calls raise
         ``ValueError``; there is no unfused SiTU path.
         Frontends whose JAX GLU/dGLU entry points only support BF16 discrete
         weights fall back to unfused TE grouped GEMM.

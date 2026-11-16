@@ -76,7 +76,7 @@ class _MoEBlock(TransformerEngineBase):
         Activation between ``layer_w0 @ wi_0`` and the elementwise
         product with ``layer_w0 @ wi_1``. Default ``"silu"``. Pass
         ``"situglu"`` for fused MXFP8
-        SiTU-GLU on SM100/SM103. SiTU requires compatible cuDNN Frontend JAX
+        SiTU-GLU on SM100/SM103. SiTU requires cuDNN Frontend >= 1.33.0 with compatible JAX
         APIs and ``use_cudnn_fusion=True``; there is no unfused SiTU path.
     activation_params : Optional[dict]
         Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``

@@ -109,7 +109,7 @@ _JAX_BACKWARD_ARGS = tuple(
 
 
 def grouped_gemm_glu_dependencies_available(*, act_func: str = "swiglu") -> tuple[bool, str]:
-    """Check dense MXFP8 forward/backward APIs for the selected GLU activation."""
+    """Require Frontend >= 1.33.0 for SiTU or >= 1.32.0 for other GLU activations."""
     if act_func not in ("swiglu", "geglu", "situglu"):
         return False, f"Unsupported grouped GLU activation: {act_func}"
     try:
@@ -117,8 +117,12 @@ def grouped_gemm_glu_dependencies_available(*, act_func: str = "swiglu") -> tupl
         if not cutlass_jax.is_available():
             return False, "CuTeDSL JAX support is unavailable"
         cudnn = importlib.import_module("cudnn")
-        if Version(cudnn.__version__) < Version("1.32.0"):
-            return False, f"cuDNN Frontend >= 1.32.0 is required, got {cudnn.__version__}"
+        minimum_version = "1.33.0" if act_func == "situglu" else "1.32.0"
+        if Version(cudnn.__version__) < Version(minimum_version):
+            return (
+                False,
+                f"cuDNN Frontend >= {minimum_version} is required, got {cudnn.__version__}",
+            )
         for module, name, arguments in (
             (cudnn, "grouped_gemm_glu_wrapper_sm100", _FORWARD_ARGS),
             (cudnn, "grouped_gemm_dglu_wrapper_sm100", _BACKWARD_ARGS),
