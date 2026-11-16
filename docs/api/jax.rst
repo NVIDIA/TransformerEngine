@@ -37,10 +37,15 @@ For example, a dense region can treat both the FSDP and expert mesh axes as
 FSDP, while a routed MoE region assigns them separate roles::
 
     from transformer_engine.jax.dense import dense
+    from transformer_engine.jax.moe import moe
     from transformer_engine.jax.sharding import MeshResource
 
     y = dense(x, kernel, mesh_resource=MeshResource(
         fsdp_resource=("fsdp", "expert"),
+    ))
+    out, *_ = moe(y, router_info, wi, wo, num_experts=num_experts, mesh_resource=MeshResource(
+        fsdp_resource="fsdp",
+        ep_resource="expert",
     ))
 
 The tuple order should match the physical axes in the tensors' partition
