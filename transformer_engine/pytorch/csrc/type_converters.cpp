@@ -100,14 +100,16 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
 TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer) {
   auto ret = TensorWrapper(NVTE_MXFP8_1D_SCALING);
 
-  const bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
-  const bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  const py::object rowwise_data = tensor.attr("_rowwise_data");
+  const py::object columnwise_data = tensor.attr("_columnwise_data");
+  const bool rowwise_usage = !rowwise_data.is_none();
+  const bool columnwise_usage = !columnwise_data.is_none();
   const bool with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
 
   NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for MXFP4 Tensor.");
 
   if (rowwise_usage) {
-    const auto &data = tensor.attr("_rowwise_data").cast<at::Tensor>();
+    const auto data = rowwise_data.cast<at::Tensor>();
     const auto &scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
     ret.set_rowwise_data(data.data_ptr(), DType::kFloat4E2M1,
                          convert_shape_back_from_fp4(getTensorShape(data), false));
@@ -115,7 +117,7 @@ TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer)
   }
 
   if (columnwise_usage) {
-    const auto &data = tensor.attr("_columnwise_data").cast<at::Tensor>();
+    const auto data = columnwise_data.cast<at::Tensor>();
     const auto &scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
     ret.set_columnwise_data(data.data_ptr(), DType::kFloat4E2M1,
                             convert_shape_back_from_fp4(getTensorShape(data), false));
