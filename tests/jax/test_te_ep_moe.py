@@ -122,7 +122,6 @@ if get_device_compute_capability(0) < 100:
 
 from transformer_engine.jax.flax import _MoEBlock as MoEBlock
 from transformer_engine.jax.moe import (
-    SiTUActivation,
     RouterComputationInfo,
     RoutingMapInfo,
     get_moe_recv_capacity_per_rank,
@@ -348,10 +347,10 @@ def _pure_jax_moe_reference(
     # Activation runs in x.dtype (typically bf16) to mirror the impl --
     # the impl keeps silu+multiply in the wi GEMM output dtype because
     # storing higher precision than the consumer (wo) GEMM buys nothing.
-    if isinstance(activation_type, SiTUActivation):
+    if activation_type == "situglu":
         gate, up = layer_w0.astype(jnp.float32), layer_w1.astype(jnp.float32)
-        capped_gate = activation_type.gate_beta * jnp.tanh(gate / activation_type.gate_beta)
-        capped_up = activation_type.up_beta * jnp.tanh(up / activation_type.up_beta)
+        capped_gate = 4.0 * jnp.tanh(gate / 4.0)
+        capped_up = 25.0 * jnp.tanh(up / 25.0)
         intermediate = (capped_gate * jax.nn.sigmoid(gate) * capped_up).astype(x.dtype)
     else:
         intermediate = jax.nn.silu(layer_w0) * layer_w1
@@ -406,9 +405,11 @@ def _make_block(
     mesh_resource=None,
     use_cudnn_fusion,
     activation_type="silu",
+    activation_params=None,
 ):
     kwargs = dict(
         activation_type=activation_type,
+        activation_params=activation_params,
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
         intermediate_size=INTER,
@@ -1274,7 +1275,7 @@ class TestTeEpMoeCudnnCutedslFusion:
             pytest.param("silu", False, True, id="swiglu-standard-early"),
             pytest.param("silu", True, False, id="swiglu-native-late"),
             pytest.param("silu", True, True, id="swiglu-native-early"),
-            pytest.param(SiTUActivation(), False, False, id="situ-default"),
+            pytest.param("situglu", False, False, id="situ-default"),
         ],
     )
     def test_mxfp8_forward_and_backward(
@@ -1292,7 +1293,7 @@ class TestTeEpMoeCudnnCutedslFusion:
         from transformer_engine.jax import cpp_extensions as tex
 
         available, reason = tex.grouped_gemm_glu_dependencies_available(
-            act_func="situglu" if isinstance(activation_type, SiTUActivation) else "swiglu"
+            act_func="situglu" if activation_type == "situglu" else "swiglu"
         )
         if not available:
             pytest.skip(reason)
@@ -1316,14 +1317,14 @@ class TestTeEpMoeCudnnCutedslFusion:
         original_dglu = tex.grouped_gemm_dglu
 
         def checked_glu(*args, **kwargs):
-            if isinstance(activation_type, SiTUActivation):
+            if activation_type == "situglu":
                 assert kwargs["act_func"] == "situglu"
                 assert (kwargs["situ_beta1"], kwargs["situ_beta2"]) == (4.0, 25.0)
             shared_calls.append("glu")
             return original_glu(*args, **kwargs)
 
         def checked_dglu(*args, **kwargs):
-            if isinstance(activation_type, SiTUActivation):
+            if activation_type == "situglu":
                 assert kwargs["act_func"] == "dsituglu"
                 assert (kwargs["situ_beta1"], kwargs["situ_beta2"]) == (4.0, 25.0)
             shared_calls.append("dglu")
@@ -1335,6 +1336,9 @@ class TestTeEpMoeCudnnCutedslFusion:
             apply_topk_weights_early=apply_topk_weights_early,
             quantization_recipe=MXFP8BlockScaling(),
             activation_type=activation_type,
+            activation_params=(
+                {"gate_beta": 4.0, "up_beta": 25.0} if activation_type == "situglu" else None
+            ),
         )
         x = _make_inputs(jax.random.PRNGKey(30))
         variables, output, aux, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(31))
@@ -1380,7 +1384,7 @@ class TestTeEpMoeCudnnCutedslFusion:
             {k: jnp.asarray(v) for k, v in params_np.items() if k != "expert_bias"},
             jnp.asarray(x_np),
         )
-        if isinstance(activation_type, SiTUActivation):
+        if activation_type == "situglu":
             np.testing.assert_allclose(
                 output_np,
                 np.asarray(jax.device_get(output_ref)).astype(np.float32),

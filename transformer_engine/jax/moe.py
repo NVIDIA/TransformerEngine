@@ -41,8 +41,9 @@ stateful recipes follow the same update semantics as the other TE MLPs.
 
 import math
 import warnings
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import partial
+from collections.abc import Mapping
 from typing import Any, Optional, Tuple, Union
 
 import flax.struct
@@ -72,7 +73,6 @@ from .router import ScoreFunction, _validate_score_function
 from .sharding import MeshResource, _get_mesh, global_mesh_resource, global_shard_guard
 
 __all__ = [
-    "SiTUActivation",
     "RouterComputationInfo",
     "RoutingMapInfo",
     "get_moe_recv_capacity_per_rank",
@@ -80,25 +80,33 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True)
-class SiTUActivation:
-    """SiTU-GLU configuration for cuDNN-fused MXFP8 MoE on SM100/SM103.
+def _resolve_moe_activation_params(activation_type, activation_params):
+    if activation_params is None:
+        activation_params = {}
+    if not isinstance(activation_params, Mapping):
+        raise TypeError("activation_params must be a mapping or None")
+    if activation_type != "situglu":
+        if activation_params:
+            raise ValueError("activation_params are only supported for activation_type='situglu'")
+        return (4.0, 25.0)
+    unknown = activation_params.keys() - {"gate_beta", "up_beta"}
+    if unknown:
+        raise ValueError(f"Unsupported SiTU activation_params: {sorted(unknown, key=str)}")
+    values = []
+    for name, default in (("gate_beta", 4.0), ("up_beta", 25.0)):
+        value = float(activation_params.get(name, default))
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive, got {value}")
+        values.append(value)
+    return tuple(values)
 
-    Computes ``gate_beta * tanh(gate / gate_beta) * sigmoid(gate)`` times
-    ``up_beta * tanh(up / up_beta)``. Both caps must be finite and positive.
-    Requires cuDNN Frontend JAX APIs exposing both SiTU parameters.
-    Unfused SiTU execution is unsupported.
-    """
 
-    gate_beta: float = 4.0
-    up_beta: float = 25.0
-
-    def __post_init__(self):
-        for name in ("gate_beta", "up_beta"):
-            value = float(getattr(self, name))
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be finite and positive, got {value}")
-            object.__setattr__(self, name, value)
+def _fused_glu_activation_kwargs(activation_type, situ_params, *, backward=False):
+    act_func = "situglu" if activation_type == "situglu" else "swiglu"
+    kwargs = {"act_func": ("d" if backward else "") + act_func}
+    if activation_type == "situglu":
+        kwargs.update(situ_beta1=situ_params[0], situ_beta2=situ_params[1])
+    return kwargs
 
 
 @flax.struct.dataclass
@@ -244,7 +252,7 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str], *, activation_type="s
     else:
         if capability < 100:
             reasons.append(f"fused kernels require SM100+, got SM{capability}")
-        is_situ = isinstance(activation_type, SiTUActivation)
+        is_situ = activation_type == "situglu"
         if is_situ and capability not in (100, 103):
             reasons.append(f"SiTU fusion requires SM100/SM103, got SM{capability}")
         if not reasons:
@@ -254,7 +262,7 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str], *, activation_type="s
             if available:
                 return True
             reasons.append(f"shared fused API is incompatible: {error}")
-    if isinstance(activation_type, SiTUActivation):
+    if activation_type == "situglu":
         raise ValueError("SiTU requires cuDNN MXFP8 fusion: " + "; ".join(reasons))
     warnings.warn(
         "use_cudnn_fusion=True: falling back to the unfused TE grouped-GEMM path: "
@@ -280,8 +288,8 @@ def _cudnn_jax_fusion_rejection_reasons(
 ) -> list[str]:
     """Return reasons this call cannot use cuDNN's shared grouped GLU/dGLU JAX APIs."""
     errors = []
-    if not isinstance(activation_type, SiTUActivation) and str(activation_type).lower() != "silu":
-        errors.append("requires activation_type='silu' or SiTUActivation")
+    if activation_type != "situglu" and str(activation_type).lower() != "silu":
+        errors.append("requires activation_type='silu' or 'situglu'")
     if wi_0_bias is not None or wi_1_bias is not None:
         errors.append("does not support FC1 gate/up bias")
     hidden = x.shape[-1]
@@ -931,6 +939,7 @@ def _ffn_fwd_per_shard(
     fsdp_size: int,
     wi_fsdp_axis: Optional[int],
     wo_fsdp_axis: Optional[int],
+    situ_params: Tuple[float, float] = (4.0, 25.0),
 ):
     """Run the grouped FFN on one shard's EP receive buffer."""
     hidden = recv_tokens_local.shape[-1]
@@ -997,15 +1006,7 @@ def _ffn_fwd_per_shard(
             prob,
             compute_dtype=sorted_x.dtype,
             output_dtype=fc2_quantizer_set.x.q_dtype,
-            **(
-                {
-                    "act_func": "situglu",
-                    "situ_beta1": activation_type.gate_beta,
-                    "situ_beta2": activation_type.up_beta,
-                }
-                if isinstance(activation_type, SiTUActivation)
-                else {}
-            ),
+            **_fused_glu_activation_kwargs(activation_type, situ_params),
         )
         combined_out = combined_out_3d.reshape(sorted_x.shape[0], combined)
         if wi_0_checkpoint_name is not None:
@@ -1145,6 +1146,7 @@ def _ffn_bwd_per_shard(
     has_bias: bool,
     use_cudnn_jax_fusion: bool,
     cudnn_native_weight_layout: bool,
+    situ_params: Tuple[float, float] = (4.0, 25.0),
 ):
     """Backward mirror of :func:`_ffn_fwd_per_shard`."""
     group_sizes = local_group_sizes.reshape(-1).astype(jnp.int32)
@@ -1192,15 +1194,7 @@ def _ffn_bwd_per_shard(
             padded_offsets,
             prob,
             output_dtype=fc1_quantizer_set.dgrad.q_dtype,
-            **(
-                {
-                    "act_func": "dsituglu",
-                    "situ_beta1": activation_type.gate_beta,
-                    "situ_beta2": activation_type.up_beta,
-                }
-                if isinstance(activation_type, SiTUActivation)
-                else {}
-            ),
+            **_fused_glu_activation_kwargs(activation_type, situ_params, backward=True),
         )
         d_recv_w_from_intermediate = (
             dprob.astype(recv_w_flat.dtype)
@@ -1358,6 +1352,7 @@ def _moe_fwd_rule(
     quant_before_fsdp_ag,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
+    situ_params: Tuple[float, float] = (4.0, 25.0),
 ):
     """Forward: [gate -> route ->] ep_dispatch -> FFN -> ep_combine.
 
@@ -1658,6 +1653,7 @@ def _moe_fwd_rule(
                 quantizer_sets,
                 num_local_experts=num_local_experts,
                 activation_type=activation_type,
+                situ_params=situ_params,
                 apply_topk_weights_early=apply_topk_weights_early,
                 use_cudnn_jax_fusion=use_cudnn_jax_fusion,
                 wi_0_checkpoint_name=wi_0_checkpoint_name,
@@ -1777,6 +1773,7 @@ def _moe_bwd_rule(
     quant_before_fsdp_ag,
     use_cudnn_fusion,
     cudnn_native_weight_layout,
+    situ_params,
     residuals,
     cotangents,
 ):
@@ -1869,6 +1866,7 @@ def _moe_bwd_rule(
                 *args,
                 ctx.quantizer_sets,
                 activation_type=activation_type,
+                situ_params=situ_params,
                 apply_topk_weights_early=apply_topk_weights_early,
                 has_bias=has_bias,
                 use_cudnn_jax_fusion=use_cudnn_jax_fusion,
@@ -2068,7 +2066,7 @@ def _moe_aux_loss_bwd(ctx, d_aux_loss, K):
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(8, 26)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(8, 27)))
 def _moe(
     x,
     router_info,
@@ -2096,6 +2094,7 @@ def _moe(
     quant_before_fsdp_ag,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
+    situ_params: Tuple[float, float] = (4.0, 25.0),
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -2124,6 +2123,7 @@ def _moe(
         quant_before_fsdp_ag,
         use_cudnn_fusion,
         cudnn_native_weight_layout,
+        situ_params,
     )
     return primal
 
@@ -2141,7 +2141,7 @@ def moe(
     wo_bias: Optional[jnp.ndarray] = None,
     *,
     num_experts: int,
-    activation_type: Union[str, SiTUActivation] = "silu",
+    activation_type: str = "silu",
     apply_topk_weights_early: bool = False,
     quantizer_sets: Tuple[QuantizerSet, QuantizerSet] = (
         noop_quantizer_set,
@@ -2161,6 +2161,7 @@ def moe(
     dispatch_checkpoint_name: Optional[str] = None,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
+    activation_params: Optional[dict] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray, jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -2174,10 +2175,13 @@ def moe(
 
     Parameters
     ----------
-    activation_type : Union[str, SiTUActivation]
-        Gate activation (default ``"silu"``), or :class:`SiTUActivation` for
-        fused MXFP8 SiTU-GLU. SiTU requires cuDNN fusion on SM100/SM103;
-        unsupported configurations raise ``ValueError``.
+    activation_type : str
+        Gate activation (default ``"silu"``), or ``"situglu"`` for fused MXFP8
+        SiTU-GLU on SM100/SM103. Unsupported SiTU configurations raise ``ValueError``.
+    activation_params : Optional[dict]
+        Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``
+        (default 25.0). Values must be finite and positive. Other activations
+        do not accept parameters.
     router_info : Union[RouterComputationInfo, RoutingMapInfo]
         :class:`RouterComputationInfo` makes TE compute the gate and top-k
         from the given router parameters. :class:`RoutingMapInfo` supplies
@@ -2238,8 +2242,8 @@ def moe(
         ``ValueError``; there is no unfused SiTU path.
         Frontends whose JAX GLU/dGLU entry points only support BF16 discrete
         weights fall back to unfused TE grouped GEMM.
-        Ineligible calls warn and fall back to TE's regular grouped-GEMM
-        implementation. API signatures and GPU capability determine support.
+        Except for SiTU, ineligible calls warn and fall back to TE's regular
+        grouped-GEMM implementation. API signatures and GPU capability determine support.
     cudnn_native_weight_layout : Optional[bool]
         ``False`` selects standard contiguous gate/up [E,K,2N] storage;
         ``True`` selects native [E,2N,K] storage with alternating 32-column
@@ -2265,8 +2269,9 @@ def moe(
     """
     if not isinstance(use_cudnn_fusion, bool):
         raise TypeError("use_cudnn_fusion must be a bool")
-    if isinstance(activation_type, SiTUActivation) and not use_cudnn_fusion:
-        raise ValueError("SiTU requires use_cudnn_fusion=True and compatible MXFP8 quantizers")
+    situ_params = _resolve_moe_activation_params(activation_type, activation_params)
+    if activation_type == "situglu" and not use_cudnn_fusion:
+        raise ValueError("SiTU requires use_cudnn_fusion=True")
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
         mesh_resource, quant_before_fsdp_ag
     )
@@ -2355,6 +2360,7 @@ def moe(
             quant_before_fsdp_ag,
             use_cudnn_fusion,
             cudnn_native_weight_layout,
+            situ_params,
         )
         if not has_aux_loss:
             aux_loss = None
