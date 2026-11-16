@@ -234,11 +234,16 @@ def _leading_axis_ok(spec, resource_axes=None, mesh=None):
 def _ep_outer_axis():
     """Legacy single outer axis used by the standalone EP custom VJP wrapper."""
     resource = global_mesh_resource()
+    fsdp_resource = resource.fsdp_resource
+    if isinstance(fsdp_resource, tuple):
+        # A dense FSDP tuple may include the EP axis, which never counts as an outer axis.
+        fsdp_axes = tuple(axis for axis in fsdp_resource if axis != resource.ep_resource)
+        fsdp_resource = fsdp_axes[0] if len(fsdp_axes) == 1 else fsdp_axes or None
     if resource.dp_resource is not None and get_mesh_axis_size(resource.dp_resource) > 1:
         return resource.dp_resource
-    if resource.fsdp_resource is not None and get_mesh_axis_size(resource.fsdp_resource) > 1:
-        return resource.fsdp_resource
-    return resource.dp_resource or resource.fsdp_resource
+    if fsdp_resource is not None and get_mesh_axis_size(fsdp_resource) > 1:
+        return fsdp_resource
+    return resource.dp_resource or fsdp_resource
 
 
 def _ep_leading_dims(is_outer):
