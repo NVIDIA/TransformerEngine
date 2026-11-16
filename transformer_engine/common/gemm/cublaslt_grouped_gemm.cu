@@ -157,7 +157,7 @@ struct GroupedGemmSetupWorkspace {
   float **alpha_ptrs = nullptr;
   float **beta_ptrs = nullptr;
   // Per-tensor scale_inv pointers (float* for tensor/FP8 block scaling, E8M0* for MXFP8,
-  // E4M3* for NVFP4)
+  // E4M3/UE5M3* for NVFP4)
   void **a_scale_inv_ptrs = nullptr;
   void **b_scale_inv_ptrs = nullptr;
   // Storage dimensions for cuBLAS matrix layouts
@@ -929,6 +929,20 @@ inline void set_nvfp4_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
   auto get_scale_mode = [](transformer_engine::DType dtype) -> cublasLtMatmulMatrixScale_t {
     if (dtype == transformer_engine::DType::kFloat8E4M3) {
       return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+    }
+    if (dtype == transformer_engine::DType::kFloat8UE5M3) {
+#if CUBLAS_VERSION >= 131100
+      NVTE_CHECK(transformer_engine::cuda::cublas_version() >= 131100,
+                 "NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
+                 "but run-time cuBLAS version is ",
+                 transformer_engine::cuda::cublas_version(), ".");
+      return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE5M3;
+#else
+      NVTE_ERROR(
+          "NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
+          "but compile-time cuBLAS version is ",
+          CUBLAS_VERSION, ".");
+#endif
     }
     NVTE_ERROR("Unsupported dtype for NVFP4 scales (", transformer_engine::to_string(dtype), ").");
   };
