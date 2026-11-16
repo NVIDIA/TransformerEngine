@@ -1013,7 +1013,8 @@ class GemmPrimitive(BasePrimitive):
             rhs_cspecs = (None,) * len(rhs_cspecs)
 
             # Non-contracting dims of RHS always needs to be gathered along the FSDP axis
-            if mesh_resource is None:
+            # Explicit resources and tuple FSDP resources gather each FSDP axis individually.
+            if mesh_resource is None and not isinstance(gsr.fsdp_resource, tuple):
                 rhs_non_cspecs = tuple(
                     (
                         None
