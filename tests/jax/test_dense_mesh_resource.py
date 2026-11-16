@@ -71,6 +71,38 @@ def test_partition_gathers_weights_instead_of_activations(fsdp_axes):
     assert output == (fsdp_axes, None)
 
 
+@pytest.mark.parametrize("batch_axes", ["fsdp", ("fsdp", "expert")])
+@pytest.mark.parametrize(
+    "weight_axes,kept_axes",
+    [("fsdp", None), (("expert", "fsdp"), None), (("fsdp", "expert", "tp"), "tp")],
+)
+def test_tuple_global_fsdp_matches_override(batch_axes, weight_axes, kept_axes):
+    def info(spec, ndim, size=1):
+        return SimpleNamespace(sharding=SimpleNamespace(spec=P(*spec)), ndim=ndim, size=size)
+
+    args = [
+        info((batch_axes, None), 2),
+        info((None,), 1),
+        info((None, weight_axes), 2),
+        info((None,), 1),
+        info((None,), 1, size=0),
+    ]
+    resource = MeshResource(fsdp_resource=("fsdp", "expert"))
+
+    def parse(override):
+        return GemmPrimitive._parse_operand_output_specs(
+            args, ((1,), (0,)), False, CollectiveOp.NONE, ScalingMode.NO_SCALING, override
+        )[:2]
+
+    with global_shard_guard(resource):
+        specs, output = parse(None)
+    assert specs[0] == (batch_axes, None)
+    assert specs[2] == (None, kept_axes)
+    assert output == (batch_axes, kept_axes)
+    with global_shard_guard(MeshResource()):
+        assert parse(_mesh_resource_snapshot(resource)) == (specs, output)
+
+
 @pytest.mark.parametrize("ep,fsdp", [(4, 1), (2, 2)])
 def test_dense_override_forward_and_vjp(ep, fsdp):
     if jax.device_count() < 4:
