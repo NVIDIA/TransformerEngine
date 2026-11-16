@@ -2258,18 +2258,18 @@ def moe(
         weights fall back to unfused TE grouped GEMM.
         Ineligible calls warn and fall back to TE's regular grouped-GEMM
         implementation. API signatures and GPU capability determine support.
-    dispatch_quantizer : Optional[Quantizer]
-        Quantizer used to quantize tokens before EP dispatch so that the dispatch moves
-        quantized data and compact scales instead of high-precision activations. Only MXFP8
-        E4M3 quantizers are supported, and the hidden size must be a multiple of 512. The
-        quantizer's layout is ignored; tokens are always quantized rowwise. Defaults to
-        ``None`` (no dispatch quantization).
     cudnn_native_weight_layout : Optional[bool]
         ``False`` selects standard contiguous gate/up [E,K,2N] storage;
         ``True`` selects native [E,2N,K] storage with alternating 32-column
         gate/up blocks. Defaults to ``None``, inferring storage from the global
         shape. Ambiguous square shapes require an explicit flag. This option
         describes parameter storage independently of the selected execution path.
+    dispatch_quantizer : Optional[Quantizer]
+        Quantizer used to quantize tokens before EP dispatch so that the dispatch moves
+        quantized data and compact scales instead of high-precision activations. Only MXFP8
+        E4M3 quantizers are supported, and the hidden size must be a multiple of 512. The
+        quantizer's layout is ignored; tokens are always quantized rowwise. Defaults to
+        ``None`` (no dispatch quantization).
 
     Notes
     -----

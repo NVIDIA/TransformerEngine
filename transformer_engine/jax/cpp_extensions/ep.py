@@ -18,6 +18,7 @@ import functools
 import os
 import warnings
 from dataclasses import dataclass
+from typing import Union
 
 import jax
 import jax.numpy as jnp
@@ -202,6 +203,7 @@ def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
     )
 
 
+# MXFP8 scale-block size along the hidden dim; matches the dispatch kernel (kEpMxfp8BlockSize).
 _MXFP8_BLOCK = 32
 
 
@@ -1502,7 +1504,7 @@ def _ep_fused_prepare_and_dispatch_fwd(
 def ep_prepare_and_dispatch_fwd(
     cfg: EpLayerConfig,
     topk_idx,
-    tokens,
+    tokens: Union[jnp.ndarray, ScaledTensor1x],
     topk_weights,
     recv_capacity_per_rank,
 ):
@@ -1524,13 +1526,14 @@ def ep_prepare_and_dispatch_fwd(
     )
     recv_tokens, recv_scale_inv, *rest = outputs
     if isinstance(tokens_in, ScaledTensor1x):
+        # Dispatch output is always rank-3, so the scale boundary is the last axis.
         recv_tokens = ScaledTensorFactory.create_1x(
             recv_tokens,
             recv_scale_inv,
             scaling_mode=tokens_in.scaling_mode,
             dq_dtype=tokens_in.dq_dtype,
             data_layout=tokens_in.data_layout,
-            flatten_axis=tokens_in.flatten_axis,
+            flatten_axis=-1,
         )
     return (recv_tokens, *rest)
 

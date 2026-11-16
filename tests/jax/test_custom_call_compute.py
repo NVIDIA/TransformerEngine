@@ -2469,6 +2469,7 @@ class TestGroupedGemmGluFallback:
             wi=jnp.ones((1, combined, 128) if native_layout else (1, 128, combined), jnp.bfloat16),
             wo=jnp.ones((1, 128, 128), jnp.bfloat16),
             quantizer_sets=(quantizers, quantizers),
+            compute_dtype=jnp.bfloat16,
             num_local_experts=1,
             use_cudnn_jax_fusion=True,
             cudnn_native_weight_layout=native_layout,

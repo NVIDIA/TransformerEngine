@@ -1400,7 +1400,8 @@ class GroupedRequantizePrimitive(BasePrimitive):
         """Output avals: colwise data, colwise scales, swizzled rowwise scales, workspace."""
         assert data_aval.dtype == jnp.float8_e4m3fn and len(data_aval.shape) == 2
         assert scale_inv_aval.dtype == jnp.float8_e8m0fnu
-        assert group_sizes_aval.dtype == jnp.int32
+        # 1-D group_sizes: Python counts groups with .size, the handler with dimensions()[0].
+        assert group_sizes_aval.dtype == jnp.int32 and len(group_sizes_aval.shape) == 1
         rowwise_scale_shape, colwise_scale_shape = ScalingMode(
             ScalingMode.MXFP8_1D_SCALING
         ).get_grouped_scale_shape_2x(
@@ -1449,6 +1450,8 @@ def _grouped_requantize_supported(data, quantizer, dq_dtype):
         and dq_dtype == jnp.bfloat16
         and rows % 128 == 0
         and hidden % 128 == 0
+        # Kernel maps 32-row tiles to grid.y, so rows / 32 must fit the CUDA grid limit.
+        and rows // 32 <= 65535
     )
 
 
