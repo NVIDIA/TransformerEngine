@@ -77,7 +77,12 @@ def build_rope_tables(
     mscale: float = 1.0,
     mscale_all_dim: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Build cosine/sine tables for :func:`apply_mla_rope_q` and :func:`apply_mla_rope_kv`.
+    r"""Build cosine/sine tables for :func:`apply_mla_rope_q` and :func:`apply_mla_rope_kv`.
+
+    With :math:`d` = ``emb_dim``, row :math:`p` holds :math:`\cos\theta_{p,j}` and
+    :math:`\sin\theta_{p,j}` for :math:`j < d`, where
+    :math:`\theta_{p,j} = p\,\omega_{j \bmod d/2}` and :math:`\omega_i = \mathrm{base}^{-2i/d}`.
+    YaRN rescales :math:`\omega` and multiplies the tables by a magnitude factor.
 
     Parameters
     ----------
@@ -560,7 +565,18 @@ def apply_mla_rope_q(
     tensor_format: str = "sbhd",
     in_place: bool = False,
 ) -> torch.Tensor:
-    """Rotate the trailing query channels, preserving the non-rotary prefix.
+    r"""Rotate the trailing query channels, preserving the non-rotary prefix.
+
+    With :math:`d` = ``head_dim_rope``, each interleaved pair :math:`(x_{2i}, x_{2i+1})` of
+    the rotary channels at position :math:`p` is rotated and written in half-split order:
+
+    .. math::
+
+       y_i = x_{2i}\cos\theta_{p,i} - x_{2i+1}\sin\theta_{p,i}, \qquad
+       y_{i+d/2} = x_{2i+1}\cos\theta_{p,i} + x_{2i}\sin\theta_{p,i}
+
+    where :math:`\cos\theta_{p,i}` and :math:`\sin\theta_{p,i}` are entry :math:`i` of
+    row :math:`p` of the tables.
 
     Parameters
     ----------
@@ -625,6 +641,9 @@ def apply_mla_rope_kv(
     tensor_format: str = "sbhd",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Assemble keys and values using a shared rotary key head.
+
+    ``k_pos_emb`` is rotated as the rotary channels in :func:`apply_mla_rope_q` and
+    appended to the non-rotary key channels of every head.
 
     Parameters
     ----------
