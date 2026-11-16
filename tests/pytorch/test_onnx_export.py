@@ -10,8 +10,9 @@ representation. Toward this end, each test captures the output of a TE module fo
 converts the TE module to ONNX, and uses ONNX Runtime (ORT) to execute the ONNX graph and
 validate the output against TE's output.
 
-Until FP8 is introduced to the ONNX standard, FP8 QuantizeLinear/DequantizeLinear is implemented
-using custom ORT operations.
+FP8 quantization is exported as TensorRT custom operations, which ORT cannot execute. Graphs
+that contain them run on the ONNX reference evaluator instead, with the custom operations
+implemented using TE's quantizers.
 
 To run many repetitive tests use pytest-loop:
     $ python3 -m pip install pytest-loop
@@ -26,10 +27,11 @@ import pytest
 import warnings
 import numpy as np
 import onnxruntime as ort
+from onnx.reference import ReferenceEvaluator
+from onnx.reference.op_run import OpRun
 import torch
 from torch import nn as nn
 from typing import Optional, Union, Tuple, List
-from onnxruntime_extensions import PyCustomOpDef, get_library_path, onnx_op
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.export import is_in_onnx_export_mode, te_translation_table
@@ -72,78 +74,68 @@ supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "clamped_sw
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
 
-@onnx_op(
-    op_type="trt::TRT_FP8QuantizeLinear",
-    domain="trt",
-    inputs=[
-        PyCustomOpDef.dt_float,
-        PyCustomOpDef.dt_float,
-    ],
-    outputs=[PyCustomOpDef.dt_uint8],
-)
-def trt_fp8_quantize(t, scale_inv):
-    """FP8 quantization extension for ONNX Runtime."""
-    x = torch.from_numpy(t).cuda()
-    q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1 / torch.from_numpy(scale_inv).cuda(),
-        amax=torch.zeros([1]).cuda(),
-        fp8_dtype=te.DType.kFloat8E4M3,
-    )
-    return q(x)._data.cpu().numpy()
+# The ONNX reference evaluator matches these classes to graph nodes by domain and class name.
+class TRT_FP8QuantizeLinear(OpRun):
+    """FP8 quantization for the ONNX reference evaluator."""
+
+    op_domain = "trt"
+
+    def _run(self, t, scale_inv):
+        x = torch.tensor(t, device="cuda")
+        q = te.tensor.float8_tensor.Float8Quantizer(
+            scale=1 / torch.tensor(scale_inv, device="cuda"),
+            amax=torch.zeros([1]).cuda(),
+            fp8_dtype=te.DType.kFloat8E4M3,
+        )
+        return (q(x)._data.cpu().numpy(),)
 
 
-@onnx_op(
-    op_type="trt::TRT_FP8DequantizeLinear",
-    domain="trt",
-    inputs=[
-        PyCustomOpDef.dt_uint8,
-        PyCustomOpDef.dt_float,
-    ],
-    outputs=[PyCustomOpDef.dt_float],
-)
-def trt_fp8_dequantize(t, scale_inv):
-    """FP8 dequantization extension for ONNX Runtime."""
-    x = torch.from_numpy(t).cuda()
-    q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1 / torch.from_numpy(scale_inv).cuda(),
-        amax=torch.zeros([1]).cuda(),
-        fp8_dtype=te.DType.kFloat8E4M3,
-    )
-    quantizer_tensor = q.create_tensor_from_data(x, fake_dtype=torch.float32)
-    return quantizer_tensor.dequantize().cpu().numpy()
+class TRT_FP8DequantizeLinear(OpRun):
+    """FP8 dequantization for the ONNX reference evaluator."""
+
+    op_domain = "trt"
+
+    def _run(self, t, scale_inv):
+        x = torch.tensor(t, device="cuda")
+        q = te.tensor.float8_tensor.Float8Quantizer(
+            scale=1 / torch.tensor(scale_inv, device="cuda"),
+            amax=torch.zeros([1]).cuda(),
+            fp8_dtype=te.DType.kFloat8E4M3,
+        )
+        quantizer_tensor = q.create_tensor_from_data(x, fake_dtype=torch.float32)
+        return (quantizer_tensor.dequantize().cpu().numpy(),)
 
 
-@onnx_op(
-    op_type="trt::TRT_MXFP8DynamicQuantize",
-    domain="trt",
-    inputs=[
-        PyCustomOpDef.dt_float,
-    ],
-    outputs=[PyCustomOpDef.dt_uint8, PyCustomOpDef.dt_uint8],
-)
-def trt_mxfp8_quantize(t):
-    """MXFP8 quantization extension for ONNX Runtime."""
-    x = torch.from_numpy(t).cuda()
-    q = te.tensor.mxfp8_tensor.MXFP8Quantizer(te.DType.kFloat8E4M3)
-    return q(x)._rowwise_data.cpu().numpy(), q(x)._rowwise_scale_inv.cpu().numpy()
+class TRT_MXFP8DynamicQuantize(OpRun):
+    """MXFP8 quantization for the ONNX reference evaluator."""
+
+    op_domain = "trt"
+
+    def _run(self, t):
+        x = torch.tensor(t, device="cuda")
+        q = te.tensor.mxfp8_tensor.MXFP8Quantizer(te.DType.kFloat8E4M3)
+        return q(x)._rowwise_data.cpu().numpy(), q(x)._rowwise_scale_inv.cpu().numpy()
 
 
-@onnx_op(
-    op_type="trt::TRT_MXFP8DequantizeLinear",
-    domain="trt",
-    inputs=[
-        PyCustomOpDef.dt_uint8,
-        PyCustomOpDef.dt_uint8,
-    ],
-    outputs=[PyCustomOpDef.dt_float],
-)
-def trt_mxfp8_dequantize(t, scale_inv):
-    """MXFP8 dequantization extension for ONNX Runtime."""
-    x = torch.from_numpy(t).cuda()
-    scale_inv_tensor = torch.from_numpy(scale_inv).cuda()
-    q = te.tensor.mxfp8_tensor.MXFP8Quantizer(te.DType.kFloat8E4M3)
-    quantizer_tensor = q.create_tensor_from_data(x, scale_inv_tensor, fake_dtype=torch.float32)
-    return quantizer_tensor.dequantize().cpu().numpy()
+class TRT_MXFP8DequantizeLinear(OpRun):
+    """MXFP8 dequantization for the ONNX reference evaluator."""
+
+    op_domain = "trt"
+
+    def _run(self, t, scale_inv):
+        x = torch.tensor(t, device="cuda")
+        scale_inv_tensor = torch.tensor(scale_inv, device="cuda")
+        q = te.tensor.mxfp8_tensor.MXFP8Quantizer(te.DType.kFloat8E4M3)
+        quantizer_tensor = q.create_tensor_from_data(x, scale_inv_tensor, fake_dtype=torch.float32)
+        return (quantizer_tensor.dequantize().cpu().numpy(),)
+
+
+TRT_CUSTOM_OPS = [
+    TRT_FP8QuantizeLinear,
+    TRT_FP8DequantizeLinear,
+    TRT_MXFP8DynamicQuantize,
+    TRT_MXFP8DequantizeLinear,
+]
 
 
 @pytest.fixture()
@@ -316,7 +308,8 @@ def validate_result(
     te_outputs: List[torch.Tensor] = None,
 ):
     """Compare the outputs of a Transformer Engine (TE) module vs the outputs of its ONNX
-    representation using ONNX Runtime (ORT) and ensure they are close.
+    representation using ONNX Runtime (ORT), or the ONNX reference evaluator for FP8 graphs,
+    and ensure they are close.
 
     The purpose of the output comparison is to validate that TE models are converted to
     their correct ONNX representation by testing that TE and ORT outputs match within some
@@ -330,25 +323,20 @@ def validate_result(
     Argument `te_outputs` can be used to provide pre-computed TE outputs.
     """
 
-    def create_ort_session(fname: str, is_fp8: bool):
-        def load_custom_ops(session_opts: ort.SessionOptions):
-            """For FP8 validation with ORT we need to load our custom FP8 Q/DQ extension."""
-            session_opts.register_custom_ops_library(get_library_path())
-            print("registered custom FP8 Q/DQ ops!")
-
-        """Create an ONNX Runtime session for validation."""
-        kwargs = {"providers": ["CUDAExecutionProvider", "CPUExecutionProvider"]}
+    def create_session(fname: str, is_fp8: bool):
+        """Create a session that runs the ONNX graph for validation."""
         if is_fp8:
-            sess_options = ort.SessionOptions()
-            load_custom_ops(sess_options)
-            kwargs["sess_options"] = sess_options
+            return ReferenceEvaluator(fname, new_ops=TRT_CUSTOM_OPS)
+        return ort.InferenceSession(
+            fname, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+        )
 
-        s = ort.InferenceSession(fname, **kwargs)
-        return s
-
-    def create_ort_input_dict(session, inputs):
+    def create_input_dict(session, inputs):
         inputs = inputs if isinstance(inputs, list) or isinstance(inputs, tuple) else (inputs,)
-        input_names = [x.name for x in session.get_inputs()]
+        if isinstance(session, ReferenceEvaluator):
+            input_names = session.input_names
+        else:
+            input_names = [x.name for x in session.get_inputs()]
         inps = [to_numpy(x) for x in inputs if x is not None]
         inp_dict = dict(zip(input_names, inps))
         return inp_dict
@@ -356,13 +344,13 @@ def validate_result(
     input_names = input_names or ["input"]
     output_names = output_names or ["output"]
 
-    # Run ORT session and TE model.
+    # Run the ONNX graph and TE model.
     fname = os.path.join(NVTE_TEST_ARTIFACTS_DIR, fname)
     if not te_outputs:
         te_outputs = te_infer(model, inps, is_fp8)
-    ort_s = create_ort_session(fname, is_fp8)
-    input_feed = create_ort_input_dict(ort_s, inps)
-    onnx_outputs = ort_s.run(None, input_feed=input_feed)
+    session = create_session(fname, is_fp8)
+    input_feed = create_input_dict(session, inps)
+    onnx_outputs = session.run(None, input_feed)
     compare_outputs(
         onnx_outputs, te_outputs, atol, rtol, max_errors_printed, allow_cnt_errors, fname
     )
@@ -812,7 +800,7 @@ def test_export_core_attention(
         return
     atol = 5e-1 if is_fp8 else 1e-2
     validate_result(
-        fname, inp, model, is_fp8=True, atol=atol, input_names=input_names, te_outputs=te_outputs
+        fname, inp, model, is_fp8=is_fp8, atol=atol, input_names=input_names, te_outputs=te_outputs
     )
 
 
