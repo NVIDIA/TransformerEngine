@@ -74,6 +74,8 @@ Router, routing kernels, and grouped dense for MoE layers. See
 
 .. autoapifunction:: transformer_engine.jax.dense.grouped_dense
 
+.. autoapiclass:: transformer_engine.jax.moe.SiTUActivation
+
 .. autoapifunction:: transformer_engine.jax.moe.moe
 
 .. autoapifunction:: transformer_engine.jax.ep.ep_bootstrap

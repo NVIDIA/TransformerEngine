@@ -108,7 +108,7 @@ _JAX_BACKWARD_ARGS = tuple(
 )
 
 
-def grouped_gemm_glu_dependencies_available() -> tuple[bool, str]:
+def grouped_gemm_glu_dependencies_available(*, require_situ: bool = False) -> tuple[bool, str]:
     """Require Frontend >= 1.32.0 and shared JAX APIs supporting dense MXFP8."""
     try:
         cutlass_jax = importlib.import_module("cutlass.jax")
@@ -126,6 +126,8 @@ def grouped_gemm_glu_dependencies_available() -> tuple[bool, str]:
             api = getattr(module, name, None)
             if not callable(api):
                 return False, f"{module.__name__}.{name} is unavailable"
+            if require_situ:
+                arguments += ("situ_beta1", "situ_beta2")
             signature = inspect.signature(api)
             missing = set(arguments) - signature.parameters.keys()
             if missing:
@@ -151,8 +153,11 @@ def grouped_gemm_glu(
     *,
     compute_dtype,
     output_dtype,
+    act_func: str = "swiglu",
+    situ_beta1: float = 4.0,
+    situ_beta2: float = 25.0,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Run cuDNN's shared grouped MXFP8 GLU API in SwiGLU mode."""
+    """Run cuDNN's shared grouped MXFP8 GLU API with the selected activation."""
     cudnn_grouped_gemm_glu = getattr(
         importlib.import_module("cudnn"), "grouped_gemm_glu_wrapper_sm100"
     )
@@ -167,6 +172,9 @@ def grouped_gemm_glu(
         prob,
         compute_dtype=compute_dtype,
         output_dtype=output_dtype,
+        act_func=act_func,
+        situ_beta1=situ_beta1,
+        situ_beta2=situ_beta2,
     )
 
 
@@ -181,6 +189,9 @@ def _grouped_gemm_forward(
     *,
     compute_dtype,
     output_dtype,
+    act_func: str = "swiglu",
+    situ_beta1: float = 4.0,
+    situ_beta2: float = 25.0,
 ):
     rows, hidden, _ = a.shape
     experts, combined, b_hidden = b.shape
@@ -188,6 +199,9 @@ def _grouped_gemm_forward(
         raise ValueError(f"A K={hidden} does not match B K={b_hidden}")
     alpha = jnp.ones((experts,), dtype=jnp.float32)
     norm_const = jnp.ones((1,), dtype=jnp.float32)
+    situ_kwargs = {}
+    if act_func == "situglu":
+        situ_kwargs = {"situ_beta1": situ_beta1, "situ_beta2": situ_beta2}
     result = cudnn_forward(
         a_tensor=a.reshape(rows, hidden),
         b_tensor=b,
@@ -201,8 +215,9 @@ def _grouped_gemm_forward(
         d_dtype=jnp.dtype(output_dtype),
         discrete_col_sfd=True,
         sf_vec_size=32,
-        act_func="swiglu",
+        act_func=act_func,
         generate_c=True,
+        **situ_kwargs,
     )
     return (
         result["c_tensor"].reshape(rows, combined),
@@ -223,8 +238,11 @@ def grouped_gemm_dglu(
     prob: jax.Array,
     *,
     output_dtype,
+    act_func: str = "dswiglu",
+    situ_beta1: float = 4.0,
+    situ_beta2: float = 25.0,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Run cuDNN's shared grouped MXFP8 dGLU API in dSwiGLU mode."""
+    """Run cuDNN's shared grouped MXFP8 dGLU API with the selected activation."""
     if a.ndim != 2:
         raise ValueError(f"Expected A[M,K], got {a.shape}")
     if b.ndim != 3:
@@ -246,6 +264,9 @@ def grouped_gemm_dglu(
     alpha = jnp.ones((experts,), dtype=jnp.float32)
     beta = jnp.ones((experts,), dtype=jnp.float32)
     norm_const = jnp.ones((1,), dtype=jnp.float32)
+    situ_kwargs = {}
+    if act_func == "dsituglu":
+        situ_kwargs = {"situ_beta1": situ_beta1, "situ_beta2": situ_beta2}
     result = cudnn_grouped_gemm_dglu(
         a_tensor=a,
         b_tensor=b,
@@ -261,7 +282,8 @@ def grouped_gemm_dglu(
         discrete_col_sfd=True,
         dprob_tensor=None,
         sf_vec_size=32,
-        act_func="dswiglu",
+        act_func=act_func,
+        **situ_kwargs,
     )
     return (
         result["d_row_tensor"],

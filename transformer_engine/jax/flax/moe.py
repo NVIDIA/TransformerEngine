@@ -34,7 +34,13 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 from transformer_engine.common.recipe import Recipe
-from ..moe import RouterComputationInfo, _moe_mesh_axes, _resolve_moe_mesh_resource, moe
+from ..moe import (
+    RouterComputationInfo,
+    SiTUActivation,
+    _moe_mesh_axes,
+    _resolve_moe_mesh_resource,
+    moe,
+)
 from ..quantize import QuantizerSet
 from ..router import ScoreFunction
 from ..sharding import MeshResource, _get_mesh, global_shard_guard
@@ -67,9 +73,12 @@ class _MoEBlock(TransformerEngineBase):
         Top-k value for routing.
     intermediate_size : int
         Hidden dim of the per-expert FFN (the inner ``mlp`` axis).
-    activation_type : str
+    activation_type : Union[str, SiTUActivation]
         Activation between ``layer_w0 @ wi_0`` and the elementwise
-        product with ``layer_w0 @ wi_1``. Default ``"silu"``.
+        product with ``layer_w0 @ wi_1``. Default ``"silu"``. Pass
+        :class:`~transformer_engine.jax.moe.SiTUActivation` for fused MXFP8
+        SiTU-GLU on SM100/SM103. SiTU requires compatible cuDNN Frontend JAX
+        APIs and ``use_cudnn_fusion=True``; there is no unfused SiTU path.
 
     score_function : Union[str, ScoreFunction]
         ``"softmax"`` (default), ``"sigmoid"``, or ``"sqrtsoftplus"`` for the routing scores.
@@ -140,7 +149,7 @@ class _MoEBlock(TransformerEngineBase):
     num_experts: int = 8
     num_experts_per_tok: int = 2
     intermediate_size: int = 2048
-    activation_type: str = "silu"
+    activation_type: Union[str, SiTUActivation] = "silu"
 
     # Routing
     score_function: Union[str, ScoreFunction] = "softmax"
