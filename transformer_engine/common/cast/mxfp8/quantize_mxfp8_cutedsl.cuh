@@ -231,11 +231,6 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
     return false;
   }
-  // TODO(kainingz): port 2D quantization to CuTeDSL
-  if (use_2d_quantization) {
-    // report_cutedsl_not_chosen("2D quantization is not supported.");
-    return false;
-  }
   checkCuDriverContext(stream);
   const MXFP8QuantConfig config{/*dtype=*/input_tensor->dtype(),
                                 /*fp8_dtype=*/output_tensor->dtype(),
