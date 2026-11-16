@@ -50,7 +50,7 @@ Model layers
 ------------
 
 DeepSeek-V3
-^^^^^^^^^^^
+~~~~~~~~~~~
 
 .. autoapiclass:: transformer_engine.pytorch.models.DeepSeekV3Layer(hidden_size, num_attention_heads, **kwargs)
   :members: forward
@@ -93,7 +93,7 @@ Other
 .. autoapifunction:: transformer_engine.pytorch.deinterleave_glu_tensor
 
 MLA rotary position embeddings
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.build_rope_tables
 
