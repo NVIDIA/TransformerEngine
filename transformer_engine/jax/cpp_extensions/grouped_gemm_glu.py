@@ -108,8 +108,10 @@ _JAX_BACKWARD_ARGS = tuple(
 )
 
 
-def grouped_gemm_glu_dependencies_available(*, require_situ: bool = False) -> tuple[bool, str]:
-    """Require Frontend >= 1.32.0 and shared JAX APIs supporting dense MXFP8."""
+def grouped_gemm_glu_dependencies_available(*, act_func: str = "swiglu") -> tuple[bool, str]:
+    """Check dense MXFP8 forward/backward APIs for the selected GLU activation."""
+    if act_func not in ("swiglu", "geglu", "situglu"):
+        return False, f"Unsupported grouped GLU activation: {act_func}"
     try:
         cutlass_jax = importlib.import_module("cutlass.jax")
         if not cutlass_jax.is_available():
@@ -126,7 +128,7 @@ def grouped_gemm_glu_dependencies_available(*, require_situ: bool = False) -> tu
             api = getattr(module, name, None)
             if not callable(api):
                 return False, f"{module.__name__}.{name} is unavailable"
-            if require_situ:
+            if act_func == "situglu":
                 arguments += ("situ_beta1", "situ_beta2")
             signature = inspect.signature(api)
             missing = set(arguments) - signature.parameters.keys()

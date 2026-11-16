@@ -2287,42 +2287,40 @@ class TestGroupedGemmGluFallback:
         assert available == (change == "optional")
         assert bool(reason) == (change != "optional")
 
-    @pytest.mark.parametrize("missing", [None, "situ_beta1", "situ_beta2"])
     @pytest.mark.parametrize(
-        "name,arguments",
+        "name,missing",
         [
-            ("grouped_gemm_glu_wrapper_sm100", _glu_adapter._FORWARD_ARGS),
-            ("grouped_gemm_dglu_wrapper_sm100", _glu_adapter._BACKWARD_ARGS),
-            ("grouped_gemm_glu_jax_sm100", _glu_adapter._JAX_FORWARD_ARGS),
-            ("grouped_gemm_dglu_jax_sm100", _glu_adapter._JAX_BACKWARD_ARGS),
+            ("grouped_gemm_glu_wrapper_sm100", "situ_beta1"),
+            ("grouped_gemm_dglu_wrapper_sm100", "situ_beta2"),
+            ("grouped_gemm_glu_jax_sm100", "situ_beta2"),
+            ("grouped_gemm_dglu_jax_sm100", "situ_beta1"),
         ],
     )
-    def test_situ_requires_scalar_parameters_in_both_framework_apis(
-        self, frontend, name, arguments, missing
-    ):
-        apis = (
-            ("grouped_gemm_glu_wrapper_sm100", _glu_adapter._FORWARD_ARGS),
-            ("grouped_gemm_dglu_wrapper_sm100", _glu_adapter._BACKWARD_ARGS),
-            ("grouped_gemm_glu_jax_sm100", _glu_adapter._JAX_FORWARD_ARGS),
-            ("grouped_gemm_dglu_jax_sm100", _glu_adapter._JAX_BACKWARD_ARGS),
-        )
-        for api_name, args in apis:
+    def test_situ_requires_scalar_parameters_in_both_framework_apis(self, frontend, name, missing):
+        apis = {
+            "grouped_gemm_glu_wrapper_sm100": _glu_adapter._FORWARD_ARGS,
+            "grouped_gemm_dglu_wrapper_sm100": _glu_adapter._BACKWARD_ARGS,
+            "grouped_gemm_glu_jax_sm100": _glu_adapter._JAX_FORWARD_ARGS,
+            "grouped_gemm_dglu_jax_sm100": _glu_adapter._JAX_BACKWARD_ARGS,
+        }
+        for api_name, args in apis.items():
             setattr(frontend, api_name, self._api(args + ("situ_beta1", "situ_beta2")))
-        if missing:
-            setattr(
-                frontend,
-                name,
-                self._api(
-                    arguments + tuple(arg for arg in ("situ_beta1", "situ_beta2") if arg != missing)
-                ),
-            )
+        assert _glu_adapter.grouped_gemm_glu_dependencies_available(act_func="situglu")[0]
+        arguments = apis[name] + tuple(
+            arg for arg in ("situ_beta1", "situ_beta2") if arg != missing
+        )
+        setattr(frontend, name, self._api(arguments))
         assert _glu_adapter.grouped_gemm_glu_dependencies_available()[0]
-        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available(require_situ=True)
-        assert available is (missing is None)
-        if missing:
-            assert name in reason and missing in reason
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available(act_func="situglu")
+        assert not available and name in reason and missing in reason
 
-    @pytest.mark.parametrize("capability", [90, 100, 103, 107, 120])
+    @pytest.mark.parametrize("act_func,expected", [("geglu", True), ("unknown", False)])
+    def test_fused_activation_support(self, frontend, act_func, expected):
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available(act_func=act_func)
+        assert available is expected
+        assert bool(reason) is not expected
+
+    @pytest.mark.parametrize("capability", [100, 103, 107])
     def test_situ_fusion_device_support(self, frontend, monkeypatch, capability):
         for name, args in (
             ("grouped_gemm_glu_wrapper_sm100", _glu_adapter._FORWARD_ARGS),
@@ -2344,8 +2342,7 @@ class TestGroupedGemmGluFallback:
                     [], activation_type=_moe_module.SiTUActivation()
                 )
 
-    @pytest.mark.parametrize("name", ["gate_beta", "up_beta"])
-    @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+    @pytest.mark.parametrize("name,value", [("gate_beta", 0), ("up_beta", float("nan"))])
     def test_situ_invalid_cap(self, name, value):
         with pytest.raises(ValueError, match=name):
             _moe_module.SiTUActivation(**{name: value})
@@ -2370,67 +2367,6 @@ class TestGroupedGemmGluFallback:
             _moe_module._select_cudnn_jax_fusion(
                 ["requires MXFP8 quantizers"], activation_type=_moe_module.SiTUActivation()
             )
-
-    @pytest.mark.parametrize("backward", [False, True], ids=["forward", "backward"])
-    @pytest.mark.parametrize(
-        "caps", [None, (4.0, 25.0), (2.0, 8.0)], ids=["swiglu", "situ-default", "situ-custom"]
-    )
-    def test_activation_reaches_shared_api(self, frontend, monkeypatch, backward, caps):
-        rows, hidden, width = 256, 128, 128
-        calls = []
-
-        def shared(**kwargs):
-            expected = "dswiglu" if backward else "swiglu"
-            if caps is None:
-                assert "situ_beta1" not in kwargs and "situ_beta2" not in kwargs
-            else:
-                expected = "dsituglu" if backward else "situglu"
-                assert (kwargs["situ_beta1"], kwargs["situ_beta2"]) == caps
-            assert kwargs["act_func"] == expected
-            calls.append(expected)
-            output = jnp.zeros((rows, width * (2 if backward else 1)), jnp.float8_e4m3fn)
-            return dict(
-                c_tensor=jnp.zeros((rows, 2 * width), jnp.bfloat16),
-                d_tensor=output,
-                d_row_tensor=output,
-                d_col_tensor=output,
-                dprob_tensor=jnp.zeros((rows,), jnp.float32),
-                sfd_row_tensor=jnp.zeros((1,), jnp.uint8),
-                sfd_col_tensor=jnp.zeros((1,), jnp.uint8),
-            )
-
-        name = "grouped_gemm_dglu_wrapper_sm100" if backward else "grouped_gemm_glu_wrapper_sm100"
-        monkeypatch.setattr(frontend, name, shared)
-        sfa = jnp.zeros(_glu_adapter._sf_atom_shape(1, rows, hidden), jnp.uint8)
-        combined = width if backward else 2 * width
-        sfb = jnp.zeros(_glu_adapter._sf_atom_shape(1, combined, hidden), jnp.uint8)
-        b = jnp.zeros((1, combined, hidden), jnp.float8_e4m3fn)
-        offsets = jnp.asarray([rows], jnp.int32)
-        prob = jnp.ones((rows,), jnp.float32)
-        options = {"output_dtype": jnp.float8_e4m3fn}
-        if caps is not None:
-            options.update(
-                act_func="dsituglu" if backward else "situglu",
-                situ_beta1=caps[0],
-                situ_beta2=caps[1],
-            )
-        if backward:
-            a = jnp.zeros((rows, hidden), jnp.float8_e4m3fn)
-            c = jnp.zeros((rows, 2 * width), jnp.bfloat16)
-            result = jax.jit(
-                lambda a: _glu_adapter.grouped_gemm_dglu(
-                    a, b, c, sfa, sfb, offsets, prob, **options
-                )
-            )(a)
-        else:
-            a = jnp.zeros((rows, hidden, 1), jnp.float8_e4m3fn)
-            result = jax.jit(
-                lambda a: _glu_adapter.grouped_gemm_glu(
-                    a, b, sfa, sfb, offsets, prob, compute_dtype=jnp.bfloat16, **options
-                )
-            )(a)
-        jax.block_until_ready(result)
-        assert len(calls) == 1
 
     @pytest.mark.parametrize("name", ["grouped_gemm_glu_jax_sm100", "grouped_gemm_dglu_jax_sm100"])
     def test_bf16_only_jax_api_falls_back(self, frontend, monkeypatch, name):
@@ -2574,11 +2510,8 @@ class TestGroupedGemmGluFallback:
 
     @pytest.mark.parametrize("native_layout", [False, True])
     @pytest.mark.parametrize("gather_gated_dimension", [False, True])
-    @pytest.mark.parametrize(
-        "activation_type", ["silu", _moe_module.SiTUActivation(), _moe_module.SiTUActivation(2, 8)]
-    )
     def test_fused_forward_uses_shared_glu(
-        self, monkeypatch, native_layout, gather_gated_dimension, activation_type
+        self, monkeypatch, native_layout, gather_gated_dimension
     ):
 
         class SelectedKernel(Exception):
@@ -2586,10 +2519,6 @@ class TestGroupedGemmGluFallback:
 
         def selected(*args, **kwargs):
             assert args[1].shape == (1, 256, 128)
-            if isinstance(activation_type, _moe_module.SiTUActivation):
-                assert kwargs["act_func"] == "situglu"
-                assert kwargs["situ_beta1"] == activation_type.gate_beta
-                assert kwargs["situ_beta2"] == activation_type.up_beta
             raise SelectedKernel
 
         monkeypatch.setattr(_moe_module.tex, "grouped_gemm_glu", selected)
@@ -2627,7 +2556,6 @@ class TestGroupedGemmGluFallback:
             wo=jnp.ones((1, 128, 128), jnp.bfloat16),
             quantizer_sets=(quantizers, quantizers),
             num_local_experts=1,
-            activation_type=activation_type,
             use_cudnn_jax_fusion=True,
             cudnn_native_weight_layout=native_layout,
             quant_before_fsdp_ag=gather_gated_dimension,

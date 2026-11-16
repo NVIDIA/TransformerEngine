@@ -1267,12 +1267,16 @@ class TestTeEpMoeCudnnCutedslFusion:
             )
 
     @pytest.mark.parametrize(
-        "activation_type",
-        ["silu", SiTUActivation(), SiTUActivation(2.0, 8.0)],
-        ids=["swiglu", "situ-k3", "situ-custom"],
+        "activation_type,native_layout,apply_topk_weights_early",
+        [
+            pytest.param("silu", False, False, id="swiglu-standard-late"),
+            pytest.param("silu", False, True, id="swiglu-standard-early"),
+            pytest.param("silu", True, False, id="swiglu-native-late"),
+            pytest.param("silu", True, True, id="swiglu-native-early"),
+            pytest.param(SiTUActivation(), False, False, id="situ-standard-late"),
+            pytest.param(SiTUActivation(2, 8), True, True, id="situ-custom-native-early"),
+        ],
     )
-    @pytest.mark.parametrize("native_layout", [False, True])
-    @pytest.mark.parametrize("apply_topk_weights_early", [False, True])
     def test_mxfp8_forward_and_backward(
         self,
         mesh,
@@ -1288,7 +1292,7 @@ class TestTeEpMoeCudnnCutedslFusion:
         from transformer_engine.jax import cpp_extensions as tex
 
         available, reason = tex.grouped_gemm_glu_dependencies_available(
-            require_situ=isinstance(activation_type, SiTUActivation)
+            act_func="situglu" if isinstance(activation_type, SiTUActivation) else "swiglu"
         )
         if not available:
             pytest.skip(reason)

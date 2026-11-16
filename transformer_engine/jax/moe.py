@@ -244,12 +244,12 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str], *, activation_type="s
     else:
         if capability < 100:
             reasons.append(f"fused kernels require SM100+, got SM{capability}")
-        require_situ = isinstance(activation_type, SiTUActivation)
-        if require_situ and capability not in (100, 103):
+        is_situ = isinstance(activation_type, SiTUActivation)
+        if is_situ and capability not in (100, 103):
             reasons.append(f"SiTU fusion requires SM100/SM103, got SM{capability}")
         if not reasons:
             available, error = tex.grouped_gemm_glu_dependencies_available(
-                require_situ=require_situ
+                act_func="situglu" if is_situ else "swiglu"
             )
             if available:
                 return True
