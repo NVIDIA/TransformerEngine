@@ -65,7 +65,7 @@ struct Mxfp4Mxfp8GemmConfig {
 
 template <typename Config>
 void run_gemm(const void *a_fp8, const void *a_scale, const void *b_fp4, const void *b_scale,
-              void *d, int m, int n, int k, float alpha, float beta, void *workspace,
+              const void *c, void *d, int m, int n, int k, float alpha, float beta, void *workspace,
               size_t workspace_size, cudaStream_t stream) {
   using Gemm = typename Config::Gemm;
   using ElementA = typename Config::ElementA;
@@ -79,6 +79,7 @@ void run_gemm(const void *a_fp8, const void *a_scale, const void *b_fp4, const v
   auto layout_SFA = BlkScaledConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, 1));
   auto layout_SFB = BlkScaledConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, 1));
 
+  auto *c_ptr = reinterpret_cast<const ElementD *>(c);
   auto *d_ptr = reinterpret_cast<ElementD *>(d);
   typename Gemm::Arguments arguments{
       cutlass::gemm::GemmUniversalMode::kGemm,
@@ -87,7 +88,7 @@ void run_gemm(const void *a_fp8, const void *a_scale, const void *b_fp4, const v
        reinterpret_cast<const typename ElementB::DataType *>(b_fp4), stride_B,
        reinterpret_cast<const typename ElementA::ScaleFactorType *>(a_scale), layout_SFA,
        reinterpret_cast<const typename ElementB::ScaleFactorType *>(b_scale), layout_SFB},
-      {{alpha, beta}, d_ptr, stride_D, d_ptr, stride_D}};
+      {{alpha, beta}, c_ptr, stride_D, d_ptr, stride_D}};
 
   Gemm gemm;
   NVTE_CHECK(gemm.can_implement(arguments) == cutlass::Status::kSuccess,
@@ -120,9 +121,9 @@ bool is_mxfp4_mxfp8_gemm(const Tensor &A, const Tensor &B) {
   return is_fp4_dtype(A.dtype()) != is_fp4_dtype(B.dtype());
 }
 
-void cutlass_mxfp4_mxfp8_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                              const Tensor *inputBias, bool transa, bool transb, float alpha,
-                              float beta, void *workspace, size_t workspace_size,
+void cutlass_mxfp4_mxfp8_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *inputC,
+                              Tensor *outputD, const Tensor *inputBias, bool transa, bool transb,
+                              float alpha, float beta, void *workspace, size_t workspace_size,
                               cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_CHECK(cuda::sm_arch() >= 100, "MXFP4 x MXFP8 GEMM requires Blackwell (SM 10.0+).");
@@ -164,7 +165,21 @@ void cutlass_mxfp4_mxfp8_gemm(const Tensor *inputA, const Tensor *inputB, Tensor
   const DType out_dtype = outputD->data.dtype;
   NVTE_CHECK(m % 8 == 0, "MXFP4 x MXFP8 GEMM requires M (", m, ") to be a multiple of 8.");
 
-  // D = alpha * acc + bias, with bias as the epilogue source operand.
+  // D = alpha * acc + beta * C, with C read in the layout of D.
+  const void *c_ptr = outputD->data.dptr;
+  if (inputC == nullptr) {
+    beta = 0.0f;
+  } else if (inputC != outputD) {
+    NVTE_CHECK(inputC->dtype() == out_dtype,
+               "GEMM requires C and D to have the same dtype (C=", to_string(inputC->dtype()),
+               ", D=", to_string(out_dtype), ").");
+    const auto [C0, C1] = inputC->flat_2d_dims();
+    NVTE_CHECK(C0 == n && C1 == m, "GEMM input C has incompatible dimensions (expected ", n, "x", m,
+               ", got ", C0, "x", C1, ").");
+    c_ptr = inputC->data.dptr;
+  }
+
+  // D = alpha * acc + bias, with bias broadcast into D as the epilogue source operand.
   if (inputBias != nullptr && inputBias->data.has_data()) {
     NVTE_CHECK(beta == 0.0f, "MXFP4 x MXFP8 GEMM does not support bias with accumulation.");
     NVTE_CHECK(inputBias->data.numel() == m, "Bias has invalid size (expected ", m, ", got ",
@@ -179,13 +194,14 @@ void cutlass_mxfp4_mxfp8_gemm(const Tensor *inputA, const Tensor *inputB, Tensor
                 reinterpret_cast<OType *>(outputD->data.dptr),
                 reinterpret_cast<const BiasType *>(inputBias->data.dptr), n, m);););
     NVTE_CHECK_CUDA(cudaGetLastError());
+    c_ptr = outputD->data.dptr;
     beta = 1.0f;
   }
 
-#define NVTE_MXFP4_MXFP8_GEMM_LAUNCH(LAYOUT_B, OTYPE)                                           \
-  run_gemm<Mxfp4Mxfp8GemmConfig<LAYOUT_B, OTYPE>>(                                              \
-      inputB->data.dptr, inputB->scale_inv.dptr, a_data.dptr, a_scale.dptr, outputD->data.dptr, \
-      cm, cn, ck, alpha, beta, workspace, workspace_size, stream)
+#define NVTE_MXFP4_MXFP8_GEMM_LAUNCH(LAYOUT_B, OTYPE)                              \
+  run_gemm<Mxfp4Mxfp8GemmConfig<LAYOUT_B, OTYPE>>(                                 \
+      inputB->data.dptr, inputB->scale_inv.dptr, a_data.dptr, a_scale.dptr, c_ptr, \
+      outputD->data.dptr, cm, cn, ck, alpha, beta, workspace, workspace_size, stream)
 
   if (out_dtype == DType::kBFloat16) {
     if (transa) {

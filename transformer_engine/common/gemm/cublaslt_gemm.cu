@@ -424,7 +424,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *input
                "MXFP4 x MXFP8 GEMM does not support the bias-gradient epilogue.");
     NVTE_CHECK(inputCounter == nullptr || inputCounter->data.dptr == nullptr,
                "MXFP4 x MXFP8 GEMM does not support atomic GEMM.");
-    cutlass_mxfp4_mxfp8_gemm(inputA, inputB, outputD, inputBias, transa == CUBLAS_OP_T,
+    cutlass_mxfp4_mxfp8_gemm(inputA, inputB, inputC, outputD, inputBias, transa == CUBLAS_OP_T,
                              transb == CUBLAS_OP_T, *reinterpret_cast<const float *>(alpha),
                              *reinterpret_cast<const float *>(beta), workspace, workspaceSize,
                              stream);

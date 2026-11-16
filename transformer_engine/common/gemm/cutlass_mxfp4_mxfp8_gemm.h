@@ -20,11 +20,11 @@ bool is_mxfp4_mxfp8_gemm(const Tensor &A, const Tensor &B);
  *
  *  Follows the column-major conventions of cublas_gemm. A must be the MXFP4 operand and B the
  *  MXFP8 operand. A may be transposed (row-wise data, TN) or not (column-wise data, NN); B must
- *  not be transposed. Both operands need GEMM-swizzled scales.
+ *  not be transposed. Both operands need GEMM-swizzled scales. A null C is treated as zero.
  */
-void cutlass_mxfp4_mxfp8_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                              const Tensor *inputBias, bool transa, bool transb, float alpha,
-                              float beta, void *workspace, size_t workspace_size,
+void cutlass_mxfp4_mxfp8_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *inputC,
+                              Tensor *outputD, const Tensor *inputBias, bool transa, bool transb,
+                              float alpha, float beta, void *workspace, size_t workspace_size,
                               cudaStream_t stream);
 
 }  // namespace transformer_engine
