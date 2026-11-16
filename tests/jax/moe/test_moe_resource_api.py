@@ -121,6 +121,23 @@ def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "fsdp_resource,outer_axis",
+    [("fsdp", "fsdp"), (("fsdp", "ep"), "fsdp"), (("ep", "fsdp"), "fsdp"), (("ep",), None)],
+)
+def test_ep_outer_axis_excludes_ep_from_fsdp_tuple(monkeypatch, fsdp_resource, outer_axis):
+    from types import SimpleNamespace
+    from transformer_engine.jax import sharding
+    from transformer_engine.jax.cpp_extensions import ep
+    from transformer_engine.jax.ep import _default_out_partition_spec
+
+    monkeypatch.setattr(sharding, "_get_mesh", lambda: SimpleNamespace(shape={"fsdp": 2, "ep": 4}))
+    with global_shard_guard(MeshResource(fsdp_resource=fsdp_resource, ep_resource="ep")):
+        assert ep._ep_outer_axis() == outer_axis
+        leading = (outer_axis, "ep") if outer_axis is not None else "ep"
+        assert _default_out_partition_spec() == (leading,)
+
+
+@pytest.mark.parametrize(
     "resource,quantize,error",
     [
         (MeshResource(), False, "ep_resource"),
