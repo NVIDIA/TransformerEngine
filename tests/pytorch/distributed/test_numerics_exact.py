@@ -25,6 +25,7 @@ if torch.cuda.device_count() < 2:
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+mxfp4_available, reason_for_no_mxfp4 = te.is_mxfp4_available(return_reason=True)
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
     return_reason=True
 )
@@ -81,7 +82,7 @@ def test_distributed(quantization, batch_size, hidden_size, out_size):
     ],
 )
 def test_distributed_mxfp4_mxfp8(batch_size, hidden_size, out_size):
-    if not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
+    if not mxfp4_available: # mxfp4_available is True is sufficient condition.
+        pytest.skip(reason_for_no_mxfp4)
 
     _run_test("mxfp4_mxfp8", batch_size, hidden_size, out_size)

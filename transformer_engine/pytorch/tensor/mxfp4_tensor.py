@@ -245,16 +245,6 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
                 return tensor.detach()
             return tensor.view(shape)
 
-        if func == aten.copy_.default:
-            dst, src = args[0], args[1]
-            if (
-                isinstance(dst, MXFP4Tensor)
-                and isinstance(src, MXFP4Tensor)
-                and dst._with_gemm_swizzled_scales != src._with_gemm_swizzled_scales
-            ):
-                dst.quantize_(src)
-                return None
-
         return super().__torch_dispatch__(func, types, args, kwargs)
 
     @property

@@ -39,6 +39,7 @@ __all__ = [
     "quantized_model_init",
     "is_fp8_available",
     "is_mxfp8_available",
+    "is_mxfp4_available",
     "is_fp8_block_scaling_available",
     "is_nvfp4_available",
     "is_fp8_ue5m3_available",
@@ -52,6 +53,7 @@ __all__ = [
 
 _FP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _MXFP8_SUPPORT: Optional[Tuple[bool, str]] = None
+_MXFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _NVFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_BLOCK_SCALING_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_UE5M3_SUPPORT: Optional[Tuple[bool, str]] = None
@@ -172,6 +174,16 @@ def _compute_mxfp8_support() -> Tuple[bool, str]:
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
 
 
+def _compute_mxfp4_support() -> Tuple[bool, str]:
+    """Return if MXFP4 with MXFP8 execution is available."""
+    mxfp8_supported, reason = check_mxfp8_support()
+    if not mxfp8_supported:
+        return False, reason
+    if float(torch.version.cuda) < 12.8:
+        return False, "CUDA 12.8 or newer required for MXFP4 execution."
+    return True, ""
+
+
 def _compute_nvfp4_support() -> Tuple[bool, str]:
     """Return if nvfp4 support is available"""
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
@@ -205,6 +217,15 @@ def check_mxfp8_support() -> Tuple[bool, str]:
     if _MXFP8_SUPPORT is None:
         _MXFP8_SUPPORT = _compute_mxfp8_support()
     return _MXFP8_SUPPORT
+
+
+@torch.compiler.assume_constant_result
+def check_mxfp4_support() -> Tuple[bool, str]:
+    """Return if MXFP4 with MXFP8 execution is available."""
+    global _MXFP4_SUPPORT
+    if _MXFP4_SUPPORT is None:
+        _MXFP4_SUPPORT = _compute_mxfp4_support()
+    return _MXFP4_SUPPORT
 
 
 @torch.compiler.assume_constant_result
@@ -385,6 +406,27 @@ def is_mxfp8_available(return_reason: bool = False) -> Union[bool, Tuple[bool, s
     if return_reason:
         return check_mxfp8_support()
     return check_mxfp8_support()[0]
+
+
+def is_mxfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine if support is available for MXFP4 with MXFP8 execution.
+
+    Requires an MXFP8-compatible GPU and CUDA 12.8 or newer, as reported
+    by ``torch.version.cuda``.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when required support is not available. The reason
+        will be an empty string if support for MXFP4 is available.
+
+    """
+    if return_reason:
+        return check_mxfp4_support()
+    return check_mxfp4_support()[0]
 
 
 def is_fp8_block_scaling_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:

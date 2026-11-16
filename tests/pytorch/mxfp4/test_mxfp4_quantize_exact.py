@@ -18,8 +18,8 @@ from mxfp4_utils import (
     unpack_e2m1,
 )
 
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
-pytestmark = pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+mxfp4_available, reason_for_no_mxfp4 = te.is_mxfp4_available(return_reason=True)
+pytestmark = pytest.mark.skipif(not mxfp4_available, reason=reason_for_no_mxfp4)
 
 
 def _normalize_negative_zero(codes: torch.Tensor) -> torch.Tensor:
@@ -128,23 +128,6 @@ def test_mxfp4_tensor_view(swizzled):
 
     with pytest.raises(RuntimeError):
         qx.view(2048, 64)
-
-
-@pytest.mark.parametrize("src_swizzled", [False, True])
-@pytest.mark.parametrize("dst_swizzled", [False, True])
-def test_mxfp4_tensor_copy_between_scale_layouts(src_swizzled, dst_swizzled):
-    src_quantizer = MXFP4Quantizer()
-    src_quantizer.optimize_for_gemm = src_swizzled
-    dst_quantizer = MXFP4Quantizer()
-    dst_quantizer.optimize_for_gemm = dst_swizzled
-    src = src_quantizer(_make_input((256, 512), torch.bfloat16, seed=0))
-    dst = dst_quantizer(_make_input((256, 512), torch.bfloat16, seed=1))
-
-    dst.copy_(src)
-    assert dst._with_gemm_swizzled_scales == dst_swizzled
-    torch.testing.assert_close(
-        dst.dequantize(dtype=torch.float32), src.dequantize(dtype=torch.float32), rtol=0, atol=0
-    )
 
 
 def test_mxfp4_quantize_rejects_misaligned_shape():

@@ -26,6 +26,7 @@ from transformer_engine.pytorch import (
 )
 
 from transformer_engine.pytorch.quantized_tensor import prepare_for_saving, restore_from_saved
+from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
@@ -60,6 +61,7 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
     return_reason=True
 )
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+mxfp4_available, reason_for_no_mxfp4 = te.is_mxfp4_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 _quantization_list: List[str] = []
 if fp8_available:
@@ -131,6 +133,8 @@ def make_quantizer(quantization: str, device: torch.device = "cuda"):
             amax_epsilon=0.0,
             block_scaling_dim=1,
         )
+    if quantization == "mxfp4":
+        return MXFP4Quantizer()
     if quantization == "mxfp8":
         return MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
     if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
@@ -1095,6 +1099,67 @@ class TestMXFP8Tensor:
         # Make sure we are not trivially passing the test
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_deq, -x_ref, **_tols[fp8_dtype])
+
+
+@pytest.mark.parametrize(
+    "quantization",
+    [
+        pytest.param(
+            "mxfp4",
+            marks=pytest.mark.skipif(not mxfp4_available, reason=reason_for_no_mxfp4),
+        ),
+        pytest.param(
+            "mxfp8",
+            marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+        ),
+        pytest.param(
+            "nvfp4",
+            marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+        ),
+    ],
+)
+@pytest.mark.parametrize("src_swizzled", [False, True])
+@pytest.mark.parametrize("dst_swizzled", [False, True])
+@pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
+def test_copy_scale_layouts(quantization, src_swizzled, dst_swizzled, usage):
+    """Copy matching layouts verbatim and requantize mismatched layouts."""
+    torch.manual_seed(1234)
+    src_quantizer = make_quantizer(quantization)
+    src_quantizer.set_usage(
+        rowwise=usage in ("rowwise", "both"),
+        columnwise=usage in ("columnwise", "both"),
+    )
+    src_quantizer.optimize_for_gemm = src_swizzled
+    dst_quantizer = src_quantizer.copy()
+    dst_quantizer.optimize_for_gemm = dst_swizzled
+    src = src_quantizer(torch.randn(128, 128, dtype=torch.float32, device="cuda"))
+    dst = dst_quantizer(torch.randn(128, 128, dtype=torch.float32, device="cuda"))
+    assert src._with_gemm_swizzled_scales == src_swizzled
+    assert dst._with_gemm_swizzled_scales == dst_swizzled
+
+    if quantization == "nvfp4" and usage == "columnwise" and src_swizzled != dst_swizzled:
+        original_buffers = {
+            name: buffer.clone()
+            for name, buffer in dst.get_metadata().items()
+            if isinstance(buffer, torch.Tensor)
+        }
+        with pytest.raises(NotImplementedError, match="Dequantizing column-wise NVFP4 data"):
+            dst.copy_(src)
+        assert dst._with_gemm_swizzled_scales == dst_swizzled
+        for name, original in original_buffers.items():
+            torch.testing.assert_close(getattr(dst, f"_{name}"), original, rtol=0, atol=0)
+        return
+
+    expected = src if src_swizzled == dst_swizzled else dst_quantizer(src.dequantize())
+    dst.copy_(src, non_blocking=True)
+
+    assert src._with_gemm_swizzled_scales == src_swizzled
+    assert dst._with_gemm_swizzled_scales == dst_swizzled
+    for name, buffer in expected.get_metadata().items():
+        if isinstance(buffer, torch.Tensor):
+            torch.testing.assert_close(getattr(dst, f"_{name}"), buffer, rtol=0, atol=0)
+    if quantization != "nvfp4" or usage != "columnwise":
+        torch.testing.assert_close(dst.dequantize(), expected.dequantize(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("quantization", _quantization_list)
