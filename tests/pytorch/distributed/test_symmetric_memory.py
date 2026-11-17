@@ -15,7 +15,13 @@ from transformer_engine.pytorch import distributed as te_dist
 
 def _check_cache(rank, init_file):
     torch.cuda.set_device(rank)
-    dist.init_process_group("nccl", init_method=f"file://{init_file}", rank=rank, world_size=2)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=2,
+        device_id=torch.device("cuda", rank),
+    )
     try:
         group = dist.group.WORLD
         stream = torch.cuda.Stream()

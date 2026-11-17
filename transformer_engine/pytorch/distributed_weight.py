@@ -19,6 +19,7 @@ __all__ = [
     "materialize_weight_for_forward",
     "materialize_weight_for_backward",
     "finalize_weight_grads",
+    "weight_grad_dtype",
 ]
 
 
@@ -99,6 +100,28 @@ def materialize_weight_for_backward(weights: Any) -> List[Any]:
         out = leader.materialize_group_for_backward()
         return list(out) if isinstance(out, (list, tuple)) else [out]
     return list(weights)
+
+
+def weight_grad_dtype(weights: Any, compute_dtype: torch.dtype) -> torch.dtype:
+    """Dtype for a wgrad buffer the caller allocates itself.
+
+    A distributed weight reduces its wgrad before accumulating, so the GEMM must already emit
+    ``main_grad``'s dtype -- otherwise the reduction rounds on every rank. Falls back to
+    ``compute_dtype`` for plain weights, and for an implementer whose ``main_grad`` the framework
+    has not attached yet.
+    """
+    if not isinstance(weights, (list, tuple)):
+        weights = [weights]
+    leader = weights[0]
+    # When main_grad is attached in case of distributed weights,
+    # GEMM/GGEMM writes into unsharded scratch buffer.
+    # This is later reduce-scatterred into sharded main_grad.
+    # We want the unsharded weight buffer to have the same type as main_grad.
+    if is_distributed_weight(leader):
+        main_grad = getattr(leader, "main_grad", None)
+        if main_grad is not None:
+            return main_grad.dtype
+    return compute_dtype
 
 
 def finalize_weight_grads(weights: Any, wgrads: List[Any]) -> List[Any]:

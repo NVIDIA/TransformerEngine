@@ -11,6 +11,7 @@ import warnings
 import torch
 
 from transformer_engine_torch import CommOverlapType, bulk_overlap_ag_with_external_gemm
+from transformer_engine.pytorch.device import te_device_type
 from ...cpp_extensions import general_gemm
 from ...distributed import gather_along_first_dim, get_distributed_world_size
 from ...module.base import (
@@ -182,7 +183,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             else:
                 device = grad_output.device
         device = canonicalize_device(device)
-        if device.type != "cuda":
+        if device.type != te_device_type():
             raise ValueError(f"Only CUDA devices are supported (got {device})")
 
         # Check datatype

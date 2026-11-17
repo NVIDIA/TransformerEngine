@@ -177,7 +177,12 @@ NVFP4 stores columnwise data and scaling factors in a **transposed layout**:
 - **Columnwise**: data ``[B, A]`` (transposed) with 1×16 horizontal blocks, ``scales`` shape ``[B, A/16]``
 
 Scale tensors are padded for hardware alignment: first dimension to a multiple of 128,
-second dimension to a multiple of 4 (e.g. rowwise: ``[roundup(A, 128), roundup(B/16, 4)]``).
+second dimension to a multiple of 4 (e.g. rowwise:
+``[roundup(A, 128), roundup(ceil(B/16), 4)]``).
+
+The leading dimension of the NVFP4 tensor needs to be divisible by 32 (16-byte aligned).
+For training, since the backward pass uses transposes of the forward pass inputs,
+this requirement is expanded to both leading and outer dimensions of the tensors.
 
 .. raw:: html
    :file: img/nvfp4_row_col.svg
@@ -200,7 +205,10 @@ If before synchronization there was ``amax_1`` on node 1,
 
 **Quantized all-gather**
 
-NVFP4 all-gather is supported.
+NVFP4 all-gather is supported when the local shard's last dimension is
+divisible by 32. If columnwise data is gathered, the product of the preceding
+dimensions must also be divisible by 16. Row-scaled NVFP4 uses the
+high-precision all-gather path.
 
 .. raw:: html
    :file: img/nvfp4_all_gather.svg

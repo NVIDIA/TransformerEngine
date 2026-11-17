@@ -299,6 +299,76 @@ class TestGroupedTensor:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
+    def test_autograd_identity_view_preserves_grouped_storage_and_gradient(self) -> None:
+        """Autograd's identity view keeps grouped metadata and passes back a dense gradient."""
+
+        class Identity(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, tensor):
+                return tensor
+
+            @staticmethod
+            def backward(ctx, grad):
+                return grad
+
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        source = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            first_dims=first_dims,
+            tensor_offsets=tensor_offsets,
+            requires_grad=True,
+        )
+
+        view = Identity.apply(source)
+        assert isinstance(view, GroupedTensor)
+        assert view is not source
+        assert view._base is source
+        assert view.rowwise_data is source.rowwise_data
+        assert view.first_dims is first_dims
+        assert view.tensor_offsets is tensor_offsets
+
+        expected = torch.arange(1, 13, dtype=torch.float32, device="cuda").reshape(3, 4)
+        (grad,) = torch.autograd.grad(view, source, grad_outputs=expected)
+        assert type(grad) is torch.Tensor
+        torch.testing.assert_close(grad, expected)
+
+    def test_record_stream_tracks_grouped_buffers(self, monkeypatch) -> None:
+        """record_stream should reach every allocation owned by the wrapper."""
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        last_dims = torch.tensor([4, 4], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        grouped_tensor = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            columnwise_data=torch.randn(12, device="cuda"),
+            scale_inv=torch.ones(2, device="cuda"),
+            columnwise_scale_inv=torch.ones(2, device="cuda"),
+            amax=torch.zeros(2, device="cuda"),
+            columnwise_amax=torch.zeros(2, device="cuda"),
+            scale=torch.ones(2, device="cuda"),
+            first_dims=first_dims,
+            last_dims=last_dims,
+            tensor_offsets=tensor_offsets,
+        )
+        buffers = grouped_tensor.get_data_tensors()
+        recorded = []
+        original_record_stream = torch.Tensor.record_stream
+
+        def record_stream(tensor, stream):
+            recorded.append(tensor)
+            return original_record_stream(tensor, stream)
+
+        monkeypatch.setattr(torch.Tensor, "record_stream", record_stream)
+        grouped_tensor.record_stream(torch.cuda.Stream())
+
+        assert all(any(record is buffer for record in recorded) for buffer in buffers)
+
     def test_basic_construction_all_same_shape(self) -> None:
         """Test GroupedTensor construction with all tensors having same shape"""
         num_tensors = 4
@@ -505,6 +575,73 @@ class TestGroupedTensor:
             numel = shape[i][0] * shape[i][1]
             expected_offset = _rowwise_offset_bytes(i * numel, quantization)
             assert rowwise_data.data_ptr() == original_data_ptr + expected_offset
+
+    @pytest.mark.parametrize(
+        "quantization", [pytest.param(None, id="unquantized"), *_quantization_params]
+    )
+    def test_split_with_multidimensional_buffers(self, quantization: Optional[str]) -> None:
+        """Test splitting views of contiguous storage with non-flat buffer shapes."""
+        num_tensors = 3
+        shapes = (
+            [(128, 512), (256, 512), (384, 512)]
+            if quantization is None
+            else [(256, 512)] * num_tensors
+        )
+        quantizer = (
+            None if quantization is None else make_quantizer(quantization, num_tensors, shapes)
+        )
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
+            num_tensors=num_tensors,
+            shapes=shapes,
+            quantizer=quantizer,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        flat_parts = grouped_tensor.split_into_quantized_tensors()
+
+        for name in (
+            "rowwise_data",
+            "columnwise_data",
+            "scale_inv",
+            "columnwise_scale_inv",
+            "amax",
+            "columnwise_amax",
+        ):
+            buffer = getattr(grouped_tensor, name)
+            if buffer is not None:
+                setattr(grouped_tensor, name, buffer.view(1, -1))
+
+        shaped_parts = grouped_tensor.split_into_quantized_tensors()
+        assert len(shaped_parts) == len(flat_parts)
+        tensor_fields = (
+            "_data",
+            "_transpose",
+            "_scale_inv",
+            "_rowwise_data",
+            "_columnwise_data",
+            "_rowwise_scale_inv",
+            "_columnwise_scale_inv",
+            "_amax_rowwise",
+            "_amax_columnwise",
+        )
+        for flat_part, shaped_part in zip(flat_parts, shaped_parts):
+            assert flat_part.shape == shaped_part.shape
+            if quantization is None:
+                assert flat_part.data_ptr() == shaped_part.data_ptr()
+                continue
+            for field in tensor_fields:
+                flat_buffer = getattr(flat_part, field, None)
+                shaped_buffer = getattr(shaped_part, field, None)
+                if isinstance(flat_buffer, torch.Tensor):
+                    assert shaped_buffer.shape == flat_buffer.shape
+                    assert shaped_buffer.data_ptr() == flat_buffer.data_ptr()
+                else:
+                    assert shaped_buffer is None
+
+        if quantization is None:
+            grouped_tensor.rowwise_data = grouped_tensor.rowwise_data.view(2, -1).T
+            with pytest.raises(ValueError, match="contiguous"):
+                grouped_tensor.split_into_quantized_tensors()
 
     def test_split_varying_shapes(self) -> None:
         """Test split_into_quantized_tensors with varying shapes"""

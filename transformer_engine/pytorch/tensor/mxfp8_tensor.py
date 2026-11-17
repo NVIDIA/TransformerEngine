@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Tensor class with MXFP8 data"""
+
 from __future__ import annotations
 from collections.abc import Iterable
 import math
@@ -13,9 +14,10 @@ import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
-from ..utils import devices_match, round_up_to_nearest_multiple
+from ..utils import ceil_div, devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
@@ -122,13 +124,18 @@ class MXFP8Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
-        if inp.ndim < 2:
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
+
+        For distributed all-gather with columnwise scaling, the first
+        dimension must be aligned to the block size so that no scaling
+        block spans across GPU boundaries.
+        """
+        if len(inp.shape) < 2:
             return False
-        if inp.shape[-1] % MXFP8_BLOCK_SCALING_SIZE != 0:
+        if inp.shape[-1] % 16 != 0:
             return False
-        if math.prod(inp.shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0:
+        if self.columnwise_usage and math.prod(inp.shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0:
             return False
         return True
 
@@ -162,17 +169,19 @@ class MXFP8Quantizer(Quantizer):
         CuBLAS doc: https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
         """
         if columnwise:
-            # Columnwise: scale_inv shape is [prod(shape[:-1]) // BLOCK_SIZE, shape[-1]]
+            # Columnwise: scale_inv shape is [ceildiv(prod(shape[:-1]), BLOCK_SIZE), shape[-1]]
             # with padding to multiples of [4, 128]
             return (
-                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(
+                    ceil_div(math.prod(shape[:-1]), MXFP8_BLOCK_SCALING_SIZE), 4
+                ),
                 round_up_to_nearest_multiple(shape[-1], 128),
             )
-        # Rowwise: scale_inv shape is [prod(shape[:-1]), shape[-1] // BLOCK_SIZE]
+        # Rowwise: scale_inv shape is [prod(shape[:-1]), ceildiv(shape[-1], BLOCK_SIZE)]
         # with padding to multiples of [128, 4]
         return (
             round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+            round_up_to_nearest_multiple(ceil_div(shape[-1], MXFP8_BLOCK_SCALING_SIZE), 4),
         )
 
     def get_columnwise_shape(self, rowwise_data_shape: Tuple[int, ...]) -> Tuple[int, ...]:
@@ -547,15 +556,18 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             shape = args[1]
             first_dim = math.prod(shape[:-1])
             last_dim = shape[-1]
-            if (
-                first_dim % MXFP8_BLOCK_SCALING_SIZE != 0
-                or last_dim % MXFP8_BLOCK_SCALING_SIZE != 0
-            ):
+            # Fall back to high-precision for shapes the quantizer cannot
+            # represent. Only last_dim % 16 is required (matches the relaxed
+            # C++ quantizer); partial trailing blocks use ceildiv.
+            if last_dim % 16 != 0:
                 return super().__torch_dispatch__(func, types, args, kwargs)
-            rowwise_scale_inv_shape = [first_dim, last_dim // MXFP8_BLOCK_SCALING_SIZE]
+            rowwise_scale_inv_shape = [
+                first_dim,
+                round_up_to_nearest_multiple(ceil_div(last_dim, MXFP8_BLOCK_SCALING_SIZE), 4),
+            ]
             columnwise_scale_inv_shape = [
-                first_dim // MXFP8_BLOCK_SCALING_SIZE,
-                last_dim,
+                ceil_div(first_dim, MXFP8_BLOCK_SCALING_SIZE),
+                round_up_to_nearest_multiple(last_dim, 128),
             ]
             if tensor._rowwise_data is not None:
                 rowwise_data = tensor._rowwise_data.__torch_dispatch__(
@@ -642,15 +654,22 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         shape = self.shape
         if self._with_gemm_swizzled_scales:
             raise NotImplementedError(
-                "FSDP2 is only supported for MXFP8Tensors with compact scales"
+                "FSDP2 is only supported for MXFP8Tensors with compact scales."
             )
+        flattened_in_shape0 = math.prod(shape[:-1])
         if rowwise_scale_inv is not None:
             # Remove padding from rowwise scale_inv
-            flattened_in_shape0 = math.prod(shape[:-1])
             if rowwise_scale_inv.size(0) != flattened_in_shape0:
                 rowwise_scale_inv = rowwise_scale_inv[:flattened_in_shape0]
         if columnwise_scale_inv is not None:
             # Remove padding from columnwise scale_inv
+            if flattened_in_shape0 % MXFP8_BLOCK_SCALING_SIZE != 0:
+                raise NotImplementedError(
+                    "FSDP2 during the backward pass is only supported for MXFP8Tensors with "
+                    f"the flattened first dimension divisible by {MXFP8_BLOCK_SCALING_SIZE} "
+                    f"and got tensor with shape {shape} with flattened first dimension "
+                    f"{flattened_in_shape0}."
+                )
             flattened_in_shape0 = math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE
             if columnwise_scale_inv.size(0) != flattened_in_shape0:
                 columnwise_scale_inv = columnwise_scale_inv[:flattened_in_shape0]
@@ -823,7 +842,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         """
 
         # Tensor device
-        new_device = tensor.device if tensor.is_cuda else self.device
+        new_device = tensor.device if tensor.device.type == te_device_type() else self.device
         if not devices_match(new_device, tensor.device):
             tensor = tensor.to(device=new_device)
 
