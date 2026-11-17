@@ -231,6 +231,24 @@ def _resolve_ep_axes(ep_axes=None) -> Tuple[str, ...]:
     return _normalize_ep_axes(ep_axes)
 
 
+def _non_ep_axes(resource_axes, ep_axes: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Axes of a resource (None, a mesh axis name or a tuple of names) that are not EP axes."""
+    axes = (resource_axes,) if isinstance(resource_axes, str) else resource_axes or ()
+    return tuple(axis for axis in axes if axis not in ep_axes)
+
+
+def _ep_outer_axes(resource, ep_axes: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Distinct DP and FSDP mesh axes outside EP, flattening tuple resources."""
+    return tuple(
+        dict.fromkeys(
+            (
+                *_non_ep_axes(resource.dp_resource, ep_axes),
+                *_non_ep_axes(resource.fsdp_resource, ep_axes),
+            )
+        )
+    )
+
+
 def _capture_ep_resource_axes(ep_axes=None):
     """Capture physical axes at bind time for asynchronous SPMD partitioning."""
     try:
@@ -239,13 +257,8 @@ def _capture_ep_resource_axes(ep_axes=None):
         if ep_axes is None:
             raise
         return _ep_axis_entry(_normalize_ep_axes(ep_axes)), ()
-    outer_axes = tuple(
-        dict.fromkeys(
-            axis for axis in (resource.dp_resource, resource.fsdp_resource) if axis is not None
-        )
-    )
     ep_axes = _resolve_ep_axes(ep_axes)
-    return _ep_axis_entry(ep_axes), tuple(a for a in outer_axes if a not in ep_axes)
+    return _ep_axis_entry(ep_axes), _ep_outer_axes(resource, ep_axes)
 
 
 def _leading_axis_ok(spec, resource_axes=None, *, ep_axes=None):
@@ -269,26 +282,16 @@ def _ep_outer_axis(ep_axes=None):
     """Legacy single outer axis used by the standalone EP custom VJP wrapper."""
     resource = global_mesh_resource()
     ep_axes = _resolve_ep_axes(ep_axes)
-    if (
-        resource.dp_resource not in ep_axes
-        and resource.dp_resource is not None
-        and get_mesh_axis_size(resource.dp_resource) > 1
-    ):
-        return resource.dp_resource
-    if (
-        resource.fsdp_resource not in ep_axes
-        and resource.fsdp_resource is not None
-        and get_mesh_axis_size(resource.fsdp_resource) > 1
-    ):
-        return resource.fsdp_resource
-    return next(
-        (
-            a
-            for a in (resource.dp_resource, resource.fsdp_resource)
-            if a is not None and a not in ep_axes
-        ),
-        None,
-    )
+    # A tuple resource, e.g. a dense FSDP tuple, may include EP axes, which never count as outer.
+    dp_axes = _non_ep_axes(resource.dp_resource, ep_axes)
+    fsdp_axes = _non_ep_axes(resource.fsdp_resource, ep_axes)
+    dp_resource = dp_axes[0] if len(dp_axes) == 1 else dp_axes or None
+    fsdp_resource = fsdp_axes[0] if len(fsdp_axes) == 1 else fsdp_axes or None
+    if dp_resource is not None and get_mesh_axis_size(dp_resource) > 1:
+        return dp_resource
+    if fsdp_resource is not None and get_mesh_axis_size(fsdp_resource) > 1:
+        return fsdp_resource
+    return dp_resource or fsdp_resource
 
 
 def _ep_leading_dims(is_outer):
