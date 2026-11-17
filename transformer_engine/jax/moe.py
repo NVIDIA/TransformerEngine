@@ -180,7 +180,6 @@ def _moe_mesh_axes(resource: MeshResource):
 def _resolve_moe_mesh_resource(
     mesh_resource=None,
     quant_before_fsdp_ag=False,
-    ep_axis=None,
 ):
     """Resolve and snapshot the explicit or active mesh resource."""
     if not isinstance(quant_before_fsdp_ag, bool):
@@ -199,11 +198,7 @@ def _resolve_moe_mesh_resource(
             " context."
         )
     # Snapshot the mutable resource so the custom VJP retains its forward-time axes.
-    mesh_resource = (
-        replace(mesh_resource, ep_resource=ep_axis)
-        if ep_axis is not None
-        else replace(mesh_resource)
-    )
+    mesh_resource = replace(mesh_resource)
     _moe_mesh_axes(mesh_resource)
     if quant_before_fsdp_ag and not mesh_resource.fsdp_resource:
         raise ValueError("quant_before_fsdp_ag=True requires MeshResource.fsdp_resource.")
@@ -2116,7 +2111,6 @@ def moe(
         noop_quantizer_set,
         noop_quantizer_set,
     ),
-    ep_axis: Optional[Union[str, Tuple[str, ...]]] = None,
     mesh_resource: Optional[MeshResource] = None,
     quant_before_fsdp_ag: bool = False,
     input_axes: Tuple[Optional[str], ...] = (),
@@ -2178,15 +2172,13 @@ def moe(
     dispatch_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the EP dispatch outputs.
         ``None`` leaves these values unnamed; the opaque prepare handle is never named.
-    ep_axis : Optional[str | tuple[str, ...]]
-        Override the expert-parallel resource with a physical axis or ordered
-        tuple of axes. All selected axes participate in one EP domain.
     mesh_resource : Optional[MeshResource]
         Physical parallelism resources. ``None`` uses the active
         ``global_shard_guard`` context; an explicit resource takes precedence.
         One of these is required. Batch sharding combines ``dp_resource`` then
         ``fsdp_resource`` (omitting unset/duplicate axes), with ``ep_resource``
-        innermost. EP must be set and distinct from the outer axes.
+        innermost. EP must be set and distinct from the outer axes; it may be
+        an ordered tuple of axes that together form one EP domain.
     quant_before_fsdp_ag : bool
         Quantize expert-weight shards before gathering their MXFP8 data and
         scales on ``mesh_resource.fsdp_resource``. Default ``False`` gathers
@@ -2231,7 +2223,7 @@ def moe(
     if not isinstance(use_cudnn_fusion, bool):
         raise TypeError("use_cudnn_fusion must be a bool")
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
-        mesh_resource, quant_before_fsdp_ag, ep_axis=ep_axis
+        mesh_resource, quant_before_fsdp_ag
     )
     original_shape = x.shape
     if x.ndim not in (2, 3):
