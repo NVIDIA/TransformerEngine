@@ -76,6 +76,21 @@ def test_ep_outer_axes_flatten_tuple_resources(resource, outer_axes):
         assert ep._capture_ep_resource_axes() == (("ep", "tp"), outer_axes)
 
 
+def test_tuple_resources_flatten_in_default_spec_and_sizes(monkeypatch):
+    """Tuple FSDP and EP resources give a flat default EP output spec and product sizes."""
+    from types import SimpleNamespace
+    from transformer_engine.jax import sharding
+    from transformer_engine.jax.ep import _default_out_partition_spec
+
+    mesh = SimpleNamespace(shape={"fsdp": 2, "data": 2, "ep": 2, "tp": 2}, empty=False)
+    monkeypatch.setattr(sharding, "_get_mesh", lambda: mesh)
+    resource = MeshResource(fsdp_resource=("fsdp", "data", "ep"), ep_resource=("ep", "tp"))
+    with global_shard_guard(resource):
+        assert _default_out_partition_spec() == (("fsdp", "data", "ep", "tp"),)
+        assert sharding.ep_axis_size() == 4
+        assert sharding.get_active_resource_axis("ep_resource") == ("ep", "tp")
+
+
 def test_global_default_and_duplicate_outer_axis():
     with global_shard_guard(
         MeshResource(dp_resource="fsdp", fsdp_resource="fsdp", ep_resource="ep")
