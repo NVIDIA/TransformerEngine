@@ -520,7 +520,7 @@ def quantize_mxfp8_smem_tile_general_partial(
 @cute.jit
 def shift_to_right(mS: cute.Tensor, columns_to_shift: Int32) -> cute.Tensor:
     """Derive a new tensor where every logical index (input to the layout) is shifted to the right by `columns_to_shift` columns
-    
+
     For example, define mS's layout as f. This function will return a tensor with a composed layout f', where f'(x, y) = f(x, y + columns_to_shift).
     In other words, the logical index (input of the layout, which is converted to coordinates from the shape) is shifted to the right
     by `columns_to_shift` columns, while the mapping relationship is the same, and it is only applied to a shifted input index.
@@ -532,10 +532,10 @@ def shift_to_right(mS: cute.Tensor, columns_to_shift: Int32) -> cute.Tensor:
     """
     num_rows = cute.size(mS.layout, mode=[0])
     offset_to_shift = columns_to_shift * num_rows
-    shifted_layout = cute.make_composed_layout(mS.layout, offset_to_shift, cute.make_layout(mS.layout.shape))
-    return cute.make_tensor(
-        mS.iterator, shifted_layout
+    shifted_layout = cute.make_composed_layout(
+        mS.layout, offset_to_shift, cute.make_layout(mS.layout.shape)
     )
+    return cute.make_tensor(mS.iterator, shifted_layout)
 
 
 @cute.jit
