@@ -12,6 +12,8 @@ import jax
 import jax.numpy as jnp
 from packaging.version import Version
 
+from .activation import ActivationParams
+
 __all__ = [
     "grouped_gemm_dglu",
     "grouped_gemm_glu",
@@ -160,8 +162,7 @@ def grouped_gemm_glu(
     compute_dtype,
     output_dtype,
     act_func: str = "swiglu",
-    situ_beta1: float = 4.0,
-    situ_beta2: float = 25.0,
+    act_params: ActivationParams = ActivationParams(),
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Run cuDNN's shared grouped MXFP8 GLU API with the selected activation."""
     cudnn_grouped_gemm_glu = getattr(
@@ -179,8 +180,7 @@ def grouped_gemm_glu(
         compute_dtype=compute_dtype,
         output_dtype=output_dtype,
         act_func=act_func,
-        situ_beta1=situ_beta1,
-        situ_beta2=situ_beta2,
+        act_params=act_params,
     )
 
 
@@ -196,8 +196,7 @@ def _grouped_gemm_forward(
     compute_dtype,
     output_dtype,
     act_func: str = "swiglu",
-    situ_beta1: float = 4.0,
-    situ_beta2: float = 25.0,
+    act_params: ActivationParams = ActivationParams(),
 ):
     rows, hidden, _ = a.shape
     experts, combined, b_hidden = b.shape
@@ -207,7 +206,10 @@ def _grouped_gemm_forward(
     norm_const = jnp.ones((1,), dtype=jnp.float32)
     situ_kwargs = {}
     if act_func == "situglu":
-        situ_kwargs = {"situ_beta1": situ_beta1, "situ_beta2": situ_beta2}
+        situ_kwargs = {
+            "situ_beta1": act_params.situglu.gate_beta,
+            "situ_beta2": act_params.situglu.up_beta,
+        }
     result = cudnn_forward(
         a_tensor=a.reshape(rows, hidden),
         b_tensor=b,
@@ -245,8 +247,7 @@ def grouped_gemm_dglu(
     *,
     output_dtype,
     act_func: str = "dswiglu",
-    situ_beta1: float = 4.0,
-    situ_beta2: float = 25.0,
+    act_params: ActivationParams = ActivationParams(),
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Run cuDNN's shared grouped MXFP8 dGLU API with the selected activation."""
     if a.ndim != 2:
@@ -272,7 +273,10 @@ def grouped_gemm_dglu(
     norm_const = jnp.ones((1,), dtype=jnp.float32)
     situ_kwargs = {}
     if act_func == "dsituglu":
-        situ_kwargs = {"situ_beta1": situ_beta1, "situ_beta2": situ_beta2}
+        situ_kwargs = {
+            "situ_beta1": act_params.situglu.gate_beta,
+            "situ_beta2": act_params.situglu.up_beta,
+        }
     result = cudnn_grouped_gemm_dglu(
         a_tensor=a,
         b_tensor=b,
