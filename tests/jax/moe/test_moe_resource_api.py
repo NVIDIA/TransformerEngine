@@ -213,10 +213,14 @@ def test_invalid_resource(resource, quantize, error):
 
 
 def test_bool_and_resource_types():
+    from transformer_engine.jax.ep import ep_bootstrap
+
     with pytest.raises(TypeError, match="must be a bool"):
         _resolve_moe_mesh_resource(MeshResource(ep_resource="ep"), "true")
     with pytest.raises(TypeError, match="must be a MeshResource"):
         _resolve_moe_mesh_resource("ep")
+    with pytest.raises(TypeError, match="must be a MeshResource"):
+        ep_bootstrap(None, None, 2, 1, 1, 1, mesh_resource="ep")
 
 
 @pytest.mark.parametrize("quantize", [False, True])

@@ -17,6 +17,7 @@ import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis, _normalize_ep_axes
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.sharding import (
+    MeshResource,
     _get_mesh,
     get_num_devices_in_mesh,
     global_mesh_resource,
@@ -158,6 +159,8 @@ def ep_bootstrap(
         mesh_resource: MeshResource naming the EP and outer DP/FSDP mesh axes.
             ``None`` uses the active global_shard_guard.
     """
+    if mesh_resource is not None and not isinstance(mesh_resource, MeshResource):
+        raise TypeError("mesh_resource must be a MeshResource or None.")
     if rank is None:
         rank = jax.process_index()
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
