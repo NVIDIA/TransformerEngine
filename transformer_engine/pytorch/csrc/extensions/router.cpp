@@ -350,12 +350,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> fused_topk_with_aux_l
   const int score_function_value = get_score_function_value(score_function);
   const int num_groups_value = num_groups.value_or(-1);
   const int group_topk_value = group_topk.value_or(-1);
-  TORCH_CHECK(nvte_fused_topk_with_aux_loss_scores_is_supported(static_cast<int>(num_experts), topk,
-                                                                num_groups_value, group_topk_value,
-                                                                score_function_value),
-              "fused_topk_with_aux_loss_scores does not support num_experts=", num_experts,
-              ", topk=", topk, ", num_groups=", num_groups_value, ", group_topk=", group_topk_value,
-              ", score_function=", score_function);
   const auto options = logits.options();
   std::vector<int64_t> topk_sizes(sizes.begin(), sizes.end() - 1);
   topk_sizes.push_back(topk);

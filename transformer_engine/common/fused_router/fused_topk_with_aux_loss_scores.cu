@@ -448,6 +448,10 @@ void check_config(int num_experts, int topk, int num_groups, int group_topk, int
              ", group_topk=", group_topk);
 }
 
+// The kernel reproduces the tie-breaking of the separate kernels' naive top-k. They use radix
+// selection, which breaks ties differently, when topk >= NVTE_RADIX_TOPK_THRESHOLD.
+bool separate_topk_is_naive(int topk) { return topk < get_radix_topk_threshold(); }
+
 void check_aligned(const void *ptr, const char *name) {
   NVTE_CHECK(reinterpret_cast<uintptr_t>(ptr) % 16 == 0, name, " must be 16-byte aligned");
 }
@@ -476,6 +480,11 @@ void fused_topk_with_aux_loss_scores_forward(const Tensor &logits, int num_token
                                              Tensor &aux_tokens_per_expert,
                                              Tensor &tokens_per_expert, cudaStream_t stream) {
   check_config(num_experts, topk, num_groups, group_topk, score_function);
+  NVTE_CHECK(separate_topk_is_naive(topk),
+             "fused top-k with aux-loss scores requires topk < NVTE_RADIX_TOPK_THRESHOLD; got ",
+             "topk=", topk, ", NVTE_RADIX_TOPK_THRESHOLD=", get_radix_topk_threshold(),
+             ". At or above the threshold the separate top-k kernels use radix selection, whose "
+             "tie-breaking this kernel does not reproduce.");
   NVTE_CHECK(num_tokens >= 0, "num_tokens must be non-negative, got ", num_tokens);
   const std::vector<size_t> dense_shape{static_cast<size_t>(num_tokens),
                                         static_cast<size_t>(num_experts)};
@@ -639,14 +648,11 @@ void fused_topk_with_aux_loss_scores_backward(const Tensor &logits, const Tensor
 
 int nvte_fused_topk_with_aux_loss_scores_is_supported(int num_experts, int topk, int num_groups,
                                                       int group_topk, int score_function) {
-  // The kernel selects the top-k like the separate kernels' naive path. With
-  // NVTE_RADIX_TOPK_THRESHOLD <= topk the separate kernels use radix selection instead, which
-  // breaks ties differently, so the fused kernel would not reproduce them: not supported.
-  if (topk >= transformer_engine::fused_router::get_radix_topk_threshold()) return 0;
-  return transformer_engine::fused_router::is_supported_config(num_experts, topk, num_groups,
-                                                               group_topk, score_function)
-             ? 1
-             : 0;
+  using namespace transformer_engine::fused_router;
+  const bool supported =
+      separate_topk_is_naive(topk) &&
+      is_supported_config(num_experts, topk, num_groups, group_topk, score_function);
+  return supported ? 1 : 0;
 }
 
 void nvte_fused_topk_with_aux_loss_scores_forward(

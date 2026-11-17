@@ -6,6 +6,7 @@ from itertools import product
 import os
 import subprocess
 import sys
+import textwrap
 from typing import Optional
 
 import pytest
@@ -2323,6 +2324,116 @@ def test_fused_topk_with_aux_loss_scores_cuda_graph():
         assert torch.equal(route_counts, expected_counts)
 
 
+@pytest.mark.parametrize(
+    "dtype,probs_dtype,index_dtype",
+    [
+        (torch.bfloat16, torch.float32, torch.int64),
+        (torch.float16, None, torch.int32),
+        (torch.float32, None, torch.int64),
+    ],
+)
+def test_fused_topk_with_aux_loss_scores_compile(dtype, probs_dtype, index_dtype):
+    """torch.compile(fullgraph=True, dynamic=True) matches eager for [seq, batch, experts]
+    logits, gradient and in-place route counts included, in training and in inference."""
+    torch._dynamo.reset()
+    counters.clear()
+    num_experts, topk = 256, 8
+    generator = torch.Generator(device="cuda").manual_seed(5)
+    expert_bias = 0.05 * torch.randn(num_experts, device="cuda", generator=generator)
+
+    def router(logits, tokens_per_expert):
+        probs, indices, scores, counts = te_router.fused_topk_with_aux_loss_scores(
+            logits,
+            topk,
+            8,
+            4,
+            2.5,
+            "sigmoid",
+            expert_bias,
+            tokens_per_expert=tokens_per_expert,
+            probs_dtype=probs_dtype,
+            index_dtype=index_dtype,
+        )
+        aux_loss = fused_moe_aux_loss(
+            scores.reshape(-1, num_experts),
+            counts,
+            scores.numel() // num_experts,
+            num_experts,
+            topk,
+            1e-3,
+            deterministic=True,
+        )
+        return probs, indices, aux_loss
+
+    compiled = torch.compile(router, fullgraph=True, dynamic=True)
+    route_counts = torch.zeros(num_experts, dtype=torch.int64, device="cuda")
+    expected_counts = torch.zeros_like(route_counts)
+    for seq_len in (16, 37, 64):
+        logits = _router_logits(2 * seq_len, num_experts, dtype, "ties", generator)
+        logits = logits.view(seq_len, 2, num_experts)
+        grad_probs = torch.randn(seq_len, 2, topk, device="cuda", generator=generator)
+        actual_logits = logits.clone().requires_grad_(True)
+        expected_logits = logits.clone().requires_grad_(True)
+        actual = compiled(actual_logits, route_counts)
+        expected = router(expected_logits, expected_counts)
+        assert actual[0].shape == (seq_len, 2, topk) and actual[0].dtype == expected[0].dtype
+        assert torch.equal(actual[0], expected[0])
+        assert torch.equal(actual[1], expected[1])
+        torch.testing.assert_close(actual[2], expected[2])
+        assert torch.equal(route_counts, expected_counts)
+        (actual_grad,) = torch.autograd.grad(
+            (actual[0].float() * grad_probs).sum() + actual[2], actual_logits
+        )
+        (expected_grad,) = torch.autograd.grad(
+            (expected[0].float() * grad_probs).sum() + expected[2], expected_logits
+        )
+        assert torch.equal(actual_grad, expected_grad)
+        assert counters["stats"]["unique_graphs"] == 1
+
+    with torch.no_grad():
+        actual = compiled(logits, route_counts)
+        expected = router(logits, expected_counts)
+    for actual_output, expected_output in zip(actual, expected):
+        assert torch.equal(actual_output, expected_output)
+    assert torch.equal(route_counts, expected_counts)
+
+
+@pytest.mark.parametrize(
+    "dtype,fp32_probs,index_dtype",
+    [
+        (torch.bfloat16, True, torch.int64),
+        (torch.float16, False, torch.int32),
+        (torch.float32, False, torch.int64),
+    ],
+)
+def test_fused_topk_with_aux_loss_scores_opcheck(dtype, fp32_probs, index_dtype):
+    logits = torch.randn(16, 256, device="cuda", dtype=dtype)
+    expert_bias = 0.05 * torch.randn(256, device="cuda")
+    for num_groups, group_topk, tokens_per_expert in (
+        (8, 4, torch.zeros(256, device="cuda", dtype=torch.int64)),
+        (None, None, None),
+    ):
+        forward_args = (
+            logits,
+            8,
+            num_groups,
+            group_topk,
+            2.5,
+            "sigmoid",
+            expert_bias,
+            tokens_per_expert,
+            fp32_probs,
+            index_dtype,
+        )
+        torch.library.opcheck(te_router._topk_aux_scores_forward, forward_args)
+        probs, indices, scores, _ = te_router._topk_aux_scores_forward(*forward_args)
+        for grad_aux_scores in (torch.randn_like(scores), None):
+            torch.library.opcheck(
+                te_router._topk_aux_scores_backward,
+                (logits, indices, torch.randn_like(probs), grad_aux_scores, 2.5, "sigmoid"),
+            )
+
+
 def test_fused_topk_with_aux_loss_scores_unsupported():
     supported = te_router.fused_topk_with_aux_loss_scores_is_supported
     assert supported(256, 8, 8, 4, "sigmoid")
@@ -2332,24 +2443,36 @@ def test_fused_topk_with_aux_loss_scores_unsupported():
     assert not supported(256, 8, 4, 2, "sigmoid")
     assert not supported(256, 8, 8, 4, "softmax")
     logits = torch.randn(16, 128, device="cuda")
-    with pytest.raises(RuntimeError, match="does not support"):
+    with pytest.raises(RuntimeError, match="got score_function=0, num_experts=128"):
         te_router.fused_topk_with_aux_loss_scores(logits, 8, 8, 4, 1.0, "sigmoid", None)
 
 
-@pytest.mark.parametrize("threshold, expected", [("8", False), ("9", True)])
+@pytest.mark.parametrize("threshold, expected", [("8", "False radix-error"), ("9", "True ok")])
 def test_fused_topk_with_aux_loss_scores_radix_threshold(threshold, expected):
     """With NVTE_RADIX_TOPK_THRESHOLD <= topk the separate kernels use radix selection, whose
-    tie-breaking the fused kernel does not reproduce, so the fused kernel reports unsupported.
+    tie-breaking the fused kernel does not reproduce, so the fused kernel reports unsupported
+    and its forward raises an error that names the variable.
     The threshold is read once per process, hence the subprocess."""
-    code = (
-        "import transformer_engine.pytorch.router as r;"
-        "print(r.fused_topk_with_aux_loss_scores_is_supported(256, 8, 8, 4, 'sigmoid'))"
+    code = textwrap.dedent(
+        """
+        import torch
+        import transformer_engine.pytorch.router as r
+
+        supported = r.fused_topk_with_aux_loss_scores_is_supported(256, 8, 8, 4, "sigmoid")
+        logits = torch.randn(4, 256, device="cuda")
+        try:
+            r.fused_topk_with_aux_loss_scores(logits, 8, 8, 4, 1.0, "sigmoid", None)
+            result = "ok"
+        except RuntimeError as error:
+            result = "radix-error" if "NVTE_RADIX_TOPK_THRESHOLD" in str(error) else repr(error)
+        print(supported, result)
+        """
     )
     env = dict(os.environ, NVTE_RADIX_TOPK_THRESHOLD=threshold)
     out = subprocess.run(
         [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
     )
-    assert out.stdout.strip().splitlines()[-1] == str(expected)
+    assert out.stdout.strip().splitlines()[-1] == expected
 
 
 def profile_topk_softmax(

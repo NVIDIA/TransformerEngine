@@ -600,7 +600,7 @@ class FusedTopkWithAuxLossScores(torch.autograd.Function):
         score_function: str,
         expert_bias: Optional[torch.Tensor],
         tokens_per_expert: Optional[torch.Tensor],
-        probs_dtype: Optional[torch.dtype],
+        fp32_probs: bool,
         index_dtype: torch.dtype,
     ):
         # pylint: disable=missing-function-docstring
@@ -614,10 +614,11 @@ class FusedTopkWithAuxLossScores(torch.autograd.Function):
                 score_function,
                 expert_bias,
                 tokens_per_expert,
-                probs_dtype == torch.float32 and logits.dtype != torch.float32,
+                fp32_probs,
                 index_dtype,
             )
         )
+        ctx.compiled = False
         ctx.mark_non_differentiable(topk_indices, aux_tokens_per_expert)
         ctx.save_for_backward(logits, topk_indices)
         ctx.scaling_factor = scaling_factor
@@ -634,7 +635,10 @@ class FusedTopkWithAuxLossScores(torch.autograd.Function):
         logits, topk_indices = ctx.saved_tensors
         if grad_probs is None:
             grad_probs = torch.zeros(topk_indices.shape, dtype=logits.dtype, device=logits.device)
-        grad_logits = tex.fused_topk_with_aux_loss_scores_bwd(
+        backward = (
+            _topk_aux_scores_backward if ctx.compiled else tex.fused_topk_with_aux_loss_scores_bwd
+        )
+        grad_logits = backward(
             logits,
             topk_indices,
             grad_probs.contiguous(),
@@ -643,6 +647,47 @@ class FusedTopkWithAuxLossScores(torch.autograd.Function):
             ctx.score_function,
         )
         return grad_logits, None, None, None, None, None, None, None, None, None
+
+
+class _CompiledFusedTopkWithAuxLossScores(FusedTopkWithAuxLossScores):
+    """Single-pass top-k routing with aux-loss scores, traced by torch.compile."""
+
+    @staticmethod
+    def forward(
+        logits: torch.Tensor,
+        topk: int,
+        num_groups: Optional[int],
+        group_topk: Optional[int],
+        scaling_factor: Optional[float],
+        score_function: str,
+        expert_bias: Optional[torch.Tensor],
+        tokens_per_expert: Optional[torch.Tensor],
+        fp32_probs: bool,
+        index_dtype: torch.dtype,
+    ):
+        # pylint: disable=missing-function-docstring
+        return _topk_aux_scores_forward(
+            logits,
+            topk,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            tokens_per_expert,
+            fp32_probs,
+            index_dtype,
+        )
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        # pylint: disable=missing-function-docstring
+        logits, _, _, _, ctx.scaling_factor, ctx.score_function, _, _, _, _ = inputs
+        _, topk_indices, _, aux_tokens_per_expert = output
+        ctx.compiled = True
+        ctx.mark_non_differentiable(topk_indices, aux_tokens_per_expert)
+        ctx.save_for_backward(logits, topk_indices)
+        ctx.set_materialize_grads(False)
 
 
 def fused_topk_with_aux_loss_scores_is_supported(
@@ -696,8 +741,9 @@ def fused_topk_with_aux_loss_scores(
     including the gradient of ``logits``, which is what autograd accumulates in the logits dtype
     from the two backward passes. The probabilities are returned compactly, ``[..., topk]`` in
     the order of ``topk_indices``, instead of as a dense ``[..., num_experts]`` tensor. The
-    function does not synchronize with the host and can be captured in a CUDA graph.
-    Use :func:`fused_topk_with_aux_loss_scores_is_supported` to check a configuration.
+    function does not synchronize with the host and can be captured in a CUDA graph. Supports
+    ``torch.compile(fullgraph=True)``. Use :func:`fused_topk_with_aux_loss_scores_is_supported`
+    to check a configuration.
 
     Parameters
     ----------
@@ -714,7 +760,9 @@ def fused_topk_with_aux_loss_scores(
         fp32 ``[num_experts]``, added to the scores for the selection only.
     tokens_per_expert : torch.Tensor, optional
         int64 ``[num_experts]``. The number of routes to each expert is added to it in place,
-        e.g. the local token counts used to update ``expert_bias``.
+        e.g. the local token counts used to update ``expert_bias``, in eager and compiled
+        execution. For automatic CUDA graph replay under ``torch.compile``, use a module buffer
+        or ``torch._dynamo.mark_static_address``; otherwise capture may be skipped.
     probs_dtype : torch.dtype, optional
         ``None`` (the logits dtype) or ``torch.float32``. With float32 the values are the
         logits-dtype probabilities widened to float32 (what ``probs.float()`` gives, for
@@ -736,7 +784,12 @@ def fused_topk_with_aux_loss_scores(
         raise ValueError(f"probs_dtype must be None or torch.float32, got {probs_dtype}")
     if index_dtype not in (torch.int32, torch.int64):
         raise ValueError(f"index_dtype must be torch.int32 or torch.int64, got {index_dtype}")
-    return FusedTopkWithAuxLossScores.apply(
+    function = (
+        _CompiledFusedTopkWithAuxLossScores
+        if torch.compiler.is_compiling()
+        else FusedTopkWithAuxLossScores
+    )
+    return function.apply(
         logits,
         topk,
         num_groups,
@@ -745,7 +798,7 @@ def fused_topk_with_aux_loss_scores(
         score_function,
         expert_bias,
         tokens_per_expert,
-        probs_dtype,
+        probs_dtype == torch.float32 and logits.dtype != torch.float32,
         index_dtype,
     )
 
@@ -1379,3 +1432,82 @@ def _aux_loss_autograd(ctx, grad_aux_loss, _grad_const):
 
 
 _aux_loss_forward.register_autograd(_aux_loss_autograd, setup_context=_aux_loss_setup_context)
+
+
+@torch.library.custom_op("te_moe::router_topk_aux_scores_fwd", mutates_args=("tokens_per_expert",))
+def _topk_aux_scores_forward(
+    logits: torch.Tensor,
+    topk: int,
+    num_groups: Optional[int],
+    group_topk: Optional[int],
+    scaling_factor: Optional[float],
+    score_function: str,
+    expert_bias: Optional[torch.Tensor],
+    tokens_per_expert: Optional[torch.Tensor],
+    fp32_probs: bool,
+    index_dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        return tex.fused_topk_with_aux_loss_scores_fwd(
+            logits,
+            topk,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            tokens_per_expert,
+            fp32_probs,
+            index_dtype,
+        )
+
+
+@_topk_aux_scores_forward.register_fake
+def _topk_aux_scores_forward_fake(
+    logits,
+    topk,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
+    expert_bias,
+    tokens_per_expert,
+    fp32_probs,
+    index_dtype,
+):
+    del num_groups, group_topk, scaling_factor, score_function, expert_bias, tokens_per_expert
+    topk_shape = (*logits.shape[:-1], topk)
+    return (
+        logits.new_empty(topk_shape, dtype=torch.float32 if fp32_probs else logits.dtype),
+        logits.new_empty(topk_shape, dtype=index_dtype),
+        logits.new_empty(logits.shape, dtype=torch.float32),
+        logits.new_empty((logits.shape[-1],), dtype=torch.int64),
+    )
+
+
+@torch.library.custom_op("te_moe::router_topk_aux_scores_bwd", mutates_args=())
+def _topk_aux_scores_backward(
+    logits: torch.Tensor,
+    topk_indices: torch.Tensor,
+    grad_probs: torch.Tensor,
+    grad_aux_scores: Optional[torch.Tensor],
+    scaling_factor: Optional[float],
+    score_function: str,
+) -> torch.Tensor:
+    with torch.cuda.device(logits.device):
+        return tex.fused_topk_with_aux_loss_scores_bwd(
+            logits,
+            topk_indices,
+            grad_probs.contiguous(),
+            grad_aux_scores,
+            scaling_factor,
+            score_function,
+        )
+
+
+@_topk_aux_scores_backward.register_fake
+def _topk_aux_scores_backward_fake(
+    logits, topk_indices, grad_probs, grad_aux_scores, scaling_factor, score_function
+):
+    del topk_indices, grad_probs, grad_aux_scores, scaling_factor, score_function
+    return torch.empty_like(logits)

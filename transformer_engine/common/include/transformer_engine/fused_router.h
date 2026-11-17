@@ -253,8 +253,8 @@ int nvte_fused_topk_with_aux_loss_scores_is_supported(int num_experts, int topk,
  *  - nvte_fused_score_for_moe_aux_loss_forward: aux_scores (sigmoid scores normalised over all
  *    experts), and the column sums of its routing map (aux_tokens_per_expert);
  *  - the column sums of the selected routes, added to tokens_per_expert when it is given.
- *  See nvte_fused_topk_with_aux_loss_scores_is_supported for the supported configurations.
- *  No host synchronisation; safe to capture in a CUDA graph.
+ *  See nvte_fused_topk_with_aux_loss_scores_is_supported for the supported configurations;
+ *  any other configuration is an error. No host synchronisation; safe to capture in a CUDA graph.
  *
  *  \param[in]     logits          Logits from the gating GEMM, [num_tokens, num_experts]
  *                                 (fp32/bf16/fp16, 16-byte aligned).
