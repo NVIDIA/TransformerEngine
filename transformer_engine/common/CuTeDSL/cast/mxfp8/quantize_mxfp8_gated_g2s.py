@@ -18,7 +18,6 @@ Gated input is [M, 2N] with [act | gate] along the last dim. Every operand is ad
             y_grad[M, N]
 """
 
-from ast import Tuple
 from typing import Optional
 
 import cutlass
