@@ -304,12 +304,13 @@ GROUP_Q_LAYOUTS = [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayou
 
 
 def get_group_cfg_key(shape_rep, in_dtype, fp8_dtype, q_layout):
-    """Registry key for the grouped V2 kernel (swizzled, without dbias or activation)."""
+    """Registry key for the grouped V2 kernel (swizzled 1D scaling, without dbias or activation)."""
     major, minor = device_compute_capability()
+    # swizzled, with_dbias, with_dact, with_act, use_2d_quantization
     return (
         f"cutedsl_group_mxfp8_sm{major * 10 + minor}_{DTYPE_TO_STR[in_dtype]}_"
         f"{FP8_TO_KEY[fp8_dtype]}_{int(q_layout.has_rowwise)}_{int(q_layout.has_colwise)}_"
-        f"{shape_rep}_1_0_0_0_none"
+        f"{shape_rep}_1_0_0_0_0_none"
     )
 
 
