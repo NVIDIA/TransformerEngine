@@ -8,9 +8,11 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
-
-#include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
+#include <transformer_engine/cast.h>
+
+#include <stdexcept>
+
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -18,6 +20,9 @@ using namespace transformer_engine;
 using namespace test;
 
 namespace {
+
+// Alignment required by the public grouped TMA workspace contract.
+constexpr size_t kTmaWorkspaceAlignment = 128;
 
 enum ProcessingMethod {
     CAST_ONLY,
@@ -263,7 +268,10 @@ void performTest(const ProcessingMethod processing_method,
                  const std::vector<size_t>& offsets_h,
                  const bool rowwise,
                  const bool colwise,
-                 const bool use_2d_quantization = false) {
+                 const bool use_2d_quantization = false,
+                 const bool use_workspace = false,
+                 const bool capture_with_workspace = false,
+                 const bool check_workspace_contract = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -528,7 +536,86 @@ void performTest(const ProcessingMethod processing_method,
     Tensor workspace;
     switch (processing_method) {
         case ProcessingMethod::CAST_ONLY: {
-            nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
+            if (use_workspace) {
+                auto quantize = [&](NVTETensor ws, cudaStream_t stream) {
+                    nvte_group_quantize_v2(in_group_tensor, out_group_tensor, ws, quant_config,
+                                           stream);
+                };
+                quantize(workspace.data(), 0);
+                ASSERT_EQ(workspace.dtype(), DType::kByte);
+                ASSERT_EQ(workspace.rowwise_shape().ndim, 1);
+                ASSERT_GT(workspace.rowwise_shape().data[0], 0);
+                if (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM) {
+                    EXPECT_EQ(workspace.rowwise_shape().data[0], 1);
+                } else {
+                    EXPECT_EQ(workspace.rowwise_shape().data[0] % kTmaWorkspaceAlignment, 0);
+                }
+                // A size query must leave both quantized outputs untouched.
+                if (rowwise) {
+                    ASSERT_EQ(cudaMemcpy(out_data_rowwise_h.data(), out_data_rowwise_d,
+                                         out_data_size, cudaMemcpyDeviceToHost), cudaSuccess);
+                    EXPECT_TRUE(std::all_of(out_data_rowwise_h.begin(), out_data_rowwise_h.end(),
+                                            [](OutputType x) { return static_cast<float>(x) == 0.f; }));
+                }
+                if (colwise) {
+                    ASSERT_EQ(cudaMemcpy(out_data_colwise_h.data(), out_data_colwise_d,
+                                         out_data_size, cudaMemcpyDeviceToHost), cudaSuccess);
+                    EXPECT_TRUE(std::all_of(out_data_colwise_h.begin(), out_data_colwise_h.end(),
+                                            [](OutputType x) { return static_cast<float>(x) == 0.f; }));
+                }
+                workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+                if (check_workspace_contract) {
+                    EXPECT_THROW(quantize(nullptr, 0), std::runtime_error);
+                    TensorWrapper opaque_workspace;
+                    opaque_workspace.set_rowwise_data(workspace.rowwise_dptr(), DType::kByte,
+                                                      std::vector<size_t>{1});
+                    EXPECT_THROW(quantize(opaque_workspace.data(), 0), std::runtime_error);
+                    opaque_workspace.set_rowwise_data(
+                        static_cast<char *>(workspace.rowwise_dptr()) + 1, DType::kByte,
+                        std::vector<size_t>{workspace.rowwise_shape().data[0]});
+                    EXPECT_THROW(quantize(opaque_workspace.data(), 0), std::runtime_error);
+                    EXPECT_THROW(nvte_group_quantize(in_group_tensor, out_group_tensor,
+                                                       quant_config, 0), std::runtime_error);
+                }
+                if (capture_with_workspace) {
+                    cudaStream_t stream;
+                    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+                    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                    cudaGraph_t graph;
+                    ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed), cudaSuccess);
+                    quantize(workspace.data(), stream);
+                    ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
+                    cudaGraphExec_t graph_exec;
+                    ASSERT_EQ(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0), cudaSuccess);
+                    ASSERT_EQ(cudaGraphLaunch(graph_exec, stream), cudaSuccess);
+                    ASSERT_EQ(cudaGraphLaunch(graph_exec, stream), cudaSuccess);
+                    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+                    ASSERT_EQ(cudaGraphExecDestroy(graph_exec), cudaSuccess);
+                    ASSERT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+                    ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+                } else {
+                    // Each call reconstructs the view using a fresh tensor handle.
+                    for (int repeat = 0; repeat < 3; ++repeat) {
+                        ASSERT_EQ(cudaMemset(workspace.rowwise_dptr(), 0xa5,
+                                             workspace.rowwise_shape().data[0]), cudaSuccess);
+                        TensorWrapper fresh_workspace(workspace.rowwise_dptr(),
+                            std::vector<size_t>{workspace.rowwise_shape().data[0]}, DType::kByte);
+                        quantize(fresh_workspace.data(), 0);
+                    }
+                }
+            } else {
+                if (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM) {
+                    nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
+                } else {
+                    EXPECT_THROW(nvte_group_quantize(in_group_tensor, out_group_tensor,
+                                                     quant_config, 0), std::runtime_error);
+                    nvte_group_quantize_v2(in_group_tensor, out_group_tensor, workspace.data(),
+                                           quant_config, 0);
+                    workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+                    nvte_group_quantize_v2(in_group_tensor, out_group_tensor, workspace.data(),
+                                           quant_config, 0);
+                }
+            }
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
@@ -552,21 +639,25 @@ void performTest(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_ACT: {
-            auto nvte_group_act = &nvte_group_gelu;
-            if (OP == &silu)       { nvte_group_act = &nvte_group_silu; }
-            else if (OP == &relu)  { nvte_group_act = &nvte_group_relu; }
-            else if (OP == &qgelu) { nvte_group_act = &nvte_group_qgelu; }
-            else if (OP == &srelu) { nvte_group_act = &nvte_group_srelu; }
-            nvte_group_act(in_group_tensor, out_group_tensor, 0);
+            auto nvte_group_act = &nvte_group_gelu_v2;
+            if (OP == &silu)       { nvte_group_act = &nvte_group_silu_v2; }
+            else if (OP == &relu)  { nvte_group_act = &nvte_group_relu_v2; }
+            else if (OP == &qgelu) { nvte_group_act = &nvte_group_qgelu_v2; }
+            else if (OP == &srelu) { nvte_group_act = &nvte_group_srelu_v2; }
+            nvte_group_act(in_group_tensor, out_group_tensor, workspace.data(), 0);
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+            nvte_group_act(in_group_tensor, out_group_tensor, workspace.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            auto nvte_group_dact = &nvte_group_dgelu;
-            if (OP == &dsilu)       { nvte_group_dact = &nvte_group_dsilu; }
-            else if (OP == &drelu)  { nvte_group_dact = &nvte_group_drelu; }
-            else if (OP == &dqgelu) { nvte_group_dact = &nvte_group_dqgelu; }
-            else if (OP == &dsrelu) { nvte_group_dact = &nvte_group_dsrelu; }
-            nvte_group_dact(grad_group_tensor, in_group_tensor, out_group_tensor, 0);
+            auto nvte_group_dact = &nvte_group_dgelu_v2;
+            if (OP == &dsilu)       { nvte_group_dact = &nvte_group_dsilu_v2; }
+            else if (OP == &drelu)  { nvte_group_dact = &nvte_group_drelu_v2; }
+            else if (OP == &dqgelu) { nvte_group_dact = &nvte_group_dqgelu_v2; }
+            else if (OP == &dsrelu) { nvte_group_dact = &nvte_group_dsrelu_v2; }
+            nvte_group_dact(grad_group_tensor, in_group_tensor, out_group_tensor, workspace.data(), 0);
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+            nvte_group_dact(grad_group_tensor, in_group_tensor, out_group_tensor, workspace.data(), 0);
             break;
         }
     }
@@ -858,6 +949,11 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
             performTest<InputType, OutputType>(processing_method, OP, shape_rep, num_tensors,
                                                logical_shape, first_dims, last_dims, offsets,
                                                rowwise, colwise);
+            if (processing_method == ProcessingMethod::CAST_ONLY) {
+                performTest<InputType, OutputType>(processing_method, OP, shape_rep, num_tensors,
+                                                   logical_shape, first_dims, last_dims, offsets,
+                                                   rowwise, colwise, false, true);
+            }
         );
     );
 }
@@ -888,7 +984,94 @@ TEST(OperatorTest_GroupedFusedCastMXFP8, Test2DQuantization) {
             rowwise,
             colwise,
             /*use_2d_quantization=*/true);
+        performTest<bf16, fp8e4m3>(
+            ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::SAME_BOTH_DIMS,
+            num_tensors, logical_shape, first_dims, last_dims, offsets, rowwise, colwise,
+            /*use_2d_quantization=*/true, /*use_workspace=*/true);
     }
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceMoreThanOneCtaOfGroups) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t num_tensors = 129;
+    std::vector<size_t> first_dims(num_tensors, 128);
+    first_dims.front() = 256;
+    std::vector<size_t> last_dims(num_tensors, 128);
+    std::vector<size_t> offsets(num_tensors + 1, 0);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+    }
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_FIRST_DIM,
+        num_tensors, {offsets.back() / 128, 128}, first_dims, last_dims, offsets,
+        /*rowwise=*/true, /*colwise=*/false, /*use_2d_quantization=*/false,
+        /*use_workspace=*/true);
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceGraphCapture) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t num_tensors = 65;
+    std::vector<size_t> first_dims(num_tensors, 128);
+    std::vector<size_t> last_dims(num_tensors, 128);
+    first_dims.front() = 256;
+    last_dims.back() = 256;
+    std::vector<size_t> offsets(num_tensors + 1, 0);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+    }
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_BOTH_DIMS,
+        num_tensors, {1, offsets.back()}, first_dims, last_dims, offsets,
+        /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/false,
+        /*use_workspace=*/true, /*capture_with_workspace=*/true);
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceMoreThan64Descriptors) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t num_tensors = 65;
+    std::vector<size_t> first_dims(num_tensors, 128);
+    std::vector<size_t> last_dims(num_tensors, 128);
+    first_dims.front() = 256;
+    last_dims.back() = 256;
+    std::vector<size_t> offsets(num_tensors + 1, 0);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+    }
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_BOTH_DIMS,
+        num_tensors, {1, offsets.back()}, first_dims, last_dims, offsets,
+        /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/false,
+        /*use_workspace=*/true, /*capture_with_workspace=*/false,
+        /*check_workspace_contract=*/true);
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, WorkspaceVaryingLastDimGraphCapture) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t num_tensors = 129;
+    std::vector<size_t> first_dims(num_tensors, 128);
+    std::vector<size_t> last_dims(num_tensors, 128);
+    last_dims.back() = 256;
+    std::vector<size_t> offsets(num_tensors + 1, 0);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+    }
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_LAST_DIM,
+        num_tensors, {128, offsets.back() / 128}, first_dims, last_dims, offsets,
+        /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/true,
+        /*use_workspace=*/true, /*capture_with_workspace=*/true);
 }
 
 std::string to_string(const ProcessingMethod method) {

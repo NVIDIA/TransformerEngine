@@ -422,7 +422,11 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
                                    /*swizzled=*/false);
   fill_source(source, shape_info);
   fill_output_sentinel(input);
-  nvte_group_quantize(source.data(), input.data(), nullptr, 0);
+  TensorWrapper workspace;
+  nvte_group_quantize_v2(source.data(), input.data(), workspace.data(), nullptr, 0);
+  auto workspace_data = test::cuda_alloc(workspace.shape().data[0]);
+  workspace.set_rowwise_data(workspace_data.get(), workspace.dtype(), workspace.shape());
+  nvte_group_quantize_v2(source.data(), input.data(), workspace.data(), nullptr, 0);
 
   // Code under test.
   auto actual = make_grouped_tensor(shape_info, DType::kFloat8E4M3,
@@ -449,8 +453,14 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
     dequantized_nvte.set_rowwise_data(dequantized_out.get(), DType::kBFloat16,
                                     shape_info.logical_shape);
   }
-  nvte_group_requantize(input.data(), actual.data(),
-                       return_dequantized ? dequantized_nvte.data() : nullptr, nullptr, 0);
+  if (shape_info.same_last_dim) {
+    nvte_group_requantize(input.data(), actual.data(),
+                         return_dequantized ? dequantized_nvte.data() : nullptr, nullptr, 0);
+  } else {
+    nvte_group_requantize_v2(input.data(), actual.data(),
+                            return_dequantized ? dequantized_nvte.data() : nullptr,
+                            workspace.data(), nullptr, 0);
+  }
 
   // Reference descriptors delimit the live prefix, while allocations retain
   // full capacity so byte comparisons also check untouched tails.
@@ -472,13 +482,13 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
                                          NVTE_DELAYED_TENSOR_SCALING,
                                          /*rowwise=*/true, /*columnwise=*/false);
   fill_output_sentinel(dequantized);
-  nvte_group_dequantize(reference_input.data(), dequantized.data(), 0);
+  nvte_group_dequantize_v2(reference_input.data(), dequantized.data(), workspace.data(), 0);
 
   auto reference_compact = make_grouped_tensor(
       reference_shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
       /*rowwise=*/false, /*columnwise=*/true, /*swizzled=*/false);
   fill_output_sentinel(reference_compact);
-  nvte_group_quantize(dequantized.data(), reference_compact.data(), nullptr, 0);
+  nvte_group_quantize_v2(dequantized.data(), reference_compact.data(), workspace.data(), nullptr, 0);
 
   std::unique_ptr<OwnedGroupedTensor> reference_swizzled;
   if (output_swizzled) {
@@ -522,6 +532,68 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
                      expected_rowwise_scales, actual.rowwise_scale_bytes);
   EXPECT_EQ(actual.tensor->get_rowwise_data().data_ptr, input.rowwise_data.get());
   EXPECT_EQ(actual.tensor->get_with_gemm_swizzled_scales(), output_swizzled);
+}
+
+TEST(GroupedRequantizeTest, WorkspaceQueryAndValidation) {
+  if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) GTEST_SKIP();
+  for (const auto &shape : {GroupShapeCase{"Uniform", {{128, 128}, {128, 128}}},
+                            GroupShapeCase{"VaryingLast", {{128, 128}, {128, 256}}}}) {
+    SCOPED_TRACE(shape.name);
+    const auto info = make_shape_info(shape);
+    auto input = make_grouped_tensor(info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
+                                     /*rowwise=*/true, /*columnwise=*/false);
+    auto output = make_grouped_tensor(info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
+                                      /*rowwise=*/false, /*columnwise=*/true);
+    fill_output_sentinel(output);
+    if (!info.same_last_dim) {
+      EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
+                   std::runtime_error);
+    }
+    TensorWrapper requirement;
+    cudaStream_t stream;
+    cudaGraph_t graph;
+    NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    NVTE_CHECK_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    nvte_group_requantize_v2(input.data(), output.data(), nullptr, requirement.data(), nullptr,
+                             stream);
+    NVTE_CHECK_CUDA(cudaStreamEndCapture(stream, &graph));
+    size_t nodes = 0;
+    NVTE_CHECK_CUDA(cudaGraphGetNodes(graph, nullptr, &nodes));
+    EXPECT_EQ(nodes, 0);
+    NVTE_CHECK_CUDA(cudaGraphDestroy(graph));
+    NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+    EXPECT_EQ(requirement.dtype(), DType::kByte);
+    if (info.same_last_dim) {
+      EXPECT_EQ(requirement.shape().data[0], 1);
+    } else {
+      EXPECT_GT(requirement.shape().data[0], 1);
+    }
+    for (const auto &[ptr, bytes] :
+         {std::make_pair(output.columnwise_data.get(), output.data_bytes),
+          std::make_pair(output.columnwise_scale_inv.get(), output.columnwise_scale_bytes)}) {
+      std::vector<uint8_t> untouched(bytes);
+      NVTE_CHECK_CUDA(cudaMemcpy(untouched.data(), ptr, bytes, cudaMemcpyDeviceToHost));
+      EXPECT_EQ(untouched, std::vector<uint8_t>(bytes, 0xA5));
+    }
+    const size_t bytes = requirement.shape().data[0];
+    auto storage = test::cuda_alloc(bytes);
+    TensorWrapper workspace(storage.get(), std::vector<size_t>{bytes - 1}, DType::kByte);
+    EXPECT_THROW(nvte_group_requantize_v2(input.data(), output.data(), nullptr, workspace.data(),
+                                          nullptr, 0),
+                 std::runtime_error);
+    if (!info.same_last_dim) {
+      workspace.set_rowwise_data(static_cast<char *>(storage.get()) + 1, DType::kByte,
+                                 std::vector<size_t>{bytes});
+      EXPECT_THROW(nvte_group_requantize_v2(input.data(), output.data(), nullptr, workspace.data(),
+                                            nullptr, 0),
+                   std::runtime_error);
+    }
+    input.tensor->set_rowwise_data(input.rowwise_data.get(), DType::kByte,
+                                   std::vector<size_t>{info.total_elements});
+    EXPECT_THROW(nvte_group_requantize_v2(input.data(), output.data(), nullptr, requirement.data(),
+                                          nullptr, 0),
+                 std::runtime_error);
+  }
 }
 
 const std::vector<GroupShapeCase> kGroupShapeCases = {

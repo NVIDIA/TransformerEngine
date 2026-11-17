@@ -983,7 +983,8 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_varying_first
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTensor *output,
-                    const QuantizationConfig *quant_config, cudaStream_t stream) {
+                    const QuantizationConfig *quant_config, cudaStream_t stream,
+                    bool query_only = false) {
   using namespace group_quantize_kernel;
   (void)quant_config;
 
@@ -1095,6 +1096,23 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                                "Varying last-dimension grouped FP8 quantization requires "
                                "last_dims and tensor_offsets.");
                   }
+                  if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM &&
+                                SCALING_TYPE == ScalingType::ROWWISE) {
+                    constexpr size_t flat_nvec = ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
+                    constexpr size_t flat_in_vec_bytes = flat_nvec * sizeof(IType);
+                    constexpr size_t flat_out_vec_bytes = flat_nvec * sizeof(OType);
+                    const bool flat_aligned =
+                        last_logical_dim % flat_nvec == 0 &&
+                        reinterpret_cast<uintptr_t>(input->data.dptr) % flat_in_vec_bytes == 0 &&
+                        reinterpret_cast<uintptr_t>(output->data.dptr) % flat_out_vec_bytes == 0;
+                    NVTE_CHECK(flat_aligned,
+                               "Varying first-dimension rowwise grouped FP8 quantization requires "
+                               "vector-aligned inputs: the last logical dimension must be a "
+                               "multiple of ",
+                               flat_nvec,
+                               " and the input/output base pointers must be vector aligned.");
+                  }
+                  if (query_only) return;
                   bool launched_fast_path = false;
                   if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
                     const size_t rows_per_tensor = first_logical_dim / num_tensors;
@@ -1159,25 +1177,6 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                     if constexpr (SCALING_TYPE == ScalingType::ROWWISE) {
                       const size_t total_elements = first_logical_dim * last_logical_dim;
                       constexpr size_t flat_nvec = ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
-                      // nvcc 13.0 fails to parse `using` type aliases inside this
-                      // macro-expanded block in some TUs (activation/glu.cu); use
-                      // the equivalent byte counts (Vec<T, N>::BYTES == N * sizeof(T)).
-                      constexpr size_t flat_in_vec_bytes = flat_nvec * sizeof(IType);
-                      constexpr size_t flat_out_vec_bytes = flat_nvec * sizeof(OType);
-                      const bool flat_aligned =
-                          last_logical_dim % flat_nvec == 0 &&
-                          reinterpret_cast<uintptr_t>(input->data.dptr) % flat_in_vec_bytes == 0 &&
-                          reinterpret_cast<uintptr_t>(output->data.dptr) % flat_out_vec_bytes == 0;
-                      // Only vector-aligned inputs are supported. A non-multiple
-                      // row length or a misaligned base pointer would force
-                      // uncoalesced scalar access, which we deliberately do not
-                      // support on this path.
-                      NVTE_CHECK(
-                          flat_aligned,
-                          "Varying first-dimension rowwise grouped FP8 quantization requires "
-                          "vector-aligned inputs: the last logical dimension must be a "
-                          "multiple of ",
-                          flat_nvec, " and the input/output base pointers must be vector aligned.");
                       const dim3 flat_block(ROWWISE_FLAT_THREADS);
                       const int num_sms = ::transformer_engine::cuda::sm_count();
                       // Target ~8 blocks per SM of *active* work. The actual
