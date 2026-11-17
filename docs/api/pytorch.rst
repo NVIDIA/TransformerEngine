@@ -326,7 +326,7 @@ Optimizers
 ----------
 
 .. autoapiclass:: transformer_engine.pytorch.optimizers.FusedAdam
-  :members: reload_master_param, get_unscaled_state, set_scaled_state
+  :members: update_param
 
 Deprecated functions
 --------------------

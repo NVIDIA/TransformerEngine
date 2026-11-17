@@ -114,7 +114,7 @@ class TestFusedAdam(TestFusedOptimizer):
     @pytest.mark.parametrize("store_remainders", [False, True])
     @pytest.mark.parametrize("initialized", [False, True])
     @pytest.mark.parametrize("source_device", ["cpu", "cuda"])
-    def test_reload_master_param(self, param_dtype, store_remainders, initialized, source_device):
+    def test_update_param(self, param_dtype, store_remainders, initialized, source_device):
         """Reload FP32 values exactly, preserving Adam history and the source tensor."""
         param = nn.Parameter(torch.ones(32, dtype=param_dtype, device="cuda"))
         optimizer = self.fused_optim(
@@ -136,7 +136,7 @@ class TestFusedAdam(TestFusedOptimizer):
             device=source_device,
         )
         saved_source = source.clone()
-        optimizer.reload_master_param(param, source)
+        optimizer.update_param(param=param, values=source)
         assert torch.equal(source.view(torch.int32), saved_source.view(torch.int32))
         assert optimizer.param_groups[0].get("step") == step
         for name, (old_tensor, old_value) in old_state.items():
@@ -201,7 +201,7 @@ class TestFusedAdam(TestFusedOptimizer):
             ),
         ],
     )
-    def test_reload_quantized_master_param(self, recipe):
+    def test_update_quantized_param(self, recipe):
         """Quantized parameters keep exact FP32 masters and quantized model storage."""
         with quantized_model_init(enabled=True, recipe=recipe()):
             model = te.Linear(256, 256, bias=False, params_dtype=torch.bfloat16).cuda()
@@ -213,7 +213,7 @@ class TestFusedAdam(TestFusedOptimizer):
         source = torch.full(param.shape, 1.001, device="cuda")
         expected = param.detach().clone()
         expected.copy_(source)
-        optimizer.reload_master_param(param, source)
+        optimizer.update_param(param, source)
         assert isinstance(param, QuantizedTensor)
         assert torch.equal(optimizer.state[param]["master_param"], source)
         assert torch.equal(
@@ -230,7 +230,7 @@ class TestFusedAdam(TestFusedOptimizer):
         )
 
     @pytest.mark.parametrize("master_dtype", [torch.float32, torch.float16])
-    def test_reload_master_param_mixed_dtypes(self, master_dtype):
+    def test_update_param_mixed_dtypes(self, master_dtype):
         """Remainders apply only to BF16 parameters, and scaled masters use the existing setter."""
         params = [
             nn.Parameter(torch.ones(16, dtype=dtype, device="cuda"))
@@ -246,7 +246,7 @@ class TestFusedAdam(TestFusedOptimizer):
         source = torch.full((16,), 1.001, device="cuda")
         original_source = source.clone()
         for param in params:
-            optimizer.reload_master_param(param, source)
+            optimizer.update_param(param, source)
         assert torch.equal(source, original_source)
         assert torch.equal(params[1], source)
         for param in params:
@@ -262,7 +262,7 @@ class TestFusedAdam(TestFusedOptimizer):
                 )
 
     @pytest.mark.parametrize("invalid", ["dtype", "shape", "no_master", "not_owned"])
-    def test_reload_master_param_rejects_invalid_input(self, invalid):
+    def test_update_param_rejects_invalid_input(self, invalid):
         param = nn.Parameter(torch.ones(4, device="cuda", dtype=torch.bfloat16))
         optimizer = self.fused_optim([param], master_weights=invalid != "no_master", **self.options)
         source = torch.ones(3 if invalid == "shape" else 4, device="cuda")
@@ -271,12 +271,12 @@ class TestFusedAdam(TestFusedOptimizer):
         # A view such as param.data shares storage but is not the optimizer's parameter.
         target = param.data if invalid == "not_owned" else param
         with pytest.raises((ValueError, RuntimeError)):
-            optimizer.reload_master_param(target, source)
+            optimizer.update_param(target, source)
         assert len(optimizer.state) == 0
         assert torch.equal(param, torch.ones_like(param))
 
     @pytest.mark.parametrize("master_layout", ["matching", "local", "replicated", "plain_param"])
-    def test_reload_dtensor_master_param(self, master_layout):
+    def test_update_dtensor_param(self, master_layout):
         """DTensor masters must match the parameter's distribution; local tensors are accepted."""
         from torch.distributed.device_mesh import init_device_mesh
         from torch.distributed.tensor import DTensor, Replicate, Shard
@@ -308,11 +308,11 @@ class TestFusedAdam(TestFusedOptimizer):
 
             if master_layout in ("replicated", "plain_param"):
                 with pytest.raises(ValueError):
-                    optimizer.reload_master_param(param, source)
+                    optimizer.update_param(param, source)
                 assert len(optimizer.state) == 0
                 return
 
-            optimizer.reload_master_param(param, source)
+            optimizer.update_param(param, source)
             state = optimizer.state[param]
             for name in ("exp_avg", "exp_avg_sq", "master_param"):
                 assert isinstance(state[name], DTensor)
