@@ -205,7 +205,7 @@ def ep_bootstrap(
     outer_axes = tuple(
         dict.fromkeys(
             a
-            for a in (resource.dp_resource, resource.fsdp_resource)
+            for a in (resource.dp_resource, *tex.ep._fsdp_outer_axes(resource))
             if a is not None and a not in ep_axes
         )
     )
