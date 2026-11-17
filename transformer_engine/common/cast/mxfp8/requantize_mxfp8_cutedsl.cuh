@@ -79,7 +79,11 @@ inline bool mxfp8_requantize_cutedsl(const GroupedTensor &input, GroupedTensor *
   const size_t rows = input.logical_shape.data[0];
   const size_t hidden = input.logical_shape.data[1];
   const size_t groups = input.num_tensors;
-  if (rows == 0 || hidden == 0 || rows % 128 || hidden % 128 || (hidden >= 512 && hidden % 512))
+  const bool return_dequantized = dequantized != nullptr && dequantized->data.dptr != nullptr;
+  // Varying first dims without BF16 output use the warp-tile kernel, which loads scales as words.
+  const bool warp_tile = !input.all_same_shape() && !return_dequantized;
+  if (rows == 0 || hidden == 0 || rows % 128 || hidden % 128 ||
+      (!warp_tile && hidden >= 512 && hidden % 512))
     return false;
   // TMA's compact scale matrix requires a 16-byte row stride for wide tensors.
   // The narrow specializations copy full-width compact scales as 1D bulk data.
@@ -93,14 +97,15 @@ inline bool mxfp8_requantize_cutedsl(const GroupedTensor &input, GroupedTensor *
       !is_aligned_ptr(output->columnwise_scale_inv.dptr, 16) ||
       (rowwise && !is_aligned_ptr(output->scale_inv.dptr, 16)))
     return false;
+  // The warp-tile kernel takes rows and groups at run time, so one key serves every capacity.
   const MXFP8RequantConfig config{input.data.dtype,
-                                  rows,
+                                  warp_tile ? 0 : rows,
                                   hidden,
-                                  groups,
+                                  warp_tile ? 0 : groups,
                                   input.all_same_shape() ? rows / groups : 0,
                                   output->with_gemm_swizzled_scales,
                                   rowwise,
-                                  dequantized != nullptr && dequantized->data.dptr != nullptr};
+                                  return_dequantized};
   auto kernel = config.get_kernel();
   if (!kernel) return false;
 
