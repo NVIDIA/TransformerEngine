@@ -268,7 +268,7 @@ int nvte_fused_topk_with_aux_loss_scores_is_supported(int num_experts, int topk,
  *  \param[in]     expert_bias     Expert bias [num_experts] (optional, may be empty).
  *  \param[out]    probs           Routing probabilities [num_tokens, topk], in the logits dtype or
  *                                 float32 (then holding the logits-dtype values, widened).
- *  \param[out]    topk_indices    Selected experts [num_tokens, topk], int32 or int64.
+ *  \param[out]    topk_indices    Selected experts [num_tokens, topk], int16, int32 or int64.
  *  \param[out]    aux_scores      Scores for the auxiliary loss [num_tokens, num_experts], float32.
  *  \param[out]    aux_tokens_per_expert  Tokens per expert of the aux-loss routing map,
  *                                        [num_experts] int64; overwritten.

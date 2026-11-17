@@ -340,8 +340,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> fused_topk_with_aux_l
   TORCH_CHECK(logits.dim() >= 1, "logits must have at least 1 dim");
   TORCH_CHECK(logits.is_cuda() && logits.is_contiguous(),
               "logits must be a contiguous CUDA tensor");
-  TORCH_CHECK(index_dtype == at::kInt || index_dtype == at::kLong,
-              "index_dtype must be int32 or int64");
+  TORCH_CHECK(index_dtype == at::kShort || index_dtype == at::kInt || index_dtype == at::kLong,
+              "index_dtype must be int16, int32 or int64");
   at::cuda::CUDAGuard device_guard(logits.device());
   const auto sizes = logits.sizes();
   const int64_t num_experts = sizes.back();

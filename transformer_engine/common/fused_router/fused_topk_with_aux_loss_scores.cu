@@ -456,20 +456,6 @@ void check_aligned(const void *ptr, const char *name) {
   NVTE_CHECK(reinterpret_cast<uintptr_t>(ptr) % 16 == 0, name, " must be 16-byte aligned");
 }
 
-#define TE_ROUTER_INDEX_32_64_SWITCH(dtype, type, ...)                                \
-  switch (dtype) {                                                                    \
-    case DType::kInt32: {                                                             \
-      using type = int32_t;                                                           \
-      { __VA_ARGS__ }                                                                 \
-    } break;                                                                          \
-    case DType::kInt64: {                                                             \
-      using type = int64_t;                                                           \
-      { __VA_ARGS__ }                                                                 \
-    } break;                                                                          \
-    default:                                                                          \
-      NVTE_ERROR("topk_indices must be int32 or int64, got ", to_string(dtype), "."); \
-  }
-
 }  // namespace
 
 void fused_topk_with_aux_loss_scores_forward(const Tensor &logits, int num_tokens, int num_experts,
@@ -531,7 +517,7 @@ void fused_topk_with_aux_loss_scores_forward(const Tensor &logits, int num_token
   const bool grouped = group_topk > 0;
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,
-      TE_ROUTER_INDEX_32_64_SWITCH(
+      TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
           topk_indices.data.dtype, IndexType,
           auto launch =
               [&](auto kernel, auto *probs_ptr) {
@@ -603,7 +589,7 @@ void fused_topk_with_aux_loss_scores_backward(const Tensor &logits, const Tensor
   const int blocks = static_cast<int>((threads + kBwdThreadsPerBlock - 1) / kBwdThreadsPerBlock);
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,
-      TE_ROUTER_INDEX_32_64_SWITCH(
+      TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
           topk_indices.data.dtype, IndexType,
           auto launch =
               [&](auto kernel, auto *grad_ptr) {
@@ -640,8 +626,6 @@ void fused_topk_with_aux_loss_scores_backward(const Tensor &logits, const Tensor
             }
           }););
 }
-
-#undef TE_ROUTER_INDEX_32_64_SWITCH
 
 }  // namespace fused_router
 }  // namespace transformer_engine

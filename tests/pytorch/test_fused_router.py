@@ -2131,6 +2131,7 @@ def _separate_router_kernels(
     expert_bias,
     probs_dtype,
     index_dtype,
+    score_function="sigmoid",
 ):
     """The unfused path: dense-index top-k + gather, aux scores + column sums, route counts."""
     num_experts = logits.shape[-1]
@@ -2142,14 +2143,14 @@ def _separate_router_kernels(
         num_groups,
         group_topk,
         scaling_factor,
-        "sigmoid",
+        score_function,
         expert_bias,
         topk_indices=topk_indices,
     )
     probs = dense_probs.gather(-1, topk_indices.long())
     if probs_dtype is not None:
         probs = probs.to(probs_dtype)
-    aux_map, aux_scores = fused_compute_score_for_moe_aux_loss(logits, topk, "sigmoid")
+    aux_map, aux_scores = fused_compute_score_for_moe_aux_loss(logits, topk, score_function)
     aux_counts = aux_map.reshape(-1, num_experts).sum(dim=0)
     route_counts = torch.zeros(num_experts, dtype=torch.int64, device="cuda")
     route_counts.scatter_add_(
@@ -2174,7 +2175,7 @@ def test_fused_topk_with_aux_loss_scores(dtype, num_tokens, grouped, with_bias, 
     )
     grad_probs = torch.randn(num_tokens, topk, device="cuda", generator=generator).to(dtype)
     grad_scores = torch.randn(num_tokens, num_experts, device="cuda", generator=generator)
-    assert te_router.fused_topk_with_aux_loss_scores_is_supported(
+    assert te_router._single_pass_router_kernel_supported(
         num_experts, topk, num_groups, group_topk, "sigmoid"
     )
 
@@ -2208,7 +2209,7 @@ def test_fused_topk_with_aux_loss_scores(dtype, num_tokens, grouped, with_bias, 
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("index_dtype", [torch.int64, torch.int32])
+@pytest.mark.parametrize("index_dtype", [torch.int64, torch.int32, torch.int16])
 @pytest.mark.parametrize("aux_grad", ["aux_loss", "none"])
 def test_fused_topk_with_aux_loss_scores_fp32_probs(monkeypatch, dtype, index_dtype, aux_grad):
     """probs_dtype=float32 equals probs.float() of the separate kernels, gradient included,
@@ -2325,19 +2326,22 @@ def test_fused_topk_with_aux_loss_scores_cuda_graph():
 
 
 @pytest.mark.parametrize(
-    "dtype,probs_dtype,index_dtype",
+    "dtype,probs_dtype,index_dtype,num_experts",
     [
-        (torch.bfloat16, torch.float32, torch.int64),
-        (torch.float16, None, torch.int32),
-        (torch.float32, None, torch.int64),
+        (torch.bfloat16, torch.float32, torch.int64, 256),
+        (torch.float16, None, torch.int32, 256),
+        (torch.float32, None, torch.int64, 256),
+        (torch.bfloat16, torch.float32, torch.int16, 128),
     ],
 )
-def test_fused_topk_with_aux_loss_scores_compile(dtype, probs_dtype, index_dtype):
+def test_fused_topk_with_aux_loss_scores_compile(dtype, probs_dtype, index_dtype, num_experts):
     """torch.compile(fullgraph=True, dynamic=True) matches eager for [seq, batch, experts]
-    logits, gradient and in-place route counts included, in training and in inference."""
+    logits, gradient and in-place route counts included, in training and in inference, both
+    for the single-kernel configuration (256 experts) and for one that runs the separate
+    kernels (128 experts)."""
     torch._dynamo.reset()
     counters.clear()
-    num_experts, topk = 256, 8
+    topk = 8
     generator = torch.Generator(device="cuda").manual_seed(5)
     expert_bias = 0.05 * torch.randn(num_experts, device="cuda", generator=generator)
 
@@ -2434,38 +2438,116 @@ def test_fused_topk_with_aux_loss_scores_opcheck(dtype, fp32_probs, index_dtype)
             )
 
 
-def test_fused_topk_with_aux_loss_scores_unsupported():
-    supported = te_router.fused_topk_with_aux_loss_scores_is_supported
-    assert supported(256, 8, 8, 4, "sigmoid")
-    assert supported(256, 8, None, None, "sigmoid")
-    assert not supported(128, 8, 8, 4, "sigmoid")
-    assert not supported(256, 6, 8, 4, "sigmoid")
-    assert not supported(256, 8, 4, 2, "sigmoid")
-    assert not supported(256, 8, 8, 4, "softmax")
-    logits = torch.randn(16, 128, device="cuda")
-    with pytest.raises(RuntimeError, match="got score_function=0, num_experts=128"):
-        te_router.fused_topk_with_aux_loss_scores(logits, 8, 8, 4, 1.0, "sigmoid", None)
+@pytest.mark.parametrize(
+    "num_experts,topk,num_groups,group_topk,score_function,with_bias",
+    [
+        (128, 8, 8, 4, "sigmoid", True),
+        (256, 6, None, None, "sigmoid", True),
+        (256, 8, 4, 2, "sigmoid", False),
+        (256, 8, 8, 4, "softmax", False),
+        (256, 8, 8, 4, "sqrtsoftplus", True),
+    ],
+)
+def test_fused_topk_with_aux_loss_scores_unfused_configs(
+    num_experts, topk, num_groups, group_topk, score_function, with_bias
+):
+    """Configurations without a single-kernel implementation run the separate kernels."""
+    num_tokens, scaling_factor, dtype = 300, 2.5, torch.bfloat16
+    generator = torch.Generator(device="cuda").manual_seed(3)
+    logits = _router_logits(num_tokens, num_experts, dtype, "ties", generator)
+    expert_bias = (
+        0.05 * torch.randn(num_experts, device="cuda", generator=generator) if with_bias else None
+    )
+    grad_probs = torch.randn(num_tokens, topk, device="cuda", generator=generator)
+    grad_scores = torch.randn(num_tokens, num_experts, device="cuda", generator=generator)
+
+    assert not te_router._single_pass_router_kernel_supported(
+        num_experts, topk, num_groups, group_topk, score_function
+    )
+    ref_logits = logits.clone().requires_grad_(True)
+    ref = _separate_router_kernels(
+        ref_logits,
+        topk,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        expert_bias,
+        torch.float32,
+        torch.int32,
+        score_function,
+    )
+    ((ref[0] * grad_probs).sum() + (ref[2] * grad_scores).sum()).backward()
+
+    actual_logits = logits.clone().requires_grad_(True)
+    route_counts = torch.zeros(num_experts, dtype=torch.int64, device="cuda")
+    probs, topk_indices, aux_scores, aux_counts = te_router.fused_topk_with_aux_loss_scores(
+        actual_logits,
+        topk,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        expert_bias,
+        tokens_per_expert=route_counts,
+        probs_dtype=torch.float32,
+        index_dtype=torch.int32,
+    )
+    ((probs * grad_probs).sum() + (aux_scores * grad_scores).sum()).backward()
+
+    assert torch.equal(topk_indices, ref[1])
+    assert torch.equal(_bits(probs), _bits(ref[0]))
+    assert torch.equal(_bits(aux_scores), _bits(ref[2]))
+    assert torch.equal(aux_counts, ref[3])
+    assert torch.equal(route_counts, ref[4])
+    assert torch.equal(_bits(actual_logits.grad), _bits(ref_logits.grad))
 
 
-@pytest.mark.parametrize("threshold, expected", [("8", "False radix-error"), ("9", "True ok")])
+def test_fused_topk_with_aux_loss_scores_argument_validation():
+    logits = torch.randn(16, 256, device="cuda")
+    with pytest.raises(ValueError, match="float64"):
+        te_router.fused_topk_with_aux_loss_scores(logits.double(), 8, 8, 4, 1.0, "sigmoid", None)
+    with pytest.raises(ValueError, match="probs_dtype"):
+        te_router.fused_topk_with_aux_loss_scores(
+            logits, 8, 8, 4, 1.0, "sigmoid", None, probs_dtype=torch.float16
+        )
+    with pytest.raises(ValueError, match="index_dtype"):
+        te_router.fused_topk_with_aux_loss_scores(
+            logits, 8, 8, 4, 1.0, "sigmoid", None, index_dtype=torch.uint8
+        )
+    with pytest.raises(ValueError, match="tokens_per_expert"):
+        te_router.fused_topk_with_aux_loss_scores(
+            logits,
+            8,
+            8,
+            4,
+            1.0,
+            "sigmoid",
+            None,
+            tokens_per_expert=torch.zeros(256, dtype=torch.int32, device="cuda"),
+        )
+
+
+@pytest.mark.parametrize("threshold, expected", [("8", "False True"), ("9", "True True")])
 def test_fused_topk_with_aux_loss_scores_radix_threshold(threshold, expected):
-    """With NVTE_RADIX_TOPK_THRESHOLD <= topk the separate kernels use radix selection, whose
-    tie-breaking the fused kernel does not reproduce, so the fused kernel reports unsupported
-    and its forward raises an error that names the variable.
+    """With NVTE_RADIX_TOPK_THRESHOLD <= topk the separate top-k kernels use radix selection,
+    whose tie-breaking the single kernel does not reproduce, so the separate kernels run
+    instead and the result is still that of the separate kernels.
     The threshold is read once per process, hence the subprocess."""
     code = textwrap.dedent(
         """
         import torch
         import transformer_engine.pytorch.router as r
 
-        supported = r.fused_topk_with_aux_loss_scores_is_supported(256, 8, 8, 4, "sigmoid")
-        logits = torch.randn(4, 256, device="cuda")
-        try:
-            r.fused_topk_with_aux_loss_scores(logits, 8, 8, 4, 1.0, "sigmoid", None)
-            result = "ok"
-        except RuntimeError as error:
-            result = "radix-error" if "NVTE_RADIX_TOPK_THRESHOLD" in str(error) else repr(error)
-        print(supported, result)
+        single_pass = r._single_pass_router_kernel_supported(256, 8, 8, 4, "sigmoid")
+        logits = (torch.randint(-3, 4, (64, 256), device="cuda") / 2).to(torch.bfloat16)
+        _, indices, _, _ = r.fused_topk_with_aux_loss_scores(
+            logits, 8, 8, 4, 1.0, "sigmoid", None
+        )
+        expected = torch.empty_like(indices)
+        r.fused_topk_with_score_function(
+            logits, 8, False, 8, 4, 1.0, "sigmoid", None, topk_indices=expected
+        )
+        print(single_pass, torch.equal(indices, expected))
         """
     )
     env = dict(os.environ, NVTE_RADIX_TOPK_THRESHOLD=threshold)

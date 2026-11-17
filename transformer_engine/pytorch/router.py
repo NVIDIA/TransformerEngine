@@ -19,6 +19,7 @@ import warnings
 from typing import Optional, Tuple, Union
 
 import torch
+from torch.fx.experimental.symbolic_shapes import guard_scalar
 import transformer_engine_torch as tex
 
 from .constants import TE_DType_To_Torch
@@ -690,23 +691,57 @@ class _CompiledFusedTopkWithAuxLossScores(FusedTopkWithAuxLossScores):
         ctx.set_materialize_grads(False)
 
 
-def fused_topk_with_aux_loss_scores_is_supported(
+@torch.compiler.assume_constant_result
+def _single_pass_router_kernel_supported(
     num_experts: int,
     topk: int,
     num_groups: Optional[int],
     group_topk: Optional[int],
     score_function: str,
 ) -> bool:
-    """Whether :func:`fused_topk_with_aux_loss_scores` supports a router configuration.
-
-    Supported: ``score_function="sigmoid"``, 256 experts, ``topk=8``, and either no group limit
-    or ``num_groups=8`` with ``group_topk=4`` (DeepSeek-V3 routing); and ``topk`` below
-    ``NVTE_RADIX_TOPK_THRESHOLD`` (default 16). At or above it the separate top-k kernels use
-    radix selection, which breaks ties differently, so the fused kernel is not supported.
-    """
+    """Whether the single-kernel implementation of :func:`fused_topk_with_aux_loss_scores`
+    supports a router configuration (currently DeepSeek-V3 routing: sigmoid, 256 experts,
+    top-8, no group limit or 8 groups with group top-4)."""
     return tex.fused_topk_with_aux_loss_scores_is_supported(
         num_experts, topk, num_groups, group_topk, score_function
     )
+
+
+def _topk_with_aux_loss_scores_unfused(
+    logits: torch.Tensor,
+    topk: int,
+    num_groups: Optional[int],
+    group_topk: Optional[int],
+    scaling_factor: Optional[float],
+    score_function: str,
+    expert_bias: Optional[torch.Tensor],
+    tokens_per_expert: Optional[torch.Tensor],
+    probs_dtype: Optional[torch.dtype],
+    index_dtype: torch.dtype,
+):
+    """:func:`fused_topk_with_aux_loss_scores` composed from the separate router functions."""
+    num_experts = logits.shape[-1]
+    topk_indices = torch.empty((*logits.shape[:-1], topk), dtype=index_dtype, device=logits.device)
+    probs, topk_indices = fused_topk_with_score_function(
+        logits,
+        topk,
+        False,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        expert_bias,
+        topk_indices=topk_indices,
+    )
+    probs = probs.gather(-1, topk_indices.long())
+    if probs_dtype is not None:
+        probs = probs.to(probs_dtype)
+    aux_routing_map, aux_scores = fused_compute_score_for_moe_aux_loss(logits, topk, score_function)
+    aux_tokens_per_expert = aux_routing_map.reshape(-1, num_experts).sum(dim=0)
+    if tokens_per_expert is not None:
+        routes = topk_indices.reshape(-1).long()
+        tokens_per_expert.view(-1).scatter_add_(0, routes, torch.ones_like(routes))
+    return probs, topk_indices, aux_scores, aux_tokens_per_expert
 
 
 def fused_topk_with_aux_loss_scores(
@@ -742,8 +777,12 @@ def fused_topk_with_aux_loss_scores(
     from the two backward passes. The probabilities are returned compactly, ``[..., topk]`` in
     the order of ``topk_indices``, instead of as a dense ``[..., num_experts]`` tensor. The
     function does not synchronize with the host and can be captured in a CUDA graph. Supports
-    ``torch.compile(fullgraph=True)``. Use :func:`fused_topk_with_aux_loss_scores_is_supported`
-    to check a configuration.
+    ``torch.compile(fullgraph=True)``.
+
+    Every configuration that the separate functions support is supported. DeepSeek-V3 routing
+    (``score_function="sigmoid"``, 256 experts, ``topk=8``, and no group limit or
+    ``num_groups=8`` with ``group_topk=4``) runs as a single kernel in each direction; other
+    configurations run the separate kernels shown above.
 
     Parameters
     ----------
@@ -755,7 +794,8 @@ def fused_topk_with_aux_loss_scores(
         used in the group topk
     scaling_factor : float, optional
     score_function : str
-        currently only "sigmoid".
+        "softmax", "sigmoid" or "sqrtsoftplus", as for :func:`fused_topk_with_score_function`
+        (with ``use_pre_softmax=False``).
     expert_bias : torch.Tensor, optional
         fp32 ``[num_experts]``, added to the scores for the selection only.
     tokens_per_expert : torch.Tensor, optional
@@ -769,7 +809,7 @@ def fused_topk_with_aux_loss_scores(
         consumers that need float32 weights), and the incoming float32 gradient is rounded to
         the logits dtype, as the backward of that cast would do.
     index_dtype : torch.dtype, default = torch.int64
-        ``torch.int64`` or ``torch.int32``.
+        ``torch.int64``, ``torch.int32`` or ``torch.int16``.
 
     Returns
     -------
@@ -780,10 +820,36 @@ def fused_topk_with_aux_loss_scores(
     aux_tokens_per_expert : torch.Tensor in int64, ``[num_experts]``
         the local number of tokens per expert of the auxiliary-loss routing map.
     """
+    if logits.dtype == torch.float64:
+        raise ValueError("Current TE does not support float64 router type.")
     if probs_dtype not in (None, logits.dtype, torch.float32):
         raise ValueError(f"probs_dtype must be None or torch.float32, got {probs_dtype}")
-    if index_dtype not in (torch.int32, torch.int64):
-        raise ValueError(f"index_dtype must be torch.int32 or torch.int64, got {index_dtype}")
+    if index_dtype not in (torch.int16, torch.int32, torch.int64):
+        raise ValueError(
+            f"index_dtype must be torch.int16, torch.int32 or torch.int64, got {index_dtype}"
+        )
+    # The expert count is fixed for a router; guard_scalar makes it a constant (with a guard)
+    # under torch.compile(dynamic=True) so that the support query can be evaluated when tracing.
+    num_experts = guard_scalar(logits.shape[-1])
+    if tokens_per_expert is not None and (
+        tokens_per_expert.dtype != torch.int64 or tokens_per_expert.numel() != num_experts
+    ):
+        raise ValueError("tokens_per_expert must be int64 with num_experts elements")
+    if not _single_pass_router_kernel_supported(
+        num_experts, topk, num_groups, group_topk, score_function
+    ):
+        return _topk_with_aux_loss_scores_unfused(
+            logits,
+            topk,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            tokens_per_expert,
+            None if probs_dtype == logits.dtype else probs_dtype,
+            index_dtype,
+        )
     function = (
         _CompiledFusedTopkWithAuxLossScores
         if torch.compiler.is_compiling()
