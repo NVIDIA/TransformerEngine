@@ -25,7 +25,14 @@ def _compiled_q_rms_norm(q: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 def _packed_prefixes(hidden_states, cu_seqlens, max_seqlen, ratio):
-    """Build compressed sequence prefixes and output capacity."""
+    """Build compressed sequence boundaries and an allocation length for packed thd input.
+
+    Subtract adjacent cu_seqlens values to get sequence lengths, divide each by
+    ratio with rounding down, then prepend zero to their cumulative sum. TE allocates
+    floor(total_input_tokens / ratio) outputs without reading the device count on
+    the host; this can exceed the sum of per-sequence compressed counts. Return
+    (cu_comp, total_comp, max_seqlen).
+    """
     if not isinstance(cu_seqlens, torch.Tensor):
         raise ValueError("THD requires contiguous INT32 cu_seqlens_q [B+1] on the input device.")
     if (
@@ -39,9 +46,8 @@ def _packed_prefixes(hidden_states, cu_seqlens, max_seqlen, ratio):
     if not isinstance(max_seqlen, int) or max_seqlen < ratio:
         raise ValueError("THD requires integer max_seqlen_q >= compression_ratio.")
     # The sum of per-sequence floors can be smaller than floor(T / ratio).
-    # Allocate that safe capacity without reading CUDA prefix contents on host;
-    # cuDNN uses the compressed prefix to exclude output padding beyond the valid
-    # compressed KV tokens.
+    # TE allocates that upper bound without reading the CUDA count on the host;
+    # cuDNN uses cu_comp to exclude output padding beyond the valid compressed tokens.
     lengths = cu_seqlens[1:] - cu_seqlens[:-1]
     cu_comp = torch.cat((cu_seqlens.new_zeros(1), (lengths // ratio).cumsum(0, dtype=torch.int32)))
     total_comp = hidden_states.shape[0] // ratio
@@ -53,9 +59,55 @@ def _packed_prefixes(hidden_states, cu_seqlens, max_seqlen, ratio):
 class DSv4Attention(torch.nn.Module):
     """DSv4 CSA/HCA attention in ``sbhd``, ``bshd``, or packed ``thd`` format.
 
-    Composes TE projections/norms, Compressor, Indexer, and RoPE with cuDNN
-    sparse attention. See the sparse_attention README for support and training
-    requirements. Shared-input projections are fused.
+    Composes TE projections/norms, Compressor, Indexer and RoPE with cuDNN sparse
+    attention. Shared-input projections are fused. See the sparse_attention README
+    for support and training requirements.
+
+    Parameters
+    ----------
+    hidden_size : int
+        Input and output hidden-state width.
+    q_lora_rank : int
+        Width of the query-down projection and its residual.
+    layer_type : str
+        ``compressed_sparse_attention`` (CSA, with an indexer) or
+        ``heavily_compressed_attention`` (HCA, without top-k selection).
+    head_dim : int
+        Attention head width; currently 512, with 64 heads.
+    rope_head_dim : int
+        Even number of trailing channels rotated by RoPE; at least 2, no greater
+        than head_dim, and no greater than 128 for CSA's index queries/keys.
+    sliding_window : int
+        Local causal attention window size, including the current token.
+    compression_ratio : int
+        Number of input tokens per compressed block.
+    o_groups : int
+        Number of output-projection groups; must divide 64 * head_dim.
+    o_lora_rank : int
+        Intermediate output-projection width per group.
+    index_n_heads : int, default = 64
+        CSA index heads, either 32 or 64; unused for HCA.
+    index_topk : int, default = 512
+        Maximum compressed KV tokens selected per CSA query; unused for HCA.
+    rope_theta : float, default = 160000.0
+        Frequency base for the default rotary embeddings; ignored with custom rope.
+    rope : torch.nn.Module, optional
+        Custom module called as ``rope(sequence_length, device)`` returning token
+        and compressed ``(cos, sin)`` pairs. None uses the default embeddings.
+    rms_norm_eps : float, default = 1e-6
+        Epsilon for query and KV normalization.
+    max_seqlen : int, optional
+        Initial length of the default RoPE cache. The cache grows when needed;
+        this does not replace forward's max_seqlen_q for packed ``thd`` input.
+    device : torch.device or str, default = "cuda"
+        Device on which to allocate parameters and default RoPE buffers.
+    params_dtype : torch.dtype, default = torch.float32
+        Dtype used to initialize parameters; activation support is described in
+        the README independently of parameter initialization.
+    qkv_format : str, default = "sbhd"
+        Hidden-state layout: ``[S,B,hidden_size]``, ``[B,S,hidden_size]``, or
+        ``[T,hidden_size]`` for sbhd, bshd or thd. Sequence-major input is transposed
+        before calling the batched/packed Compressor and Indexer components.
     """
 
     def __init__(
@@ -180,7 +232,7 @@ class DSv4Attention(torch.nn.Module):
         max_seqlen_q: Optional[int] = None,
         return_indexer_context: bool = False,
     ):
-        """Run full self-attention and optionally expose single-sequence CSA context.
+        """Run full DSv4 sparse-attention and optionally expose single-sequence CSA context.
 
         Parameters
         ----------
@@ -188,9 +240,10 @@ class DSv4Attention(torch.nn.Module):
             Input ``[S,B,hidden_size]`` for ``sbhd``, ``[B,S,hidden_size]`` for
             ``bshd``, or ``[T,hidden_size]`` for packed ``thd``.
         cu_seqlens_q : torch.Tensor, optional
-            Contiguous CUDA INT32 ``[B+1]`` prefixes, required only for ``thd``.
-            Prefixes start at zero, end at T, and contain no padding/global offsets;
-            their contents are caller-owned and are not checked on the host.
+            Contiguous CUDA INT32 ``[B+1]`` cumulative sequence token counts, required
+            only for ``thd``. Start at zero, end at T, and do not decrease; adjacent
+            differences are sequence lengths. Tokens are packed without gaps.
+            The caller supplies these values; they are not checked on the host.
         max_seqlen_q : int, optional
             Maximum sequence length, required only for ``thd``.
         return_indexer_context : bool, default = False

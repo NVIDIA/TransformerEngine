@@ -33,9 +33,34 @@ class Compressor(torch.nn.Module):
     that do not fill a complete block (``k`` here) are excluded from compression.
     In DSv4Attention, they remain available through local sliding-window attention.
 
-    Accept batch-major ``[B,S,D]`` or packed ``[T,D]`` hidden states with
-    token/compressed prefixes. Return ``[total_comp,width]`` compressed KV representations
+    Accept batched ``[B,S,D]`` or packed ``thd`` hidden states ``[T,D]`` with
+    cumulative sequence token counts. Standalone calls do not interpret
+    sequence-major ``[S,B,D]`` input; DSv4Attention performs that conversion.
+    Return ``[total_comp,width]`` compressed KV representations
     before RoPE, plus projected head weights when ``weight_width`` is nonzero.
+
+    See the sparse_attention README for support requirements.
+
+    Parameters
+    ----------
+    hidden_size : int
+        Input hidden-state width.
+    width : int
+        Width of each compressed KV representation.
+    ratio : int
+        Number of input tokens per compression block.
+    overlap : bool
+        Whether each output also uses the preceding complete block.
+    eps : float
+        Epsilon for RMSNorm after compression.
+    device : torch.device or str
+        Device on which to allocate parameters.
+    params_dtype : torch.dtype
+        Dtype used to initialize projection, position-bias and normalization parameters.
+    weight_width : int, default = 0
+        Additional per-input-token head-weight projection width. Indexer sets this
+        to n_heads for its scoring weights; DSv4Attention's main KV compressor
+        leaves it at zero.
     """
 
     def __init__(
@@ -64,28 +89,31 @@ class Compressor(torch.nn.Module):
         self.projected, self.weight_width = projected, weight_width
 
     def forward(self, hidden_states, cu_seqlens, cu_seqlens_comp, *, total_comp):
-        """Project and compress KV entries before RoPE.
+        """Project and compress KV blocks before RoPE.
 
         Parameters
         ----------
         hidden_states : torch.Tensor
-            Batch-major ``[B,S,hidden_size]`` or packed ``[T,hidden_size]`` input.
+            Batched ``[B,S,hidden_size]`` with equal sequence length S, or packed ``thd``
+            ``[T,hidden_size]`` with sequences concatenated along the token dimension.
         cu_seqlens, cu_seqlens_comp : torch.Tensor
-            Contiguous CUDA INT32 ``[B+1]`` token/compressed prefixes. Compressed
-            segment lengths are ``floor(length / ratio)``.
+            Contiguous CUDA INT32 ``[B+1]`` cumulative input/compressed token counts,
+            starting at zero. Each compressed count increment is the corresponding
+            input sequence length divided by ratio, rounded down.
         total_comp : int
-            Allocated compressed output length. For dense input, use exactly
-            ``B * (S // ratio)``; packed output may include padding after the valid
-            compressed KV tokens.
+            Allocated compressed output length. For ``[B,S,hidden_size]`` input, use
+            exactly ``B * (S // ratio)``; DSv4Attention allocates ``T // ratio`` for ``thd``
+            input, which may include output padding after the
+            valid compressed tokens counted by ``cu_seqlens_comp[-1]``.
 
         Returns
         -------
         torch.Tensor or tuple of torch.Tensor
-            Normalized ``[total_comp,width]`` compressed KV representations.
-            When ``weight_width > 0``, also return head weights with shape
-            ``hidden_states.shape[:-1] +
-            (weight_width,)``. Only outputs for compressed KV token indices below
-            ``cu_seqlens_comp[-1]`` are valid; the remaining output is padding.
+            Normalized compressed KV ``[total_comp,width]``. If ``weight_width > 0``,
+            return ``(compressed_kv, weights)`` with per-input-token head weights of
+            shape ``hidden_states.shape[:-1] + (weight_width,)``. Indexer uses this
+            projection for scoring; the main KV compressor does not. Only compressed
+            token indices below ``cu_seqlens_comp[-1]`` are valid; the rest is padding.
         """
         projected = self.fused_proj(hidden_states)
         widths = (
@@ -107,7 +135,7 @@ class Compressor(torch.nn.Module):
             total_comp=total_comp,
         )
         if hidden_states.ndim == 2:
-            # cuDNN guarantees valid output only before the final compressed prefix.
+            # cuDNN guarantees valid output only for the cu_seqlens_comp[-1] compressed tokens.
             # Zero output from cu_seqlens_comp[-1] onward before RMSNorm so
             # uninitialized values cannot affect weight gradients.
             valid = torch.arange(total_comp, device=hidden_states.device) < cu_seqlens_comp[-1]

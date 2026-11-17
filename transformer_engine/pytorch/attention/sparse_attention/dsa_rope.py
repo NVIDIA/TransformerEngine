@@ -61,7 +61,7 @@ def _apply_rotary_eager(x, cos, sin, cu_seqlens=None):
         token_indices = torch.arange(x.shape[0], device=x.device)
         sequences = torch.bucketize(token_indices, cu_seqlens[1:], right=True)
         positions = token_indices - cu_seqlens[sequences]
-        # Compressed tensors may have unused capacity past the final prefix.
+        # Compressed tensors may have output padding after cu_seqlens[-1].
         positions = torch.where(token_indices < cu_seqlens[-1], positions, 0)
         cos, sin = cos[0, positions], sin[0, positions]
     width = cos.shape[-1]

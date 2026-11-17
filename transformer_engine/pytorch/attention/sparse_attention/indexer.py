@@ -14,12 +14,34 @@ from .dsa_rope import apply_rotary
 
 
 class Indexer(torch.nn.Module):
-    """Select compressed KV entries using the indexer's own Q/K/weight projections.
+    """Select compressed KV tokens using the indexer's own Q/K/weight projections.
 
-    Accept batch-major or packed hidden states and query residuals, sequence
-    prefixes, and caller-provided RoPE tables. Return global compressed KV token
-    indices addressing compressed KV only;
-    ``return_context=True`` also returns live Q/K/head weights for a separate loss.
+    Accept batched [B,S,D] or packed thd [T,D] hidden states and matching query residuals.
+    Standalone calls do not interpret sequence-major [S,B,D] input; DSv4Attention
+    transposes that layout first. Return global compressed KV token indices;
+    return_context=True also returns live Q/K/head weights for a caller-owned loss.
+    See the sparse_attention README for support and training requirements.
+
+    Parameters
+    ----------
+    hidden_size : int
+        Input hidden-state width for compressed-key and head-weight projections.
+    q_lora_rank : int
+        Width of the query-down residual supplied to forward.
+    head_dim : int
+        Index query/key width; the current selection operation uses 128.
+    n_heads : int
+        Number of index heads, 32 or 64. Also sets the per-token scoring-weight width.
+    top_k : int
+        Maximum compressed KV tokens to select per query token.
+    ratio : int
+        Input tokens per compression block. Indexer uses overlapping compression.
+    eps : float
+        Epsilon for the compressed-key RMSNorm.
+    device : torch.device or str
+        Device on which to allocate parameters.
+    params_dtype : torch.dtype
+        Dtype used to initialize projection and compression parameters.
     """
 
     def __init__(
@@ -68,21 +90,24 @@ class Indexer(torch.nn.Module):
         Parameters
         ----------
         hidden_states : torch.Tensor
-            Batch-major ``[B,S,hidden_size]`` or packed ``[T,hidden_size]`` input.
+            Batched ``[B,S,hidden_size]`` with equal sequence length S, or packed ``thd``
+            ``[T,hidden_size]`` with concatenated sequences.
         q_residual : torch.Tensor
             Query-down residual with matching leading axes and width ``q_lora_rank``.
         cu, cu_comp : torch.Tensor
-            CUDA INT32 ``[B+1]`` token/compressed prefixes.
+            CUDA INT32 ``[B+1]`` cumulative input/compressed token counts, starting
+            at zero. Each compressed increment is the input sequence length
+            divided by ratio, rounded down.
         token_rope, compressed_rope : tuple of torch.Tensor
             FP32 cosine/sine pairs ``[1,max_positions,1,rotary_width]`` for
             token and compressed-window positions, respectively.
         total_comp : int
             Allocated compressed output length: exactly ``B * (S // ratio)`` for
-            dense input; packed output may include padding after the valid
+            ``[B,S,hidden_size]`` input; packed ``thd`` output may include padding after the valid
             compressed KV tokens.
         max_seqlen : int
-            Maximum token sequence length used to bound selection. For dense
-            input this must equal S; for packed input use the maximum segment length.
+            Maximum sequence length used to bound selection. For ``[B,S,hidden_size]``
+            input this must equal S; for packed ``thd`` input use the longest sequence length.
         return_context : bool, default = False
             Also return differentiable Q/K/head weights for a caller-owned loss.
 
@@ -129,8 +154,8 @@ class Indexer(torch.nn.Module):
             top_k=min(self.top_k, n_comp),
             ratio=self.ratio,
             max_seqlen=max_seqlen,
-            # cuDNN's compile bound covers the partial trailing ratio even
-            # though cu_comp contains only complete compressed blocks.
+            # Pass ceil(max_seqlen / ratio) as cuDNN max_seqlen_k; cu_comp still
+            # counts only complete blocks, using floor(length / ratio) per sequence.
             max_compressed_seqlen=(max_seqlen + self.ratio - 1) // self.ratio,
             scale=(self.head_dim * self.n_heads) ** -0.5,
         )

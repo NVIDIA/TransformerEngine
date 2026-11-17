@@ -16,7 +16,6 @@ from transformer_engine.pytorch.attention.sparse_attention import (
     dsv4_attention,
 )
 
-
 # Sparse attention
 
 
@@ -60,8 +59,9 @@ def test_dsa_sparse_attention(variant, head_dim):
     reference_leaves = tuple(x.detach().float().requires_grad_() for x in leaves)
     indices = None
     if variant == "csa":
-        # Select alternating compressed KV tokens; global compressed KV token indices
-        # expose mistakes at the second sequence's compressed token offset.
+        # With ratio=4, sequence one has 64 compressed tokens. Sequence two
+        # therefore selects packed indices 64, 66, ... rather than 0, 2, ... .
+        # Comparing with its separate reference catches a missing sequence offset.
         indices = torch.full((total, 32), -1, device="cuda", dtype=torch.int32)
         start = comp_start = 0
         for length, count in zip(lengths, comp_lengths):

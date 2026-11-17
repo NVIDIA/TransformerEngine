@@ -64,15 +64,23 @@ output = dsa_cudnn.sparse_attention(
 output = ...  # Apply inverse RoPE and grouped output projection.
 ```
 
-Dense inputs are repacked into tokens in batch-major order before these calls;
-packed THD inputs already have that layout. Attention uses the original query
+Batched inputs contain B sequences of the same length S. `DSv4Attention` accepts
+`[S,B,hidden_size]` (sbhd) or `[B,S,hidden_size]` (bshd), and packs tokens in
+batch-major order before these calls. Packed `[T,hidden_size]` (thd) inputs
+concatenate sequences, with cumulative token counts identifying their boundaries.
+Standalone `Compressor` and `Indexer` accept only batched `[B,S,D]` or packed
+`thd` `[T,D]` input; callers must transpose sequence-major inputs first. Hidden
+states have no explicit head axis; prepared queries have shape `[T,H,D]`.
+Attention uses the original query
 `[T,64,D]` and concatenated local/compressed KV `[T+Tc,D]`; there is no
 compressed query. `T` is the total query/local KV token count.
-`_prepare_sparse_indices` creates a list of KV token indices for each query token,
+`_prepare_sparse_kv_indices` creates a list of KV token indices for each query token,
 combining causal local KV token indices with compressed KV token indices offset
-by `T`; invalid entries are `-1`. This differs from `select_indices`, which scores
-the indexer's projected Q/K/head weights and returns global compressed KV token
-indices addressing only packed compressed KV, before the offset is applied.
+by `T`; invalid entries are `-1`. CSA supplies global compressed KV token indices
+from `select_indices`; HCA passes `indices=None` and includes all eligible
+compressed tokens. `_prepare_sparse_kv_indices` documents a small example of these
+index spaces. Selection indices address only packed compressed KV before the
+local KV offset is applied.
 
 `dsa_rope` supplies token/compressed-position embeddings and rotary application.
 A caller may override the default embeddings with a `rope` module returning
