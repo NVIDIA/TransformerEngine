@@ -4,6 +4,8 @@
 
 """Per-call dense mesh roles survive VJP tracing and custom partitioning."""
 
+import math
+import re
 from types import SimpleNamespace
 
 import jax
@@ -133,6 +135,56 @@ def test_dense_override_forward_and_vjp(ep, fsdp):
     expected = jax.jit(jax.value_and_grad(reference, (0, 1), has_aux=True))(x, weight)
     for result, ref in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
         np.testing.assert_allclose(result, ref, rtol=2e-5, atol=2e-5)
+
+
+def _all_gather_sizes(hlo):
+    """Element counts of the all-gather results in compiled HLO text."""
+    return [
+        math.prod(int(dim) for dim in dims.split(",") if dim)
+        for result in re.findall(r"= ([^=\n]*?) all-gather(?:-done)?\(", hlo)
+        for dims in re.findall(r"\[([\d,]*)\]", result)
+    ]
+
+
+@pytest.mark.parametrize("operation", ["dense", "layernorm_dense"])
+@pytest.mark.parametrize("weight_axes", ["expert", ("expert", "fsdp")])
+def test_tuple_global_fsdp_forward_and_vjp(operation, weight_axes):
+    """A tuple global fsdp_resource with no override gathers the weight, not the activation."""
+    if jax.device_count() < 4:
+        pytest.skip("Requires four GPUs")
+    mesh = Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "expert"))
+    batch_axes = ("fsdp", "expert")
+    x = jax.random.normal(jax.random.key(0), (64, 128))
+    weight = jax.random.normal(jax.random.key(1), (128, 256)) / 16
+    gamma = jnp.ones(128)
+
+    def objective(x, weight):
+        if operation == "dense":
+            y = dense(x, weight)
+        else:
+            y = layernorm_dense(x, weight, gamma, None, norm_type="rmsnorm")
+        # Keep the activation batch-sharded under both partitioners.
+        y = jax.lax.with_sharding_constraint(y, NamedSharding(mesh, P(batch_axes, None)))
+        return jnp.mean(y * y), y
+
+    def reference(x, weight):
+        if operation == "layernorm_dense":
+            x = x * jax.lax.rsqrt(jnp.mean(x * x, axis=-1, keepdims=True) + 1e-6)
+        y = x @ weight
+        return jnp.mean(y * y), y
+
+    expected = jax.jit(jax.value_and_grad(reference, (0, 1), has_aux=True))(x, weight)
+    x = jax.device_put(x, NamedSharding(mesh, P(batch_axes, None)))
+    weight = jax.device_put(weight, NamedSharding(mesh, P(None, weight_axes)))
+    # Partitioning reads the global resource, so it stays set through compilation.
+    with jax.set_mesh(mesh), global_shard_guard(MeshResource(fsdp_resource=batch_axes)):
+        fn = jax.jit(jax.value_and_grad(objective, (0, 1), has_aux=True))
+        compiled = fn.lower(x, weight).compile()
+        actual = compiled(x, weight)
+    for result, ref in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
+        np.testing.assert_allclose(result, ref, rtol=2e-4, atol=2e-5)
+    # The activation keeps its batch sharding; only the whole weight is gathered.
+    assert set(_all_gather_sizes(compiled.as_text())) == {weight.size}
 
 
 @pytest.mark.parametrize("operation", ["layernorm_dense", "layernorm_mlp"])
