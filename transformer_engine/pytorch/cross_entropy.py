@@ -10,6 +10,7 @@ import warnings
 import torch
 
 import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.jit import no_torch_dynamo
 
 __all__ = ["parallel_cross_entropy"]
@@ -114,10 +115,10 @@ def _validate_inputs(
         raise ValueError(f"inp dimensions must be non-zero, but got shape {tuple(inp.shape)}")
     if inp.dtype not in (torch.bfloat16, torch.float32):
         raise TypeError(f"inp must have BF16 or FP32 dtype, but got {inp.dtype}")
-    if not inp.is_cuda:
-        raise ValueError("inp must be a CUDA tensor")
+    if inp.device.type != te_device_type():
+        raise ValueError(f"inp must be a {te_device_type()} tensor, but got {inp.device}")
     if target.device != inp.device:
-        raise ValueError("target must be on the same CUDA device as inp")
+        raise ValueError(f"target must be on the same {te_device_type()} device as inp")
     if target.dtype != torch.int64:
         raise TypeError(f"target must have torch.int64 dtype, but got {target.dtype}")
     if target.numel() != inp.shape[0] * inp.shape[1]:

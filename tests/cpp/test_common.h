@@ -108,11 +108,12 @@ struct TypeInfo {
     struct Helper {
         constexpr static DType getType() {
             constexpr int i = static_cast<int>(current);
-            if (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
-                return current;
-            } else {
-                return Helper<U, static_cast<DType>(i + 1)>::getType();
+            if constexpr (i < static_cast<int>(std::tuple_size<types>::value)) {
+                if (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
+                    return current;
+                }
             }
+            return Helper<U, static_cast<DType>(i + 1)>::getType();
         }
     };
 
@@ -125,6 +126,8 @@ struct TypeInfo {
 
     template <typename U>
     constexpr static DType getType() {
+        static_assert(Helper<U, DType::kByte>::getType() != DType::kNumTypes,
+                      "Type is not registered");
         return Helper<U, DType::kByte>::getType();
     }
 

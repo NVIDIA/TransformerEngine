@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+
 from collections.abc import Iterable, Sequence
 import io
 import os
@@ -272,6 +273,13 @@ def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monke
     assert first_forward_calls == 1
     assert fusion_calls == 1
 
+    # A recipe representation change selects a new plan without resetting the
+    # op's quantizers when the changed setting does not affect their state.
+    equivalent_current_scaling.fp8_dpa = True
+    fuser.maybe_fuse_ops(False, equivalent_current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling]
+    assert fusion_calls == 2
+
     # Backward override affects both recipe state and fusion topology, so it
     # triggers one reset and constructs a distinct cached plan.
     overridden_current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(
@@ -280,7 +288,7 @@ def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monke
     fuser.maybe_fuse_ops(False, overridden_current_scaling, x, extra_inputs)
     assert reset_recipes == [current_scaling, overridden_current_scaling]
     assert first_forward_calls == 1
-    assert fusion_calls == 2
+    assert fusion_calls == 3
 
     delayed_scaling = transformer_engine.common.recipe.DelayedScaling(
         amax_history_len=8,
@@ -289,10 +297,10 @@ def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monke
     fuser.maybe_fuse_ops(False, delayed_scaling, x, extra_inputs)
     assert reset_recipes == [current_scaling, overridden_current_scaling, delayed_scaling]
     assert first_forward_calls == 1
-    assert fusion_calls == 3
+    assert fusion_calls == 4
 
-    # Amax history length only affects delayed-scaling recipe state. Reset that
-    # state, but restore the existing DelayedScaling fusion plan from the cache.
+    # Amax history length changes the recipe representation, so reset the
+    # delayed-scaling state and build a new fusion plan.
     resized_delayed_scaling = transformer_engine.common.recipe.DelayedScaling(
         amax_history_len=16,
         backward_override=None,
@@ -305,13 +313,51 @@ def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monke
         resized_delayed_scaling,
     ]
     assert first_forward_calls == 1
-    assert fusion_calls == 3
+    assert fusion_calls == 5
 
     # Repeating the exact recipe parameters performs neither operation again.
     fuser.maybe_fuse_ops(False, resized_delayed_scaling, x, extra_inputs)
     assert len(reset_recipes) == 4
     assert first_forward_calls == 1
-    assert fusion_calls == 3
+    assert fusion_calls == 5
+
+
+def test_operation_fuser_rebuilds_for_extra_recipe_attribute(monkeypatch) -> None:
+    """A monkey-patched recipe flag must select a new fusion plan."""
+
+    seen_flags = []
+
+    def track_fusion(ops, *, recipe):
+        seen_flags.append(getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False))
+        return ops
+
+    monkeypatch.setattr(OperationFuser, "forward_backward_fusion_functions", [track_fusion])
+    monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [])
+
+    op = te_ops.Identity()
+    monkeypatch.setattr(op, "reset_recipe_state", lambda **_: None)
+    monkeypatch.setattr(op, "pre_first_fuser_forward", lambda: None)
+    fuser = OperationFuser([op])
+    recipe = transformer_engine.common.recipe.CustomRecipe(qfactory=lambda role: None)
+    x = torch.ones(1)
+    extra_inputs = [()]
+
+    fuser.maybe_fuse_ops(False, recipe, x, extra_inputs)
+    assert seen_flags == [False]
+
+    recipe.enable_cutedsl_fused_grouped_mlp = True
+    fuser.maybe_fuse_ops(False, recipe, x, extra_inputs)
+    fuser.maybe_fuse_ops(False, recipe, x, extra_inputs)
+    assert seen_flags == [False, True]
+
+    recipe.enable_cutedsl_fused_grouped_mlp = False
+    fuser.maybe_fuse_ops(False, recipe, x, extra_inputs)
+    assert seen_flags == [False, True, False]
+
+    del recipe.enable_cutedsl_fused_grouped_mlp
+    fuser.maybe_fuse_ops(False, recipe, x, extra_inputs)
+    assert seen_flags == [False, True, False]
 
 
 @torch.no_grad()
@@ -1387,6 +1433,8 @@ class TestFuser:
             return te_ops.RMSNorm(size, **kwargs)
         if op_type == "grouped_linear":
             return te_ops.GroupedLinear(num_groups, size, size, bias=True, **kwargs)
+        if op_type == "batched_linear":
+            return te_ops.BatchedLinear(num_groups, size, size, bias=True, **kwargs)
         if op_type == "linear":
             return te_ops.Linear(size, size, bias=True, **kwargs)
         if op_type == "sequential":
@@ -1409,7 +1457,16 @@ class TestFuser:
 
     @pytest.mark.parametrize(
         "op_type",
-        ("basic_linear", "bias", "layer_norm", "rmsnorm", "grouped_linear", "linear", "sequential"),
+        (
+            "basic_linear",
+            "bias",
+            "layer_norm",
+            "rmsnorm",
+            "grouped_linear",
+            "batched_linear",
+            "linear",
+            "sequential",
+        ),
     )
     @pytest.mark.parametrize("reset_submodules", (False, True))
     def test_deferred_param_init(
@@ -1430,6 +1487,8 @@ class TestFuser:
         if op_type == "grouped_linear":
             in_shape = (size * num_groups, size)
             extra_inputs.append(torch.full((num_groups,), size, dtype=torch.int, device=device))
+        if op_type == "batched_linear":
+            in_shape = (num_groups, size, size)
         x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
         x_ref = x.detach().clone().requires_grad_()
 
@@ -1467,7 +1526,7 @@ class TestFuser:
         for name, param in params.items():
             assert_close_grads(param, ref_params[name], **tols)
 
-    @pytest.mark.parametrize("op_type", ("linear", "grouped_linear"))
+    @pytest.mark.parametrize("op_type", ("linear", "grouped_linear", "batched_linear"))
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("reset_submodules", (False, True))
     def test_deferred_param_init_quantized(
@@ -1489,6 +1548,8 @@ class TestFuser:
         if op_type == "grouped_linear":
             in_shape = (size * num_groups, size)
             extra_inputs.append(torch.full((num_groups,), size, dtype=torch.int, device=device))
+        if op_type == "batched_linear":
+            in_shape = (num_groups, size, size)
         if quantization is None:
             pytest.skip("Quantization scheme is not specified")
         if op_type == "grouped_linear" and quantization == "nvfp4_4over6":
@@ -1820,7 +1881,7 @@ class TestBasicOps:
                 pytest.skip("FP8 output is only supported with FP8 GEMMs")
             if quantized_grad_input and not quantized_compute:
                 pytest.skip("FP8 grad input is only supported with FP8 GEMMs")
-        if quantization not in (None, "fp8"):
+        if quantization not in (None, "fp8", "fp8_delayed_scaling"):
             if quantized_output or quantized_grad_input:
                 pytest.skip("Recipe does not support quantized GEMM output")
 
@@ -3186,6 +3247,154 @@ class TestBasicOps:
             assert_close_grads(getattr(op, f"weight{group_idx}"), ws_ref[group_idx], **tols)
             if bias:
                 assert_close_grads(getattr(op, f"bias{group_idx}"), bs_ref[group_idx], **tols)
+
+    @pytest.mark.parametrize("input_batch_dim", (0, -2))
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    @pytest.mark.parametrize("weight_requires_grad", (False, True))
+    def test_batched_linear(
+        self,
+        *,
+        batch_size: int = 3,
+        input_batch_dim: int,
+        bias: bool,
+        weight_shape: tuple[int, int] = (128, 128),
+        rows_shape: tuple[int, int] = (4, 32),
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantized_compute: Optional[bool] = None,
+        quantized_weight: bool,
+        input_requires_grad: bool,
+        weight_requires_grad: bool,
+    ) -> None:
+        """Strided batched GEMM"""
+
+        # Make input and weight shapes consistent
+        out_features, in_features = weight_shape
+        if input_batch_dim == 0:
+            in_shape = (batch_size, *rows_shape, in_features)
+        else:
+            in_shape = (*rows_shape, batch_size, in_features)
+        out_shape = in_shape[:-1] + (out_features,)
+
+        # Skip invalid configurations
+        if quantized_compute is None:
+            quantized_compute = quantization is not None
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(quantization, dims=out_shape)
+        if quantization is None and quantized_weight:
+            pytest.skip("Quantization scheme is not specified")
+        if quantization is not None and dtype not in (torch.bfloat16, torch.float16):
+            pytest.skip("Quantized batched GEMM is only supported with BF16/FP16")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=input_requires_grad,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            (batch_size, out_features, in_features),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=weight_requires_grad,
+        )
+        b_ref, b_test = None, None
+        if bias:
+            b_ref, b_test = make_reference_and_test_tensors(
+                (batch_size, out_features),
+                test_dtype=dtype,
+                test_device=device,
+                requires_grad=weight_requires_grad,
+            )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        if input_batch_dim == 0:
+            y_ref = torch.einsum("g...d,grd->g...r", x_ref, w_ref)
+            if bias:
+                y_ref = y_ref + b_ref.view(batch_size, *([1] * len(rows_shape)), out_features)
+        else:
+            y_ref = torch.einsum("...gd,grd->...gr", x_ref, w_ref)
+            if bias:
+                y_ref = y_ref + b_ref
+        if input_requires_grad or weight_requires_grad:
+            y_ref.backward(dy_ref)
+
+        # Construct fusible operation
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+            op = te_ops.BatchedLinear(
+                batch_size,
+                in_features,
+                out_features,
+                input_batch_dim=input_batch_dim,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+            )
+        with torch.no_grad():
+            op.weight.copy_(w_test)
+            if bias:
+                op.bias.copy_(b_test)
+            del w_test, b_test
+            for param in op.parameters():
+                param.requires_grad_(requires_grad=weight_requires_grad)
+
+        # Forward and backward pass with op
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
+            y_test = op(x_test)
+        if input_requires_grad or weight_requires_grad:
+            y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+        if quantized_compute:
+            tols = quantization_tols(quantization)
+
+        # Check results
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(op.weight, w_ref, **tols)
+        if bias:
+            assert_close_grads(op.bias, b_ref, **tols)
+
+    @pytest.mark.parametrize("input_batch_dim", (0, -2))
+    @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
+    @pytest.mark.parametrize("quantization", ("mxfp8",))
+    def test_batched_linear_with_weight_dequantization(
+        self,
+        *,
+        input_batch_dim: int,
+        dtype: torch.dtype,
+        quantization: str,
+    ) -> None:
+        """Strided batched GEMM with quantized weight and high-precision compute"""
+        self.test_batched_linear(
+            input_batch_dim=input_batch_dim,
+            bias=True,
+            dtype=dtype,
+            quantization=quantization,
+            quantized_compute=False,
+            quantized_weight=True,
+            input_requires_grad=True,
+            weight_requires_grad=True,
+        )
 
     def test_grouped_linear_caller_buffers(
         self,
@@ -5661,3 +5870,103 @@ class TestTrainingLoops:
             quantization=quantization,
             recipe=recipe,
         )
+
+    @pytest.mark.parametrize("quantization", (None, "mxfp8", "fp8_current_scaling"))
+    def test_grouped_linear_training_loop(
+        self,
+        *,
+        stages: Sequence[str] = ("train", "infer", "train", "infer"),
+        num_groups: int = 3,
+        weight_shape: tuple[int, int] = (128, 128),
+        dtype: Optional[torch.dtype] = None,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+    ) -> None:
+        """Training loops with grouped linear op."""
+        if dtype is None:
+            dtype = torch.bfloat16 if is_bf16_available() else torch.float32
+
+        # Tensor shapes
+        split_sizes = [128 * (1 + group_idx % 2) for group_idx in range(num_groups)]
+        splits = torch.tensor(split_sizes, dtype=torch.int64, device=device)
+        out_features, in_features = weight_shape
+        in_shape = [sum(split_sizes), in_features]
+        out_shape = in_shape[:-1] + [out_features]
+
+        # Quantization recipe
+        quantized_compute = quantization is not None
+        recipe = make_recipe(quantization)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(quantization, dims=out_shape)
+
+        # Initialize weights
+        with te.quantized_model_init(enabled=quantized_compute, recipe=recipe):
+            module = te_ops.GroupedLinear(
+                num_groups,
+                in_features,
+                out_features,
+                bias=False,
+                dtype=dtype,
+                device=device,
+            )
+        weights = list(module.parameters())
+        assert len(weights) == len(split_sizes)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+        if quantization is not None:
+            tols = quantization_tols(quantization)
+
+        # Training loop stages
+        for stage in stages:
+            training = stage == "train"
+            if training:
+                with torch.no_grad():
+                    # Update parameters with random values to simulate
+                    # optimizer step or FSDP param all-gather
+                    for weight in weights:
+                        weight.copy_(torch.empty_like(weight).uniform_())
+                        weight.grad = None
+
+            # Forward reference implementation
+            x_ref, x_test = make_reference_and_test_tensors(
+                in_shape,
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+                requires_grad=training,
+            )
+            weights_ref = [to_cpu(weight) for weight in weights]
+            outputs_ref = [
+                torch.nn.functional.linear(x_part, weight_ref)
+                for x_part, weight_ref in zip(torch.split(x_ref, split_sizes), weights_ref)
+            ]
+            y_ref = torch.cat(outputs_ref)
+
+            # Grouped linear forward
+            with (
+                torch.inference_mode(not training),
+                te.autocast(enabled=quantized_compute, recipe=recipe),
+            ):
+                y_test = module(x_test, splits)
+
+            # Backward pass
+            if training:
+                dy_ref, dy_test = make_reference_and_test_tensors(
+                    out_shape,
+                    quantization=quantization,
+                    test_dtype=dtype,
+                    test_device=device,
+                    requires_grad=False,
+                )
+                y_ref.backward(dy_ref)
+                y_test.backward(dy_test)
+
+            # Check results
+            assert_close(y_test, y_ref, **tols)
+            if training:
+                assert_close_grads(x_test, x_ref, **tols)
+                for weight, weight_ref in zip(weights, weights_ref):
+                    assert_close_grads(weight, weight_ref, **tols)

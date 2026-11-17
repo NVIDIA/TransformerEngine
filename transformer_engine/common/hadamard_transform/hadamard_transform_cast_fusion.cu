@@ -91,8 +91,17 @@ StochasticNumericConverterBase(cutlass::Array<float, 8> const &input, cutlass::A
         "f"(input[4]), "f"(input[5]), "f"(input[6]), "f"(input[7]),
         "r"(rbits[0]), "r"(rbits[1]));
   } else {
+#if FP4_TYPE_SUPPORTED
+    // No cvt.rs on this architecture (e.g. SM110): use the software rounder.
+    auto output_ptr = reinterpret_cast<uint16_t *>(&output);
+    output_ptr[0] =
+        ptx::stochastic_round_fp4_e2m1x4(input[0], input[1], input[2], input[3], rbits[0]);
+    output_ptr[1] =
+        ptx::stochastic_round_fp4_e2m1x4(input[4], input[5], input[6], input[7], rbits[1]);
+#else
     NVTE_DEVICE_ERROR("FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
+#endif
   }
   return output;
 }

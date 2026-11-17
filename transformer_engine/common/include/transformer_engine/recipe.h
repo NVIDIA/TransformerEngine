@@ -76,7 +76,9 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
 /*! \brief Compute an FP8 tensor's amax.
  *
  *  The amax (maximum absolute value) of the input tensor is computed
- *  and written to the amax buffer of the output tensor.
+ *  and written to the amax buffer of the output tensor. For a Tensor
+ *  with distinct row-wise and column-wise amax buffers, the
+ *  amax is written to both.
  *
  *  \param[in]     input            Input tensor. Must be unquantized.
  *  \param[in,out] output           Output tensor. Must be an FP8 tensor with per-tensor scaling.
@@ -88,7 +90,8 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
  *
  *  The amax (maximum absolute value) of the input tensor is computed
  *  and written to the amax buffer of the output tensor, using the provided
- *  quantization configuration.
+ *  quantization configuration. For a Tensor with distinct row-wise
+ *  and column-wise amax buffers, the amax is written to both.
  *  One useful config is the noop tensor, which is needed by cuda graph.
  *
  *  \param[in]     input            Input tensor. Must be unquantized.
@@ -290,6 +293,7 @@ void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
  *  \param[in]     input            Input tensor (continuous segment of flattened original tensor).
  *  \param[in,out] amax_rowwise     Output tensor for row-wise maximum absolute values.
  *  \param[in,out] amax_colwise     Output tensor for column-wise maximum absolute values.
+ *                                An empty NVTETensor skips column-wise computation.
  *  \param[in]     rows             Number of rows in the logical tensor.
  *  \param[in]     cols             Number of columns in the logical tensor.
  *  \param[in]     start_offset     Starting offset in the flattened tensor.
@@ -303,7 +307,9 @@ void nvte_mxfp8_scaling_compute_partial_amax(const NVTETensor input, NVTETensor 
  *
  *  This function casts the input tensor to MXFP8 format, producing both row-wise and
  *  column-wise scaled outputs. input contains a continuous segment from the flattened
- *  original tensor.
+ *  original tensor. To skip column-wise computation, pass an empty NVTETensor for
+ *  output_colwise; scale_inv_colwise is ignored in this case. Column-wise output
+ *  requires column-wise scales. Row-wise outputs remain required.
  *
  *  \param[in]     input               Input (continuous segment of flattened original tensor).
  *  \param[out]    output_rowwise      Output tensor with row-wise scaling (MXFP8 format).
