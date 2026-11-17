@@ -92,14 +92,11 @@ class _MoEBlock(TransformerEngineBase):
         Logical sharding axis tuples (consumed by Flax's
         :func:`with_logical_partitioning` and our internal
         :func:`with_sharding_constraint_by_logical_axes`).
-    ep_axis : Optional[str | tuple[str, ...]]
-        Physical EP axis or ordered tuple of axes, overriding the EP resource.
-        Inputs may be [tokens, hidden] or [batch, sequence, hidden].
     mesh_resource : Optional[MeshResource]
         Physical DP, FSDP and EP mesh axes. ``None`` resolves the active global
         MeshResource context. An explicit resource takes precedence; one of
         these is required. Batch sharding uses DP and FSDP as outer axes and
-        EP innermost.
+        EP innermost; EP may be an ordered tuple of axes.
     quant_before_fsdp_ag : bool
         Quantize MXFP8 weight shards before their FSDP all-gather. Defaults to
         ``False``; ``True`` requires ``mesh_resource.fsdp_resource``.
@@ -166,7 +163,6 @@ class _MoEBlock(TransformerEngineBase):
     input_axes: Tuple[Optional[str], ...] = ()
 
     # Parallelism
-    ep_axis: Optional[Union[str, Tuple[str, ...]]] = None
     mesh_resource: Optional[MeshResource] = None
     quant_before_fsdp_ag: bool = False
 
@@ -204,12 +200,12 @@ class _MoEBlock(TransformerEngineBase):
         Parameters
         ----------
         inputs : jnp.ndarray
-            ``[batch, sequence, hidden]``.
+            ``[batch, sequence, hidden]`` or ``[tokens, hidden]``.
 
         Returns
         -------
         output : jnp.ndarray
-            ``[batch, sequence, hidden]``.
+            Same shape as ``inputs``.
         aux_loss : Optional[jnp.ndarray]
             Scalar load-balancing loss when ``aux_loss_coeff > 0``,
             else ``None``.
@@ -222,7 +218,6 @@ class _MoEBlock(TransformerEngineBase):
         mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
             self.mesh_resource,
             self.quant_before_fsdp_ag,
-            ep_axis=self.ep_axis,
         )
         _, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
         assert inputs.ndim in (2, 3), (

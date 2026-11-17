@@ -56,6 +56,15 @@ def test_global_default_and_duplicate_outer_axis():
     assert quantize is False
 
 
+def test_tuple_ep_resource():
+    resource, _ = _resolve_moe_mesh_resource(
+        MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource=("ep", "tp"))
+    )
+    assert _moe_mesh_axes(resource) == (("ep", "tp"), ("dp", "fsdp"))
+    with pytest.raises(ValueError, match="distinct"):
+        _resolve_moe_mesh_resource(MeshResource(fsdp_resource="tp", ep_resource=("ep", "tp")))
+
+
 @pytest.mark.parametrize("fsdp_resource", ["fsdp", ("fsdp",), ("fsdp", "ep"), ("ep", "fsdp")])
 def test_ep_partitioning_retains_bind_time_resources(fsdp_resource):
     from transformer_engine.jax.cpp_extensions import ep

@@ -135,6 +135,7 @@ from transformer_engine.jax.moe import (
     moe,
     record_ep_bootstrap_signature_for_moe,
 )
+from transformer_engine.jax.cpp_extensions.ep import get_ep_config
 from transformer_engine.jax.ep import ep_bootstrap, ep_finalize
 from transformer_engine.common.recipe import Format, MXFP8BlockScaling
 from transformer_engine.jax.quantize import ScalingMode, is_scaling_mode_supported
@@ -157,7 +158,10 @@ assert TP_SIZE in (1, 2), f"TE_EP_MOE_TP_SIZE must be 1 or 2, got {TP_SIZE}"
 assert INPUT_RANK in (2, 3), f"TE_EP_MOE_INPUT_RANK must be 2 or 3, got {INPUT_RANK}"
 EP_AXIS = EXPERT_AXIS if TP_SIZE == 1 else (EXPERT_AXIS, TENSOR_AXIS)
 EP_AXES = (EP_AXIS,) if isinstance(EP_AXIS, str) else EP_AXIS
-EXPLICIT_EP_AXIS = None if TP_SIZE == 1 else EP_AXIS
+# With TP, the MoE block overrides the global resource so EP spans (expert, tensor).
+EXPLICIT_MESH_RESOURCE = (
+    None if TP_SIZE == 1 else MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+)
 MESH_SHAPE = (FSDP_SIZE, EP_SIZE) if TP_SIZE == 1 else (FSDP_SIZE, EP_SIZE, TP_SIZE)
 MESH_AXES = (FSDP_AXIS, *EP_AXES)
 COMBINED_EP_SIZE = EP_SIZE * TP_SIZE
@@ -259,7 +263,7 @@ def mesh(use_cudnn_fusion):
             recv_capacity_per_rank=recv_capacity_per_rank,
             hidden_dim=HIDDEN,
             max_token_dtype=DTYPE,
-            ep_axes=EXPLICIT_EP_AXIS,
+            mesh_resource=EXPLICIT_MESH_RESOURCE,
         )
     record_ep_bootstrap_signature_for_moe(
         num_experts=NUM_EXPERTS,
@@ -433,7 +437,7 @@ def _make_block(
     quantization_recipe=None,
     dispatch_checkpoint_name=None,
     quant_before_fsdp_ag=False,
-    mesh_resource=None,
+    mesh_resource=EXPLICIT_MESH_RESOURCE,
     dispatch_quantization_recipe=None,
     use_cudnn_fusion,
 ):
@@ -443,7 +447,6 @@ def _make_block(
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
         intermediate_size=INTER,
-        ep_axis=EXPLICIT_EP_AXIS,
         mesh_resource=mesh_resource,
         apply_topk_weights_early=apply_topk_weights_early,
         aux_loss_coeff=aux_loss_coeff,
@@ -722,6 +725,14 @@ def test_quantized_weight_gather_matches_full_precision_gather(
     )
 
 
+@pytest.mark.usefixtures("mesh")
+def test_ep_bootstrap_matches_mesh_resource():
+    """Bootstrap sizes EP from the MoE resource and counts every outer data-parallel axis."""
+    cfg = get_ep_config()
+    assert cfg.ep_size == COMBINED_EP_SIZE
+    assert cfg.num_ep_groups == NUM_DEVICES_REQUIRED // COMBINED_EP_SIZE
+
+
 @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_reason)
 @pytest.mark.parametrize("quant_before_fsdp_ag", [False, True])
 def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, make_block):
@@ -875,7 +886,7 @@ class TestTeEpMoeHashRouting:
                     params["wi"],
                     params["wo"],
                     num_experts=NUM_EXPERTS,
-                    ep_axis=EXPLICIT_EP_AXIS,
+                    mesh_resource=EXPLICIT_MESH_RESOURCE,
                     input_axes=("batch", *([None] * (INPUT_RANK - 1))),
                     wi_kernel_axes=("exp", "embed", "mlp"),
                     wo_kernel_axes=("exp", "mlp", "embed"),
@@ -1001,7 +1012,7 @@ class TestTeEpMoeRouterInfo:
                 params["wi"],
                 params["wo"],
                 num_experts=NUM_EXPERTS,
-                ep_axis=EXPLICIT_EP_AXIS,
+                mesh_resource=EXPLICIT_MESH_RESOURCE,
                 input_axes=("batch", *([None] * (INPUT_RANK - 1))),
                 dtype=DTYPE,
                 use_cudnn_fusion=use_cudnn_fusion,
