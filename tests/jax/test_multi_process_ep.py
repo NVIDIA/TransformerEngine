@@ -1437,15 +1437,13 @@ class TestEpDomainGrouping(unittest.TestCase):
             domains.setdefault(root, {})[col] = rank
         self.assertEqual([domains[0][i] for i in range(4)], [0, 1, 2, 3])
 
-        with mesh:
-            ep_axes = ("expert", "tensor")
-            ok, ep_axis, outer_axes = _leading_axis_ok(
-                PartitionSpec(ep_axes, None, None), ep_axes=ep_axes
-            )
+        ep_axes = ("expert", "tensor")
+        with mesh, global_shard_guard(MeshResource(ep_resource=ep_axes)):
+            ok, ep_axis, outer_axes = _leading_axis_ok(PartitionSpec(ep_axes, None, None))
             self.assertTrue(ok)
             self.assertEqual(ep_axis, ("expert", "tensor"))
             self.assertEqual(outer_axes, ())
-            self.assertTrue(_ep_spec_ok(PartitionSpec(ep_axes, None, None), 2, ep_axes=ep_axes))
+            self.assertTrue(_ep_spec_ok(PartitionSpec(ep_axes, None, None), 2))
 
     def test_ep_flattened_replica_groups_multi_domain(self):
         """Verify flattened replica IDs are grouped by DP coordinate."""
