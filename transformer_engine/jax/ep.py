@@ -129,13 +129,13 @@ def ep_bootstrap(
     max_token_dtype=jnp.bfloat16,
     max_num_sms=0,
     drop_on_overflow=False,
-    ep_axes=None,
+    mesh_resource=None,
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
-    Must run inside an active JAX Mesh. ``ep_axes`` overrides
-    ``MeshResource.ep_resource`` when provided; axes outside the ordered EP
-    tuple form separate EP domains. The communicator is auto-selected between
+    Must run inside an active JAX Mesh. ``mesh_resource`` names the EP and
+    outer DP/FSDP mesh axes, as for ``moe``; axes outside the ordered EP axes
+    form separate EP domains. The communicator is auto-selected between
     self-hosted NCCL and XLA's borrowed comm (see
     ``tex.ep.use_nccl_comm_from_xla``).
 
@@ -155,8 +155,8 @@ def ep_bootstrap(
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
-        ep_axes: Physical mesh axis name or ordered tuple of names. Defaults to
-            ``MeshResource.ep_resource``.
+        mesh_resource: MeshResource naming the EP and outer DP/FSDP mesh axes.
+            ``None`` uses the active global_shard_guard.
     """
     if rank is None:
         rank = jax.process_index()
@@ -172,12 +172,14 @@ def ep_bootstrap(
             " XLA collectives FFI support, or launch one process per GPU instead."
         )
 
-    explicit_ep_axes = ep_axes
-    ep_resource = (
-        global_mesh_resource().ep_resource if explicit_ep_axes is None else explicit_ep_axes
-    )
+    resource = global_mesh_resource() if mesh_resource is None else mesh_resource
+    ep_resource = resource.ep_resource
     if ep_resource is None:
-        raise ValueError("ep_bootstrap requires ep_axes or MeshResource.ep_resource to be set.")
+        raise ValueError(
+            "ep_bootstrap requires MeshResource.ep_resource to be set; pass"
+            " mesh_resource=MeshResource(..., ep_resource=<axis name>) or enter a"
+            " global_shard_guard before bootstrap."
+        )
     mesh = _get_mesh()
     if mesh.empty:
         raise ValueError(
@@ -200,7 +202,6 @@ def ep_bootstrap(
     ep_size = int(np.prod([mesh.shape[axis] for axis in ep_axes]))
     # num_ep_groups counts only the distinct-token (dp/fsdp) axes; replicated
     # axes (tp, pp, ...) do not create distinct EP-output slabs.
-    resource = global_mesh_resource()
     outer_axes = tuple(
         dict.fromkeys(
             a
