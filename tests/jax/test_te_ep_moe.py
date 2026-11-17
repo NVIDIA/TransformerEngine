@@ -1514,13 +1514,13 @@ class TestTeEpMoeAuxLoss:
         coeff = 1e-2
         block = make_block(aux_loss_coeff=coeff, **config)
         x = _make_inputs(jax.random.PRNGKey(24))
-        variables, _, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(25))
+        variables, _, aux, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(25))
 
         with _ctx(mesh):
             x_sh = _shard_inputs(x, mesh)
 
             def aux_only(variables, x):
-                _, aux, _trt = block.apply(variables, x)
+                _, aux, _trt, _counts = block.apply(variables, x)
                 return aux.astype(jnp.float32)
 
             grads_te, grad_x_te = jax.jit(jax.grad(aux_only, argnums=(0, 1)))(variables, x_sh)
