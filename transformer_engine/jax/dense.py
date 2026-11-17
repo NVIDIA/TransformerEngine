@@ -17,6 +17,7 @@ import jax.numpy as jnp
 
 from . import cpp_extensions as tex
 from .cpp_extensions.amax import AmaxScope
+from .sharding import MeshResource, _mesh_resource_snapshot
 from .quantize import (
     ScaledTensor,
     QuantizerSet,
@@ -65,6 +66,7 @@ def dense(
     output_axes: Tuple[str, ...] = None,
     collective_op_set: tex.CollectiveOpSet = tex.noop_collective_op_set,
     quantizer_set: QuantizerSet = noop_quantizer_set,
+    mesh_resource: MeshResource | None = None,
 ):
     """Perform dense layer transformation with optional quantization.
 
@@ -83,6 +85,8 @@ def dense(
         output_axes: Logical axes for sharding the output
         collective_op_set: A set of CollectiveOp objects for forward and backward passes.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
+        mesh_resource: Optional mesh role override for this dense operation.
+            None uses the global mesh resource context.
 
     Returns:
         Transformed output tensor
@@ -112,11 +116,12 @@ def dense(
         output_axes,
         collective_op_set,
         quantizer_set,
+        _mesh_resource_snapshot(mesh_resource),
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7, 8))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7, 8, 10))
 def _dense(
     x,
     kernel,
@@ -128,6 +133,7 @@ def _dense(
     output_axes,
     collective_op_set,
     quantizer_set,  # need to be a diff_arg for DelayedScaling state management
+    mesh_resource,
 ):
     """Internal implementation of dense layer transformation with custom VJP.
 
@@ -160,6 +166,7 @@ def _dense(
         output_axes,
         collective_op_set,
         quantizer_set,
+        mesh_resource,
     )
     return output
 
@@ -175,6 +182,7 @@ def _dense_fwd_rule(
     output_axes,
     collective_op_set,
     quantizer_set,
+    mesh_resource,
 ):
     """Forward pass rule for dense layer transformation.
 
@@ -201,6 +209,7 @@ def _dense_fwd_rule(
         quantizer=quantizer_set.x,
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
 
@@ -209,6 +218,7 @@ def _dense_fwd_rule(
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.kernel,
         amax_scope=AmaxScope.FSDP,
+        mesh_resource=mesh_resource,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
@@ -220,6 +230,7 @@ def _dense_fwd_rule(
         contracting_dims=(x_contracting_dims, k_contracting_dims),
         transpose_batch_sequence=transpose_batch_sequence,
         collective_op=collective_op_set.forward,
+        mesh_resource=mesh_resource,
     )
     output = with_sharding_constraint_by_logical_axes(output, output_axes)
 
@@ -243,6 +254,7 @@ def _dense_bwd_rule(
     kernel_axes,
     output_axes,
     collective_op_set,
+    mesh_resource,
     ctx,
     grad,
 ):
@@ -273,6 +285,7 @@ def _dense_bwd_rule(
         quantizer=quantizer_set.dgrad,
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     # GEMM NT
@@ -291,6 +304,7 @@ def _dense_bwd_rule(
         contracting_dims=(g_contracting_dim, k_contracting_dim),
         transpose_batch_sequence=transpose_batch_sequence,
         collective_op=collective_op_set.backward,
+        mesh_resource=mesh_resource,
     )
 
     # GEMM TN
@@ -304,6 +318,7 @@ def _dense_bwd_rule(
         casted_grad.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=(x_contracting_dim, g_contracting_dim),
         transpose_batch_sequence=transpose_batch_sequence,
+        mesh_resource=mesh_resource,
     )
 
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
