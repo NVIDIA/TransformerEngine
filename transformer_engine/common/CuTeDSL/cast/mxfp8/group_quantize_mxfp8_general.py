@@ -32,7 +32,7 @@ from .quantize_mxfp8_g2s_general import (
     _quantize_rowwise_mxfp8,
     _quantize_colwise_mxfp8,
 )
-from .quantize_mxfp8_2d import quantize_colwise_mxfp8_2d, quantize_rowwise_mxfp8_2d
+from .quantize_mxfp8_2d import quantize_mxfp8_smem_tile_2d
 from .group_quantize_mxfp8_common import (
     CUTEDSL_DEBUG_LOGGING,
     THREADS_PER_WARP,
@@ -602,65 +602,6 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
 
         return storage.mbar.data_ptr(), sX, sO_row, sO_col, sActInput, sDbias
 
-    @cute.jit
-    def _quantize_tile_2d(
-        self,
-        sX_tile: cute.Tensor,
-        sO_row_tile: Optional[cute.Tensor],
-        mS_row_stage: Optional[cute.Tensor],
-        sO_col_tile: Optional[cute.Tensor],
-        mS_col_stage: Optional[cute.Tensor],
-        sBlockAmax: cute.Tensor,
-        tile_row_start: Int64,
-        tile_col_start: Int64,
-        M: Int64,
-        N: Int64,
-    ):
-        """Quantize one stage with one scale per 32x32 block (quantize_mxfp8_2d's tile functions),
-        zeroing out-of-bounds scales like the 1D grouped path."""
-        cfg = self.cfg
-        if cutlass.const_expr(cfg.COLWISE):
-            quantize_colwise_mxfp8_2d(
-                sX_tile,
-                sO_col_tile,
-                mS_col_stage,
-                sBlockAmax,
-                cfg.MAX_NORM_RCP,
-                tile_row_start,
-                tile_col_start,
-                M,
-                N,
-                DTYPE=cfg.DTYPE,
-                FP8_DTYPE=cfg.FP8_DTYPE,
-                SWIZZLE=cfg.WITH_GEMM_SWIZZLED_SCALES,
-                TILE_X=self.TILE_COLS,
-                TILE_Y=self.TILE_ROWS,
-                SKIP_SCALE_BOUNDS=False,
-                ZERO_OOB_SCALES=True,
-            )
-            if cutlass.const_expr(cfg.ROWWISE):
-                # Publish the block amaxes to the rowwise pass.
-                cute.arch.sync_threads()
-        if cutlass.const_expr(cfg.ROWWISE):
-            quantize_rowwise_mxfp8_2d(
-                sX_tile,
-                sO_row_tile,
-                mS_row_stage,
-                sBlockAmax,
-                cfg.MAX_NORM_RCP,
-                tile_row_start,
-                tile_col_start,
-                M,
-                N,
-                DTYPE=cfg.DTYPE,
-                FP8_DTYPE=cfg.FP8_DTYPE,
-                TILE_X=self.TILE_COLS,
-                TILE_Y=self.TILE_ROWS,
-                SKIP_SCALE_BOUNDS=False,
-                BLOCK_AMAX_IN_SMEM=cfg.COLWISE,
-                ZERO_OOB_SCALES=True,
-            )
-
     @cute.kernel
     def kernel(
         self,
@@ -759,19 +700,6 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         # Layout for sDbias:
         # (THREADS_Y, TILE_COLS):(THREADS_X * (MXFP8_BLOCK_SCALING_SIZE + 1), 1)
         mbar_ptr, sX, sO_row, sO_col, sActInput, sDbias = self._make_shared_storage(smem, dtype)
-        sBlockAmax = None
-        if cutlass.const_expr(cfg.USE_2D_QUANTIZATION):
-            # One amax per (warp, 32x32 block): the 2D tile functions' scratch.
-            NUM_BLOCKS_X = self.TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
-            NUM_WARPS = self.THREADS_PER_CTA // THREADS_PER_WARP
-
-            @cute.struct
-            class BlockAmaxStorage:  # pylint: disable=missing-class-docstring
-                sBlockAmax: cute.struct.MemRange[Float32, NUM_WARPS * NUM_BLOCKS_X]
-
-            sBlockAmax = smem.allocate(BlockAmaxStorage).sBlockAmax.get_tensor(
-                cute.make_layout(NUM_WARPS * NUM_BLOCKS_X)
-            )
 
         tx_count = self.TILE_ROWS * self.TILE_COLS * dtype.width // 8
         if cutlass.const_expr(cfg.WITH_DACT):
@@ -941,7 +869,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                     col_scales,
                     mWorkspace,
                     sDbias,
-                    sBlockAmax,
+                    smem,
                     descs,
                     tmap,
                     warp_idx,
@@ -1025,7 +953,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         col_scales,
                         mWorkspace,
                         sDbias,
-                        sBlockAmax,
+                        smem,
                         descs,
                         tmap,
                         warp_idx,
@@ -1110,7 +1038,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         sDbias: Optional[
             cute.Tensor
         ],  # SMEM buffer for the rowwise dbias reduction (rowwise-only dbias)
-        sBlockAmax: Optional[cute.Tensor],  # SMEM scratch for the 32x32 block amaxes (2D only)
+        smem: cutlass.Constexpr[cutlass.utils.SmemAllocator],  # 2D tile scratch
         descs: tuple[
             Optional[cute.Pointer], ...
         ],  # Per-tensor descriptors (x, act, out_row, out_col), None if single-tensor
@@ -1199,17 +1127,30 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         mS_col_stage = cute.flatten(
                             col_scales[(None, (member_tile_Y + tile_Y, tile_id_X))]
                         )
-                    self._quantize_tile_2d(
+                    quantize_mxfp8_smem_tile_2d(
                         sX_tile,
+                        None,
                         sO_row_tile,
                         mS_row_stage,
                         sO_col_tile,
                         mS_col_stage,
-                        sBlockAmax,
+                        None,
                         (member_tile_Y + tile_Y) * self.TILE_ROWS,
                         tile_start_col,
                         member_rows,
                         member_cols,
+                        ROWWISE=cfg.ROWWISE,
+                        COLWISE=cfg.COLWISE,
+                        WITH_AMAX=False,
+                        MAX_NORM_RCP=cfg.MAX_NORM_RCP,
+                        DTYPE=cfg.DTYPE,
+                        FP8_DTYPE=cfg.FP8_DTYPE,
+                        WITH_GEMM_SWIZZLED_SCALES=cfg.WITH_GEMM_SWIZZLED_SCALES,
+                        TILE_X=self.TILE_COLS,
+                        TILE_Y=self.TILE_ROWS,
+                        SKIP_SCALE_BOUNDS=False,
+                        smem=smem,
+                        ZERO_OOB_SCALES=True,
                     )
                 if cutlass.const_expr(cfg.COLWISE and not cfg.USE_2D_QUANTIZATION):
                     _, partial_dbias = _quantize_colwise_mxfp8(

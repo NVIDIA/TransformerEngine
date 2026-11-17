@@ -347,6 +347,7 @@ def quantize_mxfp8_smem_tile_2d(  # pylint: disable=unused-argument
     TILE_Y: cutlass.Constexpr[int],
     SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
     smem: cutlass.memory.SmemAllocator,
+    ZERO_OOB_SCALES: cutlass.Constexpr[bool] = False,  # zero the scales of blocks past N
     **_fusion_args,  # The general tile function's fusion knobs, all off for a plain cast.
 ):
     """2D quantize a SMEM tile; returns (amax, None)."""
@@ -380,6 +381,7 @@ def quantize_mxfp8_smem_tile_2d(  # pylint: disable=unused-argument
             TILE_X=TILE_X,
             TILE_Y=TILE_Y,
             SKIP_SCALE_BOUNDS=SKIP_SCALE_BOUNDS,
+            ZERO_OOB_SCALES=ZERO_OOB_SCALES,
         )
         if cutlass.const_expr(ROWWISE):
             # Publish the block amaxes to the rowwise pass.
@@ -401,6 +403,7 @@ def quantize_mxfp8_smem_tile_2d(  # pylint: disable=unused-argument
             TILE_Y=TILE_Y,
             SKIP_SCALE_BOUNDS=SKIP_SCALE_BOUNDS,
             BLOCK_AMAX_IN_SMEM=COLWISE,
+            ZERO_OOB_SCALES=ZERO_OOB_SCALES,
         )
     amax = None
     if cutlass.const_expr(WITH_AMAX):
