@@ -311,11 +311,11 @@ def ep_finalize():
     tex.ep.reset_ep_config()
 
 
-def _default_out_partition_spec(ep_axes=None):
+def _default_out_partition_spec():
     """Leading-axis default: ``(("dp","ep"),)`` if DP/FSDP is set, else ``("ep",)``."""
-    outer = _ep_outer_axis(ep_axes)
+    outer = _ep_outer_axis()
     outer_axes = (outer,) if isinstance(outer, str) else outer or ()
-    leading_axes = (*outer_axes, *tex.ep._resolve_ep_axes(ep_axes))
+    leading_axes = (*outer_axes, *tex.ep._resolve_ep_axes())
     leading = leading_axes[0] if len(leading_axes) == 1 else leading_axes
     return (leading,)
 
@@ -323,8 +323,8 @@ def _default_out_partition_spec(ep_axes=None):
 # ── ep_dispatch (custom_vjp) ─────────────────────────────────────────────────
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 4, 5))
-def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=None):
+@partial(jax.custom_vjp, nondiff_argnums=(0, 4))
+def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     """Scatter tokens and weights to expert ranks.
 
     ``cfg`` is a per-layer ``EpLayerConfig``; distinct layers may share a
@@ -339,33 +339,28 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_
     ``drop_on_overflow`` is set. When ``recv_capacity_per_rank`` is not sized for
     the worst case, detect overflow by ``process_allgather``-ing it, then
     ``max(...) > recv_capacity_per_rank`` flags an overflowing step.
-
-    ``ep_axes`` may be a mesh axis name or an ordered tuple of names. When it
-    is ``None``, the active ``MeshResource.ep_resource`` is used.
     """
-    return _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes)[0]
+    return _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)[0]
 
 
-def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=None):
+def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     if not jnp.issubdtype(topk_weights.dtype, jnp.floating):
         raise TypeError(
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
     recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
-        tex.ep_prepare_and_dispatch_fwd(
-            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=ep_axes
-        )
+        tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
     )
     out_leading = tuple(tokens.shape[:-1])
     primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)
     return primal, (handle_mem, out_leading)
 
 
-def _dispatch_bwd(cfg, recv_capacity_per_rank, ep_axes, res, g_outputs):
+def _dispatch_bwd(cfg, recv_capacity_per_rank, res, g_outputs):
     del recv_capacity_per_rank
     handle_mem, out_leading = res
     # Re-pin cotangent: XLA transpose can drop the EP axis and feed the FFI a global tensor.
-    out_spec = _default_out_partition_spec(ep_axes)
+    out_spec = _default_out_partition_spec()
     spec = jax.sharding.PartitionSpec(*out_spec)
     g_recv_tokens = with_sharding_constraint(g_outputs[0], spec)
     g_recv_topk_weights = with_sharding_constraint(g_outputs[1], spec)
@@ -376,7 +371,6 @@ def _dispatch_bwd(cfg, recv_capacity_per_rank, ep_axes, res, g_outputs):
         g_recv_topk_weights,
         out_leading,
         out_partition_spec=out_spec,
-        ep_axes=ep_axes,
     )
     return (None, grad_tokens, grad_topk_weights)
 
@@ -387,7 +381,7 @@ ep_dispatch.defvjp(_dispatch_fwd, _dispatch_bwd)
 # ── ep_combine (custom_vjp) ──────────────────────────────────────────────────
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 4, 5, 6))
+@partial(jax.custom_vjp, nondiff_argnums=(0, 4, 5))
 def ep_combine(
     cfg,
     handle_mem,
@@ -395,7 +389,6 @@ def ep_combine(
     expert_out,
     num_local_tokens,
     out_sharding=None,
-    ep_axes=None,
 ):
     """Scatter-sum expert outputs back to source ranks. **Unweighted.**
 
@@ -404,8 +397,6 @@ def ep_combine(
     not through this op. ``num_local_tokens`` is STATIC: int -> ``[T, H]``,
     tuple -> ``[*tuple, H]``. ``out_sharding`` defaults via
     ``_default_out_partition_spec``; only the leading dim may be sharded.
-    ``ep_axes`` accepts an explicit mesh axis name or tuple and otherwise falls
-    back to ``MeshResource.ep_resource``.
     """
     return _combine_fwd(
         cfg,
@@ -414,7 +405,6 @@ def ep_combine(
         expert_out,
         num_local_tokens,
         out_sharding,
-        ep_axes,
     )[0]
 
 
@@ -425,32 +415,24 @@ def _combine_fwd(
     expert_out,
     num_local_tokens,
     out_sharding,
-    ep_axes=None,
 ):
     del token_counts
     if out_sharding is None:
-        out_sharding = _default_out_partition_spec(ep_axes)
+        out_sharding = _default_out_partition_spec()
     result = tex.ep_combine_fwd(
-        cfg,
-        handle_mem,
-        expert_out,
-        num_local_tokens,
-        out_partition_spec=out_sharding,
-        ep_axes=ep_axes,
+        cfg, handle_mem, expert_out, num_local_tokens, out_partition_spec=out_sharding
     )
     return result, (handle_mem, expert_out.shape[-2])
 
 
-def _combine_bwd(cfg, _num_local_tokens, _out_sharding, ep_axes, res, g_result):
+def _combine_bwd(cfg, _num_local_tokens, _out_sharding, res, g_result):
     handle_mem, recv_capacity_per_rank = res
     # Re-pin cotangent (same XLA-transpose workaround as _dispatch_bwd).
     if _out_sharding is None:
-        _out_sharding = _default_out_partition_spec(ep_axes)
+        _out_sharding = _default_out_partition_spec()
     spec = jax.sharding.PartitionSpec(*_out_sharding)
     g_result = with_sharding_constraint(g_result, spec)
-    grad_expert_out = tex.ep_combine_bwd(
-        cfg, handle_mem, g_result, recv_capacity_per_rank, ep_axes=ep_axes
-    )
+    grad_expert_out = tex.ep_combine_bwd(cfg, handle_mem, g_result, recv_capacity_per_rank)
     return (None, None, grad_expert_out)
 
 
