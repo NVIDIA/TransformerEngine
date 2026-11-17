@@ -37,6 +37,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -514,47 +515,28 @@ void fused_topk_with_aux_loss_scores_forward(const Tensor &logits, int num_token
   check_aligned(aux_scores.data.dptr, "aux_scores");
 
   const int blocks = (num_tokens + kWarpsPerBlock - 1) / kWarpsPerBlock;
-  const bool grouped = group_topk > 0;
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,
       TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
           topk_indices.data.dtype, IndexType,
-          auto launch =
-              [&](auto kernel, auto *probs_ptr) {
-                kernel<<<blocks, kWarpsPerBlock * kThreadsPerWarp, 0, stream>>>(
-                    reinterpret_cast<const DataType *>(logits.data.dptr),
-                    has_bias ? expert_bias.data.dptr : nullptr,
-                    has_bias ? expert_bias.data.dtype : DType::kFloat32, num_tokens, scaling_factor,
-                    probs_ptr, reinterpret_cast<IndexType *>(topk_indices.data.dptr),
-                    reinterpret_cast<CompType *>(aux_scores.data.dptr),
-                    reinterpret_cast<int64_t *>(aux_tokens_per_expert.data.dptr),
-                    count_routes ? reinterpret_cast<int64_t *>(tokens_per_expert.data.dptr)
-                                 : nullptr);
-                NVTE_CHECK_CUDA(cudaGetLastError());
-              };
-          if (probs.data.dtype == logits.data.dtype) {
-            auto *probs_ptr = reinterpret_cast<DataType *>(probs.data.dptr);
-            if (grouped) {
-              launch(fused_topk_with_aux_loss_scores_forward_kernel<DataType, DataType, IndexType,
-                                                                    true>,
-                     probs_ptr);
-            } else {
-              launch(fused_topk_with_aux_loss_scores_forward_kernel<DataType, DataType, IndexType,
-                                                                    false>,
-                     probs_ptr);
-            }
-          } else {
-            auto *probs_ptr = reinterpret_cast<float *>(probs.data.dptr);
-            if (grouped) {
-              launch(
-                  fused_topk_with_aux_loss_scores_forward_kernel<DataType, float, IndexType, true>,
-                  probs_ptr);
-            } else {
-              launch(
-                  fused_topk_with_aux_loss_scores_forward_kernel<DataType, float, IndexType, false>,
-                  probs_ptr);
-            }
-          }););
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              probs.data.dtype == logits.data.dtype, kProbsInLogitsType,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  group_topk > 0, kGrouped,
+                  using ProbType = std::conditional_t<kProbsInLogitsType, DataType, float>;
+                  fused_topk_with_aux_loss_scores_forward_kernel<DataType, ProbType, IndexType,
+                                                                 kGrouped>
+                  <<<blocks, kWarpsPerBlock * kThreadsPerWarp, 0, stream>>>(
+                      reinterpret_cast<const DataType *>(logits.data.dptr),
+                      has_bias ? expert_bias.data.dptr : nullptr,
+                      has_bias ? expert_bias.data.dtype : DType::kFloat32, num_tokens,
+                      scaling_factor, reinterpret_cast<ProbType *>(probs.data.dptr),
+                      reinterpret_cast<IndexType *>(topk_indices.data.dptr),
+                      reinterpret_cast<CompType *>(aux_scores.data.dptr),
+                      reinterpret_cast<int64_t *>(aux_tokens_per_expert.data.dptr),
+                      count_routes ? reinterpret_cast<int64_t *>(tokens_per_expert.data.dptr)
+                                   : nullptr);
+                  NVTE_CHECK_CUDA(cudaGetLastError());););););
 }
 
 void fused_topk_with_aux_loss_scores_backward(const Tensor &logits, const Tensor &topk_indices,
@@ -591,40 +573,23 @@ void fused_topk_with_aux_loss_scores_backward(const Tensor &logits, const Tensor
       logits.data.dtype, DataType,
       TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
           topk_indices.data.dtype, IndexType,
-          auto launch =
-              [&](auto kernel, auto *grad_ptr) {
-                kernel<<<blocks, kBwdThreadsPerBlock, 0, stream>>>(
-                    reinterpret_cast<const DataType *>(logits.data.dptr),
-                    reinterpret_cast<const IndexType *>(topk_indices.data.dptr), grad_ptr,
-                    has_aux_grad ? reinterpret_cast<const CompType *>(grad_aux_scores.data.dptr)
-                                 : nullptr,
-                    num_tokens, scaling_factor,
-                    reinterpret_cast<DataType *>(grad_logits.data.dptr));
-                NVTE_CHECK_CUDA(cudaGetLastError());
-              };
-          if (grad_probs.data.dtype == logits.data.dtype) {
-            const auto *grad_ptr = reinterpret_cast<const DataType *>(grad_probs.data.dptr);
-            if (has_aux_grad) {
-              launch(fused_topk_with_aux_loss_scores_backward_kernel<DataType, DataType, IndexType,
-                                                                     true>,
-                     grad_ptr);
-            } else {
-              launch(fused_topk_with_aux_loss_scores_backward_kernel<DataType, DataType, IndexType,
-                                                                     false>,
-                     grad_ptr);
-            }
-          } else {
-            const auto *grad_ptr = reinterpret_cast<const float *>(grad_probs.data.dptr);
-            if (has_aux_grad) {
-              launch(
-                  fused_topk_with_aux_loss_scores_backward_kernel<DataType, float, IndexType, true>,
-                  grad_ptr);
-            } else {
-              launch(fused_topk_with_aux_loss_scores_backward_kernel<DataType, float, IndexType,
-                                                                     false>,
-                     grad_ptr);
-            }
-          }););
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              grad_probs.data.dtype == logits.data.dtype, kGradProbsInLogitsType,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  has_aux_grad, kHasAuxGrad,
+                  using GradProbType =
+                      std::conditional_t<kGradProbsInLogitsType, DataType, float>;
+                  fused_topk_with_aux_loss_scores_backward_kernel<DataType, GradProbType,
+                                                                  IndexType, kHasAuxGrad>
+                  <<<blocks, kBwdThreadsPerBlock, 0, stream>>>(
+                      reinterpret_cast<const DataType *>(logits.data.dptr),
+                      reinterpret_cast<const IndexType *>(topk_indices.data.dptr),
+                      reinterpret_cast<const GradProbType *>(grad_probs.data.dptr),
+                      has_aux_grad ? reinterpret_cast<const CompType *>(grad_aux_scores.data.dptr)
+                                   : nullptr,
+                      num_tokens, scaling_factor,
+                      reinterpret_cast<DataType *>(grad_logits.data.dptr));
+                  NVTE_CHECK_CUDA(cudaGetLastError());););););
 }
 
 }  // namespace fused_router
