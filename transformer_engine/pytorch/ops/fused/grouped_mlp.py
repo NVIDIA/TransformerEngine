@@ -1126,8 +1126,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     @classmethod
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Whether this op's dactivation wrapper accepts ``deterministic``."""
-        return True
+        """Whether this op's dactivation kernel supports deterministic dprob on this device."""
+        return get_device_compute_capability() in ((10, 0), (10, 3))
 
     @classmethod
     @functools.lru_cache(maxsize=None)
