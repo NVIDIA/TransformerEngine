@@ -319,7 +319,7 @@ def test_prequantized_values_and_validation():
     output = jax.jit(lambda xs, ys: _attention(xs, quantized_qkv=ys))((q, q, q), prepared)
     np.testing.assert_allclose(output, v)
     with pytest.raises(ValueError, match="requires fp8"):
-        _attention((q, q, v), quantized_qkv=prepared, fp8=True)
+        _attention((q, q, v), quantized_qkv=prepared, fp8=False)
     with pytest.raises(ValueError, match="three separate BSHD"):
         quantize_attention_qkv((q,))
     with pytest.raises(ValueError, match="FP16/BF16"):

@@ -1687,13 +1687,11 @@ def fused_attn(
             non-differentiable auxiliary inputs.
         score_mod_bprop_tensors (Optional[Mapping[str, Any]]): Additional tensors or
             Python/NumPy scalars made available to `score_mod_bprop`.
-        fp8 (bool | str): False disables FP8 attention; True enables FP8 attention
-            with current tensor scaling (CS); "mxfp8" enables block-scaled MXFP8
-            attention. Delayed scaling (DS) is not supported for JAX attention.
+        fp8 (bool | str): False disables FP8 attention; "mxfp8" enables block-scaled
+            MXFP8 attention. Current and delayed tensor scaling are not supported
+            for JAX attention; fp8=True is invalid.
             This option is independent of the GEMM quantization recipe.
-            Outputs and gradients retain the input FP16/BF16 dtype. For CS FP8
-            backward, ``NVTE_DPA_FP8CS_O_in_F16`` selects whether the saved output
-            is consumed in FP16/BF16 (default, ``1``) or quantized to FP8 (``0``).
+            Outputs and gradients retain the input FP16/BF16 dtype.
         quantized_qkv (Optional[Tuple[ScaledTensor2x, ...]]): Prequantized MXFP8
             Q/K/V, each with independent unswizzled BHSD rowwise/columnwise data
             and E8M0 scales. Requires ``fp8="mxfp8"``. The original ``qkv``
@@ -1735,8 +1733,11 @@ def fused_attn(
                              AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
                              QKVLayout.T3HD, 0.125, 0, True, 3)
     """
-    if fp8 not in (False, True, "mxfp8"):
-        raise ValueError('fp8 must be False, True, or "mxfp8".')
+    if fp8 not in (False, "mxfp8"):
+        raise ValueError(
+            'fp8 must be False or "mxfp8". JAX attention does not support current or delayed'
+            " tensor scaling."
+        )
     if quantized_qkv is not None:
         if fp8 != "mxfp8":
             raise ValueError('quantized_qkv requires fp8="mxfp8".')

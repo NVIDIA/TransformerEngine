@@ -191,8 +191,11 @@ class FusedAttnHelper:
         that no fused backend is available), and ``NVTE_DEBUG_LEVEL=2`` additionally logs the
         resolved config and the reason fused attention was rejected.
         """
-        if self.fp8 not in (False, True, "mxfp8"):
-            raise ValueError('fp8 must be False, True, or "mxfp8".')
+        if self.fp8 not in (False, "mxfp8"):
+            raise ValueError(
+                'fp8 must be False or "mxfp8". JAX attention does not support current or delayed'
+                " tensor scaling."
+            )
         if self.q_dtype != self.kv_dtype:
             raise ValueError("Q and KV must have the same data type.")
         backend = FusedAttnBackend.No_Backend

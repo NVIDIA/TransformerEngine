@@ -643,10 +643,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         If True, return ``(output, max_logit)`` where ``max_logit`` contains the per-head
         maximum attention logits with shape ``[h]``. This path requires fused attention.
     fp8: bool | str, default = False
-        Use cuDNN FP8 attention with current tensor scaling. Inputs, outputs and input
-        gradients remain FP16/BF16. Fused attention is required, and this option is
-        independent of the GEMM quantization recipe. Set to ``"mxfp8"`` for
-        block-scaled MXFP8 attention.
+        Set to ``"mxfp8"`` for cuDNN block-scaled MXFP8 attention, or ``False`` to
+        disable FP8 attention. Inputs, outputs and input gradients remain FP16/BF16.
+        Fused attention is required, and this option is independent of the GEMM
+        quantization recipe. Current and delayed tensor scaling are not supported.
 
     Optimization parameters
     -----------------------
@@ -756,6 +756,11 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             Output tensor, or ``(output, max_logit)`` when ``return_max_logit`` is enabled.
         """
         input_dtype = query.dtype
+        if self.fp8 not in (False, "mxfp8"):
+            raise ValueError(
+                'fp8 must be False or "mxfp8". JAX attention does not support current or delayed'
+                " tensor scaling."
+            )
         if quantized_qkv is not None and self.fp8 != "mxfp8":
             raise ValueError('quantized_qkv requires fp8="mxfp8".')
 
@@ -1307,9 +1312,10 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
         Additional tensors or pass-by-value scalars for ``score_mod_bprop``.
     fp8: bool | str, default = False
-        Use cuDNN FP8 dot product attention with current tensor scaling. Inputs and
-        outputs retain their FP16/BF16 dtype; the GEMM quantization recipe is independent.
-        Set to ``"mxfp8"`` for block-scaled MXFP8 attention.
+        Set to ``"mxfp8"`` for cuDNN block-scaled MXFP8 dot product attention, or
+        ``False`` to disable FP8 attention. Inputs and outputs retain their FP16/BF16
+        dtype; the GEMM quantization recipe is independent. Current and delayed
+        tensor scaling are not supported.
     """
 
     head_dim: int
@@ -2103,10 +2109,10 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
         Additional tensors or pass-by-value scalars for ``score_mod_bprop``.
     fp8: bool | str, default = False
-        Use cuDNN FP8 attention in the self-attention and encoder-decoder blocks.
-        Attention uses current tensor scaling and retains FP16/BF16 inputs and outputs,
-        independently of the GEMM quantization recipe.
-        Set to ``"mxfp8"`` for block-scaled MXFP8 attention.
+        Set to ``"mxfp8"`` for cuDNN block-scaled MXFP8 attention in the self-attention
+        and encoder-decoder blocks, or ``False`` to disable FP8 attention. Attention
+        retains FP16/BF16 inputs and outputs, independently of the GEMM quantization
+        recipe. Current and delayed tensor scaling are not supported.
 
     Optimization parameters
     -----------------------

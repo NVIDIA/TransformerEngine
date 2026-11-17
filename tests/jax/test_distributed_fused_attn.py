@@ -16,7 +16,6 @@ from distributed_test_base import (
 )
 from test_fused_attn import (
     FusedAttnRunner,
-    _require_cudnn_attention,
     BiasShape,
     SeqDescFormat,
 )
@@ -935,34 +934,15 @@ class TestReorderCausalLoadBalancing:
         assert jnp.array_equal(inversed, ref)
 
 
-@pytest.mark.parametrize("o_in_f16", [True, False])
 @pytest.mark.parametrize("strategy", [CPStrategy.ALL_GATHER, CPStrategy.RING])
-@pytest.mark.parametrize("fp8", [False, True])
-def test_cudnn_python_context_parallel(strategy, fp8, o_in_f16, monkeypatch):
-    """Two-device context parallel attention preserves FP8 forward and backward."""
-    monkeypatch.setenv("NVTE_DPA_FP8CS_O_in_F16", "1" if o_in_f16 else "0")
+def test_cudnn_python_context_parallel(strategy):
+    """Two-device context parallel attention agrees with FP32 forward and backward."""
     if jax.local_device_count() < 2:
         pytest.skip("Context parallel attention requires two GPUs.")
     mesh = Mesh(np.asarray(jax.local_devices()[:2]), ("cp",))
     sharding = NamedSharding(mesh, PartitionSpec(None, "cp", None, None))
     q = jnp.full((2, 256, 2, 64), 0.5, jnp.bfloat16)
     v = jnp.zeros_like(q).at[:, ::2, :, 0].set(1.0)
-    if fp8:
-        # Query the per-device graph: all-gather retains the global KV sequence,
-        # while ring attention uses local Q and KV blocks.
-        _require_cudnn_attention(
-            q,
-            q,
-            v,
-            fp8=True,
-            qkv_layout=(
-                QKVLayout.BSHD_BSHD_BSHD
-                if strategy == CPStrategy.ALL_GATHER
-                else QKVLayout.BSHD_BS2HD
-            ),
-            q_max_seqlen=q.shape[1] // 2,
-            kv_max_seqlen=q.shape[1] if strategy == CPStrategy.ALL_GATHER else q.shape[1] // 2,
-        )
     arrays = tuple(jax.device_put(value, sharding) for value in (q, q, v))
 
     def attention(arrays):
@@ -980,7 +960,6 @@ def test_cudnn_python_context_parallel(strategy, fp8, o_in_f16, monkeypatch):
             is_training=True,
             context_parallel_axis="cp",
             context_parallel_strategy=strategy,
-            fp8=fp8,
         )
 
     def reference(arrays):

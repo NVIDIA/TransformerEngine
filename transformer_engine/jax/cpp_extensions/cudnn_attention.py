@@ -91,7 +91,6 @@ class AttentionGraph:
     ragged_stats: bool
     multipliers: tuple
     fp8: bool
-    fp8_o: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,15 +124,13 @@ def _build_supported_graph(spec, capabilities):
 
 
 def _request(direction, avals, config):
+    if config.fp8 not in (False, "mxfp8"):
+        raise ValueError(
+            'fp8 must be False or "mxfp8". JAX attention does not support current or delayed'
+            " tensor scaling."
+        )
     shapes = tuple((tuple(aval.shape), jnp.dtype(aval.dtype)) for aval in avals[:5])
     fp8_backward = bool(int(os.getenv("NVTE_FP8_DPA_BWD", "1")))
-    fp8_o = (
-        direction == "bwd"
-        and bool(config.fp8)
-        and config.fp8 != "mxfp8"
-        and fp8_backward
-        and not bool(int(os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1")))
-    )
     return (
         direction,
         shapes,
@@ -141,7 +138,6 @@ def _request(direction, avals, config):
         device_capabilities(),
         bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))),
         fp8_backward,
-        fp8_o,
     )
 
 
@@ -172,11 +168,9 @@ def get_graph(direction, avals, config):
 
 
 @lru_cache(maxsize=None)
-def _build_graph(
-    direction, shapes, config, capabilities, nondeterministic, fp8_backward, fp8_o=False
-):
+def _build_graph(direction, shapes, config, capabilities, nondeterministic, fp8_backward):
     description = _describe_graph(
-        direction, shapes, config, capabilities, nondeterministic, fp8_backward, fp8_o
+        direction, shapes, config, capabilities, nondeterministic, fp8_backward
     )
     cudnn = import_cudnn()
     version = check_frontend_version(cudnn)
@@ -215,13 +209,10 @@ def _build_graph(
         description.ragged_stats,
         description.multipliers,
         description.fp8,
-        fp8_o,
     )
 
 
-def _describe_graph(
-    direction, shapes, config, capabilities, nondeterministic, fp8_backward, fp8_o=False
-):
+def _describe_graph(direction, shapes, config, capabilities, nondeterministic, fp8_backward):
     """Translate JAX's API and storage conventions into a common graph description."""
     avals = tuple(jax.ShapeDtypeStruct(*shape) for shape in shapes)
     batch, sq, sk, h, hg, dq, dv = _dims(avals, config)
@@ -234,8 +225,7 @@ def _describe_graph(
     graph_batch = _bucket(max(segments, 1), 32, 512) if ragged_stats else segments
     graph_sq = _bucket(max(batch * sq, 1), 1024, 32768) if ragged_stats else sq
     graph_sk = _bucket(max(batch * sk, 1), 1024, 32768) if ragged_stats else sk
-    fp8 = config.fp8 and (not backward or fp8_backward)
-    mxfp8 = fp8 and config.fp8 == "mxfp8"
+    fp8 = config.fp8 == "mxfp8" and (not backward or fp8_backward)
     version = cudnn_version()
     if config.fp8 == "mxfp8":
         error = mxfp8_rules.support_error(
@@ -258,15 +248,6 @@ def _describe_graph(
             and dv not in (64, 128, 256)
         ):
             raise ValueError("THD learnable softmax backward requires cuDNN 9.26.0 or later.")
-    if fp8 and ragged:
-        if version < 92300:
-            raise ValueError("FP8 THD attention requires cuDNN 9.23.0 or later.")
-        if backward and capabilities[0] < 100:
-            raise ValueError("FP8 THD backward requires sm100 or later.")
-        if backward and config.softmax_type.name != "VANILLA_SOFTMAX" and version < 92600:
-            raise ValueError("FP8 THD backward with a sink token requires cuDNN 9.26.0 or later.")
-    if fp8 and backward and config.attn_bias_type.name != "NO_BIAS":
-        raise ValueError("cuDNN FP8 backward does not support attention bias or ALiBi.")
     io_dtype = _dtype(avals[0].dtype)
     qkv_dtype = "FP8_E4M3" if fp8 else io_dtype
     specs, inputs, outputs, scalars = {}, [], [], []
@@ -297,7 +278,7 @@ def _describe_graph(
     vdim = (graph_batch, hg, graph_sk, dv)
     odim = (graph_batch, h, graph_sq, dv)
     grad_strides = (qstride, kstride, vstride)
-    if mxfp8:
+    if fp8:
         qstride, kstride, vstride = (_stride(dim) for dim in (qdim, kdim, vdim))
     tensor("q", qdim, qstride, qkv_dtype, ragged_offset="offset_q" if ragged else "")
     tensor(
@@ -305,8 +286,8 @@ def _describe_graph(
         kdim,
         kstride,
         qkv_dtype,
-        source="q" if qpack == 3 and not mxfp8 else "k",
-        offset=h * dq * itemsize if qpack == 3 and not mxfp8 else 0,
+        source="q" if qpack == 3 and not fp8 else "k",
+        offset=h * dq * itemsize if qpack == 3 and not fp8 else 0,
         ragged_offset="offset_k" if ragged else "",
     )
     tensor(
@@ -314,10 +295,10 @@ def _describe_graph(
         vdim,
         vstride,
         qkv_dtype,
-        source="v" if mxfp8 else "q" if qpack == 3 else ("k" if kvpack == 2 else "v"),
+        source="v" if fp8 else "q" if qpack == 3 else ("k" if kvpack == 2 else "v"),
         offset=(
             0
-            if mxfp8
+            if fp8
             else 2 * h * dq * itemsize if qpack == 3 else hg * dq * itemsize if kvpack == 2 else 0
         ),
         ragged_offset="offset_v" if ragged else "",
@@ -354,23 +335,17 @@ def _describe_graph(
     constant("attn_scale", config.scaling_factor)
     if fp8:
         for name, dim in zip(("q", "k", "v"), (qdim, kdim, vdim)):
-            if mxfp8:
-                specs["descale_" + name] = mxfp8_scale_spec(
-                    dim, "bhsd", columnwise=name == "v" and not backward
-                )
-                inputs.append(("descale_" + name, "descale_" + name, 0))
-            else:
-                tensor("descale_" + name, (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
-        if not mxfp8:
-            constant("scale_s", 448.0)
-            constant("descale_s", 1.0 / 448.0)
+            specs["descale_" + name] = mxfp8_scale_spec(
+                dim, "bhsd", columnwise=name == "v" and not backward
+            )
+            inputs.append(("descale_" + name, "descale_" + name, 0))
     if backward:
-        tensor("o", odim, ostride, "FP8_E4M3" if fp8_o else io_dtype, ragged_offset=o_offset)
+        tensor("o", odim, ostride, ragged_offset=o_offset)
         tensor(
             "do",
             odim,
-            _stride(odim) if mxfp8 else ostride,
-            "FP8_E4M3" if mxfp8 else "FP8_E5M2" if fp8 else io_dtype,
+            _stride(odim) if fp8 else ostride,
+            "FP8_E4M3" if fp8 else io_dtype,
             ragged_offset=o_offset,
         )
         tensor("stats", stats_dim, stats_stride, "FLOAT", ragged_offset=stats_offset)
@@ -393,7 +368,7 @@ def _describe_graph(
             ("offset_q", "offset_k", "offset_v"),
         ):
             output(name, dim, stride, slot, offset, ragged_offset=ragged_offset if ragged else "")
-        if mxfp8:
+        if fp8:
             tensor("do_f16", odim, ostride)
             for name, dim in (("q_t", qdim), ("k_t", kdim), ("do_t", odim)):
                 tensor(name, dim, _stride(dim), "FP8_E4M3")
@@ -401,29 +376,15 @@ def _describe_graph(
                 inputs.append(("descale_" + name, "descale_" + name, 0))
             specs["descale_do"] = mxfp8_scale_spec(odim, "bhsd")
             inputs.append(("descale_do", "descale_do", 0))
-        elif fp8:
-            tensor("descale_do", (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
-            if fp8_o:
-                tensor("descale_o", (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
-            else:
-                constant("descale_o", 1.0)
-            for name in ("scale_dp", "descale_dp", "scale_dq", "scale_dk", "scale_dv"):
-                constant(name, 1.0)
-            for slot, name in enumerate(("amax_dq", "amax_dk", "amax_dv", "amax_dp"), 5):
-                output(name, (1, 1, 1, 1), (1, 1, 1, 1), slot, dtype="FLOAT")
     else:
         output("o", odim, ostride, 0, ragged_offset=o_offset)
         output("stats", stats_dim, stats_stride, 1, dtype="FLOAT", ragged_offset=stats_offset)
         if config.return_max_logit:
             output("max", stats_dim, stats_stride, 2, dtype="FLOAT", ragged_offset=stats_offset)
-        if fp8 and not mxfp8:
-            constant("scale_o", 1.0)
-            output("amax_s", (1, 1, 1, 1), (1, 1, 1, 1), 3, dtype="FLOAT")
-            output("amax_o", (1, 1, 1, 1), (1, 1, 1, 1), 4, dtype="FLOAT")
     options = AttentionOptions(
         backward=backward,
         fp8=fp8,
-        mxfp8=mxfp8,
+        mxfp8=fp8,
         bottom_right=config.bottom_right_diagonal,
         left_bound=left + 1 if left >= 0 else None,
         right_bound=right if right >= 0 else None,
@@ -457,14 +418,6 @@ def _offset64(offsets, multiplier):
     upper = high * mh + (carry >> 16) + (w1 >> 16)
     lower = (w1 << 16) | (w0 & 65535)
     return jnp.stack((lower, upper), axis=-1)
-
-
-def _quantize(value, dtype):
-    """Current tensor scaling implemented in JAX, independently of TE common."""
-    maximum = jnp.max(jnp.abs(value.astype(jnp.float32)))
-    scale = jnp.where(maximum > 0, float(jnp.finfo(dtype).max) / maximum, 1.0)
-    scale = jnp.minimum(scale, jnp.finfo(jnp.float32).max)
-    return (value.astype(jnp.float32) * scale).astype(dtype), jnp.reciprocal(scale)
 
 
 def _metadata(value, size, fill=0):
@@ -521,34 +474,18 @@ def execute(direction, args, config, result_avals, prepared_qkv=None):
             plan.multipliers,
         ):
             values[name] = _offset64(offsets, multiplier)
-    if config.fp8 == "mxfp8":
-        if plan.fp8:
-            if config.qkv_layout.is_qkvpacked():
-                unpacked = tuple(q[..., index, :, :] for index in range(3))
-            elif config.qkv_layout.is_kvpacked():
-                unpacked = (q, k[..., 0, :, :], k[..., 1, :, :])
-            else:
-                unpacked = (q, k, v)
-            values.update(
-                mxfp8_attention.prepare_qkv(unpacked, backward)
-                if prepared_qkv is None
-                else prepared_qkv
-            )
-    elif config.fp8:
-        for name in ("q", "k", "v"):
-            # Empty dummy operands are not quantized.
-            if values[name].size:
-                values[name], values["descale_" + name] = _quantize(values[name], jnp.float8_e4m3fn)
+    if plan.fp8:
         if config.qkv_layout.is_qkvpacked():
-            values["descale_k"] = values["descale_v"] = values["descale_q"]
+            unpacked = tuple(q[..., index, :, :] for index in range(3))
         elif config.qkv_layout.is_kvpacked():
-            values["descale_v"] = values["descale_k"]
-        if not plan.fp8:
-            for name in ("q", "k", "v"):
-                if values[name].size:
-                    values[name] = (
-                        values[name].astype(jnp.float32) * values["descale_" + name]
-                    ).astype(q.dtype)
+            unpacked = (q, k[..., 0, :, :], k[..., 1, :, :])
+        else:
+            unpacked = (q, k, v)
+        values.update(
+            mxfp8_attention.prepare_qkv(unpacked, backward)
+            if prepared_qkv is None
+            else prepared_qkv
+        )
     if backward:
         values.update(stats=stats, o=o, do=do)
         if dense_ragged_stats:
@@ -558,15 +495,9 @@ def execute(direction, args, config, result_avals, prepared_qkv=None):
                 values["seq_q"],
                 q.shape[-4] if config.qkv_layout.is_qkvpacked() else q.shape[-3],
             )
-        if plan.fp8 and config.fp8 == "mxfp8":
+        if plan.fp8:
             values.update(mxfp8_attention.prepare_doutput(do))
-        elif plan.fp8:
-            values["do"], values["descale_do"] = _quantize(do, jnp.float8_e5m2)
-            if plan.fp8_o:
-                values["o"], values["descale_o"] = _quantize(o, jnp.float8_e4m3fn)
         specs = list(result_avals[:-1])
-        if plan.fp8 and config.fp8 != "mxfp8":
-            specs += [jax.ShapeDtypeStruct((1,), jnp.float32)] * 4
     else:
         specs = list(result_avals[:3])
         if dense_ragged_stats:
@@ -575,8 +506,6 @@ def execute(direction, args, config, result_avals, prepared_qkv=None):
             specs[1] = jax.ShapeDtypeStruct(dense_shape, jnp.float32)
             if config.return_max_logit:
                 specs[2] = jax.ShapeDtypeStruct(dense_shape, jnp.float32)
-        if plan.fp8 and config.fp8 != "mxfp8":
-            specs += [jax.ShapeDtypeStruct((1,), jnp.float32)] * 2
     specs.append(jax.ShapeDtypeStruct((plan.graph.workspace_size,), jnp.uint8))
     attributes = graph_attributes(plan.graph)
     attributes.update(

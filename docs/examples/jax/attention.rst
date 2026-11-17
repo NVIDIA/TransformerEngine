@@ -19,11 +19,12 @@ stages in DeepSeek-style MLA.
 FP8 attention
 --------------
 
-Set ``fp8=True`` on the Flax ``DotProductAttention``, ``MultiHeadAttention``
-or ``TransformerLayer`` module to enable FP8 attention with current tensor
-scaling. Set ``fp8="mxfp8"`` for block-scaled MXFP8 attention. These options
-are independent of the GEMM quantization recipe. Inputs, outputs and input
-gradients retain their FP16/BF16 dtype.
+Set ``fp8="mxfp8"`` on the Flax ``DotProductAttention``, ``MultiHeadAttention``
+or ``TransformerLayer`` module to enable block-scaled MXFP8 attention, or leave
+``fp8=False`` to use FP16/BF16 attention. Current and delayed tensor scaling
+are not supported for JAX attention; ``fp8=True`` is invalid. The attention
+setting is independent of the GEMM quantization recipe. Inputs, outputs and
+input gradients retain their FP16/BF16 dtype.
 
 :envvar:`NVTE_FP8_DPA_BWD` controls whether the backward pass also uses FP8.
 Availability depends on the GPU, installed cuDNN version, and attention
