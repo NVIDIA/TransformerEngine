@@ -1119,14 +1119,14 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                     sO_row_tile = mS_row_stage = sO_col_tile = mS_col_stage = None
                     if cutlass.const_expr(cfg.ROWWISE):
                         sO_row_tile = sO_row[(None, cons_state.index)]
-                        mS_row_stage = cute.flatten(
-                            row_scales[(None, (member_tile_Y + tile_Y, tile_id_X))]
-                        )
+                        mS_row_stage = row_scales[
+                            ((None, None), (member_tile_Y + tile_Y, tile_id_X))
+                        ]
                     if cutlass.const_expr(cfg.COLWISE):
                         sO_col_tile = sO_col[(None, cons_state.index)]
-                        mS_col_stage = cute.flatten(
-                            col_scales[(None, (member_tile_Y + tile_Y, tile_id_X))]
-                        )
+                        mS_col_stage = col_scales[
+                            ((None, None), (member_tile_Y + tile_Y, tile_id_X))
+                        ]
                     quantize_mxfp8_smem_tile_2d(
                         sX_tile,
                         None,
@@ -1145,7 +1145,6 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         MAX_NORM_RCP=cfg.MAX_NORM_RCP,
                         DTYPE=cfg.DTYPE,
                         FP8_DTYPE=cfg.FP8_DTYPE,
-                        WITH_GEMM_SWIZZLED_SCALES=cfg.WITH_GEMM_SWIZZLED_SCALES,
                         TILE_X=self.TILE_COLS,
                         TILE_Y=self.TILE_ROWS,
                         SKIP_SCALE_BOUNDS=False,
@@ -1157,7 +1156,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         sX_tile,
                         sAct_tile,
                         sO_col[(None, cons_state.index)],
-                        cute.flatten(col_scales[(None, (member_tile_Y + tile_Y, tile_id_X))]),
+                        col_scales[((None, None), (member_tile_Y + tile_Y, tile_id_X))],
                         cfg.MAX_NORM_RCP,
                         (member_tile_Y + tile_Y) * self.TILE_ROWS,
                         tile_start_col,
@@ -1166,7 +1165,6 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         ACTIVATION=cfg.ACTIVATION,
                         DTYPE=cfg.DTYPE,
                         FP8_DTYPE=cfg.FP8_DTYPE,
-                        SWIZZLE=cfg.WITH_GEMM_SWIZZLED_SCALES,
                         TILE_X=self.TILE_COLS,
                         TILE_Y=self.TILE_ROWS,
                         WITH_ACT=cfg.WITH_ACT,
@@ -1185,7 +1183,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                         sX_tile,
                         None if self.CACHE_ACTIVATION else sAct_tile,
                         sO_row[(None, cons_state.index)],
-                        cute.flatten(row_scales[(None, (member_tile_Y + tile_Y, tile_id_X))]),
+                        row_scales[((None, None), (member_tile_Y + tile_Y, tile_id_X))],
                         cfg.MAX_NORM_RCP,
                         (member_tile_Y + tile_Y) * self.TILE_ROWS,
                         tile_start_col,

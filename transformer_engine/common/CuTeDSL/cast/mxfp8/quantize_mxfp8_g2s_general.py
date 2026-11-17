@@ -398,7 +398,6 @@ def _quantize_colwise_mxfp8(
     ACTIVATION: cutlass.Constexpr[str | None],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
-    SWIZZLE: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],  # pylint: disable=unused-argument  # kept for API consistency
     SKIP_INPUT_MASKING: cutlass.Constexpr[bool] = False,
@@ -527,23 +526,14 @@ def _quantize_colwise_mxfp8(
     biased_exp_c = cvt_f32_to_fp8e8m0fnu(amax_c * MAX_NORM_RCP)
     # If the input shape is divisible by the tile size * tile num, then we won't access OOB regions for sure
     if cutlass.const_expr(SKIP_SCALE_BOUNDS):
-        if cutlass.const_expr(SWIZZLE):
-            mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
-        else:
-            mS_col_stage[(0, tidx)] = biased_exp_c
+        mS_col_stage[(0, tidx)] = biased_exp_c
     else:
         scale_col = tile_col_start + tidx
         if tile_row_start < M and scale_col < N:
-            if cutlass.const_expr(SWIZZLE):
-                mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
-            else:
-                mS_col_stage[(0, tidx)] = biased_exp_c
+            mS_col_stage[(0, tidx)] = biased_exp_c
         if cutlass.const_expr(ZERO_OOB_SCALES):
             if tile_row_start < M and scale_col >= N:
-                if cutlass.const_expr(SWIZZLE):
-                    mS_col_stage[(0, tidx % 32, tidx // 32)] = Uint8(0).bitcast(Float8E8M0FNU)
-                else:
-                    mS_col_stage[(0, tidx)] = Uint8(0).bitcast(Float8E8M0FNU)
+                mS_col_stage[(0, tidx)] = Uint8(0).bitcast(Float8E8M0FNU)
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction
@@ -634,7 +624,6 @@ def quantize_mxfp8_smem_tile_general(
     MAX_NORM_RCP: cutlass.Constexpr[float],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
-    WITH_GEMM_SWIZZLED_SCALES: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],
     SKIP_INPUT_MASKING: cutlass.Constexpr[bool],
@@ -667,7 +656,6 @@ def quantize_mxfp8_smem_tile_general(
             ACTIVATION=ACTIVATION,
             DTYPE=DTYPE,
             FP8_DTYPE=FP8_DTYPE,
-            SWIZZLE=WITH_GEMM_SWIZZLED_SCALES,
             TILE_X=TILE_X,
             TILE_Y=TILE_Y,
             SKIP_INPUT_MASKING=SKIP_INPUT_MASKING,
@@ -1313,12 +1301,12 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
                 # onto GRID's hierarchical row modes — which is the
                 # (i_hi, tile_Y) tile-major order for swizzled, and the plain
                 # row-tile order for compact. Same source, both layouts correct.
-                mS_row_stage = cute.flatten(mS_row[(None, (tile_idx_y, tile_idx_x))])
+                mS_row_stage = mS_row[((None, None), (tile_idx_y, tile_idx_x))]
             sO_col_tile = None
             mS_col_stage = None
             if cutlass.const_expr(cfg.COLWISE):
                 sO_col_tile = sO_col[(None, stage_idx)]
-                mS_col_stage = cute.flatten(mS_col[(None, (tile_idx_y, tile_idx_x))])
+                mS_col_stage = mS_col[((None, None), (tile_idx_y, tile_idx_x))]
 
             amax, dbias = self._quantize_smem_tile(
                 sX_tile,
@@ -1341,7 +1329,6 @@ class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
                 MAX_NORM_RCP=self.cfg.MAX_NORM_RCP,
                 DTYPE=self.cfg.DTYPE,
                 FP8_DTYPE=self.cfg.FP8_DTYPE,
-                WITH_GEMM_SWIZZLED_SCALES=self.cfg.WITH_GEMM_SWIZZLED_SCALES,
                 TILE_X=self._TILE_COLS,
                 TILE_Y=self._TILE_ROWS,
                 SKIP_INPUT_MASKING=self.SKIP_INPUT_MASKING,
