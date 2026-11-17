@@ -582,7 +582,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                 (self.THREADS_Y, (MXFP8_BLOCK_SCALING_SIZE, self.THREADS_X)),
                 stride=(DBIAS_BUFF_WIDTH, (1, MXFP8_BLOCK_SCALING_SIZE + 1)),
             )
-            if cutlass.const_expr(self.ALIAS_DBIAS):
+            if cutlass.const_expr(self.REUSE_INPUT_FOR_DBIAS):
                 # Every load of a dbias job is consumed before the reduction (one tile column
                 # per job), so the input tiles are free then; the reduction ends with a sync
                 # before the next job loads into them again.
