@@ -11,10 +11,14 @@
  *  Per layer: call nvte_ep_handle_mem_size(layer_cfg) for the buffer size;
  *  allocate handle_mem as a kByte NVTETensor. Per step: nvte_ep_prepare seeds
  *  routing, then nvte_ep_dispatch / nvte_ep_combine / _bwd consume it.
- *  Max live handles: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 = unlimited; 0 disables
- *  the cache, so handle_mem may be relocated between calls; the JAX extension sets 0).
- *  The *_v2 ops take the layer config explicitly, bind from handle_mem, and are required
- *  when the cache is disabled.
+ *  The handle cache is disabled by default, so handle_mem may be relocated between calls.
+ *  The *_v2 ops take the layer config explicitly and bind from handle_mem; they do not use
+ *  the cache.
+ *
+ *  Deprecated: the handle cache, NVTE_EP_HANDLE_CACHE_SIZE (max live handles; -1 = unlimited;
+ *  default 0 = disabled) and the non-v2 per-step ops (nvte_ep_dispatch, nvte_ep_combine,
+ *  nvte_ep_dispatch_bwd, nvte_ep_combine_bwd) will be removed in TE 3.0. The non-v2 ops
+ *  require the cache to be enabled via NVTE_EP_HANDLE_CACHE_SIZE. Use the *_v2 ops.
  */
 
 #ifndef TRANSFORMER_ENGINE_EP_H_
@@ -176,6 +180,8 @@ void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor recv
  *  \param[out]    recv_topk_weights      [recv_T] float32 per-slot weights, or null in backward.
  *  \param[in]     recv_topk_weights_win  Optional symmem window for recv_topk_weights.
  *  \param[in]     stream                 CUDA stream.
+ *
+ *  \deprecated Relies on the handle cache; removed in TE 3.0. Use nvte_ep_dispatch_v2.
  */
 void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
                       NVTECommWindow tokens_win, NVTETensor topk_weights,
@@ -241,6 +247,8 @@ void nvte_ep_prepare_and_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NV
  *  \param[in]  expert_out_win  Optional symmem window for expert_out.
  *  \param[out] result          [T, hidden_dim] combined output.
  *  \param[in]  stream          CUDA stream.
+ *
+ *  \deprecated Relies on the handle cache; removed in TE 3.0. Use nvte_ep_combine_v2.
  */
 void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTECommWindow expert_out_win,
                      NVTETensor result, cudaStream_t stream);
@@ -263,6 +271,8 @@ void nvte_ep_combine_v2(NVTETensor handle_mem, NVTETensor expert_out, NVTECommWi
  *  \param[out] grad_tokens              [T, hidden_dim] grad w.r.t. tokens.
  *  \param[out] grad_topk_weights        [T, top_k] f32 grad w.r.t. topk_weights.
  *  \param[in]  stream                   CUDA stream.
+ *
+ *  \deprecated Relies on the handle cache; removed in TE 3.0. Use nvte_ep_dispatch_bwd_v2.
  */
 void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
                           NVTETensor g_recv_topk_weights, NVTECommWindow g_recv_topk_weights_win,
@@ -287,6 +297,8 @@ void nvte_ep_dispatch_bwd_v2(NVTETensor handle_mem, NVTETensor grad, NVTECommWin
  *  \param[out] grad_expert_out      [recv_capacity, hidden_dim] grad w.r.t. expert_out.
  *  \param[in]  grad_expert_out_win  Optional symmem window for grad_expert_out.
  *  \param[in]  stream               CUDA stream.
+ *
+ *  \deprecated Relies on the handle cache; removed in TE 3.0. Use nvte_ep_combine_bwd_v2.
  */
 void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
                          NVTETensor grad_expert_out, NVTECommWindow grad_expert_out_win,

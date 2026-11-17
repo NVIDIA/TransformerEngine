@@ -2396,7 +2396,7 @@ class TestGroupedGemmGluFallback:
             assert bound["use_cudnn_fusion"] is (request_fusion is not False)
             assert bound["cudnn_native_weight_layout"] is native_layout
             received.append(bound["use_cudnn_jax_fusion"])
-            return args[0], None, jnp.asarray(0)
+            return args[0], None, jnp.asarray(0), jnp.zeros((2,), jnp.int32)
 
         monkeypatch.setattr(_moe_module, "_moe", execute)
         x = jnp.ones((1, 1, 128), jnp.bfloat16)
@@ -2407,13 +2407,14 @@ class TestGroupedGemmGluFallback:
             kwargs["cudnn_native_weight_layout"] = native_layout
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            output, _, _ = _moe_module.moe(
+            output, _, _, _ = _moe_module.moe(
                 x,
-                jnp.ones((128, 2)),
+                _moe_module.RouterComputationInfo(
+                    gate_kernel=jnp.ones((128, 2)), num_experts_per_tok=1
+                ),
                 wi,
                 jnp.ones((2, 128, 128)),
                 num_experts=2,
-                num_experts_per_tok=1,
                 mesh_resource=MeshResource(ep_resource="ep"),
                 **kwargs,
             )
@@ -2489,7 +2490,7 @@ class TestGroupedGemmGluFallback:
 
         def execute(inputs, *args, **kwargs):
             received.append(kwargs["use_cudnn_fusion"])
-            return inputs, None, jnp.asarray(0)
+            return inputs, None, jnp.asarray(0), jnp.zeros((2,), jnp.int32)
 
         monkeypatch.setattr(flax_moe, "moe", execute)
         kwargs = {} if request_fusion is None else {"use_cudnn_fusion": request_fusion}
@@ -2523,7 +2524,6 @@ class TestGroupedGemmGluFallback:
                 None,
                 None,
                 num_experts=2,
-                num_experts_per_tok=1,
                 use_cudnn_fusion=invalid,
             )
         with pytest.raises(TypeError, match="use_cudnn_fusion must be a bool"):
@@ -2538,4 +2538,5 @@ class TestGroupedGemmGluFallback:
     def test_vjp_bool_is_static_and_defaults_to_true(self):
         assert inspect.signature(_moe_module._moe).parameters["use_cudnn_fusion"].default is True
         assert inspect.signature(_moe_module.moe).parameters["use_cudnn_fusion"].default is True
-        assert 32 in _moe_module._moe.nondiff_argnums
+        parameters = list(inspect.signature(_moe_module._moe).parameters)
+        assert parameters.index("use_cudnn_fusion") in _moe_module._moe.nondiff_argnums

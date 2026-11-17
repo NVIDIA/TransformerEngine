@@ -70,11 +70,17 @@ One-dimensional scaling is more granular, but 2D scaling offers two advantages:
   1D/2D scaled tensors have lower overhead than pure 1D scaled GEMMs.
 * *Numerical stability*: 2D scaling behaves better when transposed (details in the next section).
 
-There are some assumptions on the dimensions of the tensor (for both 1D and 2D scaling):
+There are some assumptions on the dimensions of the tensor (for both 1D and 2D scaling).
+Partial 128-element blocks are supported by quantization; the missing values in
+the final block are treated as zero and scale storage is padded as needed. GEMM
+alignment requirements are architecture- and layout-dependent. On Hopper, for
+``Linear(K, N)`` applied to an ``[M, K]`` input, Transformer Engine requires:
 
-* the tensor must have at least 2 dimensions,
-* the last dimension must be divisible by 128,
-* the product of all dimensions except the last must be divisible by 128.
+* ``K`` divisible by 16 (16-byte FP8 leading-dimension alignment),
+* ``N`` divisible by 8, and
+* ``M`` divisible by 8 for 1D-scaled inputs, or by 4 for 2D-scaled inputs.
+
+On Blackwell, this recipe is emulated with MXFP8 and follows the MXFP8 GEMM constraints.
 
 **Scaling factors**
 
@@ -144,7 +150,9 @@ unlike FP8 Current/Delayed Scaling where a single global scale applies to the en
 
 **Quantized all-gather**
 
-FP8 Blockwise Scaling all-gather is supported.
+FP8 Blockwise Scaling all-gather is supported when both the local shard's last
+dimension and the product of its preceding dimensions are divisible by 128.
+Transformer Engine falls back to a high-precision all-gather for other shapes.
 
 
 Examples

@@ -182,41 +182,11 @@ def test_nvfp4_2d_quantize_swizzle_fusion(
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
-    "M, N, expected_swizzled",
-    [
-        # Eligible: both dims % 128 == 0 -> 2D quantize kernel bakes swizzled SF.
-        (128, 128, True),
-        (256, 512, True),
-        # Ineligible (cols % 128 != 0) -> kernel emits compact SF; create_tensor
-        # reports swizzled=False (the fused kernel did not bake it in).
-        (128, 192, False),
-        # Ineligible (rows % 128 != 0).
-        (64, 128, False),
-    ],
-)
-def test_nvfp4_2d_swizzle_fusion_shape_gate(M: int, N: int, expected_swizzled: bool) -> None:
-    """``create_tensor`` must report in-kernel swizzle only for 128-aligned shapes.
-
-    ``make_empty`` runs ``create_tensor`` only (no quantize kernel, no
-    post-quantize ``inplace_swizzle_scale_for_gemm`` fallback), so its
-    ``_with_gemm_swizzled_scales`` observes the in-kernel gate in isolation.
-    """
-    quantizer = _make_quantizer(return_rowwise=True, return_transpose=True)
-    quantizer.optimize_for_gemm = True
-    out = quantizer.make_empty([M, N], dtype=torch.bfloat16)
-    assert out._with_gemm_swizzled_scales is expected_swizzled, (
-        f"2D-kernel shape gate expected _with_gemm_swizzled_scales={expected_swizzled} "
-        f"for shape ({M}, {N}), got {out._with_gemm_swizzled_scales}"
-    )
-
-
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize(
     "M, N",
     [
         (128, 128),
         (256, 512),
-        # Ineligible shapes still end up swizzled via the post-quantize fallback.
+        # Ineligible shapes: compact scales are swizzled after quantization.
         (128, 192),
         (64, 128),
     ],
@@ -225,9 +195,9 @@ def test_nvfp4_2d_swizzle_fusion_end_to_end_swizzled(M: int, N: int) -> None:
     """End-to-end quantize must never crash and must always yield swizzled SF.
 
     Eligible (128-aligned) shapes get swizzled SF directly from the 2D quantize
-    kernel; ineligible shapes are gated off the in-kernel path and get swizzled
-    by the post-quantize ``inplace_swizzle_scale_for_gemm`` fallback. Either way
-    the final ``_with_gemm_swizzled_scales`` must be True.
+    kernel; for ineligible shapes the kernel writes compact SF to scratch buffers,
+    which are then swizzled into the output. Either way the final
+    ``_with_gemm_swizzled_scales`` must be True.
     """
     quantizer = _make_quantizer(return_rowwise=True, return_transpose=True)
     quantizer.optimize_for_gemm = True

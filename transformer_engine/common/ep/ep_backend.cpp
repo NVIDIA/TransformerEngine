@@ -406,7 +406,7 @@ size_t EPBackend::cache_cap_locked() {
         handle_cache_cap_ = static_cast<size_t>(v);
       }
     } else {
-      handle_cache_cap_ = 4096;
+      handle_cache_cap_ = 0;
     }
   }
   return handle_cache_cap_;

@@ -368,7 +368,7 @@ at::Tensor scaled_activation_compute(const at::Tensor& input, const at::Tensor& 
              "scaled activation input width is not compatible with activation");
 
   auto input_tensor = input.contiguous();
-  auto scales_tensor = act_scales.contiguous().reshape({-1});
+  auto scales_tensor = act_scales.contiguous();
   const int64_t rows = input_tensor.numel() / input_tensor.size(-1);
   NVTE_CHECK(scales_tensor.numel() == rows, "scaled activation expects one scale per input row");
 
@@ -404,18 +404,16 @@ std::tuple<at::Tensor, at::Tensor> scaled_dactivation_compute(const at::Tensor& 
   const int64_t rows = input_tensor.numel() / input_tensor.size(-1);
   NVTE_CHECK(scales_tensor.numel() == rows, "scaled dactivation expects one scale per input row");
 
-  auto scales_flat = scales_tensor.reshape({-1});
   auto grad_input = at::empty_like(input_tensor);
   auto grad_scales = compute_scale_grad ? at::empty_like(scales_tensor) : at::Tensor();
-  auto grad_scales_flat = compute_scale_grad ? grad_scales.reshape({-1}) : at::Tensor();
 
   const TensorWrapper& grad_nvte = makeTransformerEngineTensor(grad_tensor);
   const TensorWrapper& input_nvte = makeTransformerEngineTensor(input_tensor);
-  const TensorWrapper& scales_nvte = makeTransformerEngineTensor(scales_flat);
+  const TensorWrapper& scales_nvte = makeTransformerEngineTensor(scales_tensor);
   const TensorWrapper& grad_input_nvte = makeTransformerEngineTensor(grad_input);
   std::optional<TensorWrapper> grad_scales_nvte;
   if (compute_scale_grad) {
-    grad_scales_nvte.emplace(makeTransformerEngineTensor(grad_scales_flat));
+    grad_scales_nvte.emplace(makeTransformerEngineTensor(grad_scales));
   }
 
   auto stream = at::cuda::getCurrentCUDAStream();

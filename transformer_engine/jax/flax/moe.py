@@ -34,7 +34,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 from transformer_engine.common.recipe import Recipe
-from ..moe import _moe_mesh_axes, _resolve_moe_mesh_resource, moe
+from ..moe import RouterComputationInfo, _moe_mesh_axes, _resolve_moe_mesh_resource, moe
 from ..quantize import QuantizerSet
 from ..router import ScoreFunction
 from ..sharding import MeshResource, _get_mesh, global_shard_guard
@@ -115,6 +115,10 @@ class _MoEBlock(TransformerEngineBase):
     dispatch_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the EP dispatch outputs.
         ``None`` leaves them unnamed.
+    collect_expert_counts : bool
+        Compute global per-expert assignment counts. Set to ``False`` when
+        callers do not consume the counts to avoid the associated all-reduce;
+        the returned ``expert_counts`` is then a zero-filled array.
 
     Per-expert dispatch-slot alignment is 256 tokens when fusion is requested,
     including fallbacks, and 128 tokens with ``use_cudnn_fusion=False``.
@@ -162,6 +166,7 @@ class _MoEBlock(TransformerEngineBase):
     apply_topk_weights_early: bool = False
     recv_capacity_per_rank: Optional[int] = None
     dispatch_checkpoint_name: Optional[str] = None
+    collect_expert_counts: bool = True
 
     # Dtypes / init / misc
     dtype: DType = jnp.float32
@@ -183,7 +188,7 @@ class _MoEBlock(TransformerEngineBase):
         super().__post_init__()
 
     @nn.compact
-    def __call__(self, inputs: Array) -> Tuple[Array, Optional[Array], Array]:
+    def __call__(self, inputs: Array) -> Tuple[Array, Optional[Array], Array, Array]:
         """Run the MoE forward pass.
 
         Parameters
@@ -201,6 +206,8 @@ class _MoEBlock(TransformerEngineBase):
         total_recv_tokens : jnp.ndarray
             Non-differentiable per-rank pre-drop recv-slot total; flags
             overflow when ``drop_on_overflow`` is set at ep_bootstrap.
+        expert_counts : jnp.ndarray
+            Global assignment counts for each expert.
         """
         mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
             self.mesh_resource,
@@ -300,33 +307,37 @@ class _MoEBlock(TransformerEngineBase):
                 make_grouped_quantizer_set("_fc2"),
             )
 
-            return moe(
-                inputs,
-                gate_kernel,
-                wi,
-                wo,
-                wi_0_bias,
-                wi_1_bias,
-                wo_bias,
-                expert_bias,
-                num_experts=self.num_experts,
+            router_info = RouterComputationInfo(
+                gate_kernel=gate_kernel,
                 num_experts_per_tok=self.num_experts_per_tok,
-                activation_type=self.activation_type,
+                expert_bias=expert_bias,
                 score_function=self.score_function,
                 use_pre_softmax=self.use_pre_softmax,
                 num_groups=self.num_groups,
                 group_topk=self.group_topk,
                 scaling_factor=self.scaling_factor,
                 aux_loss_coeff=self.aux_loss_coeff,
+                gate_kernel_axes=self.gate_kernel_axes,
+            )
+            return moe(
+                inputs,
+                router_info,
+                wi,
+                wo,
+                wi_0_bias,
+                wi_1_bias,
+                wo_bias,
+                num_experts=self.num_experts,
+                activation_type=self.activation_type,
                 use_cudnn_fusion=self.use_cudnn_fusion,
                 cudnn_native_weight_layout=False,
                 apply_topk_weights_early=self.apply_topk_weights_early,
                 quantizer_sets=quantizer_sets,
                 recv_capacity_per_rank=self.recv_capacity_per_rank,
+                collect_expert_counts=self.collect_expert_counts,
                 quant_before_fsdp_ag=quant_before_fsdp_ag,
                 mesh_resource=mesh_resource,
                 input_axes=self.input_axes,
-                gate_kernel_axes=self.gate_kernel_axes,
                 wi_kernel_axes=self.wi_kernel_axes,
                 wo_kernel_axes=self.wo_kernel_axes,
                 dtype=self.dtype,
