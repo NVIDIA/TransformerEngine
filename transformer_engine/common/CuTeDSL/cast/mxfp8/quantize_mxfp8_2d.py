@@ -62,7 +62,7 @@ from .quantize_mxfp8_g2s_general import MXFP8QuantizeGeneralG2SKernel
 def quantize_colwise_mxfp8_2d(
     sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) input smem view, post-TMA
     sO_col_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
-    mS_col_stage: cute.Tensor,  # colwise scale tensor (1D swizzled, or 2D linear)
+    mS_col_stage: cute.Tensor,  # colwise scales of this tile, swizzled or compact
     sBlockAmax: cute.Tensor,  # receives the amax of block w at index w
     MAX_NORM_RCP: cutlass.Constexpr[float],
     tile_row_start: Int32,
@@ -71,7 +71,6 @@ def quantize_colwise_mxfp8_2d(
     N: Int32,
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
-    SWIZZLE: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],
     SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
@@ -124,14 +123,10 @@ def quantize_colwise_mxfp8_2d(
         sBlockAmax[tidx // THREADS_PER_WARP] = block_amax
 
     biased_exp_c = cvt_f32_to_fp8e8m0fnu(block_amax * MAX_NORM_RCP)
-    if cutlass.const_expr(SWIZZLE):
-        scale_coord = (0, tidx % 32, tidx // 32)
-    else:
-        scale_coord = (0, tidx)
     if cutlass.const_expr(SKIP_SCALE_BOUNDS):
-        mS_col_stage[scale_coord] = biased_exp_c
+        mS_col_stage[(0, tidx)] = biased_exp_c
     elif tile_row_start < M and tile_col_start + tidx < N:
-        mS_col_stage[scale_coord] = biased_exp_c
+        mS_col_stage[(0, tidx)] = biased_exp_c
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     cvt_x2_func = get_cvt_f32x2_to_fp8x2_func(FP8_DTYPE)
@@ -154,7 +149,7 @@ def quantize_colwise_mxfp8_2d(
 def quantize_rowwise_mxfp8_2d(
     sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) input smem view, post-TMA
     sO_row_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
-    mS_row_stage: cute.Tensor,  # rowwise scale tensor (1D swizzled, or 2D linear)
+    mS_row_stage: cute.Tensor,  # rowwise scales of this tile, swizzled or compact
     sBlockAmax: cute.Tensor,  # block amaxes from the colwise pass, or scratch for the reduction
     MAX_NORM_RCP: cutlass.Constexpr[float],
     tile_row_start: Int32,
@@ -330,7 +325,6 @@ def quantize_mxfp8_smem_tile_2d(  # pylint: disable=unused-argument
     MAX_NORM_RCP: cutlass.Constexpr[float],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
-    WITH_GEMM_SWIZZLED_SCALES: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],
     SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
@@ -364,7 +358,6 @@ def quantize_mxfp8_smem_tile_2d(  # pylint: disable=unused-argument
             N,
             DTYPE=DTYPE,
             FP8_DTYPE=FP8_DTYPE,
-            SWIZZLE=WITH_GEMM_SWIZZLED_SCALES,
             TILE_X=TILE_X,
             TILE_Y=TILE_Y,
             SKIP_SCALE_BOUNDS=SKIP_SCALE_BOUNDS,
