@@ -65,6 +65,25 @@ def test_tuple_ep_resource():
         _resolve_moe_mesh_resource(MeshResource(fsdp_resource="tp", ep_resource=("ep", "tp")))
 
 
+@pytest.mark.parametrize(
+    "resource,outer_axes",
+    [
+        (MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep"), ("dp", "fsdp")),
+        (
+            MeshResource(dp_resource="dp", fsdp_resource=("fsdp", "ep"), ep_resource="ep"),
+            ("dp", "fsdp"),
+        ),
+        (MeshResource(fsdp_resource=("ep", "fsdp", "tp"), ep_resource=("ep", "tp")), ("fsdp",)),
+    ],
+)
+def test_ep_outer_axes_flatten_tuple_resources(resource, outer_axes):
+    """EP groups count each non-EP axis of a tuple DP or FSDP resource once."""
+    from transformer_engine.jax.cpp_extensions import ep
+
+    with global_shard_guard(resource):
+        assert ep._capture_ep_resource_axes()[1] == outer_axes
+
+
 def test_ep_partitioning_retains_bind_time_resources():
     from transformer_engine.jax.cpp_extensions import ep
     from jax.sharding import PartitionSpec as P
@@ -109,6 +128,23 @@ def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
         None,
     )
     assert all(output.spec[0] == ("dp", "fsdp", "ep") for output in outputs)
+
+
+@pytest.mark.parametrize(
+    "fsdp_resource,outer_axis",
+    [("fsdp", "fsdp"), (("fsdp", "ep"), "fsdp"), (("ep", "fsdp"), "fsdp"), (("ep",), None)],
+)
+def test_ep_outer_axis_excludes_ep_from_fsdp_tuple(monkeypatch, fsdp_resource, outer_axis):
+    from types import SimpleNamespace
+    from transformer_engine.jax import sharding
+    from transformer_engine.jax.cpp_extensions import ep
+    from transformer_engine.jax.ep import _default_out_partition_spec
+
+    monkeypatch.setattr(sharding, "_get_mesh", lambda: SimpleNamespace(shape={"fsdp": 2, "ep": 4}))
+    with global_shard_guard(MeshResource(fsdp_resource=fsdp_resource, ep_resource="ep")):
+        assert ep._ep_outer_axis() == outer_axis
+        leading = (outer_axis, "ep") if outer_axis is not None else "ep"
+        assert _default_out_partition_spec() == (leading,)
 
 
 @pytest.mark.parametrize(
