@@ -42,45 +42,24 @@ from .group_quantize_mxfp8_common import (
 class MXFP8GroupQuantizeG2RKernel(MXFP8GroupQuantizeKernelBase):
     """Grid of (CTAs per member, num_tensors); each CTA grid-strides its member's tiles."""
 
-    def __init__(
-        self,
-        cfg: MXFP8GroupQuantizeConfig,
-        sm_count: int,
-        CTA_THREADS_Y: int = 8,
-        CTA_THREADS_X: int = 8,
-        ELEMENTS_X_PER_THREAD: int = 16,
-        WORKERS_PER_SM: int = 256,
-        INPUT_EVICT_LAST: bool = True,
-    ) -> None:
-        """Tunable launch parameters (defaults are the current choice):
-
-        CTA_THREADS_Y x CTA_THREADS_X threads per CTA; each thread covers
-        32 / CTA_THREADS_Y rows of ELEMENTS_X_PER_THREAD columns, so a tile is 32 rows by
-        CTA_THREADS_X * ELEMENTS_X_PER_THREAD columns (TILE_COLS; every member's cols must be
-        a multiple of it). Eight lanes of 16 BF16 values (one 256-bit load each) were 1-8%
-        faster than sixteen lanes of 8 on GB200.
-
-        WORKERS_PER_SM: CTAs per SM the grid is sized for, split evenly across the members.
-        Far more than are resident: on GB200 the loop's latency is better hidden by more
-        CTAs in flight than by each CTA walking more tiles (16 -> 256 per SM took colwise
-        from ~107 to ~92 us at 32768x7168).
-
-        INPUT_EVICT_LAST: L2 policy of the input loads (outputs always use evict_last).
-        """
+    def __init__(self, cfg: MXFP8GroupQuantizeConfig, sm_count: int) -> None:
         assert self.supports(cfg), f"unsupported config {cfg}"
-        assert MXFP8_BLOCK_SCALING_SIZE % CTA_THREADS_Y == 0
-        assert MXFP8_BLOCK_SCALING_SIZE % ELEMENTS_X_PER_THREAD == 0
         self.cfg = cfg
         self.SM_COUNT = sm_count
-        self._CTA_THREADS_Y = CTA_THREADS_Y
-        self._CTA_THREADS_X = CTA_THREADS_X
-        self._ELEMENTS_X_PER_THREAD = ELEMENTS_X_PER_THREAD
-        self._ELEMENTS_Y_PER_THREAD = MXFP8_BLOCK_SCALING_SIZE // CTA_THREADS_Y
-        self.TILE_ROWS = CTA_THREADS_Y * self._ELEMENTS_Y_PER_THREAD  # 32
-        self.TILE_COLS = CTA_THREADS_X * ELEMENTS_X_PER_THREAD
-        self.THREADS_PER_CTA = CTA_THREADS_Y * CTA_THREADS_X
-        self.WORKERS_PER_SM = WORKERS_PER_SM
-        self.INPUT_EVICT_LAST = INPUT_EVICT_LAST
+        # A tile is 32 rows x (CTA_THREADS_X * ELEMENTS_X_PER_THREAD) cols. On GB200, rowwise-only
+        # is up to 1.24x faster with 16 thread rows than 8; colwise is up to 1.25x slower.
+        self._CTA_THREADS_Y = 16 if cfg.ROWWISE and not cfg.COLWISE else 8
+        self._CTA_THREADS_X = 8
+        # One 256-bit load per thread: 1-8% faster than 16 lanes of 8 BF16 values on GB200.
+        self._ELEMENTS_X_PER_THREAD = 16
+        self._ELEMENTS_Y_PER_THREAD = MXFP8_BLOCK_SCALING_SIZE // self._CTA_THREADS_Y
+        self.TILE_ROWS = MXFP8_BLOCK_SCALING_SIZE
+        self.TILE_COLS = self._CTA_THREADS_X * self._ELEMENTS_X_PER_THREAD
+        self.THREADS_PER_CTA = self._CTA_THREADS_Y * self._CTA_THREADS_X
+        # Grid sized for far more CTAs per SM than are resident, split evenly across members:
+        # more CTAs in flight hide load latency better than longer per-CTA loops.
+        self.WORKERS_PER_SM = 256
+        self.INPUT_EVICT_LAST = True  # L2 policy of the input loads; outputs use evict_last
         self.ROWS_VARY = cfg.SHAPE_REP not in (SAME_BOTH_DIMS, VARYING_LAST_DIM)
         self.COLS_VARY = cfg.SHAPE_REP not in (SAME_BOTH_DIMS, VARYING_FIRST_DIM)
         self.SAME_BOTH_DIMS = cfg.SHAPE_REP == SAME_BOTH_DIMS
