@@ -5,11 +5,10 @@
 """Grouped MXFP8 quantization in CuTeDSL: shared definitions and kernel dispatch.
 
 Holds the grouped config, the constants the grouped kernels share, and
-MXFP8GroupQuantizeEntry, which picks the kernel for a config: the single-tensor entry
-(quantize_mxfp8_common.py) on a stacked or flat view of the group, the GMEM-to-RMEM grouped
-kernel (group_quantize_mxfp8_g2r.py), or the generic grouped kernel
-(group_quantize_mxfp8_general.py). Also compiles and registers the TVM-FFI function the C++
-bridge (group_quantize_mxfp8_cutedsl.cuh) calls.
+MXFP8GroupQuantizeEntry, which picks the kernel for a config: the GMEM-to-RMEM grouped kernel
+(group_quantize_mxfp8_g2r.py) or the generic grouped kernel (group_quantize_mxfp8_general.py).
+Also compiles and registers the TVM-FFI function the C++ bridge (group_quantize_mxfp8_cutedsl.cuh)
+calls.
 """
 
 # pylint: disable=missing-class-docstring
@@ -207,28 +206,17 @@ class MXFP8GroupQuantizeEntry:
     instantiated at compile time, and each call runs the first one, in this priority order,
     whose runtime check passes:
 
-    1. A non-grouped GMEM-to-RMEM kernel on a single-tensor view of the group
-       (MXFP8GroupQuantizeSingleTensorViewKernel; 2-lane rowwise, register bidimensional, then
-       1-lane rowwise), where the group's data and scales are laid out as one tensor's.
-    2. The grouped GMEM-to-RMEM kernel (MXFP8GroupQuantizeG2RKernel), which addresses each
-       member on its own: BF16 plain casts with no single-tensor view (GEMM-swizzled colwise
-       scales, colwise passes of VARYING_LAST_DIM / VARYING_BOTH_DIMS, ...) or whose
-       non-grouped kernels cannot take the call (colwise only).
-    3. Otherwise the generic grouped kernel (MXFP8GroupQuantizeKernel), which handles every
-       config: dbias, fused (d)activations, FP16/FP32 cases the views do not cover, a set
-       cast-noop flag, 2^31+ elements, and shapes or alignments the others reject.
+    1. The grouped GMEM-to-RMEM kernel (MXFP8GroupQuantizeG2RKernel), which quantizes each
+       member on its own: BF16 plain casts.
+    2. Otherwise the generic grouped kernel (MXFP8GroupQuantizeKernel), which handles every
+       config: dbias, fused (d)activations, FP16/FP32 input, a set cast-noop flag, 2^31+
+       elements, and shapes or alignments G2R rejects.
     """
 
     def __init__(self, cfg: MXFP8GroupQuantizeConfig, sm_count: int) -> None:
         # Kernels import shared definitions from this module. Resolve their implementations
         # only when constructing the compile-time entry object.
         # pylint: disable=import-outside-toplevel
-        from .quantize_mxfp8_g2r_rowwise_2lane import MXFP8QuantizeRowwise2LaneG2RKernel
-        from .quantize_mxfp8_g2r_bidim import MXFP8QuantizeBidimensionalG2RKernel
-        from .quantize_mxfp8_g2r_rowwise_1lane import MXFP8QuantizeRowwise1LaneG2RKernel
-        from .group_quantize_mxfp8_single_tensor_view import (
-            MXFP8GroupQuantizeSingleTensorViewKernel,
-        )
         from .group_quantize_mxfp8_g2r import MXFP8GroupQuantizeG2RKernel
         from .group_quantize_mxfp8_general import MXFP8GroupQuantizeKernel
 
@@ -236,15 +224,8 @@ class MXFP8GroupQuantizeEntry:
 
         self.cfg = cfg
         # Candidate kernels in dispatch priority order; the first eligible one runs.
-        self.kernels = [
-            MXFP8GroupQuantizeSingleTensorViewKernel(cfg, kernel_cls)
-            for kernel_cls in (
-                MXFP8QuantizeRowwise2LaneG2RKernel,
-                MXFP8QuantizeBidimensionalG2RKernel,
-                MXFP8QuantizeRowwise1LaneG2RKernel,
-            )
-            if MXFP8GroupQuantizeSingleTensorViewKernel.supports(cfg, kernel_cls)
-        ]
+        self.kernels = []
+        # TODO(kainingz): G2S beats G2R on 8192x2048 G=16 varying_first rowwise (1.00x vs 0.87x)
         if MXFP8GroupQuantizeG2RKernel.supports(cfg):
             self.kernels.append(MXFP8GroupQuantizeG2RKernel(cfg, sm_count))
         # Handles every config and call; runs when no candidate above is eligible.
