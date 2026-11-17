@@ -7,7 +7,7 @@
 The launcher ``tests/jax/run_te_ep_moe.sh`` forks one pytest process per
 visible GPU. Each process binds to exactly one device via
 ``jax.distributed.initialize(..., local_device_ids=process_id)``; the
-participating processes form a global ``(fsdp, expert, tensor)`` mesh through JAX's
+participating processes form a global ``([dp,] fsdp, expert[, tensor])`` mesh through JAX's
 distributed runtime.
 
 How to run
@@ -140,25 +140,39 @@ from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 EXPERT_AXIS = "expert"
 TENSOR_AXIS = "tensor"
 FSDP_AXIS = "fsdp"
+DP_AXIS = "dp"
 EP_SIZE = 2
 TP_SIZE = int(os.environ.get("TE_EP_MOE_TP_SIZE", "2"))
+# DP_SIZE > 1 adds an outer ``dp`` axis, so EP groups must count dp x fsdp.
+DP_SIZE = int(os.environ.get("TE_EP_MOE_DP_SIZE", "1"))
 INPUT_RANK = int(os.environ.get("TE_EP_MOE_INPUT_RANK", "2" if TP_SIZE > 1 else "3"))
-FSDP_SIZE = jax.device_count() // (EP_SIZE * TP_SIZE)
+FSDP_SIZE = jax.device_count() // (DP_SIZE * EP_SIZE * TP_SIZE)
 assert TP_SIZE in (1, 2), f"TE_EP_MOE_TP_SIZE must be 1 or 2, got {TP_SIZE}"
 assert INPUT_RANK in (2, 3), f"TE_EP_MOE_INPUT_RANK must be 2 or 3, got {INPUT_RANK}"
 EP_AXIS = EXPERT_AXIS if TP_SIZE == 1 else (EXPERT_AXIS, TENSOR_AXIS)
 EP_AXES = (EP_AXIS,) if isinstance(EP_AXIS, str) else EP_AXIS
+DP_RESOURCE = DP_AXIS if DP_SIZE > 1 else None
+OUTER_AXES = (FSDP_AXIS,) if DP_SIZE == 1 else (DP_AXIS, FSDP_AXIS)
 # With TP, the MoE block overrides the global resource so EP spans (expert, tensor).
 EXPLICIT_MESH_RESOURCE = (
-    None if TP_SIZE == 1 else MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+    None
+    if TP_SIZE == 1
+    else MeshResource(dp_resource=DP_RESOURCE, ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
 )
-MESH_SHAPE = (FSDP_SIZE, EP_SIZE) if TP_SIZE == 1 else (FSDP_SIZE, EP_SIZE, TP_SIZE)
-MESH_AXES = (FSDP_AXIS, *EP_AXES)
+OUTER_SHAPE = (FSDP_SIZE,) if DP_SIZE == 1 else (DP_SIZE, FSDP_SIZE)
+MESH_SHAPE = (*OUTER_SHAPE, EP_SIZE) if TP_SIZE == 1 else (*OUTER_SHAPE, EP_SIZE, TP_SIZE)
+MESH_AXES = (*OUTER_AXES, *EP_AXES)
 COMBINED_EP_SIZE = EP_SIZE * TP_SIZE
-NUM_DEVICES_REQUIRED = FSDP_SIZE * EP_SIZE * TP_SIZE
+NUM_DEVICES_REQUIRED = DP_SIZE * FSDP_SIZE * EP_SIZE * TP_SIZE
+if FSDP_SIZE == 0:
+    pytest.skip(
+        f"dp={DP_SIZE} x expert={EP_SIZE} x tensor={TP_SIZE} needs more than"
+        f" {jax.device_count()} devices",
+        allow_module_level=True,
+    )
 assert jax.device_count() == NUM_DEVICES_REQUIRED, (
     f"device_count {jax.device_count()} must equal {NUM_DEVICES_REQUIRED} for "
-    f"expert={EP_SIZE} x fsdp={FSDP_SIZE} x tensor={TP_SIZE}"
+    f"dp={DP_SIZE} x expert={EP_SIZE} x fsdp={FSDP_SIZE} x tensor={TP_SIZE}"
 )
 
 LOGICAL_AXIS_RULES = (
@@ -167,7 +181,7 @@ LOGICAL_AXIS_RULES = (
     ("gated_weight_fsdp", FSDP_AXIS),
     ("embed", FSDP_AXIS),
     ("mlp", None),
-    ("batch", (FSDP_AXIS, *EP_AXES)),
+    ("batch", (*OUTER_AXES, *EP_AXES)),
 )
 
 # Small shapes so the parity tests stay tight on bf16. The block still
@@ -217,12 +231,12 @@ def use_cudnn_fusion(request):
 def mesh(use_cudnn_fusion):
     if jax.device_count() < NUM_DEVICES_REQUIRED:
         pytest.skip(
-            f"Need {NUM_DEVICES_REQUIRED} devices for expert={EP_SIZE} x "
+            f"Need {NUM_DEVICES_REQUIRED} devices for dp={DP_SIZE} x expert={EP_SIZE} x "
             f"fsdp={FSDP_SIZE} x tensor={TP_SIZE};"
             f" have {jax.device_count()}"
         )
     # Both ``expert`` and ``tensor`` act as EP axes. Keep the compound EP
-    # axes innermost so each FSDP replica owns one consecutive NCCL EP group.
+    # axes innermost so each DP/FSDP replica owns one consecutive NCCL EP group.
     devices = mesh_utils.create_device_mesh(MESH_SHAPE)
     mesh_obj = Mesh(devices, axis_names=MESH_AXES)
 
@@ -243,7 +257,7 @@ def mesh(use_cudnn_fusion):
     # and cannot run from inside jax.jit. Sized to the worst-case recv_pr
     # across _CONFIGS so every parametrized config is bootstrap-compatible.
     with mesh_obj, global_shard_guard(
-        MeshResource(ep_resource=EXPERT_AXIS, fsdp_resource=FSDP_AXIS)
+        MeshResource(dp_resource=DP_RESOURCE, ep_resource=EXPERT_AXIS, fsdp_resource=FSDP_AXIS)
     ):
         ep_bootstrap(
             world_size=num_procs,
@@ -470,7 +484,7 @@ def _strong_expert_bias_init(key, shape, dtype):
 
 def _shard_inputs(x, mesh):
     # Match the layout moe.py re-pins to: outer dp axes, then ep innermost.
-    spec = P((FSDP_AXIS, *EP_AXES), *([None] * (x.ndim - 1)))
+    spec = P((*OUTER_AXES, *EP_AXES), *([None] * (x.ndim - 1)))
     return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, spec))
 
 
@@ -481,7 +495,9 @@ def _ctx(mesh):
         def __enter__(self_inner):
             self_inner._m = mesh.__enter__()
             self_inner._gs = global_shard_guard(
-                MeshResource(ep_resource=EXPERT_AXIS, fsdp_resource=FSDP_AXIS)
+                MeshResource(
+                    dp_resource=DP_RESOURCE, ep_resource=EXPERT_AXIS, fsdp_resource=FSDP_AXIS
+                )
             )
             self_inner._gs.__enter__()
             self_inner._ar = nn_partitioning.axis_rules(LOGICAL_AXIS_RULES)
@@ -725,7 +741,9 @@ def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, make
         quantization_recipe=MXFP8BlockScaling(), quant_before_fsdp_ag=quant_before_fsdp_ag
     )
     candidate = baseline.clone(
-        mesh_resource=MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+        mesh_resource=MeshResource(
+            dp_resource=DP_RESOURCE, ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS
+        )
     )
     x = _make_inputs(jax.random.PRNGKey(51))
     variables, baseline_out, _, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))

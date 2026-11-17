@@ -47,6 +47,9 @@ wait
 # >=4 visible GPUs.
 TE_PATH=$TE_PATH bash $TE_PATH/tests/jax/run_te_ep_moe.sh \
     || test_fail "test_te_ep_moe.py"
+# Same suite on a (dp, fsdp, expert) mesh: dp=2 x fsdp=2 x expert=2 on 8 GPUs.
+TE_EP_MOE_DP_SIZE=2 TE_EP_MOE_TP_SIZE=1 TE_PATH=$TE_PATH bash $TE_PATH/tests/jax/run_te_ep_moe.sh \
+    || test_fail "test_te_ep_moe.py (dp x fsdp x expert)"
 # Exercise the multi-GPU tutorial in docs/examples/jax (needs >= 4 GPUs;
 # auto-skips otherwise).
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_docs_examples_jax_distributed.xml -k multi_gpu $TE_PATH/docs/examples/jax/ || test_fail "docs/examples/jax (multi-GPU)"
