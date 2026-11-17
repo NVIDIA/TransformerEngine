@@ -116,7 +116,9 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         self.DBIAS_IN_ROWWISE = cfg.WITH_DBIAS and not cfg.COLWISE
         # If possible, reuse the input SMEM tiles for for dbias reduction (the intermediate values are stored in fp32)
         # when they are large enough, as the CUDA kernel does.
-        dbias_bytes = self.THREADS_Y * self.THREADS_X * (MXFP8_BLOCK_SCALING_SIZE + 1) * 4 # +1 to avoid bank conflicts
+        dbias_bytes = (
+            self.THREADS_Y * self.THREADS_X * (MXFP8_BLOCK_SCALING_SIZE + 1) * 4
+        )  # +1 to avoid bank conflicts
         input_bytes = self.TILE_ROWS * self.TILE_COLS * self.PIPELINE_DEPTH * cfg.DTYPE.width // 8
         self.REUSE_INPUT_FOR_DBIAS = self.DBIAS_IN_ROWWISE and dbias_bytes <= input_bytes
         # Some turning knobs where this value turns to be the best in our benchmarks
