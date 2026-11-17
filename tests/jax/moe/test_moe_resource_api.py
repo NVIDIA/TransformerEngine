@@ -56,11 +56,13 @@ def test_global_default_and_duplicate_outer_axis():
     assert quantize is False
 
 
-def test_ep_partitioning_retains_bind_time_resources():
+@pytest.mark.parametrize("fsdp_resource", ["fsdp", ("fsdp",), ("fsdp", "ep"), ("ep", "fsdp")])
+def test_ep_partitioning_retains_bind_time_resources(fsdp_resource):
     from transformer_engine.jax.cpp_extensions import ep
     from jax.sharding import PartitionSpec as P
 
-    with global_shard_guard(MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")):
+    resource = MeshResource(dp_resource="dp", fsdp_resource=fsdp_resource, ep_resource="ep")
+    with global_shard_guard(resource):
         captured = ep._capture_ep_resource_axes()
     spec = P(("dp", "fsdp", "ep"), None, None)
     assert ep._leading_axis_ok(spec, captured) == (True, "ep", ("dp", "fsdp"))

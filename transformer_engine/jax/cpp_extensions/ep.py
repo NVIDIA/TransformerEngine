@@ -201,12 +201,21 @@ def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
     )
 
 
+def _fsdp_outer_axes(resource):
+    """FSDP axes of ``resource`` that count as EP outer axes, as a tuple."""
+    fsdp_resource = resource.fsdp_resource
+    if isinstance(fsdp_resource, tuple):
+        # A dense FSDP tuple may include the EP axis, which never counts as an outer axis.
+        return tuple(axis for axis in fsdp_resource if axis != resource.ep_resource)
+    return () if fsdp_resource is None else (fsdp_resource,)
+
+
 def _capture_ep_resource_axes():
     """Capture physical axes at bind time for asynchronous SPMD partitioning."""
     resource = global_mesh_resource()
     outer_axes = tuple(
         dict.fromkeys(
-            axis for axis in (resource.dp_resource, resource.fsdp_resource) if axis is not None
+            axis for axis in (resource.dp_resource, *_fsdp_outer_axes(resource)) if axis is not None
         )
     )
     return resource.ep_resource, outer_axes
@@ -234,11 +243,8 @@ def _leading_axis_ok(spec, resource_axes=None, mesh=None):
 def _ep_outer_axis():
     """Legacy single outer axis used by the standalone EP custom VJP wrapper."""
     resource = global_mesh_resource()
-    fsdp_resource = resource.fsdp_resource
-    if isinstance(fsdp_resource, tuple):
-        # A dense FSDP tuple may include the EP axis, which never counts as an outer axis.
-        fsdp_axes = tuple(axis for axis in fsdp_resource if axis != resource.ep_resource)
-        fsdp_resource = fsdp_axes[0] if len(fsdp_axes) == 1 else fsdp_axes or None
+    fsdp_axes = _fsdp_outer_axes(resource)
+    fsdp_resource = fsdp_axes[0] if len(fsdp_axes) == 1 else fsdp_axes or None
     if resource.dp_resource is not None and get_mesh_axis_size(resource.dp_resource) > 1:
         return resource.dp_resource
     if fsdp_resource is not None and get_mesh_axis_size(fsdp_resource) > 1:
