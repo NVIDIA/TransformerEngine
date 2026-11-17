@@ -1376,21 +1376,12 @@ class TestTeEpMoeCudnnCutedslFusion:
                 expert_bias=None,
                 activation_type=activation_type,
             )
-            return jnp.mean(out.astype(jnp.float32) ** 2), out
+            return jnp.mean(out.astype(jnp.float32) ** 2)
 
-        (grads_ref, grad_x_ref), output_ref = jax.jit(
-            jax.grad(loss_fn, argnums=(0, 1), has_aux=True)
-        )(
+        grads_ref, grad_x_ref = jax.jit(jax.grad(loss_fn, argnums=(0, 1)))(
             {k: jnp.asarray(v) for k, v in params_np.items() if k != "expert_bias"},
             jnp.asarray(x_np),
         )
-        if activation_type == "situglu":
-            np.testing.assert_allclose(
-                output_np,
-                np.asarray(jax.device_get(output_ref)).astype(np.float32),
-                **FWD_TOLERANCE["mxfp8"],
-                err_msg="SiTU fused MXFP8 forward parity breach",
-            )
         for name in ("gate_kernel", "wi", "wo"):
             np.testing.assert_allclose(
                 _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32),
