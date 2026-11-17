@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file linear_attention.h
- *  \brief Framework-independent linear-attention state composition.
+ *  \brief Functions for linear-attention state composition.
  */
 #ifndef TRANSFORMER_ENGINE_LINEAR_ATTENTION_H_
 #define TRANSFORMER_ENGINE_LINEAR_ATTENTION_H_
@@ -16,22 +16,30 @@
 extern "C" {
 #endif
 
-/*! \brief Apply ordered affine summaries to selected recurrent states.
+/*! \brief Compose recurrent states from ordered affine summaries.
  *
  * Each output starts from a selected initial memory and repeatedly evaluates
  * ``state = state @ transition[record] + additive[record]``. This operation
  * serves both forward prefixes and backward suffixes; backward callers pass
  * the backward-oriented transitions and a negative record stride.
  *
- * All tensors are contiguous device tensors. Initial states are FP32
- * [initial_memories, heads, value_dim, key_dim]; additives are FP32
- * [records, heads, value_dim, key_dim].
- * Transitions are FP32 [records, heads, key_dim, key_dim]. Descriptors are
- * INT32 [outputs, 4], with rows (initial_memory_index, first_record, count, stride).
- * Outputs are FP32 [outputs, heads, value_dim, key_dim]. Referenced initial-memory
- * and record indices must be valid; count must be nonnegative.
- * An initial_memory_index of -1 means an implicit zero state. Zero-count
- * descriptors copy their initial memory (or write zeros). No memory is allocated.
+ * All tensors must be contiguous device tensors. No memory is allocated.
+ *
+ * \param[in]  initial_states FP32 initial memories,
+ *                            [initial_memories, heads, value_dim, key_dim].
+ * \param[in]  additive       FP32 additive summaries,
+ *                            [records, heads, value_dim, key_dim].
+ * \param[in]  transitions    FP32 transition matrices,
+ *                            [records, heads, key_dim, key_dim].
+ * \param[in]  descriptors    INT32 [outputs, 4], with rows
+ *                            (initial_memory_index, first_record, count, stride).
+ *                            An initial_memory_index of -1 selects an implicit zero state.
+ *                            Other referenced memory and record indices must be valid.
+ *                            Count must be nonnegative; zero copies the initial memory
+ *                            (or writes zeros).
+ * \param[out] output         Caller-allocated FP32 composed memories,
+ *                            [outputs, heads, value_dim, key_dim].
+ * \param[in]  stream         CUDA stream on which to execute the operation.
  */
 void nvte_linear_attention_affine_prefix(const NVTETensor initial_states, const NVTETensor additive,
                                          const NVTETensor transitions, const NVTETensor descriptors,
