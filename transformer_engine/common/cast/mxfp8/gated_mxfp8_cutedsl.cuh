@@ -118,14 +118,6 @@ bool mxfp8_quantize_gated_cutedsl(const Tensor &gated_input, const Tensor &grad,
                                        /*swizzled=*/output->with_gemm_swizzled_scales,
                                        /*is_bwd=*/IS_BWD,
                                        /*activation=*/activation};
-    // The kernel offsets the gate half's swizzled scales by a fixed amount, which only matches
-    // the swizzled layout when the half spans whole 128-column scale tiles.
-    if (IS_BWD && config.swizzled && cols % 128 != 0) {
-      report_cutedsl_not_chosen(
-          "backward gated activations with GEMM-swizzled scales need the last dimension of the "
-          "output halves to be divisible by 128.");
-      return false;
-    }
     // TMA needs aligned global addresses
     bool aligned =
         is_aligned_ptr(gated_input.data.dptr, TMA_GMEM_ALIGNMENT) &&

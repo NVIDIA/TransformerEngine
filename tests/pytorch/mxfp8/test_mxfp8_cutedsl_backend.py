@@ -462,6 +462,8 @@ GATED_ACTIVATIONS = [
 ]
 get_gated_id = lambda a: a["name"]
 GATED_DIRECTIONS = [False, True]
+# A gate half starting mid swizzle tile (N % 128 != 0) with SKIP_SCALE_BOUNDS=True
+GATED_MATRIX_SIZES = MATRIX_SIZES + [(256, 192)]
 get_direction_id = lambda is_bwd: "bwd" if is_bwd else "fwd"
 
 
@@ -504,8 +506,6 @@ def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swi
     shape is (M, N): the gated input is [M, 2N].
     """
     M, N = shape
-    if is_bwd and swizzled:
-        pytest.skip("CuTeDSL hands backward gated activations with GEMM-swizzled scales to CUDA")
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
     x, _ = generate_inputs(M, 2 * N, in_dtype)
@@ -536,7 +536,7 @@ def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swi
         ), f"{tag}: {name} differ between backends"
 
 
-@pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
+@pytest.mark.parametrize("shape", GATED_MATRIX_SIZES, ids=get_shape_id)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
 @pytest.mark.parametrize("act", GATED_ACTIVATIONS, ids=get_gated_id)
 @pytest.mark.parametrize("is_bwd", GATED_DIRECTIONS, ids=get_direction_id)

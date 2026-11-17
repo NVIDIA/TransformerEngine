@@ -18,6 +18,7 @@ Gated input is [M, 2N] with [act | gate] along the last dim. Every operand is ad
             y_grad[M, N]
 """
 
+from ast import Tuple
 from typing import Optional
 
 import cutlass
@@ -237,7 +238,6 @@ def gated_quantize_colwise_only(
     DTYPE: cutlass.Constexpr[type],
     FP8_DTYPE: cutlass.Constexpr[type],
     MAX_NORM_RCP: cutlass.Constexpr[float],
-    SWIZZLE: cutlass.Constexpr[bool],
     SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     THREADS_PER_MXFP8_BLOCK: cutlass.Constexpr[int],
@@ -325,13 +325,12 @@ def gated_quantize_colwise_only(
             block_amax = cute.arch.fmax(block_amax, sAmax[o, t, tx])
 
         biased_exp = cvt_f32_to_fp8e8m0fnu(block_amax * MAX_NORM_RCP)
-        scale_coord = (0, tx % 32, tx // 32) if cutlass.const_expr(SWIZZLE) else (0, tx)
         if ty == 0:
             if cutlass.const_expr(SKIP_SCALE_BOUNDS):
-                mS_col_stages[o][scale_coord] = biased_exp
+                mS_col_stages[o][(0, tx)] = biased_exp
             else:
                 if tile_row_start < M and tile_col_start + tx < N:
-                    mS_col_stages[o][scale_coord] = biased_exp
+                    mS_col_stages[o][(0, tx)] = biased_exp
         inv_scale = exp2f_rcp(biased_exp)
         sO_frag = cute.composition(sO_col_tiles[o], tv_layout)[tidx, None]
         for j in cutlass.range_constexpr(FRAG_SIZE // 2):
@@ -480,7 +479,6 @@ def quantize_mxfp8_smem_tile_general_partial(
     MAX_NORM_RCP: cutlass.Constexpr[float],
     DTYPE: cutlass.Constexpr[type],
     FP8_DTYPE: cutlass.Constexpr[type],
-    WITH_GEMM_SWIZZLED_SCALES: cutlass.Constexpr[bool],
     SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],
@@ -507,7 +505,6 @@ def quantize_mxfp8_smem_tile_general_partial(
         MAX_NORM_RCP=MAX_NORM_RCP,
         DTYPE=DTYPE,
         FP8_DTYPE=FP8_DTYPE,
-        WITH_GEMM_SWIZZLED_SCALES=WITH_GEMM_SWIZZLED_SCALES,
         TILE_X=TILE_X,
         TILE_Y=TILE_Y,
         # The gated op maps the zeros TMA fills out-of-bounds elements with to zero.
@@ -521,7 +518,28 @@ def quantize_mxfp8_smem_tile_general_partial(
 
 
 @cute.jit
-def _split_gated_scales(
+def shift_to_right(mS: cute.Tensor, columns_to_shift: Int32) -> cute.Tensor:
+    """Derive a new tensor where every logical index (input to the layout) is shifted to the right by `columns_to_shift` columns
+    
+    For example, define mS's layout as f. This function will return a tensor with a composed layout f', where f'(x, y) = f(x, y + columns_to_shift).
+    In other words, the logical index (input of the layout, which is converted to coordinates from the shape) is shifted to the right
+    by `columns_to_shift` columns, while the mapping relationship is the same, and it is only applied to a shifted input index.
+
+    Note: this is different than changing the base of mS, which would be f'(x, y) = f(x, y) + offset, where the shift is applied to the output of
+    the layout mapping. What we need here is to shift the input because when you use the swizzled (and non-swizzled) mS, that layout is a mapping from
+    the logical index (activation on the left, gate on the right) to where they should really be after the GEMM swizzling, so it abstracts away the swizzling
+    and you can pretend it's a normal scale tensor and use logical indices.
+    """
+    num_rows = cute.size(mS.layout, mode=[0])
+    offset_to_shift = columns_to_shift * num_rows
+    shifted_layout = cute.make_composed_layout(mS.layout, offset_to_shift, cute.make_layout(mS.layout.shape))
+    return cute.make_tensor(
+        mS.iterator, shifted_layout
+    )
+
+
+@cute.jit
+def split_scales_to_act_and_gate(
     mS_row: Optional[cute.Tensor],
     mS_col: Optional[cute.Tensor],
     M: Int32,
@@ -530,42 +548,24 @@ def _split_gated_scales(
     COLWISE: cutlass.Constexpr[bool],
     SWIZZLED: cutlass.Constexpr[bool],
 ):
-    """Split the scales of a gated input with logical shape [M, 2N] into the act and gate halves, each with logical shape [M, N]."""
+    """Split the scales of the [M, 2N] output into views of its act and gate halves, each indexed
+    by its own [M, N] coordinates."""
     mS_row_act = mS_row_gate = mS_col_act = mS_col_gate = None
     if cutlass.const_expr(SWIZZLED):
         mS_row, mS_col = derive_swizzled_scale_layout(M, 2 * N, ROWWISE, COLWISE, mS_row, mS_col)
-        # To slice the left half (act) and right half (gate) of the swizzled scales, we need to tile using the tiler
-        # with the same mode pattern as the swizzled layout's shape:
-        # mS_row: ((32, 4, ceil(M/128)), (4, ceil(N/64))) : ((16, 4, 512·ceil(N/64)), (1, 512))
-        # mS_col: ((4, ceil(M/128)), (32, 4, ceil(N/64))) : ((1, 512), (16, 4, 512·ceil(M/128)))
-        if cutlass.const_expr(ROWWISE):
-            row_tiler = (
-                cute.make_layout((32, 4, cute.ceil_div(M, 128))),  # slice all rows
-                cute.make_layout(
-                    (4, cute.ceil_div(N, 128))
-                ),  # slice half columns so cdiv uses 128 instead of 64
-            )
-            mS_row_act = cute.local_tile(mS_row, row_tiler, (0, 0))
-            mS_row_gate = cute.local_tile(mS_row, row_tiler, (0, 1))
-        if cutlass.const_expr(COLWISE):
-            col_tiler = (
-                cute.make_layout((4, cute.ceil_div(M, 128))),  # slice all rows
-                cute.make_layout(
-                    (32, 4, cute.ceil_div(N, 128))
-                ),  # slice half columns so cdiv uses 128 instead of 64
-            )
-            mS_col_act = cute.local_tile(mS_col, col_tiler, (0, 0))
-            mS_col_gate = cute.local_tile(mS_col, col_tiler, (0, 1))
-    else:
-        # Compact scales are row-major, so each half is a block of scale columns
-        if cutlass.const_expr(ROWWISE):
-            row_tiler = (M, cute.ceil_div(N, MXFP8_BLOCK_SCALING_SIZE))
-            mS_row_act = cute.local_tile(mS_row, row_tiler, (0, 0))
-            mS_row_gate = cute.local_tile(mS_row, row_tiler, (0, 1))
-        if cutlass.const_expr(COLWISE):
-            col_tiler = (cute.ceil_div(M, MXFP8_BLOCK_SCALING_SIZE), N)
-            mS_col_act = cute.local_tile(mS_col, col_tiler, (0, 0))
-            mS_col_gate = cute.local_tile(mS_col, col_tiler, (0, 1))
+    if cutlass.const_expr(ROWWISE):
+        # When there is paddings columns in the end, we need to use N to calculate how many actual activation columns
+        # we need to shift before we get to the gated columns, instead of just using mS.shape[1] // 2.
+        columns_to_shift = cute.ceil_div(N, MXFP8_BLOCK_SCALING_SIZE)
+        # Act half starts from the same position as mS, only using its left half
+        mS_row_act = mS_row
+        mS_row_gate = shift_to_right(mS_row, columns_to_shift)
+    if cutlass.const_expr(COLWISE):
+        columns_to_shift = N
+        # Act half starts from the same position as mS, only using its left half
+        mS_col_act = mS_col
+        # Gate half starts from the right half of mS, so we shift it to the right by N columns
+        mS_col_gate = shift_to_right(mS_col, columns_to_shift)
     return mS_row_act, mS_row_gate, mS_col_act, mS_col_gate
 
 
@@ -638,7 +638,7 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
         if cutlass.const_expr(self.cfg.IS_BWD):
             # The [M, 2N] output is [act_grad | gate_grad]; the kernel takes its two halves
             mS_row_act_grad, mS_row_gate_grad, mS_col_act_grad, mS_col_gate_grad = (
-                _split_gated_scales(
+                split_scales_to_act_and_gate(
                     mS_row,
                     mS_col,
                     M,
@@ -1025,7 +1025,7 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                     for _, _, _, sO_col_out, _ in tile_quantizer_params
                 ]
                 mS_col_stages = [
-                    cute.flatten(cute.local_tile(mS_col_cta, col_scale_tile, tile_coord))
+                    cute.local_tile(mS_col_cta, col_scale_tile, tile_coord)
                     for _, _, _, _, mS_col_cta in tile_quantizer_params
                 ]
                 gated_quantize_colwise_only(
@@ -1049,7 +1049,6 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                     DTYPE=DTYPE,
                     FP8_DTYPE=cfg.FP8_DTYPE,
                     MAX_NORM_RCP=cfg.MAX_NORM_RCP,
-                    SWIZZLE=cfg.WITH_GEMM_SWIZZLED_SCALES,
                     SKIP_SCALE_BOUNDS=self.SKIP_SCALE_BOUNDS,
                     TILE_X=TILE_COLS,
                     THREADS_PER_MXFP8_BLOCK=self.THREADS_PER_MXFP8_BLOCK,
@@ -1060,7 +1059,7 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                     for _, sO_row_out, _, _, _ in tile_quantizer_params
                 ]
                 mS_row_stages = [
-                    cute.flatten(cute.local_tile(mS_row_cta, row_scale_tile, tile_coord))
+                    cute.local_tile(mS_row_cta, row_scale_tile, tile_coord)
                     for _, _, mS_row_cta, _, _ in tile_quantizer_params
                 ]
                 gated_quantize_rowwise_only(
@@ -1115,16 +1114,12 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                     mS_row_stage = None
                     if cutlass.const_expr(cfg.ROWWISE):
                         sO_row_tile = sO_row_out[(None, stage_idx)]
-                        mS_row_stage = cute.flatten(
-                            cute.local_tile(mS_row_cta, row_scale_tile, tile_coord)
-                        )
+                        mS_row_stage = cute.local_tile(mS_row_cta, row_scale_tile, tile_coord)
                     sO_col_tile = None
                     mS_col_stage = None
                     if cutlass.const_expr(cfg.COLWISE):
                         sO_col_tile = sO_col_out[(None, stage_idx)]
-                        mS_col_stage = cute.flatten(
-                            cute.local_tile(mS_col_cta, col_scale_tile, tile_coord)
-                        )
+                        mS_col_stage = cute.local_tile(mS_col_cta, col_scale_tile, tile_coord)
                     # Use the general MXFP8 SMEM tile quantize function to quantize it
                     quantize_mxfp8_smem_tile_general_partial(
                         sX_out[(None, stage_idx)],  # The SMEM tile to quantize
@@ -1142,7 +1137,6 @@ class MXFP8GatedQuantizeG2SKernel(MXFP8QuantizeGeneralG2SKernel):
                         MAX_NORM_RCP=cfg.MAX_NORM_RCP,
                         DTYPE=DTYPE,
                         FP8_DTYPE=cfg.FP8_DTYPE,
-                        WITH_GEMM_SWIZZLED_SCALES=cfg.WITH_GEMM_SWIZZLED_SCALES,
                         SKIP_SCALE_BOUNDS=self.SKIP_SCALE_BOUNDS,
                         TILE_X=TILE_COLS,
                         TILE_Y=TILE_ROWS,
