@@ -65,6 +65,25 @@ def test_tuple_ep_resource():
         _resolve_moe_mesh_resource(MeshResource(fsdp_resource="tp", ep_resource=("ep", "tp")))
 
 
+@pytest.mark.parametrize(
+    "resource,outer_axes",
+    [
+        (MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep"), ("dp", "fsdp")),
+        (
+            MeshResource(dp_resource="dp", fsdp_resource=("fsdp", "ep"), ep_resource="ep"),
+            ("dp", "fsdp"),
+        ),
+        (MeshResource(fsdp_resource=("ep", "fsdp", "tp"), ep_resource=("ep", "tp")), ("fsdp",)),
+    ],
+)
+def test_ep_outer_axes_flatten_tuple_resources(resource, outer_axes):
+    """EP groups count each non-EP axis of a tuple DP or FSDP resource once."""
+    from transformer_engine.jax.cpp_extensions import ep
+
+    with global_shard_guard(resource):
+        assert ep._capture_ep_resource_axes()[1] == outer_axes
+
+
 @pytest.mark.parametrize("fsdp_resource", ["fsdp", ("fsdp",), ("fsdp", "ep"), ("ep", "fsdp")])
 def test_ep_partitioning_retains_bind_time_resources(fsdp_resource):
     from transformer_engine.jax.cpp_extensions import ep
