@@ -47,15 +47,6 @@ def test_explicit_resource_overrides_global_and_is_snapshotted():
     assert quantize is True
 
 
-def test_global_default_and_duplicate_outer_axis():
-    with global_shard_guard(
-        MeshResource(dp_resource="fsdp", fsdp_resource="fsdp", ep_resource="ep")
-    ):
-        resource, quantize = _resolve_moe_mesh_resource()
-    assert _moe_mesh_axes(resource) == ("ep", ("fsdp",))
-    assert quantize is False
-
-
 def test_tuple_ep_resource():
     resource, _ = _resolve_moe_mesh_resource(
         MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource=("ep", "tp"))
@@ -68,20 +59,30 @@ def test_tuple_ep_resource():
 @pytest.mark.parametrize(
     "resource,outer_axes",
     [
-        (MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep"), ("dp", "fsdp")),
         (
-            MeshResource(dp_resource="dp", fsdp_resource=("fsdp", "ep"), ep_resource="ep"),
+            MeshResource(
+                dp_resource="dp", fsdp_resource=("ep", "fsdp", "tp"), ep_resource=("ep", "tp")
+            ),
             ("dp", "fsdp"),
         ),
-        (MeshResource(fsdp_resource=("ep", "fsdp", "tp"), ep_resource=("ep", "tp")), ("fsdp",)),
+        (MeshResource(dp_resource="tp", fsdp_resource="ep", ep_resource=("ep", "tp")), ()),
     ],
 )
 def test_ep_outer_axes_flatten_tuple_resources(resource, outer_axes):
-    """EP groups count each non-EP axis of a tuple DP or FSDP resource once."""
+    """EP outer axes flatten a tuple FSDP resource and drop every axis of a tuple EP."""
     from transformer_engine.jax.cpp_extensions import ep
 
     with global_shard_guard(resource):
-        assert ep._capture_ep_resource_axes()[1] == outer_axes
+        assert ep._capture_ep_resource_axes() == (("ep", "tp"), outer_axes)
+
+
+def test_global_default_and_duplicate_outer_axis():
+    with global_shard_guard(
+        MeshResource(dp_resource="fsdp", fsdp_resource="fsdp", ep_resource="ep")
+    ):
+        resource, quantize = _resolve_moe_mesh_resource()
+    assert _moe_mesh_axes(resource) == ("ep", ("fsdp",))
+    assert quantize is False
 
 
 @pytest.mark.parametrize("fsdp_resource", ["fsdp", ("fsdp",), ("fsdp", "ep"), ("ep", "fsdp")])

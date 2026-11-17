@@ -202,13 +202,7 @@ def ep_bootstrap(
     ep_size = int(np.prod([mesh.shape[axis] for axis in ep_axes]))
     # num_ep_groups counts only the distinct-token (dp/fsdp) axes; replicated
     # axes (tp, pp, ...) do not create distinct EP-output slabs.
-    outer_axes = tuple(
-        dict.fromkeys(
-            a
-            for a in (resource.dp_resource, *tex.ep._fsdp_outer_axes(resource))
-            if a is not None and a not in ep_axes
-        )
-    )
+    _, outer_axes = tex.ep._capture_ep_resource_axes(resource)
     num_ep_groups = int(np.prod([get_mesh_axis_size(a) for a in outer_axes]))
     if num_experts % ep_size != 0:
         raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")

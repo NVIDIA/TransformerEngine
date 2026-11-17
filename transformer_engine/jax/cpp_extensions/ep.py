@@ -267,15 +267,16 @@ def _resolve_ep_axes(resource=None) -> Tuple[str, ...]:
 def _fsdp_outer_axes(resource):
     """FSDP axes of ``resource`` that count as EP outer axes, as a tuple."""
     fsdp_resource = resource.fsdp_resource
+    ep_axes = _resolve_ep_axes(resource)
     if isinstance(fsdp_resource, tuple):
-        # A dense FSDP tuple may include the EP axis, which never counts as an outer axis.
-        return tuple(axis for axis in fsdp_resource if axis != resource.ep_resource)
-    return () if fsdp_resource is None else (fsdp_resource,)
+        # A dense FSDP tuple may include EP axes, which never count as outer axes.
+        return tuple(axis for axis in fsdp_resource if axis not in ep_axes)
+    return () if fsdp_resource is None or fsdp_resource in ep_axes else (fsdp_resource,)
 
 
-def _capture_ep_resource_axes():
+def _capture_ep_resource_axes(resource=None):
     """Capture physical axes at bind time for asynchronous SPMD partitioning."""
-    resource = global_mesh_resource()
+    resource = global_mesh_resource() if resource is None else resource
     ep_axes = _resolve_ep_axes(resource)
     outer_axes = tuple(
         dict.fromkeys(
@@ -312,7 +313,7 @@ def _ep_outer_axis():
     resource = global_mesh_resource()
     ep_axes = _resolve_ep_axes(resource)
     dp_resource = None if resource.dp_resource in ep_axes else resource.dp_resource
-    fsdp_axes = tuple(axis for axis in _fsdp_outer_axes(resource) if axis not in ep_axes)
+    fsdp_axes = _fsdp_outer_axes(resource)
     fsdp_resource = fsdp_axes[0] if len(fsdp_axes) == 1 else fsdp_axes or None
     if dp_resource is not None and get_mesh_axis_size(dp_resource) > 1:
         return dp_resource
