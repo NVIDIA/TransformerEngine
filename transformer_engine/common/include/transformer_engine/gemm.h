@@ -196,13 +196,19 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
  * Computes:
  *  - `D = alpha * op(A) * op(B) + beta * C`
  *
+ * C must have the same shape and dtype as D, except that FP8 output
+ * requires FP16 or BF16 C (with the same dtype as the bias, if
+ * any). C may be the same tensor as D, in which case the result is
+ * accumulated in-place, but this is not supported with FP8 output. If
+ * C is NULL, it is treated as a zero matrix.
+ *
  *  \param[in]  transa    Whether to transpose A matrix.
  *  \param[in]  transb    Whether to transpose B matrix.
  *  \param[in]  alpha     Scaling factor applied to matmul output.
  *  \param[in]  A         A matrix.
  *  \param[in]  B         B matrix.
  *  \param[in]  beta      Scaling factor applied to C matrix.
- *  \param[in]  C         C matrix.
+ *  \param[in]  C         C matrix. May be the same tensor as D, or NULL for a zero matrix.
  *  \param[out] D         Output matrix.
  *  \param[in]  workspace Workspace tensor.
  *  \param[in]  config    Additional configuration.

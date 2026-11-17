@@ -5,19 +5,16 @@
 """Transformer."""
 import os
 import warnings
-from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 
 from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.jit import (
-    set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
     get_bias_dropout_add,
     bias_dropout_add_fused_train,
@@ -545,16 +542,10 @@ class TransformerLayer(torch.nn.Module):
         self.bias_dropout_fusion = bias_dropout_fusion
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
 
-        # Set bias+dropout+add fusion grad_enable execution handler.
-        use_nvfuser = torch_version() >= (1, 10, 0) and torch_version() < (2, 2, 0)
-        self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
-
-        if self.bias_dropout_fusion:
-            set_jit_fusion_options()
-            if seq_length and micro_batch_size:
-                if self.sequence_parallel:
-                    seq_length = seq_length // self.tp_size
-                warmup_jit_bias_dropout_add_all_dtypes(hidden_size, seq_length, micro_batch_size)
+        if self.bias_dropout_fusion and seq_length and micro_batch_size:
+            if self.sequence_parallel:
+                seq_length = seq_length // self.tp_size
+            warmup_jit_bias_dropout_add_all_dtypes(hidden_size, seq_length, micro_batch_size)
 
         norm_module = {
             "LayerNorm": LayerNorm,
@@ -1023,7 +1014,7 @@ class TransformerLayer(torch.nn.Module):
             else:
                 bias_dropout_add_func = get_bias_dropout_add(self.training)
 
-            with self.bias_dropout_add_exec_handler():
+            with torch.enable_grad():
                 output = bias_dropout_add_func(hidden_state, bias, residual, self.hidden_dropout)
         else:
             if bias is not None and bias.numel() != 0:

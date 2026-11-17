@@ -2,7 +2,8 @@
 #
 # See LICENSE for license information.
 
-"""CuTeDSL MXFP8 quantization kernels."""
+"""CuTeDSL MXFP8 quantization and dequantization kernels."""
 
+from . import dequantize_mxfp8
 from . import quantize_mxfp8_common
 from . import group_quantize_mxfp8_common

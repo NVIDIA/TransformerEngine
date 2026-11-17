@@ -196,9 +196,14 @@ def generate_inputs(M, N, in_dtype, seed=0):
     return fill(), fill()
 
 
-def run_quantize(method, act, x, ain, rowwise, columnwise, fp8_dtype, swizzled):
+def run_quantize(method, act, x, ain, rowwise, columnwise, fp8_dtype, swizzled, use_2d_quant):
     """Quantize via the public dispatch; returns (mxfp8_tensor, dbias_or_None)."""
-    q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+    q = MXFP8Quantizer(
+        fp8_dtype=fp8_dtype,
+        rowwise=rowwise,
+        columnwise=columnwise,
+        with_2d_quantization=use_2d_quant,
+    )
     # Emit scales in the GEMM-swizzled layout (MXFP8QuantConfig::swizzled).
     q.optimize_for_gemm = swizzled
     if method == "CAST_ONLY":
@@ -216,7 +221,7 @@ def run_quantize(method, act, x, ain, rowwise, columnwise, fp8_dtype, swizzled):
     raise ValueError(f"unknown method {method!r}")
 
 
-def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
+def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled, use_2d_quant):
     """Mirror of MXFP8QuantConfig::to_key (quantize_mxfp8_cutedsl.cuh): the name the CuTeDSL backend registers its compiled kernel under for this config.
     Used to check if the CuTeDSL implementation is registered
     """
@@ -229,8 +234,7 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
     elif with_dact:
         desc = f"d{act['desc']}"
     # with_amax is hardcoded to False for now because currently MXFP8 quantizers never allocate an amax
-    # The last False is for use_2d_quantization; these cases never request 2D block scaling
-    flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act, False)
+    flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act, use_2d_quant)
     major, minor = device_compute_capability()
     return (
         f"cutedsl_mxfp8_sm{major * 10 + minor}_"
@@ -271,7 +275,15 @@ def extract_quantized_output(out, rowwise, columnwise, swizzled):
 
 
 def run_test_case(
-    method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=False, input_offset=0
+    method,
+    act,
+    shape,
+    block_size,
+    in_dtype,
+    fp8_dtype,
+    swizzled=False,
+    input_offset=0,
+    use_2d_quant=False,
 ):
     """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the
     same input and config. input_offset (in elements) shifts x's data pointer past the
@@ -287,14 +299,14 @@ def run_test_case(
 
     set_cutedsl_backend(False)
     out_cuda, dbias_cuda = run_quantize(
-        method, act, x, act_input, rowwise, columnwise, fp8_dtype, swizzled
+        method, act, x, act_input, rowwise, columnwise, fp8_dtype, swizzled, use_2d_quant
     )
     cuda_output = extract_quantized_output(out_cuda, rowwise, columnwise, swizzled)
 
     set_cutedsl_backend(True)
     try:
         out_cutedsl, dbias_cutedsl = run_quantize(
-            method, act, x, act_input, rowwise, columnwise, fp8_dtype, swizzled
+            method, act, x, act_input, rowwise, columnwise, fp8_dtype, swizzled, use_2d_quant
         )
         cutedsl_output = extract_quantized_output(out_cutedsl, rowwise, columnwise, swizzled)
     finally:
@@ -304,7 +316,7 @@ def run_test_case(
     # CuTeDSL backend supports, so its kernel must have been registered under the
     # config key. If not, the backend rejected or missed the config and the
     # comparison above was CUDA vs CUDA.
-    key = get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, columnwise, swizzled)
+    key = get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, use_2d_quant)
     assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
         f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
         "to CUDA and this case compared CUDA against itself"
@@ -314,6 +326,8 @@ def run_test_case(
     tag = (
         f"{method}/{act['name']}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}/{layout}"
     )
+    if use_2d_quant:
+        tag += "/2d"
     for name, cuda_bytes in cuda_output.items():
         assert torch.equal(
             cutedsl_output[name], cuda_bytes
@@ -332,6 +346,18 @@ def run_test_case(
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_cast_only(swizzled, fp8_dtype, in_dtype, block_size, shape):
     run_test_case("CAST_ONLY", IDENTITY, shape, block_size, in_dtype, fp8_dtype, swizzled)
+
+
+# 2D block scaling (one scale per 32x32 block) is only reachable as a plain cast.
+@pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_cast_only_2d(swizzled, fp8_dtype, in_dtype, block_size, shape):
+    run_test_case(
+        "CAST_ONLY", IDENTITY, shape, block_size, in_dtype, fp8_dtype, swizzled, use_2d_quant=True
+    )
 
 
 def test_cast_only_rowwise_specialized_grid_y_overflow():
@@ -654,3 +680,43 @@ def test_specialized_kernels(shape, block_size, in_dtype, swizzled, input_offset
         swizzled,
         input_offset,
     )
+
+
+OUT_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
+DEQUANT_SHAPES = MATRIX_SIZES + [(100, 48)]
+
+
+# Test cases for dequantization (mirrors C++ test's OperatorTest_DequantizeMXFP8).
+# With both data copies present, dequantize reads the rowwise one.
+@pytest.mark.parametrize("shape", DEQUANT_SHAPES, ids=get_shape_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("out_dtype", OUT_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_dequantize(swizzled, fp8_dtype, out_dtype, block_size, shape):
+    M, N = shape
+    rowwise = block_size[1] != 1
+    columnwise = block_size[0] != 1
+    x, _ = generate_inputs(M, N, torch.bfloat16)
+    set_cutedsl_backend(False)
+    q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise)
+    q.optimize_for_gemm = swizzled
+    qx = q(x)
+    out_cuda = qx.dequantize(dtype=out_dtype)
+
+    set_cutedsl_backend(True)
+    try:
+        out_cutedsl = qx.dequantize(dtype=out_dtype)
+    finally:
+        set_cutedsl_backend(False)
+
+    major, minor = device_compute_capability()
+    key = (
+        f"cutedsl_mxfp8_dequant_sm{major * 10 + minor}_{FP8_TO_KEY[fp8_dtype]}_"
+        f"{DTYPE_TO_STR[out_dtype]}_{int(rowwise)}_{int(columnwise)}_{int(swizzled)}"
+    )
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
+        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+        "to CUDA and this case compared CUDA against itself"
+    )
+    assert torch.equal(out_cutedsl, out_cuda)
