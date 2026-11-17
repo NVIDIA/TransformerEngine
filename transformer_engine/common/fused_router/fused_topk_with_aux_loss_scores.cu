@@ -577,10 +577,9 @@ void fused_topk_with_aux_loss_scores_backward(const Tensor &logits, const Tensor
               grad_probs.data.dtype == logits.data.dtype, kGradProbsInLogitsType,
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   has_aux_grad, kHasAuxGrad,
-                  using GradProbType =
-                      std::conditional_t<kGradProbsInLogitsType, DataType, float>;
-                  fused_topk_with_aux_loss_scores_backward_kernel<DataType, GradProbType,
-                                                                  IndexType, kHasAuxGrad>
+                  using GradProbType = std::conditional_t<kGradProbsInLogitsType, DataType, float>;
+                  fused_topk_with_aux_loss_scores_backward_kernel<DataType, GradProbType, IndexType,
+                                                                  kHasAuxGrad>
                   <<<blocks, kBwdThreadsPerBlock, 0, stream>>>(
                       reinterpret_cast<const DataType *>(logits.data.dptr),
                       reinterpret_cast<const IndexType *>(topk_indices.data.dptr),
