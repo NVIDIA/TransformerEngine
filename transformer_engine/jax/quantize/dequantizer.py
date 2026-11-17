@@ -143,12 +143,10 @@ class BlockScaleDequantizer(Dequantizer):
         """Dequantize a tensor using block scaling.
 
         Args:
-            data: The quantized tensor data
-            scale_inv: The inverse scaling factors
-            dq_dtype: The data type for dequantized values
-            scaling_mode: The scaling mode used for quantization
-            is_colwise: Whether the scaling is column-wise
-            flatten_axis: The axis along which the tensor could be flattened to 2D
+            scaled_tensor: The block-scaled tensor to dequantize. Its fields supply the
+                quantized data, the inverse scaling factors, the output dtype, the scaling
+                mode, whether the scaling is column-wise, and the axis it can be flattened
+                to 2D along.
 
         Returns:
             The dequantized tensor

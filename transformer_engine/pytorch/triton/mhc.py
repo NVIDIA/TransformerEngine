@@ -487,7 +487,6 @@ class mHCProjectionOp(torch.autograd.Function):
         norm_weight (tensor or None): Optional, or tensor of shape (K,). RMSNorm's learnable per-element affine parameters
         use_tf32 (bool): Whether to use TF32 precision for matmul operations. If False, uses IEEE or TF32x3 for better precision.
                          Due to a triton bug (https://github.com/triton-lang/triton/issues/10176), we will use TF32x3 if x is bf16 and phi is fp32, or use IEEE if otherwise.
-        n (int): Number of hyper connections, where only n=4 is supported in the current implementation.
         fused_grad_x_acc_buffer (torch.Tensor or None): A pre-allocated buffer for inplace gradient accumulation to avoid PyTorch autograd overhead.
 
         Returns:

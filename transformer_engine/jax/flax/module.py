@@ -335,7 +335,7 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
 
         Parameters
         ----------
-        inputs : jax.numpy.ndarray
+        x : jax.numpy.ndarray
             Input tensors.
 
         Returns
