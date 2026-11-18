@@ -98,7 +98,7 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
 }
 
 TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer) {
-  auto ret = TensorWrapper(NVTE_MXFP8_1D_SCALING);
+  auto ret = TensorWrapper(NVTE_MXFP4_1D_SCALING);
 
   const py::object rowwise_data = tensor.attr("_rowwise_data");
   const py::object columnwise_data = tensor.attr("_columnwise_data");
@@ -233,6 +233,9 @@ NVTEScalingMode ScalingModeFromQuantizer(py::handle quantizer) {
   if (IsMXFP8Quantizers(quantizer_ptr)) {
     return NVTE_MXFP8_1D_SCALING;
   }
+  if (IsMXFP4Quantizers(quantizer_ptr)) {
+    return NVTE_MXFP4_1D_SCALING;
+  }
   if (IsNVFP4Quantizers(quantizer_ptr)) {
     return NVTE_NVFP4_1D_SCALING;
   }
@@ -245,7 +248,7 @@ NVTEScalingMode ScalingModeFromQuantizer(py::handle quantizer) {
 
 DType GetTransformerEngineDTypeForScaleInv(py::handle quantizer, at::Tensor scale_inv) {
   auto *quantizer_ptr = quantizer.ptr();
-  if (IsMXFP8Quantizers(quantizer_ptr)) {
+  if (IsMXFP8Quantizers(quantizer_ptr) || IsMXFP4Quantizers(quantizer_ptr)) {
     return DType::kFloat8E8M0;
   }
   if (IsFloat8BlockwiseQuantizers(quantizer_ptr)) {

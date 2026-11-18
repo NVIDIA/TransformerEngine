@@ -92,14 +92,14 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       }
       break;
     }
+    case NVTE_MXFP4_1D_SCALING: {
+      NVTE_CHECK(!IS_ACT, "Fused activation is not supported for MXFP4 quantization.");
+      NVTE_CHECK(!quant_config_cpp.mxfp8_2d_quantization,
+                 "2D quantization is not supported for MXFP4.");
+      mxfp4::quantize(*input_tensor, noop_tensor, output_tensor, stream);
+      break;
+    }
     case NVTE_MXFP8_1D_SCALING: {
-      if (is_fp4_dtype(output_tensor->dtype())) {
-        NVTE_CHECK(!IS_ACT, "Fused activation is not supported for MXFP4 quantization.");
-        NVTE_CHECK(!quant_config_cpp.mxfp8_2d_quantization,
-                   "2D quantization is not supported for MXFP4.");
-        mxfp4::quantize(*input_tensor, noop_tensor, output_tensor, stream);
-        break;
-      }
       const Tensor *dummy_input_tensor = nullptr;
       Tensor *dummy_dbias_tensor = nullptr;
       Tensor *dummy_workspace_tensor = nullptr;

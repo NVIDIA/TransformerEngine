@@ -44,10 +44,12 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
       fp8::dequantize(input, output, stream);
       break;
     }
+    case NVTE_MXFP4_1D_SCALING: {
+      mxfp4::dequantize(input, output, stream);
+      break;
+    }
     case NVTE_MXFP8_1D_SCALING: {
-      if (is_fp4_dtype(input.dtype())) {
-        mxfp4::dequantize(input, output, stream);
-      } else if (is_supported_by_CC_100()) {
+      if (is_supported_by_CC_100()) {
         bool dequantized_with_cutedsl = false;
 #ifdef NVTE_WITH_CUTEDSL
         dequantized_with_cutedsl = cutedsl_backend::mxfp8_dequantize_cutedsl(input, output, stream);

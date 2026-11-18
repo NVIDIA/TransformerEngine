@@ -115,10 +115,7 @@ __global__ void broadcast_bias_kernel(OType *out, const BiasType *bias, size_t r
 #endif
 
 bool is_mxfp4_mxfp8_gemm(const Tensor &A, const Tensor &B) {
-  if (!is_mxfp_scaling(A.scaling_mode) || !is_mxfp_scaling(B.scaling_mode)) {
-    return false;
-  }
-  return is_fp4_dtype(A.dtype()) != is_fp4_dtype(B.dtype());
+  return is_mxfp4_scaling(A.scaling_mode) && is_mxfp8_scaling(B.scaling_mode);
 }
 
 void cutlass_mxfp4_mxfp8_gemm(const Tensor *inputA, const Tensor *inputB, const Tensor *inputC,

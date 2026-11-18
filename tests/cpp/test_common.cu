@@ -145,7 +145,7 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     ret.type_size_bits = typeToNumBits(*scale_type);
     return {ret, ret};
   }
-  if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+  if (scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_MXFP4_1D_SCALING) {
     std::vector<size_t> shape_vec;
     for (size_t i = 0; i < shape.ndim; ++i) {
       shape_vec.push_back(shape.data[i]);
@@ -345,7 +345,8 @@ Tensor::Tensor(const std::string& name,
       }
       break;
     }
-    case NVTE_MXFP8_1D_SCALING: {
+    case NVTE_MXFP8_1D_SCALING:
+    case NVTE_MXFP4_1D_SCALING: {
       // Column-wise data matches shape
       for (size_t i = 0; i < shape.ndim; ++i) {
         columnwise_shape_vec.emplace_back(shape.data[i]);
@@ -387,6 +388,7 @@ Tensor::Tensor(const std::string& name,
     }
     break;
   case NVTE_MXFP8_1D_SCALING:
+  case NVTE_MXFP4_1D_SCALING:
   case NVTE_BLOCK_SCALING_1D:
   case NVTE_BLOCK_SCALING_2D:
   case NVTE_NVFP4_1D_SCALING:

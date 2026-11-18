@@ -138,8 +138,8 @@ void check_swizzled(Tensor &input, Tensor &swizzled, const std::vector<size_t> &
   const size_t data_bytes = product(shape) / 2;
   const DType itype = input.dtype();
 
-  Tensor compact("compact", shape, DType::kFloat4E2M1, rowwise, !rowwise, NVTE_MXFP8_1D_SCALING);
-  Tensor ref("ref", shape, DType::kFloat4E2M1, rowwise, !rowwise, NVTE_MXFP8_1D_SCALING);
+  Tensor compact("compact", shape, DType::kFloat4E2M1, rowwise, !rowwise, NVTE_MXFP4_1D_SCALING);
+  Tensor ref("ref", shape, DType::kFloat4E2M1, rowwise, !rowwise, NVTE_MXFP4_1D_SCALING);
   ref.set_with_gemm_swizzled_scales(true);
   nvte_quantize(input.data(), compact.data(), 0);
   cudaMemcpy(rowwise ? ref.rowwise_dptr() : ref.columnwise_dptr(),
@@ -180,7 +180,7 @@ void performTest(const std::vector<size_t> &shape, bool rowwise, bool columnwise
   const DType itype = TypeInfo<InputType>::dtype;
   Tensor input("input", shape, itype);
   Tensor quantized("quantized", shape, DType::kFloat4E2M1, rowwise, columnwise,
-                   NVTE_MXFP8_1D_SCALING);
+                   NVTE_MXFP4_1D_SCALING);
   Tensor output("output", shape, itype);
   fillUniform(&input);
   quantized.set_with_gemm_swizzled_scales(swizzled);

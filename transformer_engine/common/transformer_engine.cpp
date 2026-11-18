@@ -52,6 +52,8 @@ std::string to_string(const NVTEScalingMode &mode) {
       return "NVTE_DELAYED_TENSOR_SCALING";
     case NVTE_MXFP8_1D_SCALING:
       return "NVTE_MXFP8_1D_SCALING";
+    case NVTE_MXFP4_1D_SCALING:
+      return "NVTE_MXFP4_1D_SCALING";
     case NVTE_BLOCK_SCALING_1D:
       return "NVTE_BLOCK_SCALING_1D";
     case NVTE_BLOCK_SCALING_2D:
@@ -102,7 +104,7 @@ void CheckScaleTensorShape(const Tensor &t, std::string_view name) {
       }
     }
   } else {
-    if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    if (is_mxfp_scaling(t.scaling_mode)) {
       // Need (4, 128) alignment even for e8 scaling factor
       constexpr std::array<size_t, 2> block_alignment{128ul, 4ul};
       const auto [first_dim, last_dim] = t.flat_2d_dims();
@@ -175,7 +177,7 @@ void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_i
                  "(expected Float32 or Byte, got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
-  } else if (is_fp4_dtype(type) && is_mxfp_scaling(t.scaling_mode)) {
+  } else if (is_fp4_dtype(type) && is_mxfp4_scaling(t.scaling_mode)) {
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "MXFP4 scaling factor input ", name,
                  "_scale_inverse must be allocated");
@@ -255,7 +257,7 @@ void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty)
                  "(expected Float32 or Float8E8M0, got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
-  } else if (is_fp4_dtype(type) && is_mxfp_scaling(t.scaling_mode)) {
+  } else if (is_fp4_dtype(type) && is_mxfp4_scaling(t.scaling_mode)) {
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "MXFP4 scaling factor output ", name,
                  "_scale_inverse must be allocated");

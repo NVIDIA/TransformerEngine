@@ -53,7 +53,7 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
     """Mixin class that holds data attributes of MXFP4Tensor.
 
     Data is FP4 E2M1 with an E8M0 scale per 32 consecutive elements,
-    using the MXFP8 scaling mode and scale layouts. Both directions
+    using the MXFP4 scaling mode and scale layouts. Both directions
     keep the logical (untransposed) orientation, with two adjacent
     elements of the last dimension packed per byte.
 

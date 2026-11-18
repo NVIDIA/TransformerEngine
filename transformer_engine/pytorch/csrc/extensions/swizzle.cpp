@@ -72,6 +72,7 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   const auto scaling_mode = tensor.scaling_mode();
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
+    case NVTE_MXFP4_1D_SCALING:
     case NVTE_NVFP4_1D_SCALING:
       // Tensor format requires scale swizzling
       break;
@@ -183,6 +184,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
   // Return early if scale swizzling is not required
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
+    case NVTE_MXFP4_1D_SCALING:
     case NVTE_NVFP4_1D_SCALING:
       // Tensor format requires scale swizzling
       break;
@@ -674,6 +676,7 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_impl(std::vector<py::object> &
     if (i == 0) {
       switch (tw.scaling_mode()) {
         case NVTE_MXFP8_1D_SCALING:
+        case NVTE_MXFP4_1D_SCALING:
         case NVTE_NVFP4_1D_SCALING:
           break;
         case NVTE_INVALID_SCALING:
@@ -760,6 +763,7 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   const auto scaling_mode = tensor_nvte.scaling_mode();
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
+    case NVTE_MXFP4_1D_SCALING:
     case NVTE_NVFP4_1D_SCALING:
       // Tensor format requires scale swizzling
       break;
@@ -789,6 +793,7 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   // Update Python tensor with swizzled scales
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
+    case NVTE_MXFP4_1D_SCALING:
       if (has_rowwise_scales) {
         tensor.attr("_rowwise_scale_inv") = rowwise_scales;
       }

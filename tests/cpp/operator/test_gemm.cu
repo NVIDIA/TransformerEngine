@@ -263,7 +263,7 @@ void run_mxfp4_mxfp8_gemm_test(const MXFP4GemmTestParams &params, Accumulation a
   Tensor B_fp32("B_fp32", B_shape, DType::kFloat32);
   set_data(&A_fp32, A_values);
   set_data(&B_fp32, B_values);
-  Tensor A("A", A_shape, DType::kFloat4E2M1, transa, !transa, NVTE_MXFP8_1D_SCALING);
+  Tensor A("A", A_shape, DType::kFloat4E2M1, transa, !transa, NVTE_MXFP4_1D_SCALING);
   Tensor B("B", B_shape, DType::kFloat8E4M3, true, false, NVTE_MXFP8_1D_SCALING);
   A.set_with_gemm_swizzled_scales(true);
   B.set_with_gemm_swizzled_scales(true);

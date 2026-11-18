@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file cast.h
- *  \brief Functions to cast to/from FP8/MXFP8.
+ *  \brief Functions to cast to/from quantized formats.
  */
 
 #ifndef TRANSFORMER_ENGINE_CAST_H_
@@ -77,14 +77,21 @@ extern "C" {
  *  This quantization mode includes both the calculation of the scaling factors
  *  per-tile and quantization of the row and/or columnwise tiles. No precalculated
  *  absolute max is required. The scaling factors are also rounded to powers of 2.
+ *
+ *  4) MXFP4 scaling, NVTE_MXFP4_1D_SCALING, stores FP4 E2M1 data with an E8M0
+ *  scale per block of 32 elements. Rowwise and columnwise MXFP4 scales support
+ *  compact and GEMM-swizzled layouts. Both data directions
+ *  retain the logical orientation, packing two adjacent columns per byte.
+ *  Quantization requires CUDA 12.8 or newer. MXFP4 does not support grouped
+ *  quantization, fused activations, fused bias gradients, or 2D quantization.
  */
 
-/*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8.
+/*! \brief Casts input tensor to a quantized format.
  *         The type of quantized tensor in the output depends on the scaling mode of the output
  *         tensor. See file level comments.
  *
  *  \param[in]     input            Input tensor to be cast.
- *  \param[in,out] output           Output FP8/MXFP8/BlockwiseFP8 tensor.
+ *  \param[in,out] output           Output quantized tensor.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
@@ -410,10 +417,10 @@ void nvte_group_quantize_dbias_dsrelu(const NVTEGroupedTensor input,
                                       cudaStream_t stream);
 
 /*! \brief Casts input tensor from reduced to higher precision.
- *         In case of the MXFP8 dequantization, the dequantized values are stored to the rowwise
+ *         In case of MXFP8 or MXFP4 dequantization, the values are stored to the rowwise
  *         data of the output tensor, regardless of whether the row- or columnwise scaling is used.
  *
- *  \param[in]     input     Input FP8/MXFP8 tensor to be cast.
+ *  \param[in]     input     Input quantized tensor to be cast.
  *  \param[in,out] output    Output tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
  */

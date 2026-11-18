@@ -448,14 +448,14 @@ class NVFP4Quantizer : public Quantizer {
 
 /*! @brief Quantizer for FP4 E2M1 data with MX (E8M0, block-32) scaling.
  *
- *  Uses the MXFP8 scaling mode and scale layouts. Both directions store
+ *  Supports compact and GEMM-swizzled MXFP4 scale layouts. Both directions store
  *  packed [..., K/2] data in the logical (untransposed) orientation.
  */
 class MXFP4Quantizer : public Quantizer {
  public:
   explicit MXFP4Quantizer(const py::handle& quantizer);
 
-  NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP8_1D_SCALING; }
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP4_1D_SCALING; }
 
   void set_quantization_params(TensorWrapper* tensor) const override {}
 

@@ -2940,7 +2940,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(
   NVTE_CHECK(result != nullptr, "Failed to create MXFP4 tensor instance");
   py::object out_py = py::reinterpret_steal<py::object>(result);
 
-  TensorWrapper out_cpp(NVTE_MXFP8_1D_SCALING);
+  TensorWrapper out_cpp(NVTE_MXFP4_1D_SCALING);
   if (rowwise_usage) {
     out_cpp.set_rowwise_data(rowwise_data_tensor.data_ptr(), DType::kFloat4E2M1, shape);
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E8M0,
@@ -3021,7 +3021,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
          "_columnwise_scale_inv", true);
   tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
 
-  TensorWrapper out_cpp(NVTE_MXFP8_1D_SCALING);
+  TensorWrapper out_cpp(NVTE_MXFP4_1D_SCALING);
   if (rowwise_usage) {
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), DType::kFloat4E2M1, shape);
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
