@@ -27,6 +27,7 @@
 #include "transformer_engine/multi_tensor.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
+#include "util.h"
 
 namespace transformer_engine {
 namespace pytorch {
@@ -36,6 +37,69 @@ namespace {
 std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   const auto &shape = tensor.shape();
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
+}
+
+std::vector<TensorWrapper> prepare_compact_quantization_outputs(
+    const std::vector<TensorWrapper> &outputs, const std::vector<bool> &needs_swizzle,
+    std::vector<at::Tensor> &scale_buffers) {
+  NVTE_CHECK(outputs.size() == needs_swizzle.size(), "Mismatched quantization outputs");
+  std::vector<TensorWrapper> compact_outputs;
+  if (std::none_of(needs_swizzle.begin(), needs_swizzle.end(), [](bool value) { return value; })) {
+    return compact_outputs;
+  }
+  compact_outputs.reserve(outputs.size());
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const auto &output = outputs[i];
+    auto &view = compact_outputs.emplace_back(output.scaling_mode());
+    set_compact_tensor_data(view, output, /*rowwise=*/true,
+                            output.get_rowwise_scale_inv().data_ptr);
+    set_compact_tensor_data(view, output, /*rowwise=*/false,
+                            output.get_columnwise_scale_inv().data_ptr);
+    const auto scale = output.get_scale();
+    view.set_scale(scale.data_ptr, static_cast<DType>(scale.dtype), scale.shape);
+    view.set_with_gemm_swizzled_scales(output.get_with_gemm_swizzled_scales() && !needs_swizzle[i]);
+    view.set_row_scaled_nvfp4(output.get_row_scaled_nvfp4());
+    view.set_nvfp4_e4m3_max(output.get_nvfp4_e4m3_max());
+  }
+  for (bool rowwise : {true, false}) {
+    std::vector<std::vector<size_t>> shapes;
+    std::vector<size_t> indices;
+    for (size_t i = 0; i < outputs.size(); ++i) {
+      const auto scales =
+          rowwise ? outputs[i].get_rowwise_scale_inv() : outputs[i].get_columnwise_scale_inv();
+      if (needs_swizzle[i] && scales.data_ptr != nullptr) {
+        shapes.emplace_back(scales.shape.data, scales.shape.data + scales.shape.ndim);
+        indices.push_back(i);
+      }
+    }
+    if (indices.empty()) continue;
+    auto buffers = bulk_allocate(shapes, std::vector<at::ScalarType>(shapes.size(), at::kByte),
+                                 std::nullopt, std::vector<size_t>(shapes.size(), 16));
+    for (size_t j = 0; j < indices.size(); ++j) {
+      const size_t i = indices[j];
+      auto &scales = scale_buffers.emplace_back(std::move(buffers[j]));
+      set_compact_tensor_data(compact_outputs[i], outputs[i], rowwise, scales.data_ptr());
+    }
+  }
+  return compact_outputs;
+}
+
+std::vector<TensorWrapper> prepare_scale_swizzle_views(
+    const std::vector<TensorWrapper> &compact_outputs, const std::vector<TensorWrapper> &outputs,
+    const std::vector<bool> &needs_swizzle, bool rowwise, std::vector<NVTETensor> &sources,
+    std::vector<NVTETensor> &destinations) {
+  std::vector<TensorWrapper> views;
+  if (compact_outputs.empty()) return views;
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const auto scales = rowwise ? compact_outputs[i].get_rowwise_scale_inv()
+                                : compact_outputs[i].get_columnwise_scale_inv();
+    if (!needs_swizzle[i] || scales.data_ptr == nullptr) continue;
+    auto &view = views.emplace_back(compact_outputs[i].scaling_mode());
+    set_compact_tensor_data(view, compact_outputs[i], rowwise, scales.data_ptr);
+    sources.push_back(view.data());
+    destinations.push_back(outputs[i].data());
+  }
+  return views;
 }
 
 void allreduce_nvfp4_amax_tensors(NVFP4Quantizer *nvfp4_quantizer_cpp,
@@ -81,12 +145,6 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   // Perform quantization
   quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
 
-  // Post-quantize swizzle for quantizers whose kernel does not bake
-  // the GEMM-swizzled scale layout in directly
-  if (quantizer_cpp->optimize_for_gemm && !output_cpp.get_with_gemm_swizzled_scales()) {
-    inplace_swizzle_scale_for_gemm(output_py);
-  }
-
   return output_py;
 }
 
@@ -128,9 +186,6 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
   }
 
   nvfp4_quantizer_cpp->quantize_impl(input_cpp, output_cpp, std::nullopt, false);
-  if (quantizer_cpp->optimize_for_gemm && !output_cpp.get_with_gemm_swizzled_scales()) {
-    inplace_swizzle_scale_for_gemm(output_py);
-  }
 
   return output_py;
 }
@@ -339,8 +394,12 @@ py::object group_quantize(const at::Tensor &input, py::handle quantizer, const s
     NVTE_CHECK(output.is_none(),
                "group_quantize: output reuse is not supported with row-scaled NVFP4.");
     if (first_dims.has_value()) {
-      NVTE_CHECK(first_dims->is_contiguous() && first_dims->scalar_type() == at::kLong,
-                 "group_quantize: first_dims must be a contiguous int64 tensor.");
+      NVTE_CHECK(first_dims->is_cuda() && first_dims->is_contiguous() &&
+                     first_dims->scalar_type() == at::kLong,
+                 "group_quantize: first_dims must be a contiguous int64 CUDA tensor.");
+      NVTE_CHECK(static_cast<size_t>(first_dims->numel()) == num_tensors,
+                 "group_quantize: first_dims has ", first_dims->numel(),
+                 " entries, but num_tensors is ", num_tensors, ".");
     } else {
       NVTE_CHECK(num_tensors > 0 && logical_first_dim % (num_tensors * 128) == 0,
                  "group_quantize: row-scaled NVFP4 with uniform shapes requires the first "
@@ -691,6 +750,74 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
 
+std::tuple<at::Tensor, at::Tensor> nvfp4_group_hadamard_amax(
+    const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
+    std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
+    std::optional<at::Tensor> tensor_offsets) {
+  using namespace transformer_engine::pytorch::detail;
+  init_extension();
+
+  NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+  NVTE_CHECK(!last_dims.has_value(),
+             "nvfp4_group_hadamard_amax: varying last dim is not supported with NVFP4.");
+  NVTE_CHECK(first_dims.has_value() && tensor_offsets.has_value(),
+             "nvfp4_group_hadamard_amax: first_dims and tensor_offsets are required.");
+  NVTE_CHECK(first_dims->is_cuda() && first_dims->scalar_type() == at::kLong &&
+                 first_dims->numel() == static_cast<int64_t>(num_tensors),
+             "nvfp4_group_hadamard_amax: first_dims must be an int64 CUDA tensor with one "
+             "entry per group.");
+  NVTE_CHECK(tensor_offsets->is_cuda() && tensor_offsets->scalar_type() == at::kLong &&
+                 tensor_offsets->numel() == static_cast<int64_t>(num_tensors + 1),
+             "nvfp4_group_hadamard_amax: tensor_offsets must be an int64 CUDA tensor with "
+             "num_tensors + 1 entries.");
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  NVTE_CHECK(IsNVFP4Quantizers(quantizer.ptr()),
+             "nvfp4_group_hadamard_amax only supports NVFP4 quantizers.");
+  NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+  NVTE_CHECK(nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax,
+             "nvfp4_group_hadamard_amax expects the NVFP4 RHT recipe with post-RHT amax.");
+
+  std::vector<size_t> logical_shape;
+  for (const auto &d : tensor.sizes()) {
+    logical_shape.push_back(d);
+  }
+  const auto float_opts = at::TensorOptions().dtype(at::kFloat).device(tensor.device());
+  auto rowwise_amax = at::zeros({static_cast<int64_t>(num_tensors)}, float_opts);
+  auto columnwise_amax = at::zeros({static_cast<int64_t>(num_tensors)}, float_opts);
+  if (logical_shape[0] == 0 || logical_shape[1] == 0) {
+    return {rowwise_amax, columnwise_amax};
+  }
+
+  const auto input_dtype = GetTransformerEngineDType(tensor.scalar_type());
+  auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
+  grouped_input_tensor.set_rowwise_data(tensor.data_ptr(), input_dtype, getTensorShape(tensor));
+
+  // The amax launcher derives which amax to compute from the storage the output declares:
+  // row-wise data requests the pre-RHT amax and column-wise data the post-RHT (transposed)
+  // amax. It only ever writes the amax buffers, so alias the input as both and allocate no
+  // quantized storage.
+  auto grouped_amax_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
+  grouped_amax_tensor.set_rowwise_data(tensor.data_ptr(), input_dtype, getTensorShape(tensor));
+  grouped_amax_tensor.set_columnwise_data(tensor.data_ptr(), input_dtype, getTensorShape(tensor));
+  grouped_amax_tensor.set_amax(rowwise_amax.data_ptr(), DType::kFloat32,
+                               getTensorShape(rowwise_amax));
+  grouped_amax_tensor.set_columnwise_amax(columnwise_amax.data_ptr(), DType::kFloat32,
+                                          getTensorShape(columnwise_amax));
+  grouped_amax_tensor.set_first_dims(first_dims->data_ptr(), DType::kInt64,
+                                     getTensorShape(*first_dims));
+  grouped_amax_tensor.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
+                                         getTensorShape(*tensor_offsets));
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_hadamard_transform_amax_graph_safe(
+        grouped_input_tensor.data(), grouped_amax_tensor.data(), 0,
+        nvfp4_quantizer_cpp->rht_matrix_random_sign_mask_t, at::cuda::getCurrentCUDAStream());
+  });
+
+  return {rowwise_amax, columnwise_amax};
+}
+
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
                                 std::optional<at::Tensor> last_dims,
@@ -942,14 +1069,8 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
              "Requantizing a grouped input requires dims that are multiples of 128, but got (",
              total_tokens, ", ", hidden_dim, ").");
 
-  // Fused path (default; NVTE_FUSED_GROUP_REQUANTIZE=0 recovers the unfused chain): one
-  // kernel replaces the group_dequantize -> group_quantize(columnwise) ->
-  // grouped_swizzle(rowwise scales) chain below, with the dequantized values living only in
-  // shared memory unless requested. The BF16-intermediate kernel variant reproduces the
-  // unfused chain's numerics, hence the otype gate; anything the kernel does not cover
-  // falls through to the unfused chain.
-  // The kernel takes the grouped tensor's cached element-based tensor_offsets;
-  // a prefix-sum over first_dims is only the fallback when they are absent.
+  // The common API selects the faster requantization kernel when no BF16 output
+  // is requested. Its BF16 intermediate reproduces the unfused chain's numerics.
   const bool tensor_offsets_usable =
       tensor_offsets.has_value() && tensor_offsets->scalar_type() == at::kLong &&
       tensor_offsets->numel() == static_cast<int64_t>(num_tensors) + 1;
@@ -984,47 +1105,48 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     at::Tensor columnwise_data = at::empty({tokens_i64 * hidden_i64}, options);
     at::Tensor columnwise_scale_inv = at::empty({tokens_i64 / 32 * hidden_i64}, options);
     at::Tensor swizzled_rowwise_scale_inv = at::empty({static_cast<int64_t>(num_scales)}, options);
+    const at::Tensor first_dims_i64 =
+        first_dims.has_value()
+            ? (first_dims->scalar_type() == at::kLong ? *first_dims : first_dims->to(at::kLong))
+            : at::floor_divide(element_offsets.slice(0, 1, num_tensors + 1) -
+                                   element_offsets.slice(0, 0, num_tensors),
+                               hidden_i64);
+    const std::vector<size_t> grouped_shape = {total_tokens, hidden_dim};
+    const std::vector<size_t> flat_data_shape = {total_tokens * hidden_dim};
+    const std::vector<size_t> scale_shape = {num_scales};
+    const std::vector<size_t> dims_shape = {num_tensors};
+    const std::vector<size_t> offsets_shape = {num_tensors + 1};
+
+    GroupedTensorWrapper input_nvte(num_tensors, grouped_shape, NVTE_MXFP8_1D_SCALING);
+    input_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype, flat_data_shape);
+    input_nvte.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                     getTensorShape(rowwise_scale_inv));
+    input_nvte.set_first_dims(first_dims_i64.data_ptr(), DType::kInt64, dims_shape);
+    input_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
+
+    GroupedTensorWrapper output_nvte(num_tensors, grouped_shape, NVTE_MXFP8_1D_SCALING);
+    output_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype, flat_data_shape);
+    output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                      scale_shape);
+    output_nvte.set_columnwise_data(columnwise_data.data_ptr(), DType::kFloat8E4M3,
+                                    flat_data_shape);
+    output_nvte.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                         scale_shape);
+    output_nvte.set_first_dims(first_dims_i64.data_ptr(), DType::kInt64, dims_shape);
+    output_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
+    output_nvte.set_with_gemm_swizzled_scales(true);
+
     at::Tensor dequantized;
+    TensorWrapper dequantized_nvte;
     if (return_dequantized) {
       dequantized =
           at::empty({tokens_i64, hidden_i64}, rowwise_data.options().dtype(at::kBFloat16));
+      dequantized_nvte.set_rowwise_data(dequantized.data_ptr(), DType::kBFloat16, grouped_shape);
     }
-
-    TensorWrapper input_nvte(NVTE_MXFP8_1D_SCALING);
-    input_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype,
-                                std::vector<size_t>{total_tokens, hidden_dim});
-    input_nvte.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
-                                     std::vector<size_t>{total_tokens, hidden_dim / 32});
-
-    // After the kernel the output is GEMM-ready: it keeps consuming the input's rowwise
-    // data, so that slot aliases the input.
-    TensorWrapper output_nvte(NVTE_MXFP8_1D_SCALING);
-    output_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype,
-                                 std::vector<size_t>{total_tokens, hidden_dim});
-    output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
-                                      std::vector<size_t>{num_scales});
-    output_nvte.set_columnwise_data(columnwise_data.data_ptr(), DType::kFloat8E4M3,
-                                    std::vector<size_t>{total_tokens, hidden_dim});
-    output_nvte.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
-                                         std::vector<size_t>{total_tokens / 32 * hidden_dim});
-
-    TensorWrapper element_offsets_nvte;
-    element_offsets_nvte.set_rowwise_data(element_offsets.data_ptr(), DType::kInt64,
-                                          std::vector<size_t>{num_tensors + 1});
-    TensorWrapper dequantized_nvte;
-    if (return_dequantized) {
-      dequantized_nvte.set_rowwise_data(dequantized.data_ptr(), DType::kBFloat16,
-                                        std::vector<size_t>{total_tokens, hidden_dim});
-    }
-
-    // BF16 intermediate: matches the unfused chain, which materializes the dequantized
-    // tensor in otype (gated to BF16 above) before requantizing.
-    QuantizationConfigWrapper quant_config;
-    quant_config.set_use_fast_math(true);
 
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_group_requantize(input_nvte.data(), output_nvte.data(), element_offsets_nvte.data(),
-                            return_dequantized ? dequantized_nvte.data() : nullptr, quant_config,
+      nvte_group_requantize(input_nvte.data(), output_nvte.data(),
+                            return_dequantized ? dequantized_nvte.data() : nullptr, nullptr,
                             at::cuda::getCurrentCUDAStream());
     });
 
@@ -1032,11 +1154,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     grouped_x.attr("columnwise_data") = columnwise_data;
     grouped_x.attr("columnwise_scale_inv") = columnwise_scale_inv;
     grouped_x.attr("_with_gemm_swizzled_scales") = py::cast(true);
-
-    if (return_dequantized) {
-      return py::cast(dequantized);
-    }
-    return py::none();
+    return return_dequantized ? py::cast(dequantized) : py::none();
   }
 
   // Dequantize first: it reads the rowwise scales, which the swizzle below replaces. Left
@@ -1120,9 +1238,31 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
                                 nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
     });
   } else {
-    // Quantize kernels individually
+    std::vector<bool> needs_swizzle(num_tensors);
     for (size_t i = 0; i < num_tensors; ++i) {
-      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i]);
+      if (input_list[i].numel() != 0 && output_list[i].get_with_gemm_swizzled_scales() &&
+          quantizer_cpp_list[i]->get_scaling_mode() == NVTE_NVFP4_1D_SCALING) {
+        const auto &quantizer = static_cast<const NVFP4Quantizer &>(*quantizer_cpp_list[i]);
+        needs_swizzle[i] = !quantizer.emits_gemm_swizzled_scales(get_tensor_shape(input_list[i]));
+      }
+    }
+    std::vector<at::Tensor> scale_buffers;
+    auto compact_outputs =
+        prepare_compact_quantization_outputs(output_list, needs_swizzle, scale_buffers);
+    auto &kernel_outputs = compact_outputs.empty() ? output_list : compact_outputs;
+    // Quantize kernels individually, then swizzle NVFP4 scales together.
+    for (size_t i = 0; i < num_tensors; ++i) {
+      quantizer_cpp_list[i]->quantize(input_list[i], kernel_outputs[i]);
+    }
+    for (bool rowwise : {true, false}) {
+      std::vector<NVTETensor> sources, destinations;
+      auto scale_views = prepare_scale_swizzle_views(compact_outputs, output_list, needs_swizzle,
+                                                     rowwise, sources, destinations);
+      if (sources.empty()) continue;
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_multi_tensor_swizzle_scaling_factors(sources.data(), destinations.data(),
+                                                  sources.size(), at::cuda::getCurrentCUDAStream());
+      });
     }
   }
 }
@@ -1420,15 +1560,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
   const auto scale_dtype = quantizer_cpp_list[0]->scale_dtype;
 
-  // with_gemm_swizzled_scales is a single group-wide boolean baked
-  // into every output tensor. We can safely request it only when
-  // (a) every quantizer in the group has optimize_for_gemm and
-  // with_rht set, and (b) every tensor's shape qualifies for RHT
-  // cast-fusion. Disagreement among quantizers would silently give
-  // some outputs a layout that their own quantizer did not request;
-  // the NVTE_CHECK loop below turns that into a loud error. The
-  // final flag ANDs all three predicates (the shape-eligibility one
-  // is computed by the loop further below).
   const bool group_optimize_for_gemm = quantizer_cpp_list[0]->optimize_for_gemm;
   const bool group_with_rht = quantizer_cpp_list[0]->with_rht;
   for (size_t i = 1; i < num_tensors; ++i) {
@@ -1445,16 +1576,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                "NVFP4 bulk allocation requires all quantizers in the group to share "
                "the same disable_second_level_scale value.");
   }
-  bool all_tensors_rht_cast_fusion_eligible = true;
-  for (size_t i = 0; i < num_tensors; ++i) {
-    if (!NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape_list[i],
-                                                         /*for_grouped_kernel=*/true)) {
-      all_tensors_rht_cast_fusion_eligible = false;
-      break;
-    }
-  }
-  const bool with_gemm_swizzled_scales =
-      group_optimize_for_gemm && group_with_rht && all_tensors_rht_cast_fusion_eligible;
 
   // Helper function to get size of byte buffer holding FP4 data (last dim divided by 2)
   auto fp4_byte_shape = [](const std::vector<size_t> &shape) -> std::vector<size_t> {
@@ -1606,7 +1727,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
         NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
                          amax_rowwise, amax_columnwise, MakePythonDType(fp4_dtype),
                          MakePythonDType(scale_dtype), quantizer_py_list[i],
-                         with_gemm_swizzled_scales, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
+                         group_optimize_for_gemm, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
                          py::arg("nvfp4_use_4over6") = nvfp4_use_4over6,
                          py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
 
@@ -1635,7 +1756,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                                              getTensorShape(amax_columnwise_list[i]));
         }
       }
-      tensor_wrapper.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+      tensor_wrapper.set_with_gemm_swizzled_scales(group_optimize_for_gemm);
       tensor_wrapper.set_row_scaled_nvfp4(row_scaled_nvfp4);
       if (nvfp4_e4m3_max != 0) {
         tensor_wrapper.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
@@ -2016,15 +2137,15 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
 
 void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                const std::vector<TensorWrapper> &input_list,
-                               std::vector<TensorWrapper> &output_list,
+                               std::vector<TensorWrapper> &outputs,
                                const std::vector<size_t> &split_sections,
                                const std::vector<NVFP4Quantizer *> &quantizers) {
   // Check tensor lists
   const size_t num_tensors = split_sections.size();
   NVTE_CHECK(input_list.size() == num_tensors, "Expected ", num_tensors, " input tensors, but got ",
              input_list.size(), ".");
-  NVTE_CHECK(output_list.size() == num_tensors, "Expected ", num_tensors,
-             " output tensors, but got ", output_list.size(), ".");
+  NVTE_CHECK(outputs.size() == num_tensors, "Expected ", num_tensors, " output tensors, but got ",
+             outputs.size(), ".");
   NVTE_CHECK(quantizers.size() == num_tensors, "Expected ", num_tensors,
              " NVFP4 quantizers, but got ", quantizers.size(), ".");
 
@@ -2074,6 +2195,22 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   const int sm = transformer_engine::cuda::sm_arch();
   const bool grouped_rht_supported = sm >= 100 && sm <= 110;
 
+  const bool emits_gemm_swizzled_scales =
+      quantizer.with_rht &&
+      std::all_of(input_list.begin(), input_list.end(), [](const auto &input) {
+        return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(get_tensor_shape(input),
+                                                               /*for_grouped_kernel=*/true);
+      });
+  std::vector<bool> needs_swizzle(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    needs_swizzle[i] = outputs[i].get_with_gemm_swizzled_scales() && !emits_gemm_swizzled_scales &&
+                       input_list[i].numel() != 0;
+  }
+  std::vector<at::Tensor> scale_buffers;
+  auto compact_outputs =
+      prepare_compact_quantization_outputs(outputs, needs_swizzle, scale_buffers);
+  auto &output_list = compact_outputs.empty() ? outputs : compact_outputs;
+
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
     if (quantizer.with_rht) {  // Quantize row-wise data, RHT+quantize column-wise data
@@ -2097,6 +2234,16 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                        stream);
     }
   });
+  for (bool rowwise : {true, false}) {
+    std::vector<NVTETensor> sources, destinations;
+    auto scale_views = prepare_scale_swizzle_views(compact_outputs, outputs, needs_swizzle, rowwise,
+                                                   sources, destinations);
+    if (sources.empty()) continue;
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_tensor_swizzle_scaling_factors(sources.data(), destinations.data(), sources.size(),
+                                                at::cuda::getCurrentCUDAStream());
+    });
+  }
 }
 
 }  // namespace

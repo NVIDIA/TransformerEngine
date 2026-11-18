@@ -16,7 +16,7 @@ import torch
 from nvdlfw_inspect.utils import gather_along_first_dim
 from nvdlfw_inspect.logging import MetricLogger
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.debug.features.utils.stats_computation import (
     STATS,
     DEPENDENCIES,

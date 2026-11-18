@@ -10,7 +10,7 @@ import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,

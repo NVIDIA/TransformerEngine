@@ -14,9 +14,8 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.torch_version import torch_version
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_cublasmp_all_gather_output,
@@ -46,7 +45,6 @@ from ..utils import (
     divide,
     init_method_constant,
     needs_quantized_gemm,
-    assert_dim_for_fp8_exec,
     nvtx_range_pop,
     nvtx_range_push,
     get_nvtx_range_context,
@@ -457,8 +455,6 @@ def _linear_forward_impl(
     inputmat = inp  # Input tensor to save for backward (maybe sharded)
     inputmat_total = None  # Input tensor to pass to GEMM (gathered)
     own_quantized_input = False
-    if fp8:
-        assert_dim_for_fp8_exec(inputmat, weight)
 
     if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
 
@@ -2006,8 +2002,7 @@ class Linear(TransformerEngineBaseModule):
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
-                   Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
-                   is used.
+                   When set to ``None``, standard all-reduce is used.
     save_original_input : bool, default = False
                        If set to ``True``, always saves the original input tensor rather than the
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
@@ -2139,13 +2134,6 @@ class Linear(TransformerEngineBaseModule):
             self.ub_overlap_rs_dgrad = self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad
             self.ub_bulk_dgrad = False
             self.ub_bulk_wgrad = False
-
-        if self.symmetric_ar_type is not None:
-            assert torch_version() >= (
-                2,
-                7,
-                0,
-            ), "Torch version must be at least 2.7 to use symmetric memory"
 
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
@@ -2580,7 +2568,7 @@ class Linear(TransformerEngineBaseModule):
                     use_compiled_op = False
 
             if use_compiled_op:
-                check_gemm_dims(inp, weight_tensor, self.fp8)
+                check_gemm_dims(inp, weight_tensor)
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
                 out, new_weight_workspace = _linear_eager(

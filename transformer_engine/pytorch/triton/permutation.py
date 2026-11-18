@@ -9,7 +9,7 @@ from typing import Union
 import torch
 import triton
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.triton.permutation import (
     _row_id_map_pass_1_kernel,
     _row_id_map_pass_2_kernel,

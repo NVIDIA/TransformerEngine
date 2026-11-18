@@ -23,6 +23,7 @@ from utils import assert_allclose
 from transformer_engine.common import _get_shared_object_file
 from transformer_engine.common.CuTeDSL.utils import device_compute_capability
 from transformer_engine.jax import cpp_extensions as tex
+from transformer_engine.jax.cpp_extensions.activation import ActivationParams
 from transformer_engine.jax.quantize import (
     QuantizerFactory,
     QuantizeLayout,
@@ -68,8 +69,8 @@ Q_LAYOUTS = [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
 # Every activation the CuTeDSL backend implements, as (JAX activation_type, name it goes by
 # in the config key). The two differ for qgelu/srelu: JAX spells them quick_gelu/squared_relu
 # (ActivationEnum in jax/cpp_extensions/activation.py), the backend uses the C++ spelling
-# (Activation in common/util/cutedsl_utils.h). Gated variants are absent because they go to a
-# separate TE/common kernel that the backend does not cover.
+# (Activation in common/util/cutedsl_utils.h). Gated variants go to a separate kernel and are
+# covered by GATED_ACTIVATIONS below.
 ACTIVATIONS = [
     (("gelu",), "gelu"),
     (("relu",), "relu"),
@@ -197,12 +198,15 @@ def extract_quantized_output(out, dbias):
 
     ScaledTensor1x carries scale_inv already trimmed to the unpadded shape (see its
     __post_init__), so there is no uninitialized scale padding to exclude.
+    FP8 -0.0 (0x80) is folded into +0.0: both backends round to zero there and may differ only
+    in its sign, which training does not depend on.
     """
     tensors = [out] if isinstance(out, ScaledTensor1x) else [out.rowwise_tensor, out.colwise_tensor]
     parts = {}
     for t in tensors:
         name = "colwise" if t.is_colwise else "rowwise"
-        parts[f"{name} data"] = np.asarray(t.data.view(jnp.uint8))
+        data = np.asarray(t.data.view(jnp.uint8))
+        parts[f"{name} data"] = np.where(data == 0x80, 0, data).astype(np.uint8)
         parts[f"{name} scales"] = np.asarray(t.scale_inv.view(jnp.uint8))
     return parts, None if dbias is None else np.asarray(dbias)
 
@@ -278,6 +282,152 @@ def test_dtypes(method, act_type, act_desc, fp8_dtype, in_dtype):
         method,
         act_type,
         act_desc,
+        (256, 384),
+        QuantizeLayout.ROWWISE_COLWISE,
+        in_dtype,
+        fp8_dtype,
+    )
+
+
+# Cover the specialized kernels' shapes
+# Note that JAX only emits linear scales and passes no noop tensor
+SPECIALIZED_CASES = {
+    # G2RRowwise2Lane: its four launch tiers (by output size).
+    "g2r_rowwise2lane_tier0": ((1024, 4096), QuantizeLayout.ROWWISE, jnp.bfloat16),
+    "g2r_rowwise2lane_tier1": ((4064, 4480), QuantizeLayout.ROWWISE, jnp.bfloat16),
+    "g2r_rowwise2lane_tier2": ((8192, 8192), QuantizeLayout.ROWWISE, jnp.bfloat16),
+    "g2r_rowwise2lane_tier3": ((16384, 8192), QuantizeLayout.ROWWISE, jnp.bfloat16),
+    # G2RRowwise1Lane
+    "g2r_rowwise1lane_fp16": ((1024, 4096), QuantizeLayout.ROWWISE, jnp.float16),
+    # RegisterBidimensional: static N == 2048 / 4096, the wide tile with and without the
+    # deep cluster, and the narrow tile (N % 512 != 0).
+    "g2r_bidim_n2048": ((256, 2048), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    "g2r_bidim_n4096": ((256, 4096), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    "g2r_bidim_wide": ((256, 6144), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    "g2r_bidim_wide_cluster": ((4096, 16384), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    "g2r_bidim_narrow": ((160, 2304), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+    # SpecializedBidimensional (g2s): fp16, or bf16 with N % 256 != 0.
+    "g2s_bidim_fp16": ((256, 1024), QuantizeLayout.ROWWISE_COLWISE, jnp.float16),
+    "g2s_bidim_bf16_n384": ((256, 384), QuantizeLayout.ROWWISE_COLWISE, jnp.bfloat16),
+}
+
+
+@pytest.mark.parametrize(
+    "shape,q_layout,in_dtype", SPECIALIZED_CASES.values(), ids=SPECIALIZED_CASES.keys()
+)
+def test_specialized_kernels(shape, q_layout, in_dtype):
+    run_test_case("CAST_ONLY", *NO_ACT, shape, q_layout, in_dtype, jnp.float8_e4m3fn)
+
+
+# Gated activations (gated_mxfp8.cuh), as (JAX activation_type, name in the config key
+# (GatedActivation in common/util/cutedsl_utils.h), activation parameters). The clamped SwiGLU
+# parameters are chosen so that its clamps are active on the [-2, 2] inputs generate_inputs draws.
+GATED_ACTIVATIONS = [
+    (("gelu", "linear"), "geglu", {}),
+    (("quick_gelu", "linear"), "qgeglu", {}),
+    (("relu", "linear"), "reglu", {}),
+    (("squared_relu", "linear"), "sreglu", {}),
+    (("silu", "linear"), "swiglu", {}),
+    (("sigmoid", "linear"), "glu", {}),
+    (
+        ("clamped_silu", "clamped_linear"),
+        "clamped_swiglu",
+        {"limit": 1.0, "alpha": 1.702, "glu_linear_offset": 0.5},
+    ),
+]
+GATED_IDS = [desc for _, desc, _ in GATED_ACTIVATIONS]
+get_direction_id = lambda is_bwd: "bwd" if is_bwd else "fwd"
+
+
+def get_gated_cfg_key(act_desc, in_dtype, fp8_dtype, q_layout, is_bwd):
+    """Mirror of MXFP8GatedQuantConfig::to_key (gated_mxfp8_cutedsl.cuh)."""
+    # JAX quantize emits scales in the linear (non-swizzled) layout
+    flags = (True, q_layout.has_colwise, False, is_bwd)
+    major, minor = device_compute_capability()
+    return (
+        f"cutedsl_mxfp8_gated_sm{major * 10 + minor}_{DTYPE_TO_STR[in_dtype]}_"
+        f"{FP8_TO_KEY[fp8_dtype]}_"
+        + "_".join("1" if f else "0" for f in flags)
+        + f"_{act_desc}"
+    )
+
+
+def run_gated_test_case(
+    act_type, act_desc, act_kwargs, is_bwd, shape, q_layout, in_dtype, fp8_dtype
+):
+    """Assert the CuTeDSL and CUDA backends produce bit-identical gated activation outputs.
+    shape is (M, N): the gated input is (M, 2, N), [act | gate] along axis -2.
+    """
+    M, N = shape
+    # generate_inputs returns (M, N) and (M, 1, N) draws; stack them into the (M, 2, N) input
+    act, gate = generate_inputs(M, N, in_dtype)
+    x = jnp.concatenate([jnp.expand_dims(act, axis=-2), gate], axis=-2)
+    grad, _ = generate_inputs(M, N, in_dtype, seed=1)
+    act_params = ActivationParams.create(act_type, **act_kwargs)
+
+    def run():
+        quantizer = QuantizerFactory.create(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=fp8_dtype, q_layout=q_layout
+        )
+        if is_bwd:
+            out, _ = tex.quantize_dact_dbias(
+                grad, x, act_type, is_dbias=False, quantizer=quantizer, act_params=act_params
+            )
+        else:
+            out = tex.act_lu(x, act_type, quantizer=quantizer, act_params=act_params)
+        return extract_quantized_output(out, None)[0]
+
+    set_cutedsl_backend(False)
+    cuda_output = run()
+    set_cutedsl_backend(True)
+    try:
+        cutedsl_output = run()
+    finally:
+        set_cutedsl_backend(False)
+
+    key = get_gated_cfg_key(act_desc, in_dtype, fp8_dtype, q_layout, is_bwd)
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
+        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+        "to CUDA and this case compared CUDA against itself"
+    )
+
+    tag = (
+        f"{act_desc}/{get_direction_id(is_bwd)}/{get_layout_id(q_layout)}/{M}x{N}/"
+        f"{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}"
+    )
+    for name, cuda_bytes in cuda_output.items():
+        assert np.array_equal(
+            cutedsl_output[name], cuda_bytes
+        ), f"{tag}: {name} differ between backends"
+
+
+@pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
+@pytest.mark.parametrize("q_layout", Q_LAYOUTS, ids=get_layout_id)
+@pytest.mark.parametrize("act_type,act_desc,act_kwargs", GATED_ACTIVATIONS, ids=GATED_IDS)
+@pytest.mark.parametrize("is_bwd", [False, True], ids=get_direction_id)
+def test_gated_sizes(is_bwd, act_type, act_desc, act_kwargs, q_layout, shape):
+    run_gated_test_case(
+        act_type,
+        act_desc,
+        act_kwargs,
+        is_bwd,
+        shape,
+        q_layout,
+        jnp.bfloat16,
+        jnp.float8_e4m3fn,
+    )
+
+
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+@pytest.mark.parametrize("act_type,act_desc,act_kwargs", GATED_ACTIVATIONS, ids=GATED_IDS)
+@pytest.mark.parametrize("is_bwd", [False, True], ids=get_direction_id)
+def test_gated_dtypes(is_bwd, act_type, act_desc, act_kwargs, fp8_dtype, in_dtype):
+    run_gated_test_case(
+        act_type,
+        act_desc,
+        act_kwargs,
+        is_bwd,
         (256, 384),
         QuantizeLayout.ROWWISE_COLWISE,
         in_dtype,

@@ -293,8 +293,8 @@ void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_ou
 
 /*! \brief Forward pass for auxiliary loss. Host-int total_num_tokens path:
  *  the coefficient is folded on the host and passed as a kernel argument.
- *  Prefer this path when total_num_tokens is statically known and the call
- *  is not captured into a CUDA Graph.
+ *  This legacy entrypoint uses an atomic reduction and is not deterministic.
+ *  Prefer :c:func:`nvte_fused_moe_aux_loss_forward_v2` for new callers.
  *
  *  \param[in]     probs              Probabilities from the forward pass.
  *  \param[in]     tokens_per_expert  Number of tokens per expert.
@@ -305,8 +305,7 @@ void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_ou
  *  \param[in]     topk               Topk value.
  *  \param[in]     coeff              Coefficient.
  *  \param[out]    aux_loss           Output GPU scalar for auxiliary loss.
- *  \param[out]    Const_buf          Output GPU scalar for temporary constant buffer for backward
- *                                    pass.
+ *  \param[out]    Const_buf          Two FP32 elements: backward coefficient and forward sum.
  *  \param[in]     stream             CUDA stream used for the operation.
  */
 void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
@@ -316,8 +315,8 @@ void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor to
 
 /*! \brief Forward pass for auxiliary loss. Device-tensor total_num_tokens path:
  *  the coefficient is computed on device from a 0-dim int64 GPU tensor so its
- *  value stays dynamic across CUDA Graph replays. Prefer this path when the
- *  caller needs CUDA-graph-safe semantics with a dynamic token count.
+ *  value stays dynamic across CUDA Graph replays. This legacy entrypoint uses
+ *  an atomic reduction. Prefer :c:func:`nvte_fused_moe_aux_loss_forward_graph_safe_v2`.
  *
  *  \param[in]     total_num_tokens   0-dim int64 GPU tensor with the total token count.
  *  Other parameters as in :c:func:`nvte_fused_moe_aux_loss_forward`.
@@ -328,6 +327,43 @@ void nvte_fused_moe_aux_loss_forward_graph_safe(const NVTETensor probs,
                                                 int num_rows, int num_cols, int topk, float coeff,
                                                 NVTETensor aux_loss, NVTETensor Const_buf,
                                                 cudaStream_t stream);
+
+/*! \brief Deterministic forward pass for auxiliary loss, with a host token count.
+ *
+ *  Each CTA writes an FP32 partial sum into workspace, then a second kernel
+ *  reduces these values in a fixed order. Repeated execution with identical
+ *  inputs on the same hardware and software is bitwise reproducible; equality
+ *  to other reduction implementations is not guaranteed.
+ *
+ *  To query workspace requirements, pass a valid workspace tensor whose data
+ *  pointer is nullptr. The call populates its shape and dtype and returns without
+ *  launching kernels or accessing other tensors, which may be nullptr during
+ *  this query. The reported capacity covers all input shapes. Allocate storage
+ *  with the reported metadata, then call again to execute the operation.
+ *  Workspace contents are overwritten and need no initialization. Storage must
+ *  remain valid through the queued forward kernels, but is not saved for backward.
+ *
+ *  \param[in,out] workspace  Temporary buffer, or an empty tensor to query its metadata.
+ *  Other parameters as in :c:func:`nvte_fused_moe_aux_loss_forward`.
+ */
+void nvte_fused_moe_aux_loss_forward_v2(const NVTETensor probs, const NVTETensor tokens_per_expert,
+                                        int total_num_tokens, int num_experts, int num_rows,
+                                        int num_cols, int topk, float coeff, NVTETensor aux_loss,
+                                        NVTETensor Const_buf, NVTETensor workspace,
+                                        cudaStream_t stream);
+
+/*! \brief Deterministic forward with a device-tensor token count.
+ *
+ *  total_num_tokens is a 0-dim int64 GPU tensor and may change between CUDA
+ *  Graph replays. Its value is never read on the host or used to size workspace.
+ *  Both the loss and saved backward coefficient are refreshed on each replay.
+ *  Workspace requirements and lifetime follow :c:func:`nvte_fused_moe_aux_loss_forward_v2`.
+ *  Other parameters as in :c:func:`nvte_fused_moe_aux_loss_forward_graph_safe`.
+ */
+void nvte_fused_moe_aux_loss_forward_graph_safe_v2(
+    const NVTETensor probs, const NVTETensor tokens_per_expert, const NVTETensor total_num_tokens,
+    int num_experts, int num_rows, int num_cols, int topk, float coeff, NVTETensor aux_loss,
+    NVTETensor Const_buf, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Backward pass for auxiliary loss.
  *

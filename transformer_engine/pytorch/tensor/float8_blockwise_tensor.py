@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import transformer_engine_torch as tex
 
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import (
     Float8BlockwiseQTensorStorage,
@@ -234,8 +234,8 @@ class Float8BlockQuantizer(Quantizer):
         colwise_shape.extend(shape[:-1])
         return tuple(colwise_shape)
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather."""
         shape = inp.size()
         if len(shape) < 2:
             return False

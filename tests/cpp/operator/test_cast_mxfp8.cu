@@ -122,11 +122,14 @@ void compute_ref(const ProcessingMethod processing_method,
 
             if (rowwise) {
                 for (size_t i = i_min; i < i_max; ++i) {
-                    float block_amax = 0.0f;
+                    // Initialized to NaN, which loses all comparisons unless the other value is also NaN.
+                    // So block_amax will be NaN if all values in the block are NaN, except for the case where the block is partial,
+                    // in which case it will be padded with 0 which will win the comparison so block_amax will be 0.
+                    float block_amax = (j_max - j_min == tile_size_X) ? NAN : 0.0f;
 
                     for (size_t j = j_min; j < j_max; ++j) {
                         const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                        block_amax = std::fmax(block_amax, std::abs(cache_buffer[cache_idx]));
                     }
 
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
@@ -143,11 +146,14 @@ void compute_ref(const ProcessingMethod processing_method,
             }
             if (colwise) {
                 for (size_t j = j_min; j < j_max; ++j) {
-                    float block_amax = 0.0f;
+                    // Initialized to NaN, which loses all comparisons unless the other value is also NaN.
+                    // So block_amax will be NaN if all values in the block are NaN, except for the case where the block is partial,
+                    // in which case it will be padded with 0 which will win the comparison so block_amax will be 0.
+                    float block_amax = (i_max - i_min == tile_size_Y) ? NAN : 0.0f;
 
                     for (size_t i = i_min; i < i_max; ++i) {
                         const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                        block_amax = std::fmax(block_amax, std::abs(cache_buffer[cache_idx]));
                     }
 
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
@@ -200,11 +206,15 @@ void compute_ref_2d_quantize(const bool rowwise,
             const size_t j_min = tile_X * tile_size_X;
             const size_t j_max = std::min(j_min + tile_size_X, cols);
 
-            float block_amax = 0.0f;
+            // Initialized to NaN, which loses all comparisons unless the other value is also NaN.
+            // So block_amax will be NaN if all values in the block are NaN, except for the case where the block is partial,
+            // in which case it will be padded with 0 which will win the comparison so block_amax will be 0.
+            const bool full_block = (i_max - i_min == tile_size_Y) && (j_max - j_min == tile_size_X);
+            float block_amax = full_block ? NAN : 0.0f;
             for (size_t i = i_min; i < i_max; ++i) {
                 for (size_t j = j_min; j < j_max; ++j) {
                     const size_t idx = i * cols + j;
-                    block_amax = std::max(block_amax, std::abs(static_cast<float>(input[idx])));
+                    block_amax = std::fmax(block_amax, std::abs(static_cast<float>(input[idx])));
                 }
             }
 
@@ -699,6 +709,9 @@ std::vector<std::vector<size_t>> matrix_sizes = {
     {1, 16},
     {16, 48},
     {128, 128},
+    // This case will cover cast_rowwise's last row being partial case, in which
+    // the kernel will reshape the input tensor with last dim being 1024 so the last row
+    // is not a full row due to 993*512 % 1024 != 0
     {993, 512},
     {1024},
     {8, 32, 1024},

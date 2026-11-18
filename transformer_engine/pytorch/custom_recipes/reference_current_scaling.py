@@ -13,7 +13,7 @@ import torch
 from transformer_engine.pytorch.custom_recipes import gemm
 from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 
 
 def current_scaling_ref_factory(role):

@@ -10,7 +10,7 @@ import warnings
 import torch
 
 import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.jit import no_torch_dynamo
 
 __all__ = ["parallel_cross_entropy"]

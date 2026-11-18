@@ -7,7 +7,7 @@ import warnings
 from typing import Optional, Tuple
 import torch
 import transformer_engine_torch as tex
-from transformer_engine import te_device_type
+from transformer_engine.pytorch.device import te_device_type
 import transformer_engine.pytorch.triton.permutation as triton_permutation
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.quantized_tensor import (
@@ -1323,7 +1323,7 @@ def moe_sort_chunks_by_index(
         Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
     split_sizes : torch.Tensor
         Chunk sizes of the inp tensor along the 0-th dimension.
-    sorted_indices : torch.Tensor
+    sorted_index : torch.Tensor
         Chunk indices used to permute the chunks.
     """
     output, _, _ = torch.ops.te_moe.chunk_sort_fwd(inp, split_sizes, sorted_index, None)
@@ -1351,7 +1351,7 @@ def moe_sort_chunks_by_index_with_probs(
         the split_sizes and sorted_indices.
     split_sizes : torch.Tensor
         Chunk sizes of the inp tensor along the 0-th dimension.
-    sorted_indices : torch.Tensor
+    sorted_index : torch.Tensor
         Chunk indices used to permute the chunks.
     """
     output, permuted_probs, _ = torch.ops.te_moe.chunk_sort_fwd(
