@@ -123,6 +123,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _rowwise_scale_inv: Annotated[Optional[torch.Tensor], InnerTensor("rowwise_scale_inv")]
     _columnwise_data: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_data")]
     _columnwise_scale_inv: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_scale_inv")]
+    _ep_scale_inv: Annotated[Optional[torch.Tensor], InnerTensor("ep_scale_inv")]
     _quantizer: Quantizer
     _fp8_dtype: DType
     _is_2D_scaled: bool
@@ -137,6 +138,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         quantizer: Quantizer,
         is_2D_scaled: bool,
         *args,
+        ep_scale_inv: Optional[torch.Tensor] = None,
         fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
@@ -152,6 +154,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
+        instance._ep_scale_inv = ep_scale_inv
 
         return instance
 
@@ -162,6 +165,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             self._columnwise_data,
             self._rowwise_scale_inv,
             self._columnwise_scale_inv,
+            self._ep_scale_inv,
         ):
             if t is not None:
                 t.data = _empty_tensor()

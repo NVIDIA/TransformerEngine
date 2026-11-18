@@ -430,7 +430,7 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                            cudaStream_t stream);
 
-/*! \brief Requantizes a grouped tensor. Currently supports MXFP8 1D scaling only.
+/*! \brief Requantizes a grouped tensor with MXFP8 or block128 FP8 1D scaling.
  *
  * Equivalent to grouped MXFP8 dequantization followed by columnwise quantization,
  * using BF16 intermediates, with optional BF16 dequantized output.
@@ -442,12 +442,20 @@ void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
  * scales for matching layouts, or use separate storage for different layouts.
  * Each group's row and column counts must be divisible by 128.
  *
- *  \param[in]     input          Compact rowwise MXFP8 grouped tensor.
+ * Block128 FP8 uses E4M3 data and FP32 scales. The hidden dimension and every
+ * group's row count must be divisible by 128. Explicit element offsets include
+ * the terminal offset.
+ * Compact rowwise scales are converted to per-group GEMM layout in separate
+ * storage; GEMM-layout input scales must alias the output scales. Rowwise data
+ * aliases the input, and optional columnwise output uses per-group GEMM layout.
+ * Quantization config controls block128 epsilon and power-of-two scales.
+ *
+ *  \param[in]     input          Rowwise FP8 grouped tensor.
  *  \param[in,out] output         Columnwise MXFP8 E4M3 grouped tensor with
  *                                optional rowwise data and scales.
  *  \param[out]    dequantized    Optional BF16 tensor with the input logical shape;
  *                                pass NULL or an unallocated tensor to skip it.
- *  \param[in]     quant_config   Unused; may be NULL.
+ *  \param[in]     quant_config   Block128 scale options; unused for MXFP8; may be NULL.
  *  \param[in]     stream         CUDA stream used for the operation.
  */
 void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,

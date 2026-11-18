@@ -436,6 +436,8 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
   /*! Whether to use 2D block scaling for MXFP8 */
   kNVTEQuantizationConfigMXFP82DQuantization = 10,
+  /*! Rowwise scale layout for 1D block scaling: 1 = GEMM_READY, 2 = COMPACT */
+  kNVTEQuantizationConfigBlockScaling1DRowwiseOption = 11,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1524,6 +1526,13 @@ class QuantizationConfigWrapper {
     const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
                                            sizeof(val));
+  }
+
+  /*! Set the rowwise scale layout for 1D block scaling. */
+  void set_block_scaling_1d_rowwise_option(uint8_t option) {
+    const auto val = option;
+    nvte_set_quantization_config_attribute(
+        config_, kNVTEQuantizationConfigBlockScaling1DRowwiseOption, &val, sizeof(val));
   }
 
   /*! \brief Set NVFP4 4over6 candidate-selection mode */

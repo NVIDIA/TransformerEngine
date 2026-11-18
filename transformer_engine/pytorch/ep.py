@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import atexit
+import os
 import warnings
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
@@ -283,6 +284,21 @@ def ep_finalize() -> None:
         _BOOTSTRAP_SETTINGS = None
 
 
+def is_ep_recipe_available(recipe) -> bool:
+    """Return whether the EP wire path understands ``recipe``."""
+    if recipe is None:
+        return True
+    from ..common.recipe import Float8BlockScaling, MXFP8BlockScaling
+
+    if isinstance(recipe, MXFP8BlockScaling):
+        return True
+    if isinstance(recipe, Float8BlockScaling):
+        from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
+
+        return callable(getattr(Float8BlockQuantizer, "quantize", None))
+    return False
+
+
 def is_symm_backed(t: torch.Tensor) -> bool:
     """Whether ``t`` is symm-mem-backed on the EP group. Prefer torch's local ``is_symm_mem_tensor``
     when the build provides it (no collective, no exception); otherwise fall back to the rendezvous
@@ -332,6 +348,7 @@ class EpBuffer:
         "total_recv_tokens",
         "dispatch_fwd_quant_recipe",
         "combine_bwd_quant_recipe",
+        "tensor_offsets",
     )
 
     def __init__(
@@ -394,6 +411,10 @@ class EpBuffer:
         else:
             self.total_recv_tokens = torch.empty(1, dtype=torch.int64, device=device)
             mark_not_offload(self.total_recv_tokens)
+        # Pre-allocate tensor_offsets for GroupedTensor construction (graph-safe).
+        self.tensor_offsets = torch.empty(
+            self.num_local_experts + 1, dtype=torch.int64, device=device
+        )
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
@@ -674,20 +695,33 @@ def _ep_prepare_and_dispatch_fwd(
 ):
     """Validate inputs, size/allocate the recv outputs, and run prepare+dispatch. Eager sizes recv
     from the host count; otherwise recv uses the buffer static recv capacity. Returns the recv
-    output (a per-expert GroupedTensor for MXFP8, else the raw recv tokens), the recv topk weights,
+    output (a per-expert GroupedTensor for scaled dispatch, else the raw recv tokens), the recv topk weights,
     and a _DispatchState for backward. No autograd; the caller owns context handling."""
-    _require_bf16("dispatch input", tokens)
     tokens_scale_inv = None
     if buffer.dispatch_fwd_quant_recipe is not None:
+        from ..common.recipe import Float8BlockScaling
         from .tensor.mxfp8_tensor import MXFP8Quantizer
-
-        quantizer = MXFP8Quantizer(
-            DType.kFloat8E4M3,
-            rowwise=True,
-            columnwise=False,
-        )
-        quantizer.internal = True
-        tokens, tokens_scale_inv = quantize_for_ep(tokens, quantizer)
+        recipe = buffer.dispatch_fwd_quant_recipe
+        if isinstance(recipe, Float8BlockScaling):
+            if recipe.x_block_scaling_dim != 1:
+                raise NotImplementedError(
+                    "NCCL EP block128 dispatch requires x_block_scaling_dim=1."
+                )
+            _require_bf16("dispatch input", tokens)
+            tokens, tokens_scale_inv = _quantize_float8_blockwise(
+                tokens, recipe, columnwise=False
+            )
+        else:
+            _require_bf16("dispatch input", tokens)
+            quantizer = MXFP8Quantizer(
+                DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=False,
+            )
+            quantizer.internal = True
+            tokens, tokens_scale_inv = quantize_for_ep(tokens, quantizer)
+    else:
+        _require_bf16("dispatch input", tokens)
 
     handle_mem = buffer.handle_mem
     tokens_per_expert = buffer.tokens_per_expert
@@ -699,11 +733,17 @@ def _ep_prepare_and_dispatch_fwd(
     num_recv_tokens = buffer.recv_capacity_per_rank
     payload_dtype = buffer.payload_dtype
     is_scaled = tokens_scale_inv is not None
-    tokens_data = tokens._rowwise_data if isinstance(tokens, MXFP8TensorStorage) else tokens
+    from .quantized_tensor import QuantizedTensorStorage
+
+    tokens_data = (
+        tokens._rowwise_data
+        if isinstance(tokens, QuantizedTensorStorage) and tokens._rowwise_data is not None
+        else tokens
+    )
     assert tokens_data.dim() == 2, "EP dispatch tokens must be 2D [num_tokens, hidden]"
     hidden = tokens_data.shape[-1]
     if is_scaled and tokens._fp8_dtype != DType.kFloat8E4M3:
-        raise NotImplementedError("EP dispatch supports only E4M3 MXFP8 tokens for now.")
+        raise NotImplementedError("EP dispatch supports only E4M3 FP8 tokens.")
     # Reinterpret byte-backed FP8 data as the fp8 dtype so the backend sees a scaled tensor.
     dispatch_tokens = tokens_data.view(torch.float8_e4m3fn) if is_scaled else tokens_data
 
@@ -733,7 +773,7 @@ def _ep_prepare_and_dispatch_fwd(
                 recv_tokens,
                 num_recv_tokens,
                 hidden,
-                tokens_scale_inv.shape[-1],
+                hidden // 128 if tokens_scale_inv.dtype == torch.float32 else tokens_scale_inv.shape[-1],
                 tokens_data.dtype,
                 tokens_scale_inv.dtype,
                 device,
@@ -744,20 +784,39 @@ def _ep_prepare_and_dispatch_fwd(
         if recv_topk_weights is None:
             recv_topk_weights = _alloc_io((num_recv_tokens,), torch.float32, device, zero_copy)
         dispatch_recv = recv_tokens.view(torch.float8_e4m3fn) if is_scaled else recv_tokens
-        torch.ops.transformer_engine_ep.prepare_and_dispatch(
-            handle_mem,
-            topk_idx,
-            dispatch_tokens,
-            topk_weights,
-            tokens_per_expert,
-            total_recv_tokens,
-            top_k,
-            alignment,
-            dispatch_recv,
-            recv_topk_weights,
-            recv_scale_inv,
-            tokens_scale_inv,
-        )
+        if is_scaled:
+            torch.ops.transformer_engine_ep.prepare_and_dispatch(
+                handle_mem,
+                topk_idx,
+                dispatch_tokens,
+                topk_weights,
+                tokens_per_expert,
+                total_recv_tokens,
+                top_k,
+                alignment,
+                dispatch_recv,
+                recv_topk_weights,
+                recv_scale_inv,
+                tokens_scale_inv,
+            )
+        else:
+            # BF16 payload: recv_scale_inv/tokens_scale_inv are None, which the custom-op
+            # mutates_args schema cannot express (autograd adinplaceorview_impl hits
+            # IndexError on Optional[Tensor]=None). Call the C++ binding directly instead.
+            tex.ep_prepare_and_dispatch(
+                handle_mem,
+                topk_idx,
+                dispatch_tokens,
+                topk_weights,
+                tokens_per_expert,
+                total_recv_tokens,
+                top_k,
+                alignment,
+                recv_tokens=recv_tokens,
+                recv_topk_weights=recv_topk_weights,
+                recv_scale_inv=None,
+                tokens_scale_inv=None,
+            )
     state = _DispatchState(
         handle_mem=handle_mem,
         tokens_shape=tokens.shape,
@@ -773,13 +832,25 @@ def _ep_prepare_and_dispatch_fwd(
     # For scaled inputs the expert-major recv data + scales are wrapped into a per-expert
     # GroupedTensor so downstream grouped GEMM and autograd see a proper quantized grouped tensor.
     if is_scaled:
-        recv_out = _make_grouped_mxfp8(
-            recv_tokens.view(tokens._rowwise_data.dtype),
-            recv_scale_inv,
-            tokens_per_expert,
-            tokens._fp8_dtype,
-            tokens._dtype,
-        )
+        if tokens_scale_inv.dtype == torch.float32:
+            recv_data = recv_tokens.view(tokens._rowwise_data.dtype)
+            recv_out = _make_grouped_blockwise(
+                recv_data,
+                recv_scale_inv,
+                tokens_per_expert,
+                tokens._fp8_dtype,
+                tokens._dtype,
+                fused_gemm_layout=False,
+                tensor_offsets=buffer.tensor_offsets,
+            )
+        else:
+            recv_out = _make_grouped_mxfp8(
+                recv_tokens.view(tokens._rowwise_data.dtype),
+                recv_scale_inv,
+                tokens_per_expert,
+                tokens._fp8_dtype,
+                tokens._dtype,
+            )
         return recv_out, recv_topk_weights, state
     return recv_tokens, recv_topk_weights, state
 
@@ -1202,6 +1273,184 @@ def _make_grouped_mxfp8(data, scale_inv, token_counts, fp8_dtype, fake_dtype):
     )
 
 
+def _assert_cuda_metadata(condition: torch.Tensor, message: str) -> None:
+    """Validate device metadata.
+
+    The production path leaves these checks disabled because async metadata
+    assertions add a measurable stream dependency to every MoE forward. Enable
+    ``NVTE_EP_DEBUG_METADATA=1`` while debugging malformed dispatch metadata.
+    """
+    if os.environ.get("NVTE_EP_DEBUG_METADATA", "0") != "1":
+        return
+    if condition.device.type == "cuda":
+        is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
+        assert_async = getattr(torch, "_assert_async", None)
+        if not callable(assert_async):
+            raise RuntimeError("CUDA metadata validation requires torch._assert_async.")
+        if callable(is_capturing) and is_capturing():
+            assert_async(condition)
+            return
+        if os.environ.get("NVTE_EP_SYNC_METADATA_VALIDATION", "0") == "1":
+            if not bool(condition.item()):
+                raise ValueError(message)
+            return
+        assert_async(condition)
+        return
+    if not bool(condition):
+        raise ValueError(message)
+
+
+def _quantize_float8_blockwise(
+    x: torch.Tensor,
+    recipe,
+    *,
+    backward: bool = False,
+    columnwise: bool = False,
+):
+    """Quantize activations with 1D block128 Float8BlockScaling.
+
+    Float8BlockQuantizer writes compact row-major FP32 scales directly as
+    ``[rows, hidden/128]``. The returned scale tensor aliases the quantized
+    tensor's rowwise scales; no layout conversion or dual-scale cast is used.
+    Columnwise storage is omitted unless explicitly requested by a consumer.
+    """
+    from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
+
+    if x.ndim != 2 or x.shape[-1] <= 0 or x.shape[-1] % 128 != 0:
+        raise ValueError("Float8BlockScaling EP requires hidden divisible by 128.")
+    block_dim = recipe.grad_block_scaling_dim if backward else recipe.x_block_scaling_dim
+    if block_dim != 1:
+        raise NotImplementedError("EP block128 wire payload requires 1D activation/gradient blocks.")
+    from ..common.recipe import Format
+
+    if recipe.fp8_format != Format.E4M3:
+        raise NotImplementedError("EP block128 wire payload currently requires Format.E4M3.")
+    qparams = recipe.fp8_quant_bwd_grad if backward else recipe.fp8_quant_fwd_inp
+    rows, hidden = x.shape
+    logical_scale_cols = hidden // 128
+
+    quantizer = Float8BlockQuantizer(
+        DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=columnwise,
+        block_scaling_dim=1,
+        amax_epsilon=qparams.amax_epsilon,
+        force_pow_2_scales=qparams.power_2_scale,
+        rowwise_scale_layout=tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
+    )
+    quantized = quantizer.quantize(x)
+    scale_inv = quantized._rowwise_scale_inv
+    if scale_inv is None or quantized._rowwise_data is None:
+        raise RuntimeError("Float8BlockScaling quantization did not produce rowwise payloads.")
+    compact = scale_inv
+    expected = (rows, logical_scale_cols)
+    if compact.shape != expected or compact.dtype != torch.float32:
+        raise RuntimeError(
+            f"unexpected Float8BlockScaling EP scale layout {tuple(compact.shape)} "
+            f"{compact.dtype}; expected {expected} torch.float32"
+        )
+    object.__setattr__(quantized, "_ep_scale_inv", compact)
+    return quantized, compact
+
+
+def ep_quantize_float8_blockwise_dual_scale(
+    tokens: torch.Tensor,
+    recipe: "Float8BlockScaling",
+    *,
+    columnwise: bool = True,
+) -> tuple[QuantizedTensor, torch.Tensor]:
+    """Compatibility wrapper producing compact rowwise scales and optional columnwise data.
+
+    Despite the historical name, this calls Float8BlockQuantizer, not a dual-scale
+    kernel. The rowwise scale is compact, not GEMM-ready; grouped consumers must
+    requantize it before GEMM. The wire scale aliases ``_rowwise_scale_inv``.
+    """
+    if not isinstance(tokens, torch.Tensor) or tokens.ndim != 2:
+        raise ValueError("EP dual-scale quantization requires a 2D token tensor.")
+    return _quantize_float8_blockwise(
+        tokens, recipe, columnwise=columnwise
+    )
+
+
+def _make_grouped_blockwise(
+    data, scale_inv, token_counts, fp8_dtype, fake_dtype, *, fused_gemm_layout=False,
+    tensor_offsets=None,
+):
+    """Wrap EP block128 payloads, preserving compact wire scales until requantization."""
+    from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
+    from .tensor.grouped_tensor import GroupedTensor
+
+    if (
+        data.ndim != 2
+        or data.dtype != torch.uint8
+        or not data.is_contiguous()
+        or scale_inv.ndim != 2
+        or scale_inv.dtype != torch.float32
+    ):
+        raise ValueError(
+            "Float8BlockScaling rowwise data and scales must be a contiguous "
+            "uint8 matrix and a 2D float32 matrix."
+        )
+    capacity_rows, hidden = data.shape
+    logical_blocks = hidden // 128
+    if (
+        hidden % 128 != 0
+        or scale_inv.shape[0] != capacity_rows
+        or scale_inv.shape[1] < logical_blocks
+    ):
+        raise ValueError(
+            "Float8BlockScaling EP receive scales must have shape "
+            f"[{capacity_rows}, >= {logical_blocks}] with optional four-column padding, "
+            f"got {tuple(scale_inv.shape)}"
+        )
+    quantizer = Float8BlockQuantizer(
+        fp8_dtype,
+        rowwise=True,
+        columnwise=False,
+        block_scaling_dim=1,
+    )
+    # Each expert owns a separate [hidden/128, expert_rows] scale matrix.
+    # A global transpose would interleave experts once hidden has >1 block.
+    if capacity_rows % 128 != 0:
+        raise ValueError("Block128 grouped EP receive capacity must be 128-aligned.")
+    if token_counts.numel() == 0:
+        raise ValueError("Block128 grouped EP requires at least one expert.")
+    if token_counts.device != data.device or token_counts.dtype != torch.int64:
+        raise ValueError("Block128 expert counts must be int64 tensors on the data device.")
+    _assert_cuda_metadata(
+        ((token_counts >= 0) & (token_counts % 128 == 0)).all(),
+        "Block128 grouped EP requires nonnegative 128-aligned expert counts.",
+    )
+    ends = token_counts.cumsum(0)
+    _assert_cuda_metadata(
+        ends[-1] <= capacity_rows,
+        "Expert counts exceed EP receive capacity.",
+    )
+    # Keep compact wire scales flat; GroupedLinear converts them when preparing GEMM input.
+    grouped_scales = scale_inv.reshape(-1)
+    if tensor_offsets is None:
+        tensor_offsets = tex.splits_to_offsets(token_counts, hidden)
+    else:
+        # Pre-allocated buffer: compute in-place via cumsum (graph-safe)
+        tensor_offsets[0] = 0
+        torch.cumsum(token_counts, 0, out=tensor_offsets[1:])
+        tensor_offsets[1:] *= hidden
+    scale_inv_offsets = None
+    grouped = GroupedTensor(
+        shape=(capacity_rows, hidden),
+        dtype=fake_dtype,
+        num_tensors=token_counts.numel(),
+        quantizer=quantizer,
+        data=data.reshape(-1).detach(),
+        scale_inv=grouped_scales.detach(),
+        first_dims=token_counts,
+        tensor_offsets=tensor_offsets,
+        scale_inv_offsets=scale_inv_offsets,
+    )
+    grouped._with_gemm_swizzled_scales = fused_gemm_layout
+    return grouped
+
+
 def ep_dispatch(
     buffer: EpBuffer,
     tokens: torch.Tensor,
@@ -1213,10 +1462,9 @@ def ep_dispatch(
 ):
     """Prepare + dispatch with autograd. ``tokens`` is bfloat16; ``topk_idx`` is int32 or int64.
 
-    When the buffer's ``dispatch_fwd_quant_recipe`` is set (``MXFP8BlockScaling`` only for now), tokens
-    are quantized internally and recv is returned as a per-expert ``GroupedTensor``; otherwise recv
-    stays bfloat16. A pre-quantized ``tokens`` is not accepted.
-
+    When the buffer's ``dispatch_fwd_quant_recipe`` is set (``MXFP8BlockScaling``
+    or 1D ``Float8BlockScaling``), tokens are quantized internally and recv is
+    returned as a per-expert ``GroupedTensor``; otherwise recv stays bfloat16.
     ``recv_tokens`` / ``recv_topk_weights`` are the recv outputs: pass caller-owned buffers
     (symm-mem-backed under zero-copy) or leave them None to allocate. For MXFP8 the recv data and
     scales share ``recv_tokens`` (data then scales), so size it to at least
@@ -1234,8 +1482,8 @@ def ep_dispatch(
         )
     if isinstance(tokens, QuantizedTensor):
         raise NotImplementedError(
-            "NCCL EP dispatch takes a bfloat16 input and quantizes internally when the buffer's "
-            "dispatch_fwd_quant_recipe is set; a pre-quantized tensor is not accepted."
+            "NCCL EP dispatch takes a bfloat16 input and quantizes internally when the "
+            "buffer's dispatch_fwd_quant_recipe is set."
         )
     _require_bf16("tokens", tokens)
     if buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
@@ -1245,12 +1493,19 @@ def ep_dispatch(
         )
 
     if buffer.dispatch_fwd_quant_recipe is not None:
-        from ..common.recipe import MXFP8BlockScaling
+        from ..common.recipe import Float8BlockScaling, MXFP8BlockScaling
 
-        if not isinstance(buffer.dispatch_fwd_quant_recipe, MXFP8BlockScaling):
+        recipe = buffer.dispatch_fwd_quant_recipe
+        if not isinstance(recipe, (MXFP8BlockScaling, Float8BlockScaling)):
             raise NotImplementedError(
-                "EP block-scaled dispatch supports MXFP8BlockScaling only; got "
+                "EP block-scaled dispatch supports MXFP8BlockScaling or "
+                "Float8BlockScaling; got "
                 f"{type(buffer.dispatch_fwd_quant_recipe).__name__}."
+            )
+        if isinstance(recipe, Float8BlockScaling) and recipe.x_block_scaling_dim != 1:
+            raise NotImplementedError(
+                "NCCL EP block128 dispatch requires Float8BlockScaling "
+                "with x_block_scaling_dim=1."
             )
 
     # Fused prepare + dispatch in one C++ op. Eager sizes the recv outputs from the per-step host

@@ -51,6 +51,13 @@ python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_quantized_tensor
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_torch_compile.xml $TE_PATH/tests/pytorch/test_torch_compile.py || test_fail "test_torch_compile.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_float8blockwisetensor.xml $TE_PATH/tests/pytorch/test_float8blockwisetensor.py || test_fail "test_float8blockwisetensor.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_float8_blockwise_scaling_exact.xml $TE_PATH/tests/pytorch/test_float8_blockwise_scaling_exact.py || test_fail "test_float8_blockwise_scaling_exact.py"
+python3 -m pytest --tb=auto --junitxml="$XML_LOG_DIR/pytest_test_ep_block128.xml" \
+    "$TE_PATH/tests/pytorch/test_ep_block128_producer.py" \
+    "$TE_PATH/tests/pytorch/test_ep_block128_contract.py" \
+    "$TE_PATH/tests/pytorch/test_ep_block128_partial_group.py" \
+    "$TE_PATH/tests/pytorch/test_ep_block128_invalid_offsets.py" \
+    "$TE_PATH/tests/pytorch/test_ep_block128_requant_parity.py" \
+    "$TE_PATH/tests/pytorch/test_fp8_blockwise_rowwise_layout_option.py" || test_fail "EP block128 quantization"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_float8_blockwise_gemm_exact.xml $TE_PATH/tests/pytorch/test_float8_blockwise_gemm_exact.py || test_fail "test_float8_blockwise_gemm_exact.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_float8_current_scaling_exact.xml $TE_PATH/tests/pytorch/test_float8_current_scaling_exact.py || test_fail "test_float8_current_scaling_exact.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/test_grouped_tensor.xml $TE_PATH/tests/pytorch/test_grouped_tensor.py || test_fail "test_grouped_tensor.py"

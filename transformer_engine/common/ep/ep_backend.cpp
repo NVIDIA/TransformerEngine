@@ -592,8 +592,9 @@ void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor to
   NVTEShape scales_in_shape, scales_out_shape;
   ncclEpTensor_t nccl_scales_in = NCCL_EP_TENSOR_INIT, nccl_scales_out = NCCL_EP_TENSOR_INIT;
   if (is_scaled) {
-    NVTE_CHECK(is_mxfp8_scaling(tokens_scaling_mode),
-               "EP dispatch supports MXFP8 block scaling only; got scaling mode ",
+    NVTE_CHECK(is_mxfp8_scaling(tokens_scaling_mode) ||
+                   tokens_scaling_mode == NVTE_BLOCK_SCALING_1D,
+               "EP dispatch supports MXFP8 or block128 FP8 scaling; got scaling mode ",
                static_cast<int>(tokens_scaling_mode));
     NVTE_CHECK(nvte_tensor_scaling_mode(recv_tokens) == tokens_scaling_mode,
                "recv_tokens scaling mode must match tokens scaling mode");

@@ -51,6 +51,9 @@ class Float8BlockQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
         force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
+        rowwise_scale_layout: tex.FP8BlockwiseRowwiseOption = (
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
+        ),
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = DType.cast(fp8_dtype)
@@ -58,6 +61,17 @@ class Float8BlockQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
+        if rowwise_scale_layout not in (
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY,
+            tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT,
+        ):
+            raise ValueError("rowwise_scale_layout must be GEMM_READY or COMPACT")
+        self.rowwise_scale_layout = rowwise_scale_layout
+
+    def _rebuild_derived_state(self) -> None:
+        # The pybind enum is not a torch.compile value field; reconstructed
+        # quantizers use the default GEMM-ready layout.
+        self.rowwise_scale_layout = tex.FP8BlockwiseRowwiseOption.ROWWISE_GEMM_READY
 
     def copy(self) -> Float8BlockQuantizer:
         """Create shallow copy"""
@@ -69,6 +83,7 @@ class Float8BlockQuantizer(Quantizer):
             block_scaling_dim=self.block_scaling_dim,
             amax_epsilon=self.amax_epsilon,
             force_pow_2_scales=self.force_pow_2_scales,
+            rowwise_scale_layout=self.rowwise_scale_layout,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -207,6 +222,8 @@ class Float8BlockQuantizer(Quantizer):
                 (dim0 + self.block_len - 1) // self.block_len,
                 round_up_to_nearest_multiple(dim1, 4),
             )
+        if self.rowwise_scale_layout == tex.FP8BlockwiseRowwiseOption.ROWWISE_COMPACT:
+            return (dim0, (dim1 + self.block_len - 1) // self.block_len)
         return (
             (dim1 + self.block_len - 1) // self.block_len,
             round_up_to_nearest_multiple(dim0, 4),

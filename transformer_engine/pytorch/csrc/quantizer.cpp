@@ -1002,7 +1002,6 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
   }
   quant_config.set_force_pow_2_scales(force_pow_2_scales);
   quant_config.set_amax_epsilon(amax_epsilon);
-
   // Compute amax
   if (compute_amax) {
     NVTE_SCOPED_GIL_RELEASE(
@@ -1050,6 +1049,9 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
   this->block_scaling_dim = quantizer.attr("block_scaling_dim").cast<int>();
   this->force_pow_2_scales = quantizer.attr("force_pow_2_scales").cast<bool>();
   this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
+  this->rowwise_scale_option =
+      quantizer.attr("rowwise_scale_layout")
+          .cast<transformer_engine::detail::FP8BlockwiseRowwiseOption>();
   NVTE_CHECK(this->block_scaling_dim == 1 || this->block_scaling_dim == 2,
              "Unsupported block scaling dim.");
 }
@@ -1201,7 +1203,10 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   const size_t blocks_X = ceildiv(logical_last_dim, kBlockLen);
 
   auto grouped_scale_elems = [&](bool columnwise) -> int64_t {
-    const auto sh = get_scale_shape(logical_shape_vec, columnwise);
+    // Grouped quantization feeds GEMM directly, regardless of the ordinary tensor layout option.
+    const auto sh = !columnwise && block_scaling_dim == 1
+                        ? std::vector<size_t>{blocks_X, roundup(logical_first_dim, 4)}
+                        : get_scale_shape(logical_shape_vec, columnwise);
     int64_t total = static_cast<int64_t>(product(sh));
     if (columnwise && block_scaling_dim == 2 && num_tensors > 1) {
       // sum_t roundup(blocks_y_t, 4) <= roundup(total_blocks_y, 4) + 4*(num_tensors-1).
@@ -1431,6 +1436,8 @@ void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& o
   }
   quant_config.set_force_pow_2_scales(force_pow_2_scales);
   quant_config.set_amax_epsilon(amax_epsilon);
+  quant_config.set_block_scaling_1d_rowwise_option(
+      static_cast<uint8_t>(rowwise_scale_option));
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
@@ -1459,9 +1466,14 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       sinv0 = ceildiv(m_dim, kBlockLen);
       sinv1 = roundup(ceildiv(k_dim, kBlockLen), 4);
     } else if (block_scaling_dim == 1) {
-      // default rowwise scaling factor shape already transpose the scaling factor so it's GEMM_READY
-      sinv0 = ceildiv(k_dim, kBlockLen);
-      sinv1 = roundup(m_dim, 4);
+      if (rowwise_scale_option ==
+          transformer_engine::detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT) {
+        sinv0 = m_dim;
+        sinv1 = ceildiv(k_dim, kBlockLen);
+      } else {
+        sinv0 = ceildiv(k_dim, kBlockLen);
+        sinv1 = roundup(m_dim, 4);
+      }
     } else {
       NVTE_ERROR(
           "Unsupported block_scaling_dim in create_tensor rowwise."

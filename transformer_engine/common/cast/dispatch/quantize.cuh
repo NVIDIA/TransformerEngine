@@ -213,7 +213,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        rowwise_option = FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+        rowwise_option = quant_config_cpp.block_scaling_1d_rowwise_option;
       }
       if (output_tensor->has_columnwise_data()) {
         columnwise_option = FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
@@ -404,7 +404,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        rowwise_option = FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+        rowwise_option = quant_config_cpp.block_scaling_1d_rowwise_option;
       }
       if (output_tensor->has_columnwise_data()) {
         columnwise_option = FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;

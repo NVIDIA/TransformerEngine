@@ -1143,6 +1143,9 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP82DQuantization:
       bool_to_uint8(config_.mxfp8_2d_quantization, buf);
       break;
+    case kNVTEQuantizationConfigBlockScaling1DRowwiseOption:
+      std::memcpy(buf, &config_.block_scaling_1d_rowwise_option, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1212,6 +1215,15 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigMXFP82DQuantization:
       uint8_to_bool(buf, config_.mxfp8_2d_quantization);
+      break;
+    case kNVTEQuantizationConfigBlockScaling1DRowwiseOption:
+      config_.block_scaling_1d_rowwise_option =
+          static_cast<detail::FP8BlockwiseRowwiseOption>(*reinterpret_cast<const uint8_t *>(buf));
+      NVTE_CHECK(config_.block_scaling_1d_rowwise_option ==
+                         detail::FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY ||
+                     config_.block_scaling_1d_rowwise_option ==
+                         detail::FP8BlockwiseRowwiseOption::ROWWISE_COMPACT,
+                 "Block scaling 1D rowwise option must be GEMM_READY or COMPACT");
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
