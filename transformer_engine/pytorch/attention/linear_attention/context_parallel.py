@@ -72,9 +72,9 @@ class _LinearAttentionCPDeviceMetadata:
     forward_zero_descriptors: torch.Tensor
     backward_zero_descriptors: torch.Tensor
     document_indices: torch.Tensor
-    outgoing: torch.Tensor
-    incoming: torch.Tensor
-    terminal: torch.Tensor
+    outgoing_fragment_indices: torch.Tensor
+    incoming_fragment_indices: torch.Tensor
+    terminal_fragment_indices: torch.Tensor
     initial_state_fragments: torch.Tensor
     initial_state_documents: torch.Tensor
     empty_documents: torch.Tensor
@@ -125,14 +125,14 @@ def _build_linear_attention_cp_device_metadata(host_metadata, device):
         forward_zero_descriptors,
         backward_zero_descriptors,
         indices([f.document for f in host_metadata.fragments]),
-        indices(host_metadata.outgoing),
-        indices(host_metadata.incoming),
-        indices(host_metadata.terminal),
+        indices(host_metadata.outgoing_fragment_indices),
+        indices(host_metadata.incoming_fragment_indices),
+        indices(host_metadata.terminal_fragment_indices),
         indices(first),
         indices([host_metadata.fragments[i].document for i in first]),
         indices(host_metadata.empty_owned),
-        cumulative(host_metadata.outgoing),
-        cumulative(host_metadata.incoming),
+        cumulative(host_metadata.outgoing_fragment_indices),
+        cumulative(host_metadata.incoming_fragment_indices),
     )
 
 
@@ -227,8 +227,8 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
             else initial_state
         )
         additive, transition = _summary_buffers(initial_state_buffer, host_metadata.slots)
-        if host_metadata.outgoing:
-            span = _selected_span(host_metadata, host_metadata.outgoing)
+        if host_metadata.outgoing_fragment_indices:
+            span = _selected_span(host_metadata, host_metadata.outgoing_fragment_indices)
             selected = tuple(t[span] for t in tensors)
             h, t = adapter._cp_forward_summary(
                 *selected[:3],
@@ -236,7 +236,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
                 device_metadata.outgoing_cu_seqlens,
                 **options,
             )
-            slots = _slot_indices(metadata, device_metadata.outgoing)
+            slots = _slot_indices(metadata, device_metadata.outgoing_fragment_indices)
             additive.index_copy_(0, slots, h)
             transition.index_copy_(0, slots, t)
         if host_metadata.communicates:
@@ -277,8 +277,10 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
         if output_final_state:
             terminal.index_copy_(
                 0,
-                device_metadata.document_indices.index_select(0, device_metadata.terminal),
-                states.detach().index_select(0, device_metadata.terminal),
+                device_metadata.document_indices.index_select(
+                    0, device_metadata.terminal_fragment_indices
+                ),
+                states.detach().index_select(0, device_metadata.terminal_fragment_indices),
             )
             if initial_state is not None:
                 terminal.index_copy_(
@@ -326,8 +328,8 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
             # Final states are replicated outputs: sum losses consuming any replica.
             dist.all_reduce(final_state_grad, group=group)
         additive, transition = _summary_buffers(final_state_grad, host_metadata.slots)
-        if host_metadata.incoming:
-            span = _selected_span(host_metadata, host_metadata.incoming)
+        if host_metadata.incoming_fragment_indices:
+            span = _selected_span(host_metadata, host_metadata.incoming_fragment_indices)
             selected = tuple(t[span] for t in tensors)
             h, t = ctx.adapter._cp_backward_summary(
                 *selected[:3],
@@ -336,7 +338,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
                 device_metadata.incoming_cu_seqlens,
                 **ctx.options,
             )
-            slots = _slot_indices(metadata, device_metadata.incoming)
+            slots = _slot_indices(metadata, device_metadata.incoming_fragment_indices)
             additive.index_copy_(0, slots, h)
             transition.index_copy_(0, slots, t)
         if host_metadata.communicates:

@@ -47,11 +47,11 @@ class LinearAttentionCPHostMetadata:
 
     Using the fragment example from LinearAttentionFragment, packed rank 1 owns:
 
-        fragments:       A [6, 8), B [8, 12)
-        local_cu_seqlens: (0, 2, 6)
-        incoming:        (0,)     # A continues from rank 0.
-        outgoing:        ()      # Neither document continues to a later rank.
-        terminal:        (0, 1)   # Both documents end on this rank.
+        fragments:                  A [6, 8), B [8, 12)
+        local_cu_seqlens:           (0, 2, 6)
+        incoming_fragment_indices:  (0,)     # A continues from rank 0.
+        outgoing_fragment_indices:  ()      # Neither document continues to a later rank.
+        terminal_fragment_indices:  (0, 1)   # Both documents end on this rank.
     """
 
     cu_seqlens: Tuple[int, ...]  # Global cumulative sequence lengths.
@@ -64,9 +64,9 @@ class LinearAttentionCPHostMetadata:
     # Select following reverse summaries to compose each fragment's ending-state gradient.
     backward_descriptors: Tuple[Tuple[int, int, int, int], ...]
     # The following three tuples contain local fragment indices, not document IDs.
-    outgoing: Tuple[int, ...]  # Document continues to a later rank.
-    incoming: Tuple[int, ...]  # Document starts on an earlier rank.
-    terminal: Tuple[int, ...]  # Document ends on this rank.
+    outgoing_fragment_indices: Tuple[int, ...]  # Document continues to a later rank.
+    incoming_fragment_indices: Tuple[int, ...]  # Document starts on an earlier rank.
+    terminal_fragment_indices: Tuple[int, ...]  # Document ends on this rank.
     initial_state_owners: Tuple[int, ...]  # Initial-state owner rank for each global document.
     empty_owned: Tuple[int, ...]  # Empty global document IDs assigned to this rank.
     slots: int  # One per rank for packed inputs; one per document for dense inputs.
@@ -121,33 +121,36 @@ def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, den
                 LinearAttentionFragment(doc, fragment_start, fragment_end, first_rank, last_rank)
             )
     cu = [0]
-    forward, backward, outgoing, incoming, terminal = [], [], [], [], []
+    forward_desc, backward_desc = [], []
+    outgoing_fragment_indices = []
+    incoming_fragment_indices = []
+    terminal_fragment_indices = []
     for index, frag in enumerate(fragments):
         cu.append(cu[-1] + frag.end - frag.start)
         slot = frag.document if dense else 0
-        forward.append(
+        forward_desc.append(
             (frag.document, frag.first_rank * slots + slot, cp_rank - frag.first_rank, slots)
         )
-        backward.append(
+        backward_desc.append(
             (frag.document, frag.last_rank * slots + slot, frag.last_rank - cp_rank, -slots)
         )
         if cp_rank < frag.last_rank:
-            outgoing.append(index)
+            outgoing_fragment_indices.append(index)
         else:
-            terminal.append(index)
+            terminal_fragment_indices.append(index)
         if cp_rank > frag.first_rank:
-            incoming.append(index)
+            incoming_fragment_indices.append(index)
     return LinearAttentionCPHostMetadata(
         cu_seqlens,
         cp_rank,
         cp_size,
         tuple(fragments),
         tuple(cu),
-        tuple(forward),
-        tuple(backward),
-        tuple(outgoing),
-        tuple(incoming),
-        tuple(terminal),
+        tuple(forward_desc),
+        tuple(backward_desc),
+        tuple(outgoing_fragment_indices),
+        tuple(incoming_fragment_indices),
+        tuple(terminal_fragment_indices),
         tuple(initial_state_owners),
         tuple(empty),
         slots,

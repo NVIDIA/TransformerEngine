@@ -43,25 +43,25 @@ def test_partition_intersections(cp_size):
                 host_metadata.local_cu_seqlens[-1]
                 == (cp_rank + 1) * cu[-1] // cp_size - cp_rank * cu[-1] // cp_size
             )
-            assert len(host_metadata.incoming) <= 1
-            assert len(host_metadata.outgoing) <= 1
-            for f, forward, backward in zip(
+            assert len(host_metadata.incoming_fragment_indices) <= 1
+            assert len(host_metadata.outgoing_fragment_indices) <= 1
+            for f, forward_desc, backward_desc in zip(
                 host_metadata.fragments,
                 host_metadata.forward_descriptors,
                 host_metadata.backward_descriptors,
             ):
-                assert forward[2] == cp_rank - f.first_rank
-                assert backward[2] == f.last_rank - cp_rank
+                assert forward_desc[2] == cp_rank - f.first_rank
+                assert backward_desc[2] == f.last_rank - cp_rank
                 # Every referenced recipe belongs to this same document.
                 for predecessor in range(f.first_rank, cp_rank):
                     p = rank_metadata[predecessor]
                     if p.fragments:
-                        assert p.fragments[p.outgoing[0]].document == f.document
+                        assert p.fragments[p.outgoing_fragment_indices[0]].document == f.document
                 for successor in range(cp_rank + 1, f.last_rank + 1):
                     p = rank_metadata[successor]
                     # An empty rank contributes an identity recipe.
                     if p.fragments:
-                        assert p.fragments[p.incoming[0]].document == f.document
+                        assert p.fragments[p.incoming_fragment_indices[0]].document == f.document
 
 
 @pytest.mark.parametrize("cu_seqlens", [[1, 2], [0], [0, 2, 1]])
