@@ -580,11 +580,12 @@ class TestGroupedLinearOp:
         overwrite_main_grad: bool,
         delay_wgrad_compute: bool,
     ) -> None:
-        """Accumulate into main_grad views that are not 16-byte aligned.
+        """A main_grad that is not 16-byte aligned makes the wgrad GEMM raise an error.
 
         Megatron-LM packs parameters into one FP32 gradient buffer without padding when the
         distributed optimizer is off, so a 3-element router bias in front of the experts
-        leaves the expert main_grad 12 bytes past a 16-byte boundary.
+        leaves the expert main_grad 12 bytes past a 16-byte boundary. The grouped GEMM
+        cannot write there, and reports it instead of faulting on the device.
         """
         if not is_op_fuser_grouped_tensor_path_supported(None, torch.bfloat16):
             pytest.skip("Native grouped GEMM is unavailable.")
@@ -607,50 +608,26 @@ class TestGroupedLinearOp:
         assert main_grads.data_ptr() % 16 == 12
         if single_grouped_weight:
             weights = [op.weight]
-            parts = op.weight.quantized_tensors or op.weight.split_into_quantized_tensors()
-            with torch.no_grad():
-                for part in parts:
-                    part.fill_(1)
             op.weight.main_grad = main_grads.view(op.weight.size())
         else:
             weights = [getattr(op, f"weight{i}") for i in range(num_groups)]
             for i, weight in enumerate(weights):
-                with torch.no_grad():
-                    weight.fill_(1)
                 weight.main_grad = main_grads[i]
         for weight in weights:
             weight.overwrite_main_grad = overwrite_main_grad
             weight.grad_added_to_main_grad = False
-        main_grad_ptrs = [weight.main_grad.data_ptr() for weight in weights]
 
-        # Group i sees inputs of 0.125 * (i + 1), so its wgrad is 4 * (i + 1).
-        x = torch.cat(
-            [
-                torch.full((tokens, in_features), 0.125 * (i + 1), device="cuda")
-                for i in range(num_groups)
-            ]
-        ).to(torch.bfloat16)
-        x.requires_grad_(True)
+        x = torch.randn(
+            num_groups * tokens, in_features, device="cuda", dtype=torch.bfloat16
+        ).requires_grad_(True)
         splits = torch.full((num_groups,), tokens, device="cuda", dtype=torch.int64)
         y = model(x, splits)
-        y.backward(torch.full_like(y, 0.5))
-        if delay_wgrad_compute:
-            op.backward_dw()
-
-        expected = torch.stack(
-            [
-                torch.full_like(main_grads[i], 4.0 * (i + 1) + (0 if overwrite_main_grad else 0.25))
-                for i in range(num_groups)
-            ]
-        )
-        MegatronTrainingHelper.verify_main_grad_accumulation(
-            weights,
-            expected_main_grads=(
-                [expected.view(op.weight.size())] if single_grouped_weight else list(expected)
-            ),
-        )
-        assert [weight.main_grad.data_ptr() for weight in weights] == main_grad_ptrs
-        torch.testing.assert_close(buffer[:3], torch.full_like(buffer[:3], 0.25), rtol=0, atol=0)
+        with pytest.raises(RuntimeError, match="data pointer must be 16-byte aligned"):
+            y.backward(torch.ones_like(y))
+            if delay_wgrad_compute:
+                op.backward_dw()
+        torch.cuda.synchronize()  # no asynchronous CUDA error is left behind
+        torch.testing.assert_close(buffer, torch.full_like(buffer, 0.25), rtol=0, atol=0)
 
     def test_single_grouped_bias_uses_registered_packed_storage(self) -> None:
         """The grouped bias compute view must alias the registered trainable parent."""

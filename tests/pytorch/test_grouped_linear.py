@@ -1290,115 +1290,11 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_b
 @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("accumulate", [False, True])
 def test_grouped_gemm_grouped_tensor_unaligned_out(out_kind, out_dtype, accumulate) -> None:
-    """Outputs that are not 16-byte aligned are computed through aligned buffers.
+    """An output that is not 16-byte aligned raises an error instead of faulting on the device.
 
-    Megatron-LM's gradient buffer packs parameters without padding when the distributed
-    optimizer is off, so expert main_grad views can start off a 16-byte boundary.
+    A view into a larger buffer need not be aligned, e.g. a Megatron-LM expert main_grad in a
+    gradient buffer that packs parameters without padding.
     """
-    if not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
-        pytest.skip("Grouped GEMM is not supported on this device or cuBLASLt version.")
-
-    torch.manual_seed(0)
-    dtype = torch.bfloat16
-    device = torch.device("cuda")
-    n, k = 256, 128
-    m_sizes = [64, 32, 96]
-    z = len(m_sizes)
-    A = [torch.randn(ms, k, dtype=dtype, device=device) for ms in m_sizes]  # input
-    B = [torch.randn(ms, n, dtype=dtype, device=device) for ms in m_sizes]  # grad_output
-    grouped_A = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
-    grouped_B = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
-    _pack_grouped_tensor(grouped_A, A)
-    _pack_grouped_tensor(grouped_B, B)
-
-    # wgrads in one buffer, starting one element past a 16-byte boundary
-    buffer = torch.randn(1 + z * n * k, dtype=out_dtype, device=device)
-    head = buffer[0].clone()
-    wgrads = buffer[1:].view(z, n, k)
-    assert wgrads.data_ptr() % 16 != 0
-    out_ref = [torch.matmul(B[i].transpose(0, 1).float(), A[i].float()) for i in range(z)]
-    if accumulate:
-        out_ref = [wgrads[i].float() + o for i, o in enumerate(out_ref)]
-    aligned = wgrads.clone()
-    if out_kind == "discrete":
-        out = list(wgrads.unbind(0))
-        aligned_out = list(aligned.unbind(0))
-    else:
-        out = GroupedTensor.make_grouped_tensor_from_rowwise_data(
-            num_tensors=z, tensor_shape=(n, k), rowwise_data=buffer[1:], dtype=out_dtype
-        )
-        aligned_out = GroupedTensor.make_grouped_tensor_from_rowwise_data(
-            num_tensors=z, tensor_shape=(n, k), rowwise_data=aligned.view(-1), dtype=out_dtype
-        )
-
-    for o in (out, aligned_out):
-        general_grouped_gemm_for_grouped_tensor(
-            grouped_A, grouped_B, o, layout="NT", accumulate=accumulate
-        )
-
-    # Same result as an aligned output, and close to an FP32 reference
-    torch.testing.assert_close(wgrads, aligned, rtol=0, atol=0)
-    tols = dtype_tols(out_dtype) if out_dtype != torch.float32 else dict(rtol=1e-4, atol=1e-3)
-    for i in range(z):
-        torch.testing.assert_close(wgrads[i], out_ref[i].to(out_dtype), **tols)
-    torch.testing.assert_close(buffer[0], head, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("accumulate", [False, True])
-@pytest.mark.parametrize("use_bias_scale", [False, True])
-def test_grouped_gemm_grouped_tensor_unaligned_out_with_bias(accumulate, use_bias_scale) -> None:
-    """A grouped output that is not 16-byte aligned gets the same accumulation and bias as an
-    aligned one."""
-    if not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
-        pytest.skip("Grouped GEMM is not supported on this device or cuBLASLt version.")
-
-    torch.manual_seed(0)
-    dtype = torch.bfloat16
-    device = torch.device("cuda")
-    n, k = 256, 128
-    m_sizes = [64, 32, 96]
-    z, m = len(m_sizes), sum(m_sizes)
-    grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)  # weight
-    grouped_B = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)  # input
-    _pack_grouped_tensor(
-        grouped_A, [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
-    )
-    _pack_grouped_tensor(
-        grouped_B, [torch.randn(ms, k, dtype=dtype, device=device) for ms in m_sizes]
-    )
-    grouped_bias = _make_grouped_tensor_uniform(z, 1, n, device, dtype)
-    _pack_grouped_tensor(
-        grouped_bias, [torch.randn(1, n, dtype=dtype, device=device) for _ in range(z)]
-    )
-    bias_scale = torch.randn(m, device=device, dtype=torch.float32) if use_bias_scale else None
-
-    # Output rows in one buffer, starting one element past a 16-byte boundary
-    buffer = torch.randn(1 + m * n, dtype=dtype, device=device)
-    aligned_buffer = buffer[1:].clone()
-    outs = []
-    for data in (buffer[1:], aligned_buffer):
-        out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
-        out.rowwise_data = data
-        outs.append(out)
-    assert outs[0].rowwise_data.data_ptr() % 16 != 0
-
-    for out in outs:
-        general_grouped_gemm_for_grouped_tensor(
-            grouped_A,
-            grouped_B,
-            out,
-            layout="TN",
-            accumulate=accumulate,
-            bias=grouped_bias,
-            bias_scale=bias_scale,
-        )
-
-    torch.testing.assert_close(buffer[1:], aligned_buffer, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("out_kind", ["discrete", "grouped"])
-def test_grouped_gemm_grouped_tensor_unaligned_out_with_beta(out_kind) -> None:
-    """An explicit beta scales the old values of a misaligned output, as for an aligned one."""
     if not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
         pytest.skip("Grouped GEMM is not supported on this device or cuBLASLt version.")
 
@@ -1416,27 +1312,23 @@ def test_grouped_gemm_grouped_tensor_unaligned_out_with_beta(out_kind) -> None:
     _pack_grouped_tensor(
         grouped_B, [torch.randn(ms, n, dtype=dtype, device=device) for ms in m_sizes]
     )
-    # Hopper takes one beta for all groups; Blackwell takes one per group.
-    num_beta = z if torch.cuda.get_device_capability() >= (10, 0) else 1
-    beta = torch.full((num_beta,), 0.5, dtype=torch.float32, device=device)
 
-    buffer = torch.randn(1 + z * n * k, dtype=torch.float32, device=device)
-    aligned = buffer[1:].clone()
-    outs = []
-    for data in (buffer[1:], aligned):
-        if out_kind == "discrete":
-            outs.append(list(data.view(z, n, k).unbind(0)))
-        else:
-            outs.append(
-                GroupedTensor.make_grouped_tensor_from_rowwise_data(
-                    num_tensors=z, tensor_shape=(n, k), rowwise_data=data, dtype=torch.float32
-                )
-            )
+    # wgrads in one buffer, starting one element past a 16-byte boundary
+    buffer = torch.randn(1 + z * n * k, dtype=out_dtype, device=device)
+    before = buffer.clone()
+    if out_kind == "discrete":
+        out = list(buffer[1:].view(z, n, k).unbind(0))
+    else:
+        out = GroupedTensor.make_grouped_tensor_from_rowwise_data(
+            num_tensors=z, tensor_shape=(n, k), rowwise_data=buffer[1:], dtype=out_dtype
+        )
 
-    for out in outs:
-        general_grouped_gemm_for_grouped_tensor(grouped_A, grouped_B, out, layout="NT", beta=beta)
-
-    torch.testing.assert_close(buffer[1:], aligned, rtol=0, atol=0)
+    with pytest.raises(RuntimeError, match="data pointer must be 16-byte aligned"):
+        general_grouped_gemm_for_grouped_tensor(
+            grouped_A, grouped_B, out, layout="NT", accumulate=accumulate
+        )
+    torch.cuda.synchronize()  # no asynchronous CUDA error is left behind
+    torch.testing.assert_close(buffer, before, rtol=0, atol=0)
 
 
 def test_grouped_gemm_grouped_tensor_unaligned_input() -> None:
