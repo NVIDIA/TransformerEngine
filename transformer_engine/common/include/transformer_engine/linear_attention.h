@@ -19,7 +19,7 @@ extern "C" {
 /*! \brief Compose recurrent states from ordered affine summaries.
  *
  * Each output starts from a selected initial memory and repeatedly evaluates
- * ``state = state @ transition[record] + additive[record]``. This operation
+ * ``state = state @ transitions[summary_index] + additive[summary_index]``. This operation
  * serves both forward prefixes and backward suffixes; backward callers pass
  * the backward-oriented transitions and a negative record stride.
  *
@@ -28,13 +28,13 @@ extern "C" {
  * \param[in]  initial_states FP32 initial memories,
  *                            [initial_memories, heads, value_dim, key_dim].
  * \param[in]  additive       FP32 additive summaries,
- *                            [records, heads, value_dim, key_dim].
+ *                            [summaries, heads, value_dim, key_dim].
  * \param[in]  transitions    FP32 transition matrices,
- *                            [records, heads, key_dim, key_dim].
+ *                            [summaries, heads, key_dim, key_dim].
  * \param[in]  descriptors    INT32 [outputs, 4], with rows
- *                            (initial_memory_index, first_record, count, stride).
+ *                            (initial_memory_index, first_summary, count, stride).
  *                            An initial_memory_index of -1 selects an implicit zero state.
- *                            Other referenced memory and record indices must be valid.
+ *                            Other referenced memory and summary indices must be valid.
  *                            Count must be nonnegative; zero copies the initial memory
  *                            (or writes zeros).
  * \param[out] output         Caller-allocated FP32 composed memories,

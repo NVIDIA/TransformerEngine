@@ -79,7 +79,7 @@ def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, den
     ``cu_seqlens`` contains full-document boundaries as host integers. For
     P = ``cp_size``, packed rank r owns [r*T//P:(r+1)*T//P] of T total tokens.
     Dense rank r owns [r*S//P:(r+1)*S//P] of each length-S document.
-    Descriptor rows are (document, first_record, count, stride). Each selects
+    Descriptor rows are (document, first_summary, count, stride). Each selects
     summaries of one document, in forward or reverse order.
     """
     cu_seqlens = tuple(cu_seqlens)
