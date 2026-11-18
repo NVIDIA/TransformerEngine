@@ -404,6 +404,9 @@ def test_quantization_block_tiling_versus_reference(
         (8192, 8192),
         (4096, 7168),
         (16384, 2048),
+        # 8 splits of 320 rows are not 128-aligned, which takes the columnwise-only
+        # grouped RHT kernel instead of the fused rowwise + columnwise one
+        (2560, 2048),
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
