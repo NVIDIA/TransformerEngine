@@ -122,8 +122,8 @@ TE prepares partitions on the host and uploads the derived indices to the GPU.
 CUDA ``cu_seqlens`` requires a synchronized host read on the first use. Pass CPU
 metadata when it is already available from the input pipeline to avoid that read.
 
-Each attention module caches its most recent partition. A bounded shared cache
-retains up to eight partitions per process so layers using the same metadata
+Each attention module caches its most recent rank metadata. A bounded shared cache
+retains up to eight prepared entries per process so layers using the same metadata
 on the same CUDA stream can reuse that preparation. Inference-mode entries are
 kept separate so autograd never saves inference tensors during training.
 Cache keys include tensor identity and its mutation counter; tracked in-place

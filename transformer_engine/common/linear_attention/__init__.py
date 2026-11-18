@@ -38,8 +38,8 @@ class LinearAttentionFragment:
 
 
 @dataclass(frozen=True)
-class LinearAttentionCPPartition:
-    """Host metadata for one CP rank.
+class LinearAttentionCPHostMetadata:
+    """Global document boundaries and local fragment metadata for one CP rank.
 
     Packed (THD) inputs intersect documents with contiguous rank intervals.
     Dense (BSHD/SBHD) inputs give each rank a nearly equal slice of every document.
@@ -73,7 +73,7 @@ class LinearAttentionCPPartition:
     communicates: bool  # Any global document spans multiple ranks.
 
 
-def build_linear_attention_partition(cu_seqlens, cp_size, cp_rank, *, dense=False):
+def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, dense=False):
     """Build one rank's fragment and summary metadata on the host.
 
     ``cu_seqlens`` contains full-document boundaries as host integers. For
@@ -137,7 +137,7 @@ def build_linear_attention_partition(cu_seqlens, cp_size, cp_rank, *, dense=Fals
             terminal.append(index)
         if cp_rank > frag.first_rank:
             incoming.append(index)
-    return LinearAttentionCPPartition(
+    return LinearAttentionCPHostMetadata(
         cu_seqlens,
         cp_rank,
         cp_size,

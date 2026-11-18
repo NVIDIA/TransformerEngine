@@ -16,7 +16,7 @@ import torch
 
 from test_gdn_attention import _GDN_AVAILABLE
 import transformer_engine
-from transformer_engine.common.linear_attention import build_linear_attention_partition
+from transformer_engine.common.linear_attention import build_linear_attention_cp_host_metadata
 import transformer_engine_torch as tex
 
 
@@ -29,34 +29,36 @@ def test_partition_intersections(cp_size):
         cu = [0]
         for length in lengths:
             cu.append(cu[-1] + length)
-        partitions = [
-            build_linear_attention_partition(cu, cp_size=cp_size, cp_rank=cp_rank)
+        rank_metadata = [
+            build_linear_attention_cp_host_metadata(cu, cp_size=cp_size, cp_rank=cp_rank)
             for cp_rank in range(cp_size)
         ]
         for doc, (start, end) in enumerate(zip(cu, cu[1:])):
-            fragments = [f for p in partitions for f in p.fragments if f.document == doc]
+            fragments = [f for p in rank_metadata for f in p.fragments if f.document == doc]
             assert sum(f.end - f.start for f in fragments) == end - start
             assert all(start <= f.start < f.end <= end for f in fragments)
             assert all(a.end == b.start for a, b in zip(fragments, fragments[1:]))
-        for cp_rank, partition in enumerate(partitions):
+        for cp_rank, host_metadata in enumerate(rank_metadata):
             assert (
-                partition.local_cu_seqlens[-1]
+                host_metadata.local_cu_seqlens[-1]
                 == (cp_rank + 1) * cu[-1] // cp_size - cp_rank * cu[-1] // cp_size
             )
-            assert len(partition.incoming) <= 1
-            assert len(partition.outgoing) <= 1
+            assert len(host_metadata.incoming) <= 1
+            assert len(host_metadata.outgoing) <= 1
             for f, forward, backward in zip(
-                partition.fragments, partition.forward_descriptors, partition.backward_descriptors
+                host_metadata.fragments,
+                host_metadata.forward_descriptors,
+                host_metadata.backward_descriptors,
             ):
                 assert forward[2] == cp_rank - f.first_rank
                 assert backward[2] == f.last_rank - cp_rank
                 # Every referenced recipe belongs to this same document.
                 for predecessor in range(f.first_rank, cp_rank):
-                    p = partitions[predecessor]
+                    p = rank_metadata[predecessor]
                     if p.fragments:
                         assert p.fragments[p.outgoing[0]].document == f.document
                 for successor in range(cp_rank + 1, f.last_rank + 1):
-                    p = partitions[successor]
+                    p = rank_metadata[successor]
                     # An empty rank contributes an identity recipe.
                     if p.fragments:
                         assert p.fragments[p.incoming[0]].document == f.document
@@ -66,31 +68,31 @@ def test_partition_intersections(cp_size):
 def test_invalid_documents(cu_seqlens):
     """Reject malformed global offsets before computing communication descriptors."""
     with pytest.raises(ValueError):
-        build_linear_attention_partition(cu_seqlens, cp_size=4, cp_rank=0)
+        build_linear_attention_cp_host_metadata(cu_seqlens, cp_size=4, cp_rank=0)
 
 
 @pytest.mark.parametrize("cp_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("length", [0, 1, 5, 9])
 def test_dense_partition_intersections(cp_size, length):
     """Dense rows retain their document identity, including uneven and empty ranks."""
-    partitions = [
-        build_linear_attention_partition(
+    rank_metadata = [
+        build_linear_attention_cp_host_metadata(
             [0, length, 2 * length], cp_size=cp_size, cp_rank=cp_rank, dense=True
         )
         for cp_rank in range(cp_size)
     ]
     for doc in (0, 1):
-        spans = [f for p in partitions for f in p.fragments if f.document == doc]
+        spans = [f for p in rank_metadata for f in p.fragments if f.document == doc]
         assert sum(f.end - f.start for f in spans) == length
         assert all(a.end == b.start for a, b in zip(spans, spans[1:]))
         if length:
             assert spans[0].start == doc * length
             assert spans[-1].end == (doc + 1) * length
-    for cp_rank, partition in enumerate(partitions):
+    for cp_rank, host_metadata in enumerate(rank_metadata):
         local_length = (cp_rank + 1) * length // cp_size - cp_rank * length // cp_size
-        assert partition.local_cu_seqlens[-1] == 2 * local_length
-        assert partition.slots == 2
-        assert len(partition.fragments) == (2 if local_length else 0)
+        assert host_metadata.local_cu_seqlens[-1] == 2 * local_length
+        assert host_metadata.slots == 2
+        assert len(host_metadata.fragments) == (2 if local_length else 0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

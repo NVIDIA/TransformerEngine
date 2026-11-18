@@ -351,7 +351,7 @@ class GatedDeltaNetAttention(LinearAttentionBase):
         if cp_group is not None and not isinstance(cp_group, dist.ProcessGroup):
             raise TypeError("GDN cp_group must be one torch.distributed.ProcessGroup or None.")
         self.cp_group = cp_group
-        self.gdn_attention._cp_partition_cache = None
+        self.gdn_attention._cp_metadata_cache = None
 
     @no_torch_dynamo(when=_needs_eager_linear_attention)
     def forward(
