@@ -1707,6 +1707,30 @@ def test_permutation_index_map(
     )
 
 
+def test_permute_with_probs_zero_probability_row_has_no_input_gradient():
+    """A routed slot with probability zero is written as a zero row and must not backprop.
+
+    The forward zeroes that row (it is routing-map padding), so it does not depend on the input; a
+    gradient arriving for it must not be accumulated into the input tensor.
+    """
+    device = "cuda"
+    routing_map = torch.tensor([[1, 1], [0, 1]], dtype=torch.int32, device=device)
+    probs = torch.tensor([[1.0, 0.0], [0.0, 1.0]], device=device)
+    x = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device=device, requires_grad=True)
+
+    out, _, _ = te_permute_with_probs(x, probs, routing_map, 3)
+    row_weights = torch.tensor([[1.0, 1.0], [10.0, 10.0], [100.0, 100.0]], device=device)
+    (out * row_weights).sum().backward()
+
+    x_ref = x.detach().clone().requires_grad_(True)
+    reference = torch.stack([x_ref[0], torch.zeros_like(x_ref[0]), x_ref[1]])
+    (reference * row_weights).sum().backward()
+
+    torch.testing.assert_close(out, reference)
+    torch.testing.assert_close(x.grad, x_ref.grad)
+
+
+
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("use_torch_compile", [False, True])
 def test_permutation_index_map_empty_input(te_dtype, use_torch_compile):

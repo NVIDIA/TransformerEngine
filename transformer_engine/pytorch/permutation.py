@@ -532,7 +532,7 @@ def _moe_permute_mask_map_setup_context(ctx, inputs, output):
     inp, routing_map, _num_out_tokens, probs, pad_offsets = inputs
     _output_tensor, row_id_map, _permuted_probs = output
     ctx.empty_input = inp.size(0) == 0
-    ctx.save_for_backward(row_id_map, pad_offsets)
+    ctx.save_for_backward(row_id_map, pad_offsets, _permuted_probs)
     ctx.num_experts = routing_map.size(1)
     ctx.num_tokens = inp.size(0)
     ctx.hidden_size = inp.size(1) if not ctx.empty_input else 0
@@ -558,7 +558,18 @@ def _moe_permute_mask_map_backward_wrapper(
         grad_output, QuantizedTensor
     ), "The backward of moe_permute does not support FP8."
 
-    row_id_map, pad_offsets = ctx.saved_tensors
+    row_id_map, pad_offsets, permuted_probs = ctx.saved_tensors
+
+    # The forward writes a zero row for a routed slot whose probability is zero (see the
+    # PERMUTE_PROBS branch of the kernel), so that row does not depend on the input and its
+    # incoming gradient must not reach it. Without this the padded row contributes to the
+    # input gradient even though it contributed nothing to the output.
+    if permuted_probs.numel() > 0:
+        # Select rather than multiply: an infinite gradient in a masked row would survive as
+        # inf * 0 = NaN, which would then leak into the accumulation.
+        grad_output = torch.where(
+            (permuted_probs != 0).unsqueeze(-1), grad_output, torch.zeros_like(grad_output)
+        )
 
     # Pass permuted_probs_grad only if it has content
     probs_grad_input = grad_permuted_probs if grad_permuted_probs.numel() > 0 else None
