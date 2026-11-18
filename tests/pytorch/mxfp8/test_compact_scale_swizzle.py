@@ -7,8 +7,8 @@ import pytest
 import torch
 from mxfp8_utils import swizzle_mxfp8_scale
 
-import transformer_engine_torch as tex
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 
 
@@ -51,8 +51,8 @@ def _make_tensor_and_reference(shape, rowwise):
         columnwise_data=None if rowwise else torch.empty(shape, dtype=torch.uint8, device="cuda"),
         rowwise_scale_inv=scales if rowwise else None,
         columnwise_scale_inv=None if rowwise else scales,
-        fp8_dtype=tex.DType.kFloat8E4M3,
-        quantizer=MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=not rowwise),
+        fp8_dtype=te.DType.kFloat8E4M3,
+        quantizer=MXFP8Quantizer(te.DType.kFloat8E4M3, rowwise=rowwise, columnwise=not rowwise),
         with_gemm_swizzled_scales=False,
     )
     return tensor, reference
