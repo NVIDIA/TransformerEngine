@@ -15,11 +15,14 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
-from transformer_engine.jax.cpp_extensions.activation import ActivationParams
+from transformer_engine.jax.cpp_extensions.activation import (
+    ActivationParams,
+    _jax_act_lu,
+    _jax_quantize_dact_dbias,
+)
 from transformer_engine.jax.flax import _MoEBlock
 from transformer_engine.jax.moe import (
     RouterComputationInfo,
-    _apply_ffn_activation,
     _moe_mesh_axes,
     _resolve_moe_mesh_resource,
 )
@@ -91,10 +94,11 @@ def test_situ_value_and_both_branch_derivatives(betas):
     gate = jnp.asarray([-10000.0, -12.0, -0.5, 0.0, 0.5, 12.0, 10000.0])
     up = jnp.asarray([10000.0, 40.0, -3.0, 2.0, 3.0, -40.0, -10000.0])
     params = ActivationParams.create("situglu", gate_beta=gate_beta, up_beta=up_beta)
-    counts = jnp.asarray([1], jnp.int32)
 
     def activate(g, u):
-        return _apply_ffn_activation("situglu", g[None, :], u[None, :], counts, params)[0]
+        return _jax_act_lu(
+            jnp.stack([g, u], axis=-2), ("situ", "situ_linear"), act_params=params
+        ).data
 
     (output, pullback) = jax.vjp(activate, gate, up)
     (dg, du) = pullback(jnp.ones_like(output))
@@ -114,9 +118,9 @@ def test_situ_value_and_both_branch_derivatives(betas):
 def test_situ_bf16_uses_fp32_before_final_cast():
     gate = jnp.asarray([0.25, 1.5, -3.0, 12.0, 64.0], dtype=jnp.bfloat16)
     up = jnp.asarray([0.75, -2.0, 32.0, 64.0, -128.0], dtype=jnp.bfloat16)
-    actual = _apply_ffn_activation(
-        "situglu", gate[None, :], up[None, :], jnp.asarray([1], jnp.int32)
-    )[0]
+    actual = _jax_act_lu(jnp.stack([gate, up], axis=-2), ("situ", "situ_linear")).data.astype(
+        gate.dtype
+    )
     (g, u) = (np.asarray(gate, np.float64), np.asarray(up, np.float64))
     expected = jnp.asarray(100 * np.tanh(g / 4) / (1 + np.exp(-g)) * np.tanh(u / 25), jnp.bfloat16)
     assert actual.dtype == jnp.bfloat16
@@ -135,16 +139,19 @@ def test_situ_masks_inactive_values_and_gradients(dtype, betas, counts):
         value[active:] = np.nan
     (gate, up, dy) = [jnp.asarray(value, dtype) for value in (gate, up, dy)]
     sizes = jnp.asarray(counts, jnp.int32)
-    activate = lambda g, u: _apply_ffn_activation(
-        "situglu",
-        g,
-        u,
-        sizes,
-        ActivationParams.create("situglu", gate_beta=betas[0], up_beta=betas[1]),
+    mask = (jnp.arange(capacity) < sizes.sum())[:, None]
+    inputs = jnp.where(mask[:, None, :], jnp.stack([gate, up], axis=-2), 0)
+    params = ActivationParams.create("situglu", gate_beta=betas[0], up_beta=betas[1])
+    activate = partial(_jax_act_lu, activation_type=("situ", "situ_linear"), act_params=params)
+    output = jnp.where(mask, jax.jit(activate)(inputs).data.astype(dtype), 0)
+    backward = partial(
+        _jax_quantize_dact_dbias,
+        activation_type=("situ", "situ_linear"),
+        is_dbias=False,
+        act_params=params,
     )
-    output = jax.jit(activate)(gate, up)
-    (_, pullback) = jax.vjp(activate, gate, up)
-    (dg, du) = jax.jit(pullback)(dy)
+    gradients, _ = jax.jit(backward)(jnp.where(mask, dy, 0), inputs)
+    dg, du = gradients.data[:, 0, :], gradients.data[:, 1, :]
     (g, u, d) = [np.asarray(value, np.float64)[:active] for value in (gate, up, dy)]
     (gate_beta, up_beta) = betas
     (tg, tu, sigmoid) = (np.tanh(g / gate_beta), np.tanh(u / up_beta), 1 / (1 + np.exp(-g)))
@@ -164,8 +171,13 @@ def test_situ_masks_inactive_values_and_gradients(dtype, betas, counts):
 def test_situ_dynamic_counts_remat_and_vmap():
     gate = jnp.arange(13 * 6, dtype=jnp.float32).reshape(13, 6) / 20 - 2
     up = -gate
-    activation = "situglu"
-    activate = partial(_apply_ffn_activation, activation)
+
+    def activate(g, u, sizes):
+        active = (jnp.arange(g.shape[0]) < sizes.sum())[:, None]
+        inputs = jnp.where(active[:, None, :], jnp.stack([g, u], axis=-2), 0)
+        output = _jax_act_lu(inputs, ("situ", "situ_linear")).data
+        return jnp.where(active, output.astype(g.dtype), 0)
+
     compiled = jax.jit(activate)
     for counts in (jnp.array([3, 0, 5]), jnp.array([1, 2, 2])):
         expected = activate(gate, up, counts)

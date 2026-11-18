@@ -54,7 +54,11 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
-from .cpp_extensions.activation import ActivationParams, _convert_to_activation_function
+from .cpp_extensions.activation import (
+    ActivationParams,
+    _jax_act_lu,
+    _jax_quantize_dact_dbias,
+)
 from .cpp_extensions.misc import jax_dtype_to_te_dtype
 from .quantize import (
     GroupedScaledTensor1x,
@@ -98,17 +102,6 @@ def _resolve_moe_activation_params(activation_type, activation_params):
 def _fused_glu_activation_kwargs(activation_type, act_params, *, backward=False):
     act_func = "situglu" if activation_type == "situglu" else "swiglu"
     return {"act_func": ("d" if backward else "") + act_func, "act_params": act_params}
-
-
-def _apply_ffn_activation(activation_type, gate, up, group_sizes, act_params=ActivationParams()):
-    gate_activation, up_activation = (
-        ("situ", "situ_linear") if activation_type == "situglu" else (activation_type, "linear")
-    )
-    active = (jnp.arange(gate.shape[0]) < group_sizes.sum())[:, None]
-    gate_fn = _convert_to_activation_function(gate_activation, act_params)
-    up_fn = _convert_to_activation_function(up_activation, act_params)
-    result = gate_fn(jnp.where(active, gate, 0)) * up_fn(jnp.where(active, up, 0))
-    return jnp.where(active, result.astype(gate.dtype), 0)
 
 
 @flax.struct.dataclass
@@ -1081,9 +1074,15 @@ def _ffn_fwd_per_shard(
     # that's all bf16; for FP8/FP4 the downstream grouped_quantize is what
     # transitions to the target precision.
     if not use_cudnn_jax_fusion:
-        intermediate = _apply_ffn_activation(
-            activation_type, gate_proj_out, up_proj_out, group_sizes, act_params
+        activations = (
+            ("situ", "situ_linear") if activation_type == "situglu" else (activation_type, "linear")
         )
+        active = jnp.arange(gate_proj_out.shape[0]) < group_sizes.sum()
+        activation_inputs = jnp.where(
+            active[:, None, None], jnp.stack([gate_proj_out, up_proj_out], axis=-2), 0
+        )
+        intermediate = _jax_act_lu(activation_inputs, activations, act_params=act_params).data
+        intermediate = jnp.where(active[:, None], intermediate.astype(gate_proj_out.dtype), 0)
     if apply_topk_weights_early and not use_cudnn_jax_fusion:
         # Fold the per-token combine weights into the FFN intermediate;
         # the downstream wo GEMM is linear so this is equivalent to the
@@ -1248,13 +1247,21 @@ def _ffn_bwd_per_shard(
             casted_wo_rhs_trans,
             contracting_dims=((1,), (2,)),
         )
+        activations = (
+            ("situ", "situ_linear") if activation_type == "situglu" else (activation_type, "linear")
+        )
+        active = jnp.arange(gate_proj_out.shape[0]) < group_sizes.sum()
+        activation_inputs = jnp.where(
+            active[:, None, None], jnp.stack([gate_proj_out, up_proj_out], axis=-2), 0
+        )
+        d_intermediate = jnp.where(active[:, None], d_intermediate, 0)
         if apply_topk_weights_early:
             # intermediate' = intermediate * w.
             # Masking is not required as grouped GEMMs consume only group-size rows.
             w_b = recv_w_flat[:, None].astype(d_intermediate.dtype)
-            intermediate_unweighted = _apply_ffn_activation(
-                activation_type, gate_proj_out, up_proj_out, group_sizes, act_params
-            )
+            intermediate_unweighted = _jax_act_lu(
+                activation_inputs, activations, act_params=act_params
+            ).data.astype(gate_proj_out.dtype)
             d_recv_w_from_intermediate = jnp.sum(
                 d_intermediate * intermediate_unweighted,
                 axis=-1,
@@ -1263,18 +1270,16 @@ def _ffn_bwd_per_shard(
         else:
             d_recv_w_from_intermediate = jnp.zeros_like(recv_w_flat)
 
-        _, dact_pullback = jax.vjp(
-            partial(
-                _apply_ffn_activation,
-                activation_type,
-                group_sizes=group_sizes,
-                act_params=act_params,
-            ),
-            gate_proj_out,
-            up_proj_out,
+        d_activation, _ = _jax_quantize_dact_dbias(
+            jnp.where(active[:, None], d_intermediate, 0),
+            activation_inputs,
+            activations,
+            is_dbias=False,
+            act_params=act_params,
         )
-        d_gate_proj_out, d_up_proj_out = dact_pullback(d_intermediate)
-        d_combined_for_bias = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
+        d_combined_for_bias = d_activation.data.reshape(
+            gate_proj_out.shape[0], 2 * gate_proj_out.shape[1]
+        )
         casted_d_combined = tex.grouped_quantize(
             d_combined_for_bias,
             fc1_quantizer_set.dgrad,
