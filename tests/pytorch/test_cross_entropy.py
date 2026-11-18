@@ -532,7 +532,12 @@ def test_parallel_cross_entropy_leading_neg_inf_block():
     leaves the running maximum at -inf, and subtracting that from itself is NaN.
     """
     hidden_size = 32776
-    logits = torch.full((2, hidden_size), float("-inf"), device="cuda", dtype=torch.float32,)
+    logits = torch.full(
+        (2, hidden_size),
+        float("-inf"),
+        device="cuda",
+        dtype=torch.float32,
+    )
     logits.requires_grad_(True)
     logits[:, -8:] = 0.0
     target = torch.full((2,), hidden_size - 1, device="cuda", dtype=torch.long)

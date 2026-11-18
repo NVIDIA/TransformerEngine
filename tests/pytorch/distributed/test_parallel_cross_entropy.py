@@ -188,16 +188,16 @@ def _run_tensor_parallel_leading_neg_inf(rank, world_size, init_file):
             reduce_loss=False,
             dist_process_group=dist.group.WORLD,
         )
-        ref_loss = torch.nn.functional.cross_entropy(
-            ref_logits, target, reduction="none"
-        )
+        ref_loss = torch.nn.functional.cross_entropy(ref_logits, target, reduction="none")
         assert torch.isfinite(loss).all(), f"rank {rank} loss is {loss}"
         torch.testing.assert_close(loss, ref_loss, **dtype_tols(torch.float32))
 
         external_grad = torch.full_like(loss, 0.5)
         loss.backward(external_grad)
         ref_loss.backward(external_grad)
-        expected_grad = ref_logits.grad[:, vocab_start : vocab_start + local_vocab].to(torch.float32)
+        expected_grad = ref_logits.grad[:, vocab_start : vocab_start + local_vocab].to(
+            torch.float32
+        )
         assert torch.isfinite(local_logits.grad).all(), f"rank {rank} gradient is not finite"
         torch.testing.assert_close(local_logits.grad, expected_grad, **dtype_tols(torch.float32))
     finally:
