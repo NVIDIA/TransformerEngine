@@ -549,6 +549,14 @@ _CACHE_EVENT = re.compile(
 _CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
 
 
+def expect_fwd_events(events, context, phase, event, expected, reason):
+    """Assert the number of forward-pass cache events of `event` in `phase`."""
+    actual = events[phase][("fwd", event)]
+    assert (
+        actual == expected
+    ), f"fwd {phase}: expected {event}={expected}, got {actual} ({reason}){context}"
+
+
 def test_fused_attn_graph_cache():
     """Test FusedAttention graph cache with level 2 diagnostics. It runs a subprocess
     to avoid contamination from other tests as the counters are process-wide.
@@ -629,6 +637,18 @@ def test_fused_attn_graph_cache():
             "more than one new cache key",
             actual=len(miss_keys["reshape"][pass_name]),
         )
+
+    if "[CACHE-TEST] thd=1" in result.stdout:
+        # Packed THD batches vary in their number of sequences. The graph batch size is bucketed, so
+        # sequence counts within one bucket must share a forward graph.
+        def expect_fwd(phase, event, expected, reason):
+            expect_fwd_events(events, context, phase, event, expected, reason)
+
+        expect_fwd("thd_warm", "EXECUTE", 1, "THD forward did not run on FusedAttention")
+        expect_fwd("thd_warm", "CREATE_GRAPH", 1, "expected one build")
+        expect_fwd("thd_vary", "EXECUTE", 4, "THD forwards did not all run on FusedAttention")
+        expect_fwd("thd_vary", "MISS", 0, "a new sequence count missed the cache")
+        expect_fwd("thd_vary", "CREATE_GRAPH", 0, "a new sequence count rebuilt the graph")
 
 
 @pytest.mark.parametrize("dtype", param_types)
