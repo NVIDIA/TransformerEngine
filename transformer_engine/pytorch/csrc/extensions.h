@@ -27,10 +27,6 @@ class CommOverlapP2P;
 
 namespace transformer_engine::pytorch {
 
-at::Tensor linear_attention_affine_prefix(const at::Tensor &initial_states,
-                                          const at::Tensor &additive, const at::Tensor &transitions,
-                                          const at::Tensor &descriptors);
-
 /***************************************************************************************************
  * Router fusion
  **************************************************************************************************/
@@ -146,6 +142,10 @@ void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at
                       at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
                       NVTE_QKV_Format kv_format, int b, int max_ctx_len, int max_seq_len,
                       int max_pages_per_seq, bool is_non_paged);
+
+at::Tensor linear_attention_affine_prefix(const at::Tensor &initial_states,
+                                          const at::Tensor &additive, const at::Tensor &transitions,
+                                          const at::Tensor &descriptors);
 
 /***************************************************************************************************
  * GEMM

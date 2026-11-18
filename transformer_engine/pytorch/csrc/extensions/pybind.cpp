@@ -645,9 +645,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Support THD format for Context Parallel
-  m.def("linear_attention_affine_prefix",
-        &transformer_engine::pytorch::linear_attention_affine_prefix,
-        "Apply ordered linear-attention state summaries", py::call_guard<py::gil_scoped_release>());
   m.def("thd_read_half_tensor", &transformer_engine::pytorch::thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
         "tensor",
@@ -678,6 +675,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::thd_copy_valid_tokens_from_per_split_to_rank_local,
         "Copy valid THD token entries from a per-split tensor into a rank-local accumulator",
         py::call_guard<py::gil_scoped_release>());
+
+  // Linear attention context parallelism
+  m.def("linear_attention_affine_prefix",
+        &transformer_engine::pytorch::linear_attention_affine_prefix,
+        "Apply ordered linear-attention state summaries", py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions
   m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_nvshmem_backend,
