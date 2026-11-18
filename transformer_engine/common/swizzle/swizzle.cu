@@ -738,28 +738,23 @@ bool has_unpadded_outer_scale_dim(const Tensor& input, bool rowwise) {
   if (shape.size() != 2) return false;
 
   const auto [rows, cols] = input.flat_2d_dims();
-  if (input.scaling_mode == NVTE_MXFP8_1D_SCALING && rowwise) {
-    const size_t padded_cols = DIVUP_TO_MULTIPLE(DIVUP(cols, size_t{MXFP8_BLOCK_SIZE}), size_t{4});
-    return shape[0] == rows && shape[1] == padded_cols &&
-           rows != DIVUP_TO_MULTIPLE(rows, size_t{128});
-  }
+  size_t outer_dim, inner_dim;
+  size_t outer_alignment, inner_alignment;
   if (input.scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    const size_t scale_rows = DIVUP(rows, size_t{MXFP8_BLOCK_SIZE});
-    const size_t padded_cols = DIVUP_TO_MULTIPLE(cols, size_t{128});
-    return shape[0] == scale_rows && shape[1] == padded_cols &&
-           scale_rows != DIVUP_TO_MULTIPLE(scale_rows, size_t{4});
+    outer_dim = rowwise ? rows : DIVUP(rows, size_t{MXFP8_BLOCK_SIZE});
+    inner_dim = rowwise ? DIVUP(cols, size_t{MXFP8_BLOCK_SIZE}) : cols;
+    outer_alignment = rowwise ? kSwizzleTileDimM : kScalesPerWord;
+    inner_alignment = rowwise ? kScalesPerWord : kSwizzleTileDimM;
+  } else if (input.scaling_mode == NVTE_NVFP4_1D_SCALING) {
+    outer_dim = rowwise ? rows : cols;
+    inner_dim = DIVUP(rowwise ? cols : rows, size_t{NVFP4_BLOCK_SIZE});
+    outer_alignment = kSwizzleTileDimM;
+    inner_alignment = kScalesPerWord;
+  } else {
+    return false;
   }
-  if (input.scaling_mode == NVTE_NVFP4_1D_SCALING && rowwise) {
-    const size_t padded_cols = DIVUP_TO_MULTIPLE(DIVUP(cols, size_t{NVFP4_BLOCK_SIZE}), size_t{4});
-    return shape[0] == rows && shape[1] == padded_cols &&
-           rows != DIVUP_TO_MULTIPLE(rows, size_t{128});
-  }
-  if (input.scaling_mode == NVTE_NVFP4_1D_SCALING && !rowwise) {
-    const size_t padded_cols = DIVUP_TO_MULTIPLE(DIVUP(rows, size_t{NVFP4_BLOCK_SIZE}), size_t{4});
-    return shape[0] == cols && shape[1] == padded_cols &&
-           cols != DIVUP_TO_MULTIPLE(cols, size_t{128});
-  }
-  return false;
+  return shape[0] == outer_dim && shape[1] == DIVUP_TO_MULTIPLE(inner_dim, inner_alignment) &&
+         outer_dim != DIVUP_TO_MULTIPLE(outer_dim, outer_alignment);
 }
 
 // Optimized scale swizzle for narrow scale widths. "Rowwise full width" means that a block stages
