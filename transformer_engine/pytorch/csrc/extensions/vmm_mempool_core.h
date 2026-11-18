@@ -38,6 +38,31 @@ class VMMPhysicalBlockPool {
     std::vector<std::pair<int, Handle>> pages;
   };
 
+  struct AllocationInfo {
+    Address base;
+    size_t requested;
+    size_t reserved;
+    Stream stream;
+    std::vector<std::pair<int, Handle>> pages;
+  };
+
+  void set_wait_for_reuse(bool wait) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    wait_for_reuse_ = wait;
+  }
+
+  AllocationInfo allocation_info(Address pointer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = active_.upper_bound(pointer);
+    if (it == active_.begin()) throw std::runtime_error("No active VMM allocation at pointer");
+    --it;
+    const auto &mapping = it->second;
+    if (pointer - it->first >= mapping.requested) {
+      throw std::runtime_error("No active VMM allocation at pointer");
+    }
+    return {it->first, mapping.requested, mapping.reserved, mapping.stream, mapping.pages};
+  }
+
   VMMPhysicalBlockPool(Ops ops, size_t page_bytes, int domain)
       : ops_(std::move(ops)), page_(page_bytes), domain_(domain) {
     if (!page_ || domain < -1 || domain > 1) throw std::invalid_argument("Invalid VMM pool layout");
@@ -46,7 +71,7 @@ class VMMPhysicalBlockPool {
   Address allocate(size_t size, Stream stream, size_t segment_bytes = 0) {
     std::lock_guard<std::mutex> lock(mutex_);
     const bool capturing = ops_.capturing(stream);
-    if (!capturing) collect();
+    if (!capturing) collect(wait_for_reuse_);
     const size_t partitions = domain_ == -1 ? 2 : 1;
     if (size > std::numeric_limits<size_t>::max() - (partitions - 1)) {
       throw std::overflow_error("VMM allocation size overflow");
@@ -143,7 +168,7 @@ class VMMPhysicalBlockPool {
   // The caller must be outside capture.
   void collect_completed() {
     std::lock_guard<std::mutex> lock(mutex_);
-    collect();
+    collect(wait_for_reuse_);
   }
 
   // Graph pins remain authoritative even after the ordinary MemPool returns a
@@ -183,7 +208,8 @@ class VMMPhysicalBlockPool {
             {"allocation_requests", allocations_}, {"free_requests", frees_},
             {"physical_blocks_created", created_}, {"physical_blocks_reused", reused_},
             {"physical_blocks_released", released_}, {"map_calls", maps_},
-            {"unmap_calls", unmaps_}};
+            {"unmap_calls", unmaps_}, {"event_wait_calls", event_waits_},
+            {"wait_for_reuse", static_cast<uint64_t>(wait_for_reuse_)}};
   }
 
  private:
@@ -206,12 +232,19 @@ class VMMPhysicalBlockPool {
     }
   }
 
-  void collect() {
+  void collect(bool wait = false) {
     for (auto it = retired_.begin(); it != retired_.end();) {
       auto current = it++;
       const auto &mapping = current->second;
       if (mapping.capture_pin && !ops_.capture_done(mapping.capture_pin)) continue;
-      if (mapping.event_recorded && !ops_.event_ready(mapping.event)) continue;
+      if (mapping.event_recorded && !ops_.event_ready(mapping.event)) {
+        if (!wait) continue;
+        // Eager diagnostic policy: wait for the retired allocation's stream
+        // before unmapping, instead of allocating additional physical backing.
+        // Graph-owned mappings above remain pinned; we never wait on a graph.
+        ops_.event_wait(mapping.event);
+        ++event_waits_;
+      }
       reclaim(current);
     }
   }
@@ -237,7 +270,8 @@ class VMMPhysicalBlockPool {
   Mappings active_, retired_;
   std::array<std::vector<Handle>, 2> cache_;
   uint64_t allocations_ = 0, frees_ = 0, created_ = 0, reused_ = 0, released_ = 0;
-  uint64_t maps_ = 0, unmaps_ = 0;
+  uint64_t maps_ = 0, unmaps_ = 0, event_waits_ = 0;
+  bool wait_for_reuse_ = false;
 };
 
 }  // namespace transformer_engine::pytorch

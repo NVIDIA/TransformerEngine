@@ -82,6 +82,10 @@ struct FakeOps {
     assert(s->events.count(event));
     return s->ready;
   }
+  void event_wait(uintptr_t event) {
+    assert(!s->capturing && s->events.count(event));
+    s->ready = true;
+  }
   void event_destroy(uintptr_t event) { assert(s->events.erase(event) == 1); }
   void synchronize() { assert(!s->capturing); s->ready = true; }
 };
@@ -116,9 +120,40 @@ void reuse_and_stream_ordering() {
   assert(s->events.empty());
 }
 
+void eager_wait_reuses_exact_handles() {
+  auto s = std::make_shared<State>();
+  Pool p(FakeOps{s}, 64, -1);
+  p.set_wait_for_reuse(true);
+  auto a = p.allocate(256, 1);
+  const auto info_a = p.allocation_info(a + 64);
+  assert(info_a.base == a && info_a.requested == 256 && info_a.pages.size() == 4);
+  p.free(a, 1);
+  s->ready = false;
+  // No explicit collect: allocation must wait before unmapping A and recycling
+  // its handles, even when B is allocated on a different stream.
+  auto b = p.allocate(128, 2);
+  const auto info_b = p.allocation_info(b);
+  assert(p.stats().at("event_wait_calls") == 1);
+  assert(p.stats().at("physical_blocks_created") == 4);
+  assert(p.stats().at("physical_blocks_reused") == 2);
+  assert(!s->mappings.count(a));
+  for (const auto &page : info_b.pages) {
+    bool found = false;
+    for (const auto &old_page : info_a.pages) if (page == old_page) found = true;
+    assert(found);
+  }
+  bool threw = false;
+  try { p.allocation_info(a); } catch (const std::runtime_error &) { threw = true; }
+  assert(threw);
+  p.free(b, 2);
+  p.empty_cache();
+  assert(s->handles.empty());
+}
+
 void graph_quarantine() {
   auto s = std::make_shared<State>();
   Pool p(FakeOps{s}, 64, -1);
+  p.set_wait_for_reuse(true);  // Waiting must not bypass live graph pins.
   auto eager = p.allocate(128, 7);
   s->capturing = true;
   auto a = p.allocate(256, 7);
@@ -241,6 +276,7 @@ void oom_reclaims_unmapped_cache() {
 
 int main() {
   reuse_and_stream_ordering();
+  eager_wait_reuses_exact_handles();
   graph_quarantine();
   independent_graph_lifetimes();
   sparse_native_segment();

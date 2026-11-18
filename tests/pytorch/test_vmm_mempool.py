@@ -202,3 +202,66 @@ def test_empty_cache_preserves_live_tensor(pool):
     pool.empty_cache()
     assert pool.contains(tensor.data_ptr())
     torch.testing.assert_close(tensor, torch.full_like(tensor, 37))
+
+
+def test_delete_a_reuses_handles_for_b_without_manual_collect(pool):
+    from transformer_engine.pytorch.tensor.vmm_mempool import VMMMemPool
+
+    eager = VMMMemPool(mode=pool.mode, wait_for_reuse=True)
+    block = eager.stats()["block_bytes"]
+    a = eager.allocate((2, 2 * block), torch.uint8)
+    a.fill_(17)
+    torch.cuda.synchronize()
+    info_a = eager.allocation_info(a)
+    before = eager.stats()
+    del a
+    # No explicit TE free, collect, empty_cache, or gc between deletion and B.
+    b = eager.allocate((2, block), torch.uint8)
+    info_b = eager.allocation_info(b)
+    after = eager.stats()
+    handles_a = {(page["domain"], page["handle"]) for page in info_a["pages"]}
+    handles_b = {(page["domain"], page["handle"]) for page in info_b["pages"]}
+    assert handles_b <= handles_a
+    assert after["physical_blocks_created"] == before["physical_blocks_created"]
+    assert after["physical_blocks_reused"] == before["physical_blocks_reused"] + 2
+    assert after["free_requests"] == before["free_requests"] + 1
+    assert after["map_calls"] == before["map_calls"] + 2
+    assert after["unmap_calls"] == before["unmap_calls"] + 4
+    assert after["physical_bytes"] == before["physical_bytes"]
+    b.fill_(31)
+    torch.testing.assert_close(b, torch.full_like(b, 31))
+
+
+def test_live_view_prevents_reuse_until_last_storage_owner_dies(pool):
+    from transformer_engine.pytorch.tensor.vmm_mempool import VMMMemPool
+
+    eager = VMMMemPool(mode=pool.mode, wait_for_reuse=True)
+    block = eager.stats()["block_bytes"]
+    a = eager.allocate((2, 2 * block), torch.uint8)
+    a.fill_(17)
+    view = a.view(-1)
+    info_a = eager.allocation_info(a)
+    before = eager.stats()
+    del a
+    b = eager.allocate((2, block), torch.uint8)
+    info_b = eager.allocation_info(b)
+    after_b = eager.stats()
+    handles_a = {(page["domain"], page["handle"]) for page in info_a["pages"]}
+    handles_b = {(page["domain"], page["handle"]) for page in info_b["pages"]}
+    assert handles_a.isdisjoint(handles_b)
+    assert after_b["free_requests"] == before["free_requests"]
+    torch.testing.assert_close(view, torch.full_like(view, 17))
+    # B remains alive; after dropping the last alias only A can supply C's blocks.
+    del view
+    c = eager.allocate((2, block), torch.uint8)
+    info_c = eager.allocation_info(c)
+    after_c = eager.stats()
+    handles_c = {(page["domain"], page["handle"]) for page in info_c["pages"]}
+    assert handles_c <= handles_a
+    assert handles_c.isdisjoint(handles_b)
+    assert after_c["physical_blocks_created"] == after_b["physical_blocks_created"]
+    assert after_c["free_requests"] == before["free_requests"] + 1
+    c.fill_(23)
+    b.fill_(31)
+    torch.testing.assert_close(c, torch.full_like(c, 23))
+    torch.testing.assert_close(b, torch.full_like(b, 31))

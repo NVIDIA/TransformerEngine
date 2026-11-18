@@ -252,6 +252,53 @@ Compare manual VMM and ordinary-MemPool correctness, physical high-water marks,
 setup/capture latency, and graph replay latency separately. The implementation
 has not yet been built or exercised against the user's actual 26.09 container.
 
+## Minimal eager A/delete/B check
+
+This diagnostic has no CUDA Graph. It allocates A, finishes its fill operation,
+snapshots its physical handle IDs, executes `del a`, and allocates smaller B.
+There is no explicit TE `free`, `collect`, `empty_cache`, Python `gc.collect`,
+or GPU synchronization between `del a` and the call allocating B. Snapshots hold
+only numbers, not Tensor/Storage references.
+
+```sh
+python tests/pytorch/benchmark_vmm_eager_reuse.py \
+    --mode dedicated --a-mib 16 --b-mib 8
+# With patched PyTorch, run the same experiment with --mode managed.
+```
+
+The benchmark enables `VMMMemPool(..., wait_for_reuse=True)`. This is an explicit
+**eager diagnostic policy**, not the default performance policy. If a retired
+allocation's completion event is not ready, TE waits for that event before
+unmapping and recycling the handles, instead of creating extra physical blocks.
+It never waits for graph pins or uses this path to enable graph-local reuse.
+The ordinary nonblocking behavior remains the default in other benchmarks.
+
+In dedicated mode, `del a` makes its Storage dead; B's ordinary controller
+allocation automatically observes that and retires A's dedicated native pool.
+In managed mode, PyTorch forwards the completed logical free directly. The
+printed `after_del_A` and `allocated_B` counters distinguish these callback
+points; they do not claim dedicated mode delivers an immediate callback on del.
+If any alias still owns A's Storage, A is not eligible in either path.
+
+PASS requires all of B's per-domain handle IDs to come from A, zero new physical
+blocks or releases, fresh map calls for B, complete unmapping of A, one free
+callback for A by the time B is allocated, no physical-capacity growth, and
+correct B contents. CUDA may recycle A's numeric virtual address; address
+inequality is not required. On a 2 MiB block device, the defaults expect eight
+blocks for A and four reused blocks for B. Output includes allocation/deletion
+host times, B's synchronized ready time, and actual event-wait count.
+
+`controller.allocation_info(tensor_or_pointer)` exposes these numeric handle
+snapshots without retaining Storage. Rebuild TE with
+`NVTE_WITH_VMM_MEMPOOL=1` for the native diagnostic methods. The corresponding
+GPU regressions also check that retaining a view prevents reuse until its last
+Storage owner is released:
+
+```sh
+python -m pytest -v -s tests/pytorch/test_vmm_mempool.py \
+    -k 'delete_a_reuses or live_view_prevents'
+```
+
 ## Measure graph lifetime separately from allocator reuse
 
 A training iteration normally replays an existing graph; it does not imply graph

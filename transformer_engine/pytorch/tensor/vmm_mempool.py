@@ -47,9 +47,14 @@ class VMMMemPool:
     allocator-managed PyTorch API is required in the default dedicated mode.
     With mode="managed" (NVTE_VMM_MEMPOOL_MODE=managed), a patched PyTorch build
     routes every allocation through one shared MemPool per controller instead.
+    wait_for_reuse=True is an eager diagnostic policy: collection waits on an
+    eligible retired mapping's allocation-stream event before remapping its
+    backing. The default remains nonblocking and may create additional blocks.
     """
 
-    def __init__(self, device=None, *, domain=-1, block_bytes=0, mode=None):
+    def __init__(
+        self, device=None, *, domain=-1, block_bytes=0, mode=None, wait_for_reuse=False
+    ):
         self.mode = os.getenv("NVTE_VMM_MEMPOOL_MODE", "dedicated") if mode is None else mode
         if self.mode not in ("dedicated", "managed"):
             raise ValueError(f"Expected dedicated or managed MemPool mode, got {self.mode!r}")
@@ -74,6 +79,7 @@ class VMMMemPool:
             raise ValueError(f"VMM MemPool requires a CUDA device, got {device}")
         self.device_index = torch.cuda.current_device() if device.index is None else device.index
         self.domain = domain
+        self.wait_for_reuse = bool(wait_for_reuse)
         self._lock = threading.RLock()
         self._pools = []
         if torch.cuda.memory.get_allocator_backend() != "native":
@@ -90,6 +96,12 @@ class VMMMemPool:
             if torch.cuda.is_current_stream_capturing():
                 raise RuntimeError("Create VMM MemPool controllers before CUDA Graph capture")
             self._backend = tex.VMMMemPoolBackend(self.device_index, domain, block_bytes)
+            if self.wait_for_reuse:
+                if not hasattr(self._backend, "set_wait_for_reuse"):
+                    raise RuntimeError(
+                        "Rebuild TE with NVTE_WITH_VMM_MEMPOOL=1 for eager reuse checks"
+                    )
+                self._backend.set_wait_for_reuse(True)
             self._managed_pool = None
             if self.mode == "managed":
                 try:
@@ -160,6 +172,17 @@ class VMMMemPool:
                     remaining.append(entry)
             self._pools = remaining
             self._backend.collect_completed()
+
+    def allocation_info(self, tensor_or_pointer):
+        """Snapshot an active allocation's physical handle IDs without retaining Storage."""
+        if not hasattr(self._backend, "allocation_info"):
+            raise RuntimeError("Rebuild TE with NVTE_WITH_VMM_MEMPOOL=1 for handle diagnostics")
+        pointer = (
+            tensor_or_pointer.data_ptr()
+            if hasattr(tensor_or_pointer, "data_ptr")
+            else operator.index(tensor_or_pointer)
+        )
+        return self._backend.allocation_info(pointer)
 
     def contains(self, pointer):
         """Whether a pointer lies in backing still held by this allocator."""

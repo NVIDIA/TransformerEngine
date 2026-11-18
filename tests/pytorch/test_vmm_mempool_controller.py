@@ -91,6 +91,10 @@ class Backend:
         self.tickets = []
         self.drains = 0
         self.allocator = types.SimpleNamespace()
+        self.wait_for_reuse = False
+
+    def set_wait_for_reuse(self, wait):
+        self.wait_for_reuse = wait
 
     def ticket(self, requested):
         ticket = Ticket(requested)
@@ -261,6 +265,12 @@ class TestOrdinaryMemPoolController(unittest.TestCase):
         self.torch.capturing = False
         self.module.clear_all_vmm_mem_pool_caches()
         self.assertEqual(self.torch.destroyed_during_capture, [False])
+
+    def test_wait_for_reuse_is_explicit_and_default_is_nonblocking(self):
+        self.assertFalse(self.controller._backend.wait_for_reuse)
+        diagnostic = self.module.VMMMemPool(mode="dedicated", wait_for_reuse=True)
+        self.assertTrue(diagnostic._backend.wait_for_reuse)
+        self.assertFalse(self.controller._backend.wait_for_reuse)
 
     def test_managed_mode_reports_missing_pytorch_support(self):
         with self.assertRaisesRegex(RuntimeError, "patched PyTorch"):

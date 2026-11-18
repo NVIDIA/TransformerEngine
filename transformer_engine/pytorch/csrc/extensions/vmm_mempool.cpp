@@ -132,6 +132,9 @@ struct CUDAOps {
     C10_CUDA_CHECK(result);
     return true;
   }
+  void event_wait(uintptr_t event) {
+    C10_CUDA_CHECK(cudaEventSynchronize(reinterpret_cast<cudaEvent_t>(event)));
+  }
   void event_destroy(uintptr_t event) {
     C10_CUDA_CHECK(cudaEventDestroy(reinterpret_cast<cudaEvent_t>(event)));
   }
@@ -300,6 +303,26 @@ class VMMMemPoolBackend {
     return std::make_shared<VMMAllocationTicket>(engine_, device_, logical_bytes, half * parts);
   }
   auto stats() { return engine_->stats(); }
+  void set_wait_for_reuse(bool wait) { engine_->set_wait_for_reuse(wait); }
+  pybind11::dict allocation_info(uint64_t pointer) {
+    const auto info = engine_->allocation_info(pointer);
+    pybind11::dict result;
+    result["base"] = info.base;
+    result["logical_bytes"] = info.requested;
+    result["reserved_bytes"] = info.reserved;
+    result["stream"] = info.stream;
+    result["block_bytes"] = block_bytes_;
+    pybind11::list pages;
+    for (size_t i = 0; i < info.pages.size(); ++i) {
+      pybind11::dict page;
+      page["domain"] = info.pages[i].first;
+      page["handle"] = info.pages[i].second;
+      page["offset"] = i * block_bytes_;
+      pages.append(page);
+    }
+    result["pages"] = pages;
+    return result;
+  }
   void collect_completed() {
     c10::cuda::CUDAGuard guard(device_);
     CUDAOps ops{device_};
@@ -342,6 +365,8 @@ void register_vmm_mempool(pybind11::module_ &m) {
       .def("empty_cache", &VMMMemPoolBackend::empty_cache)
       .def("collect_completed", &VMMMemPoolBackend::collect_completed)
       .def("stats", &VMMMemPoolBackend::stats)
+      .def("set_wait_for_reuse", &VMMMemPoolBackend::set_wait_for_reuse)
+      .def("allocation_info", &VMMMemPoolBackend::allocation_info)
       .def("contains", &VMMMemPoolBackend::contains);
 }
 }  // namespace transformer_engine::pytorch
