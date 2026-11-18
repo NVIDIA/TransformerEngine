@@ -64,9 +64,8 @@ def _cache_cp_metadata(entry):
 
 @dataclass
 class _LinearAttentionCPDeviceMetadata:
-    """Host metadata reference and device tensors for one CP rank."""
+    """Device metadata tensors for one CP rank."""
 
-    host_metadata: LinearAttentionCPHostMetadata
     cu_seqlens: torch.Tensor  # Local cumulative fragment lengths on the device.
     forward_descriptors: torch.Tensor
     backward_descriptors: torch.Tensor
@@ -83,8 +82,16 @@ class _LinearAttentionCPDeviceMetadata:
     incoming_cu_seqlens: torch.Tensor
 
 
+@dataclass
+class _LinearAttentionCPMetadata:
+    """Host and device metadata prepared for one CP rank."""
+
+    host_metadata: LinearAttentionCPHostMetadata
+    device_metadata: _LinearAttentionCPDeviceMetadata
+
+
 def _build_linear_attention_cp_device_metadata(host_metadata, device):
-    """Build device tensors and retain their associated host metadata."""
+    """Build device metadata tensors from one rank's host metadata."""
 
     def indices(values):
         return torch.tensor(values, device=device, dtype=torch.int64)
@@ -112,7 +119,6 @@ def _build_linear_attention_cp_device_metadata(host_metadata, device):
     forward_zero_descriptors[:, 0] = -1
     backward_zero_descriptors[:, 0] = -1
     return _LinearAttentionCPDeviceMetadata(
-        host_metadata,
         torch.tensor(host_metadata.local_cu_seqlens, device=device, dtype=torch.int32),
         forward_descriptors,
         backward_descriptors,
@@ -153,17 +159,17 @@ def _summary_buffers(state_template, slots):
     return additive, transition.expand(slots, heads, key_dim, key_dim).contiguous()
 
 
-def _selected_span(device_metadata, selected):
+def _selected_span(host_metadata, selected):
     """Selected spans are consecutive: all dense spans, or one packed edge span."""
-    cu_seqlens = device_metadata.host_metadata.local_cu_seqlens
+    cu_seqlens = host_metadata.local_cu_seqlens
     return slice(cu_seqlens[selected[0]], cu_seqlens[selected[-1] + 1])
 
 
-def _slot_indices(device_metadata, indices):
+def _slot_indices(metadata, indices):
     """Dense slots are document IDs; packed partitions have only one edge slot."""
-    if device_metadata.host_metadata.slots == 1:
+    if metadata.host_metadata.slots == 1:
         return torch.zeros_like(indices)
-    return device_metadata.document_indices.index_select(0, indices)
+    return metadata.device_metadata.document_indices.index_select(0, indices)
 
 
 def _local_attention(
@@ -192,7 +198,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
     def forward(
         ctx,
         adapter,
-        device_metadata,
+        metadata,
         group,
         options,
         output_final_state,
@@ -203,7 +209,8 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
     ):
         """Establish starting states, then retain the local attention graph."""
         ctx.set_materialize_grads(False)
-        host_metadata = device_metadata.host_metadata
+        host_metadata = metadata.host_metadata
+        device_metadata = metadata.device_metadata
         q = tensors[0]
         k = tensors[1]
         v = tensors[2]
@@ -221,7 +228,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
         )
         additive, transition = _summary_buffers(initial_state_buffer, host_metadata.slots)
         if host_metadata.outgoing:
-            span = _selected_span(device_metadata, host_metadata.outgoing)
+            span = _selected_span(host_metadata, host_metadata.outgoing)
             selected = tuple(t[span] for t in tensors)
             h, t = adapter._cp_forward_summary(
                 *selected[:3],
@@ -229,7 +236,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
                 device_metadata.outgoing_cu_seqlens,
                 **options,
             )
-            slots = _slot_indices(device_metadata, device_metadata.outgoing)
+            slots = _slot_indices(metadata, device_metadata.outgoing)
             additive.index_copy_(0, slots, h)
             transition.index_copy_(0, slots, t)
         if host_metadata.communicates:
@@ -282,8 +289,8 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
             dist.all_reduce(terminal, group=group)
         if track_grad:
             ctx.save_for_backward(*inputs, output, states)
-        ctx.cp_device_metadata, ctx.group, ctx.output_final_state = (
-            device_metadata,
+        ctx.cp_metadata, ctx.group, ctx.output_final_state = (
+            metadata,
             group,
             output_final_state,
         )
@@ -298,8 +305,9 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
         tensors = ctx.saved_tensors[:-3]
         starting_states, output, states = ctx.saved_tensors[-3:]
         q, k, v = tensors[:3]
-        device_metadata, group = ctx.cp_device_metadata, ctx.group
-        host_metadata = device_metadata.host_metadata
+        metadata, group = ctx.cp_metadata, ctx.group
+        host_metadata = metadata.host_metadata
+        device_metadata = metadata.device_metadata
         if grad_output is None:
             grad_output = torch.zeros_like(output)
         grad_output = grad_output.contiguous()
@@ -319,7 +327,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
             dist.all_reduce(final_state_grad, group=group)
         additive, transition = _summary_buffers(final_state_grad, host_metadata.slots)
         if host_metadata.incoming:
-            span = _selected_span(device_metadata, host_metadata.incoming)
+            span = _selected_span(host_metadata, host_metadata.incoming)
             selected = tuple(t[span] for t in tensors)
             h, t = ctx.adapter._cp_backward_summary(
                 *selected[:3],
@@ -328,7 +336,7 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
                 device_metadata.incoming_cu_seqlens,
                 **ctx.options,
             )
-            slots = _slot_indices(device_metadata, device_metadata.incoming)
+            slots = _slot_indices(metadata, device_metadata.incoming)
             additive.index_copy_(0, slots, h)
             transition.index_copy_(0, slots, t)
         if host_metadata.communicates:
@@ -443,13 +451,15 @@ def context_parallel_attention(
             document_cu_seqlens, cp_size=cp_size, cp_rank=cp_rank, dense=dense
         )
         device_metadata = _build_linear_attention_cp_device_metadata(host_metadata, q.device)
+        metadata = _LinearAttentionCPMetadata(host_metadata, device_metadata)
         # Hold the metadata tensor to prevent object-ID reuse in the cache key.
-        adapter._cp_metadata_cache = (key, device_metadata, cu_seqlens)
+        adapter._cp_metadata_cache = (key, metadata, cu_seqlens)
         if cacheable:
             _cache_cp_metadata(adapter._cp_metadata_cache)
     else:
-        device_metadata = cache[1]
-        host_metadata = device_metadata.host_metadata
+        metadata = cache[1]
+        host_metadata = metadata.host_metadata
+        device_metadata = metadata.device_metadata
         adapter._cp_metadata_cache = cache
     if tensors[0].shape[0] != host_metadata.local_cu_seqlens[-1]:
         raise ValueError("Local token count does not match this CP rank's token interval.")
@@ -484,7 +494,7 @@ def context_parallel_attention(
         )
         output, states = _LinearAttentionContextParallel.apply(
             adapter,
-            device_metadata,
+            metadata,
             group,
             kernel_kwargs,
             output_final_state,
