@@ -819,6 +819,73 @@ def test_gated_dtypes(swizzled, is_bwd, act, fp8_dtype, in_dtype):
     run_gated_test_case(act, is_bwd, (256, 384), BOTH, in_dtype, fp8_dtype, swizzled)
 
 
+# Grouped scaled SwiGLU (group_scaled_swiglu_mxfp8.cuh): input [M, 2H] = [act | gate] and a
+# per-token prob give the columnwise MXFP8 of (silu(act) * gate) * prob, [M, H]. Cases are
+# (name, member rows, buffer rows M, H); members filling only part of the buffer, as with CUDA
+# graphs, leave its tail untouched.
+SCALED_SWIGLU_CASES = [
+    ("single", [256], 256, 256),
+    ("varying_first", [128, 384, 256], 768, 256),
+    ("varying_first_empty", [128, 0, 384], 512, 256),
+    ("varying_first_partial", [256, 128], 640, 1536),
+    # GEMM-swizzled scales need H % 128 == 0, so this one runs with compact scales only.
+    ("varying_first_h160", [128, 256], 384, 160),
+]
+SCALED_SWIGLU_ACTIVATIONS = ["swiglu", "clamped_swiglu"]
+get_scaled_swiglu_case_id = lambda c: c[0]
+
+
+def run_scaled_swiglu_test_case(case, activation, in_dtype, fp8_dtype, swizzled):
+    """Assert the CuTeDSL and CUDA backends produce bit-identical grouped scaled SwiGLU outputs."""
+    _, rows, M, H = case
+    if swizzled and H % 128 != 0:
+        pytest.skip("GEMM-swizzled scales need H % 128 == 0")
+    x = 4.0 * generate_inputs(M, 2 * H, torch.float32)[0]  # Reach past the clamp limit
+    x = x.to(in_dtype)
+    prob = torch.rand(M, dtype=torch.float32, device="cuda").to(in_dtype)
+    first_dims = None if len(rows) == 1 else torch.tensor(rows, dtype=torch.int64, device="cuda")
+    tokens = sum(rows)
+    num_scales = tokens // 32 * ((H + 127) // 128 * 128)
+
+    def run():
+        q = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=False, columnwise=True)
+        q.optimize_for_gemm = swizzled
+        if activation == "clamped_swiglu":
+            out = tex.group_scaled_clamped_swiglu(
+                x, prob, q, len(rows), 3.0, 1.702, 1.0, first_dims=first_dims
+            )
+        else:
+            out = tex.group_scaled_swiglu(x, prob, q, len(rows), first_dims=first_dims)
+        return {
+            "colwise data": out.columnwise_data.view(torch.uint8).view(-1)[: tokens * H].clone(),
+            "colwise scales": out.columnwise_scale_inv.view(torch.uint8)
+            .view(-1)[:num_scales]
+            .clone(),
+        }
+
+    cuda_output, cutedsl_output = run_on_both_backends(run)
+    major, minor = device_compute_capability()
+    assert_cutedsl_kernel_registered(
+        f"cutedsl_group_mxfp8_scaled_swiglu_sm{major * 10 + minor}_{DTYPE_TO_STR[in_dtype]}_"
+        f"{FP8_TO_KEY[fp8_dtype]}_{'sbd' if first_dims is None else 'vfd'}_{int(swizzled)}_"
+        f"{activation}"
+    )
+    tag = f"{case[0]}/{activation}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}"
+    for name, cuda_bytes in cuda_output.items():
+        assert torch.equal(
+            cutedsl_output[name], cuda_bytes
+        ), f"{tag}: {name} differ between backends"
+
+
+@pytest.mark.parametrize("case", SCALED_SWIGLU_CASES, ids=get_scaled_swiglu_case_id)
+@pytest.mark.parametrize("activation", SCALED_SWIGLU_ACTIVATIONS)
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_group_scaled_swiglu(swizzled, fp8_dtype, in_dtype, activation, case):
+    run_scaled_swiglu_test_case(case, activation, in_dtype, fp8_dtype, swizzled)
+
+
 OUT_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
 DEQUANT_SHAPES = MATRIX_SIZES + [(100, 48)]
 

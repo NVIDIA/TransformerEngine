@@ -23,6 +23,9 @@ from transformer_engine.common.CuTeDSL.cast.mxfp8.group_quantize_mxfp8_common im
 from transformer_engine.common.CuTeDSL.cast.mxfp8.requantize_mxfp8 import (
     get_mxfp8_requantization_function,
 )
+from transformer_engine.common.CuTeDSL.cast.mxfp8.group_scaled_swiglu_mxfp8 import (
+    get_mxfp8_group_scaled_swiglu_function,
+)
 
 
 def register_cutedsl_backends():
@@ -35,5 +38,6 @@ def register_cutedsl_backends():
         get_mxfp8_group_quantization_function,
         get_mxfp8_dequantization_function,
         get_mxfp8_requantization_function,
+        get_mxfp8_group_scaled_swiglu_function,
     ):
         tvm_ffi.register_global_func(entrypoint.__name__, entrypoint, override=True)

@@ -33,6 +33,7 @@
 
 #ifdef NVTE_WITH_CUTEDSL
 #include "../mxfp8/group_quantize_mxfp8_cutedsl.cuh"
+#include "../mxfp8/group_scaled_swiglu_mxfp8_cutedsl.cuh"
 #include "../mxfp8/quantize_mxfp8_cutedsl.cuh"
 #endif
 
@@ -629,8 +630,15 @@ void group_scaled_swiglu_fwd_helper(const NVTEGroupedTensor input, const NVTETen
 
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
-      mxfp8::group_scaled_swiglu<ParamOP, OP>(input_tensor, prob_tensor, noop_tensor, output_tensor,
-                                              p, &quant_config_cpp, stream);
+      bool computed_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+      computed_with_cutedsl = cutedsl_backend::mxfp8_group_scaled_swiglu_cutedsl<ParamOP, OP>(
+          input_tensor, prob_tensor, noop_tensor, output_tensor, p, stream);
+#endif
+      if (!computed_with_cutedsl) {
+        mxfp8::group_scaled_swiglu<ParamOP, OP>(input_tensor, prob_tensor, noop_tensor,
+                                                output_tensor, p, &quant_config_cpp, stream);
+      }
       break;
     }
     default:

@@ -52,6 +52,7 @@ from .group_quantize_mxfp8_common import (
     OFFSETS_OFFSET,
     MXFP8GroupQuantizeConfig,
     MXFP8GroupQuantizeKernelBase,
+    find_tensor_from_offsets,
 )
 
 
@@ -124,23 +125,6 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         self.REUSE_INPUT_FOR_DBIAS = self.DBIAS_IN_ROWWISE and dbias_bytes <= input_bytes
         # Some turning knobs where this value turns to be the best in our benchmarks
         self.MIN_BLOCKS_PER_MP = 4 if self.REUSE_INPUT_FOR_DBIAS else 0
-
-    @cute.jit
-    def _find_tensor_from_offsets(
-        self, mOffsets: cute.Tensor, num_tensors: Int32, offset: Int64
-    ) -> Int32:
-        """Index of the tensor whose element range holds `offset` (find_tensor_from_offsets)."""
-        low = Int32(1)
-        hi = Int32(num_tensors)
-        # Enough bisection steps for any group of up to MAX_SUPPORTED_TENSORS members.
-        for _ in cutlass.range_constexpr(MAX_SUPPORTED_TENSORS.bit_length()):
-            if low < hi:
-                mid = low + (hi - low) // 2
-                if Int64(mOffsets[mid]) <= offset:
-                    low = mid + 1
-                else:
-                    hi = mid
-        return low - 1
 
     @cute.jit
     def _scale_tensor(self, mS: cute.Tensor, base: Int64, layout: cute.Layout) -> cute.Tensor:
@@ -826,7 +810,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                     else:  # VARYING_FIRST_DIM
                         # Otherwise if VARYING_FIRST_DIM, we need to use find these tensor member metadata
                         # from mFirstDims & mOffsets
-                        member_id = self._find_tensor_from_offsets(
+                        member_id = find_tensor_from_offsets(
                             mOffsets, num_tensors, job_start_row * member_cols
                         )
                         member_rows = Int64(mFirstDims[member_id])

@@ -108,6 +108,34 @@ def act_clamped_silu(x: Float32, limit: Float32, alpha: Float32) -> Float32:
     return c * sigmoid(alpha * c)
 
 
+@cute.jit
+def tanh_approx(x: Float32) -> Float32:
+    return cute.arch.inline_ptx(
+        "tanh.approx.f32 {$w0}, {$r0};", write_only_types=[Float32], read_only_args=[x]
+    )
+
+
+def act_silu_approx_x2(x: Float32) -> Float32:
+    """Twice silu(x), as x * (1 + tanh(x / 2)): one MUFU op instead of exp and rcp."""
+    return fma_f32(x, tanh_approx(Float32(0.5) * x), x)
+
+
+def act_clamped_silu_approx_x2(x: Float32, limit: Float32, alpha: Float32) -> Float32:
+    """Twice act_clamped_silu(x), computed as act_silu_approx_x2."""
+    c = cute.arch.fmin(limit, x)
+    return fma_f32(c, tanh_approx((Float32(0.5) * alpha) * c), c)
+
+
+@cute.jit
+def clamp_symmetric(x: Float32, limit: Float32) -> Float32:
+    """clamp(x, -limit, limit) for limit > 0."""
+    return cute.arch.inline_ptx(
+        "min.xorsign.abs.f32 {$w0}, {$r0}, {$r1};",
+        write_only_types=[Float32],
+        read_only_args=[x, limit],
+    )
+
+
 def act_situ_gate(x: Float32, beta1: Float32) -> Float32:
     """SiTU-GLU's activation, applied to the act half."""
     return beta1 * tanh(x / beta1) * sigmoid(x)

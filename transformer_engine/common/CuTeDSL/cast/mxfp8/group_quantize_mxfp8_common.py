@@ -20,7 +20,7 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Boolean, Float32, Int32
+from cutlass import Boolean, Float32, Int32, Int64
 from cutlass.utils import HardwareInfo
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
@@ -67,6 +67,22 @@ COLS_OFFSET = ROWS_OFFSET + MAX_SUPPORTED_TENSORS
 OFFSETS_OFFSET = COLS_OFFSET + MAX_SUPPORTED_TENSORS
 # Size of the TensorMap struct in int64
 TENSOR_MAP_STORAGE_INT64_COUNT = OFFSETS_OFFSET + MAX_SUPPORTED_TENSORS
+
+
+@cute.jit
+def find_tensor_from_offsets(mOffsets: cute.Tensor, num_tensors: Int32, offset: Int64) -> Int32:
+    """Index of the tensor whose element range holds `offset` (find_tensor_from_offsets)."""
+    low = Int32(1)
+    hi = Int32(num_tensors)
+    # Enough bisection steps for any group of up to MAX_SUPPORTED_TENSORS members.
+    for _ in cutlass.range_constexpr(MAX_SUPPORTED_TENSORS.bit_length()):
+        if low < hi:
+            mid = low + (hi - low) // 2
+            if Int64(mOffsets[mid]) <= offset:
+                low = mid + 1
+            else:
+                hi = mid
+    return low - 1
 
 
 class MXFP8GroupQuantizeConfig:
