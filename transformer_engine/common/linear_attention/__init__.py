@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Framework-independent metadata for contiguous linear-attention partitions."""
+"""Metadata for linear-attention partitions with contiguous token ownership"""
 
 from bisect import bisect_right
 from dataclasses import dataclass
@@ -11,7 +11,24 @@ from typing import Tuple
 
 @dataclass(frozen=True)
 class LinearAttentionFragment:
-    """Intersection of one independent document with one rank's token interval."""
+    """Metadata for a fragment: the intersection of one independent document
+    with one rank's token interval.
+
+    For example, global cu_seqlens [0, 8, 12, 24] describes documents
+    A [0, 8), B [8, 12), and C [12, 24). With CP=4, each rank owns six
+    consecutive tokens. Each row below describes one fragment:
+
+        Rank  Rank interval  Document  start  end  first_rank  last_rank
+        0     [0, 6)         A (0)         0    6           0          1
+        1     [6, 12)        A (0)         6    8           0          1
+        1     [6, 12)        B (1)         8   12           1          1
+        2     [12, 18)       C (2)        12   18           2          3
+        3     [18, 24)       C (2)        18   24           2          3
+
+    ``start`` is inclusive and ``end`` is exclusive; both are global offsets.
+    ``first_rank`` and ``last_rank`` identify the first and last ranks owning
+    tokens of the whole document, not just this fragment.
+    """
 
     document: int
     start: int
@@ -22,27 +39,38 @@ class LinearAttentionFragment:
 
 @dataclass(frozen=True)
 class LinearAttentionCPPartition:
-    """Host metadata, independent of tensor frameworks and attention flavors.
+    """Host metadata for one CP rank.
 
     Packed (THD) inputs intersect documents with contiguous rank intervals.
     Dense (BSHD/SBHD) inputs give each rank a nearly equal slice of every document.
     Empty documents have no fragments; their state is unchanged.
+
+    Using the fragment example from LinearAttentionFragment, packed rank 1 owns:
+
+        fragments:       A [6, 8), B [8, 12)
+        local_cu_seqlens: (0, 2, 6)
+        incoming:        (0,)     # A continues from rank 0.
+        outgoing:        ()      # Neither document continues to a later rank.
+        terminal:        (0, 1)   # Both documents end on this rank.
     """
 
-    cu_seqlens: Tuple[int, ...]
+    cu_seqlens: Tuple[int, ...]  # Global cumulative sequence lengths.
     cp_rank: int
     cp_size: int
     fragments: Tuple[LinearAttentionFragment, ...]
-    local_cu_seqlens: Tuple[int, ...]
+    local_cu_seqlens: Tuple[int, ...]  # Cumulative lengths of nonempty local fragments.
+    # Select preceding summaries to compose each fragment's starting memory.
     forward_descriptors: Tuple[Tuple[int, int, int, int], ...]
+    # Select following reverse summaries to compose each fragment's ending-state gradient.
     backward_descriptors: Tuple[Tuple[int, int, int, int], ...]
-    outgoing: Tuple[int, ...]
-    incoming: Tuple[int, ...]
-    terminal: Tuple[int, ...]
-    initial_state_owners: Tuple[int, ...]
-    empty_owned: Tuple[int, ...]
+    # The following three tuples contain local fragment indices, not document IDs.
+    outgoing: Tuple[int, ...]  # Document continues to a later rank.
+    incoming: Tuple[int, ...]  # Document starts on an earlier rank.
+    terminal: Tuple[int, ...]  # Document ends on this rank.
+    initial_state_owners: Tuple[int, ...]  # Initial-state owner rank for each global document.
+    empty_owned: Tuple[int, ...]  # Empty global document IDs assigned to this rank.
     slots: int  # One per rank for packed inputs; one per document for dense inputs.
-    communicates: bool
+    communicates: bool  # Any global document spans multiple ranks.
 
 
 def build_linear_attention_partition(cu_seqlens, cp_size, cp_rank, *, dense=False):
@@ -58,9 +86,9 @@ def build_linear_attention_partition(cu_seqlens, cp_size, cp_rank, *, dense=Fals
     if cp_size < 1 or not 0 <= cp_rank < cp_size:
         raise ValueError("CP size must be positive and rank must lie inside the group.")
     if len(cu_seqlens) < 2 or cu_seqlens[0] != 0:
-        raise ValueError("Global cumulative sequence lengths must start at zero.")
+        raise ValueError("cu_seqlens must start at zero and contain at least two entries.")
     if any(a > b for a, b in zip(cu_seqlens, cu_seqlens[1:])):
-        raise ValueError("Global cumulative sequence lengths must be nondecreasing.")
+        raise ValueError("cu_seqlens must be nondecreasing.")
     total = cu_seqlens[-1]
     boundaries = tuple(r * total // cp_size for r in range(cp_size + 1))
     slots = len(cu_seqlens) - 1 if dense else 1
