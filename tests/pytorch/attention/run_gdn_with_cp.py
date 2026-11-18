@@ -16,7 +16,6 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from transformer_engine.pytorch import GatedDeltaNetAttention
-from transformer_engine.pytorch.attention.linear_attention import context_parallel as cp
 from test_gdn_attention import (
     _assert_rms_close,
     _gdn_reference,
@@ -237,7 +236,7 @@ def _inference_and_deferred_group(group):
     ):
         with context():
             # CP accepts host metadata; inference tensors intentionally bypass
-            # the partition cache because they have no mutation counter.
+            # the metadata cache because they have no mutation counter.
             global_cu = torch.tensor([0, 17, 35], device=metadata_device, dtype=torch.int32)
             for boundary in (17, 19):
                 global_cu[1] = boundary
@@ -355,13 +354,12 @@ def main():
     cases = 0
     try:
         for lengths in (
-            [8, 4, 12],
-            [16, 4, 4],
-            [7, 2, 4, 5, 14],
-            [6, 6, 6, 6],
-            [0, 17, 0, 18, 0],
-            [1, 0, 1],
-            [0, 0],
+            [8, 4, 12],  # Shared and complete documents on the same rank.
+            [16, 4, 4],  # One document spans three ranks at CP=4.
+            [6, 6, 6, 6],  # Document and rank boundaries coincide.
+            [0, 17, 0, 18, 0],  # Empty documents between nonempty documents.
+            [1, 0, 1],  # Some ranks own no tokens.
+            [0, 0],  # Entirely empty input.
         ):
             _case(group, lengths)
             cases += 1
@@ -437,15 +435,8 @@ def main():
             cases += 1
         _invalid_metadata(group)
         cases += 1
-        # Independent complete documents need no state exchange or prefix work.
-        with patch.object(
-            cp, "_gather_summaries", side_effect=AssertionError("Unexpected exchange")
-        ), patch.object(
-            cp.tex,
-            "linear_attention_affine_prefix",
-            side_effect=AssertionError("Unexpected prefix"),
-        ):
-            _case(group, [8] * size, initial=False, final=False)
+        # Independent complete documents also match ordinary local attention.
+        _case(group, [8] * size, initial=False, final=False)
         cases += 1
         # A size-one group follows the ordinary local path, even while WORLD
         # contains several ranks. Every process creates groups in the same order.

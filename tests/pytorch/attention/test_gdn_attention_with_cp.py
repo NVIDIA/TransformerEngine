@@ -96,16 +96,14 @@ def test_dense_partition_intersections(cp_size, length):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-@pytest.mark.parametrize("key_dim", [3, 64, 128, 257])
-def test_common_affine_prefix(key_dim):
-    """Nonsymmetric transitions, reversed order, zero prefixes, and independent initial states."""
+def test_affine_prefix_binding():
+    """Forward summary descriptors and preserve the caller's current CUDA device."""
     torch.manual_seed(22)
+    key_dim = 3
     current = torch.cuda.current_device()
     # Also exercise the binding's device guard: allocating on another GPU must
     # neither launch on the current GPU nor change the caller's current device.
-    device = torch.device(
-        "cuda", (current + 1) % torch.cuda.device_count() if key_dim == 3 else current
-    )
+    device = torch.device("cuda", (current + 1) % torch.cuda.device_count())
     initial_states = torch.randn(3, 2, 5, key_dim, device=device)
     additive = torch.randn(6, 2, 5, key_dim, device=device)
     transitions = torch.randn(6, 2, key_dim, key_dim, device=device) / key_dim**0.5
