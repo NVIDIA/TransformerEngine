@@ -146,9 +146,21 @@ def csa_compressor(
 ) -> Any:
     """Differentiable SM100 CSA/HCA compressor kernel.
 
-    Inputs use the raw packed kernel layout. Sequence metadata is treated as
-    non-differentiable; gradients are returned for ``kv``, ``score``, and ``ape``.
-    ``ratio=4, coff=2`` is DSv4 CSA; ``ratio=128, coff=1`` is DSv4 HCA.
+    ``kv`` and ``score`` are BF16 ``[T, coff * D]`` arrays; ``ape`` is FP32
+    ``[ratio, coff * D]`` additive position bias applied to the pooling logits.
+    ``ratio=4, coff=2`` selects overlapping CSA pooling; ``ratio=128, coff=1``
+    selects non-overlapping HCA pooling. ``coff`` is the number of projected
+    channel groups combined into each output row of width ``D``.
+
+    ``cu_seqlens`` and ``cu_seqlens_comp`` are matching INT32 ``[M+1]``
+    cumulative token/block counts starting at zero. Each sequence contributes
+    ``length // ratio`` blocks; trailing partial blocks are dropped. Callers
+    supply these counts and a static ``total_comp >= cu_seqlens_comp[-1]``
+    allocation capacity. Returns BF16 ``[total_comp, D]``; only rows before
+    ``cu_seqlens_comp[-1]`` represent valid blocks.
+
+    Gradients are returned for ``kv``, ``score``, and ``ape``; metadata and
+    configuration are not differentiated.
     """
     return _csa_compressor(kv, score, ape, cu_seqlens, cu_seqlens_comp, total_comp, ratio, coff)
 
@@ -164,9 +176,14 @@ def csa_compressor_batched(
 ) -> Any:
     """Run the differentiable compressor independently on local batch shards.
 
-    ``batch_axes`` may contain several mesh axes.  MaxText passes
-    ``("data", "fsdp", "expert")`` so FSDP and EP both act as data
-    parallelism for this attention-only region.
+    Batched form of :func:`csa_compressor`: BF16 ``kv``/``score`` have shape
+    ``[B,S,coff*D]``, FP32 ``ape`` is shared with shape ``[ratio,coff*D]``,
+    and the result is BF16 ``[B,S//ratio,D]``. Token/block prefixes are built
+    internally for the equal-length batch elements.
+
+    ``batch_axes`` names mesh axes that shard the leading batch dimension;
+    inactive axes are ignored and ``()`` adds no batch sharding. Position bias
+    is replicated. This batches independent sequences, not context parallelism.
 
     Each sequence yields ``sequence // ratio`` blocks; a trailing partial block
     is dropped (and receives zero gradient), matching the DSv4 reference.
@@ -216,6 +233,8 @@ def hca_compressor_batched(
 
     ``kv``/``score`` are ``[batch, sequence, head_dim]`` and ``ape`` is
     ``[ratio, head_dim]``; returns ``[batch, sequence // ratio, head_dim]``.
+    This is :func:`csa_compressor_batched` with ``coff=1``: the same dtypes,
+    batch sharding, trailing-block behavior, and gradient contract apply.
     """
     return csa_compressor_batched(kv, score, ape, batch_axes=batch_axes, ratio=ratio, coff=1)
 
@@ -336,8 +355,15 @@ def dsa_indexer(
 ) -> Any:
     """Differentiable SM100 indexer, using cuDNN forward and a JAX reference VJP.
 
-    Dense inputs use BSHD/BSHD/BSH. Packed inputs use Q [Tq,64,128],
-    K [Tk,1,128], weights [Tq,64], and a caller-created SequenceDescriptor
+    BF16 dense inputs are Q ``[B,Sq,64,128]``, K ``[B,Sk,1,128]``, and
+    weights ``[B,Sq,64]``; returns FP32 scores ``[B,Sq,Sk]``. ``Sk`` must be
+    a multiple of four. The supported ``ratio`` is 4. Scores sum the weighted
+    per-head ReLU of Q/K dot products, scaled by ``sm_scale`` (default 1.0).
+    Only completed compressed blocks are causally visible; invalid scores
+    are ``-inf``.
+
+    Packed BF16 inputs use Q [Tq,64,128], K [Tk,1,128], weights [Tq,64],
+    and a caller-created SequenceDescriptor
     with explicit INT32 lengths [1,M] and offsets [1,M+1]. Only one contiguous
     pack is supported: valid offsets must equal cumulative lengths, segments
     start at position zero, and unused slots are trailing -1 entries. Callers
@@ -346,7 +372,12 @@ def dsa_indexer(
 
     Packed calls require positive static maximum Q/K lengths, with maxK at
     least ceil(maxQ/ratio). Returns FP32 [Tq,ceil4(maxK)], with segment-local
-    key columns and -inf for invalid entries. Metadata is not differentiated.
+    key columns and -inf for invalid entries; ceil4 rounds up to a multiple of
+    four. Metadata is not differentiated; Q, K, and weights receive gradients.
+
+    Returns scores, not selected indices. The caller owns top-k selection and
+    the indexer training objective: discrete top-k indices do not propagate
+    attention-output gradients back to the indexer scores.
     """
     cu_q = cu_k = None
     if q.ndim == 3:
@@ -392,7 +423,12 @@ def dsa_indexer_batched(
     ratio: int = 4,
     sm_scale: float = 1.0,
 ) -> Any:
-    """Run the differentiable indexer locally on each batch shard."""
+    """Run the dense :func:`dsa_indexer` locally on each batch shard.
+
+    Input/output shapes, dtypes, scales, and gradients follow its dense
+    contract. ``batch_axes`` follows :func:`csa_compressor_batched`; this
+    wrapper does not accept packed sequence metadata.
+    """
     batch_spec_q = _batch_axes_spec(batch_axes, q.ndim)
     batch_spec_k = _batch_axes_spec(batch_axes, k.ndim)
     batch_spec_w = _batch_axes_spec(batch_axes, weights.ndim)
@@ -509,9 +545,23 @@ def dsa_sparse_attention(
 ) -> Any:
     """Differentiable SM100 DSv4 sparse-attention kernel.
 
-    Gradients are returned for Q, KV, and the per-head attention sink. Sparse
-    indices and lengths are non-differentiable metadata. ``indexer_topk=0``
-    runs without an indexer prefix (HCA's fixed local + compressed index list).
+    ``q`` is BF16 ``[Tq,64,512]`` and shared ``kv`` is BF16 ``[Tkv,512]``.
+    INT32 ``topk_indices`` is ``[Tq,N]``, with physical width ``N`` a multiple
+    of 64. Indices address rows of the supplied flattened KV array; ``-1``
+    marks an unused slot. INT32 ``topk_length`` is ``[Tq]`` and bounds the
+    prefix of slots considered per query, with values in ``[0,N]``. Callers
+    construct these lists, including causal and sequence-boundary masking.
+
+    FP32 ``attn_sink`` is ``[64]``: a per-head logit contributing to the
+    softmax denominator with zero value. ``softmax_scale`` multiplies Q/K
+    logits and defaults to 1.0; no inverse-square-root scale is inferred.
+    ``indexer_topk`` is the prefix width for cuDNN's auxiliary indexer LSE
+    statistic (0, 512, 1024, or 2048, no larger than ``N``), not the total
+    attended width. Use 0 for HCA. TE returns only the BF16 output matching
+    Q's shape; the auxiliary statistic is not exposed.
+
+    Gradients are returned for Q, KV, and the attention sink. Sparse indices,
+    lengths, and configuration are not differentiated.
     """
     return _dsa_sparse_attention(
         q,
@@ -537,9 +587,14 @@ def dsa_sparse_attention_batched(
 ) -> Any:
     """Run sparse attention on local batch shards using local KV indices.
 
-    ``topk_indices`` has shape ``[batch, query_length, selected_kv]`` and
-    must be relative to that batch element's KV row.  This deliberate contract
-    prevents a global-batch all-gather before the raw CuTe kernel.
+    Batched form of :func:`dsa_sparse_attention`: Q is ``[B,S,64,512]``, KV
+    is ``[B,K,512]``, indices are ``[B,S,N]``, lengths are ``[B,S]``, and the
+    output matches Q. Dtypes, scales, and gradients follow the raw function;
+    the FP32 ``[64]`` sink is shared across the batch.
+
+    Nonnegative indices are relative to each example's KV rows ``[0,K)``;
+    this wrapper offsets them into the local flattened KV array and preserves
+    ``-1`` padding. ``batch_axes`` follows :func:`csa_compressor_batched`.
     """
     if q.ndim != 4 or kv.ndim != 3 or topk_indices.ndim != 3:
         raise ValueError("expected q=[B,S,H,D], kv=[B,K,D], and indices=[B,S,N]")

@@ -59,3 +59,14 @@ Modules
   :members: __call__
 
 .. autoapifunction:: transformer_engine.jax.flax.extend_logical_axis_rules
+
+DeepSeek-V4 operations
+---------------------
+
+.. autoapifunction:: transformer_engine.jax.csa_compressor
+.. autoapifunction:: transformer_engine.jax.csa_compressor_batched
+.. autoapifunction:: transformer_engine.jax.hca_compressor_batched
+.. autoapifunction:: transformer_engine.jax.dsa_indexer
+.. autoapifunction:: transformer_engine.jax.dsa_indexer_batched
+.. autoapifunction:: transformer_engine.jax.dsa_sparse_attention
+.. autoapifunction:: transformer_engine.jax.dsa_sparse_attention_batched
