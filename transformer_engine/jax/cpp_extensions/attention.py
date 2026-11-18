@@ -3752,8 +3752,7 @@ def fused_attn_fwd(
         bias (Optional[jnp.ndarray]): An optional bias tensor to be added to the attention scores.
         softmax_offset (Optional[jnp.ndarray]): An optional softmax offset tensor.
         sequence_descriptor (SequenceDescriptor): Sequence lengths and offsets for the query,
-            key and value, and optionally segment ids and positions. Replaces the separate
-            q_seqlen / kv_seqlen / q_seq_offsets / kv_seq_offsets arguments.
+            key and value, and optionally segment ids and positions.
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
         attn_bias_type (AttnBiasType): Type of attention bias.
         attn_mask_type (AttnMaskType): Type of attention mask.
