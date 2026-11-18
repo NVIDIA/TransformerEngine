@@ -55,9 +55,9 @@ def _batched_shard_map(fn, in_specs, out_spec, batch_axes):
 def _cudnn_compressor_forward(
     kv, score, ape, cu_seqlens, cu_seqlens_comp, *, total_comp, ratio, coff
 ):
-    from cudnn import csa_compressor_forward_jax_sm100
+    from cudnn.ops import dsa
 
-    return csa_compressor_forward_jax_sm100(
+    return dsa.compressor_forward_jax(
         kv,
         score,
         ape,
@@ -72,9 +72,9 @@ def _cudnn_compressor_forward(
 def _cudnn_compressor_backward(
     kv, score, ape, cu_seqlens, cu_seqlens_comp, grad_out, *, ratio, coff
 ):
-    from cudnn import csa_compressor_backward_jax_sm100
+    from cudnn.ops import dsa
 
-    return csa_compressor_backward_jax_sm100(
+    return dsa.compressor_backward_jax(
         kv,
         score,
         ape,
@@ -232,9 +232,9 @@ def _cudnn_indexer_forward(
     max_seqlen_q=None,
     max_seqlen_k=None,
 ):
-    from cudnn import indexer_forward_jax_sm100
+    from cudnn.ops import dsa
 
-    return indexer_forward_jax_sm100(
+    return dsa.indexer_forward_jax(
         q,
         k,
         weights,
@@ -409,9 +409,9 @@ def dsa_indexer_batched(
 def _cudnn_sparse_attention_forward(
     q, kv, topk_indices, topk_length, attn_sink, *, indexer_topk, softmax_scale
 ):
-    from cudnn import sparse_attention_forward_jax_sm100
+    from cudnn.ops import dsa
 
-    return sparse_attention_forward_jax_sm100(
+    return dsa.sparse_attention_forward_jax(
         q,
         kv,
         topk_indices,
@@ -434,9 +434,9 @@ def _cudnn_sparse_attention_backward(
     *,
     softmax_scale,
 ):
-    from cudnn import sparse_attention_backward_jax_sm100
+    from cudnn.ops import dsa
 
-    return sparse_attention_backward_jax_sm100(
+    return dsa.sparse_attention_backward_jax(
         q,
         kv,
         out,
