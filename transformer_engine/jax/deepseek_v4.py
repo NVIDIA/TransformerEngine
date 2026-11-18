@@ -11,7 +11,6 @@ These functions intentionally do not compose a higher-level attention module.
 from __future__ import annotations
 
 from functools import partial
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -88,16 +87,9 @@ def _cudnn_compressor_backward(
 
 @partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7))
 def _csa_compressor(kv, score, ape, cu_seqlens, cu_seqlens_comp, total_comp, ratio, coff):
-    return _cudnn_compressor_forward(
-        kv,
-        score,
-        ape,
-        cu_seqlens,
-        cu_seqlens_comp,
-        total_comp=total_comp,
-        ratio=ratio,
-        coff=coff,
-    )
+    return _csa_compressor_fwd(
+        kv, score, ape, cu_seqlens, cu_seqlens_comp, total_comp, ratio, coff
+    )[0]
 
 
 def _csa_compressor_fwd(kv, score, ape, cu_seqlens, cu_seqlens_comp, total_comp, ratio, coff):
@@ -134,16 +126,16 @@ _csa_compressor.defvjp(_csa_compressor_fwd, _csa_compressor_bwd)
 
 
 def csa_compressor(
-    kv: Any,
-    score: Any,
-    ape: Any,
-    cu_seqlens: Any,
-    cu_seqlens_comp: Any,
+    kv: jnp.ndarray,
+    score: jnp.ndarray,
+    ape: jnp.ndarray,
+    cu_seqlens: jnp.ndarray,
+    cu_seqlens_comp: jnp.ndarray,
     *,
     total_comp: int,
     ratio: int = 4,
     coff: int = 2,
-) -> Any:
+) -> jnp.ndarray:
     """Differentiable SM100 CSA/HCA compressor kernel.
 
     ``kv`` and ``score`` are BF16 ``[T, coff * D]`` arrays; ``ape`` is FP32
@@ -166,14 +158,14 @@ def csa_compressor(
 
 
 def csa_compressor_batched(
-    kv: Any,
-    score: Any,
-    ape: Any,
+    kv: jnp.ndarray,
+    score: jnp.ndarray,
+    ape: jnp.ndarray,
     *,
     batch_axes: tuple[str, ...] = (),
     ratio: int = 4,
     coff: int = 2,
-) -> Any:
+) -> jnp.ndarray:
     """Run the differentiable compressor independently on local batch shards.
 
     Batched form of :func:`csa_compressor`: BF16 ``kv``/``score`` have shape
@@ -222,13 +214,13 @@ def csa_compressor_batched(
 
 
 def hca_compressor_batched(
-    kv: Any,
-    score: Any,
-    ape: Any,
+    kv: jnp.ndarray,
+    score: jnp.ndarray,
+    ape: jnp.ndarray,
     *,
     batch_axes: tuple[str, ...] = (),
     ratio: int = 128,
-) -> Any:
+) -> jnp.ndarray:
     """DSv4 HCA compressor: non-overlapping softmax pooling over ``ratio`` tokens.
 
     ``kv``/``score`` are ``[batch, sequence, head_dim]`` and ``ape`` is
@@ -343,16 +335,16 @@ _dsa_indexer.defvjp(_dsa_indexer_fwd, _dsa_indexer_bwd)
 
 
 def dsa_indexer(
-    q: Any,
-    k: Any,
-    weights: Any,
+    q: jnp.ndarray,
+    k: jnp.ndarray,
+    weights: jnp.ndarray,
     *,
     ratio: int = 4,
     sm_scale: float = 1.0,
     sequence_descriptor: SequenceDescriptor | None = None,
     max_seqlen_q: int | None = None,
     max_seqlen_k: int | None = None,
-) -> Any:
+) -> jnp.ndarray:
     """Differentiable SM100 indexer, using cuDNN forward and a JAX reference VJP.
 
     BF16 dense inputs are Q ``[B,Sq,64,128]``, K ``[B,Sk,1,128]``, and
@@ -415,14 +407,14 @@ def dsa_indexer(
 
 
 def dsa_indexer_batched(
-    q: Any,
-    k: Any,
-    weights: Any,
+    q: jnp.ndarray,
+    k: jnp.ndarray,
+    weights: jnp.ndarray,
     *,
     batch_axes: tuple[str, ...] = (),
     ratio: int = 4,
     sm_scale: float = 1.0,
-) -> Any:
+) -> jnp.ndarray:
     """Run the dense :func:`dsa_indexer` locally on each batch shard.
 
     Input/output shapes, dtypes, scales, and gradients follow its dense
@@ -487,14 +479,8 @@ def _cudnn_sparse_attention_backward(
 
 @partial(jax.custom_vjp, nondiff_argnums=(5, 6))
 def _dsa_sparse_attention(q, kv, topk_indices, topk_length, attn_sink, indexer_topk, softmax_scale):
-    return _cudnn_sparse_attention_forward(
-        q,
-        kv,
-        topk_indices,
-        topk_length,
-        attn_sink,
-        indexer_topk=indexer_topk,
-        softmax_scale=softmax_scale,
+    return _dsa_sparse_attention_fwd(
+        q, kv, topk_indices, topk_length, attn_sink, indexer_topk, softmax_scale
     )[0]
 
 
@@ -534,15 +520,15 @@ _dsa_sparse_attention.defvjp(_dsa_sparse_attention_fwd, _dsa_sparse_attention_bw
 
 
 def dsa_sparse_attention(
-    q: Any,
-    kv: Any,
-    topk_indices: Any,
-    topk_length: Any,
-    attn_sink: Any,
+    q: jnp.ndarray,
+    kv: jnp.ndarray,
+    topk_indices: jnp.ndarray,
+    topk_length: jnp.ndarray,
+    attn_sink: jnp.ndarray,
     *,
     indexer_topk: int = 512,
     softmax_scale: float = 1.0,
-) -> Any:
+) -> jnp.ndarray:
     """Differentiable SM100 DSv4 sparse-attention kernel.
 
     ``q`` is BF16 ``[Tq,64,512]`` and shared ``kv`` is BF16 ``[Tkv,512]``.
@@ -575,16 +561,16 @@ def dsa_sparse_attention(
 
 
 def dsa_sparse_attention_batched(
-    q: Any,
-    kv: Any,
-    topk_indices: Any,
-    topk_length: Any,
-    attn_sink: Any,
+    q: jnp.ndarray,
+    kv: jnp.ndarray,
+    topk_indices: jnp.ndarray,
+    topk_length: jnp.ndarray,
+    attn_sink: jnp.ndarray,
     *,
     batch_axes: tuple[str, ...] = (),
     indexer_topk: int = 512,
     softmax_scale: float = 1.0,
-) -> Any:
+) -> jnp.ndarray:
     """Run sparse attention on local batch shards using local KV indices.
 
     Batched form of :func:`dsa_sparse_attention`: Q is ``[B,S,64,512]``, KV
