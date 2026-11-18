@@ -133,6 +133,23 @@ def test_ep_leading_axis_canonicalization(ep_size, expected):
     assert not ep._leading_axis_ok(P("fsdp", None, None), axes, missing_ep_mesh)[0]
 
 
+@pytest.mark.parametrize("tp_size,expected", [(1, True), (2, False)])
+def test_tuple_ep_leading_axis_canonicalization(tp_size, expected):
+    """A tuple EP axis may be absent from the spec only when its mesh size is one."""
+    from types import SimpleNamespace
+    from jax.sharding import PartitionSpec as P
+    from transformer_engine.jax.cpp_extensions import ep
+
+    mesh = SimpleNamespace(shape={"fsdp": 2, "ep": 2, "tp": tp_size})
+    axes = (("ep", "tp"), ("fsdp",))
+    assert ep._leading_axis_ok(P(("fsdp", "ep"), None, None), axes, mesh)[0] is expected
+    assert ep._leading_axis_ok(P("ep", None, None), axes, mesh)[0] is expected
+    assert ep._leading_axis_ok(P(("fsdp", "ep", "tp"), None, None), axes, mesh)[0]
+    assert not ep._leading_axis_ok(P(("fsdp", "tp"), None, None), axes, mesh)[0]
+    assert not ep._leading_axis_ok(P(None, None, None), axes, mesh)[0]
+    assert not ep._leading_axis_ok(P(("fsdp", "ep"), None, None), axes)[0]
+
+
 def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
     from types import SimpleNamespace
     from jax.sharding import NamedSharding, PartitionSpec as P
