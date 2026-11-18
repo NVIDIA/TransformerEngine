@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cstdint>
 #include <numeric>
 
 #include "../extensions.h"
@@ -343,6 +344,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> fused_topk_with_aux_l
   TORCH_CHECK(index_dtype == at::kShort || index_dtype == at::kInt || index_dtype == at::kLong,
               "index_dtype must be int16, int32 or int64");
   at::cuda::CUDAGuard device_guard(logits.device());
+  // The kernel loads logits in 16-byte vectors, but a contiguous view can start at any element.
+  if (reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 != 0) {
+    logits = logits.clone();
+  }
   const auto sizes = logits.sizes();
   const int64_t num_experts = sizes.back();
   const int64_t num_tokens =

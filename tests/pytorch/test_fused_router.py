@@ -2438,6 +2438,44 @@ def test_fused_topk_with_aux_loss_scores_opcheck(dtype, fp32_probs, index_dtype)
             )
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_fused_topk_with_aux_loss_scores_unaligned_logits(dtype):
+    """A contiguous logits view that does not start on a 16-byte boundary gives the same
+    results as aligned logits."""
+    num_tokens, num_experts, topk, scaling_factor = 37, 256, 8, 2.5
+    generator = torch.Generator(device="cuda").manual_seed(13)
+    storage = torch.randn(num_tokens * num_experts + 1, device="cuda", generator=generator)
+    storage = storage.to(dtype).requires_grad_(True)
+    unaligned = storage[1:].view(num_tokens, num_experts)
+    assert unaligned.is_contiguous() and unaligned.data_ptr() % 16 != 0
+    aligned = unaligned.detach().clone().requires_grad_(True)
+    expert_bias = 0.05 * torch.randn(num_experts, device="cuda", generator=generator)
+    grad_probs = torch.randn(num_tokens, topk, device="cuda", generator=generator)
+    grad_scores = torch.randn(num_tokens, num_experts, device="cuda", generator=generator)
+
+    outputs = []
+    for logits in (aligned, unaligned):
+        route_counts = torch.zeros(num_experts, dtype=torch.int64, device="cuda")
+        probs, indices, scores, counts = te_router.fused_topk_with_aux_loss_scores(
+            logits,
+            topk,
+            8,
+            4,
+            scaling_factor,
+            "sigmoid",
+            expert_bias,
+            tokens_per_expert=route_counts,
+            probs_dtype=torch.float32,
+        )
+        loss = (probs * grad_probs).sum() + (scores * grad_scores).sum()
+        (grad_logits,) = torch.autograd.grad(loss, logits)
+        outputs.append((probs, indices, scores, counts, route_counts, grad_logits))
+    for expected, actual in zip(*outputs):
+        if expected.is_floating_point():
+            expected, actual = _bits(expected), _bits(actual)
+        assert torch.equal(actual, expected)
+
+
 @pytest.mark.parametrize(
     "num_experts,topk,num_groups,group_topk,score_function,with_bias",
     [
