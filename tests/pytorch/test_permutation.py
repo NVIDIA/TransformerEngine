@@ -1730,7 +1730,6 @@ def test_permute_with_probs_zero_probability_row_has_no_input_gradient():
     torch.testing.assert_close(x.grad, x_ref.grad)
 
 
-
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("use_torch_compile", [False, True])
 def test_permutation_index_map_empty_input(te_dtype, use_torch_compile):
