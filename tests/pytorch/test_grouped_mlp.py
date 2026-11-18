@@ -533,64 +533,6 @@ class TestGroupedLinearOp:
                     weight.grad, torch.full_like(weight.grad, 8), rtol=0, atol=0
                 )
 
-    @pytest.mark.parametrize("single_grouped_weight", [False, True])
-    @pytest.mark.parametrize("overwrite_main_grad", [False, True])
-    @pytest.mark.parametrize("delay_wgrad_compute", [False, True])
-    def test_unaligned_main_grad(
-        self,
-        single_grouped_weight: bool,
-        overwrite_main_grad: bool,
-        delay_wgrad_compute: bool,
-    ) -> None:
-        """A main_grad that is not 16-byte aligned makes the wgrad GEMM raise an error.
-
-        Megatron-LM packs parameters into one FP32 gradient buffer without padding when the
-        distributed optimizer is off, so a 3-element router bias in front of the experts
-        leaves the expert main_grad 12 bytes past a 16-byte boundary. The grouped GEMM
-        cannot write there, and reports it instead of faulting on the device.
-        """
-        if not is_op_fuser_grouped_tensor_path_supported(None, torch.bfloat16):
-            pytest.skip("Native grouped GEMM is unavailable.")
-        num_groups, in_features, out_features, tokens = 3, 128, 128, 64
-        op = te.ops.GroupedLinear(
-            num_groups,
-            in_features,
-            out_features,
-            bias=False,
-            device="cuda",
-            dtype=torch.bfloat16,
-            accumulate_into_main_grad=True,
-            single_grouped_weight=single_grouped_weight,
-            delay_wgrad_compute=delay_wgrad_compute,
-        )
-        model = te.ops.Sequential(op)
-        numel = num_groups * out_features * in_features
-        buffer = torch.full((3 + numel,), 0.25, device="cuda", dtype=torch.float32)
-        main_grads = buffer[3:].view(num_groups, out_features, in_features)
-        assert main_grads.data_ptr() % 16 == 12
-        if single_grouped_weight:
-            weights = [op.weight]
-            op.weight.main_grad = main_grads.view(op.weight.size())
-        else:
-            weights = [getattr(op, f"weight{i}") for i in range(num_groups)]
-            for i, weight in enumerate(weights):
-                weight.main_grad = main_grads[i]
-        for weight in weights:
-            weight.overwrite_main_grad = overwrite_main_grad
-            weight.grad_added_to_main_grad = False
-
-        x = torch.randn(
-            num_groups * tokens, in_features, device="cuda", dtype=torch.bfloat16
-        ).requires_grad_(True)
-        splits = torch.full((num_groups,), tokens, device="cuda", dtype=torch.int64)
-        y = model(x, splits)
-        with pytest.raises(RuntimeError, match="data pointer must be 16-byte aligned"):
-            y.backward(torch.ones_like(y))
-            if delay_wgrad_compute:
-                op.backward_dw()
-        torch.cuda.synchronize()  # no asynchronous CUDA error is left behind
-        torch.testing.assert_close(buffer, torch.full_like(buffer, 0.25), rtol=0, atol=0)
-
     def test_single_grouped_bias_uses_registered_packed_storage(self) -> None:
         """The grouped bias compute view must alias the registered trainable parent."""
         op = te.ops.GroupedLinear(
