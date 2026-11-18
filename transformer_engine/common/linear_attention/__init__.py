@@ -49,6 +49,7 @@ class LinearAttentionCPHostMetadata:
 
         fragments:                  A [6, 8), B [8, 12)
         local_cu_seqlens:           (0, 2, 6)
+        forward_descriptors:        ((0, 0, 1, 1), (1, 1, 0, 1))
         incoming_fragment_indices:  (0,)     # A continues from rank 0.
         outgoing_fragment_indices:  ()      # Neither document continues to a later rank.
         terminal_fragment_indices:  (0, 1)   # Both documents end on this rank.
@@ -63,7 +64,6 @@ class LinearAttentionCPHostMetadata:
     forward_descriptors: Tuple[Tuple[int, int, int, int], ...]
     # Select following reverse summaries to compose each fragment's ending-state gradient.
     backward_descriptors: Tuple[Tuple[int, int, int, int], ...]
-    # The following three tuples contain local fragment indices, not document IDs.
     outgoing_fragment_indices: Tuple[int, ...]  # Document continues to a later rank.
     incoming_fragment_indices: Tuple[int, ...]  # Document starts on an earlier rank.
     terminal_fragment_indices: Tuple[int, ...]  # Document ends on this rank.
@@ -79,8 +79,6 @@ def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, den
     ``cu_seqlens`` contains full-document boundaries as host integers. For
     P = ``cp_size``, packed rank r owns [r*T//P:(r+1)*T//P] of T total tokens.
     Dense rank r owns [r*S//P:(r+1)*S//P] of each length-S document.
-    Descriptor rows are (document, first_summary, count, stride). Each selects
-    summaries of one document, in forward or reverse order.
     """
     cu_seqlens = tuple(cu_seqlens)
     if cp_size < 1 or not 0 <= cp_rank < cp_size:
@@ -121,6 +119,8 @@ def build_linear_attention_cp_host_metadata(cu_seqlens, cp_size, cp_rank, *, den
                 LinearAttentionFragment(doc, fragment_start, fragment_end, first_rank, last_rank)
             )
     cu = [0]
+    # Descriptor rows are (document, first_summary, count, stride). Each selects
+    # summaries of one document, in forward or reverse order.
     forward_desc, backward_desc = [], []
     outgoing_fragment_indices = []
     incoming_fragment_indices = []

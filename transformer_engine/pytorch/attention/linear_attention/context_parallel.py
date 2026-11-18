@@ -64,20 +64,38 @@ def _cache_cp_metadata(entry):
 
 @dataclass
 class _LinearAttentionCPDeviceMetadata:
-    """Device metadata tensors for one CP rank."""
+    """Device metadata for one CP rank's local attention and state composition.
+
+    For global cu_seqlens [0, 8, 12, 24] and CP=4, rank 1 owns fragments
+    A [6, 8) and B [8, 12). Its device tensors include::
+
+        cu_seqlens:                 [0, 2, 6]
+        document_indices:           [0, 1]
+        forward_descriptors:        [[0, 0, 1, 1], [1, 1, 0, 1]]
+        incoming_fragment_indices:  [0]
+        incoming_cu_seqlens:        [0, 2]
+        initial_state_fragments:    [1]
+        initial_state_documents:    [1]
+
+    Fragment 0 receives memory from rank 0; fragment 1 starts document B
+    on this rank and maps to global document state 1.
+    """
 
     cu_seqlens: torch.Tensor  # Local cumulative fragment lengths on the device.
-    forward_descriptors: torch.Tensor
-    backward_descriptors: torch.Tensor
+    forward_descriptors: torch.Tensor  # Starting-memory composition recipes.
+    backward_descriptors: torch.Tensor  # Ending-state-gradient composition recipes.
+    # Zero variants set descriptor column 0 to -1 for an implicit zero memory.
     forward_zero_descriptors: torch.Tensor
     backward_zero_descriptors: torch.Tensor
-    document_indices: torch.Tensor
-    outgoing_fragment_indices: torch.Tensor
-    incoming_fragment_indices: torch.Tensor
-    terminal_fragment_indices: torch.Tensor
+    document_indices: torch.Tensor  # Global document ID for each local fragment.
+    outgoing_fragment_indices: torch.Tensor  # Document continues on a later rank.
+    incoming_fragment_indices: torch.Tensor  # Document starts on an earlier rank.
+    terminal_fragment_indices: torch.Tensor  # Document ends on this rank.
+    # Paired fragment/document indices for documents starting on this rank.
     initial_state_fragments: torch.Tensor
     initial_state_documents: torch.Tensor
-    empty_documents: torch.Tensor
+    empty_documents: torch.Tensor  # Global IDs of empty documents owned by this rank.
+    # Cumulative lengths within the selected spans passed to cuDNN summary calls.
     outgoing_cu_seqlens: torch.Tensor
     incoming_cu_seqlens: torch.Tensor
 
@@ -175,7 +193,7 @@ def _slot_indices(metadata, indices):
 def _local_attention(
     adapter, tensors, gate_names, cu_seqlens, state, options, *, output_final_state=True
 ):
-    """Call the flavor adapter with packed local inputs."""
+    """Call the corresponding linear attention flavor's adapter with packed local inputs."""
     return adapter._call_op(
         *tensors[:3],
         dict(zip(gate_names, tensors[3:])),
