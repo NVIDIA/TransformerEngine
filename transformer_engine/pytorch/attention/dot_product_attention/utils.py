@@ -48,6 +48,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.float8_tensor import Float8TensorStorage
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+import transformer_engine.pytorch.triton.mxfp8_bhsd_swizzle as triton_mxfp8_bhsd_swizzle
 
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType, DType, MXFP8_BLOCK_SCALING_SIZE
@@ -149,6 +150,8 @@ class FlashAttentionUtils:
 
     v4_is_installed = False
     fa4_version = PkgVersion("0")
+    # Older FA4 releases call quack.activation.sub_packed_f32x2, removed in quack-kernels 0.6.5.
+    v4_version_required = PkgVersion("4.0.0b26")
     v4_0_0_beta31 = PkgVersion("4.0.0b31")
     v4_0_0_beta33 = PkgVersion("4.0.0b33")
     quack_version: Optional[PkgVersion] = None
@@ -3462,6 +3465,15 @@ def mxfp8_transpose_swizzle(fp8_tensors, src_format):
         "sbhd",
     ), f"mxfp8_transpose_swizzle only supports bshd/sbhd, got {src_format!r}."
 
+    if triton_mxfp8_bhsd_swizzle.can_fuse_transpose_swizzle(fp8_tensors, src_format):
+        # One Triton kernel per direction that writes the swizzled BHSD layout directly.
+        triton_mxfp8_bhsd_swizzle.fused_transpose_swizzle(fp8_tensors, src_format)
+        return
+    _mxfp8_transpose_swizzle_unfused(fp8_tensors, src_format)
+
+
+def _mxfp8_transpose_swizzle_unfused(fp8_tensors, src_format):
+    """mxfp8_transpose_swizzle with separate BHSD permute and GEMM swizzle kernels."""
     rs_list = [t._rowwise_scale_inv for t in fp8_tensors]
     cs_list = [t._columnwise_scale_inv for t in fp8_tensors]
 

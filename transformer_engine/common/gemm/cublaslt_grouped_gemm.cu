@@ -157,7 +157,7 @@ struct GroupedGemmSetupWorkspace {
   float **alpha_ptrs = nullptr;
   float **beta_ptrs = nullptr;
   // Per-tensor scale_inv pointers (float* for tensor/FP8 block scaling, E8M0* for MXFP8,
-  // E4M3* for NVFP4)
+  // E4M3/UE5M3* for NVFP4)
   void **a_scale_inv_ptrs = nullptr;
   void **b_scale_inv_ptrs = nullptr;
   // Storage dimensions for cuBLAS matrix layouts
@@ -632,6 +632,10 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     NVTE_CHECK(shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
     const size_t first_dim = shape[0];
     const size_t last_dim = shape[1];
+    const size_t leading_dim = storage_transposed ? first_dim : last_dim;
+    NVTE_CHECK((leading_dim * typeToNumBits(data.dtype)) % 128 == 0, "Grouped GEMM: ", name,
+               "_list tensor ", i, " leading dimension (", leading_dim,
+               ") must span a multiple of 16 bytes.");
     if (storage_transposed) {
       args.rows[i] = static_cast<int>(first_dim);
       args.cols[i] = static_cast<int>(last_dim);
@@ -925,6 +929,20 @@ inline void set_nvfp4_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
   auto get_scale_mode = [](transformer_engine::DType dtype) -> cublasLtMatmulMatrixScale_t {
     if (dtype == transformer_engine::DType::kFloat8E4M3) {
       return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+    }
+    if (dtype == transformer_engine::DType::kFloat8UE5M3) {
+#if CUBLAS_VERSION >= 131100
+      NVTE_CHECK(transformer_engine::cuda::cublas_version() >= 131100,
+                 "NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
+                 "but run-time cuBLAS version is ",
+                 transformer_engine::cuda::cublas_version(), ".");
+      return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE5M3;
+#else
+      NVTE_ERROR(
+          "NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
+          "but compile-time cuBLAS version is ",
+          CUBLAS_VERSION, ".");
+#endif
     }
     NVTE_ERROR("Unsupported dtype for NVFP4 scales (", transformer_engine::to_string(dtype), ").");
   };
@@ -1589,6 +1607,24 @@ inline void launch_grouped_gemm_setup(
   const size_t b_bits_per_elem = transformer_engine::typeToNumBits(B_sel.dtype);
   const size_t c_elem_size = transformer_engine::typeToSize(c_dtype);
   const size_t d_elem_size = transformer_engine::typeToSize(d_dtype);
+
+  // cuBLASLt grouped GEMM requires 16-byte aligned matrix dimensions and pointers.
+  // Check the uniform feature dimension before constructing per-group layouts and pointers.
+  auto check_uniform_last_dim_alignment = [](const TensorShapeInfo &meta,
+                                             transformer_engine::DType dtype, const char *operand) {
+    if (meta.last_dims != nullptr) return;
+    const size_t bits_per_elem = transformer_engine::typeToNumBits(dtype);
+    NVTE_CHECK((static_cast<size_t>(meta.uniform_last) * bits_per_elem) % 128 == 0,
+               "Grouped GEMM: ", operand, " uniform last dimension (", meta.uniform_last,
+               ") must span a multiple of 16 bytes.");
+  };
+  if (!a_is_discrete) {
+    check_uniform_last_dim_alignment(A_meta, A_sel.dtype, "A");
+  }
+  check_uniform_last_dim_alignment(B_meta, B_sel.dtype, "B");
+  if (!d_is_discrete) {
+    check_uniform_last_dim_alignment(D_meta, d_dtype, "D");
+  }
 
   const int threads_per_block = 256;
   const int num_blocks = (num_tensors + threads_per_block - 1) / threads_per_block;
