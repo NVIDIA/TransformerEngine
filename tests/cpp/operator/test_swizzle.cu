@@ -224,6 +224,131 @@ static void zero_scale_inv_padding(uint8_t *buf,
   set_scale_inv_padding(buf, padded_rows, padded_cols, orig_rows, orig_cols, 0);
 }
 
+class SwizzleUnpaddedOuterDimTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::pair<size_t, size_t>, NVTEScalingMode, bool>> {
+ protected:
+  void Run(size_t num_tensors, bool unchecked = false) {
+    using namespace test;
+    const auto& [shape, scaling_mode, rowwise] = GetParam();
+    const auto [rows, cols] = shape;
+    SCOPED_TRACE(::testing::Message() << "num_tensors=" << num_tensors);
+    const bool nvfp4 = scaling_mode == NVTE_NVFP4_1D_SCALING;
+    const bool row_major_scales = rowwise || nvfp4;
+    const size_t block_size = nvfp4 ? 16 : 32;
+    const size_t outer_dim =
+        nvfp4 ? (rowwise ? rows : cols) : (rowwise ? rows : divide_round_up(rows, block_size));
+    const size_t inner_dim = nvfp4 ? divide_round_up(rowwise ? cols : rows, block_size)
+                                   : (rowwise ? divide_round_up(cols, block_size) : cols);
+    const size_t padded_outer = round_up_to_nearest_multiple(outer_dim, row_major_scales ? 128 : 4);
+    const size_t padded_inner = round_up_to_nearest_multiple(inner_dim, row_major_scales ? 4 : 128);
+    ASSERT_LT(outer_dim, padded_outer);
+    const std::vector<size_t> input_scale_shape{outer_dim, padded_inner};
+    const std::vector<size_t> output_scale_shape{padded_outer, padded_inner};
+    const std::vector<size_t> data_shape =
+        nvfp4 && !rowwise ? std::vector<size_t>{cols, rows} : std::vector<size_t>{rows, cols};
+    const DType data_dtype = nvfp4 ? DType::kFloat4E2M1 : DType::kFloat8E4M3;
+    const DType scale_dtype = nvfp4 ? DType::kFloat8E4M3 : DType::kFloat8E8M0;
+    const size_t input_size = outer_dim * padded_inner;
+    const size_t output_size = padded_outer * padded_inner;
+
+    std::vector<CudaPtr<uint8_t>> input_buffers, output_buffers;
+    std::vector<TensorWrapper> inputs, outputs;
+    std::vector<NVTETensor> input_handles, output_handles;
+    std::vector<std::vector<uint8_t>> references;
+    inputs.reserve(num_tensors);
+    outputs.reserve(num_tensors);
+    for (size_t tensor_index = 0; tensor_index < num_tensors; ++tensor_index) {
+      std::vector<uint8_t> input_scales(input_size, 0xFF);
+      std::vector<uint8_t> padded_scales(output_size, 0);
+      for (size_t outer = 0; outer < outer_dim; ++outer) {
+        for (size_t inner = 0; inner < inner_dim; ++inner) {
+          const uint8_t value = 1 + (37 * outer + 13 * inner + 17 * tensor_index) % 254;
+          input_scales[outer * padded_inner + inner] = value;
+          padded_scales[outer * padded_inner + inner] = value;
+        }
+      }
+      references.emplace_back(output_size);
+      if (row_major_scales) {
+        compute_ref_swizzle<128, 4, true>(padded_scales.data(), references.back().data(),
+                                          padded_outer, padded_inner);
+      } else {
+        compute_ref_swizzle<128, 4, false>(padded_scales.data(), references.back().data(),
+                                           padded_inner, padded_outer);
+      }
+
+      input_buffers.push_back(cuda_alloc<uint8_t>(input_size));
+      output_buffers.push_back(cuda_alloc<uint8_t>(output_size));
+      NVTE_CHECK_CUDA(cudaMemcpy(input_buffers.back().get(), input_scales.data(), input_size,
+                                 cudaMemcpyHostToDevice));
+      NVTE_CHECK_CUDA(cudaMemset(output_buffers.back().get(), 0xA5, output_size));
+      inputs.emplace_back(scaling_mode);
+      outputs.emplace_back(scaling_mode);
+      if (rowwise) {
+        inputs.back().set_rowwise_data(nullptr, data_dtype, data_shape);
+        inputs.back().set_rowwise_scale_inv(input_buffers.back().get(), scale_dtype,
+                                            input_scale_shape);
+        outputs.back().set_rowwise_data(nullptr, data_dtype, data_shape);
+        outputs.back().set_rowwise_scale_inv(output_buffers.back().get(), scale_dtype,
+                                             output_scale_shape);
+      } else {
+        inputs.back().set_columnwise_data(nullptr, data_dtype, data_shape);
+        inputs.back().set_columnwise_scale_inv(input_buffers.back().get(), scale_dtype,
+                                               input_scale_shape);
+        outputs.back().set_columnwise_data(nullptr, data_dtype, data_shape);
+        outputs.back().set_columnwise_scale_inv(output_buffers.back().get(), scale_dtype,
+                                                output_scale_shape);
+      }
+      outputs.back().set_with_gemm_swizzled_scales(true);
+      input_handles.push_back(inputs.back().data());
+      output_handles.push_back(outputs.back().data());
+    }
+
+    if (num_tensors == 1) {
+      nvte_swizzle_scaling_factors(input_handles.front(), output_handles.front(), 0);
+    } else if (unchecked) {
+      nvte_multi_tensor_swizzle_scaling_factors_unchecked(input_handles.data(),
+                                                          output_handles.data(), num_tensors, 0);
+    } else {
+      nvte_multi_tensor_swizzle_scaling_factors(input_handles.data(), output_handles.data(),
+                                                num_tensors, 0);
+    }
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+    for (size_t tensor_index = 0; tensor_index < num_tensors; ++tensor_index) {
+      std::vector<uint8_t> actual(output_size);
+      NVTE_CHECK_CUDA(cudaMemcpy(actual.data(), output_buffers[tensor_index].get(), output_size,
+                                 cudaMemcpyDeviceToHost));
+      compareResults("unpadded_outer_dim_" + std::to_string(tensor_index), actual.data(),
+                     references[tensor_index].data(), output_size);
+    }
+  }
+};
+
+TEST_P(SwizzleUnpaddedOuterDimTestSuite, SingleTensor) { Run(1); }
+
+TEST_P(SwizzleUnpaddedOuterDimTestSuite, MultiTensor) {
+  Run(4);
+  Run(65);
+}
+
+TEST_P(SwizzleUnpaddedOuterDimTestSuite, MultiTensorUnchecked) {
+  Run(4, true);
+  Run(65, true);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest, SwizzleUnpaddedOuterDimTestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(std::vector<std::pair<size_t, size_t>>{
+            {32, 32}, {160, 96}, {4063, 96}, {4192, 2016}, {160, 8096}, {8096, 160}}),
+        ::testing::Values(NVTE_MXFP8_1D_SCALING, NVTE_NVFP4_1D_SCALING), ::testing::Bool()),
+    [](const testing::TestParamInfo<SwizzleUnpaddedOuterDimTestSuite::ParamType>& info) {
+      const auto& [shape, scaling_mode, rowwise] = info.param;
+      return "M" + std::to_string(shape.first) + "_K" + std::to_string(shape.second) +
+             (scaling_mode == NVTE_NVFP4_1D_SCALING ? "_NVFP4" : "_MXFP8") +
+             (rowwise ? "_rowwise" : "_columnwise");
+    });
+
 void performTestSwizzleNVFP4(const size_t M, const size_t K, bool rowwise) {
   using namespace test;
   constexpr size_t BLOCK_SIZE = 16;
