@@ -69,6 +69,24 @@ def test_ep_partitioning_retains_bind_time_resources():
     assert not ep._ep_spec_ok(P(("wrong", "ep"), None, None), 2, resource_axes=captured)
 
 
+@pytest.mark.parametrize("ep_size,expected", [(1, True), (2, False)])
+def test_ep_leading_axis_canonicalization(ep_size, expected):
+    from types import SimpleNamespace
+    from jax.sharding import PartitionSpec as P
+    from transformer_engine.jax.cpp_extensions import ep
+
+    mesh = SimpleNamespace(shape={"fsdp": 4, "ep": ep_size})
+    axes = ("ep", ("fsdp",))
+    assert ep._leading_axis_ok(P("fsdp", None, None), axes, mesh)[0] is expected
+    assert ep._leading_axis_ok(P(None, None, None), axes, mesh)[0] is expected
+    assert ep._leading_axis_ok(P(("fsdp", "ep"), None, None), axes, mesh)[0]
+    assert not ep._leading_axis_ok(P("wrong", None, None), axes, mesh)[0]
+    assert not ep._leading_axis_ok(P("fsdp", "fsdp", None), axes, mesh)[0]
+    assert not ep._leading_axis_ok(P("fsdp", None, None), axes)[0]
+    missing_ep_mesh = SimpleNamespace(shape={"fsdp": 4})
+    assert not ep._leading_axis_ok(P("fsdp", None, None), axes, missing_ep_mesh)[0]
+
+
 def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
     from types import SimpleNamespace
     from jax.sharding import NamedSharding, PartitionSpec as P

@@ -182,11 +182,6 @@ def ep_bootstrap(
         )
     if world_size is None:
         world_size = get_num_devices_in_mesh(mesh)
-    if world_size < 2:
-        raise ValueError(
-            f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
-            " at least 2 ranks to form a group."
-        )
     if get_num_devices_in_mesh(mesh) != world_size:
         raise ValueError(
             f"ep_bootstrap: mesh device count ({get_num_devices_in_mesh(mesh)}) must equal"
@@ -211,6 +206,12 @@ def ep_bootstrap(
         "recv_capacity_per_rank": recv_capacity_per_rank,
         "hidden_dim": hidden_dim,
     }
+
+    # EP=1 is entirely local. Keep the same bootstrap contract and config so
+    # callers can use the EP APIs unchanged, but do not initialize NCCL EP.
+    if ep_size == 1:
+        tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
+        return
 
     # Borrowed-comm path (auto-selected by tex.ep.use_nccl_comm_from_xla): XLA
     # owns the EP communicator, so a one-shot bootstrap op fetches it and
@@ -292,9 +293,18 @@ def ep_finalize():
 
     Reinitialization must use the same communicator mode; switching modes
     requires a process restart.
+
+    Calling this before bootstrap or after an earlier finalize is a no-op.
     """
+    try:
+        ep_size = tex.ep.get_ep_config().ep_size
+    except RuntimeError:
+        # No configuration means there is no initialized EP state to finalize.
+        return
     jax.clear_caches()
-    transformer_engine_jax.release_ep_resources()
+    # EP=1 never initialized the C++/NCCL backend.
+    if ep_size > 1:
+        transformer_engine_jax.release_ep_resources()
     tex.ep.reset_ep_config()
 
 
@@ -342,7 +352,13 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
         tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
     )
     out_leading = tuple(tokens.shape[:-1])
-    primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)
+    primal = (
+        recv_tokens,
+        recv_topk_weights,
+        handle_mem,
+        token_counts,
+        total_recv_tokens,
+    )
     return primal, (handle_mem, out_leading)
 
 
