@@ -805,6 +805,23 @@ def _requantize_setup(M: int = 1024, N: int = 256):
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("columnwise", [False, True])
+def test_prequantized_requantize_empty_gemm_metadata(columnwise):
+    """Empty dispatch results must still advertise GEMM-ready scale layout."""
+    inputs, splits, num_groups = _requantize_setup(M=0, N=512)
+    wire = make_prequantized_wire_tensor(inputs, splits)
+    tex.group_requantize_inplace(
+        wire, make_op_quantizer(columnwise), num_groups, splits, te.DType.kBFloat16
+    )
+    assert wire._with_gemm_swizzled_scales
+    assert wire.rowwise_data.numel() == 0
+    assert wire.scale_inv.numel() == 0
+    if columnwise:
+        assert wire.columnwise_data is not None
+        assert wire.columnwise_data.numel() == 0
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 def test_prequantized_requantize_passes_through_gemm_ready_input():
     """A tensor already GEMM-ready in both directions is left untouched."""
     x, splits, num_groups = _requantize_setup()

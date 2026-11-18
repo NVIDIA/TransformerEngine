@@ -9,7 +9,7 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Float32, Int64, Int32, Uint16, Uint32
+from cutlass import Boolean, Float32, Int64, Int32, Uint16, Uint32
 
 # This must match `inline std::string to_string(const DType type)`` in transformer_engine/common/common.h exactly
 # which is how we encode types to strings in C++
@@ -84,6 +84,15 @@ def fabs_f32(val: Float32) -> Float32:
 
 
 @cute.jit
+def select_f32(pred: Boolean, if_true: Float32, if_false: Float32) -> Float32:
+    """Return if_true if the runtime predicate pred holds, else if_false."""
+    result = if_false
+    if pred:
+        result = if_true
+    return result
+
+
+@cute.jit
 def fma_f32(a: Float32, b: Float32, c: Float32) -> Float32:
     """Compute the fused multiply-add of three float32 values: a * b + c."""
     return cute.arch.inline_ptx(
@@ -102,6 +111,18 @@ def exp2f_rcp(scale_e8m0) -> Float32:
     # CuTeDSL unrolls this fixed loop and emits predicate instructions for the
     # scalar conditionals, so this control flow does not hurt performance.
     for cmp_val, repl_bits in [(255, 0x7FFFFFFF), (254, 0x00400000), (0, 0x7F000000)]:
+        if biased_exp == Int32(cmp_val):
+            result = Int32(repl_bits).bitcast(Float32)
+    return result
+
+
+@cute.jit
+def exp2f(scale_e8m0) -> Float32:
+    """2^(biased_exp - 127) for an e8m0 scale, matching ptx::exp2f in util/ptx.cuh."""
+    biased_exp = Int32(scale_e8m0.bitcast(cutlass.Uint8))
+    result = (biased_exp << Int32(FP32_MANTISSA_BITS)).bitcast(Float32)
+    # 2^-127 is subnormal, so it cannot be built by shifting into the exponent field.
+    for cmp_val, repl_bits in [(255, 0x7FFFFFFF), (0, 0x00400000)]:
         if biased_exp == Int32(cmp_val):
             result = Int32(repl_bits).bitcast(Float32)
     return result
