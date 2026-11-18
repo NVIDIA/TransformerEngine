@@ -111,7 +111,7 @@ engine is unavailable, ordinary GDN state passes provide a slower fallback.
 
 CP runs eagerly, including inside ``torch.compile`` models, and supports
 first-order gradients. Full-graph compilation and CUDA graph capture are
-outside this implementation's supported contract. Other LA flavors, direct
+outside this implementation's supported contract. Other LA variants, direct
 dual-chunk ownership, headwise CP and whole-document redistribution are
 separate features.
 

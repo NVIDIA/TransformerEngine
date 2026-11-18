@@ -317,17 +317,17 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         self._validate_gates(gates, query_layer)
 
     def _prepare_cp_inputs(self, tensors, initial_state):
-        """Normalize a flavor's token-aligned CP inputs before state propagation."""
+        """Normalize token-aligned CP inputs before state propagation."""
         return tensors, initial_state
 
     def _cp_forward_summary(self, query, key, value, gates, cu_seqlens, **kernel_kwargs):
-        """Return the fragment maps S_out = S_in @ T + H for this flavor."""
+        """Return the fragment maps S_out = S_in @ T + H."""
         raise NotImplementedError(f"{self.variant} does not implement CP forward summaries.")
 
     def _cp_backward_summary(
         self, query, key, value, gates, grad_output, cu_seqlens, **kernel_kwargs
     ):
-        """Return reverse state-gradient maps for this flavor."""
+        """Return reverse state-gradient maps for this variant."""
         raise NotImplementedError(f"{self.variant} does not implement CP backward summaries.")
 
     def _run(

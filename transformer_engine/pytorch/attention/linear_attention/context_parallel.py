@@ -4,8 +4,8 @@
 
 """Contiguous linear-attention CP: fragments, collectives and state gradients.
 
-Flavor adapters supply local attention and affine summary operations. The shared
-CUDA operation composes states in document order.
+Adapters for each linear attention variant supply local attention and affine
+summary operations. The shared CUDA operation composes states in document order.
 
 Adapter contract:
 * Positional tensors carry a real-token leading axis for fragment selection;
@@ -19,7 +19,8 @@ Adapter contract:
   differentiable token-gate transformation before the CP Function. Their gradient
   reduction must match the caller's parameter-ownership contract.
 
-Only GDN supplies these hooks today; other flavors require adapter validation.
+Only GDN supplies these hooks today; other linear attention variants require
+adapter validation.
 """
 
 from collections import OrderedDict
@@ -193,7 +194,7 @@ def _slot_indices(metadata, indices):
 def _local_attention(
     adapter, tensors, gate_names, cu_seqlens, state, options, *, output_final_state=True
 ):
-    """Call the corresponding linear attention flavor's adapter with packed local inputs."""
+    """Call the linear attention variant's adapter with packed local inputs."""
     return adapter._call_op(
         *tensors[:3],
         dict(zip(gate_names, tensors[3:])),
