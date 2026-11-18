@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""CUDA VMM row-split allocation with optional allocator-managed MemPool reuse.
+"""CUDA VMM row-split allocation with optional ordinary PyTorch MemPool reuse.
 
 Logical tensors stay contiguous, with physical halves rounded to VMM granularity.
 Set NVTE_VMM_USE_MEMPOOL=1 for Storage-owned allocations and physical-block reuse.
@@ -402,10 +402,7 @@ class VMMRowSplitAllocator:
         if self._closed:
             raise RuntimeError("Cannot allocate through a closed VMMRowSplitAllocator")
         pool = get_vmm_mem_pool(self.device_index, domain=domain)
-        with pool.use():
-            tensor = torch.empty(
-                shape, dtype=dtype, device=torch.device("cuda", self.device_index)
-            )
+        tensor = pool.allocate(shape, dtype)
         tensor._nvte_vmm_allocator = self
         return tensor
 
@@ -442,7 +439,7 @@ class VMMRowSplitAllocator:
 
 
 def clear_captured_vmm_allocations() -> None:
-    """Release VMM mappings after every graph referencing them is reset."""
+    """Release manual mappings after graph reset and drain graph-safe MemPool caches."""
     for allocator in list(_CAPTURED_VMM_ALLOCATORS.values()):
         allocator.close()
     _CAPTURED_VMM_ALLOCATORS.clear()
@@ -452,8 +449,9 @@ def clear_captured_vmm_allocations() -> None:
 def get_vmm_mem_pool(device=None, *, domain=-1):
     """Shared per-device/layout physical-block pool; prepare before capture.
 
-    The returned object is a torch.cuda.MemPool and can also be passed directly
-    to torch.cuda.graph(pool=...). No complete mapped slots are reused.
+    NVTE_VMM_MEMPOOL_MODE selects dedicated (ordinary PyTorch) or managed
+    (patched PyTorch, one shared pool) integration. Use allocate(shape, dtype);
+    the controller is not a general routing scope. Mapped slots are not reused.
     """
     if device is None:
         device_index = torch.cuda.current_device()
@@ -466,16 +464,18 @@ def get_vmm_mem_pool(device=None, *, domain=-1):
         device_index = torch.cuda.current_device() if device.index is None else device.index
     if domain not in (-1, 0, 1):
         raise ValueError(f"Expected domain -1, 0, or 1, got {domain}")
-    key = (device_index, domain)
+    mode = os.getenv("NVTE_VMM_MEMPOOL_MODE", "dedicated")
+    key = (device_index, domain, mode)
     with _VMM_MEMPOOL_LOCK:
         if key not in _VMM_MEMPOOLS:
             from .vmm_mempool import VMMMemPool
 
-            _VMM_MEMPOOLS[key] = VMMMemPool(device_index, domain=domain)
+            _VMM_MEMPOOLS[key] = VMMMemPool(device_index, domain=domain, mode=mode)
         return _VMM_MEMPOOLS[key]
 
 
 def clear_vmm_mem_pool_caches():
-    """Release reusable backing after every graph retaining each pool is reset."""
-    for pool in _VMM_MEMPOOLS.values():
-        pool.empty_cache()
+    """Drain reusable backing while preserving live Storage and graph mappings."""
+    mempool_module = sys.modules.get(f"{__package__}.vmm_mempool")
+    if mempool_module is not None:
+        mempool_module.clear_all_vmm_mem_pool_caches()

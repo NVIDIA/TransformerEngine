@@ -4,6 +4,7 @@
  ************************************************************************/
 #include "transformer_engine/pytorch/csrc/extensions/vmm_mempool_core.h"
 
+#include <atomic>
 #include <cassert>
 #include <iostream>
 #include <memory>
@@ -13,6 +14,8 @@ namespace {
 struct State {
   uint64_t next_address = 4096, next_handle = 1, next_event = 1;
   bool capturing = false, ready = true;
+  int graph = 0;
+  std::vector<std::pair<int, std::shared_ptr<std::atomic<bool>>>> pins;
   int fail_map = -1, fail_create = -1;
   bool fail_access = false, fail_event = false;
   std::map<uint64_t, size_t> reservations;
@@ -25,6 +28,14 @@ struct FakeOps {
     OutOfMemory() : std::runtime_error("out of memory") {}
   };
   std::shared_ptr<State> s;
+  using CapturePin = std::shared_ptr<std::atomic<bool>>;
+  CapturePin pin_capture(uintptr_t) {
+    assert(s->capturing);
+    auto pin = std::make_shared<std::atomic<bool>>(false);
+    s->pins.emplace_back(s->graph, pin);
+    return pin;
+  }
+  bool capture_done(const CapturePin &pin) { return pin->load(); }
   uint64_t reserve(size_t bytes, size_t) {
     auto base = s->next_address;
     s->next_address += bytes + 4096;
@@ -89,6 +100,10 @@ void reuse_and_stream_ordering() {
   assert(p.stats().at("physical_blocks_reused") == 0);
   assert(s->mappings.count(a));  // No premature unmap, even on another stream.
   s->ready = true;
+  p.collect_completed();
+  assert(!s->mappings.count(a));
+  assert(p.stats().at("cached_physical_bytes") == 256);
+  assert(p.stats().at("physical_blocks_released") == 0);
   auto c = p.allocate(128, 2);
   assert(c != a && p.stats().at("physical_blocks_reused") == 2);
   assert(!s->mappings.count(a));
@@ -116,12 +131,61 @@ void graph_quarantine() {
   auto c = p.allocate(128, 7);
   assert(p.stats().at("captured_retired_bytes") == 512);
   assert(s->mappings.count(a) && s->mappings.count(b));
-  // Simulate PyTorch's valid emptyCache callback after all graph resets.
+  // Even an early drain cannot unmap memory held by a CUDA graph user object.
+  p.empty_cache();
+  assert(s->mappings.count(a) && s->mappings.count(b));
+  for (const auto &[graph, pin] : s->pins) pin->store(true);
   p.empty_cache();
   assert(!s->mappings.count(a) && !s->mappings.count(b));
   p.free(c, 7);
   p.empty_cache();
   assert(s->handles.empty() && s->events.empty());
+}
+
+void independent_graph_lifetimes() {
+  auto s = std::make_shared<State>();
+  Pool p(FakeOps{s}, 64, -1);
+  s->capturing = true;
+  auto a = p.allocate(128, 1);
+  p.free(a, 1);
+  s->graph = 1;
+  auto b = p.allocate(128, 2);
+  p.free(b, 2);
+  s->capturing = false;
+  for (const auto &[graph, pin] : s->pins) if (graph == 0) pin->store(true);
+  p.empty_cache();
+  assert(!s->mappings.count(a) && s->mappings.count(b));
+  for (const auto &[graph, pin] : s->pins) pin->store(true);
+  p.empty_cache();
+  assert(s->handles.empty() && s->reservations.empty());
+}
+
+void sparse_native_segment() {
+  auto s = std::make_shared<State>();
+  Pool p(FakeOps{s}, 64, -1);
+  auto a = p.allocate(130, 1, 1280);
+  assert(s->reservations.at(a) == 1280);
+  assert(s->mappings.size() == 4);  // Four pages, not twenty pages of physical RAM.
+  assert(p.stats().at("physical_bytes") == 256);
+  assert(p.stats().at("virtual_reserved_bytes") == 1280);
+  p.free(a, 1);
+  auto b = p.allocate(128, 2, 1024);
+  assert(!s->reservations.count(a));
+  assert(p.stats().at("physical_blocks_reused") == 2);
+  p.free(b, 2);
+  p.empty_cache();
+  assert(s->handles.empty() && s->reservations.empty());
+  bool threw = false;
+  try { p.allocate(256, 1, 128); }
+  catch (const std::invalid_argument &) { threw = true; }
+  assert(threw && s->reservations.empty());
+  s->fail_map = 2;
+  threw = false;
+  try { p.allocate(256, 1, 1280); }
+  catch (const std::runtime_error &) { threw = true; }
+  assert(threw && s->reservations.empty() && s->mappings.empty());
+  p.empty_cache();
+  assert(s->handles.empty());
 }
 
 void rollback() {
@@ -178,6 +242,8 @@ void oom_reclaims_unmapped_cache() {
 int main() {
   reuse_and_stream_ordering();
   graph_quarantine();
+  independent_graph_lifetimes();
+  sparse_native_segment();
   rollback();
   rounding_and_single_domain();
   oom_reclaims_unmapped_cache();

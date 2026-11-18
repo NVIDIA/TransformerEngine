@@ -18,7 +18,7 @@ namespace transformer_engine::pytorch {
 
 // Ops owns the device API; this policy is also tested with a simulated driver.
 // Every physical handle is one page. Virtual mappings are NEVER cached for reuse.
-// Captured mappings are quarantined until the owning MemPool permits emptyCache.
+// CUDA graph user objects pin captured mappings until every graph/exec releases them.
 template <class Ops>
 class VMMPhysicalBlockPool {
  public:
@@ -29,10 +29,12 @@ class VMMPhysicalBlockPool {
 
   struct Mapping {
     size_t requested = 0;
-    size_t half = 0;
+    size_t reserved = 0;
     Stream stream = 0;
     Event event = 0;
     bool captured = false;
+    bool event_recorded = false;
+    typename Ops::CapturePin capture_pin{};
     std::vector<std::pair<int, Handle>> pages;
   };
 
@@ -41,7 +43,7 @@ class VMMPhysicalBlockPool {
     if (!page_ || domain < -1 || domain > 1) throw std::invalid_argument("Invalid VMM pool layout");
   }
 
-  Address allocate(size_t size, Stream stream) {
+  Address allocate(size_t size, Stream stream, size_t segment_bytes = 0) {
     std::lock_guard<std::mutex> lock(mutex_);
     const bool capturing = ops_.capturing(stream);
     if (!capturing) collect();
@@ -55,17 +57,27 @@ class VMMPhysicalBlockPool {
     }
     Mapping mapping;
     mapping.requested = size;
-    mapping.half = half;
+    const size_t mapped_bytes = half * partitions;
+    if (segment_bytes && segment_bytes < mapped_bytes) {
+      throw std::invalid_argument("PyTorch segment is smaller than the localized backing");
+    }
+    // PyTorch can round a small request to a much larger segment. Reserve its
+    // full address range, but physically back only this dedicated tensor.
+    mapping.reserved = round_up(segment_bytes ? segment_bytes : mapped_bytes);
     mapping.stream = stream;
     mapping.captured = capturing;
     const size_t count = half * partitions / page_;
     mapping.pages.reserve(count);
     // Reserve cache capacity before acquiring any resources (including rollback).
     for (auto &cache : cache_) cache.reserve(cache.size() + count);
-    const auto base = ops_.reserve(half * partitions, page_);
+    const auto base = ops_.reserve(mapping.reserved, page_);
     size_t mapped = 0;
     try {
-      if (!capturing) mapping.event = ops_.event_create();
+      if (capturing) {
+        mapping.capture_pin = ops_.pin_capture(stream);
+      } else {
+        mapping.event = ops_.event_create();
+      }
       for (size_t i = 0; i < count; ++i) {
         const int domain = domain_ == -1 ? static_cast<int>(i * page_ / half) : domain_;
         auto &cache = cache_[domain];
@@ -97,7 +109,7 @@ class VMMPhysicalBlockPool {
       for (size_t i = 0; i < mapped; ++i) ops_.unmap(base + i * page_, page_);
       for (const auto &[domain, handle] : mapping.pages) cache_[domain].push_back(handle);
       if (mapping.event) ops_.event_destroy(mapping.event);
-      ops_.free_address(base, half * partitions);
+      ops_.free_address(base, mapping.reserved);
       throw;
     }
     ++allocations_;
@@ -111,20 +123,35 @@ class VMMPhysicalBlockPool {
       throw std::runtime_error("Unknown VMM allocation or allocation stream mismatch");
     }
     auto &mapping = it->second;
-    mapping.captured = mapping.captured || ops_.capturing(stream);
-    // PyTorch waits for recorded streams. Its FREE_COMPLETED does not imply
-    // completion on the allocation stream: remapping needs this additional event.
-    if (!mapping.captured) ops_.event_record(mapping.event, stream);
+    const bool capturing = ops_.capturing(stream);
+    if (capturing && !mapping.capture_pin) {
+      mapping.capture_pin = ops_.pin_capture(stream);
+      mapping.captured = true;
+    }
+    // Keep PyTorch's original Storage deleter and record_stream handling. An
+    // additional event protects the allocation stream before VMM remapping.
+    if (!capturing) {
+      if (!mapping.event) mapping.event = ops_.event_create();
+      ops_.event_record(mapping.event, stream);
+      mapping.event_recorded = true;
+    }
     retired_.insert(active_.extract(it));
     ++frees_;
   }
 
-  // ONLY call through PyTorch's managed-pool emptyCache contract: no capturing
-  // graph may retain this pool. Live Tensor/Storage allocations remain mapped.
+  // Poll completed retirements without releasing reusable physical handles.
+  // The caller must be outside capture.
+  void collect_completed() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    collect();
+  }
+
+  // Graph pins remain authoritative even after the ordinary MemPool returns a
+  // segment. A cache drain never invalidates a live graph or Tensor/Storage.
   void empty_cache() {
     std::lock_guard<std::mutex> lock(mutex_);
     ops_.synchronize();
-    for (auto it = retired_.begin(); it != retired_.end();) reclaim(it++);
+    collect();
     release_cached_handles();
   }
 
@@ -138,13 +165,18 @@ class VMMPhysicalBlockPool {
 
   std::map<std::string, uint64_t> stats() {
     std::lock_guard<std::mutex> lock(mutex_);
-    uint64_t active = 0, pending = 0, captured = 0;
-    for (const auto &[base, mapping] : active_) active += mapping.pages.size() * page_;
+    uint64_t active = 0, pending = 0, captured = 0, reserved = 0;
+    for (const auto &[base, mapping] : active_) {
+      active += mapping.pages.size() * page_;
+      reserved += mapping.reserved;
+    }
     for (const auto &[base, mapping] : retired_) {
       (mapping.captured ? captured : pending) += mapping.pages.size() * page_;
+      reserved += mapping.reserved;
     }
     const uint64_t cached = (cache_[0].size() + cache_[1].size()) * page_;
-    return {{"block_bytes", page_}, {"active_mapped_bytes", active},
+    return {{"virtual_reserved_bytes", reserved}, {"block_bytes", page_},
+            {"active_mapped_bytes", active},
             {"pending_mapped_bytes", pending}, {"captured_retired_bytes", captured},
             {"cached_physical_bytes", cached},
             {"physical_bytes", active + pending + captured + cached},
@@ -177,7 +209,10 @@ class VMMPhysicalBlockPool {
   void collect() {
     for (auto it = retired_.begin(); it != retired_.end();) {
       auto current = it++;
-      if (!current->second.captured && ops_.event_ready(current->second.event)) reclaim(current);
+      const auto &mapping = current->second;
+      if (mapping.capture_pin && !ops_.capture_done(mapping.capture_pin)) continue;
+      if (mapping.event_recorded && !ops_.event_ready(mapping.event)) continue;
+      reclaim(current);
     }
   }
 
@@ -191,7 +226,7 @@ class VMMPhysicalBlockPool {
     }
     for (const auto &[domain, handle] : mapping.pages) cache_[domain].push_back(handle);
     if (mapping.event) ops_.event_destroy(mapping.event);
-    ops_.free_address(it->first, mapping.pages.size() * page_);
+    ops_.free_address(it->first, mapping.reserved);
     retired_.erase(it);
   }
 

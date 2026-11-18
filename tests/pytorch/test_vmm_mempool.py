@@ -1,9 +1,10 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # See LICENSE for license information.
 
-"""Hardware regression tests for the optional allocator-managed VMM backend."""
+"""Hardware regression tests for VMM reuse through ordinary PyTorch MemPools."""
 
 import gc
+import time
 
 import pytest
 
@@ -14,18 +15,21 @@ torch = pytest.importorskip("torch")
 def pool():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required")
-    if not hasattr(torch._C, "_cuda_customManagedPoolAllocator"):
-        pytest.skip("PyTorch allocator-managed MemPool support is required")
     import transformer_engine_torch as tex
 
-    if not hasattr(tex, "VMMMemPoolBackend"):
+    if not hasattr(tex, "VMMAllocationTicket"):
         pytest.skip("Rebuild TE with NVTE_WITH_VMM_MEMPOOL=1")
-    get_domains = getattr(torch.cuda.memory, "get_num_locality_domains", None)
-    if get_domains is None or get_domains() < 2:
-        pytest.skip("Two CUDA locality domains are required")
     from transformer_engine.pytorch.tensor.vmm_mempool import VMMMemPool
 
-    result = VMMMemPool()
+    try:
+        result = VMMMemPool()
+    except RuntimeError as exc:
+        if (
+            "requires a CUDA 13.4" in str(exc)
+            or "requires at least two locality domains" in str(exc)
+        ):
+            pytest.skip(str(exc))
+        raise
     yield result
     gc.collect()
     result.empty_cache()
@@ -36,8 +40,7 @@ def pool():
 
 def test_physical_blocks_remapped_across_sizes(pool):
     block = pool.stats()["block_bytes"]
-    with pool.use():
-        large = torch.empty(4 * block, dtype=torch.uint8, device="cuda")
+    large = pool.allocate((4 * block,), torch.uint8)
     from transformer_engine.pytorch.tensor.vmm import is_vmm_tensor
 
     assert is_vmm_tensor(large)
@@ -45,8 +48,9 @@ def test_physical_blocks_remapped_across_sizes(pool):
     torch.cuda.synchronize()
     before = pool.stats()
     del large
-    with pool.use():
-        small = torch.empty(2 * block, dtype=torch.uint8, device="cuda")
+    pool.collect()
+    torch.cuda.synchronize()  # Includes the completion event recorded by native segment return.
+    small = pool.allocate((2 * block,), torch.uint8)
     after = pool.stats()
     assert after["physical_blocks_created"] == before["physical_blocks_created"]
     assert after["physical_blocks_reused"] == before["physical_blocks_reused"] + 2
@@ -80,8 +84,8 @@ def test_recorded_stream_use(pool):
     block = pool.stats()["block_bytes"]
     allocation_stream = torch.cuda.Stream()
     consumer_stream = torch.cuda.Stream()
-    with torch.cuda.stream(allocation_stream), pool.use():
-        tensor = torch.empty(4 * block, dtype=torch.uint8, device="cuda")
+    with torch.cuda.stream(allocation_stream):
+        tensor = pool.allocate((4 * block,), torch.uint8)
         tensor.fill_(19)
     consumer_stream.wait_stream(allocation_stream)
     with torch.cuda.stream(consumer_stream):
@@ -89,9 +93,8 @@ def test_recorded_stream_use(pool):
         output = tensor.clone()
         tensor.record_stream(consumer_stream)
     del tensor
-    with pool.use():
-        replacement = torch.empty(2 * block, dtype=torch.uint8, device="cuda")
-        replacement.fill_(31)
+    replacement = pool.allocate((2 * block,), torch.uint8)
+    replacement.fill_(31)
     torch.cuda.synchronize()
     torch.testing.assert_close(output, torch.full_like(output, 19))
 
@@ -100,34 +103,52 @@ def test_capture_temporaries_and_shared_graph_retention(pool):
     block = pool.stats()["block_bytes"]
     source = torch.full((2 * block,), 13, dtype=torch.uint8, device="cuda")
     graphs, outputs = [], []
-    # Warm up kernels before capture; these allocations use the default pool.
     source.clone().add_(1)
     torch.cuda.synchronize()
     for _ in range(2):
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, pool=pool):
-            temporary = torch.empty_like(source)
+        with torch.cuda.graph(graph):
+            temporary = pool.allocate(source.shape, source.dtype)
             temporary.copy_(source)
             output = temporary + 1
-            del temporary  # Must not unmap an address recorded in the graph.
+            del temporary
         graphs.append(graph)
         outputs.append(output)
-    assert pool.stats()["captured_retired_bytes"] >= 4 * block
+    physical_before = pool.stats()["physical_bytes"]
+    assert physical_before >= 4 * block
+    # An early cache drain must preserve captured addresses, even on PyTorch
+    # builds whose use_mem_pool does not retain custom pools for the graph.
+    if pool.mode == "managed":
+        with pytest.raises(RuntimeError):
+            pool.empty_cache()
+    else:
+        pool.empty_cache()
+    assert pool.stats()["physical_bytes"] == physical_before
     for _ in range(3):
         for graph in graphs:
             graph.replay()
         for output in outputs:
             torch.testing.assert_close(output, source + 1)
-    with pytest.raises(RuntimeError):
-        pool.empty_cache()
     graphs[0].reset()
-    with pytest.raises(RuntimeError):
-        pool.empty_cache()  # The second graph still owns the pool.
+    if pool.mode == "managed":
+        with pytest.raises(RuntimeError):
+            pool.empty_cache()
+    else:
+        pool.empty_cache()
+    assert pool.stats()["physical_bytes"] >= 2 * block
+    graphs[1].replay()
+    torch.testing.assert_close(outputs[1], source + 1)
     graphs[1].reset()
-    pool.empty_cache()
-    assert pool.stats()["captured_retired_bytes"] == 0
+    # CUDA user-object destruction is asynchronous, including after reset/sync.
+    deadline = time.monotonic() + 5
+    while True:
+        pool.empty_cache()
+        if pool.stats()["physical_bytes"] == 0:
+            break
+        assert time.monotonic() < deadline, pool.stats()
+        time.sleep(0.01)
     for output in outputs:
-        torch.testing.assert_close(output, source + 1)  # Live outputs survive drain.
+        torch.testing.assert_close(output, source + 1)
 
 
 @pytest.mark.parametrize("domain", [0, 1])
@@ -155,8 +176,7 @@ def test_pool_wrapper_can_die_before_storage(pool):
     from transformer_engine.pytorch.tensor.vmm_mempool import VMMMemPool
 
     other_pool = VMMMemPool()
-    with other_pool.use():
-        root = torch.empty(2 * pool.stats()["block_bytes"], dtype=torch.uint8, device="cuda")
+    root = other_pool.allocate((2 * pool.stats()["block_bytes"],), torch.uint8)
     root.fill_(23)
     alias = root[1:]
     del root, other_pool
@@ -165,3 +185,20 @@ def test_pool_wrapper_can_die_before_storage(pool):
     torch.testing.assert_close(alias, torch.full_like(alias, 23))
     del alias
     torch.cuda.empty_cache()
+
+
+def test_small_tensor_does_not_physically_back_native_segment_tail(pool):
+    tiny = pool.allocate((2, 16), torch.uint8)
+    stats = pool.stats()
+    assert stats["physical_bytes"] == 2 * stats["block_bytes"]
+    assert stats["virtual_reserved_bytes"] >= stats["physical_bytes"]
+    tiny.fill_(29)
+    torch.testing.assert_close(tiny, torch.full_like(tiny, 29))
+
+
+def test_empty_cache_preserves_live_tensor(pool):
+    tensor = pool.allocate((2, 128), torch.uint8)
+    tensor.fill_(37)
+    pool.empty_cache()
+    assert pool.contains(tensor.data_ptr())
+    torch.testing.assert_close(tensor, torch.full_like(tensor, 37))
