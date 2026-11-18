@@ -35,8 +35,15 @@ struct CUDAOps {
     cudaStreamCaptureStatus status;
     unsigned long long capture_id = 0;
     cudaGraph_t graph = nullptr;
+    // CUDA 13 folds the versioned entry points into the unversioned API and
+    // adds the edge-data output parameter. Select by the runtime header version.
+#if CUDART_VERSION >= 13000
+    C10_CUDA_CHECK(cudaStreamGetCaptureInfo(reinterpret_cast<cudaStream_t>(stream), &status,
+                                          &capture_id, &graph, nullptr, nullptr, nullptr));
+#else
     C10_CUDA_CHECK(cudaStreamGetCaptureInfo_v2(reinterpret_cast<cudaStream_t>(stream), &status,
                                              &capture_id, &graph, nullptr, nullptr));
+#endif
     TORCH_CHECK(status == cudaStreamCaptureStatusActive && graph,
                 "VMM allocation requires a valid active capture graph");
     auto pin = std::make_shared<std::atomic<bool>>(false);
