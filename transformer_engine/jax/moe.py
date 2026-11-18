@@ -54,7 +54,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
-from .cpp_extensions.activation import ActivationParams
+from .cpp_extensions.activation import ActivationParams, _convert_to_activation_function
 from .cpp_extensions.misc import jax_dtype_to_te_dtype
 from .quantize import (
     GroupedScaledTensor1x,
@@ -69,7 +69,6 @@ from .quantize import (
 )
 from .quantize.dequantizer import _unswizzle_mxfp8_grouped_scale
 from .cpp_extensions.gemm import swizzled_scale
-from .flax.module import _convert_to_activation_function
 from .router import ScoreFunction, _validate_score_function
 from .sharding import MeshResource, _get_mesh, global_mesh_resource, global_shard_guard
 
@@ -102,15 +101,14 @@ def _fused_glu_activation_kwargs(activation_type, act_params, *, backward=False)
 
 
 def _apply_ffn_activation(activation_type, gate, up, group_sizes, act_params=ActivationParams()):
-    if activation_type == "situglu":
-        active = (jnp.arange(gate.shape[0]) < group_sizes.sum())[:, None]
-        gate_fp32 = jnp.where(active, gate, 0).astype(jnp.float32)
-        up_fp32 = jnp.where(active, up, 0).astype(jnp.float32)
-        caps = act_params.situglu
-        gated = caps.gate_beta * jnp.tanh(gate_fp32 / caps.gate_beta) * jax.nn.sigmoid(gate_fp32)
-        linear = caps.up_beta * jnp.tanh(up_fp32 / caps.up_beta)
-        return jnp.where(active, (gated * linear).astype(gate.dtype), 0)
-    return _convert_to_activation_function(activation_type)(gate) * up
+    gate_activation, up_activation = (
+        ("situ", "situ_linear") if activation_type == "situglu" else (activation_type, "linear")
+    )
+    active = (jnp.arange(gate.shape[0]) < group_sizes.sum())[:, None]
+    gate_fn = _convert_to_activation_function(gate_activation, act_params)
+    up_fn = _convert_to_activation_function(up_activation, act_params)
+    result = gate_fn(jnp.where(active, gate, 0)) * up_fn(jnp.where(active, up, 0))
+    return jnp.where(active, result.astype(gate.dtype), 0)
 
 
 @flax.struct.dataclass
@@ -1265,23 +1263,17 @@ def _ffn_bwd_per_shard(
         else:
             d_recv_w_from_intermediate = jnp.zeros_like(recv_w_flat)
 
-        if activation_type == "situglu":
-            _, dact_pullback = jax.vjp(
-                partial(
-                    _apply_ffn_activation,
-                    activation_type,
-                    group_sizes=group_sizes,
-                    act_params=act_params,
-                ),
-                gate_proj_out,
-                up_proj_out,
-            )
-            d_gate_proj_out, d_up_proj_out = dact_pullback(d_intermediate)
-        else:
-            act_fn = _convert_to_activation_function(activation_type)
-            act_gp, dact_pullback = jax.vjp(act_fn, gate_proj_out)
-            d_up_proj_out = d_intermediate * act_gp
-            (d_gate_proj_out,) = dact_pullback(d_intermediate * up_proj_out)
+        _, dact_pullback = jax.vjp(
+            partial(
+                _apply_ffn_activation,
+                activation_type,
+                group_sizes=group_sizes,
+                act_params=act_params,
+            ),
+            gate_proj_out,
+            up_proj_out,
+        )
+        d_gate_proj_out, d_up_proj_out = dact_pullback(d_intermediate)
         d_combined_for_bias = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
         casted_d_combined = tex.grouped_quantize(
             d_combined_for_bias,
@@ -2194,11 +2186,16 @@ def moe(
     ----------
     activation_type : str
         Gate activation (default ``"silu"``), or ``"situglu"`` for SiTU-GLU.
-        SiTU uses cuDNN MXFP8 fusion when supported and a JAX/VJP fallback otherwise.
+        Eligible MXFP8 SiTU configurations use cuDNN fusion. Otherwise, SiTU
+        uses FP32 JAX operations and ``jax.vjp`` between the grouped GEMMs,
+        keeping the projection dtype at the output. Device expert counts mask
+        inactive receive capacity in forward and backward, including non-finite
+        inactive values. MXFP8 quantization remains separate in the fallback.
     activation_params : Optional[dict]
         Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``
         (default 25.0). Values must be finite and positive. Other activations
-        do not accept parameters.
+        do not accept parameters. For example,
+        ``activation_params={"gate_beta": 4.0, "up_beta": 25.0}``.
     router_info : Union[RouterComputationInfo, RoutingMapInfo]
         :class:`RouterComputationInfo` makes TE compute the gate and top-k
         from the given router parameters. :class:`RoutingMapInfo` supplies

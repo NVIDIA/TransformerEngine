@@ -74,14 +74,6 @@ Router, routing kernels, and grouped dense for MoE layers. See
 
 .. autoapifunction:: transformer_engine.jax.dense.grouped_dense
 
-MoE callers select SiTU with ``activation_type="situglu"`` and optional
-``activation_params={"gate_beta": 4.0, "up_beta": 25.0}``. Eligible MXFP8
-configurations use cuDNN fusion. With ``use_cudnn_fusion=False`` or unsupported
-fusion settings, the activation uses FP32 JAX operations and ``jax.vjp`` between
-the grouped GEMMs. Device expert counts mask inactive receive capacity in forward
-and backward, including non-finite inactive values. Outputs keep the projection
-dtype; MXFP8 quantization remains separate in the fallback.
-
 .. autoapifunction:: transformer_engine.jax.moe.moe
 
 .. autoapifunction:: transformer_engine.jax.ep.ep_bootstrap
