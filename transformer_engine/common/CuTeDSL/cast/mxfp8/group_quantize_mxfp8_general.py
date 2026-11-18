@@ -42,7 +42,6 @@ from .group_quantize_mxfp8_common import (
     COLWISE_OUTPUT_SLOT,
     SAME_BOTH_DIMS,
     VARYING_FIRST_DIM,
-    VARYING_LAST_DIM,
     VARYING_BOTH_DIMS,
     MAX_SUPPORTED_TENSORS,
     BYTES_PER_TENSORMAP,
@@ -52,6 +51,9 @@ from .group_quantize_mxfp8_common import (
     OFFSETS_OFFSET,
     MXFP8GroupQuantizeConfig,
     MXFP8GroupQuantizeKernelBase,
+    find_tensor_from_offsets,
+    member_shape,
+    update_member_tensormaps,
 )
 
 
@@ -124,23 +126,6 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         self.REUSE_INPUT_FOR_DBIAS = self.DBIAS_IN_ROWWISE and dbias_bytes <= input_bytes
         # Some turning knobs where this value turns to be the best in our benchmarks
         self.MIN_BLOCKS_PER_MP = 4 if self.REUSE_INPUT_FOR_DBIAS else 0
-
-    @cute.jit
-    def _find_tensor_from_offsets(
-        self, mOffsets: cute.Tensor, num_tensors: Int32, offset: Int64
-    ) -> Int32:
-        """Index of the tensor whose element range holds `offset` (find_tensor_from_offsets)."""
-        low = Int32(1)
-        hi = Int32(num_tensors)
-        # Enough bisection steps for any group of up to MAX_SUPPORTED_TENSORS members.
-        for _ in cutlass.range_constexpr(MAX_SUPPORTED_TENSORS.bit_length()):
-            if low < hi:
-                mid = low + (hi - low) // 2
-                if Int64(mOffsets[mid]) <= offset:
-                    low = mid + 1
-                else:
-                    hi = mid
-        return low - 1
 
     @cute.jit
     def _scale_tensor(self, mS: cute.Tensor, base: Int64, layout: cute.Layout) -> cute.Tensor:
@@ -305,7 +290,6 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                 mTensormaps,
                 first_logical_dim,
                 last_logical_dim,
-                mX.element_type,
                 tma_atom_x,
                 tma_atom_out_row,
                 tma_atom_out_col,
@@ -355,7 +339,6 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         mTensormaps: cute.Tensor,
         first_logical_dim: Int64,
         last_logical_dim: Int64,
-        dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom_x: cute.CopyAtom,
         tma_atom_orow: Optional[cute.CopyAtom],
         tma_atom_ocol: Optional[cute.CopyAtom],
@@ -371,14 +354,9 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         # For the descriptor update kernel, grid=[num_tensors, 1, 1]
         tensor_id, _, _ = cute.arch.block_idx()
         # Figure out how many rows and columns this tensor has, and where its first element is in the group.
-        if cutlass.const_expr(cfg.SHAPE_REP in (VARYING_FIRST_DIM, VARYING_BOTH_DIMS)):
-            rows = Int64(mFirstDims[tensor_id])
-        else:
-            rows = Int64(first_logical_dim)
-        if cutlass.const_expr(cfg.SHAPE_REP in (VARYING_LAST_DIM, VARYING_BOTH_DIMS)):
-            cols = Int64(mLastDims[tensor_id])
-        else:
-            cols = Int64(last_logical_dim)
+        rows, cols = member_shape(
+            cfg.SHAPE_REP, mFirstDims, mLastDims, tensor_id, first_logical_dim, last_logical_dim
+        )
         base_offset = Int64(mOffsets[tensor_id])
 
         # Same diagnostics as get_tensor_rows_num / get_tensor_cols_num. Like NVTE_DEVICE_ERROR
@@ -402,69 +380,30 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         mTensormaps[COLS_OFFSET + tensor_id] = Int64(cols)
         mTensormaps[OFFSETS_OFFSET + tensor_id] = base_offset
 
-        tmap = TensorMapManager(TensorMapUpdateMode.GMEM, BYTES_PER_TENSORMAP)
-        # Obtain the pointers of these descriptors
-        desc_x = tmap.get_tensormap_ptr(
-            mTensormaps.iterator
-            + (INPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
-        )
-        desc_orow = tmap.get_tensormap_ptr(
-            mTensormaps.iterator
-            + (ROWWISE_OUTPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
-        )
-        desc_ocol = tmap.get_tensormap_ptr(
-            mTensormaps.iterator
-            + (COLWISE_OUTPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
-        )
-        desc_act = tmap.get_tensormap_ptr(
-            mTensormaps.iterator
-            + (ACT_INPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
-        )
-
-        # Zero-sized groups: creating a descriptor with a zero extent is invalid,
-        # so skip (the main kernel skips these tensors as well).
-        if rows > 0 and cols > 0:
-            member_layout = cute.make_layout((rows, cols), stride=(cols, 1))
-
-            def member_view(tensor: cute.Tensor, elt_dtype: Type[cutlass.Numeric]) -> cute.Tensor:
-                return cute.make_tensor(
-                    cute.make_ptr(
-                        elt_dtype,
-                        tensor.iterator.toint() + base_offset * (elt_dtype.width // 8),
-                        cute.AddressSpace.gmem,
-                        assumed_align=16,
-                    ),
-                    member_layout,
-                )
-
-            views = [member_view(mX, dtype)]
-            atoms = [tma_atom_x]
-            descs = [desc_x]
-            tmap.init_tensormap_from_atom(tma_atom_x, desc_x, 0)
-            if cutlass.const_expr(cfg.ROWWISE):
-                views.append(member_view(mO_row, cfg.FP8_DTYPE))
-                atoms.append(tma_atom_orow)
-                tmap.init_tensormap_from_atom(tma_atom_orow, desc_orow, 0)
-                descs.append(desc_orow)
-            if cutlass.const_expr(cfg.COLWISE):
-                views.append(member_view(mO_col, cfg.FP8_DTYPE))
-                atoms.append(tma_atom_ocol)
-                tmap.init_tensormap_from_atom(tma_atom_ocol, desc_ocol, 0)
-                descs.append(desc_ocol)
-            if cutlass.const_expr(cfg.WITH_DACT):
-                views.append(member_view(mActInput, dtype))
-                atoms.append(tma_atom_act)
-                tmap.init_tensormap_from_atom(tma_atom_act, desc_act, 0)
-                descs.append(desc_act)
-            tmap.fence_tensormap_initialization()
-            # Update descriptors in global memory with views and atoms
-            tmap.update_tensormap(
-                tuple(views),
-                tuple(atoms),
-                tuple(descs),
-                0,
-                (),  # smem staging is unused in GMEM update mode
+        def desc_addr(slot: int) -> cute.Pointer:
+            return (
+                mTensormaps.iterator
+                + (slot * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
             )
+
+        tensors = [mX]
+        atoms = [tma_atom_x]
+        desc_addrs = [desc_addr(INPUT_SLOT)]
+        if cutlass.const_expr(cfg.ROWWISE):
+            tensors.append(mO_row)
+            atoms.append(tma_atom_orow)
+            desc_addrs.append(desc_addr(ROWWISE_OUTPUT_SLOT))
+        if cutlass.const_expr(cfg.COLWISE):
+            tensors.append(mO_col)
+            atoms.append(tma_atom_ocol)
+            desc_addrs.append(desc_addr(COLWISE_OUTPUT_SLOT))
+        if cutlass.const_expr(cfg.WITH_DACT):
+            tensors.append(mActInput)
+            atoms.append(tma_atom_act)
+            desc_addrs.append(desc_addr(ACT_INPUT_SLOT))
+        update_member_tensormaps(
+            tuple(tensors), tuple(atoms), tuple(desc_addrs), base_offset, rows, cols
+        )
 
     @cute.jit
     def _make_shared_storage(
@@ -826,7 +765,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                     else:  # VARYING_FIRST_DIM
                         # Otherwise if VARYING_FIRST_DIM, we need to use find these tensor member metadata
                         # from mFirstDims & mOffsets
-                        member_id = self._find_tensor_from_offsets(
+                        member_id = find_tensor_from_offsets(
                             mOffsets, num_tensors, job_start_row * member_cols
                         )
                         member_rows = Int64(mFirstDims[member_id])

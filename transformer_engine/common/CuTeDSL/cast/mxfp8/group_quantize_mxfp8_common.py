@@ -20,8 +20,9 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Boolean, Float32, Int32
+from cutlass import Boolean, Float32, Int32, Int64
 from cutlass.utils import HardwareInfo
+from cutlass.tensor_utils import TensorMapManager, TensorMapUpdateMode
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
@@ -67,6 +68,76 @@ COLS_OFFSET = ROWS_OFFSET + MAX_SUPPORTED_TENSORS
 OFFSETS_OFFSET = COLS_OFFSET + MAX_SUPPORTED_TENSORS
 # Size of the TensorMap struct in int64
 TENSOR_MAP_STORAGE_INT64_COUNT = OFFSETS_OFFSET + MAX_SUPPORTED_TENSORS
+
+
+@cute.jit
+def find_tensor_from_offsets(mOffsets: cute.Tensor, num_tensors: Int32, offset: Int64) -> Int32:
+    """Index of the tensor whose element range holds `offset` (find_tensor_from_offsets)."""
+    low = Int32(1)
+    hi = Int32(num_tensors)
+    # Enough bisection steps for any group of up to MAX_SUPPORTED_TENSORS members.
+    for _ in cutlass.range_constexpr(MAX_SUPPORTED_TENSORS.bit_length()):
+        if low < hi:
+            mid = low + (hi - low) // 2
+            if Int64(mOffsets[mid]) <= offset:
+                low = mid + 1
+            else:
+                hi = mid
+    return low - 1
+
+
+@cute.jit
+def member_shape(
+    shape_rep: cutlass.Constexpr[str],
+    mFirstDims: Optional[cute.Tensor],
+    mLastDims: Optional[cute.Tensor],
+    tensor_id: Int32,
+    first_logical_dim: Int64,
+    last_logical_dim: Int64,
+) -> tuple[Int64, Int64]:
+    """(rows, cols) of member tensor_id; a dim that does not vary is the logical one."""
+    rows = Int64(first_logical_dim)
+    if cutlass.const_expr(shape_rep in (VARYING_FIRST_DIM, VARYING_BOTH_DIMS)):
+        rows = Int64(mFirstDims[tensor_id])
+    cols = Int64(last_logical_dim)
+    if cutlass.const_expr(shape_rep in (VARYING_LAST_DIM, VARYING_BOTH_DIMS)):
+        cols = Int64(mLastDims[tensor_id])
+    return rows, cols
+
+
+@cute.jit
+def update_member_tensormaps(
+    tensors: tuple,
+    atoms: tuple,
+    desc_addrs: tuple,
+    base_offset: Int64,
+    rows: Int64,
+    cols: Int64,
+) -> None:
+    """Point the GMEM TMA descriptor at each of desc_addrs at one member: the row-major
+    (rows, cols) block from element base_offset of the matching group tensor, with the box of
+    the matching TMA atom. Run by a full warp. Skips empty members, as a zero extent is invalid.
+    """
+    tmap = TensorMapManager(TensorMapUpdateMode.GMEM, BYTES_PER_TENSORMAP)
+    descs = tuple(tmap.get_tensormap_ptr(addr) for addr in desc_addrs)
+
+    if rows > 0 and cols > 0:
+        member_layout = cute.make_layout((rows, cols), stride=(cols, 1))
+        views = []
+        for tensor in tensors:
+            elt_dtype = tensor.element_type
+            member_ptr = cute.make_ptr(
+                elt_dtype,
+                tensor.iterator.toint() + base_offset * (elt_dtype.width // 8),
+                cute.AddressSpace.gmem,
+                assumed_align=16,
+            )
+            views.append(cute.make_tensor(member_ptr, member_layout))
+        for atom, desc in zip(atoms, descs):
+            tmap.init_tensormap_from_atom(atom, desc, 0)
+        tmap.fence_tensormap_initialization()
+        # SMEM staging is unused in GMEM update mode
+        tmap.update_tensormap(tuple(views), atoms, descs, 0, ())
 
 
 class MXFP8GroupQuantizeConfig:

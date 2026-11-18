@@ -25,6 +25,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common import _get_shared_object_file
 from transformer_engine.common.CuTeDSL.utils import device_compute_capability
 from transformer_engine.pytorch import MXFP8Quantizer
+from transformer_engine.pytorch.constants import TE_DType
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
@@ -857,3 +858,35 @@ def test_dequantize(swizzled, fp8_dtype, out_dtype, block_size, shape):
         "to CUDA and this case compared CUDA against itself"
     )
     assert torch.equal(out_cutedsl, out_cuda)
+
+
+# Grouped dequantize reads exactly one data copy, so only 1D block sizes apply.
+@pytest.mark.parametrize("case", GROUP_CASES, ids=get_group_case_id)
+@pytest.mark.parametrize("block_size", [ROW, COL], ids=get_block_id)
+@pytest.mark.parametrize("out_dtype", OUT_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+def test_group_dequantize(fp8_dtype, out_dtype, block_size, case):
+    _, shape_rep, members = case
+    rowwise = block_size[1] != 1
+    set_cutedsl_backend(False)
+    qx, _ = run_group_quantize(
+        members, torch.bfloat16, fp8_dtype, rowwise, not rowwise, False, False, False
+    )
+    out_cuda = tex.group_dequantize(qx, TE_DType[out_dtype]).rowwise_data
+
+    set_cutedsl_backend(True)
+    try:
+        out_cutedsl = tex.group_dequantize(qx, TE_DType[out_dtype]).rowwise_data
+    finally:
+        set_cutedsl_backend(False)
+
+    major, minor = device_compute_capability()
+    key = (
+        f"cutedsl_group_mxfp8_dequant_sm{major * 10 + minor}_{FP8_TO_KEY[fp8_dtype]}_"
+        f"{DTYPE_TO_STR[out_dtype]}_{int(rowwise)}_{shape_rep}"
+    )
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
+        f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
+        "to CUDA and this case compared CUDA against itself"
+    )
+    assert torch.equal(out_cutedsl.view(torch.uint8), out_cuda.view(torch.uint8))
