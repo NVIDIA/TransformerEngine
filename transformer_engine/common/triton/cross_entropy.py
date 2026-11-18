@@ -97,7 +97,14 @@ def cross_entropy_forward_kernel(
             )
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
-        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
+        # A block that is entirely -inf leaves the running maximum at -inf, and
+        # exp(-inf - -inf) is NaN, which would poison the denominator for the rest of
+        # the row. There is no probability mass yet, so keep d at zero and add
+        # nothing until a finite logit appears.
+        if m_new == float("-inf"):
+            d = 0.0
+        else:
+            d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
         m = m_new
         if label_smoothing > 0:
             x_sum += tl.sum(tl.where(mask, x, 0.0))
@@ -183,7 +190,14 @@ def cross_entropy_tp_pre_kernel(
             )
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
-        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
+        # A block that is entirely -inf leaves the running maximum at -inf, and
+        # exp(-inf - -inf) is NaN, which would poison the denominator for the rest of
+        # the row. There is no probability mass yet, so keep d at zero and add
+        # nothing until a finite logit appears.
+        if m_new == float("-inf"):
+            d = 0.0
+        else:
+            d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
         m = m_new
         if COMPUTE_X_SUM:
             x_sum += tl.sum(tl.where(mask, x, 0.0))
@@ -246,7 +260,12 @@ def cross_entropy_tp_post_kernel(
                     argmax = rank_idx.to(tl.int64) * n_cols + local_argmax.to(tl.int64)
                     argmax_max = rank_argmax_max
         global_m = tl.maximum(m, m_new)
-        d = d * tl.exp(m - global_m) + d_new * tl.exp(m_new - global_m)
+        if global_m == float("-inf"):
+            # Every rank is entirely -inf for this row, so there is still no probability
+            # mass and exp(-inf - -inf) would be NaN. Same guard as the block loop above.
+            d = 0.0
+        else:
+            d = d * tl.exp(m - global_m) + d_new * tl.exp(m_new - global_m)
         m = global_m
         x_y = tl.maximum(x_y, tl.load(rank_data_ptr + 2))
         if label_smoothing > 0:

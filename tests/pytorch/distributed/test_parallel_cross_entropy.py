@@ -153,6 +153,72 @@ def _run_tensor_parallel_argmax(rank, world_size, init_file, label_smoothing):
         dist.destroy_process_group()
 
 
+def _run_tensor_parallel_leading_neg_inf(rank, world_size, init_file):
+    """One rank's whole vocabulary shard is -inf; the loss must still be finite.
+
+    This is the tensor-parallel shape of the leading--inf problem: the shard that holds the first
+    logits contributes no probability mass at all, so its local maximum stays at -inf and its local
+    denominator stays at zero. The cross-rank merge must still produce the same loss as a
+    single-rank computation over the full vocabulary.
+    """
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+        device_id=device,
+    )
+    try:
+        vocab = 32
+        local_vocab = vocab // world_size
+        reference_logits = torch.full((2, vocab), float("-inf"), device=device)
+        reference_logits[:, local_vocab:] = 0.0  # only the second shard carries any mass
+        target = torch.tensor([vocab - 1, vocab - 2], device=device)
+
+        vocab_start = rank * local_vocab
+        local_logits = reference_logits[:, vocab_start : vocab_start + local_vocab].clone()
+        local_logits.requires_grad_(True)
+        ref_logits = reference_logits.detach().clone().requires_grad_(True)
+
+        loss = parallel_cross_entropy(
+            local_logits,
+            target,
+            reduce_loss=False,
+            dist_process_group=dist.group.WORLD,
+        )
+        ref_loss = torch.nn.functional.cross_entropy(
+            ref_logits, target, reduction="none"
+        )
+        assert torch.isfinite(loss).all(), f"rank {rank} loss is {loss}"
+        torch.testing.assert_close(loss, ref_loss, **dtype_tols(torch.float32))
+
+        external_grad = torch.full_like(loss, 0.5)
+        loss.backward(external_grad)
+        ref_loss.backward(external_grad)
+        expected_grad = ref_logits.grad[:, vocab_start : vocab_start + local_vocab].to(torch.float32)
+        assert torch.isfinite(local_logits.grad).all(), f"rank {rank} gradient is not finite"
+        torch.testing.assert_close(local_logits.grad, expected_grad, **dtype_tols(torch.float32))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_parallel_cross_entropy_tensor_parallel_leading_neg_inf():
+    """A rank whose entire vocabulary shard is -inf must not poison the merged loss."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("tensor-parallel cross entropy test requires two CUDA devices")
+    world_size = 2
+    with tempfile.TemporaryDirectory() as temp_dir:
+        init_file = os.path.join(temp_dir, "distributed_init")
+        mp.spawn(
+            _run_tensor_parallel_leading_neg_inf,
+            args=(world_size, init_file),
+            nprocs=world_size,
+            join=True,
+        )
+
+
 @pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
 def test_parallel_cross_entropy_tensor_parallel(label_smoothing):
     """Validate tensor-parallel loss and gradients on two ranks."""
