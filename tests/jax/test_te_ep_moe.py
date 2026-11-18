@@ -584,6 +584,13 @@ def _quantization_recipe(quantization):
 # -----------------------------------------------------------------------------
 
 _CONFIGS = [
+    *[
+        pytest.param(
+            dict(activation_type="situglu", apply_topk_weights_early=early),
+            id=f"situ-{'early' if early else 'late'}-weighting",
+        )
+        for early in (False, True)
+    ],
     pytest.param(
         dict(score_function="softmax"),
         id="softmax",
@@ -739,6 +746,7 @@ def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, make
 def _reference_kwargs_from_config(config, params_np):
     """Pick out the reference-relevant pieces of a parametrize config."""
     return dict(
+        activation_type=config.get("activation_type", "silu"),
         score_function=config.get("score_function", "softmax"),
         expert_bias=(
             jnp.asarray(params_np["expert_bias"])

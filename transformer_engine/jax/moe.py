@@ -101,6 +101,18 @@ def _fused_glu_activation_kwargs(activation_type, act_params, *, backward=False)
     return {"act_func": ("d" if backward else "") + act_func, "act_params": act_params}
 
 
+def _apply_ffn_activation(activation_type, gate, up, group_sizes, act_params=ActivationParams()):
+    if activation_type == "situglu":
+        active = (jnp.arange(gate.shape[0]) < group_sizes.sum())[:, None]
+        gate_fp32 = jnp.where(active, gate, 0).astype(jnp.float32)
+        up_fp32 = jnp.where(active, up, 0).astype(jnp.float32)
+        caps = act_params.situglu
+        gated = caps.gate_beta * jnp.tanh(gate_fp32 / caps.gate_beta) * jax.nn.sigmoid(gate_fp32)
+        linear = caps.up_beta * jnp.tanh(up_fp32 / caps.up_beta)
+        return jnp.where(active, (gated * linear).astype(gate.dtype), 0)
+    return _convert_to_activation_function(activation_type)(gate) * up
+
+
 @flax.struct.dataclass
 class RouterComputationInfo:
     """Router parameters and settings for :func:`moe` to compute routing itself.
@@ -254,8 +266,6 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str], *, activation_type="s
             if available:
                 return True
             reasons.append(f"shared fused API is incompatible: {error}")
-    if activation_type == "situglu":
-        raise ValueError("SiTU requires cuDNN MXFP8 fusion: " + "; ".join(reasons))
     warnings.warn(
         "use_cudnn_fusion=True: falling back to the unfused TE grouped-GEMM path: "
         + "; ".join(reasons)
@@ -1073,8 +1083,9 @@ def _ffn_fwd_per_shard(
     # that's all bf16; for FP8/FP4 the downstream grouped_quantize is what
     # transitions to the target precision.
     if not use_cudnn_jax_fusion:
-        act_fn = _convert_to_activation_function(activation_type)
-        intermediate = act_fn(gate_proj_out) * up_proj_out
+        intermediate = _apply_ffn_activation(
+            activation_type, gate_proj_out, up_proj_out, group_sizes, act_params
+        )
     if apply_topk_weights_early and not use_cudnn_jax_fusion:
         # Fold the per-token combine weights into the FFN intermediate;
         # the downstream wo GEMM is linear so this is equivalent to the
@@ -1239,12 +1250,13 @@ def _ffn_bwd_per_shard(
             casted_wo_rhs_trans,
             contracting_dims=((1,), (2,)),
         )
-        act_fn = _convert_to_activation_function(activation_type)
         if apply_topk_weights_early:
             # intermediate' = intermediate * w.
             # Masking is not required as grouped GEMMs consume only group-size rows.
             w_b = recv_w_flat[:, None].astype(d_intermediate.dtype)
-            intermediate_unweighted = act_fn(gate_proj_out) * up_proj_out
+            intermediate_unweighted = _apply_ffn_activation(
+                activation_type, gate_proj_out, up_proj_out, group_sizes, act_params
+            )
             d_recv_w_from_intermediate = jnp.sum(
                 d_intermediate * intermediate_unweighted,
                 axis=-1,
@@ -1253,10 +1265,23 @@ def _ffn_bwd_per_shard(
         else:
             d_recv_w_from_intermediate = jnp.zeros_like(recv_w_flat)
 
-        # Activation bwd stays in the GEMM dtype, matching the forward path.
-        act_gp, dact_pullback = jax.vjp(act_fn, gate_proj_out)
-        d_up_proj_out = d_intermediate * act_gp
-        (d_gate_proj_out,) = dact_pullback(d_intermediate * up_proj_out)
+        if activation_type == "situglu":
+            _, dact_pullback = jax.vjp(
+                partial(
+                    _apply_ffn_activation,
+                    activation_type,
+                    group_sizes=group_sizes,
+                    act_params=act_params,
+                ),
+                gate_proj_out,
+                up_proj_out,
+            )
+            d_gate_proj_out, d_up_proj_out = dact_pullback(d_intermediate)
+        else:
+            act_fn = _convert_to_activation_function(activation_type)
+            act_gp, dact_pullback = jax.vjp(act_fn, gate_proj_out)
+            d_up_proj_out = d_intermediate * act_gp
+            (d_gate_proj_out,) = dact_pullback(d_intermediate * up_proj_out)
         d_combined_for_bias = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
         casted_d_combined = tex.grouped_quantize(
             d_combined_for_bias,
@@ -2168,8 +2193,8 @@ def moe(
     Parameters
     ----------
     activation_type : str
-        Gate activation (default ``"silu"``), or ``"situglu"`` for fused MXFP8
-        SiTU-GLU on SM100/SM103. Unsupported SiTU configurations raise ``ValueError``.
+        Gate activation (default ``"silu"``), or ``"situglu"`` for SiTU-GLU.
+        SiTU uses cuDNN MXFP8 fusion when supported and a JAX/VJP fallback otherwise.
     activation_params : Optional[dict]
         Static SiTU soft caps: ``gate_beta`` (default 4.0) and ``up_beta``
         (default 25.0). Values must be finite and positive. Other activations
@@ -2228,14 +2253,13 @@ def moe(
         Defaults to ``True``: try cuDNN's shared JAX grouped MXFP8 GLU/dGLU APIs
         on SM100+ GPUs; cuDNN selects the architecture-specific kernels. ``False`` uses unfused TE grouped GEMM.
         Requires cuDNN Frontend >= 1.32.0 with compatible JAX APIs.
-        SiTU additionally requires SM100/SM103 and JAX GLU/dGLU APIs exposing
+        SiTU fusion additionally requires SM100/SM103 and JAX GLU/dGLU APIs exposing
         ``situ_beta1`` and ``situ_beta2`` with Frontend >= 1.33.0.
-        Ineligible SiTU calls raise
-        ``ValueError``; there is no unfused SiTU path.
         Frontends whose JAX GLU/dGLU entry points only support BF16 discrete
         weights fall back to unfused TE grouped GEMM.
-        Except for SiTU, ineligible calls warn and fall back to TE's regular
-        grouped-GEMM implementation. API signatures and GPU capability determine support.
+        Ineligible calls warn and fall back to TE's regular grouped-GEMM implementation,
+        with JAX activation operations and a VJP for SiTU. API signatures and GPU
+        capability determine fusion support.
     cudnn_native_weight_layout : Optional[bool]
         ``False`` selects standard contiguous gate/up [E,K,2N] storage;
         ``True`` selects native [E,2N,K] storage with alternating 32-column
@@ -2262,8 +2286,6 @@ def moe(
     if not isinstance(use_cudnn_fusion, bool):
         raise TypeError("use_cudnn_fusion must be a bool")
     act_params = _resolve_moe_activation_params(activation_type, activation_params)
-    if activation_type == "situglu" and not use_cudnn_fusion:
-        raise ValueError("SiTU requires use_cudnn_fusion=True")
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
         mesh_resource, quant_before_fsdp_ag
     )

@@ -6,6 +6,7 @@
 
 import importlib
 import inspect
+from functools import partial
 from types import SimpleNamespace
 
 import jax
@@ -18,6 +19,7 @@ from transformer_engine.jax.cpp_extensions.activation import ActivationParams
 from transformer_engine.jax.flax import _MoEBlock
 from transformer_engine.jax.moe import (
     RouterComputationInfo,
+    _apply_ffn_activation,
     _moe_mesh_axes,
     _resolve_moe_mesh_resource,
 )
@@ -81,6 +83,136 @@ def test_situ_activation_params_reach_grouped_gemm_adapters(monkeypatch, soft_ca
     for call in calls:
         assert call["situ_beta1"] == expected["gate_beta"]
         assert call["situ_beta2"] == expected["up_beta"]
+
+
+@pytest.mark.parametrize("betas", [(4.0, 25.0), (2.0, 7.0)])
+def test_situ_value_and_both_branch_derivatives(betas):
+    (gate_beta, up_beta) = betas
+    gate = jnp.asarray([-10000.0, -12.0, -0.5, 0.0, 0.5, 12.0, 10000.0])
+    up = jnp.asarray([10000.0, 40.0, -3.0, 2.0, 3.0, -40.0, -10000.0])
+    params = ActivationParams.create("situglu", gate_beta=gate_beta, up_beta=up_beta)
+    counts = jnp.asarray([1], jnp.int32)
+
+    def activate(g, u):
+        return _apply_ffn_activation("situglu", g[None, :], u[None, :], counts, params)[0]
+
+    (output, pullback) = jax.vjp(activate, gate, up)
+    (dg, du) = pullback(jnp.ones_like(output))
+    (g, u) = (np.asarray(gate, np.float64), np.asarray(up, np.float64))
+    sigmoid = 0.5 + 0.5 * np.tanh(g / 2)
+    (tg, tu) = (np.tanh(g / gate_beta), np.tanh(u / up_beta))
+    (capped_gate, capped_up) = (gate_beta * tg * sigmoid, up_beta * tu)
+    derivative_gate = (1 - tg**2) * sigmoid + gate_beta * tg * sigmoid * (1 - sigmoid)
+    for actual, expected in (
+        (output, capped_gate * capped_up),
+        (dg, derivative_gate * capped_up),
+        (du, capped_gate * (1 - tu**2)),
+    ):
+        np.testing.assert_allclose(actual, expected, atol=2e-05, rtol=2e-05)
+
+
+def test_situ_bf16_uses_fp32_before_final_cast():
+    gate = jnp.asarray([0.25, 1.5, -3.0, 12.0, 64.0], dtype=jnp.bfloat16)
+    up = jnp.asarray([0.75, -2.0, 32.0, 64.0, -128.0], dtype=jnp.bfloat16)
+    actual = _apply_ffn_activation(
+        "situglu", gate[None, :], up[None, :], jnp.asarray([1], jnp.int32)
+    )[0]
+    (g, u) = (np.asarray(gate, np.float64), np.asarray(up, np.float64))
+    expected = jnp.asarray(100 * np.tanh(g / 4) / (1 + np.exp(-g)) * np.tanh(u / 25), jnp.bfloat16)
+    assert actual.dtype == jnp.bfloat16
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float16, jnp.bfloat16])
+@pytest.mark.parametrize("betas", [(4.0, 25.0), (2.0, 8.0)])
+@pytest.mark.parametrize("counts", [[3, 0, 5], [0, 0, 0], [0] * 257 + [13], [0]])
+def test_situ_masks_inactive_values_and_gradients(dtype, betas, counts):
+    capacity = 0 if counts == [0] else 13
+    active = sum(counts)
+    rng = np.random.default_rng(72)
+    (gate, up, dy) = [rng.uniform(-5, 5, (capacity, 6)).astype(np.float32) for _ in range(3)]
+    for value in (gate, up, dy):
+        value[active:] = np.nan
+    (gate, up, dy) = [jnp.asarray(value, dtype) for value in (gate, up, dy)]
+    sizes = jnp.asarray(counts, jnp.int32)
+    activate = lambda g, u: _apply_ffn_activation(
+        "situglu",
+        g,
+        u,
+        sizes,
+        ActivationParams.create("situglu", gate_beta=betas[0], up_beta=betas[1]),
+    )
+    output = jax.jit(activate)(gate, up)
+    (_, pullback) = jax.vjp(activate, gate, up)
+    (dg, du) = jax.jit(pullback)(dy)
+    (g, u, d) = [np.asarray(value, np.float64)[:active] for value in (gate, up, dy)]
+    (gate_beta, up_beta) = betas
+    (tg, tu, sigmoid) = (np.tanh(g / gate_beta), np.tanh(u / up_beta), 1 / (1 + np.exp(-g)))
+    ref = (
+        gate_beta * tg * sigmoid * up_beta * tu,
+        d * ((1 - tg**2) * sigmoid + gate_beta * tg * sigmoid * (1 - sigmoid)) * up_beta * tu,
+        d * gate_beta * tg * sigmoid * (1 - tu**2),
+    )
+    tolerance = {jnp.float32: 2e-05, jnp.float16: 0.003, jnp.bfloat16: 0.02}[dtype]
+    for actual, expected in zip((output, dg, du), ref):
+        actual = np.asarray(actual, np.float32)
+        assert np.isfinite(actual).all()
+        np.testing.assert_array_equal(actual[active:], 0)
+        np.testing.assert_allclose(actual[:active], expected, atol=tolerance, rtol=tolerance)
+
+
+def test_situ_dynamic_counts_remat_and_vmap():
+    gate = jnp.arange(13 * 6, dtype=jnp.float32).reshape(13, 6) / 20 - 2
+    up = -gate
+    activation = "situglu"
+    activate = partial(_apply_ffn_activation, activation)
+    compiled = jax.jit(activate)
+    for counts in (jnp.array([3, 0, 5]), jnp.array([1, 2, 2])):
+        expected = activate(gate, up, counts)
+        np.testing.assert_allclose(compiled(gate, up, counts), expected, atol=2e-05, rtol=2e-05)
+        loss = lambda g, u: activate(g, u, counts).sum()
+        gradients = jax.jit(jax.grad(loss, (0, 1)))(gate, up)
+        remat = jax.jit(jax.grad(jax.checkpoint(loss), (0, 1)))(gate, up)
+        for actual, reference in zip(remat, gradients):
+            np.testing.assert_allclose(actual, reference, atol=2e-05, rtol=2e-05)
+    counts = jnp.array([[3, 0, 5], [1, 2, 2]], dtype=jnp.int32)
+    (gates, ups) = (jnp.stack([gate, gate]), jnp.stack([up, up]))
+    mapped = jax.jit(jax.vmap(activate))(gates, ups, counts)
+    for actual, sizes in zip(mapped, counts):
+        np.testing.assert_allclose(actual, activate(gate, up, sizes), atol=2e-05, rtol=2e-05)
+    hlo = compiled.lower(gate, up, counts[0]).compile().as_text()
+    assert "te_grouped_situglu_ffi" not in hlo
+
+
+@pytest.mark.parametrize(
+    "capability,available,expected",
+    [(89, True, False), (100, False, False), (103, True, True), (107, True, False)],
+)
+def test_situ_fusion_or_jax_fallback(monkeypatch, capability, available, expected):
+    import transformer_engine_jax
+
+    module = importlib.import_module("transformer_engine.jax.moe")
+    monkeypatch.setattr(
+        transformer_engine_jax, "get_device_compute_capability", lambda _: capability
+    )
+    monkeypatch.setattr(
+        module.tex,
+        "grouped_gemm_glu_dependencies_available",
+        lambda **_: (available, "unavailable frontend"),
+    )
+    if expected:
+        assert module._select_cudnn_jax_fusion([], activation_type="situglu")
+    else:
+        with pytest.warns(UserWarning, match="falling back"):
+            assert not module._select_cudnn_jax_fusion([], activation_type="situglu")
+
+
+def test_situ_can_disable_fusion():
+    module = importlib.import_module("transformer_engine.jax.moe")
+    with pytest.raises(ValueError, match="active global_shard_guard"):
+        module.moe(
+            None, None, None, None, num_experts=2, activation_type="situglu", use_cudnn_fusion=False
+        )
 
 
 @pytest.fixture(autouse=True)
