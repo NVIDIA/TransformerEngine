@@ -7,6 +7,7 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/swizzle.h>
 
+#include <algorithm>
 #include <cassert>
 #include <mutex>
 #include <numeric>
@@ -1610,6 +1611,9 @@ void int4_vectorized_multi_tensor_swizzle(const std::vector<Tensor*>& input,
                   original_k,
                   input_has_unpadded_outer_dim};
   }
+  std::partition(tensors.begin(), tensors.end(), [](const SwizzleTensorDescriptor& tensor) {
+    return tensor.input_has_unpadded_outer_dim;
+  });
   for (size_t first = 0; first < num_tensors;) {
     size_t end = first + 1;
     while (end < num_tensors && end - first < kMaxTensorsPerLaunch &&

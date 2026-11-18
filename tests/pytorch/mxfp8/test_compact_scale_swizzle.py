@@ -72,10 +72,13 @@ def test_compact_scale_swizzle(shape, rowwise):
 
 @pytest.mark.skipif(not te.is_mxfp8_available(), reason="MXFP8 requires Blackwell")
 @pytest.mark.parametrize("rowwise", [False, True])
-def test_multi_tensor_compact_scale_swizzle(rowwise):
+@pytest.mark.parametrize("num_tensors", [3, 64, 130])
+def test_multi_tensor_compact_scale_swizzle(rowwise, num_tensors):
     """Multi-tensor swizzle handles compact and already outer-aligned inputs in one batch."""
+    shapes = ((160, 96), (256, 128), (288, 224))
     tensors_and_references = [
-        _make_tensor_and_reference(shape, rowwise) for shape in ((160, 96), (256, 128), (288, 224))
+        _make_tensor_and_reference(shapes[index % len(shapes)], rowwise)
+        for index in range(num_tensors)
     ]
     tensors = [item[0] for item in tensors_and_references]
     tex.multi_tensor_swizzle_scales_for_gemm_(tensors, rowwise, not rowwise)
