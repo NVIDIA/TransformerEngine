@@ -141,6 +141,7 @@ inline void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cu
   using namespace quantize_kernel;
   CheckInputTensor(input, "cast_input");
   CheckOutputTensor(*output, "cast_output", false);
+  NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
 
   const bool use_rowwise = output->has_data();
   const bool use_colwise = output->has_columnwise_data();

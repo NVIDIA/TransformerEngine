@@ -242,4 +242,14 @@ INSTANTIATE_TEST_SUITE_P(
              (usage.second ? "C" : "") + "X" + (std::get<3>(info.param) ? "Swizzled" : "Compact");
     });
 
+TEST(CastMXFP4Test, RejectsMismatchedOutputShape) {
+  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+    GTEST_SKIP();
+  }
+  Tensor input("input", std::vector<size_t>{256, 128}, DType::kBFloat16);
+  Tensor output("output", std::vector<size_t>{128, 128}, DType::kFloat4E2M1, true, true,
+                NVTE_MXFP4_1D_SCALING);
+  EXPECT_THROW(nvte_quantize(input.data(), output.data(), 0), std::runtime_error);
+}
+
 #endif  // FP4_TYPE_SUPPORTED
