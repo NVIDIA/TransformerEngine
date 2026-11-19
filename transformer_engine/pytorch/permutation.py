@@ -530,9 +530,11 @@ def _moe_permute_mask_map_backward_fake(  # pylint: disable=unused-argument
 def _moe_permute_mask_map_setup_context(ctx, inputs, output):
     """Save context for backward pass."""
     inp, routing_map, _num_out_tokens, probs, pad_offsets = inputs
-    _output_tensor, row_id_map, _permuted_probs = output
+    _output_tensor, row_id_map, permuted_probs = output
     ctx.empty_input = inp.size(0) == 0
-    ctx.save_for_backward(row_id_map, pad_offsets)
+    # Forward writes a zero row wherever the permuted prob is zero, so those
+    # rows must not contribute to the input gradient.
+    ctx.save_for_backward(row_id_map, pad_offsets, permuted_probs if probs is not None else None)
     ctx.num_experts = routing_map.size(1)
     ctx.num_tokens = inp.size(0)
     ctx.hidden_size = inp.size(1) if not ctx.empty_input else 0
@@ -558,7 +560,9 @@ def _moe_permute_mask_map_backward_wrapper(
         grad_output, QuantizedTensor
     ), "The backward of moe_permute does not support FP8."
 
-    row_id_map, pad_offsets = ctx.saved_tensors
+    row_id_map, pad_offsets, permuted_probs = ctx.saved_tensors
+    if permuted_probs is not None:
+        grad_output = grad_output.masked_fill((permuted_probs == 0).unsqueeze(-1), 0)
 
     # Pass permuted_probs_grad only if it has content
     probs_grad_input = grad_permuted_probs if grad_permuted_probs.numel() > 0 else None
