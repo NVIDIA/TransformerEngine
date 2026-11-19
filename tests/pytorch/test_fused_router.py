@@ -2341,7 +2341,9 @@ def test_fused_topk_with_aux_loss_scores_compile(dtype, probs_dtype, index_dtype
     kernels (128 experts)."""
     torch._dynamo.reset()
     counters.clear()
-    topk = 8
+    # Read from the closure, like router settings read from a config, so that dynamic=True makes
+    # them symbolic unless the function specializes them.
+    topk, num_groups, group_topk = 8, 8, 4
     generator = torch.Generator(device="cuda").manual_seed(5)
     expert_bias = 0.05 * torch.randn(num_experts, device="cuda", generator=generator)
 
@@ -2349,8 +2351,8 @@ def test_fused_topk_with_aux_loss_scores_compile(dtype, probs_dtype, index_dtype
         probs, indices, scores, counts = te_router.fused_topk_with_aux_loss_scores(
             logits,
             topk,
-            8,
-            4,
+            num_groups,
+            group_topk,
             2.5,
             "sigmoid",
             expert_bias,

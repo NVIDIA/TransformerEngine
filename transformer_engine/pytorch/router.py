@@ -828,9 +828,13 @@ def fused_topk_with_aux_loss_scores(
         raise ValueError(
             f"index_dtype must be torch.int16, torch.int32 or torch.int64, got {index_dtype}"
         )
-    # The expert count is fixed for a router; guard_scalar makes it a constant (with a guard)
-    # under torch.compile(dynamic=True) so that the support query can be evaluated when tracing.
+    # The router configuration is fixed, so guard_scalar specializes the integers that
+    # torch.compile(dynamic=True) would make symbolic (the expert count, and integer arguments
+    # read from closures or attributes): the support query needs constants when tracing.
     num_experts = guard_scalar(logits.shape[-1])
+    topk = guard_scalar(topk)
+    num_groups = None if num_groups is None else guard_scalar(num_groups)
+    group_topk = None if group_topk is None else guard_scalar(group_topk)
     if tokens_per_expert is not None and (
         tokens_per_expert.dtype != torch.int64 or tokens_per_expert.numel() != num_experts
     ):
