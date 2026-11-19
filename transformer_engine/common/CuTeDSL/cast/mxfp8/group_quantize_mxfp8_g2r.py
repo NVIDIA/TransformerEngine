@@ -100,6 +100,10 @@ class MXFP8GroupQuantizeG2RKernel(MXFP8GroupQuantizeKernelBase):
             # The common cols must tile exactly; VARYING_LAST_DIM / VARYING_BOTH_DIMS members
             # are 128-aligned by the grouped kernels' contract and use 128-wide tiles.
             eligible = eligible and mX.shape[1] % self.TILE_COLS == 0
+        if cutlass.const_expr(self.SAME_BOTH_DIMS):
+            # The dispatcher only guarantees 32-row members for SAME_BOTH_DIMS with compact
+            # scales; the general kernel handles those by tiling the stacked rows.
+            eligible = eligible and (Int64(mX.shape[0]) // Int64(num_tensors)) % 128 == 0
         return eligible
 
     @cute.jit

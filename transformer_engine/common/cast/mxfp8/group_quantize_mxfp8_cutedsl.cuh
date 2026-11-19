@@ -350,12 +350,18 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
     }
 
     if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
-      // The kernel tiles the stacked rows without tensor boundaries, which matches the CUDA
-      // kernel's per-tensor tiling only when every member's rows are a multiple of its
-      // 128-row chunk. mxfp8::group_quantize raises for a non-integral row count.
+      // The kernel tiles the stacked rows without tensor boundaries. With compact scales this
+      // matches the CUDA kernel's per-tensor tiling as long as no 32-row scale block straddles
+      // two members. GEMM-swizzled scales are padded per member and the dbias partials are
+      // reduced per 128-row job, so those need members aligned to the 128-row chunk.
+      // mxfp8::group_quantize raises for a non-integral row count.
       const size_t first_logical_dim = input_tensor->logical_shape.data[0];
-      if (first_logical_dim % num_tensors != 0 || (first_logical_dim / num_tensors) % 128 != 0) {
-        report_cutedsl_not_chosen("the rows of each group member are not a multiple of 128.");
+      const size_t row_alignment =
+          (IS_DBIAS || output_tensor->with_gemm_swizzled_scales) ? 128 : 32;
+      if (first_logical_dim % num_tensors != 0 ||
+          (first_logical_dim / num_tensors) % row_alignment != 0) {
+        report_cutedsl_not_chosen("the rows of each group member are not a multiple of ",
+                                  row_alignment, ".");
         return false;
       }
     } else if (!output_tensor->tensor_offsets.has_data()) {
