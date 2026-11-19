@@ -325,8 +325,7 @@ def test_gdn_dense_layout(qkv_format, dtype, compile_model):
     if compile_model:
         torch._dynamo.reset()
         attention = torch.compile(attention, fullgraph=True)
-    # Exercise explicit full-document metadata in eager and compiled dense calls;
-    # the other dtype retains the shape-inferred path.
+    # Use BF16 for explicit cu_seqlens and FP16 for inferred offsets to cover both paths.
     cu_seqlens = (
         torch.arange(batch + 1, device=q.device, dtype=torch.int32) * sequence
         if dtype == torch.bfloat16
