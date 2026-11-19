@@ -106,6 +106,17 @@ class _SlotReplayGuard:
             del self._owners[key]
 
 
+# Attributes through which each graphed callable exposes the slot memory it shares with its
+# peers. The pool comes last so that reset drops it after the arenas: the pool's destructor
+# returns only blocks that are already free to the device.
+_SLOT_MEMORY_ATTRIBUTES = (
+    "_te_cuda_graph_saved_arenas",
+    "_te_cuda_graph_offload_arenas",
+    "_te_cuda_graph_user_grad_arenas",
+    "_te_cuda_graph_allocator_pool",
+)
+
+
 class _AllocatorSettingsGuard:
     """Restore temporary allocator settings even when graph capture fails."""
 
@@ -1736,6 +1747,8 @@ def _make_graphed_callables(
             ),
         ):
             match_staging_group(group_idx, set())
+        # The recursive matcher refers to itself; delete it so its state is freed without gc.
+        del match_staging_group
 
         for group_idx, group in enumerate(staging_groups):
             input_target = staging_targets.get(group_idx)
@@ -3085,7 +3098,7 @@ def _make_graphed_callables(
         )
         return functionalized, helpers
 
-    def make_graphed_attribute_functions(graph_idx, helpers):
+    def make_graphed_attribute_functions(graph_idx, helpers, owner):
         # Snapshot per-callable state so returned closures do not retain the outer lists.
         fwd_graph = fwd_graphs[graph_idx]
         bwd_graph = bwd_graphs[graph_idx]
@@ -3093,6 +3106,8 @@ def _make_graphed_callables(
         need_bwd_dw = need_bwd_dw_graph.get(graph_idx, False)
         te_modules = visited_te_modules.get(graph_idx, set())
         static_wgrads = per_callable_static_wgrads[graph_idx]
+        # A weak reference keeps ``owner.reset`` from forming a cycle with ``owner``.
+        owner_ref = weakref.ref(owner)
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
@@ -3131,6 +3146,12 @@ def _make_graphed_callables(
             te_modules = ()
             static_wgrads = ()
             helpers.release_static_state()
+
+            # Drop this callable's references to the slot memory; peers keep their own.
+            current_owner = owner_ref()
+            if current_owner is not None:
+                for name in _SLOT_MEMORY_ATTRIBUTES:
+                    vars(current_owner).pop(name, None)
 
         return backward_dw, reset
 
@@ -3230,14 +3251,19 @@ def _make_graphed_callables(
         backward_dw_func, reset_func = make_graphed_attribute_functions(
             i,
             helpers,
+            ret[-1],
         )
         setattr(ret[-1], "backward_dw", backward_dw_func)
         setattr(ret[-1], "reset", reset_func)
         if slot_allocator_pool is not None:
-            setattr(ret[-1], "_te_cuda_graph_allocator_pool", slot_allocator_pool)
-            setattr(ret[-1], "_te_cuda_graph_saved_arenas", slot_saved_arenas)
-            setattr(ret[-1], "_te_cuda_graph_offload_arenas", slot_offload_arenas)
-            setattr(ret[-1], "_te_cuda_graph_user_grad_arenas", slot_user_grad_arenas)
+            slot_memory = (
+                slot_saved_arenas,
+                slot_offload_arenas,
+                slot_user_grad_arenas,
+                slot_allocator_pool,
+            )
+            for name, value in zip(_SLOT_MEMORY_ATTRIBUTES, slot_memory):
+                setattr(ret[-1], name, value)
 
     if just_one_callable:
         return ret[0]
@@ -3370,7 +3396,9 @@ def make_graphed_callables(
         gradients before any such overwrite can occur.
     _graph_memory_slots: sequence of 7-int tuples, default = None
         Private. Lets mutually exclusive graph variants, for example one per context-parallel
-        size, share one memory pool. One ``(saved_arena, io_slot, branch, chunk, layer,
+        size, share one memory pool. Resetting a returned callable drops its references to the
+        pool and arenas, which are freed once every callable has been reset and the outputs and
+        gradients returned by replays are gone. One ``(saved_arena, io_slot, branch, chunk, layer,
         warmup_group, grad_arena)`` tuple per graph input, in ``sample_args`` order.
         ``saved_arena`` holds the tensors the forward saves for backward and its public outputs;
         ``grad_arena`` holds the gradients returned for user inputs. Graph inputs may share an

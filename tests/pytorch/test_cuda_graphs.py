@@ -172,6 +172,67 @@ def test_slot_memory_offload_preserves_saved_view_aliases(mixed_policy):
         reset_graphs(graphs)
 
 
+def test_slot_memory_reset_releases_arenas_of_retained_callables():
+    """Resetting every callable frees the slot pool, without gc, while the handles are kept."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            with te_graph._graph_memory_offload_context(lambda tensor: tensor.is_cuda):
+                return inp.sin().square()
+
+    arena_names = (
+        "_te_cuda_graph_saved_arenas",
+        "_te_cuda_graph_offload_arenas",
+        "_te_cuda_graph_user_grad_arenas",
+    )
+    # Both graphs share one sample input, so the second one stages its input in the pool.
+    shared = torch.ones(4096, device="cuda", requires_grad=True)
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        graphed = make_graphed_callables(
+            (Module().cuda(),),
+            ((shared,), (shared,)),
+            num_warmup_iters=2,
+            _order=[1, 1, -1, -1],
+            _num_layers_per_chunk=[1],
+            _reuse_graph_input_output_buffers=True,
+            _graph_memory_slots=(_slot(0, 0, 0, warmup=0), _slot(1, 1, 1, warmup=0)),
+        )
+        pool_id = graphed[0]._te_cuda_graph_allocator_pool.id
+        assert all(getattr(graphed[0], name) for name in arena_names)
+        storages = [
+            weakref.ref(arena.untyped_storage())
+            for name in arena_names
+            for arena in getattr(graphed[0], name).values()
+        ]
+
+        graphed[0].reset()
+        assert all(storage() is not None for storage in storages)
+
+        # The peer keeps the shared memory and still replays correctly.
+        inp = torch.randn(4096, device="cuda", requires_grad=True)
+        output = graphed[1](inp)
+        output.sum().backward()
+        torch.testing.assert_close(inp.grad, 2 * inp.detach().sin() * inp.detach().cos())
+        del inp, output  # Replay outputs and gradients alias the arenas.
+
+        graphed[1].reset()
+        assert not any(
+            hasattr(graph, name) for graph in graphed for name in te_graph._SLOT_MEMORY_ATTRIBUTES
+        )
+        assert all(storage() is None for storage in storages)
+        pool_segments = [
+            segment
+            for segment in torch.cuda.memory_snapshot()
+            if tuple(segment["segment_pool_id"]) == tuple(pool_id)
+        ]
+        assert not pool_segments
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+
 def nvfp4_vanilla():
     nvfp4_recipe = recipe.NVFP4BlockScaling()
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
