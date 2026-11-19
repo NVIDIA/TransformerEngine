@@ -6,6 +6,7 @@
 
 import math
 import re
+from functools import partial
 from types import SimpleNamespace
 
 import jax
@@ -14,6 +15,8 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from flax.linen import logical_axis_rules
+from utils import assert_allclose
+from test_custom_call_compute import _ref_jax_norm_impl
 
 from transformer_engine.jax.cpp_extensions.gemm import GemmPrimitive, CollectiveOp
 from transformer_engine.jax.dense import dense
@@ -134,6 +137,29 @@ def test_partition_gathers_only_activation_axes_kept_on_weight(batch_axes):
         assert parse(None) == (specs, output)
 
 
+def _value_and_grads(forward, *args):
+    """Mean square of forward's output, the output, and the gradient for every argument."""
+
+    def loss(*args):
+        y = forward(*args)
+        return jnp.mean(y * y), y
+
+    return jax.value_and_grad(loss, tuple(range(len(args))), has_aux=True)(*args)
+
+
+def _assert_matches_single_device_and_reference(actual, forward, reference, *args):
+    """A sharded run must match forward on one device in FP32, and forward must match an XLA
+    reference with BF16 inputs, as in test_custom_call_compute."""
+    args = tuple(np.asarray(a) for a in args)
+    single = jax.jit(partial(_value_and_grads, forward))
+    for result, ref in zip(jax.tree.leaves(actual), jax.tree.leaves(single(*args))):
+        assert_allclose(result, ref, dtype=jnp.float32)
+    args = tuple(jnp.asarray(a, jnp.bfloat16) for a in args)
+    expected = jax.jit(partial(_value_and_grads, reference))(*args)
+    for result, ref in zip(jax.tree.leaves(single(*args)), jax.tree.leaves(expected)):
+        assert_allclose(result, ref, dtype=jnp.bfloat16)
+
+
 @pytest.mark.parametrize(
     "resource",
     [
@@ -154,23 +180,20 @@ def test_dense_override_forward_and_vjp(ep, fsdp, resource):
     weight = (jnp.arange(128 * 128).reshape(128, 128) % 11 / 16).astype(jnp.float32)
     x, weight = jax.device_put(x, x_sharding), jax.device_put(weight, w_sharding)
 
-    def objective(x, weight):
-        y = dense(x, weight, mesh_resource=resource)
-        return jnp.mean(y * y), y
+    def forward(x, weight, mesh_resource=None):
+        return dense(x, weight, mesh_resource=mesh_resource)
 
     def reference(x, weight):
-        y = x @ weight
-        return jnp.mean(y * y), y
+        return jnp.dot(x, weight)
 
     # Trace and compile after leaving the surrounding context. Partitioning must
     # use the explicit override rather than whatever global roles exist then.
+    fn = jax.jit(partial(_value_and_grads, partial(forward, mesh_resource=resource)))
     with jax.set_mesh(mesh), global_shard_guard(MeshResource(fsdp_resource="fsdp")):
-        lowered = jax.jit(jax.value_and_grad(objective, (0, 1), has_aux=True)).lower(x, weight)
+        lowered = fn.lower(x, weight)
     with jax.set_mesh(mesh), global_shard_guard(MeshResource(fsdp_resource="wrong")):
         actual = lowered.compile()(x, weight)
-    expected = jax.jit(jax.value_and_grad(reference, (0, 1), has_aux=True))(x, weight)
-    for result, ref in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
-        np.testing.assert_allclose(result, ref, rtol=2e-5, atol=2e-5)
+    _assert_matches_single_device_and_reference(actual, forward, reference, x, weight)
 
 
 def _all_gather_sizes(hlo):
@@ -194,31 +217,29 @@ def test_tuple_global_fsdp_forward_and_vjp(operation, weight_axes):
     weight = jax.random.normal(jax.random.key(1), (128, 256)) / 16
     gamma = jnp.ones(128)
 
-    def objective(x, weight):
+    def forward(x, weight, gamma):
         if operation == "dense":
-            y = dense(x, weight)
-        else:
-            y = layernorm_dense(x, weight, gamma, None, norm_type="rmsnorm")
+            return dense(x, weight)
+        return layernorm_dense(x, weight, gamma, None, norm_type="rmsnorm")
+
+    def sharded(x, weight, gamma):
         # Keep the activation batch-sharded under both partitioners.
-        y = jax.lax.with_sharding_constraint(y, NamedSharding(mesh, P(batch_axes, None)))
-        return jnp.mean(y * y), y
+        y = forward(x, weight, gamma)
+        return jax.lax.with_sharding_constraint(y, NamedSharding(mesh, P(batch_axes, None)))
 
-    def reference(x, weight):
+    def reference(x, weight, gamma):
         if operation == "layernorm_dense":
-            x = x * jax.lax.rsqrt(jnp.mean(x * x, axis=-1, keepdims=True) + 1e-6)
-        y = x @ weight
-        return jnp.mean(y * y), y
+            x = _ref_jax_norm_impl(x, gamma, None, "rmsnorm", False, 1e-6, None)
+        return jnp.dot(x, weight)
 
-    expected = jax.jit(jax.value_and_grad(reference, (0, 1), has_aux=True))(x, weight)
     x = jax.device_put(x, NamedSharding(mesh, P(batch_axes, None)))
     weight = jax.device_put(weight, NamedSharding(mesh, P(None, weight_axes)))
     # Partitioning reads the global resource, so it stays set through compilation.
     with jax.set_mesh(mesh), global_shard_guard(MeshResource(fsdp_resource=batch_axes)):
-        fn = jax.jit(jax.value_and_grad(objective, (0, 1), has_aux=True))
-        compiled = fn.lower(x, weight).compile()
-        actual = compiled(x, weight)
-    for result, ref in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
-        np.testing.assert_allclose(result, ref, rtol=2e-4, atol=2e-5)
+        fn = jax.jit(partial(_value_and_grads, sharded))
+        compiled = fn.lower(x, weight, gamma).compile()
+        actual = compiled(x, weight, gamma)
+    _assert_matches_single_device_and_reference(actual, forward, reference, x, weight, gamma)
     # The activation keeps its batch sharding; only the whole weight is gathered.
     assert set(_all_gather_sizes(compiled.as_text())) == {weight.size}
 
@@ -238,37 +259,33 @@ def test_fused_dense_override_parameter_gradients(operation):
     w1 = jax.device_put(w1, NamedSharding(mesh, P(None, None, axes)))
     w2 = jax.device_put(w2, NamedSharding(mesh, P(None, axes)))
 
-    def objective(x, w1, w2, gamma, bias):
+    def forward(x, w1, w2, gamma, bias, mesh_resource=None):
         if operation == "layernorm_dense":
-            y = layernorm_dense(
-                x, w2, gamma, None, bias, norm_type="rmsnorm", mesh_resource=resource
+            return layernorm_dense(
+                x, w2, gamma, None, bias, norm_type="rmsnorm", mesh_resource=mesh_resource
             )
-        else:
-            y = layernorm_mlp(
-                x,
-                gamma,
-                None,
-                [w1, w2],
-                [bias[None, :], bias],
-                norm_type="rmsnorm",
-                activation_type=("relu",),
-                mesh_resource=resource,
-            )
-        return jnp.mean(y * y)
+        return layernorm_mlp(
+            x,
+            gamma,
+            None,
+            [w1, w2],
+            [bias[None, :], bias],
+            norm_type="rmsnorm",
+            activation_type=("relu",),
+            mesh_resource=mesh_resource,
+        )
 
     def reference(x, w1, w2, gamma, bias):
-        normalized = x * jax.lax.rsqrt(jnp.mean(x * x, axis=-1, keepdims=True) + 1e-6) * gamma
+        normalized = _ref_jax_norm_impl(x, gamma, None, "rmsnorm", False, 1e-6, None)
         if operation == "layernorm_mlp":
-            normalized = jax.nn.relu(normalized @ w1[:, 0, :] + bias)
-        y = normalized @ w2 + bias
-        return jnp.mean(y * y)
+            normalized = jax.nn.relu(jnp.dot(normalized, w1[:, 0, :]) + bias)
+        return jnp.dot(normalized, w2) + bias
 
     args = x, w1, w2, gamma, bias
+    fn = jax.jit(partial(_value_and_grads, partial(forward, mesh_resource=resource)))
     with jax.set_mesh(mesh), global_shard_guard(MeshResource(fsdp_resource="wrong")):
-        actual = jax.jit(jax.value_and_grad(objective, tuple(range(5))))(*args)
-    expected = jax.jit(jax.value_and_grad(reference, tuple(range(5))))(*args)
-    for result, ref in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
-        np.testing.assert_allclose(result, ref, rtol=2e-4, atol=2e-5)
+        actual = fn(*args)
+    _assert_matches_single_device_and_reference(actual, forward, reference, *args)
 
 
 def test_quantization_override_amax_and_bias_reductions():
