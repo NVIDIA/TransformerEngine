@@ -18,6 +18,7 @@ from transformer_engine.common.CuTeDSL.utils import (
     prefetch_l2,
     rcp_rn_f32,
     row_offset,
+    st_global_u32,
     st_global_u8,
     st_global_v2,
 )
@@ -26,6 +27,9 @@ from transformer_engine.common.CuTeDSL.utils_nvfp4 import (
     coefficient_of,
     compute_global_encode_sf,
     pack_row_block,
+    swizzled_scale_column_offset,
+    swizzled_scale_row_offset,
+    transpose_quad_bytes,
 )
 from transformer_engine.common.CuTeDSL.philox_rng import (
     BLOCK_PHILOX_FOLD_SUPPORTED,
@@ -53,6 +57,8 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
     next wave is prefetched into L2. The per-block coefficient depends only on the block's scale
     byte, so its IEEE divide is evaluated once per CTA into a shared-memory table indexed by that
     byte. Stochastic rounding draws Philox once per block (philox_rng.make_block_philox_fold).
+    With GEMM-swizzled scales a lane quad transposes the wave's 4x4 scale bytes, so each lane
+    stores one row's four scales as one word.
     """
 
     # A CTA covers 128 blocks = 2048 input bytes and 128 scale bytes per row.
@@ -183,6 +189,7 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
     ):
         """Device entry for the rowwise-only register kernel."""
         STOCHASTIC = self.cfg.USE_STOCHASTIC_ROUNDING
+        SWIZZLED = self.cfg.WITH_GEMM_SWIZZLED_SCALES
         WAVE = self._WAVE
         tidx, _, _ = cute.arch.thread_idx()
         bidx, bidy, _ = cute.arch.block_idx()
@@ -218,6 +225,9 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
         x_j = mX.iterator.toint() + Int64(j) * (NVFP4_BLOCK_SCALING_SIZE * 2)
         q_j = mO_row.iterator.toint() + Int64(j) * (NVFP4_BLOCK_SCALING_SIZE // 2)
         s_j = mS_row.iterator.toint() + Int64(j)
+        if cutlass.const_expr(SWIZZLED):
+            # Lane q of each lane quad stores the quad's four scales of the wave's row q.
+            s_j = mS_row.iterator.toint() + swizzled_scale_column_offset(j - tidx % 4)
         x_pitch = K * 2  # bytes per input row
         q_pitch = K // 2  # bytes per output row
 
@@ -284,4 +294,11 @@ class NVFP4QuantizeRowwiseG2RKernel(NVFP4QuantizeKernelBase):
                         row = r0 + w + i
                         if active:
                             st_global_v2(q_j + row_offset(row, q_pitch), w0, w1)
-                            st_global_u8(s_j + row_offset(row, s_pitch), codes[i])
+                            if cutlass.const_expr(not SWIZZLED):
+                                st_global_u8(s_j + row_offset(row, s_pitch), codes[i])
+                if cutlass.const_expr(SWIZZLED):
+                    word = transpose_quad_bytes(codes, tidx)
+                    if active:
+                        st_global_u32(
+                            s_j + swizzled_scale_row_offset(r0 + w + tidx % 4, s_pitch), word
+                        )

@@ -39,6 +39,9 @@ from transformer_engine.common.CuTeDSL.utils_nvfp4 import (
     compute_global_encode_sf,
     pack_column_block,
     pack_row_block,
+    swizzled_scale_column_offset,
+    swizzled_scale_row_offset,
+    transpose_quad_bytes,
 )
 from transformer_engine.common.CuTeDSL.philox_rng import (
     BLOCK_PHILOX_FOLD_SUPPORTED,
@@ -66,11 +69,13 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
     A CTA owns _TILE_K columns and walks up to _MAX_SLABS slabs of _SLAB_M rows, keeping the
     whole transposed FP4 result for its columns in shared memory:
       A. rowwise: one block per thread per quarter slab, from a GROUP-CTA wide strip (adjacent
-         CTAs pool their rowwise work so a warp writes 256 contiguous payload bytes and whole
-         32-byte scale sectors);
+         CTAs pool their rowwise work so a warp writes 256 contiguous payload bytes and, with
+         compact scales, whole 32-byte scale sectors, or half sectors with GEMM-swizzled
+         scales);
       B. columnwise: four adjacent columns per thread over one 16-row block, re-reading the rows
          phase A just brought into L2, into the transposed staging buffer;
-      C. drain: four lanes per column, each writing one 32-byte sector of its transposed run.
+      C. drain: four lanes per column, each writing one 32-byte sector of its transposed run;
+         GEMM-swizzled scales leave as whole 512-byte tiles.
     The slab count is chosen per launch by a cost model of streaming work against the per-CTA
     drain.
     """
@@ -234,6 +239,7 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
     ):
         """Device entry for the rowwise + columnwise register kernel."""
         STOCHASTIC = self.cfg.USE_STOCHASTIC_ROUNDING
+        SWIZZLED = self.cfg.WITH_GEMM_SWIZZLED_SCALES
         THREADS = self._THREADS
         TILE_K = self._TILE_K
         SLAB_M = self._SLAB_M
@@ -296,12 +302,26 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
         arow = j0 < blocks_per_row
         # A band of at most 32 rows that starts inside the matrix also ends inside it
         # (M % 32 == 0), so clamping the band base is all the bounds work phase A's walk needs.
+        # With GEMM-swizzled scales a band spans 34 rows and ends inside it as M % 128 == 0.
         BAND_SAFE = ROWS_A <= 32
         x_pitch = K * 2
         q_pitch = K // 2
         x_col = x_base + Int64(j) * (BLOCK * 2)
         q_col_off = q_row_base + Int64(j) * (BLOCK // 2)
         s_col_off = s_row_base + Int64(j)
+        if cutlass.const_expr(SWIZZLED):
+            # Phase A's lane q of a lane quad stores the quad's four scales of its rows[q] (_slab)
+            # from the quad's first column. The offset of rows[q] in its slab goes here; _slab
+            # adds the slab's.
+            quad_lane = tidx % 4
+            s_col_off = (
+                s_row_base
+                + swizzled_scale_column_offset(j - quad_lane)
+                + swizzled_scale_row_offset(
+                    ROWS_A // 2 * qa + 2 * rl + quad_lane % 2 + 32 * (quad_lane // 2),
+                    s_row_pitch,
+                )
+            )
 
         # Phase B lanes: four adjacent columns per thread (a warp spans 128 columns, one
         # 256-byte request per row) and one of the slab's four column blocks.
@@ -313,8 +333,12 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
         # The first real load is inside the slab loop, so it cannot be hoisted above the
         # encode-scale chain; a prefetch can, and warms the first slab meanwhile.
         pb = r00 + ROWS_A * qa + rl
+        pstep = [RG * i for i in range(4)]
+        if cutlass.const_expr(SWIZZLED):
+            pb = r00 + ROWS_A // 2 * qa + 2 * rl  # as in _slab
+            pstep = [i % 2 + 32 * (i // 2) for i in range(4)]
         for i in cutlass.range_constexpr(4):
-            r = pb + RG * i
+            r = pb + pstep[i]
             if cutlass.const_expr(BAND_SAFE):
                 if pb >= M:
                     r = r00 + RG * i
@@ -417,13 +441,32 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
                             st_global_v4(q_ptr + Int64(16), d[4:8])
                     else:  # tail slab: this lane owns exactly two blocks
                         st_global_v4(q_ptr, d[0:4])
-                    scale_word = staging_scales[slot * (self._STAGING_SCALE_BYTES // 4) + ll]
-                    if nblk >= 4:
-                        st_global_u32(s_ptr, scale_word)
-                    else:
-                        st_global_u16(s_ptr, scale_word)
+                    if cutlass.const_expr(not SWIZZLED):
+                        scale_word = staging_scales[slot * (self._STAGING_SCALE_BYTES // 4) + ll]
+                        if nblk >= 4:
+                            st_global_u32(s_ptr, scale_word)
+                        else:
+                            st_global_u16(s_ptr, scale_word)
                 q_ptr = q_ptr + Int64(q_col_pitch)
                 s_ptr = s_ptr + Int64(s_col_pitch)
+            if cutlass.const_expr(SWIZZLED):
+                # Thread t writes bytes [4t, 4t + 4) of each of the CTA's 128x4 scale tiles, one
+                # per slab: the slab's word of column 32 * (t % 4) + t // 4. c0 is a multiple of
+                # 128 and r00 // BLOCK of 4 (the swizzled layout needs 128-aligned dims).
+                sc = 32 * (tidx % 4) + tidx // 4
+                scale_slot = sc % 4 * 32 + sc // 4  # where phase B staged column sc
+                s_tile = (
+                    s_col_base
+                    + swizzled_scale_row_offset(c0, s_col_pitch)
+                    + swizzled_scale_column_offset(r00 // BLOCK)
+                    + Int64(4 * tidx)
+                )
+                for s in cutlass.range_constexpr(self._MAX_SLABS):
+                    if 4 * s < valid_blocks:
+                        st_global_u32(
+                            s_tile + Int64(512 * s),
+                            staging_scales[scale_slot * (self._STAGING_SCALE_BYTES // 4) + s],
+                        )
 
     @cute.jit
     def _slab(
@@ -458,6 +501,7 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
         STOCHASTIC: cutlass.Constexpr,
     ):
         """Phases A and B for the slab of rows [r0, r0 + _SLAB_M)."""
+        SWIZZLED = self.cfg.WITH_GEMM_SWIZZLED_SCALES
         THREADS = self._THREADS
         SLAB_M = self._SLAB_M
         BLOCK = NVFP4_BLOCK_SCALING_SIZE
@@ -469,6 +513,12 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
         rbase = r0 + ROWS_A * qa + rl
         afull = arow and r0 + SLAB_M <= M
         rows = [rbase + RG * i for i in range(4)]
+        if cutlass.const_expr(SWIZZLED):
+            # Rows 2m, 2m + 1, 32 + 2m and 33 + 2m of the slab: in the swizzled layout, two
+            # adjacent 16-byte lines of both its 32-row groups, so a lane quad's 16 scale bytes
+            # of them fill half of one 32-byte sector.
+            rbase = r0 + ROWS_A // 2 * qa + 2 * rl
+            rows = [rbase + i % 2 + 32 * (i // 2) for i in range(4)]
         v = []
         for i in cutlass.range_constexpr(4):
             r = rows[i]
@@ -502,7 +552,14 @@ class NVFP4QuantizeBidimensionalG2RKernel(NVFP4QuantizeKernelBase):
             w0, w1 = pack_row_block(v[i], coeff2_a[i], rnd_row[i], STOCHASTIC)
             if afull or (rows[i] < M and arow):
                 st_global_v2(q_col_off + row_offset(rows[i], q_pitch), w0, w1)
-                st_global_u8(s_col_off + row_offset(rows[i], s_row_pitch), codes_a[i])
+                if cutlass.const_expr(not SWIZZLED):
+                    st_global_u8(s_col_off + row_offset(rows[i], s_row_pitch), codes_a[i])
+        if cutlass.const_expr(SWIZZLED):
+            # Lane q of each lane quad stores the quad's four scales of rows[q]. r0 is a multiple
+            # of 64 and s_col_off holds the offset of rows[q] - r0 < 64, so the offsets add.
+            word = transpose_quad_bytes(codes_a, cp)
+            if afull:
+                st_global_u32(s_col_off + swizzled_scale_row_offset(r0, s_row_pitch), word)
 
         # Phase B: the rows phase A just read are still in L2, so this column-major pass is a
         # cache re-read rather than a second DRAM stream.

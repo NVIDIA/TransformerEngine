@@ -11,6 +11,10 @@ TMA-staged (g2s) kernel. Only configs the CuTeDSL backend serves are tested.
 
 Stochastic rounding is checked statistically rather than byte for byte, since the g2r kernels draw
 Philox per output block and the CUDA kernel per thread.
+
+A quantizer that optimizes for GEMM gets GEMM-swizzled scales from the CuTeDSL kernels themselves
+on 128-aligned shapes, and from the swizzle after the CUDA kernel otherwise; both give the same
+bytes.
 """
 
 # pylint: disable=wrong-import-position
@@ -30,6 +34,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import _get_shared_object_file
 from transformer_engine.common.CuTeDSL.utils import device_compute_capability
 from transformer_engine.pytorch import NVFP4Quantizer
+from transformer_engine.pytorch.cpp_extensions import general_gemm
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
@@ -70,18 +75,26 @@ DIRECTIONS = [(True, False), (True, True)]
 get_shape_id = lambda s: "x".join(str(d) for d in s)
 get_direction_id = lambda d: "rowwise-columnwise" if d[1] else "rowwise"
 get_fast_math_id = lambda f: "fastmath" if f else "exact"
+get_optimize_for_gemm_id = lambda o: "swizzled" if o else "compact"
 
 
 def set_cutedsl_backend(enabled):
+    """Switch the backend and NVTE_ENABLE_CUTEDSL_BACKEND, which quantizers read to choose
+    between GEMM-swizzled scales from the kernel and a swizzle after it."""
+    os.environ["NVTE_ENABLE_CUTEDSL_BACKEND"] = "1" if enabled else "0"
     CORE_LIB.nvte_set_cutedsl_backend(1 if enabled else 0)
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _restore_backend_choice_from_env():
     """Restore the flag that decides the CuTeDSL / CUDA backend choice when this pytest module is done."""
-    yield
     flag = os.getenv("NVTE_ENABLE_CUTEDSL_BACKEND")
+    yield
     set_cutedsl_backend(flag is not None and not flag.startswith("0"))
+    if flag is None:
+        del os.environ["NVTE_ENABLE_CUTEDSL_BACKEND"]
+    else:
+        os.environ["NVTE_ENABLE_CUTEDSL_BACKEND"] = flag
 
 
 def flat_dims(shape):
@@ -101,12 +114,31 @@ def generate_input(shape, seed=SEED):
     return x.to(torch.bfloat16).view(shape)
 
 
-def make_quantizer(rowwise, columnwise, row_scaled=False, stochastic_rounding=False):
-    return NVFP4Quantizer(
+def make_quantizer(
+    rowwise, columnwise, row_scaled=False, stochastic_rounding=False, optimize_for_gemm=False
+):
+    quantizer = NVFP4Quantizer(
         rowwise=rowwise,
         columnwise=columnwise,
         row_scaled_nvfp4=row_scaled,
         stochastic_rounding=stochastic_rounding,
+    )
+    quantizer.optimize_for_gemm = optimize_for_gemm
+    return quantizer
+
+
+def kernel_writes_swizzled_scales(shape, row_scaled=False, stochastic_rounding=False):
+    """Whether a quantizer that optimizes for GEMM gets its GEMM-swizzled scales from the CuTeDSL
+    kernel rather than the later swizzle. Mirror of nvfp4_gemm_swizzled_scales_alignment
+    (cutedsl_gemm_swizzled_scales.h) for the rowwise E4M3 quantizers with an amax used here."""
+    major, minor = device_compute_capability()
+    rows, cols = flat_dims(shape)
+    return (
+        100 <= major * 10 + minor <= 110
+        and not (stochastic_rounding and major != 10)
+        and not row_scaled
+        and rows % 128 == 0
+        and cols % 128 == 0
     )
 
 
@@ -118,10 +150,10 @@ def quantize(quantizer, x, noop_flag=None, out=None):
     return out.quantize_(x, noop_flag=noop_flag)
 
 
-def get_cfg_key(stochastic_rounding, fast_math, row_scaled, columnwise):
+def get_cfg_key(stochastic_rounding, fast_math, row_scaled, columnwise, swizzled=False):
     """Mirror of NVFP4QuantConfig::to_key (quantize_transpose_nvfp4_cutedsl.cuh)."""
     major, minor = device_compute_capability()
-    flags = (stochastic_rounding, fast_math, row_scaled, columnwise)
+    flags = (stochastic_rounding, fast_math, row_scaled, columnwise, swizzled)
     return f"cutedsl_nvfp4_sm{major * 10 + minor}_" + "_".join("1" if f else "0" for f in flags)
 
 
@@ -151,12 +183,12 @@ def extract_quantized_output(out, shape, rowwise, columnwise):
     return parts
 
 
-def run_test_case(shape, rowwise, columnwise, row_scaled=False, x=None):
+def run_test_case(shape, rowwise, columnwise, row_scaled=False, x=None, optimize_for_gemm=False):
     """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the same input."""
     if x is None:
         x = generate_input(shape)
     fast_math = os.environ.get("NVTE_USE_FAST_MATH", "0") == "1"
-    quantizer = make_quantizer(rowwise, columnwise, row_scaled)
+    quantizer = make_quantizer(rowwise, columnwise, row_scaled, optimize_for_gemm=optimize_for_gemm)
 
     set_cutedsl_backend(False)
     out_cuda = quantize(quantizer, x)
@@ -169,8 +201,10 @@ def run_test_case(shape, rowwise, columnwise, row_scaled=False, x=None):
     finally:
         set_cutedsl_backend(False)
 
+    assert out_cutedsl._with_gemm_swizzled_scales == optimize_for_gemm
     # Guard against a silent CUDA fallback, which would compare CUDA against itself.
-    key = get_cfg_key(False, fast_math, row_scaled, columnwise)
+    swizzled = optimize_for_gemm and kernel_writes_swizzled_scales(shape, row_scaled)
+    key = get_cfg_key(False, fast_math, row_scaled, columnwise, swizzled)
     assert (
         tvm_ffi.get_global_func(key, allow_missing=True) is not None
     ), f"CuTeDSL kernel not registered for {key}; the backend fell back to CUDA"
@@ -190,9 +224,10 @@ def run_test_case(shape, rowwise, columnwise, row_scaled=False, x=None):
 @pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
 @pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
 @pytest.mark.parametrize("fast_math", [False, True], ids=get_fast_math_id)
-def test_cast(fast_math, direction, shape, monkeypatch):
+@pytest.mark.parametrize("optimize_for_gemm", [False, True], ids=get_optimize_for_gemm_id)
+def test_cast(optimize_for_gemm, fast_math, direction, shape, monkeypatch):
     monkeypatch.setenv("NVTE_USE_FAST_MATH", "1" if fast_math else "0")
-    run_test_case(shape, *direction)
+    run_test_case(shape, *direction, optimize_for_gemm=optimize_for_gemm)
 
 
 @pytest.mark.parametrize("fast_math", [False, True], ids=get_fast_math_id)
@@ -222,6 +257,110 @@ def test_row_scaled_columnwise_falls_back_to_cuda(monkeypatch):
     assert tvm_ffi.get_global_func(key, allow_missing=True) is None, f"{key} was compiled"
     for name, cuda_bytes in cuda_output.items():
         assert torch.equal(fallback_output[name], cuda_bytes), f"{name} differ"
+
+
+@pytest.mark.skipif(
+    device_compute_capability()[0] != 10, reason="CuTeDSL stochastic rounding needs SM 10.x"
+)
+@pytest.mark.parametrize("shape", [(512, 1024), (512, 1152), (8192, 7168)], ids=get_shape_id)
+@pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
+def test_stochastic_rounding_swizzled_scales(direction, shape):
+    """Under stochastic rounding the scales do not depend on the draws, so the GEMM-swizzled
+    scales the CuTeDSL kernels write equal those of the CUDA backend and its swizzle. The draws
+    do not depend on the scale layout, so the data equal those of the CuTeDSL kernels with
+    compact scales."""
+    rowwise, columnwise = direction
+    x = generate_input(shape)
+    quantizer = make_quantizer(
+        rowwise, columnwise, stochastic_rounding=True, optimize_for_gemm=True
+    )
+    compact_quantizer = make_quantizer(rowwise, columnwise, stochastic_rounding=True)
+
+    set_cutedsl_backend(False)
+    cuda_output = extract_quantized_output(quantize(quantizer, x), shape, rowwise, columnwise)
+    set_cutedsl_backend(True)
+    try:
+        out = quantize(quantizer, x)
+        compact_output = extract_quantized_output(
+            quantize(compact_quantizer, x), shape, rowwise, columnwise
+        )
+    finally:
+        set_cutedsl_backend(False)
+    cutedsl_output = extract_quantized_output(out, shape, rowwise, columnwise)
+
+    assert out._with_gemm_swizzled_scales
+    swizzled = kernel_writes_swizzled_scales(shape, stochastic_rounding=True)
+    key = get_cfg_key(True, False, False, columnwise, swizzled)
+    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, key
+    for name, cuda_bytes in cuda_output.items():
+        if "data" not in name:
+            assert torch.equal(cutedsl_output[name], cuda_bytes), f"{name} differ"
+        else:
+            assert torch.equal(cutedsl_output[name], compact_output[name]), f"{name} differ"
+
+
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+def test_gemm_of_swizzled_scales(layout):
+    """A GEMM of operands whose scales the CuTeDSL kernels swizzled equals the GEMM of the CUDA
+    backend's compact operands, which the GEMM swizzles itself. The operands are 128-aligned, so
+    every layout reads scales the CuTeDSL kernel wrote."""
+    M, N, K = 384, 256, 512
+    a_shape = (N, K) if layout[0] == "T" else (K, N)
+    b_shape = (K, M) if layout[1] == "T" else (M, K)
+    if not kernel_writes_swizzled_scales(a_shape):
+        pytest.skip("the CuTeDSL kernels write GEMM-swizzled scales on SM 100-110 only")
+    a, b = generate_input(a_shape), generate_input(b_shape, seed=SEED + 1)
+
+    set_cutedsl_backend(True)
+    try:
+        quantizer = make_quantizer(True, True, optimize_for_gemm=True)
+        a_swizzled, b_swizzled = quantize(quantizer, a), quantize(quantizer, b)
+    finally:
+        set_cutedsl_backend(False)
+    quantizer = make_quantizer(True, True)
+    a_compact, b_compact = quantize(quantizer, a), quantize(quantizer, b)
+    assert a_swizzled._with_gemm_swizzled_scales and b_swizzled._with_gemm_swizzled_scales
+    assert not a_compact._with_gemm_swizzled_scales and not b_compact._with_gemm_swizzled_scales
+
+    expected = general_gemm(a_compact, b_compact, out_dtype=torch.float32, layout=layout)[0]
+    actual = general_gemm(a_swizzled, b_swizzled, out_dtype=torch.float32, layout=layout)[0]
+    assert torch.equal(actual, expected)
+
+
+def test_swizzled_scales_skip_the_separate_swizzle():
+    """On a 128-aligned shape the CuTeDSL kernels write the GEMM-swizzled scales themselves, so the
+    call launches a CuTeDSL quantize kernel and no swizzle kernel, unlike the CUDA backend's call,
+    and gives the same bytes. The vector-blockwise kernel writes them too, so the CuTeDSL kernel
+    is asserted to have run."""
+    shape = (256, 1024)
+    if not kernel_writes_swizzled_scales(shape):
+        pytest.skip("the CuTeDSL kernels write GEMM-swizzled scales on SM 100-110 only")
+    x = generate_input(shape)
+    quantizer = make_quantizer(True, True, optimize_for_gemm=True)
+
+    def profiled_quantize(enabled):
+        set_cutedsl_backend(enabled)
+        quantize(quantizer, x)  # compiles the kernels outside the profile
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            out = quantize(quantizer, x)
+            torch.cuda.synchronize()
+        names = [e.name for e in prof.events()]
+        swizzles = [n for n in names if re.search(r"swizzle_\w*kernel", n)]
+        quantizes = [n for n in names if re.search(r"NVFP4Quantize\w*Kernel", n)]
+        return extract_quantized_output(out, shape, True, True), swizzles, quantizes
+
+    try:
+        cuda_output, cuda_swizzles, cuda_quantizes = profiled_quantize(False)
+        cutedsl_output, cutedsl_swizzles, cutedsl_quantizes = profiled_quantize(True)
+    finally:
+        set_cutedsl_backend(False)
+
+    assert cuda_swizzles, "the CUDA backend's call launched no swizzle kernel"
+    assert not cutedsl_swizzles, f"the CuTeDSL backend's call launched {cutedsl_swizzles}"
+    assert cutedsl_quantizes, "the CuTeDSL backend's call launched no CuTeDSL quantize kernel"
+    assert not cuda_quantizes, f"the CUDA backend's call launched {cuda_quantizes}"
+    for name, cuda_bytes in cuda_output.items():
+        assert torch.equal(cutedsl_output[name], cuda_bytes), f"{name} differ"
 
 
 @pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
@@ -331,7 +470,8 @@ def test_cuda_graph(direction):
 
 
 @pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
-def test_unaligned_input_uses_g2s(direction):
+@pytest.mark.parametrize("optimize_for_gemm", [False, True], ids=get_optimize_for_gemm_id)
+def test_unaligned_input_uses_g2s(optimize_for_gemm, direction):
     """A 16-byte-aligned input is not eligible for the g2r kernels' 32-byte loads, so the g2s
     kernel serves it."""
     shape = (256, 384)
@@ -340,7 +480,7 @@ def test_unaligned_input_uses_g2s(direction):
     x = buffer[8:].view(shape)
     x.copy_(generate_input(shape))
     assert x.data_ptr() % 32 == 16
-    run_test_case(shape, *direction, x=x)
+    run_test_case(shape, *direction, x=x, optimize_for_gemm=optimize_for_gemm)
 
 
 def test_rowwise_g2r_grid_y_overflow_uses_g2s():

@@ -6,7 +6,7 @@
 
 import cutlass
 from cutlass import cute
-from cutlass import BFloat16, Boolean, Float32, Float8E4M3FN, Int32, Int64, Uint32
+from cutlass import BFloat16, Boolean, Float32, Float8E4M3FN, Int32, Int64, Uint32, Uint64
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -15,6 +15,7 @@ from transformer_engine.common.CuTeDSL.utils import (
     BFLOAT16_MAX,
     FLOAT32_MAX,
     abs_max_tree_bf16x2,
+    make_prmt_u32,
     rcp_rn_f32,
     swap_halves_b32,
 )
@@ -332,6 +333,60 @@ def zero_b32() -> Int32:
     """A zero the packed abs-max can start from. As a literal it would be folded into an
     immediate operand, which max.xorsign.abs.bf16x2 does not accept."""
     return cute.arch.inline_ptx("mov.b32 {$w0}, 0;", write_only_types=[Int32])
+
+
+@cute.jit
+def prmt_sel_u32(a: Uint32, b: Uint32, selector: Uint32) -> Uint32:
+    """The byte permute of make_prmt_u32 with the selector in a register, for a selector that
+    differs between threads."""
+    return cute.arch.inline_ptx(
+        "prmt.b32 {$w0}, {$r0}, {$r1}, {$r2};",
+        write_only_types=[Uint32],
+        read_only_args=[a, b, selector],
+    )
+
+
+_prmt_low_bytes_u32 = make_prmt_u32(0x0040)
+_prmt_low_halves_u32 = make_prmt_u32(0x5410)
+
+
+@cute.jit
+def transpose_quad_bytes(values, lane: Int32) -> Uint32:
+    """Transpose the 4x4 bytes held by each aligned quad of lanes: a lane passes four values (their
+    low bytes) and gets back the word whose byte i is values[lane % 4] of the quad's lane i. Two
+    butterfly shuffles, so every lane of the warp must call it."""
+    word = _prmt_low_halves_u32(
+        _prmt_low_bytes_u32(values[0], values[1]), _prmt_low_bytes_u32(values[2], values[3])
+    )
+    # Swap 2x2 blocks with the lane two away (a0 a1 b0 b1, or b2 b3 a2 a3 on its upper half),
+    # then bytes inside them with the neighbor (a0 b0 a2 b2, or b1 a1 b3 a3 on an odd lane).
+    upper = Uint32(lane) & Uint32(2)
+    word = prmt_sel_u32(
+        word, cute.arch.shuffle_sync_bfly(word, 2), Uint32(0x5410) - upper * Uint32(0x10CD)
+    )
+    odd = Uint32(lane) & Uint32(1)
+    word = prmt_sel_u32(
+        word, cute.arch.shuffle_sync_bfly(word, 1), Uint32(0x6240) - odd * Uint32(0x2B2B)
+    )
+    return word
+
+
+@cute.jit
+def swizzled_scale_row_offset(row: Int32, pitch: Int32) -> Int64:
+    """Byte offset of a row's scales in the GEMM-swizzled layout of a scale matrix `pitch` bytes
+    wide, a multiple of 4: 128x4 tiles of 512 bytes, row-major over (row // 128, column // 4), in
+    which row r's four scales sit at (r % 32) * 16 + (r // 32 % 4) * 4. Add
+    swizzled_scale_column_offset for the column. A tile row of pitch * 128 bytes fits 32 bits."""
+    r = Uint32(row)
+    in_tile = (r & Uint32(31)) * Uint32(16) + ((r >> Uint32(5)) & Uint32(3)) * Uint32(4)
+    return Int64(Uint64(r >> Uint32(7)) * Uint64(Uint32(pitch) << Uint32(7)) + Uint64(in_tile))
+
+
+@cute.jit
+def swizzled_scale_column_offset(column: Int32) -> Int64:
+    """Byte offset of a scale column in the GEMM-swizzled layout (swizzled_scale_row_offset)."""
+    c = Uint32(column)
+    return Int64(Uint64((c >> Uint32(2)) * Uint32(512) + (c & Uint32(3))))
 
 
 # --- Register-resident (g2r) kernels: the numeric core ---

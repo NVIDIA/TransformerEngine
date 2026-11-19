@@ -25,9 +25,12 @@
 #include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/fused_attn.h>
+#include <transformer_engine/gemm.h>
 #include <transformer_engine/hadamard_transform.h>
 #include <transformer_engine/recipe.h>
+#include <transformer_engine/swizzle.h>
 #include "../test_common.h"
+#include "cast/nvfp4/cutedsl_gemm_swizzled_scales.h"
 #include "transformer_engine/transformer_engine.h"
 
 // The CuTeDSL backend's runtime switch, which the library exports for tests.
@@ -1443,6 +1446,30 @@ std::vector<std::vector<size_t>> row_scaled_transpose_dims = {
     {2048, 256},
 };
 
+// One direction of a compact NVFP4 tensor: its data and amax, and its scales swizzled for GEMM by
+// nvte_swizzle_scaling_factors, which takes one direction at a time.
+Tensor with_gemm_swizzled_scales(const Tensor& compact, const std::vector<size_t>& shape,
+                                 const bool columnwise) {
+    Tensor compact_scales("compact_scales", shape, DType::kFloat4E2M1, !columnwise, columnwise,
+                          NVTE_NVFP4_1D_SCALING);
+    Tensor swizzled("swizzled", shape, DType::kFloat4E2M1, !columnwise, columnwise,
+                    NVTE_NVFP4_1D_SCALING);
+    swizzled.set_with_gemm_swizzled_scales(true);
+    const auto copy = [&compact](const Tensor& dst, const NVTETensorParam param) {
+        const NVTEBasicTensor src_param = nvte_get_tensor_param(compact.data(), param);
+        const NVTEBasicTensor dst_param = nvte_get_tensor_param(dst.data(), param);
+        NVTE_CHECK_CUDA(cudaMemcpy(dst_param.data_ptr, src_param.data_ptr,
+                                   bytes(src_param.shape, static_cast<DType>(src_param.dtype)),
+                                   cudaMemcpyDeviceToDevice));
+    };
+    copy(compact_scales, columnwise ? kNVTEColumnwiseScaleInv : kNVTERowwiseScaleInv);
+    copy(swizzled, columnwise ? kNVTEColumnwiseData : kNVTERowwiseData);
+    copy(swizzled, columnwise ? kNVTEColumnwiseAmax : kNVTEAmax);
+    nvte_swizzle_scaling_factors(compact_scales.data(), swizzled.data(), 0);
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+    return swizzled;
+}
+
 // Switches the CuTeDSL backend off for its lifetime and back to NVTE_ENABLE_CUTEDSL_BACKEND's
 // setting on any exit.
 struct CuTeDSLBackendOff {
@@ -1576,6 +1603,90 @@ void performTestPhiloxState(const std::vector<size_t>& shape, const bool use_2d_
                                          scale_mismatches);
     }
     ASSERT_EQ(scale_mismatches, 0u);
+}
+
+// A 1D output with GEMM-swizzled scales gets the bytes of the CUDA backend's compact quantization
+// followed by nvte_swizzle_scaling_factors, and so does a GEMM of it. The CuTeDSL kernels write
+// those scales when the backend is on; when it declines (here, as it is switched off), the
+// quantization must not reach the tuned 1D kernel, which writes compact scales.
+template <typename InputType>
+void performTestSwizzledScales1D(const std::vector<size_t>& shape, const bool columnwise,
+                                 const bool cutedsl_off) {
+    DType itype = TypeInfo<InputType>::dtype;
+    DType otype = DType::kFloat4E2M1;
+
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+
+    Tensor input("input", shape, itype);
+    fillCase<fp32>(&input, InputsFillCase::uniform);
+
+    // Golden amax chosen so the 2nd-stage scaling mantissa is zero (avoids rounding noise).
+    const float golden_amax = 448.0f * 6.0f * 8.0f;
+
+    Tensor compact("compact", shape, otype, /*rowwise=*/true, columnwise, NVTE_NVFP4_1D_SCALING);
+    Tensor output("output", shape, otype, /*rowwise=*/true, columnwise, NVTE_NVFP4_1D_SCALING);
+    output.set_with_gemm_swizzled_scales(true);
+    for (Tensor* t : {&compact, &output}) {
+        t->cpu_rowwise_amax_ptr<float>()[0] = golden_amax;
+        if (columnwise) {
+            t->cpu_columnwise_amax_ptr<float>()[0] = golden_amax;
+        }
+        t->from_cpu();
+    }
+
+    QuantizationConfigWrapper quant_config;
+    {
+        CuTeDSLBackendOff cuda_backend;
+        nvte_quantize_v2(input.data(), compact.data(), quant_config, 0);
+        if (cutedsl_off) {
+            nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
+        }
+    }
+    if (!cutedsl_off) {
+        nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
+    }
+    Tensor ref_row = with_gemm_swizzled_scales(compact, shape, /*columnwise=*/false);
+
+    // The GEMM of the output with itself, and of the reference with itself.
+    Tensor gemm("gemm", std::vector<size_t>{rows, rows}, DType::kBFloat16);
+    Tensor ref_gemm("ref_gemm", std::vector<size_t>{rows, rows}, DType::kBFloat16);
+    Tensor workspace("workspace", std::vector<size_t>{32ull * 1024 * 1024}, DType::kByte);
+    for (auto [operand, d] : {std::pair<Tensor*, Tensor*>{&output, &gemm},
+                              std::pair<Tensor*, Tensor*>{&ref_row, &ref_gemm}}) {
+        NVTETensor a = operand->data(), d_tensor = d->data(), ws = workspace.data();
+        NVTETensor bias = nullptr, pre_gelu_out = nullptr;
+        nvte_multi_tensor_gemm(&a, &a, &d_tensor, &bias, &pre_gelu_out, 1, /*transa=*/true,
+                               /*transb=*/false, /*grad=*/false, &ws, /*accumulate=*/false,
+                               /*use_split_accumulator=*/false, 0, 0);
+    }
+
+    cudaDeviceSynchronize();
+    auto err = cudaGetLastError();
+    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    output.to_cpu();
+    compact.to_cpu();
+    compare_nvfp4_tensors("swizzled_scales_data", output.rowwise_cpu_dptr<fp4e2m1>(),
+                          compact.rowwise_cpu_dptr<fp4e2m1>(), static_cast<int>(rows),
+                          static_cast<int>(cols), /*atol=*/0.0, /*rtol=*/0.0);
+    compareResults("swizzled_scales", output.rowwise_cpu_scale_inv_ptr<uint8_t>(),
+                   ref_row.rowwise_cpu_scale_inv_ptr<uint8_t>(),
+                   product(output.rowwise_scale_inv_shape()));
+    if (columnwise) {
+        Tensor ref_col = with_gemm_swizzled_scales(compact, shape, /*columnwise=*/true);
+        compare_nvfp4_tensors("swizzled_scales_data_t", output.columnwise_cpu_dptr<fp4e2m1>(),
+                              compact.columnwise_cpu_dptr<fp4e2m1>(), static_cast<int>(cols),
+                              static_cast<int>(rows), /*atol=*/0.0, /*rtol=*/0.0);
+        compareResults("swizzled_scales_t", output.columnwise_cpu_scale_inv_ptr<uint8_t>(),
+                       ref_col.columnwise_cpu_scale_inv_ptr<uint8_t>(),
+                       product(output.columnwise_scale_inv_shape()));
+    }
+
+    ref_gemm.to_cpu();
+    auto [atol, rtol] = getTolerances(DType::kBFloat16);
+    compareResults("swizzled_scales_gemm", gemm, ref_gemm.rowwise_cpu_dptr<bf16>(), true, atol,
+                   rtol);
 }
 
 }  // namespace
@@ -2007,3 +2118,91 @@ INSTANTIATE_TEST_SUITE_P(
         name += std::get<4>(info.param) ? "XCuTeDSLOff" : "XBackendAsSet";
         return name;
     });
+
+class CastNVFP4SwizzledScales1DTestSuite
+    : public ::testing::TestWithParam<std::tuple<std::vector<size_t>, bool, bool>> {};
+
+TEST_P(CastNVFP4SwizzledScales1DTestSuite, MatchesSwizzledCompactScales) {
+    // The NVFP4 quantize kernels and GEMM require Blackwell.
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    performTestSwizzledScales1D<bf16>(std::get<0>(GetParam()), std::get<1>(GetParam()),
+                                      std::get<2>(GetParam()));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    CastNVFP4SwizzledScales1DTestSuite,
+    // 128-aligned, as the frontends ask for swizzled scales, with several 128x4 scale tiles.
+    ::testing::Combine(
+        ::testing::Values(std::vector<size_t>{256, 512}, std::vector<size_t>{512, 1024},
+                          std::vector<size_t>{8, 32, 1024}),
+        ::testing::Values(false, true),   // columnwise
+        ::testing::Values(false, true)),  // CuTeDSL backend switched off
+    [](const testing::TestParamInfo<CastNVFP4SwizzledScales1DTestSuite::ParamType>& info) {
+        std::string name;
+        for (const auto& s : std::get<0>(info.param)) {
+            name += "X" + std::to_string(s);
+        }
+        name += std::get<1>(info.param) ? "XBothDirections" : "XRowwise";
+        name += std::get<2>(info.param) ? "XCuTeDSLOff" : "XBackendAsSet";
+        return name;
+    });
+
+// The rule by which a framework asks for, and the CuTeDSL backend accepts, GEMM-swizzled scales on
+// NVFP4 1D outputs: every term declines on its own.
+TEST(CastNVFP4CuTeDSLSwizzledScalesTest, AlignmentRule) {
+    struct Inputs {
+        bool with_rht = false;
+        bool with_2d_quantization = false;
+        bool row_scaled_nvfp4 = false;
+        bool nvfp4_use_4over6 = false;
+        int sm_arch = 100;
+        DType scale_dtype = DType::kFloat8E4M3;
+        bool with_amax = true;
+        bool rowwise = true;
+        bool stochastic_rounding = false;
+    };
+    const auto alignment = [](const Inputs& in) {
+        return cutedsl_backend::nvfp4_gemm_swizzled_scales_alignment(
+            in.with_rht, in.with_2d_quantization, in.row_scaled_nvfp4, in.nvfp4_use_4over6,
+            in.sm_arch, in.scale_dtype, in.with_amax, in.rowwise, in.stochastic_rounding);
+    };
+    const auto changed = [](auto change) {
+        Inputs in;
+        change(in);
+        return in;
+    };
+
+    const std::optional<std::pair<size_t, size_t>> tile{{128, 128}};
+    for (const int sm_arch : {100, 103, 110}) {
+        EXPECT_EQ(alignment(changed([&](Inputs& in) { in.sm_arch = sm_arch; })), tile)
+            << "SM " << sm_arch;
+    }
+    for (const int sm_arch : {100, 103}) {
+        const auto with_sr = changed([&](Inputs& in) {
+            in.sm_arch = sm_arch;
+            in.stochastic_rounding = true;
+        });
+        EXPECT_EQ(alignment(with_sr), tile) << "SR on SM " << sm_arch;
+    }
+    const std::vector<std::pair<std::string, Inputs>> declined = {
+        {"RHT", changed([](Inputs& in) { in.with_rht = true; })},
+        {"2D", changed([](Inputs& in) { in.with_2d_quantization = true; })},
+        {"row-scaled", changed([](Inputs& in) { in.row_scaled_nvfp4 = true; })},
+        {"4over6", changed([](Inputs& in) { in.nvfp4_use_4over6 = true; })},
+        {"SM 90", changed([](Inputs& in) { in.sm_arch = 90; })},
+        {"SM 120", changed([](Inputs& in) { in.sm_arch = 120; })},
+        {"UE5M3 scales", changed([](Inputs& in) { in.scale_dtype = DType::kFloat8UE5M3; })},
+        {"no amax", changed([](Inputs& in) { in.with_amax = false; })},
+        {"columnwise only", changed([](Inputs& in) { in.rowwise = false; })},
+        {"SR on SM 110", changed([](Inputs& in) {
+             in.sm_arch = 110;
+             in.stochastic_rounding = true;
+         })},
+    };
+    for (const auto& [name, in] : declined) {
+        EXPECT_FALSE(alignment(in).has_value()) << name;
+    }
+}

@@ -17,6 +17,7 @@
 
 #include "../../common.h"
 #include "../../tvm_ffi_bridge.h"
+#include "cutedsl_gemm_swizzled_scales.h"
 
 namespace transformer_engine {
 namespace cutedsl_backend {
@@ -33,15 +34,17 @@ struct NVFP4QuantConfig {
   bool use_fast_math;            // If fast math approximations are used during quantization
   bool row_scaled_nvfp4;         // If scales are computed per row (row-scaled NVFP4)
   bool return_transpose;         // If columnwise (transposed) output is produced
+  bool swizzled;                 // If the scales are written in the GEMM-swizzled layout
   uint32_t sm_arch = static_cast<uint32_t>(cuda::sm_arch());
 
-  // Bit layout: flags [3:0], SM architecture [12:4] (9 used/reserved).
+  // Bit layout: flags [4:0], SM architecture [13:5] (9 used/reserved).
   uint32_t to_id() const {
     NVTE_CHECK(sm_arch < 512, "SM architecture no longer fits in the 9 bits to_id() gives it.");
     return static_cast<uint32_t>(use_stochastic_rounding) |
            (static_cast<uint32_t>(use_fast_math) << 1) |
            (static_cast<uint32_t>(row_scaled_nvfp4) << 2) |
-           (static_cast<uint32_t>(return_transpose) << 3) | (sm_arch << 4);
+           (static_cast<uint32_t>(return_transpose) << 3) | (static_cast<uint32_t>(swizzled) << 4) |
+           (sm_arch << 5);
   }
 
   std::optional<tvm::ffi::Function> get_kernel() const {
@@ -63,7 +66,9 @@ struct NVFP4QuantConfig {
         .append("_")
         .append(row_scaled_nvfp4 ? "1" : "0")
         .append("_")
-        .append(return_transpose ? "1" : "0");
+        .append(return_transpose ? "1" : "0")
+        .append("_")
+        .append(swizzled ? "1" : "0");
     return key;
   }
 
@@ -72,8 +77,9 @@ struct NVFP4QuantConfig {
     if (!entrypoint.has_value()) {
       return false;
     }
-    tvm::ffi::Any result = (*entrypoint)(tvm::ffi::String(fn_name), use_stochastic_rounding,
-                                         use_fast_math, row_scaled_nvfp4, return_transpose);
+    tvm::ffi::Any result =
+        (*entrypoint)(tvm::ffi::String(fn_name), use_stochastic_rounding, use_fast_math,
+                      row_scaled_nvfp4, return_transpose, swizzled);
     return result.try_cast<bool>().value_or(false);
   }
 };
@@ -162,9 +168,6 @@ bool nvfp4_quantize_transpose_cutedsl(const Tensor &input, const Tensor *noop, T
     if (input.dtype() != DType::kBFloat16) {
       return false;
     }
-    if (output->with_gemm_swizzled_scales) {
-      return false;
-    }
     if (output->has_data() && output->scale_inv.dtype != DType::kFloat8E4M3) {
       return false;
     }
@@ -183,6 +186,25 @@ bool nvfp4_quantize_transpose_cutedsl(const Tensor &input, const Tensor *noop, T
       return false;
     }
     const auto [rows, cols] = input.flat_2d_dims();
+    // GEMM-swizzled scales only where the rule the framework uses to hand them to the kernel
+    // accepts them. A config the rule declines falls back without a report, like those above.
+    if (output->with_gemm_swizzled_scales) {
+      const bool nvfp4_use_4over6 =
+          quant_config != nullptr && quant_config->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      const auto alignment = nvfp4_gemm_swizzled_scales_alignment(
+          /*with_rht=*/false, use_2d_quantization, output->row_scaled_nvfp4, nvfp4_use_4over6,
+          cuda::sm_arch(), output->scale_inv.dtype, output->amax.dptr != nullptr,
+          output->has_data(), quant_config != nullptr && quant_config->stochastic_rounding);
+      if (!alignment) {
+        return false;
+      }
+      if (rows % alignment->first != 0 || cols % alignment->second != 0) {
+        report_cutedsl_not_chosen(
+            "NVFP4 quantization with GEMM-swizzled scales needs rows divisible by ",
+            alignment->first, " and columns divisible by ", alignment->second, ".");
+        return false;
+      }
+    }
     if (rows % 32 != 0 || cols % 32 != 0) {
       report_cutedsl_not_chosen("NVFP4 quantization needs rows and columns divisible by 32.");
       return false;
@@ -192,11 +214,9 @@ bool nvfp4_quantize_transpose_cutedsl(const Tensor &input, const Tensor *noop, T
         quant_config != nullptr ? quant_config->stochastic_rounding : false;
     const bool use_fast_math = quant_config != nullptr ? quant_config->use_fast_math : false;
     const bool row_scaled_nvfp4 = output->row_scaled_nvfp4;
+    const bool swizzled = output->with_gemm_swizzled_scales;
     const NVFP4QuantConfig config{
-        use_stochastic_rounding,
-        use_fast_math,
-        row_scaled_nvfp4,
-        return_transpose,
+        use_stochastic_rounding, use_fast_math, row_scaled_nvfp4, return_transpose, swizzled,
     };
 
     // Checks mirroring the CUDA version

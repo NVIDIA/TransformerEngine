@@ -29,6 +29,8 @@ from transformer_engine.common.CuTeDSL.utils import (
     fabs_f32,
     make_prmt_u32,
     pack_u32x2,
+    st_global_u32,
+    st_global_u8,
     x2_hi_to_f32_bf16,
     x2_lo_to_f32_bf16,
 )
@@ -40,6 +42,8 @@ from transformer_engine.common.CuTeDSL.utils_nvfp4 import (
     cvt_f32x8_to_fp4x8_sr,
     mul_cvt_bf16x8_to_fp4x8,
     mul_cvt_bf16x8_to_fp4x8_sr,
+    swizzled_scale_column_offset,
+    swizzled_scale_row_offset,
     zero_b32,
 )
 from transformer_engine.common.CuTeDSL.philox_rng import PhiloxRng
@@ -820,11 +824,26 @@ class NVFP4QuantizeGeneralG2SKernel(NVFP4QuantizeKernelBase):
             cute.recast_ptr(mS.iterator, dtype=Uint32),
             cute.make_layout((mS.shape[0], scale_stride // 4), stride=(scale_stride // 4, 1)),
         )
-        if row_global < outer:
-            if count == self.SCALES_PER_CHUNK_X:
-                for c4 in cutlass.range_constexpr(self.SCALES_PER_CHUNK_X // 4):
-                    mS_u32[row_global, chunk_sf_col0 // 4 + c4] = frg_u32[c4]
-            else:
-                for c in cutlass.range_constexpr(self.SCALES_PER_CHUNK_X):
-                    if c < count:
-                        mS[row_global, chunk_sf_col0 + c] = frg[c]
+        if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+            # A u32 still holds four scales of one row: the chunk's first column is a multiple
+            # of 4, so the four share one 4-byte group of the swizzled layout.
+            s_row = mS.iterator.toint() + swizzled_scale_row_offset(row_global, scale_stride)
+            if row_global < outer:
+                if count == self.SCALES_PER_CHUNK_X:
+                    for c4 in cutlass.range_constexpr(self.SCALES_PER_CHUNK_X // 4):
+                        s_col = swizzled_scale_column_offset(chunk_sf_col0 + 4 * c4)
+                        st_global_u32(s_row + s_col, frg_u32[c4])
+                else:
+                    for c in cutlass.range_constexpr(self.SCALES_PER_CHUNK_X):
+                        if c < count:
+                            s_col = swizzled_scale_column_offset(chunk_sf_col0 + c)
+                            st_global_u8(s_row + s_col, frg_u32[c // 4] >> Uint32(8 * (c % 4)))
+        else:
+            if row_global < outer:
+                if count == self.SCALES_PER_CHUNK_X:
+                    for c4 in cutlass.range_constexpr(self.SCALES_PER_CHUNK_X // 4):
+                        mS_u32[row_global, chunk_sf_col0 // 4 + c4] = frg_u32[c4]
+                else:
+                    for c in cutlass.range_constexpr(self.SCALES_PER_CHUNK_X):
+                        if c < count:
+                            mS[row_global, chunk_sf_col0 + c] = frg[c]

@@ -8,6 +8,7 @@
 #include <pybind.h>
 
 #include "common.h"
+#include "common/cast/nvfp4/cutedsl_gemm_swizzled_scales.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "pybind.h"
@@ -1957,7 +1958,8 @@ bool NVFP4Quantizer::meets_alignment(const std::vector<size_t>& shape,
 
 NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::gemm_swizzled_scales_alignment(
     bool optimize_for_gemm, bool with_rht, bool with_2d_quantization, bool row_scaled_nvfp4,
-    bool nvfp4_use_4over6, int sm_arch, std::optional<bool> disable_rht_cast_fusion) {
+    bool nvfp4_use_4over6, int sm_arch, std::optional<bool> disable_rht_cast_fusion,
+    DType scale_dtype, bool with_amax, bool rowwise_usage, bool stochastic_rounding) {
   if (!optimize_for_gemm) {
     return std::nullopt;
   }
@@ -1971,7 +1973,16 @@ NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::gemm_swizzled_scales_alignment(
   if (with_2d_quantization && !row_scaled_nvfp4 && !nvfp4_use_4over6) {
     return get_2d_swizzle_fusion_alignment(sm_arch);
   }
-  return std::nullopt;
+  const auto alignment = cutedsl_backend::nvfp4_gemm_swizzled_scales_alignment(
+      with_rht, with_2d_quantization, row_scaled_nvfp4, nvfp4_use_4over6, sm_arch, scale_dtype,
+      with_amax, rowwise_usage, stochastic_rounding);
+  if (!alignment) {
+    return std::nullopt;
+  }
+  // If the backend then declines the quantization, the CUDA kernel it falls back to writes the
+  // swizzled scales.
+  const bool enabled = transformer_engine::getenv<bool>("NVTE_ENABLE_CUTEDSL_BACKEND");
+  return enabled ? alignment : std::nullopt;
 }
 
 bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
@@ -1986,10 +1997,12 @@ bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>
 }
 
 bool NVFP4Quantizer::emits_gemm_swizzled_scales(const std::vector<size_t>& shape) const {
-  return meets_alignment(shape, gemm_swizzled_scales_alignment(
-                                    optimize_for_gemm, with_rht, with_2d_quantization,
-                                    row_scaled_nvfp4, nvfp4_4over6_mode != kNVTENVFP44Over6Disabled,
-                                    transformer_engine::cuda::sm_arch(), std::nullopt));
+  return meets_alignment(
+      shape, gemm_swizzled_scales_alignment(
+                 optimize_for_gemm, with_rht, with_2d_quantization, row_scaled_nvfp4,
+                 nvfp4_4over6_mode != kNVTENVFP44Over6Disabled, transformer_engine::cuda::sm_arch(),
+                 std::nullopt, scale_dtype, !disable_second_level_scale, rowwise_usage,
+                 stochastic_rounding));
 }
 
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(

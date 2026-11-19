@@ -176,6 +176,10 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           (output_tensor->has_data() ||
            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
+      // The tuned 1D kernel writes compact scales only, so a 1D output with GEMM-swizzled scales
+      // that the CuTeDSL backend declines takes the vector-blockwise kernel, which writes them.
+      bool use_vector_blockwise_kernel = !nvfp4_use_4over6 && !use_optimized_kernel;
+
       // Launch NVFP4 quantize kernel
       if (nvfp4_use_4over6) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
@@ -205,13 +209,16 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
               cutedsl_backend::nvfp4_quantize_transpose_cutedsl</*use_2d_quantization=*/false>(
                   *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
 #endif
-          if (!quantized_with_cutedsl) {
+          if (!quantized_with_cutedsl && output_tensor->with_gemm_swizzled_scales) {
+            use_vector_blockwise_kernel = true;
+          } else if (!quantized_with_cutedsl) {
             unpack_philox_state(quant_config_cpp, stream);
             nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
                 *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
           }
         }
-      } else {
+      }
+      if (use_vector_blockwise_kernel) {
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
         unpack_philox_state(quant_config_cpp, stream);
@@ -384,6 +391,10 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           (output_tensor->has_data() ||
            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
+      // The tuned 1D kernel writes compact scales only, so a 1D output with GEMM-swizzled scales
+      // that the CuTeDSL backend declines takes the vector-blockwise kernel, which writes them.
+      bool use_vector_blockwise_kernel = !nvfp4_use_4over6 && !use_optimized_kernel;
+
       // Launch NVFP4 quantize kernel
       if (nvfp4_use_4over6) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
@@ -412,12 +423,15 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
               cutedsl_backend::nvfp4_quantize_transpose_cutedsl</*use_2d_quantization=*/false>(
                   *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
 #endif
-          if (!quantized_with_cutedsl) {
+          if (!quantized_with_cutedsl && output_tensor->with_gemm_swizzled_scales) {
+            use_vector_blockwise_kernel = true;
+          } else if (!quantized_with_cutedsl) {
             nvfp4::quantize_transpose</*use_2d_quantization*/ false>(
                 *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
           }
         }
-      } else {
+      }
+      if (use_vector_blockwise_kernel) {
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
         quantize_transpose_vector_blockwise_fp4(

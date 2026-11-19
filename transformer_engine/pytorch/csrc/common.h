@@ -426,11 +426,11 @@ class NVFP4Quantizer : public Quantizer {
   bool emits_gemm_swizzled_scales(const std::vector<size_t>& shape) const;
 
   // Flattened row/column alignment for directly emitted GEMM-swizzled scales, or no such path.
-  static ShapeAlignment gemm_swizzled_scales_alignment(bool optimize_for_gemm, bool with_rht,
-                                                       bool with_2d_quantization,
-                                                       bool row_scaled_nvfp4, bool nvfp4_use_4over6,
-                                                       int sm_arch,
-                                                       std::optional<bool> disable_rht_cast_fusion);
+  // The CuTeDSL 1D path needs NVTE_ENABLE_CUTEDSL_BACKEND.
+  static ShapeAlignment gemm_swizzled_scales_alignment(
+      bool optimize_for_gemm, bool with_rht, bool with_2d_quantization, bool row_scaled_nvfp4,
+      bool nvfp4_use_4over6, int sm_arch, std::optional<bool> disable_rht_cast_fusion,
+      DType scale_dtype, bool with_amax, bool rowwise_usage, bool stochastic_rounding);
 
  private:
   static ShapeAlignment rht_cast_fusion_alignment(int sm_arch,

@@ -86,20 +86,28 @@ class NVFP4QuantizeConfig:
         use_fast_math: bool,
         row_scaled_nvfp4: bool,
         return_transpose: bool,
+        with_gemm_swizzled_scales: bool,
     ):
         self.USE_STOCHASTIC_ROUNDING = use_stochastic_rounding
         self.USE_FAST_MATH = use_fast_math
         if row_scaled_nvfp4 and return_transpose:
             raise ValueError("row-scaled NVFP4 with a transposed output is not implemented")
+        if row_scaled_nvfp4 and with_gemm_swizzled_scales:
+            raise ValueError("row-scaled NVFP4 with GEMM-swizzled scales is not implemented")
         self.ROW_SCALED_NVFP4 = row_scaled_nvfp4
         self.RETURN_TRANSPOSE = return_transpose
+        # The scales are written in the GEMM-swizzled layout (swizzled_scale_row_offset). The
+        # C++ dispatcher asks for it only when rows and columns are multiples of 128, so the
+        # kernels write every byte of the scale tensors and leave no padding to zero.
+        self.WITH_GEMM_SWIZZLED_SCALES = with_gemm_swizzled_scales
 
     def __str__(self):
         return (
             f"NVFP4QuantizeConfig(use_stochastic_rounding={self.USE_STOCHASTIC_ROUNDING}, "
             f"use_fast_math={self.USE_FAST_MATH}, "
             f"row_scaled_nvfp4={self.ROW_SCALED_NVFP4}, "
-            f"return_transpose={self.RETURN_TRANSPOSE})"
+            f"return_transpose={self.RETURN_TRANSPOSE}, "
+            f"with_gemm_swizzled_scales={self.WITH_GEMM_SWIZZLED_SCALES})"
         )
 
     __repr__ = __str__
@@ -335,6 +343,7 @@ def get_nvfp4_quantization_function(
     use_fast_math: bool,
     row_scaled_nvfp4: bool,
     return_transpose: bool,
+    with_gemm_swizzled_scales: bool,
 ) -> bool:
     """Compile the NVFP4 quantize kernel for this config and register it in the TVM-FFI global
     registry under EXACTLY `fn_name` (the key the C++ dispatcher built). Returns True if a kernel
@@ -362,6 +371,7 @@ def get_nvfp4_quantization_function(
             use_fast_math=use_fast_math,
             row_scaled_nvfp4=row_scaled_nvfp4,
             return_transpose=return_transpose,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         )
     except ValueError as e:
         # The exception message states exactly why the config is unsupported. Surfacing it as a
