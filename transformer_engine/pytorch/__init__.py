@@ -33,6 +33,8 @@ from transformer_engine.pytorch.attention import (
     DSv4Attention,
     Compressor,
     Indexer,
+    dense_indexer_loss_scores,
+    dense_indexer_loss_backward,
 )
 from transformer_engine.pytorch.attention import GatedDeltaNetAttention
 from transformer_engine.pytorch.attention import GatedDeltaNet2Attention

@@ -5,7 +5,13 @@
 """Python interface for attention"""
 
 from .dot_product_attention import DotProductAttention
-from .sparse_attention import DSv4Attention, Compressor, Indexer
+from .sparse_attention import (
+    DSv4Attention,
+    Compressor,
+    Indexer,
+    dense_indexer_loss_scores,
+    dense_indexer_loss_backward,
+)
 from .linear_attention import (
     GatedDeltaNetAttention,
     GatedDeltaNet2Attention,
@@ -22,6 +28,8 @@ __all__ = [
     "DSv4Attention",
     "Compressor",
     "Indexer",
+    "dense_indexer_loss_scores",
+    "dense_indexer_loss_backward",
     "GatedDeltaNetAttention",
     "GatedDeltaNet2Attention",
     "GatedDeltaProductAttention",

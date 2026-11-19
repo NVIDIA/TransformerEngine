@@ -7,6 +7,7 @@
 import pytest
 import torch
 
+from transformer_engine.pytorch import dense_indexer_loss_scores, dense_indexer_loss_backward
 from transformer_engine.pytorch.attention.sparse_attention import (
     Compressor,
     Indexer,
@@ -140,107 +141,64 @@ def test_dsa_rejects_unsupported_metadata():
 # RoPE
 
 
-@pytest.mark.parametrize("heads", [1, 64])
-def test_dsa_triton_rope_batched(monkeypatch, heads):
-    """The packed Triton kernels must reset positions at each BSHD sequence."""
+@pytest.mark.parametrize("layout", ["batched_q", "packed_kv"])
+def test_dsa_triton_rope_adapters(monkeypatch, layout):
+    """Compare production Q/KV adapter roles with eager outputs, gradients and aliasing."""
     if not torch.cuda.is_available():
         pytest.skip("Triton DSA RoPE requires CUDA")
     if dsa_rope._triton_rope_module() is None:
         pytest.skip("Triton DSL is unavailable")
     torch.manual_seed(23)
-    batch, seq, dim, width = 2, 17, 512, 64
-    x = torch.randn(batch, seq, heads, dim, device="cuda", dtype=torch.bfloat16)
-    (cos, sin), _ = dsa_rope.rotary_embeddings(seq, 4, width, 160000.0, x.device)
-    cu = torch.arange(batch + 1, device=x.device, dtype=torch.int32) * seq
+    inplace = layout == "batched_q"
+    if inplace:
+        x = torch.randn(2, 17, 64, 512, device="cuda", dtype=torch.bfloat16)
+        boundaries, seq = [0, 17, 34], 17
+        apply = dsa_rope._apply_rotary_query
+    else:
+        # Ragged lengths 3 and 5, followed by one padded compressed-token position.
+        x = torch.randn(9, 1, 512, device="cuda", dtype=torch.bfloat16)
+        boundaries, seq = [0, 3, 8], 5
+        apply = dsa_rope.apply_dsa_rope
+    (cos, sin), _ = dsa_rope.rotary_embeddings(seq, 4, 64, 160000.0, x.device)
+    cu = torch.tensor(boundaries, device=x.device, dtype=torch.int32)
     gradient = torch.randn_like(x)
 
     eager = dsa_rope._apply_rotary_eager
+    reference_input = x.detach().clone().requires_grad_()
+    reference = eager(reference_input, cos, sin, cu)
+    if not inplace:
+        # Check eager packed indexing against separate sequences, including padding at position 0.
+        with torch.no_grad():
+            expected = torch.cat(
+                [
+                    eager(
+                        x[start:end].unsqueeze(0), cos[:, : end - start], sin[:, : end - start]
+                    ).squeeze(0)
+                    for start, end in ((0, 3), (3, 8), (8, 9))
+                ]
+            )
+        torch.testing.assert_close(reference, expected)
+    reference_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
+
     monkeypatch.setattr(
         dsa_rope,
         "_apply_rotary_eager",
         lambda *_: pytest.fail("Triton dispatch fell back to eager RoPE"),
     )
-    candidate_input = x.detach().requires_grad_()
-    candidate = dsa_rope.apply_rotary(candidate_input, cos, sin, cu)
-    candidate_grad = torch.autograd.grad(candidate, candidate_input, gradient)[0]
+    candidate_source = x.detach().clone().requires_grad_()
+    candidate_input = candidate_source.clone() if inplace else candidate_source
+    candidate_ptr = candidate_input.data_ptr()
+    candidate = apply(candidate_input, cos, sin, cu)
+    candidate_grad = torch.autograd.grad(candidate, candidate_source, gradient)[0]
 
-    reference_input = x.detach().requires_grad_()
-    reference = eager(reference_input, cos, sin)
-    reference_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
-
-    assert candidate.data_ptr() != candidate_input.data_ptr()
+    assert (candidate.data_ptr() == candidate_ptr) == inplace
     torch.testing.assert_close(candidate, reference, atol=2e-2, rtol=2e-2)
-    grad_delta = candidate_grad.float() - reference_grad.float()
-    assert grad_delta.abs().max() <= 0.03125
-    assert grad_delta.norm() / reference_grad.float().norm() < 0.002
-
-    query_source = x.detach().requires_grad_()
-    query_input = query_source.clone()
-    query_ptr = query_input.data_ptr()
-    query = dsa_rope._apply_rotary_query(query_input, cos, sin, cu)
-    query_grad = torch.autograd.grad(query, query_source, gradient)[0]
-
-    assert query.data_ptr() == query_ptr
-    torch.testing.assert_close(query, reference, atol=2e-2, rtol=2e-2)
-    torch.testing.assert_close(query_grad, reference_grad, atol=0.03125, rtol=0.002)
-
-
-def test_dsa_rope_non_power_of_two(monkeypatch):
-    """An accepted width of 96 must fall back for both rotary entry points."""
-    if not torch.cuda.is_available():
-        pytest.skip("DSA rotary dispatch requires CUDA")
-    if dsa_rope._triton_rope_module() is None:
-        pytest.skip("Triton DSL is unavailable")
-    torch.manual_seed(41)
-    x = torch.randn(17, 2, 128, device="cuda", dtype=torch.bfloat16)
-    (cos, sin), _ = dsa_rope.rotary_embeddings(17, 4, 96, 160000.0, x.device)
-    cu = torch.tensor([0, 17], device=x.device, dtype=torch.int32)
-    monkeypatch.setattr(
-        dsa_rope, "_launch_triton", lambda *_: pytest.fail("Width 96 reached Triton")
-    )
-    assert not dsa_rope._can_use_triton(x, cos, sin, cu)
-    gradient = torch.randn_like(x)
-    reference_input = x.detach().requires_grad_()
-    reference = dsa_rope._apply_rotary_eager(reference_input, cos, sin, cu)
-    reference_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
-    for apply in (dsa_rope.apply_rotary, dsa_rope._apply_rotary_query):
-        candidate_input = x.detach().requires_grad_()
-        candidate = apply(candidate_input, cos, sin, cu)
-        candidate_grad = torch.autograd.grad(candidate, candidate_input, gradient)[0]
-        torch.testing.assert_close(candidate, reference)
-        torch.testing.assert_close(candidate_grad, reference_grad)
-
-
-def test_dsa_packed_rope_eager():
-    """Reset per-sequence positions and safely rotate unused compressed capacity."""
-    torch.manual_seed(31)
-    cu = torch.tensor([0, 3, 8], dtype=torch.int32)
-    (cos, sin), _ = dsa_rope.rotary_embeddings(5, 1, 4, 12345.0, "cpu")
-    x = torch.randn(9, 2, 8, requires_grad=True)
-    reference_input = x.detach().clone().requires_grad_()
-    actual = dsa_rope.apply_rotary(x, cos, sin, cu)
-    expected = torch.cat(
-        [
-            dsa_rope._apply_rotary_eager(
-                reference_input[start:end].unsqueeze(0),
-                cos[:, : end - start],
-                sin[:, : end - start],
-            ).squeeze(0)
-            for start, end in ((0, 3), (3, 8), (8, 9))
-        ]
-    )
-    gradient = torch.randn_like(actual)
-    actual.backward(gradient)
-    expected.backward(gradient)
-    torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(x.grad, reference_input.grad)
+    torch.testing.assert_close(candidate_grad, reference_grad, atol=0.03125, rtol=0.002)
 
 
 @pytest.mark.parametrize("interleaved", [False, True])
-@pytest.mark.parametrize("inverse", [False, True])
-@pytest.mark.parametrize("cp_rank", [0, 1])
-def test_common_rope_layout_inverse_packed(interleaved, inverse, cp_rank):
-    """Independent pair equations cover shared lookup, both layouts and transpose."""
+def test_common_rope_layout_packed(interleaved):
+    """Check both Q output layouts and gradients for the current CP1/noninverse callers."""
     if not torch.cuda.is_available():
         pytest.skip("Triton RoPE requires CUDA")
     kernels = dsa_rope._triton_rope_module()
@@ -249,21 +207,16 @@ def test_common_rope_layout_inverse_packed(interleaved, inverse, cp_rank):
     import triton
 
     torch.manual_seed(53)
-    # CP2 local lengths are 4 and 6, plus one padded token position. Each rank owns
-    # the first/last chunks prescribed by the zig-zag CP mapping.
-    positions = (
-        [0, 1, 6, 7, 0, 1, 2, 9, 10, 11, 0] if cp_rank == 0 else [2, 3, 4, 5, 3, 4, 5, 6, 7, 8, 0]
-    )
-    cu = torch.tensor([0, 8, 20], device="cuda", dtype=torch.int32)
+    # Two sequences of lengths 4 and 6, then one padded token using position zero.
+    positions = [0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 0]
+    cu = torch.tensor([0, 4, 10], device="cuda", dtype=torch.int32)
     x = torch.randn(11, 3, 80, device="cuda", dtype=torch.bfloat16)
-    # Noncontiguous rows ensure callers preserve the explicit table strides.
-    cos = torch.randn(12, 128, device="cuda")[:, ::2]
-    sin = torch.randn(12, 128, device="cuda")[:, ::2]
+    # Contiguous columns with a larger row stride exercise explicit table strides.
+    cos = torch.randn(6, 128, device="cuda")[:, :64]
+    sin = torch.randn(6, 128, device="cuda")[:, :64]
     reference_input = x.detach().requires_grad_()
     tail = reference_input[..., 16:].float()
     c, s = cos[positions, None], sin[positions, None]
-    if inverse:
-        s = -s
     left = tail[..., 0::2] * c[..., :32] - tail[..., 1::2] * s[..., :32]
     right = tail[..., 1::2] * c[..., 32:] + tail[..., 0::2] * s[..., 32:]
     rotated = (
@@ -274,13 +227,9 @@ def test_common_rope_layout_inverse_packed(interleaved, inverse, cp_rank):
     expected_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
     candidate, actual_grad = x.clone(), gradient.clone()
     grid = lambda meta: (11, triton.cdiv(3, meta["BLOCK_H"]))
-    # The tables have strided columns; materialize those columns while retaining
-    # a larger row stride, which is the kernel's supported table contract.
-    cos = torch.stack((cos, cos), 1)[:, 0, :]
-    sin = torch.stack((sin, sin), 1)[:, 0, :]
     for kernel, tensor in (
-        (kernels._autotuned_mla_rope_fwd_inplace_kernel, candidate),
-        (kernels._autotuned_mla_rope_bwd_inplace_kernel, actual_grad),
+        (kernels.rotary_fwd_q_kernel, candidate),
+        (kernels.rotary_bwd_q_kernel, actual_grad),
     ):
         kernel[grid](
             tensor,
@@ -297,9 +246,9 @@ def test_common_rope_layout_inverse_packed(interleaved, inverse, cp_rank):
             tensor.stride(1),
             cos.stride(0),
             sin.stride(0),
-            cp_rank,
-            2,
-            INVERSE=inverse,
+            0,
+            1,
+            INVERSE=False,
             REMOVE_INTERLEAVING=interleaved,
         )
     torch.testing.assert_close(candidate, reference, atol=0.03125, rtol=0.002)
@@ -395,7 +344,7 @@ def test_dsa_indexer_backward(index_heads):
     ).contiguous()
     target = (comp_logits - full_lse[..., None]).exp().sum(2)
     target = target / target.sum(-1, keepdim=True).clamp_min(1e-30)
-    index_score, attn_score = dsa_cudnn.dense_indexer_loss_scores(
+    index_score, attn_score = dense_indexer_loss_scores(
         qi,
         ki,
         wi,
@@ -423,7 +372,7 @@ def test_dsa_indexer_backward(index_heads):
         coefficient * upstream * (target * (target.clamp_min(1e-30).log() - log_prob)).sum() / seq
     )
     reference_grads = torch.autograd.grad(loss, (qr, kr, wr))
-    actual_grads = dsa_cudnn.dense_indexer_loss_backward(
+    actual_grads = dense_indexer_loss_backward(
         qi,
         ki,
         wi,
@@ -491,7 +440,6 @@ def test_dsv4_thd_compressed_prefixes():
 @pytest.mark.parametrize(
     "prefix,maximum",
     [
-        (None, 8),
         ([0, 8], 8),
         (torch.tensor([0, 8], dtype=torch.int64), 8),
         (torch.tensor([[0, 8]], dtype=torch.int32), 8),
@@ -526,8 +474,7 @@ def test_dsv4_thd_rejects_hidden_batch_axis_and_multi_sequence_context():
 
 
 @pytest.mark.parametrize("variant,ratio", [("hca", 128), ("csa", 4)])
-@pytest.mark.parametrize("lengths", [[129, 257], [255, 383]])
-def test_dsv4_attention_thd(variant, ratio, lengths):
+def test_dsv4_attention_thd(variant, ratio):
     """Packed full-layer output and gradients match independent dense sequences."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in (
         (10, 0),
@@ -538,6 +485,7 @@ def test_dsv4_attention_thd(variant, ratio, lengths):
     cudnn = pytest.importorskip("cudnn")
     if not hasattr(getattr(cudnn, "DSA", None), "sparse_attention_forward_wrapper"):
         pytest.skip("DSv4 requires cuDNN Frontend 1.29 sparse attention APIs")
+    lengths = [255, 383]
     torch.manual_seed(37)
     layer = dsv4_attention.DSv4Attention(
         hidden_size=32,

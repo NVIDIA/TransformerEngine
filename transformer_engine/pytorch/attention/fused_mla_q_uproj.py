@@ -21,7 +21,7 @@ from packaging.version import Version as PkgVersion
 try:
     import triton
     from transformer_engine.common.triton.dsa_rope import (
-        _autotuned_mla_rope_bwd_inplace_kernel as rotary_bwd_q_kernel,
+        rotary_bwd_q_kernel,
     )
 except ImportError:
     triton = None

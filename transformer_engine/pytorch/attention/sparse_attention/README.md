@@ -21,7 +21,7 @@ DSv4Attention
 ├── Indexer (CSA only)
 │   ├── TE index-query/head-weight projections
 │   ├── own Compressor (index keys)
-│   ├── dsa_rope.apply_rotary (query + index keys)
+│   ├── dsa_rope.apply_dsa_rope (query + index keys)
 │   └── dsa_cudnn.select_indices -> cuDNN score + top-k
 ├── dsa_rope embeddings + rotary application
 ├── dsa_cudnn.sparse_attention -> cuDNN sparse attention
@@ -154,9 +154,12 @@ single-sequence, caller-owned indexer loss. Without that objective, the
 indexer is not trained by the attention output alone. Pre-attention
 normalization, residuals, and loss calculation remain model-owned.
 
-For B=1, the caller can train the indexer with the dense helper primitives:
+For B=1, the caller can train the indexer with `dense_indexer_loss_scores` and
+`dense_indexer_loss_backward`, exported alongside the three sparse-attention classes:
 
 ```python
+from transformer_engine.pytorch import dense_indexer_loss_scores, dense_indexer_loss_backward
+
 output, context = csa(hidden_states, return_indexer_context=True)
 qi, ki, wi = (context[name].unsqueeze(0)
               for name in ("index_q", "index_k", "index_w"))
@@ -167,12 +170,12 @@ qa, kc = (context[name].unsqueeze(0)
 # The selected sparse-attention LSE excludes sink and is not this denominator.
 full_lse = ...
 index_scale = (qi.shape[2] * qi.shape[3]) ** -0.5
-index_scores, teacher_scores = dsa_cudnn.dense_indexer_loss_scores(
+index_scores, teacher_scores = dense_indexer_loss_scores(
     qi, ki, wi, qa, kc, full_lse,
     ratio=csa.compression_ratio, index_scale=index_scale,
     attention_scale=csa.head_dim ** -0.5,
 )
-index_grads = dsa_cudnn.dense_indexer_loss_backward(
+index_grads = dense_indexer_loss_backward(
     qi, ki, wi, index_scores, teacher_scores,
     torch.ones((), device=qi.device),
     ratio=csa.compression_ratio, index_scale=index_scale,

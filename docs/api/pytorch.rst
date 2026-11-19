@@ -34,6 +34,10 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.Indexer(hidden_size, q_lora_rank, head_dim, n_heads, top_k, ratio, eps, device, params_dtype, **kwargs)
   :members: forward
 
+.. autoapifunction:: transformer_engine.pytorch.dense_indexer_loss_scores
+
+.. autoapifunction:: transformer_engine.pytorch.dense_indexer_loss_backward
+
 .. autoapiclass:: transformer_engine.pytorch.GatedDeltaNetAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward
 

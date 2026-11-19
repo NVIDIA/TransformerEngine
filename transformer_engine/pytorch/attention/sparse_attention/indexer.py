@@ -10,7 +10,7 @@ from transformer_engine.pytorch.module import Linear
 
 from .compressor import Compressor
 from .dsa_cudnn import select_indices
-from .dsa_rope import apply_rotary
+from .dsa_rope import apply_dsa_rope
 
 
 class Indexer(torch.nn.Module):
@@ -127,7 +127,7 @@ class Indexer(torch.nn.Module):
         )
         # The singleton axis is the shared index-key head, not a tunable head count.
         key = (
-            apply_rotary(
+            apply_dsa_rope(
                 index_compressed.reshape(*comp_shape, 1, self.head_dim),
                 *compressed_rope,
                 cu_comp,
@@ -139,7 +139,7 @@ class Indexer(torch.nn.Module):
             *hidden_states.shape[:-1], self.n_heads, self.head_dim
         )
         query = (
-            apply_rotary(query, *token_rope, cu)
+            apply_dsa_rope(query, *token_rope, cu)
             .reshape(-1, self.n_heads, self.head_dim)
             .contiguous()
         )

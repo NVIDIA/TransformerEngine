@@ -113,11 +113,7 @@ def _apply_rotary_triton(x, cos, sin, cu_seqlens):
 
 
 def _launch_triton(packed, cos, sin, cu_seqlens, module, backward):
-    kernel = (
-        module._autotuned_mla_rope_bwd_inplace_kernel
-        if backward
-        else module._autotuned_mla_rope_fwd_inplace_kernel
-    )
+    kernel = module.rotary_bwd_q_kernel if backward else module.rotary_fwd_q_kernel
     heads, dim = packed.shape[-2:]
 
     def grid(meta):
@@ -152,7 +148,7 @@ class _TritonRotary(torch.autograd.Function):
     def forward(ctx, x, cos, sin, cu_seqlens, module):
         """Rotate a copy and save the frequency tables for backward."""
         # cuDNN attention saves its output for backward. Cloning also preserves
-        # apply_rotary's established out-of-place contract for every call site.
+        # apply_dsa_rope's established out-of-place contract for every call site.
         output = x.clone(memory_format=torch.contiguous_format)
         packed = output.reshape(-1, x.shape[-2], x.shape[-1])
         _launch_triton(packed, cos, sin, cu_seqlens, module, False)
@@ -198,7 +194,7 @@ class _TritonQueryRotary(torch.autograd.Function):
 def _apply_rotary_query(query, cos, sin, cu_seqlens):
     """Rotate fresh normalized queries in place with Triton, avoiding a copy.
 
-    Unlike apply_rotary, this private path requires an input safe to mutate.
+    Unlike apply_dsa_rope, this private path requires an input safe to mutate.
     Its backward and eager fallback remain out of place.
     """
     if not _can_use_triton(query, cos, sin, cu_seqlens):
@@ -207,7 +203,7 @@ def _apply_rotary_query(query, cos, sin, cu_seqlens):
     return _TritonQueryRotary.apply(query, _rope_tables(cos), _rope_tables(sin), cu_seqlens, module)
 
 
-def apply_rotary(x, cos, sin, cu_seqlens=None):
+def apply_dsa_rope(x, cos, sin, cu_seqlens=None):
     """Rotate trailing interleaved pairs, using Triton when its contract is satisfied."""
     if _can_use_triton(x, cos, sin, cu_seqlens):
         return _apply_rotary_triton(x, cos, sin, cu_seqlens)

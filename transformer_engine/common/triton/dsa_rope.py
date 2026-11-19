@@ -48,7 +48,7 @@ def _get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
 
 
 @triton.jit
-def _mla_rope_fwd_inplace_kernel(
+def _rotary_fwd_q_kernel(
     Q,
     COS,
     SIN,
@@ -134,7 +134,7 @@ def _mla_rope_fwd_inplace_kernel(
         tl.store(Q + x_right_off, x_right, mask=mask)
 
 
-_autotuned_mla_rope_fwd_inplace_kernel = triton.autotune(
+rotary_fwd_q_kernel = triton.autotune(
     configs=[
         triton.Config({"BLOCK_H": 1}),
         triton.Config({"BLOCK_H": 2}),
@@ -147,11 +147,11 @@ _autotuned_mla_rope_fwd_inplace_kernel = triton.autotune(
     ],
     key=["emb_dim", "head_num"],
     restore_value=["Q"],
-)(_mla_rope_fwd_inplace_kernel)
+)(_rotary_fwd_q_kernel)
 
 
 @triton.jit
-def _mla_rope_bwd_inplace_kernel(
+def _rotary_bwd_q_kernel(
     DO,
     COS,
     SIN,
@@ -237,7 +237,7 @@ def _mla_rope_bwd_inplace_kernel(
     tl.store(DO + x_2_off, x_2, mask=mask)
 
 
-_autotuned_mla_rope_bwd_inplace_kernel = triton.autotune(
+rotary_bwd_q_kernel = triton.autotune(
     configs=[
         triton.Config({"BLOCK_H": 1}),
         triton.Config({"BLOCK_H": 2}),
@@ -250,7 +250,7 @@ _autotuned_mla_rope_bwd_inplace_kernel = triton.autotune(
     ],
     key=["emb_dim", "head_num"],
     restore_value=["DO"],
-)(_mla_rope_bwd_inplace_kernel)
+)(_rotary_bwd_q_kernel)
 
 
 @triton.autotune(

@@ -12,7 +12,7 @@ from transformer_engine.pytorch.module import Linear, RMSNorm
 
 from .compressor import Compressor
 from .dsa_cudnn import sparse_attention as _sparse_attention
-from .dsa_rope import _apply_rotary_query, _DSv4RotaryEmbedding, apply_rotary
+from .dsa_rope import _apply_rotary_query, _DSv4RotaryEmbedding, apply_dsa_rope
 from .indexer import Indexer
 
 __all__ = ["DSv4Attention"]
@@ -315,9 +315,9 @@ class DSv4Attention(torch.nn.Module):
             .reshape(-1, self.num_heads, self.head_dim)
             .contiguous()
         )
-        local_kv = apply_rotary(self.kv_norm(local_kv_projected).unsqueeze(-2), *token_rope, cu)
+        local_kv = apply_dsa_rope(self.kv_norm(local_kv_projected).unsqueeze(-2), *token_rope, cu)
         local_kv = local_kv.reshape(-1, self.head_dim).contiguous()
-        compressed_kv = apply_rotary(
+        compressed_kv = apply_dsa_rope(
             self.compressor(hidden_states, cu, cu_comp, total_comp=total_comp).reshape(
                 *comp_shape, 1, self.head_dim
             ),
@@ -360,7 +360,7 @@ class DSv4Attention(torch.nn.Module):
             max_compressed_seqlen=None if self.is_csa else seq // self.compression_ratio,
         ).reshape(*token_shape, self.num_heads, self.head_dim)
         cos, sin = token_rope
-        output = apply_rotary(output, cos, -sin, cu).reshape(*token_shape, self.o_groups, -1)
+        output = apply_dsa_rope(output, cos, -sin, cu).reshape(*token_shape, self.o_groups, -1)
         weight = self.o_a_proj.weight.reshape(self.o_groups, self.o_lora_rank, -1)
         grouped = torch.einsum("...gd,grd->...gr", output, weight).flatten(-2)
         result = self.o_b_proj(grouped)

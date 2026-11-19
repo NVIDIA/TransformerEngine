@@ -471,7 +471,10 @@ def test_inputs_on_non_current_device():
 
 @pytest.mark.skipif(not HAVE_TRITON, reason="MLA RoPE requires Triton")
 def test_mla_rope_kv_equations_backward():
-    """Separate MLA K/V assembly and positional-gradient reduction survive reuse."""
+    """Compare MLA K/V assembly and input gradients with independent PyTorch equations.
+
+    The positional key is shared across heads, so its gradient must sum their contributions.
+    """
     if not torch.cuda.is_available():
         pytest.skip("MLA RoPE requires CUDA")
     torch.manual_seed(59)
