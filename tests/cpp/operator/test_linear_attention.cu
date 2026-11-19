@@ -28,8 +28,10 @@ void RunAffinePrefixTest(size_t key_dim, size_t heads, size_t value_dim, size_t 
   using test::Tensor;
   using transformer_engine::DType;
   constexpr size_t kNumInitialStates = 3;
-  constexpr unsigned kSeed = 2026;     // Keep random inputs reproducible.
-  constexpr double kTolerance = 2e-5;  // Allow FP32 accumulation error against the FP64 reference.
+  constexpr unsigned kSeed = 2026;  // Keep random inputs reproducible.
+  // Allow FP32 rounding across repeated compositions against the FP64 reference.
+  constexpr double kAbsoluteTolerance = 5e-6;
+  constexpr double kRelativeTolerance = 5e-6;
   const size_t num_outputs = descriptor_rows.size();
   const size_t state_size = heads * value_dim * key_dim;
   // Create inputs and output storage for the requested state shapes.
@@ -103,7 +105,10 @@ void RunAffinePrefixTest(size_t key_dim, size_t heads, size_t value_dim, size_t 
           state.swap(next);
         }
         for (size_t col = 0; col < key_dim; ++col) {
-          ASSERT_NEAR(actual[output_index * state_size + row_offset + col], state[col], kTolerance)
+          // Match the shared test helper's absolute-or-relative acceptance rule.
+          const double tolerance =
+              std::max(kAbsoluteTolerance, kRelativeTolerance * std::abs(state[col]));
+          ASSERT_NEAR(actual[output_index * state_size + row_offset + col], state[col], tolerance)
               << "output=" << output_index << ", head=" << head << ", value=" << value
               << ", column=" << col;
         }
