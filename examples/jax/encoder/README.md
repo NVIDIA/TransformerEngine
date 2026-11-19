@@ -2,6 +2,11 @@
 
 This example uses Transformer Encoder to demonstrate the Transformer Engine usage. And more focus on scaling up training on multiple GPUs. Highly recommend studying the [MNIST example of the Transformer Engine](/examples/jax/mnist) before reading this example. The Transformer Engine is built on top of [Flax](https://github.com/google/flax). Thus, examples use `jit` `in `in_shardings` and `out_shardings` parameters to set up multiple GPU training. The basic parallel jit usage can be referred to [Scale up Flax Modules on multiple devices](https://flax.readthedocs.io/en/latest/guides/flax_on_pjit.html).
 
+Install the example dependencies with `pip install -r requirements.txt`. Python 3.14
+uses datasets 4.4 or newer for compatible dataset fingerprinting; older Python
+versions retain datasets 3.x. Label columns are converted to NumPy arrays before
+training, including the `Column` objects returned by newer datasets versions.
+
 ## Single GPU ##
 
 1. Setup dataset: This is done by using the `tfds` library to download the GLUE/CoLA dataset and using `nltk` to tokenize the sentences. This example focuses on Transformer Engine usage. Thus, a simple algorithm is used to convert tokens to INT32 tensors as input to the embedding layer. The `get_datasets` and `data_preprocess` routines are used for this purpose.

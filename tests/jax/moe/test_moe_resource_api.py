@@ -83,11 +83,11 @@ def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
     monkeypatch.setattr(ep.EpPrepareAndDispatchPrimitive.outer_primitive, "bind", bind)
     cfg = SimpleNamespace(top_k=1, dispatch_output_per_expert_alignment=256, topk_idx_dtype=0)
     with global_shard_guard(MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")):
-        inspect.unwrap(ep._ep_fused_prepare_and_dispatch_fwd)(cfg, None, None, None, 256)
+        inspect.unwrap(ep._ep_fused_prepare_and_dispatch_fwd)(cfg, None, None, None, None, 256)
 
     mesh = Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1, 1), ("dp", "fsdp", "ep"))
     sharding = NamedSharding(mesh, P(("dp", "fsdp", "ep"), None, None))
-    args = [SimpleNamespace(sharding=sharding)] * 3
+    args = [SimpleNamespace(sharding=sharding)] * 4
     _, _, outputs, _ = ep.EpPrepareAndDispatchPrimitive.partition(
         captured["top_k"],
         captured["dispatch_output_per_expert_alignment"],
