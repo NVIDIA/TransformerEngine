@@ -317,17 +317,29 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         self._validate_gates(gates, query_layer)
 
     def _prepare_cp_inputs(self, tensors, initial_state):
-        """Normalize token-aligned CP inputs before state propagation."""
+        """Normalize token-aligned CP inputs before state propagation.
+
+        Each tensor must retain a real-token leading axis for fragment selection;
+        additional axes, such as GDP's Householder axis, stay intact until FE dispatch.
+        """
         return tensors, initial_state
 
     def _cp_forward_summary(self, query, key, value, gates, cu_seqlens, **kernel_kwargs):
-        """Return the fragment maps S_out = S_in @ T + H."""
+        """Return FP32 (H, T) satisfying S_out = S_in @ T + H for each fragment.
+
+        H has shape [fragments, heads, V, K] and T [fragments, heads, K, K].
+        Summaries and local attention must use identical gate and normalization semantics.
+        """
         raise NotImplementedError(f"{self.variant} does not implement CP forward summaries.")
 
     def _cp_backward_summary(
         self, query, key, value, gates, grad_output, cu_seqlens, **kernel_kwargs
     ):
-        """Return reverse state-gradient maps for this variant."""
+        """Return FP32 reverse state-gradient maps, including local output losses.
+
+        H and T have the forward summary shapes, with T already oriented for backward.
+        Gate and normalization semantics must match local attention.
+        """
         raise NotImplementedError(f"{self.variant} does not implement CP backward summaries.")
 
     def _run(

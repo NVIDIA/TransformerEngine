@@ -2,25 +2,11 @@
 #
 # See LICENSE for license information.
 
-"""Contiguous linear-attention CP: fragments, collectives and state gradients.
+"""Context parallelism for linear attention with contiguous token ownership.
 
-Adapters for each linear attention variant supply local attention and affine
-summary operations. The shared CUDA operation composes states in document order.
-
-Adapter contract:
-* Positional tensors carry a real-token leading axis for fragment selection;
-  additional axes, such as GDP's Householder axis, remain intact until FE dispatch.
-* Forward hooks return FP32 H [fragments, heads, V, K] and T [fragments, heads, K, K]
-  satisfying X_end = X_start @ T + H. Reverse hooks provide the analogous
-  state-gradient recipe, with transitions already in backward orientation.
-* Local attention and summaries must use identical gate and normalization semantics.
-* Kernel options are configuration, not an autograd path for trainable parameters.
-  Future non-token parameters need explicit gradient inputs/returns, or a
-  differentiable token-gate transformation before the CP Function. Their gradient
-  reduction must match the caller's parameter-ownership contract.
-
-Only GDN supplies these hooks today; other linear attention variants require
-adapter validation.
+Coordinates fragment metadata, affine-summary exchange, state composition,
+and distributed backward. Variant adapters provide local attention and summary
+operations; currently only GDN is supported.
 """
 
 from collections import OrderedDict
@@ -211,6 +197,10 @@ class _LinearAttentionContextParallel(torch.autograd.Function):
     Summary APIs intentionally do not have autograd registrations. Differentiating
     an all-gather of summaries therefore cannot recover cross-rank gradients.
     The reverse summary exchange supplies the missing final-state adjoints to FE.
+
+    Kernel options carry configuration, not trainable parameters. Non-token
+    parameters need explicit gradient inputs/returns or differentiable token-gate
+    preparation before this Function, with reductions matching parameter ownership.
     """
 
     @staticmethod
