@@ -153,17 +153,15 @@ def test_dsa_triton_rope_adapters(monkeypatch, layout):
     if inplace:
         x = torch.randn(2, 17, 64, 512, device="cuda", dtype=torch.bfloat16)
         boundaries, seq = [0, 17, 34], 17
-        apply = dsa_rope._apply_rotary_query
     else:
         # Ragged lengths 3 and 5, followed by one padded compressed-token position.
         x = torch.randn(9, 1, 512, device="cuda", dtype=torch.bfloat16)
         boundaries, seq = [0, 3, 8], 5
-        apply = dsa_rope.apply_dsa_rope
     (cos, sin), _ = dsa_rope.rotary_embeddings(seq, 4, 64, 160000.0, x.device)
     cu = torch.tensor(boundaries, device=x.device, dtype=torch.int32)
     gradient = torch.randn_like(x)
 
-    eager = dsa_rope._apply_rotary_eager
+    eager = dsa_rope.apply_dsa_rope_eager
     reference_input = x.detach().clone().requires_grad_()
     reference = eager(reference_input, cos, sin, cu)
     if not inplace:
@@ -182,13 +180,13 @@ def test_dsa_triton_rope_adapters(monkeypatch, layout):
 
     monkeypatch.setattr(
         dsa_rope,
-        "_apply_rotary_eager",
+        "apply_dsa_rope_eager",
         lambda *_: pytest.fail("Triton dispatch fell back to eager RoPE"),
     )
     candidate_source = x.detach().clone().requires_grad_()
     candidate_input = candidate_source.clone() if inplace else candidate_source
     candidate_ptr = candidate_input.data_ptr()
-    candidate = apply(candidate_input, cos, sin, cu)
+    candidate = dsa_rope.apply_dsa_rope(candidate_input, cos, sin, cu, allow_inplace=inplace)
     candidate_grad = torch.autograd.grad(candidate, candidate_source, gradient)[0]
 
     assert (candidate.data_ptr() == candidate_ptr) == inplace
@@ -501,7 +499,10 @@ def test_dsv4_attention_thd(variant, ratio):
         o_lora_rank=8,
         index_topk=8,
         rope=(
-            dsa_rope._DSv4RotaryEmbedding(ratio, 64, 12345.0, "cuda") if variant == "csa" else None
+            # A warm CPU cache must move on a same-length CUDA request.
+            dsa_rope.DSv4RotaryEmbedding(ratio, 64, 12345.0, "cpu", max_seqlen=max(lengths))
+            if variant == "csa"
+            else None
         ),
         params_dtype=torch.bfloat16,
         qkv_format="thd",
@@ -510,6 +511,9 @@ def test_dsv4_attention_thd(variant, ratio):
     cu = torch.tensor([0, lengths[0], sum(lengths)], device=x.device, dtype=torch.int32)
     actual = layer(x, cu_seqlens_q=cu, max_seqlen_q=max(lengths))
     assert actual.shape == x.shape
+    if variant == "csa":
+        assert layer.rope.cos.device == x.device
+        assert layer.rope.cos.dtype == torch.float32
     gradient = torch.randn_like(actual)
     actual.backward(gradient)
     packed_grads = {

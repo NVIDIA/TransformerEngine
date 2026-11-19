@@ -82,7 +82,8 @@ compressed tokens. `_prepare_sparse_kv_indices` documents a small example of the
 index spaces. Selection indices address only packed compressed KV before the
 local KV offset is applied.
 
-`dsa_rope` supplies token/compressed-position embeddings and rotary application.
+`dsa_rope.DSv4RotaryEmbedding` caches token/compressed-position embeddings.
+`dsa_rope.apply_dsa_rope` applies them.
 A caller may override the default embeddings with a `rope` module returning
 token and compressed `(cos, sin)` pairs.
 

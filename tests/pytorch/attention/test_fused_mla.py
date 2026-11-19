@@ -470,10 +470,13 @@ def test_inputs_on_non_current_device():
 
 
 @pytest.mark.skipif(not HAVE_TRITON, reason="MLA RoPE requires Triton")
-def test_mla_rope_kv_equations_backward():
-    """Compare MLA K/V assembly and input gradients with independent PyTorch equations.
+def test_mla_rope_kv():
+    """Compare MLA keys, values, and input gradients with independent PyTorch equations.
 
-    The positional key is shared across heads, so its gradient must sum their contributions.
+    Split the KV input into per-head key and value channels. Rotate the shared
+    positional key for each token and append it to every head's key. The value
+    channels pass through unchanged. Backward sums the positional-key gradients
+    across heads.
     """
     if not torch.cuda.is_available():
         pytest.skip("MLA RoPE requires CUDA")

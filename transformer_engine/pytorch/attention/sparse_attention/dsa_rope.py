@@ -8,6 +8,8 @@ from functools import lru_cache
 
 import torch
 
+from transformer_engine.pytorch.utils import canonicalize_device
+
 
 def rotary_embeddings(seq, ratio, width, theta, device):
     """Return token and compressed-window (cos, sin) pairs in FP32."""
@@ -19,8 +21,25 @@ def rotary_embeddings(seq, ratio, width, theta, device):
     return (cos, sin), (cos[:, window_positions], sin[:, window_positions])
 
 
-class _DSv4RotaryEmbedding(torch.nn.Module):
-    """Cache shared FP32 token frequencies; compressed positions are window starts."""
+class DSv4RotaryEmbedding(torch.nn.Module):
+    """Cache FP32 token frequencies and compressed-window start frequencies.
+
+    Buffers are not saved in state_dict. Module.to() moves the cache while keeping
+    its frequencies in FP32, even when a different floating-point dtype is requested.
+
+    Parameters
+    ----------
+    ratio : int
+        Number of input tokens per compressed window.
+    width : int
+        Even rotary dimension.
+    theta : float
+        Rotary frequency base.
+    device : torch.device or str
+        Device for the optional initial cache.
+    max_seqlen : int, optional
+        Initial cache length. Otherwise allocate lazily on the first forward call.
+    """
 
     def __init__(self, ratio, width, theta, device, max_seqlen=None):
         super().__init__()
@@ -41,11 +60,30 @@ class _DSv4RotaryEmbedding(torch.nn.Module):
         return self
 
     def forward(self, seq, device):
-        """Return cached token and compressed-window frequency pairs."""
+        """Return FP32 token and compressed ``(cos, sin)`` pairs.
+
+        Parameters
+        ----------
+        seq : int
+            Token sequence length. Grow the cache if needed.
+        device : torch.device or str
+            Requested output device. Move an existing cache when it differs.
+
+        Returns
+        -------
+        tuple
+            Token pair with shape [1, seq, 1, width] and compressed pair with shape
+            [1, seq // ratio, 1, width]. Compressed positions are window starts
+            0, ratio, 2 * ratio, ... . Returned tensors are views of the cache.
+        """
+        device = canonicalize_device(device)
         if self.cos is None or self.cos.shape[1] < seq:
             (self.cos, self.sin), _ = rotary_embeddings(
                 seq, self.ratio, self.width, self.theta, device
             )
+        elif self.cos.device != device:
+            self.cos = self.cos.to(device=device)
+            self.sin = self.sin.to(device=device)
         n_comp = seq // self.ratio
         return (self.cos[:, :seq], self.sin[:, :seq]), (
             self.cos[:, : n_comp * self.ratio : self.ratio],
@@ -53,7 +91,7 @@ class _DSv4RotaryEmbedding(torch.nn.Module):
         )
 
 
-def _apply_rotary_eager(x, cos, sin, cu_seqlens=None):
+def apply_dsa_rope_eager(x, cos, sin, cu_seqlens=None):
     """Rotate trailing interleaved pairs in FP32, then restore input dtype."""
     if x.ndim == 3:
         if cu_seqlens is None:
@@ -104,14 +142,6 @@ def _rope_tables(table):
     return torch.cat((pairs, pairs), dim=-1)
 
 
-def _apply_rotary_triton(x, cos, sin, cu_seqlens):
-    """Apply Triton RoPE out of place so callers retain the eager aliasing contract."""
-    module = _triton_rope_module()
-    if module is None:
-        raise RuntimeError("Triton RoPE is unavailable.")
-    return _TritonRotary.apply(x, _rope_tables(cos), _rope_tables(sin), cu_seqlens, module)
-
-
 def _launch_triton(packed, cos, sin, cu_seqlens, module, backward):
     kernel = module.rotary_bwd_q_kernel if backward else module.rotary_fwd_q_kernel
     heads, dim = packed.shape[-2:]
@@ -142,19 +172,21 @@ def _launch_triton(packed, cos, sin, cu_seqlens, module, backward):
 
 
 class _TritonRotary(torch.autograd.Function):
-    """Pair the retained in-place Triton kernels behind an out-of-place autograd API."""
+    """Apply the shared Triton kernels with optional input mutation."""
 
     @staticmethod
-    def forward(ctx, x, cos, sin, cu_seqlens, module):
-        """Rotate a copy and save the frequency tables for backward."""
-        # cuDNN attention saves its output for backward. Cloning also preserves
-        # apply_dsa_rope's established out-of-place contract for every call site.
-        output = x.clone(memory_format=torch.contiguous_format)
+    def forward(ctx, x, cos, sin, cu_seqlens, module, allow_inplace):
+        """Rotate a contiguous buffer and save the frequency tables for backward."""
+        # Contiguity ensures the packed reshape aliases the buffer we return.
+        inplace = allow_inplace and x.is_contiguous()
+        output = x if inplace else x.clone(memory_format=torch.contiguous_format)
         packed = output.reshape(-1, x.shape[-2], x.shape[-1])
         _launch_triton(packed, cos, sin, cu_seqlens, module, False)
         ctx.save_for_backward(cos, sin, cu_seqlens)
         ctx.module = module
         ctx.shape = x.shape
+        if inplace:
+            ctx.mark_dirty(x)
         return output
 
     @staticmethod
@@ -164,47 +196,23 @@ class _TritonRotary(torch.autograd.Function):
         grad_input = grad_output.clone(memory_format=torch.contiguous_format)
         packed = grad_input.reshape(-1, ctx.shape[-2], ctx.shape[-1])
         _launch_triton(packed, cos, sin, cu_seqlens, ctx.module, True)
-        return grad_input, None, None, None, None
+        return grad_input, None, None, None, None, None
 
 
-class _TritonQueryRotary(torch.autograd.Function):
-    """Rotate the fresh normalized query in place; keep backward out of place."""
+def apply_dsa_rope(x, cos, sin, cu_seqlens=None, *, allow_inplace=False):
+    """Rotate trailing interleaved pairs, using Triton when its contract is satisfied.
 
-    @staticmethod
-    def forward(ctx, query, cos, sin, cu_seqlens, module):
-        """Rotate the fresh query and record its in-place mutation."""
-        packed = query.reshape(-1, query.shape[-2], query.shape[-1])
-        _launch_triton(packed, cos, sin, cu_seqlens, module, False)
-        ctx.save_for_backward(cos, sin, cu_seqlens)
-        ctx.module = module
-        ctx.shape = query.shape
-        ctx.mark_dirty(query)
-        return query
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        """Apply the backward rotation without mutating the output gradient."""
-        cos, sin, cu_seqlens = ctx.saved_tensors
-        grad_input = grad_output.clone(memory_format=torch.contiguous_format)
-        packed = grad_input.reshape(-1, ctx.shape[-2], ctx.shape[-1])
-        _launch_triton(packed, cos, sin, cu_seqlens, ctx.module, True)
-        return grad_input, None, None, None, None
-
-
-def _apply_rotary_query(query, cos, sin, cu_seqlens):
-    """Rotate fresh normalized queries in place with Triton, avoiding a copy.
-
-    Unlike apply_dsa_rope, this private path requires an input safe to mutate.
-    Its backward and eager fallback remain out of place.
+    By default, preserve the input. With allow_inplace=True, the caller must supply
+    a fresh buffer safe for autograd mutation; only contiguous Triton inputs are
+    mutated. Noncontiguous inputs and the eager fallback remain out of place.
     """
-    if not _can_use_triton(query, cos, sin, cu_seqlens):
-        return _apply_rotary_eager(query, cos, sin, cu_seqlens)
-    module = _triton_rope_module()
-    return _TritonQueryRotary.apply(query, _rope_tables(cos), _rope_tables(sin), cu_seqlens, module)
-
-
-def apply_dsa_rope(x, cos, sin, cu_seqlens=None):
-    """Rotate trailing interleaved pairs, using Triton when its contract is satisfied."""
     if _can_use_triton(x, cos, sin, cu_seqlens):
-        return _apply_rotary_triton(x, cos, sin, cu_seqlens)
-    return _apply_rotary_eager(x, cos, sin, cu_seqlens)
+        return _TritonRotary.apply(
+            x,
+            _rope_tables(cos),
+            _rope_tables(sin),
+            cu_seqlens,
+            _triton_rope_module(),
+            allow_inplace,
+        )
+    return apply_dsa_rope_eager(x, cos, sin, cu_seqlens)

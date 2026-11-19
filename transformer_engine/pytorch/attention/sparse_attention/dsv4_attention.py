@@ -12,7 +12,7 @@ from transformer_engine.pytorch.module import Linear, RMSNorm
 
 from .compressor import Compressor
 from .dsa_cudnn import sparse_attention as _sparse_attention
-from .dsa_rope import _apply_rotary_query, _DSv4RotaryEmbedding, apply_dsa_rope
+from .dsa_rope import DSv4RotaryEmbedding, apply_dsa_rope
 from .indexer import Indexer
 
 __all__ = ["DSv4Attention"]
@@ -207,11 +207,11 @@ class DSv4Attention(torch.nn.Module):
         self.sliding_window = sliding_window
         # A model can supply its RoPE frequencies (for example YaRN) without
         # duplicating that policy here. It must return the same token/compressed
-        # (cos, sin) pairs as _DSv4RotaryEmbedding.forward.
+        # (cos, sin) pairs as DSv4RotaryEmbedding.forward.
         self.rope = (
             rope
             if rope is not None
-            else _DSv4RotaryEmbedding(
+            else DSv4RotaryEmbedding(
                 compression_ratio, rope_head_dim, rope_theta, device, max_seqlen
             )
         )
@@ -311,7 +311,7 @@ class DSv4Attention(torch.nn.Module):
         # Query-up norm is unweighted; TE RMSNorm would add a learned scale.
         q = _compiled_q_rms_norm(q, self.rms_norm_eps)
         q = (
-            _apply_rotary_query(q, *token_rope, cu)
+            apply_dsa_rope(q, *token_rope, cu, allow_inplace=True)
             .reshape(-1, self.num_heads, self.head_dim)
             .contiguous()
         )
