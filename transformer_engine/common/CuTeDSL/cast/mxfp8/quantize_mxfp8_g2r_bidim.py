@@ -515,17 +515,15 @@ def _quantize_colwise(
     )
 
     # Who writes the colwise scales:
-    # - The first warp row, after the reduction. Each thread stores its own columns' scales. With
-    #   compact scales they are contiguous: one wide store per thread.
-    # - Or the reducers, as they compute the scales. Each stores its own columns, a byte at a time.
-    # The reducers write in two cases:
-    # - GEMM-swizzled scales. Adjacent columns' scales are 16 bytes apart there, so the first warp
-    #   row would store the whole tile's scales a byte at a time, and warp 0 would be the last to
-    #   reach the next barrier. The reducers spread those stores over their warps. The predicated
-    #   (EDGE) kernel is the exception: the reducer write measured slower there.
-    # - Fewer column pairs than threads (256-column tiles). The reducers then fill only some warps.
-    #   They write the scales as part of the reduction, and the other warps skip both.
-    # Otherwise the first warp row writes.
+    # - 256-column tiles: the reducers. They are 128 threads (one per column pair) in the first 4
+    #   warps. Each stores its 2 scales as it computes them; the other warps skip both steps.
+    # - 512-column tiles, GEMM-swizzled scales: the reducers, which fill all 8 warps. Swizzled
+    #   scales of adjacent columns are 16 bytes apart, so each scale takes its own byte store.
+    #   The reducers split the tile's 512 stores over 8 warps instead of leaving them to warp 0.
+    # - 512-column tiles, GEMM-swizzled scales, predicated (EDGE) kernel: warp 0, a byte at a
+    #   time. It measured faster than the reducers here.
+    # - 512-column tiles, compact scales: warp 0. A thread's 16 scales are contiguous, so it
+    #   writes them in one 16-byte store.
     REDUCERS_WRITE_SCALES = (WITH_GEMM_SWIZZLED_SCALES and not EDGE) or (
         CTA_THREADS_X * ELEMENTS_X_PER_THREAD // 2 < CTA_THREADS_Y * CTA_THREADS_X
     )
