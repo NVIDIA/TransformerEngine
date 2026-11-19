@@ -7,7 +7,8 @@
 // The dbias reduction of the MXFP8 and FP8 quantize must add each column of the FP32 workspace in
 // row order, starting from 0, and round once to the output type. This checks it bit for bit against
 // that sum on the host, on data whose magnitudes span 2^-30..2^30 with mixed signs, so that any
-// other order or grouping of the adds would change the result.
+// other order or grouping of the adds would change the result. Most FP16 sums of that data overflow
+// to infinity, so FP16 also runs on data scaled by 2^-26, whose sums all stay finite.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -58,14 +59,15 @@ DType dtype_of<__half>() {
 }
 
 template <typename T>
-void check(const size_t rows, const size_t cols, const uint32_t seed) {
+void check(const size_t rows, const size_t cols, const uint32_t seed,
+           const int scale_exponent = 0) {
   std::mt19937 gen(seed);
   std::uniform_real_distribution<float> mantissa(1.0f, 2.0f);
   std::uniform_int_distribution<int> exponent(-30, 30);
   std::bernoulli_distribution negative(0.5);
   std::vector<float> workspace(rows * cols);
   for (float &w : workspace) {
-    w = std::ldexp(mantissa(gen), exponent(gen)) * (negative(gen) ? -1.0f : 1.0f);
+    w = std::ldexp(mantissa(gen), exponent(gen) + scale_exponent) * (negative(gen) ? -1.0f : 1.0f);
   }
   std::vector<T> expected(cols);
   for (size_t c = 0; c < cols; ++c) {
@@ -110,6 +112,8 @@ TEST_P(ReduceDbiasTest, AddsEachColumnInRowOrder) {
   check<float>(rows, cols, 1);
   check<__nv_bfloat16>(rows, cols, 2);
   check<__half>(rows, cols, 3);
+  // Up to 2000 rows, |sum| <= 2000 * 2^5 < 65504, the largest finite FP16.
+  check<__half>(rows, cols, 4, -26);
 }
 
 INSTANTIATE_TEST_SUITE_P(
