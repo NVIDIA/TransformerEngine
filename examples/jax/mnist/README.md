@@ -2,7 +2,7 @@
 
 This example uses MNIST training to demonstrate the Transformer Engine usage. The Transformer Engine is built on top of [Flax](https://github.com/google/flax), a neural network library and ecosystem for JAX. Thus, the Transformer Engine is free to interoperate with other Flax modules. The basic Flax usage can be referred to [Flax Basics](https://flax.readthedocs.io/en/latest/guides/flax_basics.html).
 
-1. Setup dataset: The first step is to prepare the dataset. This is done by using the `tfds` library to download the MNIST dataset and perform image preprocessing. The `get_datasets` routine is used for this purpose.
+1. Setup dataset: The first step is to prepare the dataset. The `get_datasets` routine uses Hugging Face `datasets` to download MNIST and materialize NumPy arrays for image preprocessing. Install `requirements.txt`; Python 3.14 and newer require `datasets>=4.4.0` for compatible dataset fingerprinting, while older Python versions retain `datasets<4.0.0`.
 
 2. Define model: The `Net` class is a small CNN model for image classification. It has an option to switch between using `nn.Dense` provided by Flax and `te.DenseGeneral` provided by the Transformer Engine. This allows for easy comparison between the two libraries.
 
