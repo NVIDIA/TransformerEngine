@@ -12,6 +12,7 @@ import warnings
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.quantization as quantization
 from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     MXFP8Quantizer,
@@ -55,6 +56,37 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
     return_reason=True
 )
 fp4_available, reason_for_no_fp4 = te.is_nvfp4_available(return_reason=True)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_autocast_reuse_after_failed_entry(monkeypatch):
+    monkeypatch.setattr(FP8GlobalStateManager, "quantization_state", quantization.FP8GlobalState())
+    original_check = quantization.check_recipe_support
+    fail_next_check = True
+
+    def fail_once(recipe):
+        nonlocal fail_next_check
+        if fail_next_check:
+            fail_next_check = False
+            raise RuntimeError("recipe validation failed")
+        original_check(recipe)
+
+    monkeypatch.setattr(quantization, "check_recipe_support", fail_once)
+    context = te.autocast(recipe=Float8CurrentScaling())
+    with te.autocast(enabled=False, calibrating=True, recipe=Float8CurrentScaling()):
+        saved_state = FP8GlobalStateManager.get_autocast_state()
+        saved_depth = FP8GlobalStateManager.quantization_state.autocast_depth
+        with pytest.raises(RuntimeError, match="recipe validation failed"):
+            with context:
+                pytest.fail("Autocast body ran after failed validation")
+        assert FP8GlobalStateManager.get_autocast_state() == saved_state
+        assert FP8GlobalStateManager.quantization_state.autocast_depth == saved_depth
+
+        with context:
+            assert FP8GlobalStateManager.is_fp8_enabled()
+            assert FP8GlobalStateManager.quantization_state.autocast_depth == saved_depth + 1
+        assert FP8GlobalStateManager.get_autocast_state() == saved_state
+        assert FP8GlobalStateManager.quantization_state.autocast_depth == saved_depth
 
 
 # FP8 per tensor delayed scaling
@@ -592,8 +624,9 @@ def test_nvfp4_row_scaled_quantizer_roles(
         expected_e4m3_max(tensor_type) for tensor_type in ("input", "weight", "output")
     ]
     assert [q.nvfp4_4over6_err_mode for q in forward_quantizers] == [nvfp4_4over6_err_mode] * 3
-    assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
-    assert forward_quantizers[1].is_quantizable(torch.empty(16, 16))
+    all_gather_input = torch.empty(16, 32)
+    assert not forward_quantizers[0].supports_quantized_allgather(all_gather_input)
+    assert forward_quantizers[1].supports_quantized_allgather(all_gather_input)
 
     role_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
@@ -820,3 +853,31 @@ def test_fp8_recipe_unpickle_rebuilds_missing_quant_params(recipe):
     assert restored.fp8_quant_fwd_inp.power_2_scale == recipe.fp8_quant_fwd_inp.power_2_scale
     assert restored.fp8_quant_fwd_weight.power_2_scale == recipe.fp8_quant_fwd_weight.power_2_scale
     assert restored.fp8_quant_bwd_grad.power_2_scale == recipe.fp8_quant_bwd_grad.power_2_scale
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+@pytest.mark.parametrize(
+    "role", ["fp8_quant_fwd_inp", "fp8_quant_fwd_weight", "fp8_quant_bwd_grad"]
+)
+def test_float8_block_scaling_non_pow2_scales_arch_support(role):
+    """Non-power-of-2 FP8 block scales are rejected on Blackwell and newer, accepted on Hopper."""
+    fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling()
+    setattr(
+        fp8_recipe,
+        role,
+        transformer_engine.common.recipe.QParams(power_2_scale=False, amax_epsilon=0.0),
+    )
+    if torch.cuda.get_device_capability() >= (10, 0):
+        with pytest.raises(RuntimeError, match="power-of-2"):
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                pass
+    else:
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            pass
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+def test_float8_block_scaling_default_recipe_supported():
+    """The default FP8 block-scaling recipe (power-of-2 scales) is accepted on every arch."""
+    with te.autocast(enabled=True, recipe=transformer_engine.common.recipe.Float8BlockScaling()):
+        pass

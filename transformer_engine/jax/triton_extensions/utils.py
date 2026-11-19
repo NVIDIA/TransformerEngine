@@ -33,6 +33,11 @@ Environment Variables:
         (jax-ml/jax#35218) instead of silently falling back to non-autotuned
         dispatch. Useful for CI or debugging to ensure autotuning is active.
         Default is "0" (silent compatibility fallback).
+    NVTE_JAX_TRITON_ASSUME_ALIGNED: If "1" (default), pointer arguments of JAX Triton kernels are
+        compiled with ``tt.divisibility=16`` (16-byte aligned), matching the alignment declared to
+        the launcher via ``create_array_parameter(0, 16)`` and what a PyTorch launch specializes
+        on. Without the hint Triton cannot vectorize global loads, which can cause large register
+        spills and slowdowns for some configs. Set to "0" to compile without the hint.
 """
 
 import hashlib
@@ -51,6 +56,7 @@ import jax.numpy as jnp
 from ..version_utils import (
     TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION,
     TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION,
+    TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION,
     TRITON_EXTENSION_MIN_JAX_VERSION,
     is_triton_autotuned_alias_safe,
     is_triton_extension_supported,
@@ -204,6 +210,21 @@ __all__ = ["triton_call_lowering", "get_triton_info"]
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
 
+# Alignment (bytes) assumed for every array argument, as declared to the launcher by
+# gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES).
+_ARRAY_ALIGNMENT_BYTES = 16
+
+
+def _assume_aligned_pointers() -> bool:
+    """Whether to mark pointer arguments as 16-byte aligned (NVTE_JAX_TRITON_ASSUME_ALIGNED)."""
+    val = os.environ.get("NVTE_JAX_TRITON_ASSUME_ALIGNED", "1")
+    try:
+        return bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_JAX_TRITON_ASSUME_ALIGNED must be an integer (0 or 1), got: {val!r}"
+        ) from e
+
 
 def get_triton_info():
     """Get information about the installed Triton package.
@@ -310,6 +331,7 @@ def compile_triton(
                 num_ctas,
                 enable_fp_fusion,
                 compute_capability,
+                _assume_aligned_pointers(),
             )
         ).encode()
     ).hexdigest()
@@ -336,10 +358,21 @@ def compile_triton(
         if const_name in signature_with_constexpr:
             signature_with_constexpr[const_name] = "constexpr"
 
+    # Array (pointer) arguments are aligned to _ARRAY_ALIGNMENT_BYTES (see create_array_parameter
+    # in triton_call_lowering). Tell Triton so it can emit vectorized loads/stores, as it does for
+    # aligned pointers in a PyTorch launch. The buffers are abstract at lowering time, so this is an
+    # assumption, not a check.
+    attrs = {}
+    if _assume_aligned_pointers():
+        for idx, name in enumerate(kernel_fn.arg_names):
+            if str(signature_with_constexpr.get(name, "")).startswith("*"):
+                attrs[(idx,)] = [["tt.divisibility", _ARRAY_ALIGNMENT_BYTES]]
+
     src = tc.ASTSource(
         fn=kernel_fn,
         constexprs=constants,
         signature=signature_with_constexpr,
+        attrs=attrs,
     )
 
     compiled = tc.compile(
@@ -350,7 +383,21 @@ def compile_triton(
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
-    if version.parse(jax.__version__) >= version.parse("0.8.2"):
+    if jax_version_meet_requirement(TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION):
+        # Device-side TMA descriptors (tl.make_tensor_descriptor) live in global scratch memory
+        # that the launch has to allocate.
+        kernel = gpu_triton.TritonKernel(
+            compiled.name,
+            num_warps,
+            num_ctas,
+            compiled.metadata.shared,
+            compiled.asm["ptx"],
+            "",  # ttir
+            compute_capability,
+            global_scratch_size=compiled.metadata.global_scratch_size,
+            global_scratch_align=compiled.metadata.global_scratch_align,
+        )
+    elif version.parse(jax.__version__) >= version.parse("0.8.2"):
         kernel = gpu_triton.TritonKernel(
             compiled.name,  # arg0: kernel_name (str)
             num_warps,  # arg1: num_warps (int)
@@ -375,6 +422,18 @@ def compile_triton(
 
     _TRITON_KERNEL_CACHE[cache_key] = kernel
     return kernel
+
+
+class _AbstractArray:
+    """Stand-in for an array argument passed to an autotuner's `early_config_prune`."""
+
+    def __init__(self, aval):
+        self.shape = tuple(aval.shape)
+        self.dtype = jnp.dtype(aval.dtype)
+
+    def element_size(self):
+        """Bytes per element, matching `torch.Tensor.element_size`."""
+        return self.dtype.itemsize
 
 
 def triton_call_lowering(
@@ -407,6 +466,14 @@ def triton_call_lowering(
         constexprs: Compile-time constants for the kernel. This includes both
                     tl.constexpr arguments AND scalar runtime arguments (like
                     num_tokens, strides) that are known at JAX trace time.
+                    Autotuned config kwargs need not be included.
+
+    For autotuned kernels, ``prune_configs_by={"early_config_prune": ...}`` is
+    applied before compiling the configs. The pruner receives ``constexprs`` and,
+    for array arguments, stand-ins exposing ``shape``, ``dtype`` and
+    ``element_size()``. ``perf_model``, ``top_k``, ``reset_to_zero`` and
+    ``restore_value`` are not supported; use ``input_output_aliases`` on
+    pre-initialized buffers instead of ``reset_to_zero``/``restore_value``.
 
     Returns:
         MLIR lowering result
@@ -431,16 +498,35 @@ def triton_call_lowering(
     # Get arg names from kernel function
     if isinstance(kernel_fn, autotuner.Autotuner):
         arg_names = kernel_fn.fn.arg_names
+        configs = list(kernel_fn.configs)
     else:
         arg_names = kernel_fn.arg_names
+        configs = []
 
     # Build signature for tensor arguments only (inputs + outputs)
     # Scalar arguments should be passed via constexprs and will be
-    # specialized into the kernel at compile time
+    # specialized into the kernel at compile time. Autotuned config kwargs
+    # (e.g. BLOCK_SIZE) are also constexprs, supplied per config below.
     all_avals = list(ctx.avals_in) + list(ctx.avals_out)
     constexpr_names = set(constexprs.keys()) if constexprs else set()
+    constexpr_names.update(name for config in configs for name in config.kwargs)
     tensor_arg_names = [n for n in arg_names if n not in constexpr_names]
     signature = {n: get_triton_dtype(a) for n, a in zip(tensor_arg_names, all_avals)}
+    # The launcher appends Triton's trailing implicit arguments (global scratch, profile scratch)
+    # right after the declared pointer parameters, so pass exactly one array parameter per
+    # kernel pointer argument. Outputs aliased to inputs are not separate kernel arguments;
+    # an extra parameter would be read by the kernel as its global scratch pointer.
+    num_array_params = len(signature)
+
+    # Apply the autotuner's `early_config_prune`, as Triton does at launch. Array
+    # arguments are only known abstractly here, so the pruner receives stand-ins
+    # exposing `shape`, `dtype` and `element_size()`.
+    early_config_prune = getattr(kernel_fn, "early_config_prune", None)
+    if configs and early_config_prune is not None:
+        named_args = {n: _AbstractArray(a) for n, a in zip(tensor_arg_names, all_avals)}
+        named_args.update(constexprs or {})
+        configs = list(early_config_prune(configs, named_args))
+        assert configs, f"early_config_prune returned no configs for {arg_names}"
 
     assert callable(grid) or isinstance(grid, tuple), (
         "Argument 'grid' must be a tuple or a callable but received: "
@@ -511,7 +597,7 @@ def triton_call_lowering(
         kernel_calls = []
         actual_kernel_fn = kernel_fn.fn
 
-        for config in kernel_fn.configs:
+        for config in configs:
             # Extract parameters from config
             config_num_warps = config.num_warps if config.num_warps is not None else num_warps
             config_num_stages = config.num_stages if config.num_stages is not None else num_stages
@@ -536,8 +622,8 @@ def triton_call_lowering(
 
             # Create kernel call for this config
             config_params = []
-            for _ in list(ctx.avals_in) + list(ctx.avals_out):
-                config_params.append(gpu_triton.create_array_parameter(0, 16))
+            for _ in range(num_array_params):
+                config_params.append(gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES))
 
             # Per-config grid: evaluate `grid(meta)` if grid is a callable so
             # the launch shape matches this config's BLOCK_SIZE (etc.).
@@ -583,8 +669,8 @@ def triton_call_lowering(
         # it and use the first config's kwargs (user constexprs take priority via dict merge).
         if isinstance(kernel_fn, autotuner.Autotuner):
             actual_kernel_fn = kernel_fn.fn
-            if kernel_fn.configs:
-                first_cfg = kernel_fn.configs[0]
+            if configs:
+                first_cfg = configs[0]
                 # user constexprs override config kwargs (so stride / size scalars win)
                 kernel_constexprs = {**first_cfg.kwargs, **(constexprs or {})}
                 num_warps = first_cfg.num_warps if first_cfg.num_warps is not None else num_warps
@@ -605,8 +691,8 @@ def triton_call_lowering(
         )
 
         kernel_params = []
-        for _ in list(ctx.avals_in) + list(ctx.avals_out):
-            kernel_params.append(gpu_triton.create_array_parameter(0, 16))
+        for _ in range(num_array_params):
+            kernel_params.append(gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES))
 
         # Non-autotuned dispatch: evaluate `grid(meta)` once with the merged
         # constexprs (which already reflect the single config we'll launch).

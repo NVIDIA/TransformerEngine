@@ -3,14 +3,23 @@
 # See LICENSE for license information.
 """Mixture-of-Experts (MoE) layer for TransformerEngine JAX.
 
-This module exposes :func:`moe`, a single fused MoE forward pass + bwd
-built on top of TE's NCCL-backed Expert Parallelism primitives
-(``tex.ep_dispatch`` / ``tex.ep_combine``). The block runs::
+This module exposes :func:`moe`, a fused MoE forward + backward path built on
+top of TE's NCCL-backed Expert Parallelism primitives
+(``tex.ep_dispatch`` / ``tex.ep_combine``). The ``router_info`` argument
+selects how tokens are routed:
 
-    gate  ->  topk  ->  ep_dispatch  ->  per-expert FFN (grouped GEMMs)
-          ->  ep_combine  ->  output
+* :class:`RouterComputationInfo` -- TE computes the router::
 
-under a single ``jax.custom_vjp`` so the routing, dispatch, FFN and
+      gate  ->  topk  ->  ep_dispatch  ->  per-expert FFN (grouped GEMMs)
+            ->  ep_combine  ->  output
+
+* :class:`RoutingMapInfo` -- the caller supplies expert indices and routing
+  weights (e.g. hash routing), and the ``gate -> topk`` stage is skipped::
+
+      external routing  ->  ep_dispatch  ->  per-expert FFN (grouped GEMMs)
+                        ->  ep_combine  ->  output
+
+Both paths run under a single ``jax.custom_vjp`` so the routing, dispatch, FFN and
 combine steps fuse cleanly under XLA without leaking intermediate
 residuals into the user-facing autograd graph.
 
@@ -48,9 +57,12 @@ from .cpp_extensions.misc import jax_dtype_to_te_dtype
 from .quantize import (
     GroupedScaledTensor1x,
     GroupedQuantizer,
+    Quantizer,
     QuantizerSet,
     ScaledTensorFactory,
     ScalingMode,
+    QuantizeLayout,
+    QuantizerFactory,
     ScaledTensor2x,
     TensorUsage,
     noop_quantizer_set,
@@ -62,7 +74,90 @@ from .flax.module import _convert_to_activation_function
 from .router import ScoreFunction, _validate_score_function
 from .sharding import MeshResource, _get_mesh, global_mesh_resource, global_shard_guard
 
-__all__ = ["get_moe_recv_capacity_per_rank", "moe"]
+__all__ = [
+    "RouterComputationInfo",
+    "RoutingMapInfo",
+    "get_moe_recv_capacity_per_rank",
+    "moe",
+]
+
+
+@flax.struct.dataclass
+class RouterComputationInfo:
+    """Router parameters and settings for :func:`moe` to compute routing itself.
+
+    Array fields are pytree leaves; the remaining fields are static.
+
+    Parameters
+    ----------
+    gate_kernel : jnp.ndarray
+        ``[hidden, num_experts]`` router projection.
+    num_experts_per_tok : int
+        Top-k value for routing.
+    expert_bias : Optional[jnp.ndarray]
+        ``[num_experts]`` learnable router bias added before the top-k
+        when ``score_function='sigmoid'`` or ``'sqrtsoftplus'``. ``None``
+        disables it. The bias has no gradient through the top-k primitive
+        itself (it only steers expert selection); a zero cotangent is
+        returned for it.
+    score_function : Union[str, ScoreFunction]
+        ``"softmax"`` (default), ``"sigmoid"``, or ``"sqrtsoftplus"``.
+    use_pre_softmax : bool
+        Apply softmax before top-k (vs. after).
+    num_groups, group_topk : Optional[int]
+        Grouped top-k knobs (DeepSeek-style). ``None`` disables grouping.
+    scaling_factor : float
+        Multiplier on the routing weights.
+    aux_loss_coeff : float
+        Per-step expert-load-balance loss coefficient. ``0.0`` (default)
+        disables the aux loss entirely. When non-zero, the loss is computed
+        over the global batch from token-sharded routing scores; only the
+        ``[E]`` per-expert token counts and summed scores are all-reduced
+        across ``(*data_parallelism_axes, ep_axis)``.
+    gate_kernel_axes : Tuple[Optional[str], ...]
+        Logical sharding axes of ``gate_kernel``.
+    """
+
+    gate_kernel: jnp.ndarray
+    num_experts_per_tok: int = flax.struct.field(pytree_node=False)
+    expert_bias: Optional[jnp.ndarray] = None
+    score_function: Union[str, ScoreFunction] = flax.struct.field(
+        pytree_node=False, default="softmax"
+    )
+    use_pre_softmax: bool = flax.struct.field(pytree_node=False, default=False)
+    num_groups: Optional[int] = flax.struct.field(pytree_node=False, default=None)
+    group_topk: Optional[int] = flax.struct.field(pytree_node=False, default=None)
+    scaling_factor: float = flax.struct.field(pytree_node=False, default=1.0)
+    aux_loss_coeff: float = flax.struct.field(pytree_node=False, default=0.0)
+    gate_kernel_axes: Tuple[Optional[str], ...] = flax.struct.field(pytree_node=False, default=())
+
+
+@flax.struct.dataclass
+class RoutingMapInfo:
+    """Caller-computed routing for :func:`moe`, bypassing TE's router.
+
+    Note: the shape of ``routing_indices`` provides the number of experts per token.
+
+    Parameters
+    ----------
+    routing_indices : jnp.ndarray
+        Integer expert indices with shape ``[batch, sequence, top_k]``.
+        Non-differentiable. Each token's ``top_k`` indices must be distinct,
+        otherwise the default receive-capacity bound is invalid.
+    routing_weights : jnp.ndarray
+        Routing weights with the same shape as ``routing_indices``.
+        Gradients are returned through the custom VJP, so caller-side
+        routers remain fully differentiable.
+    """
+
+    routing_indices: jnp.ndarray
+    routing_weights: jnp.ndarray
+
+
+def _num_experts_per_tok(router_info: Union[RouterComputationInfo, RoutingMapInfo]) -> int:
+    if isinstance(router_info, RouterComputationInfo):
+        return router_info.num_experts_per_tok
+    return router_info.routing_indices.shape[-1]
 
 
 def _moe_mesh_axes(resource: MeshResource):
@@ -231,6 +326,7 @@ def get_moe_recv_capacity_per_rank(
     supplied, ``use_cudnn_fusion=True`` (default) reserves 256-token alignment,
     including fallbacks; ``False`` reserves 128 for regular TE grouped GEMM. This keeps
     eager bootstrap callers in sync with the later compiled ``moe()`` call.
+    The bound assumes each token's top-k expert indices are distinct.
     """
     if not isinstance(use_cudnn_fusion, bool):
         raise TypeError("use_cudnn_fusion must be a bool")
@@ -311,6 +407,60 @@ def _with_sharding_constraint_cast_bwd(x: jnp.ndarray, sharding) -> jnp.ndarray:
 
     _constraint.defvjp(_constraint_fwd, _constraint_bwd)
     return _constraint(x)
+
+
+def _prepare_moe_input(
+    x: jnp.ndarray,
+    ep_axis: str,
+    data_parallelism_axes: Tuple[str, ...],
+    *,
+    caller: str,
+) -> jnp.ndarray:
+    """Validate and constrain an MoE input to the EP communication layout.
+
+    NCCL EP forms communication groups from consecutive global ranks, with
+    ``ep_axis`` as the innermost component of the compound leading mesh axis.
+    The expected activation layout is therefore
+    ``P((*data_parallelism_axes, ep_axis), None, None)``. If ``x`` has an
+    incompatible known sharding, this function warns before inserting the
+    reshard. The custom constraint also keeps the backward cotangent in the
+    input activation dtype.
+
+    Parameters
+    ----------
+    x : jnp.ndarray
+        Rank-3 MoE input activation.
+    ep_axis : str
+        Physical mesh axis used for expert parallelism.
+    data_parallelism_axes : Tuple[str, ...]
+        Physical outer data-parallel mesh axes.
+    caller : str
+        Public API name used in diagnostics.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``x`` constrained to the EP-compatible input sharding.
+    """
+    mesh = _get_mesh()
+    if mesh is None or mesh.empty:
+        raise ValueError(f"{caller}(...) requires an active jax.sharding.Mesh.")
+    for axis in (ep_axis, *data_parallelism_axes):
+        if axis not in mesh.shape:
+            raise ValueError(f"TE MoE resource axis {axis!r} is not in the active mesh.")
+
+    expected_leading: Any = (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
+    expected_spec = P(expected_leading, None, None)
+    actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
+    if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
+        warnings.warn(
+            f"{caller}(...): inbound x sharding {actual_spec} does not match expected "
+            f"{expected_spec}; inserting a reshard. Apply "
+            "jax.lax.with_sharding_constraint upstream to avoid this overhead.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return _with_sharding_constraint_cast_bwd(x, NamedSharding(mesh, expected_spec))
 
 
 # =============================================================================
@@ -394,17 +544,19 @@ def _te_ep_assert_compatible_bootstrap(
 class _Ctx:
     """Residuals carried from the fwd rule into the bwd rule.
 
-    Flattened automatically by jax.custom_vjp; ``cfg`` is the only
-    static field (the rest are jnp.ndarray, GroupedNoScaleTensor, or
-    None when aux_loss_coeff == 0).
+    Flattened automatically by jax.custom_vjp; ``cfg`` and
+    ``routing_weights_dtype`` are static fields (the rest are jnp.ndarray,
+    GroupedNoScaleTensor, or None when aux_loss_coeff == 0). ``router`` and the router-side
+    residuals (``logits_2d``, ``saved_scores``, ``routing_map``) are None
+    when routing is caller-supplied via :class:`RoutingMapInfo`.
     """
 
     x: jnp.ndarray
-    gate_kernel: jnp.ndarray
-    expert_bias: jnp.ndarray
-    logits_2d: jnp.ndarray
-    saved_scores: jnp.ndarray
-    routing_map: jnp.ndarray
+    router: Optional[RouterComputationInfo]
+    logits_2d: Optional[jnp.ndarray]
+    saved_scores: Optional[jnp.ndarray]
+    routing_map: Optional[jnp.ndarray]
+    selected_experts: jnp.ndarray
     cfg: Any = flax.struct.field(pytree_node=False)
     handle_mem: jnp.ndarray
     recv_topk_weights: jnp.ndarray
@@ -417,9 +569,10 @@ class _Ctx:
     expert_outputs: jnp.ndarray
     local_group_sizes: jnp.ndarray
     quantizer_sets: Any
-    aux_const_buf: Any = None
     aux_tokens_per_expert: Any = None
     aux_saved_scores: Any = None
+    # Caller-supplied routing only: dtype of the routing_weights cotangent.
+    routing_weights_dtype: Any = flax.struct.field(pytree_node=False, default=None)
 
 
 # =============================================================================
@@ -490,6 +643,27 @@ def _validate_moe_quantizer_sets(
                     f"group count {expected}; got n_groups={quantizer.n_groups} and "
                     f"{len(quantizer.quantizers)} child quantizers."
                 )
+
+
+def _validate_dispatch_quantizer(dispatch_quantizer, fc1_x_quantizer, hidden):
+    """Check that tokens can be dispatched with ``dispatch_quantizer`` and requantized for FC1."""
+    if dispatch_quantizer.scaling_mode != ScalingMode.MXFP8_1D_SCALING:
+        raise NotImplementedError(
+            "dispatch_quantizer supports only MXFP8_1D_SCALING, got"
+            f" {dispatch_quantizer.scaling_mode}."
+        )
+    if dispatch_quantizer.q_dtype != jnp.float8_e4m3fn:
+        raise ValueError(
+            f"dispatch_quantizer supports only E4M3 payloads, got {dispatch_quantizer.q_dtype}."
+        )
+    if not isinstance(fc1_x_quantizer, GroupedQuantizer):
+        raise ValueError(
+            "dispatch_quantizer requires an MXFP8 grouped quantizer for the FC1 input."
+        )
+    if hidden % 512 != 0:
+        raise ValueError(
+            f"dispatch_quantizer requires the hidden size to be a multiple of 512, got {hidden}."
+        )
 
 
 def _with_grouped_weight_buffers(tensor, data, scale_inv, original_shape):
@@ -733,11 +907,13 @@ def _ffn_fwd_per_shard(
     token_counts_local: jnp.ndarray,
     wi: jnp.ndarray,
     wo: jnp.ndarray,
+    recv_scale_inv_local: Optional[jnp.ndarray],
     wi_0_bias: Optional[jnp.ndarray],
     wi_1_bias: Optional[jnp.ndarray],
     wo_bias: Optional[jnp.ndarray],
     quantizer_sets: Tuple[QuantizerSet, QuantizerSet],
     *,
+    compute_dtype,
     num_local_experts: int,
     activation_type: str,
     apply_topk_weights_early: bool,
@@ -752,26 +928,40 @@ def _ffn_fwd_per_shard(
     wi_fsdp_axis: Optional[int],
     wo_fsdp_axis: Optional[int],
 ):
-    """Run the grouped FFN on one shard's EP receive buffer."""
+    """Run the grouped FFN on one shard's EP receive buffer.
+
+    ``recv_scale_inv_local`` is set when ``recv_tokens_local`` holds dispatched MXFP8 data. The
+    dispatched data is consumed by the forward FC1 GEMM directly, and only the FC1 operands for
+    the backward pass are requantized from it.
+    """
     hidden = recv_tokens_local.shape[-1]
     sorted_x = recv_tokens_local.reshape(-1, hidden)
     recv_w_flat = recv_topk_weights_local.reshape(-1)
     group_sizes = token_counts_local.reshape(-1).astype(jnp.int32)
 
-    wi = wi.astype(sorted_x.dtype)
-    wo = wo.astype(sorted_x.dtype)
+    wi = wi.astype(compute_dtype)
+    wo = wo.astype(compute_dtype)
 
     wi_combined_bias = (
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
 
     fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
-    casted_sorted_x = tex.grouped_quantize(
-        sorted_x,
-        fc1_quantizer_set.x,
-        group_sizes,
-        flatten_axis=-1,
-    )
+    if recv_scale_inv_local is None:
+        casted_sorted_x = tex.grouped_quantize(
+            sorted_x,
+            fc1_quantizer_set.x,
+            group_sizes,
+            flatten_axis=-1,
+        )
+    else:
+        casted_sorted_x = tex.grouped_requantize(
+            sorted_x,
+            recv_scale_inv_local.reshape(sorted_x.shape[0], -1),
+            group_sizes,
+            fc1_quantizer_set.x,
+            compute_dtype,
+        )
     casted_wi = _prepare_fc1_weight(
         wi,
         fc1_quantizer_set.kernel,
@@ -815,7 +1005,7 @@ def _ffn_fwd_per_shard(
             casted_wi_rhs.scale_inv,
             padded_offsets,
             prob,
-            compute_dtype=sorted_x.dtype,
+            compute_dtype=compute_dtype,
             output_dtype=fc2_quantizer_set.x.q_dtype,
         )
         combined_out = combined_out_3d.reshape(sorted_x.shape[0], combined)
@@ -863,7 +1053,7 @@ def _ffn_fwd_per_shard(
             colwise_data=intermediate_col.reshape(-1),
             colwise_scale_inv=intermediate_scale_col,
             scaling_mode=scaling_mode,
-            dq_dtype=sorted_x.dtype,
+            dq_dtype=compute_dtype,
             data_layout=fc2_quantizer_set.x.data_layout,
             q_layout=fc2_quantizer_set.x.q_layout,
             flatten_axis=1,
@@ -1133,33 +1323,31 @@ def _ffn_bwd_per_shard(
 # =============================================================================
 
 
+def _aux_loss_scale(num_experts, topk, num_tokens, aux_loss_coeff):
+    """Coefficient of ``sum_e P_e * N_e`` in ``fused_moe_aux_loss``."""
+    return num_experts * aux_loss_coeff / (topk * num_tokens * num_tokens)
+
+
 def _moe_fwd_rule(
     x,
-    gate_kernel,
+    router_info,
     wi,
     wo,
     wi_0_bias,
     wi_1_bias,
     wo_bias,
-    expert_bias,
     quantizer_sets,
+    dispatch_quantizer,
     num_experts,
-    num_experts_per_tok,
     activation_type,
-    score_function,
-    use_pre_softmax,
-    num_groups,
-    group_topk,
-    scaling_factor,
-    aux_loss_coeff,
     mesh_resource,
     input_axes,
-    gate_kernel_axes,
     wi_kernel_axes,
     wo_kernel_axes,
     dtype,
     apply_topk_weights_early,
     recv_capacity_per_rank,
+    collect_expert_counts,
     use_cudnn_jax_fusion,
     wi_0_checkpoint_name,
     wi_1_checkpoint_name,
@@ -1169,15 +1357,17 @@ def _moe_fwd_rule(
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
 ):
-    """Forward: gate -> topk -> ep_dispatch -> FFN -> ep_combine.
+    """Forward: [gate -> route ->] ep_dispatch -> FFN -> ep_combine.
 
-    Returns ``(output, aux_loss)``. ``aux_loss`` is a zero scalar when
-    ``aux_loss_coeff == 0``.
+    Returns ``(output, aux_loss, total_recv_tokens, expert_counts)``.
+    ``aux_loss`` is a zero scalar unless the router computes it and ``aux_loss_coeff`` > 0.
     """
     with global_shard_guard(mesh_resource):
         ep_axis, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
-        del gate_kernel_axes  # used in bwd only
         from jax.experimental.shard_map import shard_map
+
+        router = router_info if isinstance(router_info, RouterComputationInfo) else None
+        compute_aux_loss = router is not None and router.aux_loss_coeff > 0.0
 
         x = with_sharding_constraint_by_logical_axes(x, input_axes)
 
@@ -1201,7 +1391,9 @@ def _moe_fwd_rule(
             num_expert_groups=num_experts,
         )
         B, S, H = x.shape
-        K = num_experts_per_tok
+        K = _num_experts_per_tok(router_info)
+        if dispatch_quantizer is not None:
+            _validate_dispatch_quantizer(dispatch_quantizer, quantizer_sets[0].x, H)
         cudnn_native_weight_layout = _resolve_cudnn_native_weight_layout(
             wi, H, cudnn_native_weight_layout
         )
@@ -1283,88 +1475,112 @@ def _moe_fwd_rule(
         ep2_spec = P(batch_pspec_axis, None)
         x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, ep3_spec))
 
-        # ---------------- Gate (global view) ----------------
-        # tex.fused_topk_with_score_function is only validated against its
-        # pytorch reference at fp32 (see tests/pytorch/test_fused_router.py:
-        # parametrize gates dtype on torch.float32 only; the tolerance helper
-        # raises NotImplementedError for any other dtype). Keeping logits in
-        # the activation dtype (e.g. bf16) lets sigmoid / softmax / topk
-        # accumulate at low precision and silently produce NaNs on tokens
-        # whose normalised weights underflow. Cast to fp32 here to stay in
-        # the validated regime.
-        gate_kernel_cast = gate_kernel.astype(x.dtype)
-        gate_logits = jnp.einsum("bsh,he->bse", x, gate_kernel_cast)
-        logits_2d = gate_logits.reshape(-1, num_experts).astype(jnp.float32)
+        # ------------------------ Routing ------------------------
 
-        # ---------------- Routing (global view) ----------------
-        # expert_bias is an empty (shape-(0,)) sentinel when the caller did
-        # not enable it; the primitive treats that as "no bias".
-        eb_arg = expert_bias if expert_bias.shape != (0,) else jnp.zeros((0,), dtype=jnp.float32)
-        sparse_probs, routing_map, saved_scores = tex.fused_topk_with_score_function_fwd(
-            logits_2d,
-            topk=K,
-            use_pre_softmax=use_pre_softmax,
-            num_groups=-1 if num_groups is None else num_groups,
-            group_topk=-1 if group_topk is None else group_topk,
-            scaling_factor=scaling_factor,
-            score_function=score_function,
-            expert_bias=eb_arg,
-            compute_aux_scores=False,
-        )
-        sparse_probs = sparse_probs.astype(dtype)
-
-        # ---------------- Aux loss (global view, replicated) ----------------
-        # ``fused_moe_aux_loss_fwd`` sums probs and tokens_per_expert across
-        # all tokens, which is wrong when T is sharded. Force-replicate the
-        # gate logits and recompute the routing map at global view so the
-        # kernel sees a complete [T_global, E] tensor. The replication is a
-        # single all-gather over (*dp, ep) and lives off the dispatch
-        # critical path.
-        if aux_loss_coeff > 0.0:
-            global_logits_2d = jax.lax.with_sharding_constraint(logits_2d, NamedSharding(mesh, P()))
-            _, global_routing_map, _ = tex.fused_topk_with_score_function_fwd(
-                global_logits_2d,
-                topk=K,
-                use_pre_softmax=use_pre_softmax,
-                num_groups=-1 if num_groups is None else num_groups,
-                group_topk=-1 if group_topk is None else group_topk,
-                scaling_factor=scaling_factor,
-                score_function=score_function,
-                expert_bias=eb_arg,
-                compute_aux_scores=False,
+        if router is None:
+            # ---------------- Caller-supplied routing ----------------
+            routing_indices = jax.lax.with_sharding_constraint(
+                router_info.routing_indices, NamedSharding(mesh, ep3_spec)
             )
-            aux_tokens_per_expert = jnp.sum(global_routing_map.astype(jnp.int32), axis=0)
+            external_weights = jax.lax.with_sharding_constraint(
+                router_info.routing_weights, NamedSharding(mesh, ep3_spec)
+            )
+            selected_experts = routing_indices.reshape(-1, K).astype(jnp.int32)
+            routing_weights = external_weights.reshape(-1, K).astype(dtype)
+            logits_2d = routing_map = saved_scores = None
+        else:
+            # ---------------- Gate (global view) ----------------
+            # tex.fused_topk_with_score_function is only validated against its
+            # pytorch reference at fp32 (see tests/pytorch/test_fused_router.py:
+            # parametrize gates dtype on torch.float32 only; the tolerance helper
+            # raises NotImplementedError for any other dtype). Keeping logits in
+            # the activation dtype (e.g. bf16) lets sigmoid / softmax / topk
+            # accumulate at low precision and silently produce NaNs on tokens
+            # whose normalised weights underflow. Cast to fp32 here to stay in
+            # the validated regime.
+            gate_kernel_cast = router.gate_kernel.astype(x.dtype)
+            gate_logits = jnp.einsum("bsh,he->bse", x, gate_kernel_cast)
+            logits_2d = gate_logits.reshape(-1, num_experts).astype(jnp.float32)
+
+            # ---------------- Routing (global view) ----------------
+            # The fused top-k primitive takes an empty shape-(0,) tensor as "no bias".
+            if router.expert_bias is None:
+                eb_arg = jnp.zeros((0,), dtype=jnp.float32)
+            else:
+                eb_arg = router.expert_bias.astype(jnp.float32)
+            topk_kwargs = {
+                "topk": K,
+                "use_pre_softmax": router.use_pre_softmax,
+                "num_groups": -1 if router.num_groups is None else router.num_groups,
+                "group_topk": -1 if router.group_topk is None else router.group_topk,
+                "scaling_factor": router.scaling_factor,
+                "score_function": router.score_function,
+                "expert_bias": eb_arg,
+                "compute_aux_scores": False,
+            }
+            sparse_probs, routing_map, saved_scores = tex.fused_topk_with_score_function_fwd(
+                logits_2d, **topk_kwargs
+            )
+            sparse_probs = sparse_probs.astype(dtype)
+            # argsort on a bool tensor places True last (False=0 < True=1), so the
+            # last K indices are the selected expert IDs.
+            selected_experts = jnp.argsort(routing_map, axis=-1)[..., -K:]
+            routing_weights = jnp.take_along_axis(sparse_probs, selected_experts, axis=-1)
+
+        if collect_expert_counts:
+            if router is None:
+                expert_counts = jnp.sum(
+                    jax.nn.one_hot(selected_experts, num_experts, dtype=jnp.int32),
+                    axis=(0, 1),
+                )
+            else:
+                expert_counts = jnp.sum(routing_map.astype(jnp.int32), axis=0)
+            # The token dimension is sharded over the compound data/EP axis.
+            # Replicating the reduced result emits the required all-reduce.
+            expert_counts = jax.lax.with_sharding_constraint(
+                expert_counts, NamedSharding(mesh, P())
+            )
+        else:
+            # Keep the custom-VJP output structure stable without paying for an
+            # otherwise-unused per-layer all-reduce.
+            expert_counts = jnp.zeros((num_experts,), dtype=jnp.int32)
+
+        # ---------------- Aux loss (token-sharded) ----------------
+        # aux_loss = coeff * E / (K * T^2) * sum_e P_e * N_e, where P_e (summed
+        # aux probs) and N_e (tokens routed to e) are both sums over tokens, so
+        # only these [E] partial sums are all-reduced across (*dp, ep). The topk
+        # kernels are row-wise, so the token-sharded routing_map equals the one a
+        # replicated recompute would produce. ``fused_moe_aux_loss_fwd`` is not
+        # used because its partition rule runs the kernel on the local shard only.
+        if compute_aux_loss:
+            aux_logits_2d = jax.lax.with_sharding_constraint(
+                logits_2d, NamedSharding(mesh, ep2_spec)
+            )
+            aux_tokens_per_expert = jnp.sum(routing_map.astype(jnp.int32), axis=0)
             # compute_aux_scores=True takes a separate kernel path: clean
             # per-expert softmax, no grouping / bias / scaling.
             aux_probs, _aux_rm, aux_saved_scores = tex.fused_topk_with_score_function_fwd(
-                global_logits_2d.astype(jnp.float32),
+                aux_logits_2d,
                 topk=K,
                 use_pre_softmax=False,
                 num_groups=-1,
                 group_topk=-1,
                 scaling_factor=1.0,
-                score_function=score_function,
+                score_function=router.score_function,
                 expert_bias=jnp.zeros((0,), dtype=jnp.float32),
                 compute_aux_scores=True,
             )
-            aux_loss, aux_const_buf = tex.fused_moe_aux_loss_fwd(
-                aux_probs.astype(jnp.float32),
-                aux_tokens_per_expert.astype(jnp.int32),
-                topk=K,
-                coeff=aux_loss_coeff,
-            )
+            aux_probs_per_expert = jnp.sum(aux_probs.astype(jnp.float32), axis=0)
+            aux_loss = _aux_loss_scale(
+                num_experts, K, logits_2d.shape[0], router.aux_loss_coeff
+            ) * jnp.sum(aux_probs_per_expert * aux_tokens_per_expert.astype(jnp.float32))
             aux_loss = aux_loss.astype(dtype)
         else:
             aux_loss = jnp.zeros((), dtype=dtype)
-            aux_const_buf = None
             aux_tokens_per_expert = None
             aux_saved_scores = None
 
         # ---------------- Routing -> (topk_idx, topk_w) at 3D ----------------
-        # argsort on a bool tensor places True last (False=0 < True=1), so the
-        # last K indices are the selected expert IDs.
-        selected_experts = jnp.argsort(routing_map, axis=-1)[..., -K:]
-        routing_weights = jnp.take_along_axis(sparse_probs, selected_experts, axis=-1)
         topk_idx_3d = selected_experts.reshape(B, S, K).astype(jnp.int32)
         topk_w_3d = routing_weights.reshape(B, S, K).astype(jnp.float32)
         # tex.ep_prepare/dispatch's partition only folds ep_axis into a replicated
@@ -1381,14 +1597,37 @@ def _moe_fwd_rule(
             dispatch_output_per_expert_alignment=dispatch_alignment,
             topk_idx_dtype=int(jax_dtype_to_te_dtype(topk_idx_3d.dtype)),
         )
-        recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
-            tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx_3d, x, topk_w_3d, recv_pr)
-        )
+        dispatch_x = x
+        if dispatch_quantizer is not None:
+            dispatch_x = tex.quantize(
+                x,
+                QuantizerFactory.create(
+                    scaling_mode=dispatch_quantizer.scaling_mode,
+                    q_dtype=dispatch_quantizer.q_dtype,
+                    q_layout=QuantizeLayout.ROWWISE,
+                ),
+            )
+        (
+            recv_tokens,
+            recv_topk_weights,
+            token_counts,
+            total_recv_tokens,
+            handle_mem,
+        ) = tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx_3d, dispatch_x, topk_w_3d, recv_pr)
+        recv_scale_inv = None
+        if dispatch_quantizer is not None:
+            recv_tokens, recv_scale_inv = recv_tokens.data, recv_tokens.scale_inv
         token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
         if dispatch_checkpoint_name is not None:
             recv_tokens = checkpoint_name(recv_tokens, dispatch_checkpoint_name)
             recv_topk_weights = checkpoint_name(recv_topk_weights, dispatch_checkpoint_name)
+            if dispatch_quantizer is not None:
+                recv_scale_inv = checkpoint_name(recv_scale_inv, dispatch_checkpoint_name)
         recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))
+        if dispatch_quantizer is not None:
+            recv_scale_inv = jax.lax.with_sharding_constraint(
+                recv_scale_inv, NamedSharding(mesh, ep3_spec)
+            )
         recv_topk_weights = jax.lax.with_sharding_constraint(
             recv_topk_weights, NamedSharding(mesh, ep2_spec)
         )
@@ -1398,6 +1637,9 @@ def _moe_fwd_rule(
         bias_spec = P(ep_axis, None)
         ffn_in_specs = (ep3_spec, ep2_spec, ep2_spec, wi_input_spec, wo_input_spec)
         ffn_in_args = [recv_tokens, recv_topk_weights, token_counts, wi, wo]
+        if dispatch_quantizer is not None:
+            ffn_in_specs += (ep3_spec,)
+            ffn_in_args.append(recv_scale_inv)
         if has_bias:
             ffn_in_specs += (bias_spec, bias_spec, bias_spec)
             ffn_in_args.extend([wi_0_bias, wi_1_bias, wo_bias])
@@ -1421,21 +1663,21 @@ def _moe_fwd_rule(
         )
 
         def _ffn_fwd_body(*args):
-            if has_bias:
-                r_tok, r_w, tc, local_wi, local_wo, w0b, w1b, wob = args
-            else:
-                r_tok, r_w, tc, local_wi, local_wo = args
-                w0b = w1b = wob = None
+            r_tok, r_w, tc, local_wi, local_wo, *rest = args
+            r_scale_inv = rest.pop(0) if dispatch_quantizer is not None else None
+            w0b, w1b, wob = rest if has_bias else (None, None, None)
             return _ffn_fwd_per_shard(
                 r_tok,
                 r_w,
                 tc,
                 local_wi,
                 local_wo,
+                r_scale_inv,
                 w0b,
                 w1b,
                 wob,
                 quantizer_sets,
+                compute_dtype=x.dtype,
                 num_local_experts=num_local_experts,
                 activation_type=activation_type,
                 apply_topk_weights_early=apply_topk_weights_early,
@@ -1504,11 +1746,11 @@ def _moe_fwd_rule(
 
         ctx = _Ctx(
             x=x,
-            gate_kernel=gate_kernel,
-            expert_bias=expert_bias,
+            router=router,
             logits_2d=logits_2d,
             saved_scores=saved_scores,
             routing_map=routing_map,
+            selected_experts=selected_experts,
             cfg=cfg,
             handle_mem=handle_mem,
             recv_topk_weights=recv_topk_weights,
@@ -1521,9 +1763,11 @@ def _moe_fwd_rule(
             expert_outputs=expert_outputs,
             local_group_sizes=local_group_sizes,
             quantizer_sets=quantizer_sets,
-            aux_const_buf=aux_const_buf,
             aux_tokens_per_expert=aux_tokens_per_expert,
             aux_saved_scores=aux_saved_scores,
+            routing_weights_dtype=(
+                None if router is not None else router_info.routing_weights.dtype
+            ),
         )
         static = {
             "has_bias": has_bias,
@@ -1531,28 +1775,21 @@ def _moe_fwd_rule(
             "recv_pr": recv_pr,
             "cudnn_native_weight_layout": cudnn_native_weight_layout,
         }
-        # total_recv_tokens is a non-differentiable overflow signal (see moe()).
-        return (output, aux_loss, total_recv_tokens), (ctx, static)
+        # The integer metadata outputs are non-differentiable (see moe()).
+        return (output, aux_loss, total_recv_tokens, expert_counts), (ctx, static)
 
 
 def _moe_bwd_rule(
     num_experts,
-    num_experts_per_tok,
     activation_type,
-    score_function,
-    use_pre_softmax,
-    num_groups,
-    group_topk,
-    scaling_factor,
-    aux_loss_coeff,
     mesh_resource,
     input_axes,
-    gate_kernel_axes,
     wi_kernel_axes,
     wo_kernel_axes,
     dtype,
     apply_topk_weights_early,
     recv_capacity_per_rank,
+    collect_expert_counts,
     use_cudnn_jax_fusion,
     wi_0_checkpoint_name,
     wi_1_checkpoint_name,
@@ -1568,10 +1805,9 @@ def _moe_bwd_rule(
     with global_shard_guard(mesh_resource):
         ep_axis, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
         del (
-            num_groups,
-            group_topk,
             dtype,
             recv_capacity_per_rank,
+            collect_expert_counts,
             wi_0_checkpoint_name,
             wi_1_checkpoint_name,
             wo_checkpoint_name,
@@ -1582,10 +1818,11 @@ def _moe_bwd_rule(
         )  # captured / unused in bwd
         from jax.experimental.shard_map import shard_map
 
-        # total_recv_tokens is a non-differentiable output; its cotangent is unused.
-        d_output, d_aux_loss, _d_total_recv_tokens = cotangents
+        # The integer metadata outputs are non-differentiable; their cotangents are unused.
+        d_output, d_aux_loss, _d_total_recv_tokens, _d_expert_counts = cotangents
 
         ctx, static = residuals
+        router = ctx.router
         has_bias = static["has_bias"]
         x_shape = static["x_shape"]
         recv_pr = static["recv_pr"]
@@ -1594,7 +1831,7 @@ def _moe_bwd_rule(
         if mesh is None or mesh.empty:
             raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
         B, S, _ = x_shape
-        K = num_experts_per_tok
+        K = ctx.selected_experts.shape[-1]
         if not data_parallelism_axes:
             batch_pspec_axis: Any = ep_axis
         else:
@@ -1740,69 +1977,63 @@ def _moe_bwd_rule(
             out_partition_spec=out_partition_spec,
         )
 
-        # ---------------- Routing bwd (global view) ----------------
-        # The cotangent on routing_weights is a sparse scatter into sparse_probs
-        # at the selected_experts indices.
-        selected_experts = jnp.argsort(ctx.routing_map, axis=-1)[..., -K:]
-        d_topk_w_flat = d_topk_w.reshape(-1, K)
-        d_sparse_probs = jnp.zeros(ctx.routing_map.shape, dtype=d_topk_w_flat.dtype)
-        d_sparse_probs = d_sparse_probs.at[
-            jnp.arange(ctx.routing_map.shape[0])[:, None], selected_experts
-        ].set(d_topk_w_flat)
-
-        d_logits_2d = tex.fused_topk_with_score_function_bwd(
-            ctx.routing_map,
-            ctx.saved_scores,
-            d_sparse_probs.astype(ctx.saved_scores.dtype),
-            topk=K,
-            use_pre_softmax=use_pre_softmax,
-            scaling_factor=scaling_factor,
-            score_function=score_function,
-            compute_aux_scores=False,
-        )
-
-        # ---------------- Aux loss bwd (global view, replicated) ----------------
-        # Reverse the fwd's all-gather/aux pipeline: aux_loss_bwd produces
-        # d_aux_probs, then topk_bwd(compute_aux_scores=True) produces the
-        # extra d_logits contribution. The replicated tensor adds into the
-        # T-sharded routing-side d_logits via JAX's normal broadcast.
-        if aux_loss_coeff > 0.0:
-            T_global = ctx.logits_2d.shape[0]
-            d_aux_loss_scalar = d_aux_loss.reshape(()).astype(jnp.float32)
-            d_aux_probs = tex.fused_moe_aux_loss_bwd(
-                ctx.aux_const_buf,
-                ctx.aux_tokens_per_expert.astype(jnp.int32),
-                d_aux_loss_scalar,
-                num_tokens=int(T_global),
+        if router is None:
+            # Caller-supplied routing: d_topk_w is the routing-weights cotangent, and
+            # the integer routing indices get a zero (None) cotangent.
+            d_router_info = RoutingMapInfo(
+                routing_indices=None,
+                routing_weights=d_topk_w.astype(ctx.routing_weights_dtype),
             )
-            # routing_map is ignored by the kernel when compute_aux_scores=True,
-            # so pass a zero placeholder of the right shape/dtype.
-            zero_routing_map = jnp.zeros(ctx.aux_saved_scores.shape, dtype=ctx.routing_map.dtype)
-            d_logits_aux = tex.fused_topk_with_score_function_bwd(
-                zero_routing_map,
-                ctx.aux_saved_scores,
-                d_aux_probs.astype(ctx.aux_saved_scores.dtype),
+            d_x = d_x_from_dispatch
+        else:
+            # ---------------- Routing bwd (global view) ----------------
+            # The cotangent on routing_weights is a sparse scatter into sparse_probs
+            # at the selected_experts indices.
+            d_topk_w_flat = d_topk_w.reshape(-1, K)
+            d_sparse_probs = jnp.zeros(ctx.routing_map.shape, dtype=d_topk_w_flat.dtype)
+            d_sparse_probs = d_sparse_probs.at[
+                jnp.arange(ctx.routing_map.shape[0])[:, None], ctx.selected_experts
+            ].set(d_topk_w_flat)
+
+            d_logits_2d = tex.fused_topk_with_score_function_bwd(
+                ctx.routing_map,
+                ctx.saved_scores,
+                d_sparse_probs.astype(ctx.saved_scores.dtype),
                 topk=K,
-                use_pre_softmax=False,
-                scaling_factor=1.0,
-                score_function=score_function,
-                compute_aux_scores=True,
+                use_pre_softmax=router.use_pre_softmax,
+                scaling_factor=router.scaling_factor,
+                score_function=router.score_function,
+                compute_aux_scores=False,
             )
-            d_logits_2d = d_logits_2d + d_logits_aux.astype(d_logits_2d.dtype)
+            # ---------------- Aux loss bwd (token-sharded) ----------------
+            if router.aux_loss_coeff > 0.0:
+                d_logits_2d = d_logits_2d + _moe_aux_loss_bwd(
+                    ctx, d_aux_loss, K, num_experts, mesh, ep2_spec
+                ).astype(d_logits_2d.dtype)
 
-        # ---------------- Gate bwd (global view) ----------------
-        d_gate_logits = d_logits_2d.reshape(B, S, num_experts)
-        gate_kernel_cast = ctx.gate_kernel.astype(ctx.x.dtype)
-        d_x_from_gate = jnp.einsum("bse,he->bsh", d_gate_logits, gate_kernel_cast)
-        d_gate_kernel = jnp.einsum("bsh,bse->he", ctx.x, d_gate_logits).astype(
-            ctx.gate_kernel.dtype
-        )
-        d_x = d_x_from_gate + d_x_from_dispatch
+            # ---------------- Gate bwd (global view) ----------------
+            d_gate_logits = d_logits_2d.reshape(B, S, num_experts)
+            gate_kernel_cast = router.gate_kernel.astype(ctx.x.dtype)
+            d_x_from_gate = jnp.einsum("bse,he->bsh", d_gate_logits, gate_kernel_cast)
+            d_gate_kernel = jnp.einsum("bsh,bse->he", ctx.x, d_gate_logits).astype(
+                router.gate_kernel.dtype
+            )
+            d_gate_kernel = with_sharding_constraint_by_logical_axes(
+                d_gate_kernel, router.gate_kernel_axes
+            )
+            d_x = d_x_from_gate + d_x_from_dispatch
+            # expert_bias has no learnable bwd path through fused_topk: the
+            # primitive's bwd returns None for the bias slot, so its cotangent is zero.
+            d_router_info = router.replace(
+                gate_kernel=d_gate_kernel,
+                expert_bias=(
+                    None if router.expert_bias is None else jnp.zeros_like(router.expert_bias)
+                ),
+            )
 
         # Pin output grads to the declared logical axes so downstream
         # optimizers see consistent shardings.
         d_x = with_sharding_constraint_by_logical_axes(d_x, input_axes)
-        d_gate_kernel = with_sharding_constraint_by_logical_axes(d_gate_kernel, gate_kernel_axes)
         d_wi = with_sharding_constraint_by_logical_axes(d_wi, wi_kernel_axes)
         d_wo = with_sharding_constraint_by_logical_axes(d_wo, wo_kernel_axes)
         if has_bias:
@@ -1812,23 +2043,44 @@ def _moe_bwd_rule(
             d_wi_1_bias = with_sharding_constraint_by_logical_axes(d_wi_1_bias, wi_bias_axes)
             d_wo_bias = with_sharding_constraint_by_logical_axes(d_wo_bias, wo_bias_axes)
 
-        # expert_bias has no learnable bwd path through fused_topk: the
-        # primitive's bwd returns None for the bias slot. Match that with a
-        # zero cotangent of the right shape so custom_vjp's arity check
-        # passes.
-        d_expert_bias = jnp.zeros_like(ctx.expert_bias)
-
         return (
             d_x,
-            d_gate_kernel,
+            d_router_info,
             d_wi,
             d_wo,
             d_wi_0_bias if has_bias else None,
             d_wi_1_bias if has_bias else None,
             d_wo_bias if has_bias else None,
-            d_expert_bias,
             ctx.quantizer_sets,
+            None,
         )
+
+
+def _moe_aux_loss_bwd(ctx, d_aux_loss, K, num_experts, mesh, ep2_spec):
+    """Aux-loss contribution using token-sharded scores and per-expert counts."""
+    aux_sharding = NamedSharding(mesh, ep2_spec)
+    T_global = ctx.logits_2d.shape[0]
+    d_aux_per_expert = (
+        _aux_loss_scale(num_experts, K, T_global, ctx.router.aux_loss_coeff)
+        * d_aux_loss.reshape(()).astype(jnp.float32)
+        * ctx.aux_tokens_per_expert.astype(jnp.float32)
+    )
+    d_aux_probs = jax.lax.with_sharding_constraint(
+        jnp.broadcast_to(d_aux_per_expert[None, :], ctx.aux_saved_scores.shape),
+        aux_sharding,
+    )
+    # routing_map is ignored by the kernel when compute_aux_scores=True;
+    # the token-sharded routing-side map is passed for its shape/dtype.
+    return tex.fused_topk_with_score_function_bwd(
+        jax.lax.with_sharding_constraint(ctx.routing_map, aux_sharding),
+        ctx.aux_saved_scores,
+        d_aux_probs.astype(ctx.aux_saved_scores.dtype),
+        topk=K,
+        use_pre_softmax=False,
+        scaling_factor=1.0,
+        score_function=ctx.router.score_function,
+        compute_aux_scores=True,
+    )
 
 
 # =============================================================================
@@ -1836,34 +2088,27 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 34)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 27)))
 def _moe(
     x,
-    gate_kernel,
+    router_info,
     wi,
     wo,
     wi_0_bias,
     wi_1_bias,
     wo_bias,
-    expert_bias,
     quantizer_sets,
+    dispatch_quantizer,
     num_experts,
-    num_experts_per_tok,
     activation_type,
-    score_function,
-    use_pre_softmax,
-    num_groups,
-    group_topk,
-    scaling_factor,
-    aux_loss_coeff,
     mesh_resource,
     input_axes,
-    gate_kernel_axes,
     wi_kernel_axes,
     wo_kernel_axes,
     dtype,
     apply_topk_weights_early,
     recv_capacity_per_rank,
+    collect_expert_counts,
     use_cudnn_jax_fusion,
     wi_0_checkpoint_name,
     wi_1_checkpoint_name,
@@ -1875,31 +2120,24 @@ def _moe(
 ):
     primal, _ = _moe_fwd_rule(
         x,
-        gate_kernel,
+        router_info,
         wi,
         wo,
         wi_0_bias,
         wi_1_bias,
         wo_bias,
-        expert_bias,
         quantizer_sets,
+        dispatch_quantizer,
         num_experts,
-        num_experts_per_tok,
         activation_type,
-        score_function,
-        use_pre_softmax,
-        num_groups,
-        group_topk,
-        scaling_factor,
-        aux_loss_coeff,
         mesh_resource,
         input_axes,
-        gate_kernel_axes,
         wi_kernel_axes,
         wo_kernel_axes,
         dtype,
         apply_topk_weights_early,
         recv_capacity_per_rank,
+        collect_expert_counts,
         use_cudnn_jax_fusion,
         wi_0_checkpoint_name,
         wi_1_checkpoint_name,
@@ -1917,23 +2155,15 @@ _moe.defvjp(_moe_fwd_rule, _moe_bwd_rule)
 
 def moe(
     x: jnp.ndarray,
-    gate_kernel: jnp.ndarray,
+    router_info: Union[RouterComputationInfo, RoutingMapInfo],
     wi: jnp.ndarray,
     wo: jnp.ndarray,
     wi_0_bias: Optional[jnp.ndarray] = None,
     wi_1_bias: Optional[jnp.ndarray] = None,
     wo_bias: Optional[jnp.ndarray] = None,
-    expert_bias: Optional[jnp.ndarray] = None,
     *,
     num_experts: int,
-    num_experts_per_tok: int,
     activation_type: str = "silu",
-    score_function: Union[str, ScoreFunction] = "softmax",
-    use_pre_softmax: bool = False,
-    num_groups: Optional[int] = None,
-    group_topk: Optional[int] = None,
-    scaling_factor: float = 1.0,
-    aux_loss_coeff: float = 0.0,
     apply_topk_weights_early: bool = False,
     quantizer_sets: Tuple[QuantizerSet, QuantizerSet] = (
         noop_quantizer_set,
@@ -1942,39 +2172,36 @@ def moe(
     mesh_resource: Optional[MeshResource] = None,
     quant_before_fsdp_ag: bool = False,
     input_axes: Tuple[Optional[str], ...] = (),
-    gate_kernel_axes: Tuple[Optional[str], ...] = (),
     wi_kernel_axes: Tuple[Optional[str], ...] = ("exp", "embed", "mlp"),
     wo_kernel_axes: Tuple[Optional[str], ...] = ("exp", "mlp", "embed"),
     dtype: jnp.dtype = jnp.float32,
     recv_capacity_per_rank: Optional[int] = None,
+    collect_expert_counts: bool = True,
     wi_0_checkpoint_name: Optional[str] = None,
     wi_1_checkpoint_name: Optional[str] = None,
     wo_checkpoint_name: Optional[str] = None,
     dispatch_checkpoint_name: Optional[str] = None,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
-) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
+    dispatch_quantizer: Optional[Quantizer] = None,
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray, jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
-    Returns ``(output, aux_loss, total_recv_tokens)``. ``aux_loss`` is ``None``
-    when ``aux_loss_coeff == 0``, else a 0-d scalar. ``total_recv_tokens`` is a
-    non-differentiable pre-drop recv-slot total (grad ``None``); see
-    ``ep_dispatch`` for using it to detect overflow.
+    Returns ``(output, aux_loss, total_recv_tokens, expert_counts)``. ``aux_loss``
+    is ``None`` when routing is caller-supplied or ``aux_loss_coeff == 0``, else
+    a 0-d scalar. ``total_recv_tokens`` is a non-differentiable pre-drop
+    recv-slot total; see ``ep_dispatch`` for using it to detect overflow.
+    ``expert_counts`` is a non-differentiable int32 array of shape
+    ``[num_experts]`` containing global top-k assignment counts (or zeros when
+    ``collect_expert_counts=False``).
 
     Parameters
     ----------
-    expert_bias : Optional[jnp.ndarray]
-        ``[num_experts]`` learnable router bias added before the top-k
-        when ``score_function='sigmoid'`` or ``'sqrtsoftplus'``. Pass ``None`` to disable.
-        The bias has no gradient through the top-k primitive itself (it
-        only steers expert selection); a zero cotangent is returned for
-        it.
-    aux_loss_coeff : float
-        Per-step expert-load-balance loss coefficient. ``0.0`` (default)
-        disables the aux loss entirely. When non-zero, an extra
-        all-gather over the routing-side logits is inserted so the
-        ``fused_moe_aux_loss`` kernel sees a global ``[T_global, E]``
-        view; this lives off the dispatch critical path.
+    router_info : Union[RouterComputationInfo, RoutingMapInfo]
+        :class:`RouterComputationInfo` makes TE compute the gate and top-k
+        from the given router parameters. :class:`RoutingMapInfo` supplies
+        precomputed expert indices and routing weights (e.g. hash routing)
+        and skips TE's router.
     quantizer_sets : Tuple[QuantizerSet, QuantizerSet]
         Independent FC1 and FC2 quantizer sets describing the global logical
         operation. Token quantizers have ``dp_size * num_experts`` groups and
@@ -1987,6 +2214,9 @@ def moe(
         (default) reserves the dropless aligned worst case. The value must match
         the capacity used by ``ep_bootstrap``. Overflow is reported through
         ``total_recv_tokens`` when bootstrap used ``drop_on_overflow=True``.
+    collect_expert_counts : bool
+        Whether to compute global per-expert assignment counts. Disable this
+        when the returned counts are unused to avoid an extra all-reduce.
     wi_0_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the gate projection output.
         With cuDNN fusion, also names the shared fused outputs, including its quantized output.
@@ -2017,10 +2247,6 @@ def moe(
         FSDP shards the gated dimension, layout conversion permutes gathered
         FP8 data and inverse scales, preserving global gate/up pairing without
         gathering or requantizing full-precision weights.
-    Per-expert dispatch-slot alignment defaults to 128 tokens (``_ALIGN_SIZE``).
-    Requesting cuDNN fusion reserves 256 tokens, also when falling back, to
-    preserve compatibility with EP bootstrap buffer sizing.
-
     use_cudnn_fusion : bool
         Defaults to ``True``: try cuDNN's shared JAX grouped MXFP8 GLU/dGLU APIs
         on SM100+ GPUs; cuDNN selects the architecture-specific kernels. ``False`` uses unfused TE grouped GEMM.
@@ -2029,18 +2255,30 @@ def moe(
         weights fall back to unfused TE grouped GEMM.
         Ineligible calls warn and fall back to TE's regular grouped-GEMM
         implementation. API signatures and GPU capability determine support.
-
     cudnn_native_weight_layout : Optional[bool]
         ``False`` selects standard contiguous gate/up [E,K,2N] storage;
         ``True`` selects native [E,2N,K] storage with alternating 32-column
         gate/up blocks. Defaults to ``None``, inferring storage from the global
         shape. Ambiguous square shapes require an explicit flag. This option
         describes parameter storage independently of the selected execution path.
+    dispatch_quantizer : Optional[Quantizer]
+        Quantizer used to quantize tokens before EP dispatch so that the dispatch moves
+        quantized data and compact scales instead of high-precision activations. Only MXFP8
+        E4M3 quantizers are supported, and the hidden size must be a multiple of 512. The
+        quantizer's layout is ignored; tokens are always quantized rowwise. Defaults to
+        ``None`` (no dispatch quantization).
+
+    Notes
+    -----
+    Per-expert dispatch-slot alignment is 128 tokens (``_ALIGN_SIZE``) with
+    ``use_cudnn_fusion=False``. Requesting cuDNN fusion (the default) reserves
+    256 tokens, also when falling back, to preserve compatibility with EP
+    bootstrap buffer sizing.
 
     MeshResource fields name physical mesh axes, not Flax logical axes.
-    ``input_axes``, ``gate_kernel_axes``, ``wi_kernel_axes`` and
-    ``wo_kernel_axes`` remain logical-axis tuples resolved through the active
-    Flax rules. The selected MeshResource is also used by internal TE sharding
+    ``input_axes``, ``wi_kernel_axes``, ``wo_kernel_axes`` and
+    ``RouterComputationInfo.gate_kernel_axes`` remain logical-axis tuples
+    resolved through the active Flax rules. The selected MeshResource is also used by internal TE sharding
     in both forward and backward, independently of an enclosing global context.
 
     See module docstring for the rest of the parameter semantics and the
@@ -2048,49 +2286,52 @@ def moe(
     """
     if not isinstance(use_cudnn_fusion, bool):
         raise TypeError("use_cudnn_fusion must be a bool")
+    if dispatch_quantizer is not None and not isinstance(dispatch_quantizer, Quantizer):
+        raise TypeError("dispatch_quantizer must be a Quantizer or None")
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
         mesh_resource, quant_before_fsdp_ag
     )
     ep_axis, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
-    score_function = _validate_score_function(score_function)
+
+    if isinstance(router_info, RouterComputationInfo):
+        router_info = router_info.replace(
+            score_function=_validate_score_function(router_info.score_function),
+            aux_loss_coeff=float(router_info.aux_loss_coeff),
+        )
+        has_aux_loss = router_info.aux_loss_coeff > 0.0
+    elif isinstance(router_info, RoutingMapInfo):
+        routing_indices = router_info.routing_indices
+        routing_weights = router_info.routing_weights
+        if routing_indices.ndim != 3 or routing_indices.shape[:2] != x.shape[:2]:
+            raise ValueError(
+                "routing_indices must have shape [batch, sequence, top_k] matching x, "
+                f"got x={x.shape}, routing_indices={routing_indices.shape}."
+            )
+        if routing_weights.shape != routing_indices.shape:
+            raise ValueError(
+                "routing_weights must have the same shape as routing_indices, got "
+                f"{routing_weights.shape} and {routing_indices.shape}."
+            )
+        if routing_indices.shape[-1] <= 0:
+            raise ValueError("routing_indices must select at least one expert per token.")
+        router_info = router_info.replace(routing_indices=routing_indices.astype(jnp.int32))
+        has_aux_loss = False
+    else:
+        raise TypeError(
+            "router_info must be a RouterComputationInfo or RoutingMapInfo, got "
+            f"{type(router_info).__name__}."
+        )
 
     with global_shard_guard(mesh_resource):
         # Enforce ((outer_dp..., ep), None, None) on inbound activations. The
         # EP comm groups consecutive global ranks (dp_color = rank // ep_size),
         # so ep MUST be innermost in the partition spec. Soft re-pin: free if
         # upstream already matches, single reshard otherwise.
-        mesh = _get_mesh()
-        if mesh is None or mesh.empty:
-            raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-        for axis in (ep_axis, *data_parallelism_axes):
-            if axis not in mesh.shape:
-                raise ValueError(f"TE MoE resource axis {axis!r} is not in the active mesh.")
-        expected_leading: Any = (
-            (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
-        )
-        expected_spec = P(expected_leading, None, None)
-        actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
-        if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
-            warnings.warn(
-                f"moe(...): inbound x sharding {actual_spec} does not match expected "
-                f"{expected_spec}; inserting a reshard. Apply "
-                "jax.lax.with_sharding_constraint upstream to avoid this overhead.",
-                UserWarning,
-                stacklevel=2,
-            )
-        x = _with_sharding_constraint_cast_bwd(x, NamedSharding(mesh, expected_spec))
+        x = _prepare_moe_input(x, ep_axis, data_parallelism_axes, caller="moe")
 
         cudnn_native_weight_layout = _resolve_cudnn_native_weight_layout(
             wi, x.shape[-1], cudnn_native_weight_layout
         )
-
-        # custom_vjp can't trace through None args; lower expert_bias to an
-        # empty shape-(0,) tensor that fused_topk_with_score_function treats
-        # as "no bias".
-        if expert_bias is None:
-            expert_bias_arg = jnp.zeros((0,), dtype=jnp.float32)
-        else:
-            expert_bias_arg = expert_bias.astype(jnp.float32)
 
         use_cudnn_jax_fusion = False
         if use_cudnn_fusion:
@@ -2106,33 +2347,26 @@ def moe(
             )
             use_cudnn_jax_fusion = _select_cudnn_jax_fusion(rejection_reasons)
 
-        output, aux_loss, total_recv_tokens = _moe(
+        output, aux_loss, total_recv_tokens, expert_counts = _moe(
             x,
-            gate_kernel,
+            router_info,
             wi,
             wo,
             wi_0_bias,
             wi_1_bias,
             wo_bias,
-            expert_bias_arg,
             quantizer_sets,
+            dispatch_quantizer,
             num_experts,
-            num_experts_per_tok,
             activation_type,
-            score_function,
-            use_pre_softmax,
-            num_groups,
-            group_topk,
-            scaling_factor,
-            float(aux_loss_coeff),
             mesh_resource,
             input_axes,
-            gate_kernel_axes,
             wi_kernel_axes,
             wo_kernel_axes,
             dtype,
             apply_topk_weights_early,
             recv_capacity_per_rank,
+            collect_expert_counts,
             use_cudnn_jax_fusion,
             wi_0_checkpoint_name,
             wi_1_checkpoint_name,
@@ -2142,9 +2376,9 @@ def moe(
             use_cudnn_fusion,
             cudnn_native_weight_layout,
         )
-        if aux_loss_coeff <= 0.0:
+        if not has_aux_loss:
             aux_loss = None
         assert (
             output.dtype == x.dtype
         ), f"moe() output dtype {output.dtype} != input dtype {x.dtype}"
-        return output, aux_loss, total_recv_tokens
+        return output, aux_loss, total_recv_tokens, expert_counts

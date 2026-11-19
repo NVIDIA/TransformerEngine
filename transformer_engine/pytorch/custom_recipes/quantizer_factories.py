@@ -29,6 +29,7 @@ from typing import Optional
 
 import torch
 from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.device import te_device_type
 from ..constants import DType
 
 
@@ -86,7 +87,7 @@ def current_scaling_factory(
 
     return Float8CurrentScalingQuantizer(
         fp8_dtype=fp8_dtype,
-        device=torch.device("cuda"),
+        device=torch.device(te_device_type()),
         force_pow_2_scales=False,
         amax_epsilon=0.0,
     )

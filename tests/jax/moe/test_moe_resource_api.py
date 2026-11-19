@@ -14,7 +14,11 @@ import pytest
 from jax.sharding import Mesh
 
 from transformer_engine.jax.flax import _MoEBlock
-from transformer_engine.jax.moe import _moe_mesh_axes, _resolve_moe_mesh_resource
+from transformer_engine.jax.moe import (
+    RouterComputationInfo,
+    _moe_mesh_axes,
+    _resolve_moe_mesh_resource,
+)
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource, global_shard_guard
 
 
@@ -27,7 +31,7 @@ def no_global_resource():
 def test_resource_required_for_function_and_block():
     module = importlib.import_module("transformer_engine.jax.moe")
     with pytest.raises(ValueError, match="active global_shard_guard"):
-        module.moe(None, None, None, None, num_experts=2, num_experts_per_tok=1)
+        module.moe(None, None, None, None, num_experts=2)
     with pytest.raises(ValueError, match="active global_shard_guard"):
         _MoEBlock().init(jax.random.PRNGKey(0), jnp.ones((1, 1, 4)))
 
@@ -79,11 +83,11 @@ def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
     monkeypatch.setattr(ep.EpPrepareAndDispatchPrimitive.outer_primitive, "bind", bind)
     cfg = SimpleNamespace(top_k=1, dispatch_output_per_expert_alignment=256, topk_idx_dtype=0)
     with global_shard_guard(MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")):
-        inspect.unwrap(ep._ep_fused_prepare_and_dispatch_fwd)(cfg, None, None, None, 256)
+        inspect.unwrap(ep._ep_fused_prepare_and_dispatch_fwd)(cfg, None, None, None, None, 256)
 
     mesh = Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1, 1), ("dp", "fsdp", "ep"))
     sharding = NamedSharding(mesh, P(("dp", "fsdp", "ep"), None, None))
-    args = [SimpleNamespace(sharding=sharding)] * 3
+    args = [SimpleNamespace(sharding=sharding)] * 4
     _, _, outputs, _ = ep.EpPrepareAndDispatchPrimitive.partition(
         captured["top_k"],
         captured["dispatch_output_per_expert_alignment"],
@@ -127,20 +131,19 @@ def test_public_api_uses_selected_resource(monkeypatch, quantize):
     def fake_vjp(*args):
         captured.update(signature.bind(*args).arguments)
         assert global_mesh_resource().ep_resource == "ep"
-        return args[0], None, jnp.zeros((1,), jnp.int32)
+        return args[0], None, jnp.zeros((1,), jnp.int32), jnp.zeros((2,), jnp.int32)
 
     monkeypatch.setattr(module, "_moe", fake_vjp)
     mesh = Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1, 1), ("dp", "fsdp", "ep"))
     kwargs = dict(
         num_experts=2,
-        num_experts_per_tok=1,
         mesh_resource=MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep"),
         quant_before_fsdp_ag=quantize,
     )
     with jax.set_mesh(mesh):
         module.moe(
             jnp.ones((1, 1, 4)),
-            jnp.ones((4, 2)),
+            RouterComputationInfo(gate_kernel=jnp.ones((4, 2)), num_experts_per_tok=1),
             jnp.ones((2, 4, 8)),
             jnp.ones((2, 4, 4)),
             **kwargs,
@@ -160,7 +163,7 @@ def test_flax_block_forwards_boolean(monkeypatch, quantize):
 
     def fake_moe(inputs, *args, **kwargs):
         captured.update(kwargs)
-        return inputs, None, jnp.zeros((1,), jnp.int32)
+        return inputs, None, jnp.zeros((1,), jnp.int32), jnp.zeros((2,), jnp.int32)
 
     monkeypatch.setattr(module, "moe", fake_moe)
     mesh = Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ("fsdp", "ep"))

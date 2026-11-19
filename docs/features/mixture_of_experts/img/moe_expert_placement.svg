@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 215" width="100%" style="max-width: 900px;">
+  <defs>
+    <style>
+      .label { font: 15px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
+      .tiny-label { font: 12px sans-serif; fill: #555; text-anchor: middle; }
+      .rank-label { font: bold 14px sans-serif; fill: #444; text-anchor: start; }
+      .expert-e0 { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.4; }
+      .expert-e1 { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.4; }
+      .expert-e2 { fill: #fff3e0; stroke: #f57c00; stroke-width: 1.4; }
+      .expert-e3 { fill: #fce4ec; stroke: #c2185b; stroke-width: 1.4; }
+      .panel { fill: #f5f5f5; stroke: #9e9e9e; stroke-width: 1.2; stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+  <rect x="60" y="30" width="380" height="175" rx="6" class="panel"/>
+  <text x="72" y="52" class="rank-label">Rank 0</text>
+  <text x="155" y="78" class="small-label">tokens</text>
+  <rect x="80" y="88" width="150" height="26" class="expert-e0"/>
+  <text x="155" y="105" class="tiny-label">t0 → E0</text>
+  <rect x="80" y="122" width="150" height="26" class="expert-e2"/>
+  <text x="155" y="139" class="tiny-label">t1 → E2</text>
+  <rect x="80" y="156" width="150" height="26" class="expert-e0"/>
+  <text x="155" y="173" class="tiny-label">t2 → E0</text>
+  <text x="340" y="78" class="small-label">local experts</text>
+  <rect x="260" y="88" width="75" height="100" class="expert-e0"/>
+  <text x="297" y="143" class="label">E0</text>
+  <rect x="345" y="88" width="75" height="100" class="expert-e1"/>
+  <text x="382" y="143" class="label">E1</text>
+  <rect x="460" y="30" width="380" height="175" rx="6" class="panel"/>
+  <text x="472" y="52" class="rank-label">Rank 1</text>
+  <text x="555" y="78" class="small-label">tokens</text>
+  <rect x="480" y="88" width="150" height="26" class="expert-e1"/>
+  <text x="555" y="105" class="tiny-label">t3 → E1</text>
+  <rect x="480" y="122" width="150" height="26" class="expert-e3"/>
+  <text x="555" y="139" class="tiny-label">t4 → E3</text>
+  <rect x="480" y="156" width="150" height="26" class="expert-e2"/>
+  <text x="555" y="173" class="tiny-label">t5 → E2</text>
+  <text x="740" y="78" class="small-label">local experts</text>
+  <rect x="660" y="88" width="75" height="100" class="expert-e2"/>
+  <text x="697" y="143" class="label">E2</text>
+  <rect x="745" y="88" width="75" height="100" class="expert-e3"/>
+  <text x="782" y="143" class="label">E3</text>
+</svg>

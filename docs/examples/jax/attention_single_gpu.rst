@@ -80,7 +80,7 @@ implementations.
       :start-after: # SINGLE_GPU_OUTPUT_START
       :end-before: # SINGLE_GPU_OUTPUT_END
 
-On a single GB200, this run is roughly **52x faster** for the fwd+bwd of this
+On a single GB200, this run is roughly **46x faster** for the fwd+bwd of this
 BSHD GQA + SWA example. This compares TE ``DotProductAttention`` against the
 native JAX baseline above, which materializes attention scores with XLA ops; it
 is not a comparison against ``jax.nn.dot_product_attention(...,

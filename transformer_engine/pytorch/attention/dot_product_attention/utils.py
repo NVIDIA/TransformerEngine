@@ -22,6 +22,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
+from transformer_engine.pytorch.device import te_device_type
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     QKVFormat,
@@ -47,6 +48,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.float8_tensor import Float8TensorStorage
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+import transformer_engine.pytorch.triton.mxfp8_bhsd_swizzle as triton_mxfp8_bhsd_swizzle
 
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType, DType, MXFP8_BLOCK_SCALING_SIZE
@@ -148,8 +150,12 @@ class FlashAttentionUtils:
 
     v4_is_installed = False
     fa4_version = PkgVersion("0")
+    # Older FA4 releases call quack.activation.sub_packed_f32x2, removed in quack-kernels 0.6.5.
+    v4_version_required = PkgVersion("4.0.0b26")
     v4_0_0_beta31 = PkgVersion("4.0.0b31")
     v4_0_0_beta33 = PkgVersion("4.0.0b33")
+    quack_version: Optional[PkgVersion] = None
+    cutlass_dsl_version: Optional[PkgVersion] = None
     use_v4 = False
     # Set by a signature probe in backends.py; fail-closed default.
     fa3_supports_softcap = False
@@ -2038,7 +2044,7 @@ def get_padding_mask(
         return (
             (positions.unsqueeze(0) >= seqlens.unsqueeze(1))
             .view(batch_size, 1, 1, max_seqlen)
-            .to(device="cuda")
+            .to(device=te_device_type())
         )
 
     attention_mask_q = _mask(cu_seqlens_q, max_seqlen_q)
@@ -2164,9 +2170,11 @@ def get_full_mask(
         actual_seqlens_kv = m[:, 0, 0, :].sum(dim=1)
 
     # apply SWA mask
-    mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+    mask = torch.arange(max_seqlen_q, dtype=torch.int32, device=te_device_type()).view(
         1, 1, max_seqlen_q, 1
-    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
+    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device=te_device_type()).view(
+        1, 1, 1, max_seqlen_kv
+    )
     swa_left = None
     swa_right = None
     if attn_mask_type == "causal_bottom_right" or (
@@ -2262,7 +2270,7 @@ def get_alibi(
                 m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
                 m = torch.cat([m, m_hat])
 
-            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device="cuda")
+            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device=te_device_type())
         _alibi_cache["_num_heads"] = num_heads
         _alibi_cache["_alibi_slopes_require_update"] = False
 
@@ -2275,9 +2283,9 @@ def get_alibi(
         else:
             raise ValueError("ALiBi slopes cannot exceed 2 dimensions.")
 
-        bias = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+        bias = torch.arange(max_seqlen_q, dtype=torch.int32, device=te_device_type()).view(
             1, 1, max_seqlen_q, 1
-        ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
+        ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device=te_device_type()).view(
             1, 1, 1, max_seqlen_kv
         )
         if actual_seqlens_q is None and actual_seqlens_kv is None:
@@ -2297,7 +2305,9 @@ def get_alibi(
         _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
         _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
         bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
-        _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
+        _alibi_cache["_alibi_bias"] = bias.contiguous().to(
+            dtype=bias_dtype, device=te_device_type()
+        )
         _alibi_cache["_alibi_bias_require_update"] = False
 
     return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
@@ -2312,7 +2322,7 @@ def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     mask = mask.squeeze(1).squeeze(1)
     reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+    zero = torch.zeros(1, dtype=torch.int32, device=te_device_type())
     cu_seqlens = torch.cat((zero, cu_seqlens))
 
     return cu_seqlens
@@ -2330,7 +2340,7 @@ def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.
 
     reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+    zero = torch.zeros(1, dtype=torch.int32, device=te_device_type())
     cu_seqlens = torch.cat((zero, cu_seqlens))
 
     mask = mask.reshape(-1)
@@ -2366,7 +2376,7 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
         ordered,
         bs * max_seqlen,
     )
-    return indices.to(dtype=torch.int64, device="cuda").unsqueeze(1).unsqueeze(1)
+    return indices.to(dtype=torch.int64, device=te_device_type()).unsqueeze(1).unsqueeze(1)
 
 
 def get_full_cu_seqlens(
@@ -3455,6 +3465,15 @@ def mxfp8_transpose_swizzle(fp8_tensors, src_format):
         "sbhd",
     ), f"mxfp8_transpose_swizzle only supports bshd/sbhd, got {src_format!r}."
 
+    if triton_mxfp8_bhsd_swizzle.can_fuse_transpose_swizzle(fp8_tensors, src_format):
+        # One Triton kernel per direction that writes the swizzled BHSD layout directly.
+        triton_mxfp8_bhsd_swizzle.fused_transpose_swizzle(fp8_tensors, src_format)
+        return
+    _mxfp8_transpose_swizzle_unfused(fp8_tensors, src_format)
+
+
+def _mxfp8_transpose_swizzle_unfused(fp8_tensors, src_format):
+    """mxfp8_transpose_swizzle with separate BHSD permute and GEMM swizzle kernels."""
     rs_list = [t._rowwise_scale_inv for t in fp8_tensors]
     cs_list = [t._columnwise_scale_inv for t in fp8_tensors]
 

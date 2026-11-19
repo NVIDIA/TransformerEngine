@@ -208,7 +208,7 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
 
     new_dataset = {
         "sentence": output,
-        "label": dataset["label"].astype(np.float32),
+        "label": np.asarray(dataset["label"], dtype=np.float32),
         "mask": mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len)),
     }
     return new_dataset, vocab, word_id
@@ -382,7 +382,7 @@ def train_and_evaluate(args):
 
             if args.dry_run:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
-                rngs = {DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng_state}
+                rngs = {DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
                 jit_train_step(state, inputs, masks, labels, var_collect, rngs)
                 print("PASSED")
                 return None

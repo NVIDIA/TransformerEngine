@@ -635,5 +635,103 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeV2Handler, GroupedQuantizeV2FFI,
                                   .Attr<int64_t>("flatten_axis"),
                               FFI_CudaGraph_Traits);
 
+// Rebuild the GEMM operands of a rowwise-prequantized MXFP8 grouped tensor: swizzled rowwise
+// scales and the columnwise copy. The rowwise data itself is consumed in place.
+Error_Type GroupedRequantizeFFI(cudaStream_t stream, Buffer_Type rowwise_data,
+                                Buffer_Type rowwise_sinv, Buffer_Type group_sizes,
+                                Result_Type colwise_out, Result_Type colwise_sinv,
+                                Result_Type swizzled_rowwise_sinv, Result_Type int64_workspace) {
+  auto data_dtype = convert_ffi_datatype_to_te_dtype(rowwise_data.element_type());
+  NVTE_CHECK(data_dtype == DType::kFloat8E4M3, "GroupedRequantize requires E4M3 data.");
+  NVTE_CHECK(convert_ffi_datatype_to_te_dtype(rowwise_sinv.element_type()) == DType::kFloat8E8M0,
+             "scale_inv must be E8M0 for MXFP8 grouped requantize.");
+
+  auto data_dims = rowwise_data.dimensions();
+  NVTE_CHECK(data_dims.size() == 2, "GroupedRequantize expects 2D data [rows, hidden].");
+  const size_t m = data_dims[0];
+  const size_t n = data_dims[1];
+  NVTE_CHECK(m % 128 == 0 && n % 128 == 0,
+             "GroupedRequantize requires rows and hidden to be multiples of 128; got (", m, ", ", n,
+             ").");
+  NVTE_CHECK(rowwise_sinv.element_count() == m * n / 32, "rowwise scale_inv must hold rows * ",
+             "hidden / 32 elements.");
+  const size_t n_groups = group_sizes.dimensions()[0];
+
+  // Workspace: [n_groups int64 row counts | n_groups + 1 int64 element offsets].
+  auto *int64_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
+  auto *offsets_ptr = int64_ptr + n_groups;
+  nvte_convert_int32_to_int64_with_multiplier(
+      reinterpret_cast<const int32_t *>(group_sizes.untyped_data()), int64_ptr, n_groups, 1,
+      stream);
+  nvte_compute_grouped_tensor_offsets(int64_ptr, offsets_ptr, n_groups, static_cast<int64_t>(n),
+                                      stream);
+
+  // Grouped tensors carry data and scales as flat buffers; grouping is described by the
+  // per-group row counts (first_dims) and element offsets.
+  NVTEShape grouped_shape{};
+  grouped_shape.ndim = 2;
+  grouped_shape.data[0] = m;
+  grouped_shape.data[1] = n;
+
+  // Grouped-tensor data buffers are flat; the 2D logical shape is passed to the constructor.
+  NVTEShape flat_data_shape{};
+  flat_data_shape.ndim = 1;
+  flat_data_shape.data[0] = m * n;
+
+  NVTEShape sz_shape{};
+  sz_shape.ndim = 1;
+  sz_shape.data[0] = n_groups;
+
+  NVTEShape offsets_shape{};
+  offsets_shape.ndim = 1;
+  offsets_shape.data[0] = n_groups + 1;
+
+  NVTEShape compact_sinv_shape{};
+  compact_sinv_shape.ndim = 2;
+  compact_sinv_shape.data[0] = m;
+  compact_sinv_shape.data[1] = n / 32;
+
+  NVTEShape swizzled_sinv_shape{};
+  swizzled_sinv_shape.ndim = 1;
+  swizzled_sinv_shape.data[0] = m * n / 32;
+
+  // Input: rowwise MXFP8 data with compact (unswizzled) E8M0 scales.
+  GroupedTensorWrapper in_grouped(n_groups, grouped_shape,
+                                  get_nvte_scaling_mode(JAXX_Scaling_Mode::MXFP8_1D_SCALING));
+  in_grouped.set_rowwise_data(rowwise_data.untyped_data(), data_dtype, flat_data_shape)
+      .set_rowwise_scale_inv(rowwise_sinv.untyped_data(), DType::kFloat8E8M0, compact_sinv_shape)
+      .set_first_dims(int64_ptr, DType::kInt64, sz_shape)
+      .set_tensor_offsets(offsets_ptr, DType::kInt64, offsets_shape);
+
+  // Output: columnwise E4M3 data + scales and swizzled rowwise scales; rowwise data aliases input.
+  GroupedTensorWrapper out_grouped(n_groups, grouped_shape,
+                                   get_nvte_scaling_mode(JAXX_Scaling_Mode::MXFP8_1D_SCALING));
+  out_grouped.set_rowwise_data(rowwise_data.untyped_data(), data_dtype, flat_data_shape)
+      .set_rowwise_scale_inv(swizzled_rowwise_sinv->untyped_data(), DType::kFloat8E8M0,
+                             swizzled_sinv_shape)
+      .set_columnwise_data(colwise_out->untyped_data(), data_dtype, flat_data_shape)
+      .set_columnwise_scale_inv(colwise_sinv->untyped_data(), DType::kFloat8E8M0,
+                                swizzled_sinv_shape)
+      .set_first_dims(int64_ptr, DType::kInt64, sz_shape)
+      .set_tensor_offsets(offsets_ptr, DType::kInt64, offsets_shape);
+  out_grouped.set_with_gemm_swizzled_scales(true);
+
+  nvte_group_requantize(in_grouped.data(), out_grouped.data(), nullptr, nullptr, stream);
+
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedRequantizeHandler, GroupedRequantizeFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // rowwise_data
+                                  .Arg<Buffer_Type>()      // rowwise_sinv (compact)
+                                  .Arg<Buffer_Type>()      // group_sizes (int32)
+                                  .Ret<Buffer_Type>()      // colwise_out
+                                  .Ret<Buffer_Type>()      // colwise_sinv
+                                  .Ret<Buffer_Type>()      // swizzled_rowwise_sinv
+                                  .Ret<Buffer_Type>(),     // int64_workspace
+                              FFI_CudaGraph_Traits);
+
 }  // namespace jax
 }  // namespace transformer_engine
