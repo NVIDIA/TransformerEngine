@@ -61,6 +61,9 @@ struct TensorShapeInfo {
   const int64_t *offsets;     // nullptr if need to compute
   int64_t uniform_first;      // used if first_dims == nullptr
   int64_t uniform_last;       // used if last_dims == nullptr
+  // Groups stored as (first, num_groups, last) instead of (num_groups, first, last).
+  // Requires uniform shapes; set by the caller from the grouped matmul config.
+  bool interleaved = false;
 
   // Create from GroupedTensor
   static TensorShapeInfo from_tensor(const transformer_engine::GroupedTensor *t) {
@@ -167,6 +170,10 @@ struct GroupedGemmSetupWorkspace {
   int *b_cols = nullptr;
   int *d_rows = nullptr;  // M (first dim) - also used for C
   int *d_cols = nullptr;  // N (last dim) - also used for C
+  // Leading dimensions (equal to rows unless the operand is interleaved)
+  int *a_ld = nullptr;
+  int *b_ld = nullptr;
+  int *d_ld = nullptr;  // also used for C
   // NVFP4: per-group computed alpha values (alpha * amax_A * amax_B * factor_inv)
   float *nvfp4_computed_alpha = nullptr;
   // End-of-layout offset in bytes (unaligned). required_setup_size rounds this up.
@@ -191,7 +198,7 @@ struct GroupedGemmSetupWorkspace {
       offset += size_bytes;
     };
 
-    // 8 pointer arrays (each 16-byte aligned), then 6 int arrays, then 1 float array.
+    // 8 pointer arrays (each 16-byte aligned), then 9 int arrays, then 1 float array.
     align_ptr();
     place(ws.A_ptrs, ptr_size);
     align_ptr();
@@ -218,6 +225,9 @@ struct GroupedGemmSetupWorkspace {
     place(ws.b_cols, int_size);
     place(ws.d_rows, int_size);
     place(ws.d_cols, int_size);
+    place(ws.a_ld, int_size);
+    place(ws.b_ld, int_size);
+    place(ws.d_ld, int_size);
     place(ws.nvfp4_computed_alpha, float_size);
 
     ws.total_bytes = offset;
@@ -840,15 +850,15 @@ inline void init_matrix_layouts(
   const cudaDataType_t B_type = get_cuda_dtype(B_sel.dtype);
   const cudaDataType_t D_type = get_cuda_dtype(d_dtype);
 
-  // Storage dimensions computed by kernel, leading dimension = rows
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descA, A_type, num_tensors, ws.a_rows,
-                                                    ws.a_cols, ws.a_rows));
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descB, B_type, num_tensors, ws.b_rows,
-                                                    ws.b_cols, ws.b_rows));
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descC, D_type, num_tensors, ws.d_rows,
-                                                    ws.d_cols, ws.d_rows));
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descD, D_type, num_tensors, ws.d_rows,
-                                                    ws.d_cols, ws.d_rows));
+  // Storage dimensions and leading dimensions computed by kernel
+  NVTE_CHECK_CUBLAS(
+      cublasLtGroupedMatrixLayoutInit(&descA, A_type, num_tensors, ws.a_rows, ws.a_cols, ws.a_ld));
+  NVTE_CHECK_CUBLAS(
+      cublasLtGroupedMatrixLayoutInit(&descB, B_type, num_tensors, ws.b_rows, ws.b_cols, ws.b_ld));
+  NVTE_CHECK_CUBLAS(
+      cublasLtGroupedMatrixLayoutInit(&descC, D_type, num_tensors, ws.d_rows, ws.d_cols, ws.d_ld));
+  NVTE_CHECK_CUBLAS(
+      cublasLtGroupedMatrixLayoutInit(&descD, D_type, num_tensors, ws.d_rows, ws.d_cols, ws.d_ld));
 }
 
 inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOperation_t op_A,
@@ -1168,9 +1178,12 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
 //   1. Explicit per-tensor offset array provided  → use it directly.
 //   2. Per-tensor first/last dims provided but no offsets → cumulative sum of (first*last) products.
 //   3. Fully uniform shapes                        → idx * uniform_first * uniform_last.
+// Interleaved groups (uniform shapes, stored as (first, num_groups, last)) start at idx * last.
 __forceinline__ __device__ int64_t compute_grouped_tensor_offset(const TensorShapeInfo &meta,
                                                                  size_t idx) {
-  if (meta.offsets) {
+  if (meta.interleaved) {
+    return static_cast<int64_t>(idx) * meta.uniform_last;
+  } else if (meta.offsets) {
     return meta.offsets[idx];
   } else if (meta.first_dims != nullptr || meta.last_dims != nullptr) {
     // offset[i] = sum_{j < i} (first_dims[j] * last_dims[j])
@@ -1390,8 +1403,8 @@ __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
 __global__ void setup_grouped_gemm_kernel(
     // Output arrays
     void **A_ptrs, void **B_ptrs, void **C_ptrs, void **D_ptrs, int *a_rows, int *a_cols,
-    int *b_rows, int *b_cols, int *d_rows, int *d_cols, float **alpha_ptrs, float **beta_ptrs,
-    void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
+    int *b_rows, int *b_cols, int *d_rows, int *d_cols, int *a_ld, int *b_ld, int *d_ld,
+    float **alpha_ptrs, float **beta_ptrs, void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
     // Inputs
     char *a_base, char *b_base, char *c_base, char *d_base, TensorShapeInfo A_meta,
     TensorShapeInfo B_meta, TensorShapeInfo C_meta, TensorShapeInfo D_meta, size_t a_bits_per_elem,
@@ -1467,6 +1480,12 @@ __global__ void setup_grouped_gemm_kernel(
     d_rows[idx] = static_cast<int>(d_last);
     d_cols[idx] = static_cast<int>(d_first);
   }
+  // Interleaved groups are row-major (first, num_groups, last): consecutive rows of one
+  // group are num_groups * last elements apart. Interleaving implies non-transposed storage.
+  const int groups = static_cast<int>(num_tensors);
+  a_ld[idx] = A_meta.interleaved ? a_rows[idx] * groups : a_rows[idx];
+  b_ld[idx] = B_meta.interleaved ? b_rows[idx] * groups : b_rows[idx];
+  d_ld[idx] = D_meta.interleaved ? d_rows[idx] * groups : d_rows[idx];
 
   // Fill alpha/beta pointers.
   // Hopper uses one shared alpha/beta scalar for all groups; Blackwell+ uses per-matrix scalars.
@@ -1556,6 +1575,20 @@ __global__ void setup_grouped_gemm_kernel(
   }
 }
 
+// Interleaved groups are addressed through a group stride and leading dimension only,
+// so they need uniform shapes and plain (unscaled, non-transposed) storage.
+inline void validate_interleaved_operand(const TensorShapeInfo &meta,
+                                         transformer_engine::DType dtype, bool storage_transposed,
+                                         const char *operand) {
+  if (!meta.interleaved) return;
+  NVTE_CHECK(meta.first_dims == nullptr && meta.last_dims == nullptr, "Grouped GEMM: interleaved ",
+             operand, " requires uniform per-group shapes.");
+  NVTE_CHECK(!transformer_engine::is_fp8_dtype(dtype) && !transformer_engine::is_fp4_dtype(dtype),
+             "Grouped GEMM: interleaved ", operand, " is only supported for unscaled data.");
+  NVTE_CHECK(!storage_transposed, "Grouped GEMM: interleaved ", operand,
+             " does not support transposed storage.");
+}
+
 // Launch the setup kernel to populate workspace arrays
 inline void launch_grouped_gemm_setup(
     const GroupedGemmSetupWorkspace &ws, const GroupedOperandSelection &A_sel,
@@ -1565,7 +1598,7 @@ inline void launch_grouped_gemm_setup(
     size_t num_tensors, cudaStream_t stream,
     const MultiTensorGroupGemmInputArgs &a_multi_tensor_args, const NVTETensor *C_list,
     const NVTETensor *D_list, bool a_is_discrete, char *a_base, transformer_engine::DType c_dtype,
-    transformer_engine::DType d_dtype) {
+    transformer_engine::DType d_dtype, bool d_interleaved = false) {
   // Use logical shape info from selection; storage transposes are tracked separately.
   TensorShapeInfo A_meta = A_sel.logical_tensor_shape;
   TensorShapeInfo B_meta = B_sel.logical_tensor_shape;
@@ -1602,6 +1635,16 @@ inline void launch_grouped_gemm_setup(
     D_meta = TensorShapeInfo::from_tensor(D);
     d_base = static_cast<char *>(D->data.dptr);
   }
+  if (d_interleaved) {
+    NVTE_CHECK(!d_is_discrete && !c_is_discrete,
+               "Grouped GEMM: interleaved D requires grouped C/D tensors.");
+    // C is described by D's layout, so it must be interleaved the same way.
+    D_meta.interleaved = true;
+    C_meta.interleaved = true;
+    validate_interleaved_operand(D_meta, d_dtype, false, "D");
+  }
+  validate_interleaved_operand(A_meta, A_sel.dtype, A_sel.storage_transposed, "A");
+  validate_interleaved_operand(B_meta, B_sel.dtype, B_sel.storage_transposed, "B");
 
   const size_t a_bits_per_elem = transformer_engine::typeToNumBits(A_sel.dtype);
   const size_t b_bits_per_elem = transformer_engine::typeToNumBits(B_sel.dtype);
@@ -1646,15 +1689,15 @@ inline void launch_grouped_gemm_setup(
 
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
-      ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
-      A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_bits_per_elem,
-      b_bits_per_elem, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
-      static_cast<float *>(beta_tensor->data.dptr), use_per_group_alpha_beta, a_is_discrete,
-      c_is_discrete, d_is_discrete, reinterpret_cast<float *>(A_sel.scale_inv),
-      reinterpret_cast<float *>(B_sel.scale_inv), a_rowwise, b_rowwise, A_sel.storage_transposed,
-      B_sel.storage_transposed, A_sel.scaling_mode, B_sel.scaling_mode, num_tensors,
-      a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args,
-      A_sel.amax ? static_cast<float *>(A_sel.amax) : nullptr,
+      ws.d_rows, ws.d_cols, ws.a_ld, ws.b_ld, ws.d_ld, ws.alpha_ptrs, ws.beta_ptrs,
+      ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs, A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta,
+      B_meta, C_meta, D_meta, a_bits_per_elem, b_bits_per_elem, c_elem_size, d_elem_size,
+      static_cast<float *>(alpha_tensor->data.dptr), static_cast<float *>(beta_tensor->data.dptr),
+      use_per_group_alpha_beta, a_is_discrete, c_is_discrete, d_is_discrete,
+      reinterpret_cast<float *>(A_sel.scale_inv), reinterpret_cast<float *>(B_sel.scale_inv),
+      a_rowwise, b_rowwise, A_sel.storage_transposed, B_sel.storage_transposed, A_sel.scaling_mode,
+      B_sel.scaling_mode, num_tensors, a_multi_tensor_args, c_multi_tensor_args,
+      d_multi_tensor_args, A_sel.amax ? static_cast<float *>(A_sel.amax) : nullptr,
       B_sel.amax ? static_cast<float *>(B_sel.amax) : nullptr,
       needs_nvfp4_alpha ? ws.nvfp4_computed_alpha : nullptr, a_unit_global_scale_amax,
       b_unit_global_scale_amax);
@@ -1711,6 +1754,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   // mirror the non-grouped GEMM logic for FP8 layout constraints.
   auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
   auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
+  A_sel.logical_tensor_shape.interleaved = config_.a_interleaved;
+  B_sel.logical_tensor_shape.interleaved = config_.b_interleaved;
   validate_grouped_gemm_scaling_modes(A_sel.scaling_mode, B_sel.scaling_mode, sm,
                                       "nvte_grouped_gemm");
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
@@ -1723,7 +1768,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, inputC, outputD, alpha_tensor,
                             beta_tensor, use_per_group_alpha_beta, num_tensors, stream,
                             a_multi_tensor_args, /*C_list=*/nullptr, /*D_list=*/nullptr,
-                            /*a_is_discrete=*/false, A_sel.dptr, inputC->dtype(), outputD->dtype());
+                            /*a_is_discrete=*/false, A_sel.dptr, inputC->dtype(), outputD->dtype(),
+                            config_.d_interleaved);
 
   // Compute average dimensions for heuristics
   // K dimension: if transa, K is A's last dim; if not, K is A's first dim
@@ -1775,6 +1821,8 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
 
   // Parse config (if provided)
   GroupedMatmulConfig config_ = parse_grouped_gemm_config(config);
+  NVTE_CHECK(!config_.a_interleaved && !config_.b_interleaved && !config_.d_interleaved,
+             "Interleaved grouped GEMM operands are only supported by nvte_grouped_gemm.");
 
   // Validate inputs and outputs.
   const size_t num_tensors = validate_grouped_gemm_inputs(num_a_tensors, {inputB}, alpha_tensor,
@@ -1938,6 +1986,8 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
 
   // Parse config (if provided)
   GroupedMatmulConfig config_ = parse_grouped_gemm_config(config);
+  NVTE_CHECK(!config_.a_interleaved && !config_.b_interleaved && !config_.d_interleaved,
+             "Interleaved grouped GEMM operands are only supported by nvte_grouped_gemm.");
 
   // Select operand storage (row-wise vs column-wise) and adjust transpose flags to
   // mirror the non-grouped GEMM logic for FP8 layout constraints.

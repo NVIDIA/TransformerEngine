@@ -1968,6 +1968,38 @@ class TestGroupedDense:
         # comparable and the cotangent dtype on `out` is unambiguous.
         return jnp.sum(out.astype(jnp.float32)) / jnp.sqrt(x.size)
 
+    def test_grouped_dense_grad_interleaved_kernel(self, input_shape):
+        """A (K, G, N) kernel with kernel_group_axis=1 matches the same (G, K, N) kernel."""
+        dtype = jnp.bfloat16
+        is_supported, reason = tex.is_v2_grouped_gemm_supported(
+            ScalingMode.NO_SCALING, dtype, has_bias=False
+        )
+        if not is_supported:
+            pytest.skip(reason)
+        x, kernel, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
+            dtype, input_shape
+        )
+
+        # A random cotangent, so that misplaced rows or columns in dgrad/wgrad change the result.
+        cotangent = jax.random.uniform(
+            jax.random.PRNGKey(1), (x.shape[0], kernel.shape[2]), jnp.float32
+        )
+
+        def loss(x, kernel, kernel_group_axis):
+            out = grouped_dense(
+                x, kernel, group_sizes, contracting_dims, kernel_group_axis=kernel_group_axis
+            )
+            return jnp.sum(out.astype(jnp.float32) * cotangent) / jnp.sqrt(x.size)
+
+        value_n_grad = jit(value_and_grad(loss, (0, 1)), static_argnums=(2,))
+        ref_out, (ref_dgrad, ref_wgrad) = value_n_grad(x, kernel, 0)
+        out, (dgrad, wgrad) = value_n_grad(x, jnp.transpose(kernel, (1, 0, 2)), 1)
+
+        assert wgrad.shape == (kernel.shape[1], kernel.shape[0], kernel.shape[2])
+        assert_allclose(out, ref_out, dtype=dtype)
+        assert_allclose(dgrad, ref_dgrad, dtype=dtype)
+        assert_allclose(wgrad, jnp.transpose(ref_wgrad, (1, 0, 2)), dtype=dtype)
+
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     def test_grouped_dense_grad_fp16(self, dtype, input_shape):
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
