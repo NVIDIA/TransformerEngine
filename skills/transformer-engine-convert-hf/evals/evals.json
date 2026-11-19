@@ -1,0 +1,69 @@
+{
+  "skill_name": "transformer-engine-convert-hf",
+  "evals": [
+    {
+      "id": "transformer-engine-convert-hf-001",
+      "prompt": "I want a fine-tuning recipe for Llama with Transformer Engine. The model is meta-llama/Llama-2-7b-hf from Hugging Face. Write the recipe to te_llama.py in the current directory.",
+      "expected_output": "A te_llama.py module that rebuilds the Hugging Face Llama model on Transformer Engine fused blocks. It defines a decoder layer based on Transformer Engine's TransformerLayer (RMSNorm, SwiGLU, grouped-query attention taken from num_key_value_heads, no bias, TE rotary position embeddings), so the input norm is fused with the QKV projection and the post-attention norm with the MLP. It builds LlamaForCausalLM with that layer in place of LlamaDecoderLayer, loads a Hugging Face checkpoint, and has a replace_params function mapping input_layernorm, q_proj/k_proj/v_proj, o_proj, post_attention_layernorm, gate_proj/up_proj and down_proj onto the TE layernorm_qkv, proj and layernorm_mlp parameters. It shows a training step under Transformer Engine's autocast with a quantization recipe, and the response states which checks ran and which did not.",
+      "expected_skill": "transformer-engine-convert-hf",
+      "expected_script": "check_recipe.py",
+      "assertions": [
+        "te_llama.py defines a decoder layer class that subclasses Transformer Engine's TransformerLayer (or composes Transformer Engine's MultiheadAttention with input_layernorm=True and Transformer Engine's LayerNormMLP), configured with normalization='RMSNorm' and activation='swiglu'.",
+        "The Transformer Engine layer sets num_gqa_groups from config.num_key_value_heads and passes Transformer Engine rotary position embeddings to the layer's forward.",
+        "te_llama.py makes LlamaForCausalLM use the Transformer Engine layer in place of Hugging Face's LlamaDecoderLayer and provides a way to load a Hugging Face Llama checkpoint into the resulting model.",
+        "A weight-mapping function copies input_layernorm.weight and the q_proj, k_proj and v_proj weights into the layernorm_qkv parameters, o_proj into the attention output projection, and post_attention_layernorm, gate_proj, up_proj and down_proj into the layernorm_mlp parameters, with gate_proj and up_proj filling the two halves of fc1_weight.",
+        "The recipe shows the forward pass running under Transformer Engine's autocast (or fp8_autocast) with a Transformer Engine quantization recipe for fine-tuning.",
+        "The final response says which validation was run and which was not, and does not describe a recipe that was never executed as validated."
+      ],
+      "checks": [
+        {"type": "file_exists", "path": "te_llama.py"}
+      ]
+    },
+    {
+      "id": "transformer-engine-convert-hf-002",
+      "prompt": "Convert Gemma to Transformer Engine. I'm using google/gemma-7b with Hugging Face transformers. Put the recipe in te_gemma.py in the current directory.",
+      "expected_output": "A te_gemma.py module that rebuilds the Hugging Face Gemma model on Transformer Engine fused blocks. Its decoder layer is based on Transformer Engine's TransformerLayer with normalization='RMSNorm', activation='geglu', zero_centered_gamma=True (Gemma's norm multiplies by 1 + weight), kv_channels taken from config.head_dim and num_gqa_groups from config.num_key_value_heads. It builds GemmaForCausalLM with that layer in place of GemmaDecoderLayer, loads a Hugging Face checkpoint, and maps the norm, QKV, output-projection and MLP weights onto the TE layernorm_qkv, proj and layernorm_mlp parameters. The response states which checks ran and which did not.",
+      "expected_skill": "transformer-engine-convert-hf",
+      "expected_script": "check_recipe.py",
+      "assertions": [
+        "te_gemma.py defines a decoder layer class that subclasses Transformer Engine's TransformerLayer (or composes Transformer Engine's MultiheadAttention with input_layernorm=True and Transformer Engine's LayerNormMLP), configured with normalization='RMSNorm' and activation='geglu'.",
+        "The Transformer Engine layer sets zero_centered_gamma=True and passes the head dimension from the Gemma config (config.head_dim) as kv_channels.",
+        "te_gemma.py makes GemmaForCausalLM use the Transformer Engine layer in place of Hugging Face's GemmaDecoderLayer and provides a way to load a Hugging Face Gemma checkpoint into the resulting model.",
+        "A weight-mapping function copies the input norm and the q_proj, k_proj and v_proj weights into the layernorm_qkv parameters in the layout that matches the fuse_qkv_params setting used (interleaved per head when fused into one weight, three direct copies otherwise), and copies post_attention_layernorm, gate_proj, up_proj and down_proj into the layernorm_mlp parameters.",
+        "The final response says which validation was run and which was not, and does not describe a recipe that was never executed as validated."
+      ],
+      "checks": [
+        {"type": "file_exists", "path": "te_gemma.py"}
+      ]
+    },
+    {
+      "id": "transformer-engine-convert-hf-003",
+      "prompt": "Convert Mixtral to Transformer Engine. The model is mistralai/Mixtral-8x7B-v0.1 on Hugging Face. Write the recipe to te_mixtral.py in the current directory.",
+      "expected_output": "A te_mixtral.py module that rebuilds the Hugging Face Mixtral decoder layer on Transformer Engine. Attention uses Transformer Engine's MultiheadAttention with input_layernorm=True, RMSNorm and grouped-query attention, so the input norm is fused with the QKV projection. The mixture-of-experts block keeps the router gate in high precision, sorts tokens by expert with Transformer Engine's moe_permute and moe_unpermute, and runs all experts through GroupedLinear grouped GEMMs with per-expert token counts instead of a Python loop over experts. The weight mapping covers attention, norms, the router gate and the expert weights. The response states which checks ran and which did not.",
+      "expected_skill": "transformer-engine-convert-hf",
+      "expected_script": "check_recipe.py",
+      "assertions": [
+        "te_mixtral.py builds the attention sublayer with Transformer Engine's MultiheadAttention using input_layernorm=True, normalization='RMSNorm' and num_gqa_groups from config.num_key_value_heads, so the input norm is fused with the QKV projection.",
+        "The expert MLPs run through Transformer Engine GroupedLinear with per-expert token counts (split sizes), not through a Python loop of per-expert nn.Linear calls.",
+        "Tokens are sorted by expert and restored to their original order with Transformer Engine's moe_permute and moe_unpermute functions (or their padded or with-probs variants).",
+        "The router gate is kept out of quantization, by building it under quantized_model_init(enabled=False) or calling it under autocast(enabled=False), and the top-k routing weights are computed from its logits.",
+        "The weight mapping covers the router gate and the expert weights, with each expert's gate and up projections forming the two halves of its first weight and the down projection its second weight, in addition to the attention and norm weights.",
+        "The final response says which validation was run and which was not, and does not describe a recipe that was never executed as validated."
+      ],
+      "checks": [
+        {"type": "file_exists", "path": "te_mixtral.py"}
+      ]
+    },
+    {
+      "id": "transformer-engine-convert-hf-004",
+      "prompt": "I already have a fine-tuned Llama 3 checkpoint in Hugging Face format. How do I serve it with vLLM behind an OpenAI-compatible endpoint with low latency?",
+      "expected_output": "An answer about serving the existing Hugging Face checkpoint with vLLM's OpenAI-compatible server. The model is not converted to Transformer Engine modules and no Transformer Engine recipe file is written.",
+      "expected_skill": null,
+      "expected_script": null,
+      "assertions": [
+        "The response explains how to serve the checkpoint with vLLM's OpenAI-compatible server.",
+        "No te_<model>.py Transformer Engine recipe file is created and the model is not rewritten on Transformer Engine modules."
+      ]
+    }
+  ]
+}
