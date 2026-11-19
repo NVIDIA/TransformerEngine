@@ -184,7 +184,7 @@ def data_preprocess(dataset, vocab, word_id, max_seq_len):
 
     new_dataset = {
         "sentence": output,
-        "label": dataset["label"].astype(np.float32),
+        "label": np.asarray(dataset["label"], dtype=np.float32),
         "mask": mask_3d.reshape((dataset_size, 1, max_seq_len, max_seq_len)),
     }
     return new_dataset, vocab, word_id
