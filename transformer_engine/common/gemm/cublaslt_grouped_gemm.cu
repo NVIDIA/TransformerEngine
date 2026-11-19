@@ -157,7 +157,7 @@ struct GroupedGemmSetupWorkspace {
   float **alpha_ptrs = nullptr;
   float **beta_ptrs = nullptr;
   // Per-tensor scale_inv pointers (float* for tensor/FP8 block scaling, E8M0* for MXFP8,
-  // E4M3* for NVFP4)
+  // E4M3/UE5M3* for NVFP4)
   void **a_scale_inv_ptrs = nullptr;
   void **b_scale_inv_ptrs = nullptr;
   // Storage dimensions for cuBLAS matrix layouts
@@ -573,6 +573,19 @@ inline OperandStorageChoice choose_grouped_operand_storage(bool trans, bool is_A
   return {true, false, trans};
 }
 
+// cuBLASLt grouped GEMM requires 16-byte aligned matrix pointers, but a view into a larger
+// buffer need not be (e.g. a wgrad output in an unpadded gradient buffer). Check on the host:
+// a misaligned pointer otherwise fails inside the kernel with a misaligned address error.
+template <typename... Args>
+inline void check_grouped_gemm_ptr_alignment(const transformer_engine::SimpleTensor &data,
+                                             const Args &...operand) {
+  if (data.numel() == 0) return;
+  const auto misalignment = reinterpret_cast<uintptr_t>(data.dptr) % 16;
+  NVTE_CHECK(misalignment == 0, "Grouped GEMM: ", operand...,
+             " data pointer must be 16-byte aligned, but it is ", misalignment,
+             " bytes past a 16-byte boundary.");
+}
+
 // Build Kernel Arguments detailing out addresses and other metadata for list of C/D tensors
 // passed to the grouped GEMM kernel. Use-case: C/D --> List of wgrads for experts in MOE
 inline MultiTensorGroupGemmOutputArgs build_grouped_gemm_multi_out_args(
@@ -600,6 +613,7 @@ inline MultiTensorGroupGemmOutputArgs build_grouped_gemm_multi_out_args(
                transformer_engine::to_string(t->dtype()));
     const auto &shape = t->shape();
     NVTE_CHECK(shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
+    check_grouped_gemm_ptr_alignment(t->data, name, "_list tensor ", i);
     args.data_ptrs[i] = t->data.dptr;
     args.rows[i] = static_cast<int>(shape[1]);
     args.cols[i] = static_cast<int>(shape[0]);
@@ -627,6 +641,7 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
         use_rowwise ? t->scale_inv : t->columnwise_scale_inv;
     NVTE_CHECK(data.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
                " is missing required data.");
+    check_grouped_gemm_ptr_alignment(data, name, "_list tensor ", i);
     args.data_ptrs[i] = data.dptr;
     const auto &shape = t->shape();
     NVTE_CHECK(shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
@@ -819,6 +834,10 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   } else {
     use_columnwise(choice.storage_transposed);
   }
+  // With 16-byte rows (checked in launch_grouped_gemm_setup), every group is aligned when the
+  // base pointer is.
+  check_grouped_gemm_ptr_alignment(choice.use_rowwise ? t->data : t->columnwise_data,
+                                   is_A ? "A" : "B");
   return sel;
 }
 
@@ -929,6 +948,20 @@ inline void set_nvfp4_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
   auto get_scale_mode = [](transformer_engine::DType dtype) -> cublasLtMatmulMatrixScale_t {
     if (dtype == transformer_engine::DType::kFloat8E4M3) {
       return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+    }
+    if (dtype == transformer_engine::DType::kFloat8UE5M3) {
+#if CUBLAS_VERSION >= 131100
+      NVTE_CHECK(transformer_engine::cuda::cublas_version() >= 131100,
+                 "NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
+                 "but run-time cuBLAS version is ",
+                 transformer_engine::cuda::cublas_version(), ".");
+      return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE5M3;
+#else
+      NVTE_ERROR(
+          "NVFP4 with UE5M3 scales requires cuBLAS 13.11+, "
+          "but compile-time cuBLAS version is ",
+          CUBLAS_VERSION, ".");
+#endif
     }
     NVTE_ERROR("Unsupported dtype for NVFP4 scales (", transformer_engine::to_string(dtype), ").");
   };
@@ -1610,6 +1643,10 @@ inline void launch_grouped_gemm_setup(
   check_uniform_last_dim_alignment(B_meta, B_sel.dtype, "B");
   if (!d_is_discrete) {
     check_uniform_last_dim_alignment(D_meta, d_dtype, "D");
+    check_grouped_gemm_ptr_alignment(D->data, "D");
+  }
+  if (!c_is_discrete) {
+    check_grouped_gemm_ptr_alignment(C->data, "C");
   }
 
   const int threads_per_block = 256;

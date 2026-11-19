@@ -262,7 +262,8 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
         # BF16 packed math.
         return (
-            not cfg.WITH_AMAX
+            not cfg.USE_2D_QUANTIZATION
+            and not cfg.WITH_AMAX
             and not cfg.WITH_DBIAS
             and cfg.DTYPE is cutlass.BFloat16
             and cfg.ROWWISE
