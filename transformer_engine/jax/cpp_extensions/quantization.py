@@ -50,7 +50,13 @@ from ..quantize import (
     QuantizeLayout,
 )
 
-__all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
+__all__ = [
+    "quantize",
+    "quantize_dbias",
+    "grouped_quantize",
+    "grouped_requantize",
+    "grouped_dbias",
+]
 
 
 class BaseDBiasQuantizePrimitive(BasePrimitive):
@@ -168,16 +174,24 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 and post_rht_amax_aval.size == 1
             ), "post_rht_amax must be of dtype float32"
 
-        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
-            scaling_mode
-        ).get_scale_shape_2x(
+        # Only compute the colwise scale shape when a colwise output is requested. The
+        # colwise shape check imposes alignment on an unused axis (e.g. MXFP8 requires the
+        # colwise axis to be a multiple of 32), which must not constrain rowwise-only quantize.
+        rowwise_scale_inv_shape = ScalingMode(scaling_mode).get_scale_shape(
             x_aval.shape,
+            is_colwise=False,
             is_padded=not is_outer,
             flatten_axis=flatten_axis,
             broadcast_2d_scale_shape_to_1d=True,
         )
 
         if QuantizeLayout(q_layout).has_colwise:
+            _, colwise_scale_inv_shape = ScalingMode(scaling_mode).get_scale_shape_2x(
+                x_aval.shape,
+                is_padded=not is_outer,
+                flatten_axis=flatten_axis,
+                broadcast_2d_scale_shape_to_1d=True,
+            )
             if ScalingMode(scaling_mode).is_colwise_transposed:
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=flatten_axis)
             else:
@@ -336,15 +350,25 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             use_rht=use_rht,
             mesh_resource=_mesh_resource_snapshot(mesh_resource),
         )
-        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
-            scaling_mode
-        ).get_scale_shape_2x(
-            x.shape, is_padded=False, flatten_axis=flatten_axis, broadcast_2d_scale_shape_to_1d=True
+        # Compute the colwise scale shape only when a colwise output is requested so that a
+        # rowwise-only quantize does not inherit the colwise axis alignment constraint.
+        rowwise_scale_inv_shape = ScalingMode(scaling_mode).get_scale_shape(
+            x.shape,
+            is_colwise=False,
+            is_padded=False,
+            flatten_axis=flatten_axis,
+            broadcast_2d_scale_shape_to_1d=True,
         )
         scale_inv = jax.lax.slice(
             scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
         )
         if q_layout.has_colwise:
+            _, colwise_scale_inv_shape = ScalingMode(scaling_mode).get_scale_shape_2x(
+                x.shape,
+                is_padded=False,
+                flatten_axis=flatten_axis,
+                broadcast_2d_scale_shape_to_1d=True,
+            )
             colwise_scale_inv = jax.lax.slice(
                 colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
             )
@@ -1404,6 +1428,128 @@ def grouped_quantize(
         pre_swizzled=is_mxfp8,
     )
     return out
+
+
+class GroupedRequantizePrimitive(BasePrimitive):
+    """Rebuild the GEMM operands of a rowwise-prequantized MXFP8 grouped tensor.
+
+    Wraps nvte_group_requantize: from E4M3 rowwise data with compact (unswizzled) E8M0 scales,
+    produces the columnwise data and scales and the GEMM-swizzled rowwise scales.
+    """
+
+    name = "te_grouped_requantize_ffi"
+    multiple_results = True
+    impl_static_args = ()
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(data_aval, scale_inv_aval, group_sizes_aval):
+        """Output avals: colwise data, colwise scales, swizzled rowwise scales, workspace."""
+        assert data_aval.dtype == jnp.float8_e4m3fn and len(data_aval.shape) == 2
+        assert scale_inv_aval.dtype == jnp.float8_e8m0fnu
+        # 1-D group_sizes: Python counts groups with .size, the handler with dimensions()[0].
+        assert group_sizes_aval.dtype == jnp.int32 and len(group_sizes_aval.shape) == 1
+        rowwise_scale_shape, colwise_scale_shape = ScalingMode(
+            ScalingMode.MXFP8_1D_SCALING
+        ).get_grouped_scale_shape_2x(
+            data_aval.shape, group_sizes_aval.size, is_padded=True, flatten_axis=1
+        )
+        n_groups = group_sizes_aval.size
+        return (
+            jax.core.ShapedArray((math.prod(data_aval.shape),), jnp.float8_e4m3fn),
+            jax.core.ShapedArray(colwise_scale_shape, jnp.float8_e8m0fnu),
+            jax.core.ShapedArray(rowwise_scale_shape, jnp.float8_e8m0fnu),
+            jax.core.ShapedArray(((2 * n_groups + 1) * 8,), jnp.uint8),
+        )
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """Outer abstract; drops the workspace."""
+        return GroupedRequantizePrimitive.abstract(*args, **kwargs)[:3]
+
+    @staticmethod
+    def lowering(ctx, data, scale_inv, group_sizes):
+        """Lowering to the FFI custom call."""
+        return ffi.ffi_lowering(GroupedRequantizePrimitive.name)(ctx, data, scale_inv, group_sizes)
+
+    @staticmethod
+    def impl(data, scale_inv, group_sizes):
+        """Inner primitive implementation."""
+        assert GroupedRequantizePrimitive.inner_primitive is not None
+        colwise_out, colwise_sinv, rowwise_sinv, _ = (
+            GroupedRequantizePrimitive.inner_primitive.bind(data, scale_inv, group_sizes)
+        )
+        return colwise_out, colwise_sinv, rowwise_sinv
+
+
+register_primitive(GroupedRequantizePrimitive)
+
+
+def _grouped_requantize_supported(data, quantizer, dq_dtype):
+    """True when nvte_group_requantize can produce the GEMM operands of ``quantizer``."""
+    rows, hidden = data.shape
+    return (
+        GroupedRequantizePrimitive.enabled()
+        and get_min_device_compute_capability() >= 100
+        and quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
+        and quantizer.q_layout.is_rowwise_colwise
+        and quantizer.q_dtype == jnp.float8_e4m3fn
+        and dq_dtype == jnp.bfloat16
+        and rows % 128 == 0
+        and hidden % 128 == 0
+        # Fallback kernel maps 128-row tiles to grid.y; keep rows / 128 within the CUDA
+        # grid limit so large receive buffers fall back to grouped_quantize instead.
+        and rows // 128 <= 65535
+    )
+
+
+def grouped_requantize(
+    data: jnp.ndarray,
+    scale_inv: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    quantizer: GroupedQuantizer,
+    dq_dtype,
+) -> GroupedScaledTensor1x:
+    """Turn rowwise MXFP8 data with compact scales into a GEMM-ready grouped tensor.
+
+    Args:
+        data: E4M3 data ``[rows, hidden]``, groups stacked along the rows.
+        scale_inv: Compact (unswizzled) E8M0 scales ``[rows, hidden / 32]``.
+        group_sizes: int32 per-group row counts, each a multiple of 128.
+        quantizer: Grouped MXFP8 quantizer that the result is consumed with.
+        dq_dtype: High-precision dtype that the data represents.
+
+    Returns:
+        The grouped tensor with GEMM-swizzled scales and the layouts ``quantizer`` asks for,
+        equivalent to quantizing the dequantized values with ``grouped_quantize``.
+    """
+    rows, hidden = data.shape
+    scale_inv = scale_inv.reshape(rows, hidden // 32)
+    if not _grouped_requantize_supported(data, quantizer, dq_dtype):
+        dequantized = (
+            data.astype(jnp.float32).reshape(rows, hidden // 32, 32)
+            * scale_inv.astype(jnp.float32)[..., None]
+        ).reshape(rows, hidden)
+        return grouped_quantize(dequantized.astype(dq_dtype), quantizer, group_sizes)
+
+    colwise_out, colwise_sinv, rowwise_sinv = GroupedRequantizePrimitive.outer_primitive.bind(
+        data, scale_inv, group_sizes
+    )
+    return ScaledTensorFactory.create(
+        data=data.reshape(-1),
+        scale_inv=rowwise_sinv,
+        colwise_data=colwise_out,
+        colwise_scale_inv=colwise_sinv,
+        scaling_mode=quantizer.scaling_mode,
+        dq_dtype=dq_dtype,
+        q_layout=quantizer.q_layout,
+        data_layout=quantizer.get_data_layout(),
+        flatten_axis=-1,
+        first_dims=group_sizes,
+        original_shape=data.shape,
+        pre_swizzled=True,
+    )
 
 
 def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
