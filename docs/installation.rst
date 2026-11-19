@@ -19,7 +19,7 @@ Prerequisites
 
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set
-`NVTE_CUDA_INCLUDE_PATH` in the environment.
+:envvar:`NVTE_CUDA_INCLUDE_DIR` in the environment.
 
 Transformer Engine in NGC Containers
 ------------------------------------
