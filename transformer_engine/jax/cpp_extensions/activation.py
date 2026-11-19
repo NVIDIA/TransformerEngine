@@ -2,8 +2,9 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for activation"""
-from typing import Sequence, Union, Callable, Optional, Tuple
+import math
 import operator
+from typing import Sequence, Union, Callable, Optional, Tuple
 from functools import reduce, partial
 from dataclasses import dataclass
 
@@ -54,6 +55,7 @@ ActivationEnum = {
     ("squared_relu",): NVTE_Activation_Type.SRELU,
     ("squared_relu", "linear"): NVTE_Activation_Type.SREGLU,
     ("clamped_silu", "clamped_linear"): NVTE_Activation_Type.CLAMPED_SWIGLU,
+    ("situ", "situ_linear"): NVTE_Activation_Type.SITUGLU,
 }
 
 
@@ -89,12 +91,38 @@ class ClampedSwigluParams:
 
 
 @dataclass(frozen=True)
+class SiTUGLUParams:
+    """Soft-cap parameters for the SiTU-GLU activation function."""
+
+    beta1: float = 4.0
+    beta2: float = 25.0
+
+    def __post_init__(self):
+        """Validate and canonicalize parameters for stable JIT caching."""
+        for name in ("beta1", "beta2"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive, got {value}")
+            object.__setattr__(self, name, value)
+
+    def __hash__(self):
+        """Return a stable hash for use as a JAX static argument."""
+        return hash((self.beta1, self.beta2))
+
+    def to_ffi_lowering_dict(self):
+        """Convert parameters to the form consumed by the XLA FFI binding."""
+        return {
+            "beta1": np.float32(self.beta1),
+            "beta2": np.float32(self.beta2),
+        }
+
+
+@dataclass(frozen=True)
 class ActivationParams:
-    """Parameters for various activation functions.
-    Currently only Clamped SwiGLU activation has parameters.
-    """
+    """Parameters for activation functions with configurable behavior."""
 
     clamped_swiglu: ClampedSwigluParams = ClampedSwigluParams()
+    situglu: SiTUGLUParams = SiTUGLUParams()
 
     @staticmethod
     def create(activation_type, **kwargs):
@@ -104,13 +132,20 @@ class ActivationParams:
             "clamped_silu",
             "clamped_linear",
         }
+        SITU_ACTIVATION_TYPES = {
+            ("situ", "situ_linear"),
+            "situ",
+            "situ_linear",
+        }
         if activation_type in CLAMPED_ACTIVATION_TYPES:
-            return ActivationParams(ClampedSwigluParams(**kwargs))
+            return ActivationParams(clamped_swiglu=ClampedSwigluParams(**kwargs))
+        if activation_type in SITU_ACTIVATION_TYPES:
+            return ActivationParams(situglu=SiTUGLUParams(**kwargs))
         return ActivationParams()  # Default params for activations without parameters
 
     def __hash__(self):
         """Custom hash function to ensure dataclass is hashable for jax jit to work"""
-        return hash((self.clamped_swiglu,))
+        return hash((self.clamped_swiglu, self.situglu))
 
     def to_ffi_lowering_dict(self):
         """Convert the activation parameters to a dictionary format for FFI lowering.
@@ -118,7 +153,10 @@ class ActivationParams:
             dict: A dictionary representation of the activation parameters consumable by
             XLA FFI bindings for activation functions.
         """
-        return {"clamped_swiglu": self.clamped_swiglu.to_ffi_lowering_dict()}
+        return {
+            "clamped_swiglu": self.clamped_swiglu.to_ffi_lowering_dict(),
+            "situglu": self.situglu.to_ffi_lowering_dict(),
+        }
 
 
 def _convert_to_activation_function(fn_or_string, act_params: ActivationParams):
@@ -129,6 +167,9 @@ def _convert_to_activation_function(fn_or_string, act_params: ActivationParams):
         limit = act_params.clamped_swiglu.limit
         offset = act_params.clamped_swiglu.glu_linear_offset
         return lambda x: jnp.clip(x, min=-limit, max=limit) + offset
+    if fn_or_string == "situ_linear":
+        beta2 = act_params.situglu.beta2
+        return lambda x: beta2 * jnp.tanh(x / beta2)
     if fn_or_string == "quick_gelu":
         return lambda x: jax.nn.sigmoid(1.702 * x) * x
     if fn_or_string == "squared_relu":
@@ -137,6 +178,9 @@ def _convert_to_activation_function(fn_or_string, act_params: ActivationParams):
         limit = act_params.clamped_swiglu.limit
         alpha = act_params.clamped_swiglu.alpha
         return lambda x: jax.nn.sigmoid(alpha * jnp.minimum(x, limit)) * jnp.minimum(x, limit)
+    if fn_or_string == "situ":
+        beta1 = act_params.situglu.beta1
+        return lambda x: beta1 * jnp.tanh(x / beta1) * jax.nn.sigmoid(x)
     if isinstance(fn_or_string, str):
         return getattr(jax.nn, fn_or_string)
     if callable(fn_or_string):
