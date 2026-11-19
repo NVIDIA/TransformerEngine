@@ -28,10 +28,11 @@ void RunAffinePrefixTest(size_t key_dim, size_t heads, size_t value_dim, size_t 
   using test::Tensor;
   using transformer_engine::DType;
   constexpr size_t kNumInitialStates = 3;
-  constexpr unsigned kSeed = 2026;
-  constexpr double kTolerance = 2e-5;
+  constexpr unsigned kSeed = 2026;     // Keep random inputs reproducible.
+  constexpr double kTolerance = 2e-5;  // Allow FP32 accumulation error against the FP64 reference.
   const size_t num_outputs = descriptor_rows.size();
   const size_t state_size = heads * value_dim * key_dim;
+  // Create inputs and output storage for the requested state shapes.
   Tensor initial_states("initial_states",
                         std::vector<size_t>{kNumInitialStates, heads, value_dim, key_dim},
                         DType::kFloat32);
@@ -55,6 +56,7 @@ void RunAffinePrefixTest(size_t key_dim, size_t heads, size_t value_dim, size_t 
   for (size_t i = 0; i < num_summaries * state_size; ++i) {
     additive_cpu[i] = distribution(generator);
   }
+  // Scale transitions to keep matrix-product variance comparable across key dimensions.
   for (size_t i = 0; i < num_summaries * heads * key_dim * key_dim; ++i) {
     transitions_cpu[i] = distribution(generator) / std::sqrt(key_dim);
   }
@@ -74,6 +76,7 @@ void RunAffinePrefixTest(size_t key_dim, size_t heads, size_t value_dim, size_t 
                                       descriptors.data(), output.data(), nullptr);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   output.to_cpu();
+  // Compute the CPU reference in FP64 and compare each output with the kernel.
   const auto *actual = output.rowwise_cpu_dptr<float>();
   for (size_t output_index = 0; output_index < num_outputs; ++output_index) {
     const auto [initial_memory_index, first_summary, count, stride] = descriptor_rows[output_index];
@@ -81,10 +84,12 @@ void RunAffinePrefixTest(size_t key_dim, size_t heads, size_t value_dim, size_t 
       for (size_t value = 0; value < value_dim; ++value) {
         const size_t row_offset = (head * value_dim + value) * key_dim;
         std::vector<double> state(key_dim, 0.), next(key_dim);
+        // Start from zero unless the descriptor selects an explicit initial memory.
         if (initial_memory_index >= 0) {
           const float *start = initial_states_cpu + initial_memory_index * state_size + row_offset;
           std::copy(start, start + key_dim, state.begin());
         }
+        // Apply state = state @ T + H in the descriptor's summary order.
         for (int step = 0; step < count; ++step) {
           const int summary_index = first_summary + step * stride;
           const float *transition_matrix =
@@ -144,6 +149,8 @@ TEST(LinearAttentionPrefixLongChainTest, ForwardAndReverse) {
   RunAffinePrefixTest(kKeyDim, kHeads, kValueDim, kNumSummaries, descriptor_rows);
 }
 
+// K covers small/typical states, both block sizes, and multiple columns per thread.
+// Heads 1/8 check head indexing; V=1/5/16 covers partial, tail, and multiple full 4-row tiles.
 INSTANTIATE_TEST_SUITE_P(
     Common, LinearAttentionPrefixTest,
     ::testing::Combine(::testing::Values(3, 64, 128, 257), ::testing::Values(1, 8),
