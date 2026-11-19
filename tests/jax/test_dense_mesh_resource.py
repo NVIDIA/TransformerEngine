@@ -105,15 +105,51 @@ def test_tuple_global_fsdp_matches_override(batch_axes, weight_axes, kept_axes):
         assert parse(_mesh_resource_snapshot(resource)) == (specs, output)
 
 
+@pytest.mark.parametrize("batch_axes", [("fsdp", "expert"), ("expert", "fsdp")])
+def test_partition_gathers_only_activation_axes_kept_on_weight(batch_axes):
+    def info(spec, ndim, size=1):
+        return SimpleNamespace(sharding=SimpleNamespace(spec=P(*spec)), ndim=ndim, size=size)
+
+    args = [
+        info((batch_axes, None), 2),
+        info((None,), 1),
+        info((None, batch_axes), 2),
+        info((None,), 1),
+        info((None,), 1, size=0),
+    ]
+
+    def parse(override):
+        return GemmPrimitive._parse_operand_output_specs(
+            args, ((1,), (0,)), False, CollectiveOp.NONE, ScalingMode.NO_SCALING, override
+        )[:2]
+
+    resource = MeshResource(fsdp_resource="fsdp", ep_resource="expert")
+    with global_shard_guard(MeshResource()):
+        specs, output = parse(_mesh_resource_snapshot(resource))
+    # The weight keeps "expert", so only "expert" is gathered from the activation.
+    assert specs[0] == ("fsdp", None)
+    assert specs[2] == (None, "expert")
+    assert output == ("fsdp", "expert")
+    with global_shard_guard(MeshResource(fsdp_resource=("fsdp",), ep_resource="expert")):
+        assert parse(None) == (specs, output)
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [
+        MeshResource(fsdp_resource=("fsdp", "expert")),
+        MeshResource(fsdp_resource="fsdp", ep_resource="expert"),
+    ],
+    ids=["fsdp_expert", "fsdp_only"],
+)
 @pytest.mark.parametrize("ep,fsdp", [(4, 1), (2, 2)])
-def test_dense_override_forward_and_vjp(ep, fsdp):
+def test_dense_override_forward_and_vjp(ep, fsdp, resource):
     if jax.device_count() < 4:
         pytest.skip("Requires four GPUs")
     mesh = Mesh(np.array(jax.devices()[:4]).reshape(fsdp, ep), ("fsdp", "expert"))
     batch_axes = ("fsdp", "expert")
     x_sharding = NamedSharding(mesh, P(batch_axes, None))
     w_sharding = NamedSharding(mesh, P(None, batch_axes))
-    resource = MeshResource(fsdp_resource=batch_axes)
     x = (jnp.arange(128 * 128).reshape(128, 128) % 7 / 8).astype(jnp.float32)
     weight = (jnp.arange(128 * 128).reshape(128, 128) % 11 / 16).astype(jnp.float32)
     x, weight = jax.device_put(x, x_sharding), jax.device_put(weight, w_sharding)

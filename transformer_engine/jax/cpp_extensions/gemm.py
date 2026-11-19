@@ -985,6 +985,9 @@ class GemmPrimitive(BasePrimitive):
                 )
             sequence_dim = int(not transpose_batch_sequence)
 
+        # Explicit resources and tuple FSDP resources match non-contracting specs per mesh axis.
+        per_axis = mesh_resource is not None or isinstance(gsr.fsdp_resource, tuple)
+
         if reduce_spec is not None:
             # Non-reduce contracting axes (if any) need to be gathered, i.e. set to unsharded.
             lhs_cspecs = tuple(_retain_axes(s, reduce_axes) for s in lhs_cspecs)
@@ -1014,7 +1017,7 @@ class GemmPrimitive(BasePrimitive):
 
             # Non-contracting dims of RHS always needs to be gathered along the FSDP axis
             # Explicit resources and tuple FSDP resources gather each FSDP axis individually.
-            if mesh_resource is None and not isinstance(gsr.fsdp_resource, tuple):
+            if not per_axis:
                 rhs_non_cspecs = tuple(
                     (
                         None
@@ -1050,10 +1053,24 @@ class GemmPrimitive(BasePrimitive):
             flattened_rhs_non_cspecs = []
             for spec in rhs_non_cspecs:
                 flattened_rhs_non_cspecs.extend(spec if isinstance(spec, tuple) else [spec])
-            lhs_non_cspecs = tuple(
-                None if spec in flattened_rhs_non_cspecs or spec in rhs_non_cspecs else spec
-                for spec in lhs_non_cspecs
-            )
+            if not per_axis:
+                lhs_non_cspecs = tuple(
+                    None if spec in flattened_rhs_non_cspecs or spec in rhs_non_cspecs else spec
+                    for spec in lhs_non_cspecs
+                )
+            else:
+                # Gather only the mesh axes that RHS keeps, so no axis shards two output dims.
+                lhs_non_cspecs = tuple(
+                    _retain_axes(
+                        spec,
+                        [
+                            axis
+                            for axis in _convert_axis_spec_to_list(spec)
+                            if axis not in flattened_rhs_non_cspecs
+                        ],
+                    )
+                    for spec in lhs_non_cspecs
+                )
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs
 
