@@ -305,10 +305,12 @@ def test_unfused_k_sharded_weight_matches_unsharded(monkeypatch, native_layout):
             jnp.asarray([1]),
             weight,
             wo,
+            None,  # No dispatched MXFP8 scales
             None,
             None,
             None,
             (quantizers, quantizers),
+            compute_dtype=x.dtype,
             num_local_experts=1,
             activation_type="silu",
             apply_topk_weights_early=False,

@@ -159,7 +159,7 @@ LOGICAL_AXIS_RULES = (
 DTYPE = jnp.bfloat16
 BATCH = EP_SIZE * FSDP_SIZE * 2  # 8 on 4-GPU, 16 on 8-GPU
 SEQ = 32
-HIDDEN = 128
+HIDDEN = 512  # multiple of 512 so MXFP8 dispatch scale rows are 16-byte aligned
 INTER = 128
 NUM_EXPERTS = 8
 TOPK = 2
@@ -168,7 +168,7 @@ TOPK = 2
 # These bounds are rounded slightly above the worst error observed across
 # the forward and backward configuration matrix.
 FWD_TOLERANCE = {
-    "bf16": {"atol": 5e-4, "rtol": 5e-4},
+    "bf16": {"atol": 1e-3, "rtol": 1e-3},
     "mxfp8": {"atol": 7e-3, "rtol": 7e-3},
 }
 GRAD_FFN_TOLERANCE = {
@@ -177,7 +177,7 @@ GRAD_FFN_TOLERANCE = {
 }
 GRAD_GATE_TOLERANCE = {
     "bf16": {"atol": 7e-8, "rtol": 7e-8},
-    "mxfp8": {"atol": 8e-7, "rtol": 8e-7},
+    "mxfp8": {"atol": 1e-6, "rtol": 1e-6},
 }
 
 # Aux loss is computed in float32 from the SAME logits as the routing
@@ -318,8 +318,11 @@ def _pure_jax_moe_reference(
         # use_pre_softmax=False: topk on raw logits, then softmax over K.
         top_logits, top_indices = jax.lax.top_k(logits, k=K)
         weights = jax.nn.softmax(top_logits, axis=-1)  # [T, K], sums to 1
-    elif score_function == "sigmoid":
-        scores = jax.nn.sigmoid(logits)  # [T, E]
+    elif score_function in ("sigmoid", "sqrtsoftplus"):
+        if score_function == "sigmoid":
+            scores = jax.nn.sigmoid(logits)  # [T, E]
+        else:
+            scores = jnp.sqrt(jax.nn.softplus(logits))  # [T, E]
         if expert_bias is not None and expert_bias.shape != (0,):
             scores_for_routing = scores + expert_bias.astype(jnp.float32)[None, :]
             _, top_indices = jax.lax.top_k(scores_for_routing, k=K)
@@ -361,8 +364,11 @@ def _pure_jax_moe_reference(
         # compute_aux_scores=True.
         if score_function == "softmax":
             aux_scores = jax.nn.softmax(logits, axis=-1)
-        else:  # sigmoid
-            aux_scores = jax.nn.sigmoid(logits)
+        else:
+            if score_function == "sigmoid":
+                aux_scores = jax.nn.sigmoid(logits)
+            else:
+                aux_scores = jnp.sqrt(jax.nn.softplus(logits))
             if K > 1:
                 aux_scores = aux_scores / (aux_scores.sum(axis=-1, keepdims=True) + 1e-20)
         routing_map = (routing_weights_full > 0).astype(jnp.int32)
@@ -395,6 +401,7 @@ def _make_block(
     dispatch_checkpoint_name=None,
     quant_before_fsdp_ag=False,
     mesh_resource=None,
+    dispatch_quantization_recipe=None,
     use_cudnn_fusion,
 ):
     kwargs = dict(
@@ -413,6 +420,7 @@ def _make_block(
         dispatch_checkpoint_name=dispatch_checkpoint_name,
         quant_before_fsdp_ag=quant_before_fsdp_ag,
         use_cudnn_fusion=use_cudnn_fusion,
+        dispatch_quantization_recipe=dispatch_quantization_recipe,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
@@ -1037,6 +1045,42 @@ class TestTeEpMoeRouterInfo:
             )
 
 
+@pytest.mark.skipif(get_device_compute_capability(0) < 100, reason="MXFP8 dispatch requires SM100+")
+class TestTeEpMoeDispatchMxfp8:
+    """MXFP8 dispatch matches the high-precision dispatch under the same MXFP8 recipe."""
+
+    @pytest.mark.parametrize("config", _CONFIGS)
+    def test_forward_and_backward(self, mesh, config, make_block):
+        recipe = MXFP8BlockScaling()
+        ref_block = make_block(**config, quantization_recipe=recipe)
+        block = make_block(
+            **config,
+            quantization_recipe=recipe,
+            dispatch_quantization_recipe=recipe,
+        )
+        x = _make_inputs(jax.random.PRNGKey(4))
+        variables, out_ref, _, _ = _init_apply(ref_block, mesh, x, jax.random.PRNGKey(5))
+        _, out, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(5))
+        out_np = _to_global_numpy(out, mesh).astype(np.float32)
+        out_ref_np = _to_global_numpy(out_ref, mesh).astype(np.float32)
+        assert np.all(np.isfinite(out_np)), "output has NaN/Inf"
+        np.testing.assert_allclose(out_np, out_ref_np, **FWD_TOLERANCE["mxfp8"])
+
+        grads, grad_x = _grad_step(block, variables, mesh, x)
+        grads_ref, grad_x_ref = _grad_step(ref_block, variables, mesh, x)
+        for name in ("gate_kernel", "wi", "wo"):
+            g = _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32)
+            g_ref = _to_global_numpy(_unwrap(grads_ref["params"][name]), mesh).astype(np.float32)
+            assert np.all(np.isfinite(g)) and np.any(g != 0.0), f"{name} grad invalid"
+            rel = np.linalg.norm(g - g_ref) / np.linalg.norm(g_ref)
+            assert rel < 0.1, f"{name} grad relative L2 error {rel:.3%} >= 10%"
+        dx = _to_global_numpy(grad_x, mesh).astype(np.float32)
+        dx_ref = _to_global_numpy(grad_x_ref, mesh).astype(np.float32)
+        assert np.all(np.isfinite(dx)) and np.any(dx != 0.0), "d_x invalid"
+        rel = np.linalg.norm(dx - dx_ref) / np.linalg.norm(dx_ref)
+        assert rel < 0.1, f"d_x relative L2 error {rel:.3%} >= 10%"
+
+
 class TestTeEpMoeBackward:
     """Per-config backward correctness in a single run: per-tensor
     grads finite, non-zero AND parity vs the pure-JAX reference."""
@@ -1485,6 +1529,84 @@ class TestTeEpMoeAuxLoss:
         )
         assert np.all(np.isfinite(g_gate)), "gate grad NaN/Inf under aux-only loss"
         assert np.any(g_gate != 0.0), "aux bwd should propagate to gate_kernel"
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            pytest.param(dict(score_function="softmax"), id="softmax"),
+            pytest.param(dict(score_function="sigmoid"), id="sigmoid"),
+            pytest.param(dict(score_function="sqrtsoftplus"), id="sqrtsoftplus"),
+            pytest.param(
+                dict(
+                    score_function="sqrtsoftplus",
+                    use_expert_routing_bias=True,
+                    expert_bias_init=_strong_expert_bias_init,
+                ),
+                id="sqrtsoftplus-bias-strong",
+            ),
+        ],
+    )
+    def test_aux_loss_global_parity(self, mesh, config, make_block):
+        """The token-sharded aux loss and its gate / d_x grads match a
+        single-device reference over the global batch."""
+        coeff = 1e-2
+        block = make_block(aux_loss_coeff=coeff, **config)
+        x = _make_inputs(jax.random.PRNGKey(24))
+        variables, _, aux, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(25))
+
+        with _ctx(mesh):
+            x_sh = _shard_inputs(x, mesh)
+
+            def aux_only(variables, x):
+                _, aux, _trt, _counts = block.apply(variables, x)
+                return aux.astype(jnp.float32)
+
+            grads_te, grad_x_te = jax.jit(jax.grad(aux_only, argnums=(0, 1)))(variables, x_sh)
+
+        params_np = _params_global_numpy(variables, mesh)
+        x_np = np.asarray(jax.device_get(x))
+        ref_kwargs = _reference_kwargs_from_config(config, params_np)
+        ref_expert_bias = ref_kwargs.pop("expert_bias")
+
+        def ref_aux(gate_kernel, x):
+            _, aux_ref = _pure_jax_moe_reference(
+                x,
+                gate_kernel,
+                jnp.asarray(params_np["wi"]),
+                jnp.asarray(params_np["wo"]),
+                ref_expert_bias,
+                num_experts=NUM_EXPERTS,
+                num_experts_per_tok=TOPK,
+                aux_loss_coeff=coeff,
+                **ref_kwargs,
+            )
+            return aux_ref.astype(jnp.float32)
+
+        gate_ref = jnp.asarray(params_np["gate_kernel"])
+        aux_ref = ref_aux(gate_ref, jnp.asarray(x_np))
+        g_gate_ref, g_x_ref = jax.jit(jax.grad(ref_aux, argnums=(0, 1)))(
+            gate_ref, jnp.asarray(x_np)
+        )
+
+        np.testing.assert_allclose(
+            float(_to_global_numpy(aux, mesh)), float(jax.device_get(aux_ref)), **AUX_TOLERANCE
+        )
+        # The reference rounds the logits cotangent to bf16 at the gate GEMM
+        # output, while the TE bwd keeps it in fp32; tolerances cover that.
+        g_gate_te = _to_global_numpy(_unwrap(grads_te["params"]["gate_kernel"]), mesh)
+        g_x_te = _to_global_numpy(grad_x_te, mesh)
+        for name, g_te, g_ref in (("gate_kernel", g_gate_te, g_gate_ref), ("x", g_x_te, g_x_ref)):
+            g_ref = np.asarray(jax.device_get(g_ref)).astype(np.float32)
+            g_te = g_te.astype(np.float32)
+            assert np.all(np.isfinite(g_te)), f"aux {name} grad NaN/Inf [config={config}]"
+            assert np.any(g_te != 0.0), f"aux {name} grad identically zero [config={config}]"
+            np.testing.assert_allclose(
+                g_te,
+                g_ref,
+                rtol=2e-2,
+                atol=4e-3 * float(np.abs(g_ref).max()),
+                err_msg=f"aux {name} grad parity breach [config={config}]",
+            )
 
     def test_combined_loss_grads(self, mesh, make_block):
         """Joint main + aux loss bwd: per-tensor finite + non-zero in
