@@ -23,6 +23,17 @@ Checkpointing
 -------------
 When using checkpointing with Transformer Engine JAX, please be aware of the checkpointing policy being applied to your model. Any JAX checkpointing policy using `dot`, such as `jax.checkpoint_policies.dots_with_no_batch_dims`, may not work with GEMMs provided by Transformer Engine as they do not always use the `jax.lax.dot_general` primitive. Instead, you can use `transformer_engine.jax.checkpoint_policies.dots_and_te_gemms_with_no_batch_dims` or similar policies that are designed to work with Transformer Engine's GEMMs and `jax.lax.dot_general` GEMMs. You may also use any JAX policies that do not filter by primitive, such as `jax.checkpoint_policies.save_only_these_names` or `jax.checkpoint_policies.everything_saveable`.
 
+DeepSeek-V4 operations
+---------------------
+
+.. autoapifunction:: transformer_engine.jax.csa_compressor
+.. autoapifunction:: transformer_engine.jax.csa_compressor_batched
+.. autoapifunction:: transformer_engine.jax.hca_compressor_batched
+.. autoapifunction:: transformer_engine.jax.dsa_indexer
+.. autoapifunction:: transformer_engine.jax.dsa_indexer_batched
+.. autoapifunction:: transformer_engine.jax.dsa_sparse_attention
+.. autoapifunction:: transformer_engine.jax.dsa_sparse_attention_batched
+
 Modules
 -------
 .. autoapiclass:: transformer_engine.jax.flax.TransformerLayerType

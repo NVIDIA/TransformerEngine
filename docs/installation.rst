@@ -123,4 +123,13 @@ To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
 
   NVTE_BUILD_DEBUG=1 pip3 install --no-build-isolation .
 
+DeepSeek-V4 JAX kernels
+^^^^^^^^^^^^^^^^^^^^^^
+
+The experimental DeepSeek-V4 JAX APIs require cuDNN Frontend's
+``cudnn.ops.dsa`` JAX operations, available on upstream ``develop`` after
+the merges of cuDNN Frontend pull requests #2165 and #2336. Install that
+Frontend source with its JAX dependencies; older releases exposing only
+the legacy top-level kernel names are unsupported.
+
 .. include:: troubleshooting.rst
