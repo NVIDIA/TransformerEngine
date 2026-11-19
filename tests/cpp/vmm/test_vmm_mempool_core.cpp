@@ -150,6 +150,35 @@ void eager_wait_reuses_exact_handles() {
   assert(s->handles.empty());
 }
 
+void fractional_tensor_sizes_reuse_rounded_blocks() {
+  constexpr size_t mib = 1024 * 1024;
+  for (size_t bytes : {3 * mib, 7 * mib, 15 * mib / 2}) {
+    auto s = std::make_shared<State>();
+    Pool p(FakeOps{s}, 2 * mib, -1);
+    p.set_wait_for_reuse(true);
+    auto a = p.allocate(16 * mib, 1);
+    const auto info_a = p.allocation_info(a);
+    p.free(a, 1);
+    auto b = p.allocate(bytes, 1, 20 * mib);
+    const auto info_b = p.allocation_info(b);
+    const size_t expected_pages = bytes == 3 * mib ? 2 : 4;
+    assert(info_b.requested == bytes && info_b.pages.size() == expected_pages);
+    assert(info_b.pages[expected_pages / 2 - 1].first == 0);
+    assert(info_b.pages[expected_pages / 2].first == 1);
+    assert(p.contains(b + bytes - 1) && !p.contains(b + bytes));
+    assert(p.stats().at("physical_blocks_created") == 8);
+    assert(p.stats().at("physical_blocks_reused") == expected_pages);
+    for (const auto &page : info_b.pages) {
+      bool found = false;
+      for (const auto &old_page : info_a.pages) if (page == old_page) found = true;
+      assert(found);
+    }
+    p.free(b, 1);
+    p.empty_cache();
+    assert(s->handles.empty() && s->mappings.empty() && s->reservations.empty());
+  }
+}
+
 void graph_quarantine() {
   auto s = std::make_shared<State>();
   Pool p(FakeOps{s}, 64, -1);
@@ -277,6 +306,7 @@ void oom_reclaims_unmapped_cache() {
 int main() {
   reuse_and_stream_ordering();
   eager_wait_reuses_exact_handles();
+  fractional_tensor_sizes_reuse_rounded_blocks();
   graph_quarantine();
   independent_graph_lifetimes();
   sparse_native_segment();

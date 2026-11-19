@@ -344,3 +344,78 @@ real MXFP8 quantization replay, run the existing performance test with
 In a real training run, compare TE allocator counters around complete steps and
 record graph reset/recapture frequency; graph-only timing excludes eager work
 outside capture.
+
+## Fractional sizes and allocations inside capture
+
+The allocator accepts sizes that are not multiples of a VMM block. Only the
+previous eager benchmark restricted sizes; it now accepts fractional MiB without
+truncation, e.g. `--b-mib 3`, `--b-mib 7`, or `--b-mib 7.5`. Inputs must describe
+a positive whole number of bytes. Units are binary MiB (2^20 bytes).
+
+With 2 MiB blocks and split backing:
+
+| Logical size | Mapped physical backing | Padding | Physical LD boundary |
+| --- | --- | --- | --- |
+| 3 MiB | 4 MiB | 1 MiB | Offset 2 MiB |
+| 7 MiB | 8 MiB | 1 MiB | Offset 4 MiB |
+| 7.5 MiB | 8 MiB | 0.5 MiB | Offset 4 MiB |
+
+These are contiguous logical tensors with rounded physical backing, not exact
+50/50 logical placement. For example, a 3 MiB tensor has 2 MiB of logical data
+in LD0 and 1 MiB in LD1; its logical midpoint is 1.5 MiB. There is no hidden gap
+between logical rows. The unused padding is outside the logical tensor. Eager
+benchmark allocation reports now include mapped bytes, padding, actual domain
+boundary, logical midpoint, and the logical bytes backed by each domain.
+
+```sh
+python tests/pytorch/benchmark_vmm_eager_reuse.py \
+    --mode dedicated --a-mib 16 --b-mib 7.5
+```
+
+`benchmark_vmm_capture_allocations.py` adds a heavier allocation workload and
+separates capture setup from the first and steady replays:
+
+```sh
+python tests/pytorch/benchmark_vmm_capture_allocations.py \
+    --mode dedicated --a-mib 16 --b-mib 7.5 --pairs 32 --replays 200
+```
+
+It runs three cases by default, with identical fill and endpoint-copy GPU work:
+
+1. **Preallocated:** all A/B buffers are allocated before capture. The graph
+   only records operations on those buffers, providing a replay baseline.
+2. **Capture, cold cache:** repeat allocate A, fill/consume A, del A, allocate B,
+   fill/consume B, del B inside capture. A fresh TE physical cache supplies the
+   backing. This measures pool creation, physical creation, mappings, graph
+   lifetime pins, Python work, and graph instantiation together.
+3. **Capture, warm cache:** seed enough physical blocks eagerly, retire/unmap
+   those allocations before capture, then capture the same A/B sequence.
+   Physical creation during capture must be zero; mapping calls reuse cached
+   handles. Cache seeding/allocation/retirement times and counters are separate
+   from capture time.
+
+`--pairs` scales the number of allocation sites (two per pair), and `--replays`
+controls repetition of the completed graph. Use `--scenarios capture` to omit
+the preallocated baseline or `--cache-state cold|warm` to choose one cache state.
+The script reports first replay and steady replay wall/submission/CUDA interval
+latency separately. It resets validation outputs before replay so warmup values
+cannot make correctness pass without executing the graph. Both timed replay
+windows must show zero allocation/free/create/reuse/map/unmap/event-wait deltas;
+correctness helper allocations are outside those windows.
+
+**This does not implement graph-local activation reuse.** Current graph pins
+retain A's mappings/backing until graph reset; B cannot take A's physical blocks
+inside the same capture. The output reports `first_pair_B_blocks_from_A` and
+`intra_capture_reuse_implemented=false` explicitly. The warm case reuses backing
+from eager seeding, not from A within the captured pair. Under the current
+policy, physical capacity approaches the sum of the rounded A+B sizes over all
+pairs, rather than peak logically live data. On a 2 MiB-block device, 32 pairs
+of 16 MiB A and 7.5 MiB B require 768 MiB of physical backing.
+
+Consequently, unmaps occur during eager seed retirement and post-reset cleanup,
+not while A's graph-referenced address is still needed by replay. The benchmark
+reports capture map/unmap counters rather than attributing all setup time to
+remapping. First replay may also include graph upload and first-use effects.
+Repeat measurements on the target GPU before drawing performance conclusions.
+No allocator/native-extension change is required for these benchmark additions
+if the eager handle-diagnostic extension from commit 4aa427ed08 is already built.

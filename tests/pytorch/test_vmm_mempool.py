@@ -265,3 +265,31 @@ def test_live_view_prevents_reuse_until_last_storage_owner_dies(pool):
     b.fill_(31)
     torch.testing.assert_close(c, torch.full_like(c, 23))
     torch.testing.assert_close(b, torch.full_like(b, 31))
+
+
+@pytest.mark.parametrize("b_mib", ["3", "7", "7.5"])
+def test_non_aligned_tensor_size_reuses_rounded_backing(pool, b_mib):
+    from transformer_engine.pytorch.tensor.vmm_mempool import VMMMemPool
+    from vmm_benchmark_utils import byte_shape, handles, mib_bytes, split_mapped_bytes
+
+    eager = VMMMemPool(mode=pool.mode, wait_for_reuse=True)
+    a = eager.allocate((2, 8 * 1024 * 1024), torch.uint8)
+    info_a = eager.allocation_info(a)
+    before = eager.stats()
+    del a
+    logical = mib_bytes(b_mib)
+    b = eager.allocate(byte_shape(logical), torch.uint8)
+    info_b = eager.allocation_info(b)
+    after = eager.stats()
+    block = after["block_bytes"]
+    mapped = split_mapped_bytes(logical, block)
+    assert b.numel() == logical
+    assert info_b["logical_bytes"] == logical
+    assert len(info_b["pages"]) * block == mapped
+    assert handles(info_b) <= handles(info_a)
+    assert after["physical_blocks_created"] == before["physical_blocks_created"]
+    assert after["map_calls"] == before["map_calls"] + mapped // block
+    boundary = next(page["offset"] for page in info_b["pages"] if page["domain"] == 1)
+    assert boundary == mapped // 2
+    b.fill_(43)
+    torch.testing.assert_close(b, torch.full_like(b, 43))

@@ -14,29 +14,16 @@ import json
 import time
 
 
-def _handles(info):
-    return {(page["domain"], page["handle"]) for page in info["pages"]}
-
-
-def _describe(info):
-    return {
-        "virtual_address": hex(info["base"]),
-        "logical_bytes": info["logical_bytes"],
-        "reserved_bytes": info["reserved_bytes"],
-        "physical_blocks": [
-            {"domain": page["domain"], "handle": hex(page["handle"])}
-            for page in info["pages"]
-        ],
-    }
+from vmm_benchmark_utils import byte_shape, describe, handles, mib_bytes
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("dedicated", "managed"), default="dedicated")
-    parser.add_argument("--a-mib", type=int, default=16)
-    parser.add_argument("--b-mib", type=int, default=8)
+    parser.add_argument("--a-mib", dest="a_bytes", type=mib_bytes, default="16", metavar="MiB")
+    parser.add_argument("--b-mib", dest="b_bytes", type=mib_bytes, default="8", metavar="MiB")
     args = parser.parse_args()
-    if args.b_mib <= 0 or args.a_mib < args.b_mib:
+    if args.a_bytes < args.b_bytes:
         parser.error("Require a-mib >= b-mib > 0 so A can supply all of B's blocks")
 
     import torch
@@ -46,9 +33,7 @@ def main():
         raise RuntimeError("A CUDA GPU is required")
     pool = VMMMemPool(mode=args.mode, wait_for_reuse=True)
     block = pool.stats()["block_bytes"]
-    a_bytes, b_bytes = args.a_mib * 1024 * 1024, args.b_mib * 1024 * 1024
-    if a_bytes % (2 * block) or b_bytes % (2 * block):
-        parser.error(f"A and B must be aligned to two physical blocks ({2 * block} bytes)")
+    a_bytes, b_bytes = args.a_bytes, args.b_bytes
     print(json.dumps({
         "event": "environment", "mode": args.mode,
         "torch": torch.__version__, "cuda": torch.version.cuda,
@@ -57,7 +42,7 @@ def main():
     }), flush=True)
 
     start = time.perf_counter()
-    a = pool.allocate((2, a_bytes // 2), torch.uint8)
+    a = pool.allocate(byte_shape(a_bytes), torch.uint8)
     a_allocate_ms = (time.perf_counter() - start) * 1000
     a.fill_(17)
     torch.cuda.synchronize()  # Finish A's GPU use before testing its Storage lifetime.
@@ -65,7 +50,7 @@ def main():
     info_a = pool.allocation_info(a)
     after_a = pool.stats()
     print(json.dumps({
-        "event": "allocated_A", "allocation": _describe(info_a), "stats": after_a,
+        "event": "allocated_A", "allocation": describe(info_a), "stats": after_a,
     }), flush=True)
 
     # The experiment: PyTorch owns the Storage deletion. No manual TE release.
@@ -76,7 +61,7 @@ def main():
     # In dedicated mode, B's normal allocation performs automatic dead-pool
     # collection. In managed mode, PyTorch directly forwards completed frees.
     start = time.perf_counter()
-    b = pool.allocate((2, b_bytes // 2), torch.uint8)
+    b = pool.allocate(byte_shape(b_bytes), torch.uint8)
     b_allocate_ms = (time.perf_counter() - start) * 1000
     torch.cuda.synchronize()
     b_ready_ms = (time.perf_counter() - start) * 1000
@@ -84,10 +69,10 @@ def main():
     after_b = pool.stats()
     print(json.dumps({"event": "after_del_A", "stats": after_delete}), flush=True)
     print(json.dumps({
-        "event": "allocated_B", "allocation": _describe(info_b), "stats": after_b,
+        "event": "allocated_B", "allocation": describe(info_b), "stats": after_b,
     }), flush=True)
 
-    a_handles, b_handles = _handles(info_a), _handles(info_b)
+    a_handles, b_handles = handles(info_a), handles(info_b)
     reused = len(a_handles & b_handles)
     new_blocks = after_b["physical_blocks_created"] - after_a["physical_blocks_created"]
     maps = after_b["map_calls"] - after_a["map_calls"]
