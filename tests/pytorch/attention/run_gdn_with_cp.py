@@ -55,6 +55,7 @@ def _case(
     lengths,
     *,
     dtype=torch.bfloat16,
+    heads=2,
     key_dim=64,
     value_dim=64,
     layout="thd",
@@ -75,7 +76,7 @@ def _case(
     size, rank = dist.get_world_size(group), dist.get_rank(group)
     if rank == 0:
         print(
-            f"GDN CP case: lengths={lengths}, dtype={dtype}, K={key_dim}, V={value_dim},"
+            f"GDN CP case: lengths={lengths}, dtype={dtype}, H={heads}, K={key_dim}, V={value_dim},"
             f" layout={layout}, norm={norm}, initial={initial}, final={final},"
             f" checkpoint={checkpoint}, last_loss={last_loss}, fallback={fallback},"
             f" independent={independent}, inference_warmup={inference_warmup}",
@@ -83,7 +84,6 @@ def _case(
         )
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
     torch.manual_seed(791 + (dist.get_rank(tp_group) if tp_group is not None else 0))
-    heads = 2
     total = sum(lengths)
     cu = [0]
     for length in lengths:
@@ -355,14 +355,19 @@ def main():
     try:
         for lengths in (
             [8, 4, 12],  # Shared and complete documents on the same rank.
-            [16, 4, 4],  # One document spans three ranks at CP=4.
-            [6, 6, 6, 6],  # Document and rank boundaries coincide.
+            [16, 4, 4],  # One document spans several ranks.
+            [6] * size,  # Document and rank boundaries coincide.
             [0, 17, 0, 18, 0],  # Empty documents between nonempty documents.
             [1, 0, 1],  # Some ranks own no tokens.
             [0, 0],  # Entirely empty input.
         ):
             _case(group, lengths)
             cases += 1
+        lengths = torch.randint(
+            32, 129, (4,), generator=torch.Generator().manual_seed(1234)
+        ).tolist()
+        _case(group, lengths, heads=8, norm=True, independent=True)
+        cases += 1
         for dtype in (torch.float16, torch.bfloat16):
             for norm in (False, True):
                 _case(
@@ -386,15 +391,16 @@ def main():
         for layout, dtype in (("bshd", torch.bfloat16), ("sbhd", torch.float16)):
             _case(
                 group,
-                [size * 65] * 2,
+                [size * 65] * 4,
                 dtype=dtype,
+                heads=8,
                 layout=layout,
                 norm=True,
                 dense_global=layout == "bshd",
             )
             cases += 1
         for layout in ("bshd", "sbhd"):
-            _case(group, [size * 17 + 3] * 2, layout=layout, dense_global=True)
+            _case(group, [size * 17 + 3] * 4, heads=8, layout=layout, dense_global=True)
             cases += 1
         _case(group, [1, 1], layout="bshd", dense_global=True, checkpoint=True)
         cases += 1
@@ -424,7 +430,7 @@ def main():
         # Larger cuTile geometries have no dedicated FROST summary engine;
         # exercise the real capability fallback, rather than a mocked error.
         if importlib.util.find_spec("cuda.tile") is not None:
-            _case(group, [131, 7], key_dim=192, value_dim=160, independent=True)
+            _case(group, [131, 7], key_dim=256, value_dim=256, independent=True)
             cases += 1
         _inference_and_deferred_group(group)
         cases += 1
@@ -445,9 +451,9 @@ def main():
         _case(singleton, [17, 13])
         _case(singleton, [17, 17], layout="bshd", dense_global=True)
         cases += 2
-        if size == 4:
-            cp_groups = [dist.new_group(ranks) for ranks in ([0, 1], [2, 3])]
-            tp_groups = [dist.new_group(ranks) for ranks in ([0, 2], [1, 3])]
+        if size >= 4:
+            cp_groups = [dist.new_group([r, r + 1]) for r in range(0, size, 2)]
+            tp_groups = [dist.new_group(list(range(r, size, 2))) for r in (0, 1)]
             rank = dist.get_rank()
             _case(cp_groups[rank // 2], [139, 13], tp_group=tp_groups[rank % 2])
             cases += 1

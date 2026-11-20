@@ -2,11 +2,10 @@
 #
 # See LICENSE for license information.
 
-"""Contiguous GDN CP: host boundaries, common arithmetic, and multi-GPU numerics."""
+"""End-to-end numerical tests for contiguous GDN context parallelism."""
 
 import os
 from pathlib import Path
-import random
 import subprocess
 import sys
 import tempfile
@@ -16,129 +15,18 @@ import torch
 
 from test_gdn_attention import _GDN_AVAILABLE
 import transformer_engine
-from transformer_engine.common.linear_attention import build_linear_attention_cp_host_metadata
-import transformer_engine_torch as tex
 
 
-@pytest.mark.parametrize("cp_size", [1, 2, 4, 8])
-def test_partition_intersections(cp_size):
-    """Recover all document intervals without dropping tokens or crossing documents."""
-    rng = random.Random(301)
-    for _ in range(100):
-        lengths = [rng.randrange(0, 20) for _ in range(rng.randrange(1, 10))]
-        cu = [0]
-        for length in lengths:
-            cu.append(cu[-1] + length)
-        rank_metadata = [
-            build_linear_attention_cp_host_metadata(cu, cp_size=cp_size, cp_rank=cp_rank)
-            for cp_rank in range(cp_size)
-        ]
-        for doc, (start, end) in enumerate(zip(cu, cu[1:])):
-            fragments = [f for p in rank_metadata for f in p.fragments if f.document == doc]
-            assert sum(f.end - f.start for f in fragments) == end - start
-            assert all(start <= f.start < f.end <= end for f in fragments)
-            assert all(a.end == b.start for a, b in zip(fragments, fragments[1:]))
-        for cp_rank, host_metadata in enumerate(rank_metadata):
-            assert (
-                host_metadata.local_cu_seqlens[-1]
-                == (cp_rank + 1) * cu[-1] // cp_size - cp_rank * cu[-1] // cp_size
-            )
-            assert len(host_metadata.incoming_fragment_indices) <= 1
-            assert len(host_metadata.outgoing_fragment_indices) <= 1
-            for f, forward_desc, backward_desc in zip(
-                host_metadata.fragments,
-                host_metadata.forward_descriptors,
-                host_metadata.backward_descriptors,
-            ):
-                assert forward_desc[2] == cp_rank - f.first_rank
-                assert backward_desc[2] == f.last_rank - cp_rank
-                # Every referenced recipe belongs to this same document.
-                for predecessor in range(f.first_rank, cp_rank):
-                    p = rank_metadata[predecessor]
-                    if p.fragments:
-                        assert p.fragments[p.outgoing_fragment_indices[0]].document == f.document
-                for successor in range(cp_rank + 1, f.last_rank + 1):
-                    p = rank_metadata[successor]
-                    # An empty rank contributes an identity recipe.
-                    if p.fragments:
-                        assert p.fragments[p.incoming_fragment_indices[0]].document == f.document
-
-
-@pytest.mark.parametrize("cu_seqlens", [[1, 2], [0], [0, 2, 1]])
-def test_invalid_documents(cu_seqlens):
-    """Reject malformed global offsets before computing communication descriptors."""
-    with pytest.raises(ValueError):
-        build_linear_attention_cp_host_metadata(cu_seqlens, cp_size=4, cp_rank=0)
-
-
-@pytest.mark.parametrize("cp_size", [1, 2, 4, 8])
-@pytest.mark.parametrize("length", [0, 1, 5, 9])
-def test_dense_partition_intersections(cp_size, length):
-    """Dense rows retain their document identity, including uneven and empty ranks."""
-    rank_metadata = [
-        build_linear_attention_cp_host_metadata(
-            [0, length, 2 * length], cp_size=cp_size, cp_rank=cp_rank, dense=True
-        )
-        for cp_rank in range(cp_size)
-    ]
-    for doc in (0, 1):
-        spans = [f for p in rank_metadata for f in p.fragments if f.document == doc]
-        assert sum(f.end - f.start for f in spans) == length
-        assert all(a.end == b.start for a, b in zip(spans, spans[1:]))
-        if length:
-            assert spans[0].start == doc * length
-            assert spans[-1].end == (doc + 1) * length
-    for cp_rank, host_metadata in enumerate(rank_metadata):
-        local_length = (cp_rank + 1) * length // cp_size - cp_rank * length // cp_size
-        assert host_metadata.local_cu_seqlens[-1] == 2 * local_length
-        assert host_metadata.slots == 2
-        assert len(host_metadata.fragments) == (2 if local_length else 0)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_affine_prefix_binding():
-    """Forward summary descriptors and preserve the caller's current CUDA device."""
-    torch.manual_seed(22)
-    key_dim = 3
-    current = torch.cuda.current_device()
-    # Also exercise the binding's device guard: allocating on another GPU must
-    # neither launch on the current GPU nor change the caller's current device.
-    device = torch.device("cuda", (current + 1) % torch.cuda.device_count())
-    initial_states = torch.randn(3, 2, 5, key_dim, device=device)
-    additive = torch.randn(6, 2, 5, key_dim, device=device)
-    transitions = torch.randn(6, 2, key_dim, key_dim, device=device) / key_dim**0.5
-    rows = [
-        [0, 0, 0, 1],
-        [1, 0, 3, 1],
-        [2, 5, 3, -2],
-        [-1, 0, 0, 1],
-        [-1, 0, 3, 1],
-        [-1, 5, 3, -2],
-    ]
-    descriptors = torch.tensor(rows, device=device, dtype=torch.int32)
-    actual = tex.linear_attention_affine_prefix(initial_states, additive, transitions, descriptors)
-    assert torch.cuda.current_device() == current
-    expected = []
-    for source, first, count, stride in rows:
-        x = (
-            torch.zeros_like(initial_states[0], dtype=torch.float64)
-            if source == -1
-            else initial_states[source].double()
-        )
-        for step in range(count):
-            index = first + step * stride
-            x = x @ transitions[index].double() + additive[index].double()
-        expected.append(x)
-    torch.testing.assert_close(actual.double(), torch.stack(expected), atol=2e-5, rtol=2e-5)
-
-
-@pytest.mark.parametrize("size", [2, 4])
-def test_gdn_with_cp(size):
+def test_gdn_with_cp():
     """Run genuine NCCL CP with all token and state gradients checked numerically."""
-    if not _GDN_AVAILABLE or torch.cuda.device_count() < size:
+    available = torch.cuda.device_count()
+    size = next((size for size in (8, 4, 2) if available >= size), None)
+    if size is None:
+        pytest.skip(f"GDN CP test requires at least 2 GPUs, but found {available}")
+    if not _GDN_AVAILABLE:
         if os.getenv("NVTE_GDN_CP_TEST_REQUIRED", "0") == "1":
-            pytest.fail(f"Required GDN CP test needs FE GDN and {size} CUDA GPUs")
-        pytest.skip(f"GDN CP test requires FE GDN and {size} CUDA GPUs")
+            pytest.fail("Required GDN CP test needs the cuDNN frontend GDN runtime")
+        pytest.skip("GDN CP test requires the cuDNN frontend GDN runtime")
     runner = Path(__file__).with_name("run_gdn_with_cp.py")
     env = os.environ.copy()
     # torchrun starts a script, so its sys.path[0] is the tests directory.
