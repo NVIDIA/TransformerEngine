@@ -1598,6 +1598,8 @@ def make_graphed_callables(
                    weight's ``main_grad`` before each backward clears its
                    ``_fsdp_wgrad_written`` flag in ``"backward_pre_hooks"``, so the
                    captured fused wgrad overwrites ``main_grad`` instead of accumulating.
+                   The hook runs only during warmup and capture, never on replay, so the
+                   caller clears the flag from its own code on every later iteration.
                    Backward replays set the flag again for the weights whose flag their
                    capture set, so a later eager wgrad into the same ``main_grad``
                    accumulates. A graphed wgrad that follows an eager one in the same
