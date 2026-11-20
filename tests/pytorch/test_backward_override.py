@@ -1883,7 +1883,7 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_override_switch
     model._module_groups = model._make_module_groups(model._modules.values())
     fuser = model._module_groups[0]
     x = torch.randn(32, in_features, dtype=dtype, device="cuda", requires_grad=True)
-    extra_inputs = [() for _ in range(fuser._num_basic_ops)]
+    extra_inputs = ()
 
     quant_recipe = make_recipe(recipe_name)
     skip_unsupported_backward_override("ops_linear", quant_recipe, backward_override)
