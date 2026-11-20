@@ -1225,3 +1225,144 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_output_capacity(
 
     for got, ref in zip(actual, expected):
         torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
+
+
+def _row_grouped_operands(splits, n=96, k=128):
+    """Make row-scaled inputs and per-tensor weights for each expert."""
+    wq = NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False)
+    xq = NVFP4Quantizer(rowwise=True, columnwise=False, with_rht=False, row_scaled_nvfp4=True)
+    weights = [wq(torch.randn(n, k, device="cuda", dtype=torch.bfloat16)) for _ in splits]
+    inputs = [xq(torch.randn(m, k, device="cuda", dtype=torch.bfloat16)) for m in splits]
+    return weights, inputs
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_nvfp4_row_grouped_graph_replay(out_dtype):
+    """Repeated graph replay consumes current payloads and current amax values."""
+    splits = [64, 0, 128]
+    weights, inputs = _row_grouped_operands(splits)
+    out = torch.empty(sum(splits), 96, device="cuda", dtype=out_dtype)
+
+    def run():
+        return general_grouped_gemm(
+            weights,
+            inputs,
+            [out],
+            [None] * len(splits),
+            out_dtype,
+            m_splits=splits,
+            single_output=True,
+        )[0]
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            run()
+    torch.cuda.current_stream().wait_stream(stream)
+    for step in range(3):
+        for operand in weights + inputs:
+            if operand.numel():
+                # Both quantized payload and its global scales change each step.
+                q = operand._quantizer
+                q.update_quantized(
+                    torch.randn(operand.shape, device="cuda", dtype=torch.bfloat16) * (step + 1),
+                    operand,
+                )
+        reference = torch.cat(
+            [general_gemm(w, x, out_dtype=out_dtype)[0] for w, x in zip(weights, inputs)]
+        )
+        graph.replay()
+        torch.testing.assert_close(out, reference, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_nvfp4_row_grouped_streams():
+    """Grouped GEMMs synchronize correctly with non-default caller streams."""
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    results = []
+    for stream in streams:
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            splits = [32, 160]
+            weights, inputs = _row_grouped_operands(splits)
+            out = torch.empty(sum(splits), 96, device="cuda", dtype=torch.bfloat16)
+            y = general_grouped_gemm(
+                weights,
+                inputs,
+                [out],
+                [None] * 2,
+                torch.bfloat16,
+                m_splits=splits,
+                single_output=True,
+            )[0]
+            ref = torch.cat(
+                [general_gemm(w, x, out_dtype=torch.bfloat16)[0] for w, x in zip(weights, inputs)]
+            )
+            results.append((y, ref))
+        torch.cuda.current_stream().wait_stream(stream)
+    for y, ref in results:
+        torch.testing.assert_close(y, ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_batched_row_scale_copy_rounding(out_dtype):
+    """Fusion preserves FP32 multiplication and destination rounding across shapes."""
+    import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
+
+    operation = gemm_module._batched_row_scale_copy
+    values = torch.tensor(
+        [0.0, -0.0, 1.00390625, -1.00390625, 65504.0, -65504.0, 1e-20, -1e-20],
+        device="cuda",
+        dtype=torch.float32,
+    )
+    for rows, cols in [(33, 96)]:
+        intermediate = values.repeat((rows * cols + 7) // 8)[: rows * cols].reshape(rows, cols)
+        scales = torch.linspace(0.125, 3.14159, rows, device="cuda").reshape(rows, 1)
+        if rows > 1:
+            scales[0] = 0
+        # Separate eager operations define both rounding boundaries independently.
+        reference = intermediate.clone()
+        reference.mul_(scales)
+        reference = reference.to(out_dtype)
+        destination = torch.full_like(reference, 42)
+        pointer = destination.data_ptr()
+        saved_input, saved_scales = intermediate.clone(), scales.clone()
+        operation(destination, intermediate, scales)
+        assert destination.data_ptr() == pointer
+        assert torch.equal(destination.view(torch.uint8), reference.view(torch.uint8))
+        assert torch.equal(intermediate, saved_input)
+        assert torch.equal(scales, saved_scales)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("scalar_rows", [False, True])
+def test_nvfp4_row_grouped_scale_shapes(out_dtype, scalar_rows):
+    """Scalar and per-row scales preserve each expert's FP32 scale-product rounding."""
+    splits = [32, 0, 96]
+    weights, inputs = _row_grouped_operands(splits)
+    if scalar_rows:
+        # The generalized GEMM contract also permits one scalar scale per operand.
+        inputs[0]._amax_rowwise = inputs[0]._amax_rowwise[:1].clone()
+    # An active expert with zero global scale must write zeros to its destination.
+    weights[2]._amax_rowwise.zero_()
+    reference = torch.cat(
+        [general_gemm(w, x, out_dtype=out_dtype)[0] for w, x in zip(weights, inputs)]
+    )
+    output = torch.full_like(reference, 42)
+    result, _, _ = general_grouped_gemm(
+        weights,
+        inputs,
+        [output],
+        [None] * len(splits),
+        out_dtype,
+        m_splits=splits,
+        single_output=True,
+    )
+    assert result.data_ptr() == output.data_ptr()
+    assert torch.equal(result.view(torch.uint8), reference.view(torch.uint8))
