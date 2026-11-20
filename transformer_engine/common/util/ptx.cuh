@@ -1947,6 +1947,7 @@ __device__ __forceinline__ void prefetch_l2_evict_last(const void *addr) {
   NVTE_DEVICE_ERROR("prefetch_l2_evict_last is only supported on SM 8.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 }
+
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-overriding-tensor-property-value
 // global -> shared::cluster, with tensor base address, dimensions, and stride overridden.
 __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared_rubin(
@@ -1966,14 +1967,11 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared_rubin(
         "l"(tensor_map_ptr), "l"(gaddr_to_override), "h"(tensor_size_x), "h"(tensor_size_y),
         "r"(tensor_lower_stride), "h"(tensor_upper_stride), "r"(mbar_ptr)
         : "memory");
-  } else {
-    NVTE_DEVICE_ERROR(
-        "cp_async_bulk_tensor_2d_global_to_shared_rubin is only supported on SM 10.7f+.");
+    return;
   }
-#else
+#endif  // __CUDA_ARCH__ == 1070
   NVTE_DEVICE_ERROR(
       "cp_async_bulk_tensor_2d_global_to_shared_rubin is only supported on SM 10.7f+.");
-#endif  // __CUDA_ARCH__ == 1070
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-overriding-tensor-property-value
@@ -1993,14 +1991,11 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global_rubin(
         "l"(gaddr_to_override), "h"(tensor_size_x), "h"(tensor_size_y), "r"(tensor_lower_stride),
         "h"(tensor_upper_stride), "r"(src_shmem_ptr)
         : "memory");
-  } else {
-    NVTE_DEVICE_ERROR(
-        "cp_async_bulk_tensor_2d_shared_to_global_rubin is only supported on SM 10.7f+.");
+    return;
   }
-#else
+#endif  // __CUDA_ARCH__ == 1070
   NVTE_DEVICE_ERROR(
       "cp_async_bulk_tensor_2d_shared_to_global_rubin is only supported on SM 10.7f+.");
-#endif  // __CUDA_ARCH__ == 1070
 }
 
 }  // namespace ptx
