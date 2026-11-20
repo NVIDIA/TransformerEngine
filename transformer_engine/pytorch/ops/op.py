@@ -24,6 +24,7 @@ from ..quantization import (
 )
 from ..tensor import Quantizer
 from ..dynamo import is_value_opaque_quantizer, register_custom_op
+from ..utils import get_module_device
 
 
 @dataclasses.dataclass
@@ -511,6 +512,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     mode=mode,
                     num_quantizers=num_quantizers,
                     roles=roles,
+                    device=get_module_device(self),
                 )
                 fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
                     forward=(mode == "forward"),
