@@ -572,7 +572,7 @@ def _build_rope_tables(seq_len, inv_freq, *, interleaved):
 
 
 def _validate_dsa_rope_width(width, head_dim=None):
-    """Require the power-of-two geometry used by the shared Triton kernels."""
+    """Require the power-of-two rotary width used by the Triton Q RoPE kernels."""
     if width < 4 or width & (width - 1):
         raise ValueError("DSv4 RoPE width must be a power of two >= 4.")
     if head_dim is not None and width > head_dim:
@@ -681,7 +681,7 @@ def apply_dsa_rope_eager(x, cos, sin, cu_seqlens=None):
 
 @lru_cache(maxsize=1)
 def _triton_rope_module():
-    """Load the optional Triton kernels shared by DSA and MLA RoPE."""
+    """Load optional Triton Q RoPE kernels for DSA and MLA and separate MLA KV kernels."""
     try:
         from transformer_engine.common.triton import dsa_mla_rope
     except ImportError:

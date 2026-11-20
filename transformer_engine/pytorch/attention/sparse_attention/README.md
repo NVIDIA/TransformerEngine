@@ -1,9 +1,12 @@
 # DSv4 attention API
 
 `DSv4Attention` is an experimental API in TE that composes cuDNN compression,
-top-k indexing, and sparse attention kernels with Megatron's DSA RoPE kernels
-through reusable building blocks such as `Compressor` and `Indexer`. cuDNN
-supplies compression and sparse attention forward and backward kernels
+top-k indexing, and sparse attention kernels with Triton RoPE through reusable
+building blocks such as `Compressor` and `Indexer`. DSv4 uses `rotary_fwd_q_kernel`
+and `rotary_bwd_q_kernel` for both Q and KV rotation. MLA's `apply_mla_rope_q`
+uses the same forward and backward kernels for Q.
+
+cuDNN supplies compression and sparse attention forward and backward kernels
 and separate indexer-loss score/backward primitives; top-k selection itself is
 discrete. The layer maps hidden states to hidden states with the same shape.
 `Compressor` and `Indexer` can also be composed into other attention layers;

@@ -6,8 +6,8 @@
 
 - FusedMLAQUpProjRopeQuant: query up-projection, RoPE and MXFP8 quantization (cuDNN FE).
 - fused_mla_kv_rope_mxfp8: key/value split, key RoPE and MXFP8 quantization. The reference
-  applies Megatron-LM's MLA key/value RoPE (the shared Triton kernels) and quantizes
-  key and value with mxfp8_quantize_only; the fused kernel must produce the same bytes.
+  uses ``rotary_fwd_kv_kernel`` to split K/V and rotate the positional key, then calls
+  ``mxfp8_quantize_only``. The fused kernel must produce the same bytes.
 
 Run:
     pytest tests/pytorch/attention/test_fused_mla.py -v

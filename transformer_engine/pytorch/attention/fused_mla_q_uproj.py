@@ -4,8 +4,7 @@
 
 """Fused MLA Q up-projection + per-head RoPE + MXFP8 quantize.
 
-The MLA RoPE Triton kernels are taken from:
-Megatron-LM megatron/core/fusions/fused_mla_yarn_rope_apply.py
+cuDNN applies RoPE during fused query forward. Backward uses ``rotary_bwd_q_kernel``.
 """
 
 from __future__ import annotations
@@ -356,7 +355,8 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
         tokens = s * b
         act_dtype = ctx.act_dtype
 
-        # --- RoPE backward (unchanged: bf16, same rotary_bwd_q_kernel as the unfused path) ---
+        # Apply BF16 RoPE backward with rotary_bwd_q_kernel.
+        # The DSA and MLA adapters also use this kernel.
         dq3 = dq.reshape(tokens, nh, q_head_dim).contiguous()
 
         def grid(META):

@@ -2,11 +2,12 @@
 #
 # See LICENSE for license information.
 
-"""Shared DSA and MLA RoPE kernels from NVIDIA/Megatron-LM.
+"""Triton RoPE kernels for DSA and MLA.
 
-Query kernels: megatron/core/fusions/fused_mla_yarn_rope_apply.py at
-c4129afff4867ca89b1fb7b4b911128424cdfbe8. Separate MLA KV kernels were moved
-from TE's mla_rope_utils.py; framework adapters own tensor preparation/autograd.
+The shared Q RoPE forward and backward kernels come from Megatron-LM's
+megatron/core/fusions/fused_mla_yarn_rope_apply.py at
+c4129afff4867ca89b1fb7b4b911128424cdfbe8. The separate MLA KV kernels came
+from TE's mla_rope_utils.py. Framework adapters prepare tensors and handle autograd.
 """
 
 import triton
