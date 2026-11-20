@@ -174,6 +174,7 @@ def initialize_ub(
     ub_cfgs: Optional[Union[dict, List[dict]]] = None,
     bootstrap_backend: Union[str, torch.distributed.Backend] = None,
     with_cublasmp: bool = False,
+    ub_names: Optional[List[str]] = None,
 ) -> None:
     r"""
     Initialize the Userbuffers communicator for overlapping tensor-parallel communications with
@@ -273,8 +274,21 @@ def initialize_ub(
     with_cublasmp : bool = False
                     Whether to use cuBlasMp for the all-gather and reduce-scatter overlaps. TE must
                     be compiled with `NVTE_WITH_CUBLASMP=1` for this option to work.
+    ub_names : List[str] = None
+               layer names (the ``ub_name`` of each module) to create communicators for, out of
+               ``["qkv", "proj", "fc1", "fc2"]``. For example, ``["proj"]`` creates only the
+               ``proj_*`` communicators. All layers are initialized when left unset. Modules
+               whose ``ub_name`` is not listed cannot use comm+GEMM overlap.
 
     """
+    all_ub_names = ["qkv", "proj", "fc1", "fc2"]
+    if ub_names is not None:
+        invalid_names = [name for name in ub_names if name not in all_ub_names]
+        if invalid_names:
+            raise ValueError(
+                f"Invalid ub_names {invalid_names}, must be a subset of {all_ub_names}"
+            )
+
     # The cuBLASMp backend falls back to a non-multicast algorithm in C++ when multicast is
     # unsupported or disabled (via UB_SKIPMC), so only enforce the multicast requirement for
     # the Userbuffers backend.
@@ -620,6 +634,8 @@ def initialize_ub(
 
         configured_methods = ["ring_exchange", "pipeline", "bulk", "external"]
         for name in (m for k in configured_methods for m in methods[k]):
+            if ub_names is not None and name.rsplit("_", 1)[0] not in ub_names:
+                continue
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
                 fp8_buf = (name in layers_all_gather_overlap) or (
