@@ -17,6 +17,7 @@ Philox per output block and the CUDA kernel per thread.
 
 import ctypes
 import os
+import re
 
 import pytest
 import torch
@@ -124,6 +125,12 @@ def get_cfg_key(stochastic_rounding, fast_math, row_scaled, columnwise):
     return f"cutedsl_nvfp4_sm{major * 10 + minor}_" + "_".join("1" if f else "0" for f in flags)
 
 
+def get_amax_key(columnwise_amax):
+    """Mirror of NVFP4GlobalAmaxConfig::to_key (compute_amax_nvfp4_cutedsl.cuh)."""
+    major, minor = device_compute_capability()
+    return f"cutedsl_nvfp4_amax_sm{major * 10 + minor}_{int(columnwise_amax)}"
+
+
 def extract_quantized_output(out, shape, rowwise, columnwise):
     """The bytes both backends must agree on. Scale padding is not written, so only the valid
     region of the scales is taken."""
@@ -167,6 +174,13 @@ def run_test_case(shape, rowwise, columnwise, row_scaled=False, x=None):
     assert (
         tvm_ffi.get_global_func(key, allow_missing=True) is not None
     ), f"CuTeDSL kernel not registered for {key}; the backend fell back to CUDA"
+    # quantize_ computes the global amax with nvte_compute_amax, which the CuTeDSL backend serves
+    # outside row-scaled NVFP4.
+    if not row_scaled:
+        amax_key = get_amax_key(columnwise)
+        assert (
+            tvm_ffi.get_global_func(amax_key, allow_missing=True) is not None
+        ), f"CuTeDSL amax kernel not registered for {amax_key}; the amax fell back to CUDA"
 
     tag = f"{get_shape_id(shape)}/{get_direction_id((rowwise, columnwise))}"
     for name, cuda_bytes in cuda_output.items():
@@ -211,17 +225,109 @@ def test_row_scaled_columnwise_falls_back_to_cuda(monkeypatch):
 
 
 @pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
-@pytest.mark.parametrize("kind", ["zero-blocks", "negative-zero-blocks", "all-zero"])
+@pytest.mark.parametrize(
+    "kind", ["zero-blocks", "negative-zero-blocks", "all-zero", "all-negative-zero"]
+)
 def test_zero_blocks(kind, direction):
     """Zero block amaxes (and, for all-zero, a zero global amax) hit the clamped reciprocal;
-    negative zero checks the sign of zero survives the scaling multiply as in CUDA."""
+    negative zero checks the sign of zero survives the scaling multiply as in CUDA, and that the
+    global amax of an all-negative-zero input is +0."""
     shape = (256, 1024)
     if kind == "all-zero":
         x = torch.zeros(shape, dtype=torch.bfloat16, device="cuda")
+    elif kind == "all-negative-zero":
+        x = torch.full(shape, -0.0, dtype=torch.bfloat16, device="cuda")
     else:
         x = generate_input(shape)
         x.view(-1, NVFP4_BLOCK_SIZE)[::3].fill_(-0.0 if kind == "negative-zero-blocks" else 0.0)
     run_test_case(shape, *direction, x=x)
+
+
+@pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
+@pytest.mark.parametrize("shape", [(96, 160), (2080, 1056)], ids=get_shape_id)
+@pytest.mark.parametrize("position", ["first", "last"])
+def test_amax_at_either_end(position, shape, direction):
+    """The global amax the quantization computes reaches the first and the last element of the
+    input, also when the input fills only part of the amax kernel's last stripe."""
+    x = generate_input(shape)
+    x.view(-1)[0 if position == "first" else -1] = 1024.0
+    run_test_case(shape, *direction, x=x)
+
+
+@pytest.mark.parametrize("shape", [(256, 1024), (256, 48)], ids=get_shape_id)
+@pytest.mark.parametrize(
+    "direction",
+    [(True, False), (True, True), (False, True)],
+    ids=["rowwise", "rowwise-columnwise", "columnwise"],
+)
+@pytest.mark.parametrize("kind", ["uniform", "inf", "nan", "subnormal"])
+def test_global_amax_matches_cuda_backend(kind, direction, shape):
+    """The amaxes nvte_compute_amax writes for an NVFP4 output are bit for bit those of the CUDA
+    backend, also for a columnwise-only output, whose quantize kernel is not a CuTeDSL one, and
+    for inputs with an infinity, NaNs or only subnormals. The CuTeDSL amax kernel serves shapes
+    whose flattened dims are multiples of 32, and TE's amax kernel the others."""
+    rowwise, columnwise = direction
+    x = generate_input(shape)
+    if kind == "inf":
+        x[3, 5], x[100, 7] = float("inf"), float("-inf")
+    elif kind == "nan":
+        x.view(-1)[::97] = float("nan")
+    elif kind == "subnormal":
+        # Without their exponent bits, the values are bf16 subnormals or zeros of either sign.
+        x = (x.view(torch.int16) & ~0x7F80).view(torch.bfloat16)
+    quantizer = make_quantizer(rowwise, columnwise)
+
+    def profiled_amaxes(enabled):
+        set_cutedsl_backend(enabled)
+        try:
+            quantize(quantizer, x)  # compiles the kernels outside the profile
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+                out = quantize(quantizer, x)
+                torch.cuda.synchronize()
+        finally:
+            set_cutedsl_backend(False)
+        names = [e.name for e in prof.events()]
+        launched = {
+            "cutedsl": any(re.search(r"amax_kernel\w*NVFP4GlobalAmaxKernel", n) for n in names),
+            "cuda": any(re.search(r"\bamax_kernel\b", n) for n in names),
+        }
+        amaxes = extract_quantized_output(out, shape, rowwise, columnwise)
+        return {k: v.view(torch.int32) for k, v in amaxes.items() if "amax" in k}, launched
+
+    cuda_amaxes, cuda_launched = profiled_amaxes(False)
+    cutedsl_amaxes, cutedsl_launched = profiled_amaxes(True)
+
+    served = all(d % 32 == 0 for d in flat_dims(shape))
+    assert cuda_launched == {"cutedsl": False, "cuda": True}, cuda_launched
+    assert cutedsl_launched == {"cutedsl": served, "cuda": not served}, cutedsl_launched
+    for name, cuda_bits in cuda_amaxes.items():
+        assert torch.equal(cutedsl_amaxes[name], cuda_bits), f"{name} differ"
+
+
+@pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
+def test_cuda_graph(direction):
+    """A quantization that computes its global amax, captured in a CUDA graph, replays on new
+    input to the bytes the CUDA backend gives for that input."""
+    rowwise, columnwise = direction
+    shape = (256, 1024)
+    quantizer = make_quantizer(rowwise, columnwise)
+    x = generate_input(shape)
+
+    set_cutedsl_backend(True)
+    try:
+        out = quantize(quantizer, x)  # compiles the kernels outside the capture
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out.quantize_(x)
+        x.copy_(generate_input(shape, seed=SEED + 1))
+        graph.replay()
+        replayed = extract_quantized_output(out, shape, rowwise, columnwise)
+    finally:
+        set_cutedsl_backend(False)
+
+    expected = extract_quantized_output(quantize(quantizer, x), shape, rowwise, columnwise)
+    for name, cuda_bytes in expected.items():
+        assert torch.equal(replayed[name], cuda_bytes), f"{name} differ"
 
 
 @pytest.mark.parametrize("direction", DIRECTIONS, ids=get_direction_id)
@@ -268,7 +374,7 @@ def test_cast_noop_flag(flag_is_set):
         set_cutedsl_backend(False)
 
     reference = before if flag_is_set else expected
-    for name in ("rowwise data", "rowwise scales"):
+    for name in ("rowwise data", "rowwise scales", "rowwise amax"):
         assert torch.equal(after[name], reference[name]), f"{name} differ"
 
 

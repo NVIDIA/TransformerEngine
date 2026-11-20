@@ -16,6 +16,10 @@
 #include "../util/vectorized_pointwise.h"
 #include "recipe_common.cuh"
 
+#ifdef NVTE_WITH_CUTEDSL
+#include "../cast/nvfp4/compute_amax_nvfp4_cutedsl.cuh"
+#endif
+
 namespace transformer_engine {
 namespace {
 
@@ -183,6 +187,13 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
       output.columnwise_amax.dptr != amax_ptr) {
     columnwise_amax = reinterpret_cast<float *>(output.columnwise_amax.dptr);
   }
+#ifdef NVTE_WITH_CUTEDSL
+  if (output.scaling_mode == NVTE_NVFP4_1D_SCALING &&
+      cutedsl_backend::nvfp4_compute_amax_cutedsl(input, amax_ptr, columnwise_amax, noop_ptr,
+                                                  stream)) {
+    return;
+  }
+#endif
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType); launch_amax_kernel<nvec>(
           reinterpret_cast<const IType *>(input.data.dptr), amax_ptr, input.data.numel(), noop_ptr,

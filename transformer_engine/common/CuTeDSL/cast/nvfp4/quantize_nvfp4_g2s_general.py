@@ -40,6 +40,7 @@ from transformer_engine.common.CuTeDSL.utils_nvfp4 import (
     cvt_f32x8_to_fp4x8_sr,
     mul_cvt_bf16x8_to_fp4x8,
     mul_cvt_bf16x8_to_fp4x8_sr,
+    zero_b32,
 )
 from transformer_engine.common.CuTeDSL.philox_rng import PhiloxRng
 from .quantize_nvfp4_common import (
@@ -49,13 +50,6 @@ from .quantize_nvfp4_common import (
     philox_seed_and_offset,
     NVFP4QuantizeKernelBase,
 )
-
-
-@cute.jit
-def zero_b32() -> Int32:
-    """A zero the packed abs-max can start from. As a literal it would be folded into an
-    immediate operand, which max.xorsign.abs.bf16x2 does not accept."""
-    return cute.arch.inline_ptx("mov.b32 {$w0}, 0;", write_only_types=[Int32])
 
 
 # Interleave low/high bf16 halves of two pair-registers for the colwise pass.

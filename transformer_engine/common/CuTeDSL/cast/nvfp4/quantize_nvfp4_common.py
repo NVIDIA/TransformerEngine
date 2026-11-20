@@ -321,6 +321,14 @@ def compile_cutedsl_function_from_cfg(cfg):
     return compiled
 
 
+def register_compiled_function(fn_name: str, compiled) -> None:
+    """Register a compiled CuTeDSL function in the TVM-FFI global registry under `fn_name`."""
+    # Register the native function rather than the Python wrapper cute.compile returns: the C++
+    # side already passes the arguments positionally, so the wrapper is pure launch overhead.
+    native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
+    tvm_ffi.register_global_func(fn_name, native if native is not None else compiled, override=True)
+
+
 def get_nvfp4_quantization_function(
     fn_name: str,
     use_stochastic_rounding: bool,
@@ -383,9 +391,45 @@ def get_nvfp4_quantization_function(
             e,
         )
         return False
-    # Register the native function rather than the Python wrapper cute.compile returns: the C++
-    # side already passes the arguments positionally, so the wrapper is pure launch overhead.
-    native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
-    tvm_ffi.register_global_func(fn_name, native if native is not None else compiled, override=True)
+    register_compiled_function(fn_name, compiled)
+
+    return True
+
+
+def get_nvfp4_global_amax_function(fn_name: str, columnwise_amax: bool) -> bool:
+    """Compile the kernels computing the global amax of a BF16 input, which also write the
+    columnwise amax if `columnwise_amax`, and register them under EXACTLY `fn_name`. Returns as
+    get_nvfp4_quantization_function does."""
+
+    # Already registered (e.g. by a prior call) -> supported.
+    if tvm_ffi.get_global_func(fn_name, allow_missing=True) is not None:
+        return True
+
+    major, minor = device_compute_capability()
+    if major < 10:
+        logger.warning(
+            "CuTeDSL NVFP4 backend requires compute capability >= 10.0 (Blackwell), "
+            "but detected %d.%d; falling back to the CUDA C++ kernels.",
+            major,
+            minor,
+        )
+        return False
+
+    # pylint: disable-next=import-outside-toplevel
+    from .quantize_nvfp4_amax import compile_global_amax_function
+
+    logger.debug(
+        "Compiling CuTeDSL NVFP4 global amax kernels (columnwise amax: %s)", columnwise_amax
+    )
+    try:
+        compiled = compile_global_amax_function(columnwise_amax=columnwise_amax)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "CuTeDSL NVFP4 global amax compilation failed, falling back to the CUDA C++ "
+            "kernels: %s",
+            e,
+        )
+        return False
+    register_compiled_function(fn_name, compiled)
 
     return True

@@ -6,7 +6,7 @@
 
 import cutlass
 from cutlass import cute
-from cutlass import BFloat16, Boolean, Float32, Float8E4M3FN, Int64, Uint32
+from cutlass import BFloat16, Boolean, Float32, Float8E4M3FN, Int32, Int64, Uint32
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -325,6 +325,13 @@ def mul_cvt_bf16x8_to_fp4x8_sr(
             asm_dialect=llvm.AsmDialect.AD_ATT,
         )
     )
+
+
+@cute.jit
+def zero_b32() -> Int32:
+    """A zero the packed abs-max can start from. As a literal it would be folded into an
+    immediate operand, which max.xorsign.abs.bf16x2 does not accept."""
+    return cute.arch.inline_ptx("mov.b32 {$w0}, 0;", write_only_types=[Int32])
 
 
 # --- Register-resident (g2r) kernels: the numeric core ---

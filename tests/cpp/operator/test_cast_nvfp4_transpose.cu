@@ -26,6 +26,7 @@
 #include <transformer_engine/activation.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/hadamard_transform.h>
+#include <transformer_engine/recipe.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -1205,6 +1206,87 @@ void performTestColumnwiseOnly2D(const std::vector<size_t>& shape) {
     EXPECT_FALSE(output_col.rowwise());
 }
 
+// nvte_compute_amax_with_config must write the input's amax to every amax of an NVFP4 output, and
+// a quantization after it must give the bytes of one handed that amax.
+template <typename InputType>
+void performTestComputeAmax(const std::vector<size_t>& shape, const bool use_2d_quantization,
+                            const bool columnwise) {
+    using namespace test;
+
+    DType itype = TypeInfo<InputType>::dtype;
+    DType otype = DType::kFloat4E2M1;
+
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+    const std::array<size_t, 4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16);
+    const std::array<size_t, 4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
+
+    Tensor input("input", shape, itype);
+    fillCase<fp32>(&input, InputsFillCase::uniform);
+    float ref_amax = 0.0f;
+    const InputType *input_vals = input.rowwise_cpu_dptr<InputType>();
+    for (size_t i = 0; i < rows * cols; ++i) {
+        ref_amax = fmaxf(ref_amax, fabsf(static_cast<float>(input_vals[i])));
+    }
+
+    // Reference: the amax handed in.
+    Tensor output_ref("output_ref", shape, otype, /*rowwise=*/true, columnwise,
+                      NVTE_NVFP4_1D_SCALING);
+    output_ref.cpu_rowwise_amax_ptr<float>()[0] = ref_amax;
+    if (columnwise) {
+        output_ref.cpu_columnwise_amax_ptr<float>()[0] = ref_amax;
+    }
+    output_ref.from_cpu();
+
+    // System under test: amaxes above the input's, which the amax computation must replace rather
+    // than take the maximum with.
+    Tensor output("output", shape, otype, /*rowwise=*/true, columnwise, NVTE_NVFP4_1D_SCALING);
+    output.cpu_rowwise_amax_ptr<float>()[0] = 2.0f * ref_amax + 1.0f;
+    if (columnwise) {
+        output.cpu_columnwise_amax_ptr<float>()[0] = 2.0f * ref_amax + 1.0f;
+    }
+    output.from_cpu();
+
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_nvfp4_2d_quantization(use_2d_quantization);
+    nvte_quantize_v2(input.data(), output_ref.data(), quant_config, 0);
+    nvte_compute_amax_with_config(input.data(), output.data(), quant_config, 0);
+    nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
+
+    cudaDeviceSynchronize();
+    auto err = cudaGetLastError();
+    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    output_ref.to_cpu();
+    output.to_cpu();
+
+    EXPECT_EQ(output.cpu_rowwise_amax_ptr<float>()[0], ref_amax);
+    if (columnwise) {
+        EXPECT_EQ(output.cpu_columnwise_amax_ptr<float>()[0], ref_amax);
+    }
+
+    size_t scale_mismatches = 0;
+    compare_nvfp4_tensors("compute_amax_data", output.rowwise_cpu_dptr<fp4e2m1>(),
+                          output_ref.rowwise_cpu_dptr<fp4e2m1>(), static_cast<int>(rows),
+                          static_cast<int>(cols), /*atol=*/0.0, /*rtol=*/0.0);
+    compare_scaling_factors<fp8e4m3>("compute_amax_scales",
+                                     output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     output_ref.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                     scale_dims[0], scale_dims[1], scale_dims[3],
+                                     scale_mismatches);
+    if (columnwise) {
+        compare_nvfp4_tensors("compute_amax_data_t", output.columnwise_cpu_dptr<fp4e2m1>(),
+                              output_ref.columnwise_cpu_dptr<fp4e2m1>(), static_cast<int>(cols),
+                              static_cast<int>(rows), /*atol=*/0.0, /*rtol=*/0.0);
+        compare_scaling_factors<fp8e4m3>("compute_amax_scales_t",
+                                         output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                         output_ref.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                         scale_dims_t[0], scale_dims_t[1], scale_dims_t[3],
+                                         scale_mismatches);
+    }
+    ASSERT_EQ(scale_mismatches, 0u);
+}
+
 std::vector<std::vector<size_t>> tensor_dims = {
     {32, 32},
     {32, 64},
@@ -1689,6 +1771,50 @@ INSTANTIATE_TEST_SUITE_P(
         for (const auto& s : info.param) {
             name += "X" + std::to_string(s);
         }
+        return name;
+    });
+
+class CastNVFP4ComputeAmaxTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::vector<size_t>, transformer_engine::DType, bool, bool>> {};
+
+TEST_P(CastNVFP4ComputeAmaxTestSuite, MatchesHandedInAmax) {
+    // The NVFP4 quantize kernels require Blackwell.
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    using namespace transformer_engine;
+    using namespace test;
+
+    const auto tensor_dims = std::get<0>(GetParam());
+    const DType input_type = std::get<1>(GetParam());
+    const bool use_2d_quantization = std::get<2>(GetParam());
+    const bool columnwise = std::get<3>(GetParam());
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
+        performTestComputeAmax<InputType>(tensor_dims, use_2d_quantization, columnwise);
+    );
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    CastNVFP4ComputeAmaxTestSuite,
+    // BF16 takes the CuTeDSL amax kernels when the backend is on, and the optimized 1D and 2D
+    // kernels; FP32 takes TE's amax kernel and the vector-blockwise one.
+    ::testing::Combine(
+        ::testing::Values(std::vector<size_t>{128, 256}, std::vector<size_t>{2048, 160}),
+        ::testing::Values(DType::kBFloat16, DType::kFloat32),
+        ::testing::Values(false, true),   // use_2d_quantization
+        ::testing::Values(false, true)),  // columnwise
+    [](const testing::TestParamInfo<CastNVFP4ComputeAmaxTestSuite::ParamType>& info) {
+        std::string name;
+        for (const auto& s : std::get<0>(info.param)) {
+            name += "X" + std::to_string(s);
+        }
+        name += "X" + test::typeName(std::get<1>(info.param));
+        name += std::get<2>(info.param) ? "X2D" : "X1D";
+        name += std::get<3>(info.param) ? "XBothDirections" : "XRowwise";
         return name;
     });
 
