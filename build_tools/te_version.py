@@ -5,16 +5,25 @@
 """Transformer Engine version string."""
 import os
 from pathlib import Path
+import re
 import subprocess
 
-from packaging.version import InvalidVersion, Version
+from packaging.version import Version
+
+# The subset of SemVer whose PEP 440 equivalent has the same precedence. PEP 440 orders dev
+# releases before alpha and beta releases, so only dev and rc prereleases are supported.
+_SEMVER_PATTERN = re.compile(
+    r"(?P<release>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
+    r"(?:-(?P<label>dev|rc)\.(?P<number>0|[1-9][0-9]*))?"
+    r"(?:\+(?P<build>[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?"
+)
 
 
 def te_raw_version() -> str:
     """Transformer Engine version string as written in VERSION.txt
 
-    May be a SemVer string such as 1.2.3-rc.1. Use this for Git tags
-    and use te_version() for anything consumed by Python packaging.
+    A SemVer string such as 1.2.3-rc.1. Use this for Git tags and use
+    te_version() for anything consumed by Python packaging.
 
     """
     root_path = Path(__file__).resolve().parent
@@ -36,7 +45,8 @@ def append_local_version(version: str, local: str) -> str:
 def te_version() -> str:
     """Transformer Engine version string, normalized to PEP 440
 
-    SemVer prerelease and build metadata are converted, e.g.
+    VERSION.txt must contain MAJOR.MINOR.PATCH, optionally followed by
+    a -dev.N or -rc.N prerelease and +BUILD metadata. For example,
     1.2.3-rc.1 becomes 1.2.3rc1 and 4.5.6-dev.123+abc123 becomes
     4.5.6.dev123+abc123.
 
@@ -45,24 +55,21 @@ def te_version() -> str:
 
     """
     raw_version = te_raw_version()
-    if raw_version[:1] in ("v", "V"):
-        # PEP 440 accepts and drops the prefix, but release tags already add a "v".
-        raise ValueError(f"Transformer Engine version {raw_version!r} must not start with 'v'.")
-    try:
-        parsed_version = Version(raw_version)
-    except InvalidVersion as e:
+    match = _SEMVER_PATTERN.fullmatch(raw_version)
+    if match is None:
         raise ValueError(
-            f"Transformer Engine version {raw_version!r} has no PEP 440 equivalent. SemVer"
-            " prerelease labels must be one of alpha, a, beta, b, c, rc, pre, preview, or dev,"
-            " followed by an optional number, e.g. 1.2.3-rc.1."
-        ) from e
-    if "-" in raw_version.split("+")[0] and parsed_version.is_postrelease:
-        # SemVer prereleases sort before the release, PEP 440 post-releases sort after it.
-        raise ValueError(
-            f"Transformer Engine version {raw_version!r} is a SemVer prerelease but is a"
-            f" post-release ({parsed_version}) under PEP 440."
+            f"Transformer Engine version {raw_version!r} is not a supported SemVer version."
+            " Expected MAJOR.MINOR.PATCH, optionally followed by -dev.N or -rc.N and +BUILD"
+            " metadata, e.g. 1.2.3, 1.2.3-rc.1, or 1.2.3-dev.4+abc123."
         )
-    version = str(parsed_version)
+    version = match["release"]
+    if match["label"] == "rc":
+        version += f"rc{match['number']}"
+    elif match["label"] == "dev":
+        version += f".dev{match['number']}"
+    if match["build"] is not None:
+        version += f"+{match['build']}"
+    version = str(Version(version))
 
     if not int(os.getenv("NVTE_NO_LOCAL_VERSION", "0")) and not bool(
         int(os.getenv("NVTE_RELEASE_BUILD", "0"))

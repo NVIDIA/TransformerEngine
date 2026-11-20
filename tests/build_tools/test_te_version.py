@@ -29,14 +29,13 @@ def raw_version(monkeypatch):
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("2.22.0", "2.22.0"),
-        ("2.22.0.dev0", "2.22.0.dev0"),
+        ("3.0.0", "3.0.0"),
+        ("10.20.30", "10.20.30"),
+        ("3.0.0-dev.0", "3.0.0.dev0"),
         ("1.2.3-rc.1", "1.2.3rc1"),
-        ("1.2.3-rc1", "1.2.3rc1"),
-        ("1.2.3-alpha.2", "1.2.3a2"),
-        ("1.2.3-beta", "1.2.3b0"),
         ("4.5.6-dev.123", "4.5.6.dev123"),
         ("4.5.6-dev.123+abc123", "4.5.6.dev123+abc123"),
+        ("1.2.3+build-5.ABC", "1.2.3+build.5.abc"),
     ],
 )
 def test_normalizes_semver(raw_version, raw, expected):
@@ -45,22 +44,59 @@ def test_normalizes_semver(raw_version, raw, expected):
 
 
 @pytest.mark.parametrize(
-    "raw,error",
+    "raw",
     [
-        ("", "has no PEP 440 equivalent"),
-        ("abc", "has no PEP 440 equivalent"),
-        ("1.2.3-nightly.5", "has no PEP 440 equivalent"),
-        ("1.2.3-rc.1.2", "has no PEP 440 equivalent"),
-        ("1.2.3-1", "is a post-release"),
-        ("1.2.3-post.1", "is a post-release"),
-        ("v1.2.3", "must not start with 'v'"),
-        ("V1.2.3-rc.1", "must not start with 'v'"),
+        "",
+        "abc",
+        "1.2",
+        "1.2.3.4",
+        "01.2.3",
+        "v1.2.3",
+        " 1.2.3",
+        # PEP 440 rather than SemVer
+        "3.0.0.dev0",
+        "1.2.3rc1",
+        "1.2.3.post1",
+        # Unsupported prereleases
+        "1.2.3-alpha.1",
+        "1.2.3-beta.1",
+        "1.2.3-nightly.5",
+        "1.2.3-1",
+        "1.2.3-rc",
+        "1.2.3-rc1",
+        "1.2.3-RC.1",
+        "1.2.3-rc.01",
+        "1.2.3-rc.1.2",
+        "1.2.3-rc.1.dev.2",
+        # Invalid build metadata
+        "1.2.3+",
+        "1.2.3+abc..def",
+        "1.2.3+abc_def",
+        "1.2.3+-abc",
     ],
 )
-def test_rejects_invalid_versions(raw_version, raw, error):
+def test_rejects_unsupported_versions(raw_version, raw):
     raw_version(raw)
-    with pytest.raises(ValueError, match=error):
+    with pytest.raises(ValueError, match="is not a supported SemVer version"):
         te_version()
+
+
+def test_preserves_semver_precedence(raw_version):
+    semver_order = [
+        "3.0.0-dev.0",
+        "3.0.0-dev.10",
+        "3.0.0-rc.1",
+        "3.0.0-rc.2",
+        "3.0.0",
+        "3.0.1-dev.0",
+        "3.1.0",
+    ]
+    pep440_versions = []
+    for raw in semver_order:
+        raw_version(raw)
+        pep440_versions.append(Version(te_version()))
+    assert pep440_versions == sorted(pep440_versions)
+    assert len(set(pep440_versions)) == len(pep440_versions)
 
 
 @pytest.mark.parametrize(
@@ -82,7 +118,7 @@ def test_appends_commit(raw_version, monkeypatch, raw, expected):
     assert te_version() == expected
 
 
-@pytest.mark.parametrize("raw", ["2.22.0", "1.2.3-rc.1", "4.5.6-dev.123+abc123"])
+@pytest.mark.parametrize("raw", ["3.0.0", "3.0.0-dev.0", "1.2.3-rc.1", "4.5.6-dev.123+abc123"])
 def test_framework_wheel_filename_is_valid(raw_version, raw):
     raw_version(raw)
     wheel_version = append_local_version(te_version(), "cu12torch2.9.1cxx11abiTRUE")
