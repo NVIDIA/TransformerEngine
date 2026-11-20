@@ -378,6 +378,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      normalization/rmsnorm/rmsnorm_fwd_mxfp8.cu
      recipe/mxfp8_scaling.cu
      recipe/nvfp4.cu
+     recipe/nvfp4_multi_tensor.cu
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 

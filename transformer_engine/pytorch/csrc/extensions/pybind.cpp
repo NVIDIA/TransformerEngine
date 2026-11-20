@@ -539,6 +539,36 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("w_list"), py::arg("start_offset_list"), py::arg("block_len") = 16,
         py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_2d_multi_tensor_partial_amax",
+        &transformer_engine::pytorch::nvfp4_2d_multi_tensor_partial_amax,
+        "NVFP4 2D tile amaxes of several partial shards, optionally of the shards cast to BF16",
+        py::arg("inp_list"), py::arg("amax_list"), py::arg("h_list"), py::arg("w_list"),
+        py::arg("start_offset_list"), py::arg("block_len") = 16,
+        py::arg("cast_dtype") = transformer_engine::DType::kFloat32,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_2d_multi_tensor_global_amax",
+        &transformer_engine::pytorch::nvfp4_2d_multi_tensor_global_amax,
+        "Per-tensor global amax as the maximum of the (reduced) NVFP4 2D tile amaxes",
+        py::arg("block_amax_list"), py::arg("global_amax_list"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_2d_multi_tensor_fused_scale",
+        &transformer_engine::pytorch::nvfp4_2d_multi_tensor_fused_scale,
+        "Multi-tensor nvfp4_fused_scale in one launch per 24 tensors", py::arg("block_amax_list"),
+        py::arg("global_amax_list"), py::arg("per_block_scale_list"), py::arg("target_scale_list"),
+        py::arg("target_amax_list"), py::arg("tile_rows_list"), py::arg("tile_cols_list"),
+        py::arg("rows_padded_list"), py::arg("block_len") = 16,
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_2d_multi_tensor_partial_cast",
+        &transformer_engine::pytorch::nvfp4_2d_multi_tensor_partial_cast,
+        "NVFP4 2D partial cast of several shards in one launch per 24 tensors, optionally of the "
+        "shards cast to BF16",
+        py::arg("inp_list"), py::arg("out_list"), py::arg("scale_list"),
+        py::arg("global_scale_list"), py::arg("h_list"), py::arg("w_list"),
+        py::arg("start_offset_list"), py::arg("block_len") = 16,
+        py::arg("cast_dtype") = transformer_engine::DType::kFloat32,
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
+        py::call_guard<py::gil_scoped_release>());
   m.def("mxfp8_scaling_compute_partial_amax",
         &transformer_engine::pytorch::mxfp8_scaling_compute_partial_amax,
         "Compute partial amax from master weights for fp8 mxfp8 scaling", py::arg("input"),
