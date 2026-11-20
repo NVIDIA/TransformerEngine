@@ -40,13 +40,11 @@ inline bool use_tma_descriptor_override() {
 #endif
 }
 
-inline void
-create_grouped_tma_map(CUtensorMap &map, const SimpleTensor &tensor,
-                       const bool use_override, const uint64_t rows,
-                       const uint64_t cols, const uint32_t tile_rows,
-                       const uint32_t tile_cols, const size_t type_bits,
-                       const CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE)
-{
+inline void create_grouped_tma_map(CUtensorMap &map, const SimpleTensor &tensor,
+                                   const bool use_override, const uint64_t rows,
+                                   const uint64_t cols, const uint32_t tile_rows,
+                                   const uint32_t tile_cols, const size_t type_bits,
+                                   const CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE) {
   const uint64_t map_rows = use_override ? 1 : rows;
   const uint64_t map_cols = use_override ? tile_cols : cols;
   create_2D_tensor_map(map, tensor, map_rows, map_cols, tile_rows, tile_cols, map_cols, 0,
@@ -62,13 +60,8 @@ struct TmaDescriptorOverride2D {
 };
 
 template <size_t TILE_Y, size_t TILE_X, typename T>
-__device__ __forceinline__ TmaDescriptorOverride2D
-make_tma_descriptor_override_2d(const T *data,
-                                const size_t rows,
-                                const size_t cols,
-                                const size_t x,
-                                const size_t y)
-{
+__device__ __forceinline__ TmaDescriptorOverride2D make_tma_descriptor_override_2d(
+    const T *data, const size_t rows, const size_t cols, const size_t x, const size_t y) {
   static_assert((TILE_X > 0) && (TILE_X < 256) && (TILE_Y > 0) && (TILE_Y < 256));
   const uint64_t stride_bytes = static_cast<uint64_t>(cols) * sizeof(T);
   const uint64_t address = reinterpret_cast<uint64_t>(data + y * cols + x);
@@ -85,15 +78,10 @@ make_tma_descriptor_override_2d(const T *data,
 }
 
 template <size_t TILE_Y, size_t TILE_X, typename T>
-__device__ __forceinline__ void
-load_grouped_tma_2d(T *dst, const CUtensorMap &map,
-                    const size_t x,
-                    const size_t y,
-                    uint64_t *barrier,
-                    const T *data,
-                    const size_t rows,
-                    const size_t cols)
-{
+__device__ __forceinline__ void load_grouped_tma_2d(T *dst, const CUtensorMap &map, const size_t x,
+                                                    const size_t y, uint64_t *barrier,
+                                                    const T *data, const size_t rows,
+                                                    const size_t cols) {
   constexpr bool has_override = ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
   if constexpr (has_override) {
     if (data != nullptr) {
@@ -109,15 +97,9 @@ load_grouped_tma_2d(T *dst, const CUtensorMap &map,
 }
 
 template <size_t TILE_Y, size_t TILE_X, typename T>
-__device__ __forceinline__ void
-store_grouped_tma_2d(T *src,
-                     const CUtensorMap &map,
-                     const size_t x,
-                     const size_t y,
-                     const T *data,
-                     const size_t rows,
-                     const size_t cols)
-{
+__device__ __forceinline__ void store_grouped_tma_2d(T *src, const CUtensorMap &map, const size_t x,
+                                                     const size_t y, const T *data,
+                                                     const size_t rows, const size_t cols) {
   constexpr bool has_override = ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
   if constexpr (has_override) {
     if (data != nullptr) {
