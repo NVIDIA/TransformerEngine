@@ -592,6 +592,27 @@ def assert_close_rms(
     ), f"RMS error {error_rms:.4g} exceeds {rtol} * RMS of expected ({expected_rms:.4g})"
 
 
+class KernelLaunchCounter:
+    """Stands in for a Triton kernel, counting its launches and forwarding them.
+
+    Replace the kernel in its module with an instance (for example with
+    ``monkeypatch.setattr``) to check whether a code path launches it.
+    """
+
+    def __init__(self, kernel):
+        self.kernel = kernel
+        self.launches = 0
+
+    def __getitem__(self, grid):
+        launch = self.kernel[grid]
+
+        def counted_launch(*args, **kwargs):
+            self.launches += 1
+            return launch(*args, **kwargs)
+
+        return counted_launch
+
+
 def run_distributed(
     args: Sequence[str],
     *,
