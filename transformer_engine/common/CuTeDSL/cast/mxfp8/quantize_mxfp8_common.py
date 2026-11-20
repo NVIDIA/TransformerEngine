@@ -170,9 +170,7 @@ def derive_swizzled_scale_vectorized_tv_layout(
     preserve properties like vectorization and coalescing that TV_U has with the unswizzled scale,
     because all pairs of (tx, vx) are still mapped to the same physical memory offsets.
     """
-    tv_layout_for_unswizzled = cute.make_layout(
-        (num_threads, num_values), stride=(num_values, 1)
-    )
+    tv_layout_for_unswizzled = cute.make_layout((num_threads, num_values), stride=(num_values, 1))
     row_layout, col_layout = swizzled_scale_layouts(M, N, ROWWISE, COLWISE)
     tv_row_for_swizzled = tv_col_for_swizzled = None
     if cutlass.const_expr(ROWWISE):

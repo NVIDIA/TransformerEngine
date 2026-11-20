@@ -221,7 +221,9 @@ def scaled_swiglu_quantize_mxfp8_gmem_tile_colwise(
                     amax_hi = x2_hi_to_f32_f16(amax[pair_idx] & Int32(0x7FFF7FFF))
                 rS[2 * pair_idx] = cvt_f32_to_fp8e8m0fnu(amax_lo * MAX_NORM_RCP)
                 rS[2 * pair_idx + 1] = cvt_f32_to_fp8e8m0fnu(amax_hi * MAX_NORM_RCP)
-                scale_rcp[pair_idx] = pack_f32x2(exp2f_rcp(rS[2 * pair_idx]), exp2f_rcp(rS[2 * pair_idx + 1]))
+                scale_rcp[pair_idx] = pack_f32x2(
+                    exp2f_rcp(rS[2 * pair_idx]), exp2f_rcp(rS[2 * pair_idx + 1])
+                )
 
         # One lane per column stages the scales. Columns past valid_cols get zero scales, as in
         # the CUDA kernel.
@@ -654,7 +656,7 @@ class MXFP8GroupScaledSwiGLUKernel:
                     cute.AddressSpace.gmem,
                     assumed_align=16,
                 ),
-                cute.make_layout(1), # Just a placeholder
+                cute.make_layout(1),  # Just a placeholder
             )
             _, col_scales = derive_swizzled_scale_layout(
                 member_rows, member_cols, False, True, None, col_scales_flat
@@ -669,7 +671,9 @@ class MXFP8GroupScaledSwiGLUKernel:
                     cute.AddressSpace.gmem,
                     assumed_align=16,
                 ),
-                cute.make_layout((member_rows // MXFP8_BLOCK_SCALING_SIZE, stride), stride=(stride, 1)),
+                cute.make_layout(
+                    (member_rows // MXFP8_BLOCK_SCALING_SIZE, stride), stride=(stride, 1)
+                ),
             )
         # The job's (4, TILE_COLS) scales, in GMEM and as staged in SMEM
         JOB_SCALE_ROWS = self.TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE
@@ -677,8 +681,11 @@ class MXFP8GroupScaledSwiGLUKernel:
         scale_start_row = (job_start_row - member_start_row) // MXFP8_BLOCK_SCALING_SIZE
         gS_job = cute.local_tile(
             cute.recast_tensor(col_scales, Uint8),
-            (JOB_SCALE_ROWS, JOB_SCALE_COLS), # scale tile shape
-            (scale_start_row // JOB_SCALE_ROWS, job_start_col // JOB_SCALE_COLS), # Coordinates for the scale tile
+            (JOB_SCALE_ROWS, JOB_SCALE_COLS),  # scale tile shape
+            (
+                scale_start_row // JOB_SCALE_ROWS,
+                job_start_col // JOB_SCALE_COLS,
+            ),  # Coordinates for the scale tile
         )
 
         # Each lane stores 16 scales that are contiguous in both SMEM and GMEM
@@ -703,14 +710,18 @@ class MXFP8GroupScaledSwiGLUKernel:
             # 8 lanes per row, each taking 16 consecutive columns
             _, tv_layout = cute.make_layout_tv(
                 thr_layout=cute.make_layout((4, 8), stride=(8, 1)),
-                val_layout=cute.make_layout((1, 16)), # Each thread does 16 bytes vectorized store
+                val_layout=cute.make_layout((1, 16)),  # Each thread does 16 bytes vectorized store
             )
 
         src_frag = cute.composition(sS_job, tv_layout)[lane_idx, None]
         dst_frag = cute.composition(gS_job, tv_layout)[lane_idx, None]
         # The row stride of compact GMEM scales is runtime, so restate the 16-byte alignment
-        src_frag = cute.make_tensor(src_frag.iterator.align(self.SCALE_STORE_BYTES), src_frag.layout)
-        dst_frag = cute.make_tensor(dst_frag.iterator.align(self.SCALE_STORE_BYTES), dst_frag.layout)
+        src_frag = cute.make_tensor(
+            src_frag.iterator.align(self.SCALE_STORE_BYTES), src_frag.layout
+        )
+        dst_frag = cute.make_tensor(
+            dst_frag.iterator.align(self.SCALE_STORE_BYTES), dst_frag.layout
+        )
         cute.autovec_copy(src_frag, dst_frag)
 
 
