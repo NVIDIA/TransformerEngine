@@ -223,6 +223,38 @@ def mul_bf16x2x2_cvt_bf16x4_to_fp8x4(fp8_dtype) -> Callable[..., Uint32]:
     return fn
 
 
+def mul_f32x2_cvt_x2_to_fp8x2(dtype, fp8_dtype) -> Callable[..., Uint16]:
+    """Return an elementwise multiply/cast of two adjacent FP32 or FP16 values to FP8.
+
+    The op takes (pair, scale_2x): one Int64 of two FP32 values or one Int32 of two packed FP16
+    values, and pack_f32x2(s0, s1); it returns the two FP8 bytes fp8(v_i * s_i), the first
+    element in the low byte. mul, not fma against zeros, so a -0 product keeps its sign, as the
+    scalar multiply of group_scaled_swiglu_mxfp8.cuh does.
+    """
+    out_op = "e5m2x2" if fp8_dtype is Float8E5M2 else "e4m3x2"
+    if dtype is Float32:
+        widen = "mov.b64 vy, {$r0};\n\t"
+    elif dtype is cutlass.Float16:
+        widen = (
+            "mov.b32 {h0, h1}, {$r0};\n\tcvt.f32.f16 y0, h0;\n\tcvt.f32.f16 y1, h1;\n\t"
+            "mov.b64 vy, {y0, y1};\n\t"
+        )
+    else:
+        raise ValueError(f"Expected Float32 or Float16, got {dtype}")
+    asm = (
+        "{\n\t.reg.b64 vy;\n\t.reg.b32 y0, y1;\n\t.reg.b16 h0, h1;\n\t"
+        + widen
+        + "mul.rn.f32x2 vy, vy, {$r1};\n\tmov.b64 {y0, y1}, vy;\n\t"
+        f"cvt.rn.satfinite.{out_op}.f32 {{$w0}}, y1, y0;\n\t}}"
+    )
+
+    @cute.jit
+    def fn(pair, scale_2x: Int64) -> Uint16:
+        return cute.arch.inline_ptx(asm, write_only_types=[Uint16], read_only_args=[pair, scale_2x])
+
+    return fn
+
+
 def _build_mul_f32x2_cvt_packed16x4_to_fp8x4(
     in_dtype, fp8_dtype, relu: bool = False
 ) -> Callable[..., Uint32]:

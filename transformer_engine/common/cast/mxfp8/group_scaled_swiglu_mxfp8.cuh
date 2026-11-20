@@ -392,18 +392,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
 
 }  // namespace group_scaled_swiglu_kernel
 
-// Host launcher: grouped scaled SwiGLU -> columnwise MXFP8.
+// Checks the arguments of group_scaled_swiglu and returns the grouped shape representation.
 //   input  : GroupedTensor [N, 2H] ([act|gate]) in a floating input dtype.
 //   prob   : Tensor [N] per-token weights, in the input (model) dtype.
 //   output : GroupedTensor with columnwise_data / columnwise_scale_inv for [N, H].
-//   p      : Empty for plain SwiGLU, ClampedSwiGLUParam for the clamped variant.
-template <typename ParamOP, float (*OP)(float, const ParamOP &)>
-void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const Tensor *noop,
-                         GroupedTensor *output, const ParamOP &p,
-                         const QuantizationConfig *quant_config, cudaStream_t stream) {
-  using namespace group_scaled_swiglu_kernel;
-
-  checkCuDriverContext(stream);
+inline ShapeRepresentation check_group_scaled_swiglu_args(const GroupedTensor *input,
+                                                          const Tensor *prob, const Tensor *noop,
+                                                          const GroupedTensor *output) {
   CheckNoopTensor(*noop, "cast_noop");
 
   NVTE_CHECK(output->has_columnwise_data(),
@@ -428,21 +423,13 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
                "(grouped layout SAME_BOTH_DIMS or VARYING_FIRST_DIM).");
   }
 
-  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
-
   // Output logical shape drives the schedule ([N, H]); input is [N, 2H].
-  const size_t first_logical_dim = output->logical_shape.data[0];     // N
-  const size_t out_last_logical_dim = output->logical_shape.data[1];  // H
-  const size_t in_last_logical_dim = input->logical_shape.data[1];    // 2H
-
-  NVTE_CHECK(in_last_logical_dim == 2 * out_last_logical_dim,
+  const size_t N = output->logical_shape.data[0];
+  const size_t H = output->logical_shape.data[1];
+  NVTE_CHECK(input->logical_shape.data[1] == 2 * H,
              "group_scaled_swiglu input last dim must be 2x the output last dim ([act|gate]).");
-  NVTE_CHECK(input->logical_shape.data[0] == first_logical_dim,
+  NVTE_CHECK(input->logical_shape.data[0] == N,
              "group_scaled_swiglu input/output must share the token dimension N.");
-
-  const size_t N = first_logical_dim;
-  const size_t H = out_last_logical_dim;
-  const size_t num_tensors = input->num_tensors;
 
   NVTE_CHECK(prob != nullptr && prob->data.dptr != nullptr, "prob tensor must be allocated.");
   // prob follows TE's cuDNN fc1_prob_tensor convention: model (input) dtype.
@@ -450,11 +437,52 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
              "prob tensor must have the same dtype as the input (model dtype).");
   NVTE_CHECK(prob->data.numel() >= N, "prob tensor must have at least N elements.");
 
+  NVTE_CHECK(N % 128 == 0, "group_scaled_swiglu requires N divisible by 128.");
+
+  if (output->with_gemm_swizzled_scales) {
+    // The swizzled block is tiled 128x4 over the transposed [H, rows/32] scale
+    // matrix, so a partial H tile would not map onto a whole number of tiles.
+    NVTE_CHECK(H % 128 == 0,
+               "group_scaled_swiglu with GEMM-swizzled scales requires the output "
+               "last dim (H) to be divisible by 128, got ",
+               H, ".");
+    if (input->num_tensors > 1) {
+      // Each expert owns a separate swizzled block whose extent depends on its
+      // own token count, so per-expert first dims and offsets are mandatory.
+      NVTE_CHECK(shape_rep == ShapeRepresentation::VARYING_FIRST_DIM,
+                 "group_scaled_swiglu with GEMM-swizzled scales and multiple experts "
+                 "requires per-expert first dims (pass first_dims / split_sections).");
+      NVTE_CHECK(output->tensor_offsets.dptr != nullptr,
+                 "group_scaled_swiglu with GEMM-swizzled scales requires tensor_offsets "
+                 "to locate each expert's swizzled scale block.");
+    }
+  }
+
+  NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
+             "Columnwise scaling tensor must be allocated");
+  return shape_rep;
+}
+
+// Host launcher: grouped scaled SwiGLU -> columnwise MXFP8. See check_group_scaled_swiglu_args
+// for the arguments.
+//   p      : Empty for plain SwiGLU, ClampedSwiGLUParam for the clamped variant.
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
+void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const Tensor *noop,
+                         GroupedTensor *output, const ParamOP &p,
+                         const QuantizationConfig *quant_config, cudaStream_t stream) {
+  using namespace group_scaled_swiglu_kernel;
+
+  checkCuDriverContext(stream);
+  const ShapeRepresentation shape_rep = check_group_scaled_swiglu_args(input, prob, noop, output);
+  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
+
+  const size_t N = output->logical_shape.data[0];
+  const size_t H = output->logical_shape.data[1];
+  const size_t num_tensors = input->num_tensors;
+
   // Single-tensor schedule: one virtual work grid over [N, H].
   const size_t work_blocks_Y = DIVUP(N, static_cast<size_t>(CHUNK_DIM_Y));
   const size_t work_blocks_X = DIVUP(H, static_cast<size_t>(CHUNK_DIM_X));
-
-  NVTE_CHECK(N % 128 == 0, "group_scaled_swiglu requires N divisible by 128.");
 
   const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
   const size_t static_grid_size = sm_num * TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM;
@@ -466,28 +494,8 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
   const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(output->last_dims.dptr);
 
-  if (with_gemm_swizzled_scales) {
-    // The swizzled block is tiled 128x4 over the transposed [H, rows/32] scale
-    // matrix, so a partial H tile would not map onto a whole number of tiles.
-    NVTE_CHECK(H % 128 == 0,
-               "group_scaled_swiglu with GEMM-swizzled scales requires the output "
-               "last dim (H) to be divisible by 128, got ",
-               H, ".");
-    if (num_tensors > 1) {
-      // Each expert owns a separate swizzled block whose extent depends on its
-      // own token count, so per-expert first dims and offsets are mandatory.
-      NVTE_CHECK(shape_rep == ShapeRepresentation::VARYING_FIRST_DIM,
-                 "group_scaled_swiglu with GEMM-swizzled scales and multiple experts "
-                 "requires per-expert first dims (pass first_dims / split_sections).");
-      NVTE_CHECK(offsets_ptr != nullptr,
-                 "group_scaled_swiglu with GEMM-swizzled scales requires tensor_offsets "
-                 "to locate each expert's swizzled scale block.");
-    }
-  }
-
   const float *const noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   e8m0_t *const scales_colwise_ptr = reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr);
-  NVTE_CHECK(scales_colwise_ptr != nullptr, "Columnwise scaling tensor must be allocated");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input->dtype(), IType,
