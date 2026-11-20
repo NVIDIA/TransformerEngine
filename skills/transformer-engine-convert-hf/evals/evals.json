@@ -8,7 +8,7 @@
       "expected_skill": "transformer-engine-convert-hf",
       "assertions": [
         "The decoder layer uses Transformer Engine's TransformerLayer, fusing layer norm with QKV and with the MLP.",
-        "The checkpoint weights are mapped onto the Transformer Engine layer.",
+        "Every checkpoint weight of the decoder layers is mapped to the correct Transformer Engine parameter, with none missing or swapped.",
         "The fine-tuning forward pass runs under Transformer Engine autocast."
       ]
     },
@@ -20,7 +20,7 @@
       "assertions": [
         "The decoder layer uses Transformer Engine's TransformerLayer with RMSNorm and GeGLU, fusing layer norm with QKV and with the MLP.",
         "Gemma's norm, which multiplies by 1 + weight, is handled with zero_centered_gamma=True.",
-        "The checkpoint weights are mapped onto the Transformer Engine layer."
+        "Every checkpoint weight of the decoder layers is mapped to the correct Transformer Engine parameter, with none missing or swapped."
       ]
     },
     {
@@ -31,7 +31,7 @@
       "assertions": [
         "Attention uses Transformer Engine's MultiheadAttention with the input layer norm fused into QKV.",
         "The MoE experts run through GroupedLinear, not a Python loop over experts.",
-        "The checkpoint weights, including the router and expert weights, are mapped onto the Transformer Engine modules."
+        "Every checkpoint weight, including the router and expert weights, is mapped to the correct Transformer Engine parameter, with none missing or swapped."
       ]
     },
     {

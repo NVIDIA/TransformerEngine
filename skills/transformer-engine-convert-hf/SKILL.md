@@ -7,6 +7,7 @@ description: >-
   TransformerLayer, GroupedLinear MoE experts) with the checkpoint weight mapping, for BF16, FP8
   or MXFP8. Not for Megatron-LM, JAX or inference serving.
 license: Apache-2.0
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 compatibility: >-
   Writing a recipe needs no GPU. Running one needs transformer_engine[pytorch], transformers and
   an NVIDIA GPU (FP8 needs Hopper or newer; MXFP8 needs Blackwell).
@@ -32,10 +33,9 @@ A *recipe* is one Python module, named after the model family (`te_llama.py`, `t
 loads the original checkpoint into it. TE publishes three recipes as tutorials; this skill
 produces the same kind of file for the model the user names.
 
-TE's speed comes from *fused* blocks, not from swapping `nn.Linear` for `te.Linear` one at a
-time. A fused block runs the normalization, the projection and the quantization as one unit, so
-the goal is to move as much of each layer as possible into fused blocks while keeping the model's
-math unchanged.
+TE's speed comes from *fused* blocks, which run the normalization, the projection and the
+quantization as one unit. Swapping `nn.Linear` for `te.Linear` one at a time fuses nothing, so
+move as much of each layer as possible into fused blocks without changing the model's math.
 
 In this skill `te` means `transformer_engine.pytorch`.
 
@@ -43,7 +43,7 @@ In this skill `te` means `transformer_engine.pytorch`.
 
 - "I want a recipe for Llama", "convert Gemma to Transformer Engine", "port Mixtral to TE".
 - "I want a fine-tuning recipe for this model with TE", "speed up my fine-tune with FP8".
-- "How do I fuse layer norm and QKV?", "replace the MoE block with GroupedLinear".
+- "How do I fuse layer norm and QKV?"
 
 Do not use it for Megatron-LM or NeMo configuration, JAX models, inference serving (vLLM,
 TensorRT-LLM), or installing TE.
@@ -52,20 +52,19 @@ TensorRT-LLM), or installing TE.
 
 > "I want a fine-tuning recipe for Llama 2 7B with TE."
 
-Output: `te_llama.py` with a `TELlamaDecoderLayer` based on `te.TransformerLayer`, a model class
-that loads the checkpoint, `replace_params`, and a training step under `te.autocast`.
+Output: `te_llama.py` with a `TELlamaDecoderLayer` based on `te.TransformerLayer`, a loader,
+`replace_params`, and a training step under `te.autocast`.
 
 > "Convert Mixtral 8x7B to TE."
 
-Output: `te_mixtral.py` whose layer uses `te.MultiheadAttention` with the input norm fused into
-QKV and runs the experts through `GroupedLinear`.
+Output: `te_mixtral.py` with `te.MultiheadAttention` (input norm fused into QKV) and the
+experts run through `GroupedLinear`.
 
 ## Prerequisites
 
-- Writing a recipe needs only the model's architecture: its `config.json` and the layer code in
-  `transformers`.
-- Running a recipe needs `transformer_engine[pytorch]`, `torch`, `transformers`, an NVIDIA GPU
-  and a local checkpoint. Access to gated models is the user's.
+- Writing a recipe needs only the model's `config.json` and its layer code in `transformers`.
+- Running one needs `transformer_engine[pytorch]`, `transformers`, an NVIDIA GPU and a local
+  checkpoint. Access to gated models is the user's.
 
 ## Instructions
 
@@ -107,7 +106,7 @@ Published recipes to start from:
 
 Name the file `te_` plus the model family and keep the names of the published recipes. A dense
 recipe has four parts: a context manager that swaps the HF layer class, the TE layer, the model
-class with a checkpoint loader, and `replace_params` with `check_params` (step 4).
+class with a checkpoint loader, and `replace_params` (step 4).
 
 ```python
 @contextmanager
@@ -170,14 +169,10 @@ class TELlamaForCausalLM:
             state_dict = safetensors.torch.load_file(shard)
             replace_params(state_dict, te_state_dict, config)  # the replaced layers
             model.load_state_dict(state_dict, strict=False)  # embeddings, final norm, LM head
-        for shard in shards:  # once every weight is written, verify the mapping
-            check_params(safetensors.torch.load_file(shard), te_state_dict, config)
         return model
 ```
 
-Imports are left out above. `RotaryPositionEmbedding` comes from
-`transformer_engine.pytorch.attention`, and `LlamaForCausalLM` from the family's `transformers`
-modeling module.
+Imports are left out; `RotaryPositionEmbedding` is in `transformer_engine.pytorch.attention`.
 
 For an MoE layer, compose the layer yourself: the attention sublayer is
 `te.MultiheadAttention(input_layernorm=True, normalization="RMSNorm", fuse_qkv_params=True,
@@ -220,8 +215,8 @@ Every HF parameter of a replaced layer needs a destination and every TE paramete
 Keys are relative to `model.layers.N.`:
 
 ```python
-def _layer_weights(hf_state_dict, te_state_dict, config):
-    """Yield (HF key, HF tensor, its destination in the TE model) for the replaced layers."""
+def replace_params(hf_state_dict, te_state_dict, config):
+    """Copy the replaced layers' weights from an HF state dict (or one shard of it)."""
     ffn = config.intermediate_size
     mapping = {  # HF name: (TE name, rows)
         "input_layernorm.weight": ("self_attention.layernorm_qkv.layer_norm_weight", slice(None)),
@@ -238,21 +233,9 @@ def _layer_weights(hf_state_dict, te_state_dict, config):
         match = re.match(r"(model\.layers\.\d+\.)(.+)", hf_key)
         if match:
             te_name, rows = mapping[match.group(2)]  # KeyError: an HF weight with no destination
-            yield hf_key, value, te_state_dict[match.group(1) + te_name][rows]
-
-
-def replace_params(hf_state_dict, te_state_dict, config):
-    """Copy the replaced layers' weights from an HF state dict (or one shard of it)."""
-    with torch.no_grad():
-        for _, value, target in _layer_weights(hf_state_dict, te_state_dict, config):
-            target.copy_(value.to(device=target.device, dtype=target.dtype))
-
-
-def check_params(hf_state_dict, te_state_dict, config):
-    """Rebuild every HF tensor from the converted weights and require an exact match."""
-    for hf_key, value, rebuilt in _layer_weights(hf_state_dict, te_state_dict, config):
-        if not torch.equal(rebuilt.cpu(), value.to(rebuilt.dtype)):
-            raise ValueError(f"Not converted exactly: {hf_key}")
+            target = te_state_dict[match.group(1) + te_name][rows]
+            with torch.no_grad():
+                target.copy_(value.to(device=target.device, dtype=target.dtype))
 ```
 
 - **Fused QKV.** With `fuse_qkv_params=True` the three weights become one,
@@ -262,12 +245,25 @@ def check_params(hf_state_dict, te_state_dict, config):
 - **MoE.** The router gate copies to `mlp.gate.weight`. Each expert has two weights: gate and up
   are the two halves of `experts_gate_up.weight{i}` and down is `experts_down.weight{i}`. Older
   Mixtral checkpoints name them `w1` (gate), `w3` (up) and `w2` (down).
-- **Mapping check.** `check_params` rebuilds each HF tensor from the converted weights and
-  compares it exactly, so a missing or unmapped weight, or two weights written to the same
-  rows, fails at load time. A layout that is wrong in both directions still passes; the logits
-  comparison in step 6 catches that.
 
-### 5. Add the precision hook (fine-tuning requests only)
+### 5. Check the weight mapping
+
+Where the recipe can run (a GPU with TE, and the local checkpoint), run:
+
+```bash
+python scripts/check_weight_mapping.py te_llama.py /path/to/checkpoint
+```
+
+The script loads the recipe's model and looks for every checkpoint weight inside the TE
+weights, row by row, without using the recipe's mapping. It fails on a weight that is missing,
+partial, overwritten, in the wrong layer or changed, and on a TE parameter that does not come
+from the checkpoint. Fix every failure.
+
+It cannot tell two same-shaped weights apart, so read the table it prints and confirm the
+order: gate before up in `fc1_weight`, and query, key and value in their own slots. Without a
+GPU, report that this check was not run.
+
+### 6. Add the precision hook (fine-tuning requests only)
 
 Verify the model in BF16 first, build the optimizer after the conversion, then turn on a recipe:
 
@@ -288,32 +284,38 @@ loss.backward()  # outside autocast
 
 Keep the MoE router and the LM head in high precision.
 
-### 6. Check and report
+### 7. Check and report
 
-Before reporting, confirm that the recipe uses a fused block, that every weight of the replaced
-layers is in the mapping, and that the constructor arguments match the config.
+Confirm that the recipe uses a fused block and that the constructor arguments match the config.
 
-With a GPU, the loader runs `check_params`. Then load the same checkpoint into the HF and TE
-models and compare logits in BF16 under `te.autocast(enabled=False)`. Expect a small relative
-error and near-total top-1 agreement; an error near 1.0 means a wrong layout or constructor
-argument.
+With a GPU, once the weight mapping check passes, load the checkpoint into the HF and TE models
+and compare logits in BF16 under `te.autocast(enabled=False)`. Expect a small relative error
+and near-total top-1 agreement; an error near 1.0 means a wrong order or constructor argument.
 
-Tell the user which techniques were applied, what stayed native and why, which checks ran, and
-which could not. A recipe that was never executed must be described that way.
+Tell the user which techniques were applied, what stayed native and why, and which checks ran
+or could not. Describe a recipe that was never executed as such.
 
 ## Rules that prevent silent errors
 
-- **RoPE base.** `RotaryPositionEmbedding` defaults to base 10000. Pass
-  `rotary_base=config.rope_theta`. If the config sets `rope_scaling`, copy `inv_freq` from the HF
-  rotary embedding instead.
+- **RoPE base.** `RotaryPositionEmbedding` defaults to base 10000; pass
+  `rotary_base=config.rope_theta`. With `rope_scaling`, copy `inv_freq` from the HF model.
 - **Masks.** Do not forward HF's additive mask; TE masks are boolean with `True` meaning masked
   out. TE's causal mask is exact for unpadded and right-padded batches. Left-padded batches need
   a padding mask or packed (`thd`) input.
 - **Layer return type.** Return a tensor or a tuple, whichever the installed `transformers`
-  model loop expects from a layer.
+  model loop expects.
 - **KV cache.** TE layers ignore HF's `past_key_values`; set `config.use_cache = False`.
 - **Order.** Convert before building the optimizer, wrapping with Accelerate or PEFT, or
   compiling.
+
+## Available Scripts
+
+| Script | Purpose | Arguments |
+|---|---|---|
+| `scripts/check_weight_mapping.py` | Check that every checkpoint weight is in the recipe's TE model exactly, and that every TE weight comes from the checkpoint | `recipe`, `model_dir`, `--model-class`, `--ignore` |
+
+Run it as in step 5, or with
+`run_script("scripts/check_weight_mapping.py", args=[recipe, model_dir])`.
 
 ## Limitations
 
@@ -328,8 +330,8 @@ which could not. A recipe that was never executed must be described that way.
 
 | Error / Symptom | Cause | Solution |
 |---|---|---|
-| Logits differ widely, or fluent but wrong text | Wrong weight layout or constructor argument | Check the QKV layout, gate/up order, RoPE base, `zero_centered_gamma` and `kv_channels`, one layer at a time |
-| `check_params` or the mapping raises | A weight is unmapped, never written or overwritten | Compare the HF `state_dict()` keys of one layer with the mapping |
+| `check_weight_mapping.py` fails | A weight is missing, overwritten, in the wrong layer or changed | Compare the HF `state_dict()` keys of one layer with the mapping |
+| Logits differ widely | Wrong order or constructor argument | Check gate/up and Q/K/V order, RoPE base, `zero_centered_gamma`, `kv_channels` |
 | Shape error copying Q/K/V | The config sets `head_dim` | Pass it as `kv_channels` |
-| HF model loop fails on the layer output | Tuple versus tensor | Return what the installed loop expects |
-| FP8 or MXFP8 unavailable | GPU or TE build lacks it | Report the reason from `te.is_fp8_available(return_reason=True)` |
+| FP8 or MXFP8 unavailable | GPU or TE build lacks it | Report `te.is_fp8_available(return_reason=True)` |
+
