@@ -339,7 +339,8 @@ def _prepare_inputs(attn):
         if attn.fp8:
             scale_fmt = p.get("qkv_scale_inv_format") or fmt
             attn.scale("descale_" + name, _descale(p[name], col), name, scale_fmt, col)
-    attn.scalar("attn_scale", torch.tensor([p["attn_scale"]], dtype=torch.float32), by_value=True)
+    attn_scale = torch.tensor([p["attn_scale"]], dtype=torch.float32, device="cpu")
+    attn.scalar("attn_scale", attn_scale, by_value=True)
     if "padding" in p["attn_mask_type"]:
         lengths = (p["cu_seqlens_q"], p["cu_seqlens_kv"])
         if not attn.use_cu_seqlens:
