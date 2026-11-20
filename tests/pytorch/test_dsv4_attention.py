@@ -166,9 +166,7 @@ def test_dsa_compressor_clears_unused_capacity(monkeypatch):
 # Indexer
 
 
-@pytest.mark.parametrize("index_heads", [32, 64])
-def test_dsa_indexer_backward(index_heads):
-    """Train the standalone Indexer and its Compressor against a dense KL reference."""
+def _require_dense_indexer_training():
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in (
         (10, 0),
         (10, 3),
@@ -185,6 +183,34 @@ def test_dsa_indexer_backward(index_heads):
         )
     ):
         pytest.skip("cuDNN dense indexer training APIs are unavailable")
+    return cudnn
+
+
+def _dense_teacher_logits(query, local_kv, compressed_kv, sink, *, ratio, window, scale):
+    query = query.float()
+    pos = torch.arange(query.shape[1], device=query.device)
+    valid = (torch.arange(compressed_kv.shape[1], device=query.device) + 1) * ratio <= (
+        pos[:, None] + 1
+    )
+    local_mask = (pos[None, :] <= pos[:, None]) & (pos[None, :] > pos[:, None] - window)
+    comp_logits = (
+        torch.einsum("bshd,bkd->bshk", query, compressed_kv.float()) * scale
+    ).masked_fill(~valid[None, :, None, :], -torch.inf)
+    local_logits = (torch.einsum("bshd,kd->bshk", query, local_kv.float()) * scale).masked_fill(
+        ~local_mask[None, :, None, :], -torch.inf
+    )
+    # The denominator covers the local window, all eligible compressed KV, and the sink.
+    full_lse = torch.logaddexp(
+        torch.logaddexp(local_logits.logsumexp(-1), comp_logits.logsumexp(-1)),
+        sink[None, None, :],
+    ).contiguous()
+    return comp_logits, full_lse, valid
+
+
+@pytest.mark.parametrize("index_heads", [32, 64])
+def test_dsa_indexer_backward(index_heads):
+    """Train the standalone Indexer and its Compressor against a dense KL reference."""
+    _require_dense_indexer_training()
     torch.manual_seed(43)
     seq, ratio, window = 256, 4, 32
     layer = Indexer(32, 16, 128, index_heads, 8, ratio, 1e-6, "cuda", torch.bfloat16)
@@ -210,21 +236,10 @@ def test_dsa_indexer_backward(index_heads):
     kc = (torch.randn(1, seq // ratio, 512, device=x.device, dtype=torch.bfloat16) * 0.1).float()
     local_kv = (torch.randn(seq, 512, device=x.device, dtype=torch.bfloat16) * 0.1).float()
     sink = torch.randn(64, device=x.device)
-    pos = torch.arange(seq, device=x.device)
-    valid = (torch.arange(seq // ratio, device=x.device) + 1) * ratio <= pos[:, None] + 1
-    local_mask = (pos[None, :] <= pos[:, None]) & (pos[None, :] > pos[:, None] - window)
     scale_i, scale_a = (index_heads * 128) ** -0.5, 512**-0.5
-    comp_logits = (torch.einsum("bshd,bkd->bshk", qa, kc) * scale_a).masked_fill(
-        ~valid[None, :, None, :], -torch.inf
+    comp_logits, full_lse, valid = _dense_teacher_logits(
+        qa, local_kv, kc, sink, ratio=ratio, window=window, scale=scale_a
     )
-    local_logits = (torch.einsum("bshd,kd->bshk", qa, local_kv) * scale_a).masked_fill(
-        ~local_mask[None, :, None, :], -torch.inf
-    )
-    # The dense teacher denominator includes local keys, ALL compressed keys, and sink.
-    full_lse = torch.logaddexp(
-        torch.logaddexp(local_logits.logsumexp(-1), comp_logits.logsumexp(-1)),
-        sink[None, None, :],
-    ).contiguous()
     target = (comp_logits - full_lse[..., None]).exp().sum(2)
     target = target / target.sum(-1, keepdim=True).clamp_min(1e-30)
     index_score, attn_score = dense_indexer_loss_scores(
@@ -296,6 +311,62 @@ def test_dsa_indexer_backward(index_heads):
 
 
 # DSv4 layer wiring
+
+
+def test_dsv4_indexer_auxiliary_backward():
+    """Backpropagate through the returned CSA context and isolate Indexer gradients."""
+    cudnn = _require_dense_indexer_training()
+    if not hasattr(cudnn.DSA, "sparse_attention_forward_wrapper"):
+        pytest.skip("cuDNN sparse attention APIs are unavailable")
+
+    torch.manual_seed(43)
+    seq, ratio, window = 256, 4, 32
+    layer = dsv4_attention.DSv4Attention(
+        hidden_size=32,
+        q_lora_rank=16,
+        layer_type="compressed_sparse_attention",
+        head_dim=512,
+        rope_head_dim=64,
+        sliding_window=window,
+        compression_ratio=ratio,
+        o_groups=8,
+        o_lora_rank=8,
+        index_n_heads=32,
+        index_topk=8,
+        params_dtype=torch.bfloat16,
+        qkv_format="bshd",
+    )
+    x = torch.randn(1, seq, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    _, context = layer(x, return_indexer_context=True)
+    qi, ki, wi = (context[name].unsqueeze(0) for name in ("index_q", "index_k", "index_w"))
+    qa, kc = (context[name].unsqueeze(0) for name in ("attn_q", "compressed_kv"))
+    scale_i, scale_a = (qi.shape[-2] * qi.shape[-1]) ** -0.5, qa.shape[-1] ** -0.5
+    _, full_lse, _ = _dense_teacher_logits(
+        qa, context["local_kv"], kc, context["sink"], ratio=ratio, window=window, scale=scale_a
+    )
+    index_score, attn_score = dense_indexer_loss_scores(
+        qi, ki, wi, qa, kc, full_lse, ratio=ratio, index_scale=scale_i, attention_scale=scale_a
+    )
+    grads = dense_indexer_loss_backward(
+        qi,
+        ki,
+        wi,
+        index_score,
+        attn_score,
+        torch.ones((), device=x.device),
+        ratio=ratio,
+        index_scale=scale_i,
+        loss_coeff=0.01,
+    )
+    torch.autograd.backward((qi, ki, wi), grads)
+
+    assert x.grad is None
+    for name, param in layer.named_parameters():
+        if name.startswith("indexer."):
+            assert param.grad is not None, name
+            assert torch.isfinite(param.grad).all() and torch.count_nonzero(param.grad) > 0, name
+        else:
+            assert param.grad is None, name
 
 
 def test_dsv4_attention_rejects_fp8(monkeypatch):
