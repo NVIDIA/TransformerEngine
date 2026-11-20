@@ -2,15 +2,15 @@
 #
 # See LICENSE for license information.
 
-"""Distributed GDN CP numerical checks; launch with torch.distributed.run."""
+"""Execute one GDN CP numerical scenario supplied by the pytest launcher."""
 
-import importlib.util
+import argparse
+import json
 import os
 import traceback
 from contextlib import nullcontext
 from unittest.mock import patch
 
-import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -26,7 +26,10 @@ from test_gdn_attention import (
 
 
 def _reference(inputs, cu, scale, norm):
-    """Independent FP64 recurrence, including unchanged states for empty documents."""
+    """Compute the independent FP64 reference for the full batch on each rank.
+
+    The caller selects rank-local output slices. Empty documents retain their initial states.
+    """
     q, k, v, g, beta, initial = inputs
     outputs, states = [], []
     if norm:
@@ -54,6 +57,7 @@ def _case(
     group,
     lengths,
     *,
+    name,
     dtype=torch.bfloat16,
     heads=2,
     key_dim=64,
@@ -67,19 +71,17 @@ def _case(
     last_loss=False,
     fallback=False,
     tp_group=None,
-    independent=False,
     dense_global=False,
+    cpu_metadata=False,
     state_only=False,
-    inference_warmup=False,
 ):
     """Compare each local output/gradient to the corresponding full-sequence result."""
     size, rank = dist.get_world_size(group), dist.get_rank(group)
     if rank == 0:
         print(
-            f"GDN CP case: lengths={lengths}, dtype={dtype}, H={heads}, K={key_dim}, V={value_dim},"
-            f" layout={layout}, norm={norm}, initial={initial}, final={final},"
-            f" checkpoint={checkpoint}, last_loss={last_loss}, fallback={fallback},"
-            f" independent={independent}, inference_warmup={inference_warmup}",
+            f"GDN CP case {name}: lengths={lengths}, dtype={dtype}, H={heads}, K={key_dim},"
+            f" V={value_dim}, layout={layout}, norm={norm}, initial={initial}, final={final},"
+            f" checkpoint={checkpoint}, last_loss={last_loss}, fallback={fallback}",
             flush=True,
         )
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
@@ -99,21 +101,8 @@ def _case(
     if not initial:
         initial_state.zero_()
     full = tuple(t.detach().requires_grad_(True) for t in (q, k, v, g, beta, initial_state))
-    global_cu = torch.tensor(cu, device=device, dtype=torch.int32)
-    if independent or total == 0:
-        ref_output, ref_states = _reference(full, cu, scale, norm)
-    else:
-        reference = GatedDeltaNetAttention(
-            heads, (key_dim, value_dim), qkv_format="thd", scale=scale
-        )
-        ref_output, ref_states = reference(
-            *full[:5],
-            cu_seqlens=global_cu,
-            initial_state=full[5] if initial else None,
-            output_final_state=True,
-            use_qk_l2norm_in_kernel=norm,
-        )
-        ref_output = ref_output.reshape(total, heads, value_dim)
+    global_cu = torch.tensor(cu, device="cpu" if cpu_metadata else device, dtype=torch.int32)
+    ref_output, ref_states = _reference(full, cu, scale, norm)
     grad_output = torch.randn_like(v)
     if last_loss:
         grad_output[: -max(1, total // size)] = 0
@@ -145,21 +134,12 @@ def _case(
     )
     module = GatedDeltaNetAttention(heads * tp_size, (key_dim, value_dim), **module_kwargs)
     kwargs = dict(
-        cu_seqlens=(
-            (global_cu.cpu() if size == 1 else global_cu)
-            if layout == "thd" or dense_global
-            else None
-        ),
+        cu_seqlens=global_cu if layout == "thd" or dense_global else None,
         initial_state=state,
         output_final_state=final,
         checkpoint_core_attention=checkpoint,
         use_qk_l2norm_in_kernel=norm,
     )
-    if inference_warmup:
-        with torch.inference_mode():
-            module(*inputs, **kwargs)
-        # A second layer must be able to train with the shared metadata.
-        module = GatedDeltaNetAttention(heads * tp_size, (key_dim, value_dim), **module_kwargs)
     summary_patch = (
         patch.object(
             module.gdn_attention, "_summary_op", side_effect=ImportError("Missing summary")
@@ -193,278 +173,134 @@ def _case(
     dist.barrier(group=group)
 
 
-def _invalid_metadata(group):
-    """Reject incompatible packed metadata before entering a collective."""
-    device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
-    size = dist.get_world_size(group)
-    q = torch.zeros(4, 2, 64, device=device, dtype=torch.bfloat16)
-    gate = torch.zeros(4, 2, device=device)
-    module = GatedDeltaNetAttention(2, 64, qkv_format="thd", cp_group=group)
-    invalid = (
-        {},
-        {"cu_seqlens": torch.tensor([0, 4 * size], dtype=torch.int64)},
-        {"cu_seqlens": torch.tensor([0, 4 * size, 2 * size], dtype=torch.int32)},
-        {"cu_seqlens": torch.tensor([0, 5 * size], dtype=torch.int32)},
-        {"cu_seqlens": torch.tensor([0, 4], dtype=torch.int32, device=device)},
-    )
-    for kwargs in invalid:
-        with pytest.raises(ValueError):
-            module(q, q, q, g=gate, beta=gate, **kwargs)
-    dist.barrier(group=group)
-
-
-def _inference_and_deferred_group(group):
-    """Default scale, deferred configuration, and metadata created in inference mode."""
+def _state_chaining(group, lengths, *, name, heads, key_dim, value_dim, dtype, norm, checkpoint):
+    """Train two connected CP calls after inference has populated the metadata cache."""
     size, rank = dist.get_world_size(group), dist.get_rank(group)
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
-    torch.manual_seed(998)
-    q, k = (
-        F.normalize(torch.randn(35, 2, 64, device=device, dtype=torch.bfloat16), dim=-1)
-        for _ in range(2)
-    )
-    v = torch.randn_like(q)
-    g, beta = -torch.rand(35, 2, device=device) * 0.02, torch.rand(35, 2, device=device) * 0.7
-    reference = GatedDeltaNetAttention(2, 64, qkv_format="thd")
-    modules = [GatedDeltaNetAttention(2, 64, qkv_format="thd") for _ in range(2)]
-    for module in modules:
-        module.set_context_parallel_group(group)
-    q, k, v, g, beta = (t.requires_grad_() for t in (q, k, v, g, beta))
-    for context, metadata_device in (
-        (torch.no_grad, "cpu"),
-        (torch.no_grad, device),
-        (torch.inference_mode, device),
-    ):
-        with context():
-            # CP accepts host metadata; inference tensors intentionally bypass
-            # the metadata cache because they have no mutation counter.
-            global_cu = torch.tensor([0, 17, 35], device=metadata_device, dtype=torch.int32)
-            for boundary in (17, 19):
-                global_cu[1] = boundary
-                expected, expected_states = reference(
-                    q, k, v, g, beta, cu_seqlens=global_cu.to(device), output_final_state=True
-                )
-                lo, hi = rank * 35 // size, (rank + 1) * 35 // size
-                # Reuse one batch across layers, then invalidate it in place.
-                for module in modules:
-                    output, states = module(
-                        q[lo:hi],
-                        k[lo:hi],
-                        v[lo:hi],
-                        g[lo:hi],
-                        beta[lo:hi],
-                        cu_seqlens=global_cu,
-                        output_final_state=True,
-                    )
-                    assert not output.requires_grad and not states.requires_grad
-                    _assert_rms_close(
-                        output, expected[lo:hi], _FWD_TOL[q.dtype], "inference output"
-                    )
-                    _assert_rms_close(
-                        states, expected_states, _STATE_TOL[q.dtype], "inference states"
-                    )
-    # Prepare a separate entry when the same modules run on another stream.
-    stream = torch.cuda.Stream(device=device)
-    stream.wait_stream(torch.cuda.current_stream(device))
-    with torch.no_grad(), torch.cuda.stream(stream):
-        global_cu = torch.tensor([0, 19, 35], dtype=torch.int32)
-        results = [
-            module(
-                q[lo:hi],
-                k[lo:hi],
-                v[lo:hi],
-                g[lo:hi],
-                beta[lo:hi],
-                cu_seqlens=global_cu,
-                output_final_state=True,
-            )
-            for module in modules
-        ]
-    stream.synchronize()
-    for output, states in results:
-        _assert_rms_close(output, expected[lo:hi], _FWD_TOL[q.dtype], "stream output")
-        _assert_rms_close(states, expected_states, _STATE_TOL[q.dtype], "stream states")
-    dist.barrier(group=group)
-
-
-def _state_chaining(group):
-    """Backpropagate through two CP calls joined by their replicated final states."""
-    size, rank = dist.get_world_size(group), dist.get_rank(group)
-    device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
+    if rank == 0:
+        print(
+            f"GDN CP case {name}: two calls, lengths={lengths}",
+            flush=True,
+        )
     torch.manual_seed(932)
-    tokens, heads, dim = 35, 2, 64
+    tokens = sum(lengths)
     full = []
     for _ in range(2):
-        q, k = (
-            F.normalize(
-                torch.randn(tokens, heads, dim, device=device, dtype=torch.bfloat16), dim=-1
-            )
-            for _ in range(2)
-        )
-        v = torch.randn_like(q)
+        q = torch.randn(tokens, heads, key_dim, device=device, dtype=dtype)
+        k = torch.randn_like(q)
+        v = torch.randn(tokens, heads, value_dim, device=device, dtype=dtype)
         g = -torch.rand(tokens, heads, device=device) * 0.02
         beta = torch.rand(tokens, heads, device=device) * 0.7
         full.extend(t.detach().requires_grad_(True) for t in (q, k, v, g, beta))
-    initial_state = (torch.randn(2, heads, dim, dim, device=device) * 0.1).requires_grad_(True)
-    cu = torch.tensor([0, 17, 35], device=device, dtype=torch.int32)
-    reference = GatedDeltaNetAttention(heads, dim, qkv_format="thd")
-    first, state = reference(
-        *full[:5], cu_seqlens=cu, initial_state=initial_state, output_final_state=True
-    )
-    second = reference(*full[5:], cu_seqlens=cu, initial_state=state)
-    grad_first, grad_second = torch.randn_like(first), torch.randn_like(second)
-    ((first * grad_first).sum() * 0.3 + (second * grad_second).sum()).backward()
+    initial_state = (
+        torch.randn(len(lengths), heads, value_dim, key_dim, device=device) * 0.1
+    ).requires_grad_(True)
+    cu = [0]
+    for length in lengths:
+        cu.append(cu[-1] + length)
+    global_cu = torch.tensor(cu, device=device, dtype=torch.int32)
+    scale = key_dim**-0.5
+    first_ref, first_state_ref = _reference((*full[:5], initial_state), cu, scale, norm)
+    # Keep the native state connected so call 2 contributes gradients to call 1.
+    second_ref, second_state_ref = _reference((*full[5:], first_state_ref), cu, scale, norm)
+    # Use matching upstream gradient dtypes on both paths to avoid extra CP-only rounding.
+    grad_first, grad_second = torch.randn_like(full[2]), torch.randn_like(full[7])
+    grad_state = torch.randn_like(initial_state) * 0.1
+    ref_loss = (first_ref * grad_first).sum() * 0.3 + (second_ref * grad_second).sum()
+    ref_loss = ref_loss + (second_state_ref * grad_state).sum()
+    ref_grads = torch.autograd.grad(ref_loss, (*full, initial_state))
+
     lo, hi = rank * tokens // size, (rank + 1) * tokens // size
     inputs = tuple(t[lo:hi].detach().requires_grad_(True) for t in full)
     local_initial_state = initial_state.detach().requires_grad_(True)
-    module = GatedDeltaNetAttention(heads, dim, qkv_format="thd", cp_group=group)
-    local_first, state = module(
-        *inputs[:5], cu_seqlens=cu, initial_state=local_initial_state, output_final_state=True
-    )
-    local_second = module(*inputs[5:], cu_seqlens=cu, initial_state=state)
-    loss = (local_first * grad_first[lo:hi]).sum() * 0.3
-    loss = loss + (local_second * grad_second[lo:hi]).sum()
-    for retain in (True, False):
-        loss.backward(retain_graph=retain)
-        for actual, expected in zip(inputs, full):
-            _assert_rms_close(
-                actual.grad,
-                expected.grad[lo:hi],
-                _BWD_TOL[torch.bfloat16],
-                "chained token gradient",
-            )
-        initial_grad = local_initial_state.grad.clone()
-        dist.all_reduce(initial_grad, group=group)
-        _assert_rms_close(
-            initial_grad,
-            initial_state.grad,
-            _BWD_TOL[torch.bfloat16],
-            "chained initial-state gradient",
+    kwargs = dict(cu_seqlens=global_cu, output_final_state=True, use_qk_l2norm_in_kernel=norm)
+    with torch.inference_mode():
+        warmup = GatedDeltaNetAttention(
+            heads, (key_dim, value_dim), qkv_format="thd", cp_group=group
         )
-        for tensor in (*inputs, local_initial_state):
-            tensor.grad = None
+        warm_output, warm_state = warmup(*inputs[:5], initial_state=local_initial_state, **kwargs)
+    assert not warm_output.requires_grad and not warm_state.requires_grad
+    _assert_rms_close(
+        warm_output,
+        first_ref[lo:hi].reshape_as(warm_output),
+        _FWD_TOL[dtype],
+        "inference output",
+    )
+    _assert_rms_close(warm_state, first_state_ref, _STATE_TOL[dtype], "inference final state")
+    # Fresh layers share training metadata, but must not reuse inference-mode tensors.
+    modules = [
+        GatedDeltaNetAttention(heads, (key_dim, value_dim), qkv_format="thd") for _ in range(2)
+    ]
+    for module in modules:
+        module.set_context_parallel_group(group)
+    first, first_state = modules[0](*inputs[:5], initial_state=local_initial_state, **kwargs)
+    second, second_state = modules[1](
+        *inputs[5:], initial_state=first_state, checkpoint_core_attention=checkpoint, **kwargs
+    )
+    for name, actual, expected in (
+        ("first output", first, first_ref[lo:hi].reshape_as(first)),
+        ("second output", second, second_ref[lo:hi].reshape_as(second)),
+    ):
+        _assert_rms_close(actual, expected, _FWD_TOL[dtype], name)
+    for actual, expected in ((first_state, first_state_ref), (second_state, second_state_ref)):
+        _assert_rms_close(actual, expected, _STATE_TOL[dtype], "chained final state")
+    loss = (first * grad_first[lo:hi].reshape_as(first)).sum() * 0.3
+    loss = loss + (second * grad_second[lo:hi].reshape_as(second)).sum()
+    # Replicated final-state losses collectively count once, as in _case.
+    loss = loss + (second_state * grad_state).sum() / size
+    loss.backward()
+    for actual, expected in zip(inputs, ref_grads[:10]):
+        _assert_rms_close(actual.grad, expected[lo:hi], _BWD_TOL[dtype], "chained token gradient")
+    initial_grad = local_initial_state.grad.clone()
+    dist.all_reduce(initial_grad, group=group)
+    _assert_rms_close(
+        initial_grad, ref_grads[10], _BWD_TOL[dtype], "chained initial-state gradient"
+    )
     dist.barrier(group=group)
 
 
+def run_gdn_with_cp(*, name, lengths, kind="attention", dtype="bf16", **kwargs):
+    """Run the configured attention, state-chaining or TP+CP correctness checks."""
+    group = dist.group.WORLD
+    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}[dtype]
+    if kind == "state_chaining":
+        _state_chaining(group, lengths, name=name, dtype=dtype, **kwargs)
+    elif kind == "tp_cp":
+        size, rank = dist.get_world_size(), dist.get_rank()
+        if size < 4 or size % 2:
+            raise ValueError("TP+CP requires an even number of at least four GPUs")
+        cp_groups = [dist.new_group([r, r + 1]) for r in range(0, size, 2)]
+        tp_groups = [dist.new_group(list(range(r, size, 2))) for r in (0, 1)]
+        try:
+            _case(
+                cp_groups[rank // 2],
+                lengths,
+                name=name,
+                dtype=dtype,
+                tp_group=tp_groups[rank % 2],
+                **kwargs,
+            )
+        finally:
+            for subgroup in (*cp_groups, *tp_groups):
+                if subgroup != dist.GroupMember.NON_GROUP_MEMBER:
+                    dist.destroy_process_group(subgroup)
+    elif kind == "attention":
+        _case(group, lengths, name=name, dtype=dtype, **kwargs)
+    else:
+        raise ValueError(f"Unknown GDN CP scenario kind: {kind}")
+
+
 def main():
-    """Run one persistent process group to amortize FE compilation across cases."""
+    """Initialize this scenario's workers and release them when its checks finish."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=json.loads, required=True)
+    config = parser.parse_args().config
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("nccl")
-    group = dist.group.WORLD
-    size = dist.get_world_size(group)
-    cases = 0
     try:
-        for lengths in (
-            [8, 4, 12],  # Shared and complete documents on the same rank.
-            [16, 4, 4],  # One document spans several ranks.
-            [6] * size,  # Document and rank boundaries coincide.
-            [0, 17, 0, 18, 0],  # Empty documents between nonempty documents.
-            [1, 0, 1],  # Some ranks own no tokens.
-            [0, 0],  # Entirely empty input.
-        ):
-            _case(group, lengths)
-            cases += 1
-        lengths = torch.randint(
-            32, 129, (4,), generator=torch.Generator().manual_seed(1234)
-        ).tolist()
-        _case(group, lengths, heads=8, norm=True, independent=True)
-        cases += 1
-        for dtype in (torch.float16, torch.bfloat16):
-            for norm in (False, True):
-                _case(
-                    group,
-                    [size * 65 + 3, 7],
-                    dtype=dtype,
-                    value_dim=128,
-                    norm=norm,
-                    independent=True,
-                )
-                cases += 1
-        _case(
-            group,
-            [size * 65 + 3, 7],
-            dtype=torch.float16,
-            key_dim=128,
-            value_dim=64,
-            independent=True,
-        )
-        cases += 1
-        for layout, dtype in (("bshd", torch.bfloat16), ("sbhd", torch.float16)):
-            _case(
-                group,
-                [size * 65] * 4,
-                dtype=dtype,
-                heads=8,
-                layout=layout,
-                norm=True,
-                dense_global=layout == "bshd",
-            )
-            cases += 1
-        for layout in ("bshd", "sbhd"):
-            _case(group, [size * 17 + 3] * 4, heads=8, layout=layout, dense_global=True)
-            cases += 1
-        _case(group, [1, 1], layout="bshd", dense_global=True, checkpoint=True)
-        cases += 1
-        for initial, final, checkpoint, last_loss in (
-            (False, False, False, True),
-            (True, False, False, True),
-            (False, True, True, True),
-            (True, True, True, False),
-        ):
-            _case(
-                group,
-                [size * 67],
-                initial=initial,
-                final=final,
-                checkpoint=checkpoint,
-                last_loss=last_loss,
-            )
-            cases += 1
-        _case(group, [size * 65 + 1, 7], fallback=True, norm=True)
-        cases += 1
-        _case(group, [size * 65 + 1, 7], state_only=True)
-        cases += 1
-        # Irregular features are zero-extended internally because ordinary FE
-        # state gradients are incorrect for some unpadded cuTile geometries.
-        _case(group, [size * 65 + 1, 7], key_dim=32, value_dim=96, norm=True, independent=True)
-        cases += 1
-        # Larger cuTile geometries have no dedicated FROST summary engine;
-        # exercise the real capability fallback, rather than a mocked error.
-        if importlib.util.find_spec("cuda.tile") is not None:
-            _case(group, [131, 7], key_dim=256, value_dim=256, independent=True)
-            cases += 1
-        _inference_and_deferred_group(group)
-        cases += 1
-        _state_chaining(group)
-        cases += 1
-        for layout, lengths in (("thd", [17, 13]), ("bshd", [size * 4] * 2)):
-            _case(group, lengths, layout=layout, inference_warmup=True, independent=True)
-            cases += 1
-        _invalid_metadata(group)
-        cases += 1
-        # Independent complete documents also match ordinary local attention.
-        _case(group, [8] * size, initial=False, final=False)
-        cases += 1
-        # A size-one group follows the ordinary local path, even while WORLD
-        # contains several ranks. Every process creates groups in the same order.
-        singletons = [dist.new_group([r]) for r in range(size)]
-        singleton = singletons[dist.get_rank(group)]
-        _case(singleton, [17, 13])
-        _case(singleton, [17, 17], layout="bshd", dense_global=True)
-        cases += 2
-        if size >= 4:
-            cp_groups = [dist.new_group([r, r + 1]) for r in range(0, size, 2)]
-            tp_groups = [dist.new_group(list(range(r, size, 2))) for r in (0, 1)]
-            rank = dist.get_rank()
-            _case(cp_groups[rank // 2], [139, 13], tp_group=tp_groups[rank % 2])
-            cases += 1
-        if dist.get_rank() == 0:
-            print(
-                f"GDN CP: {cases} correctness cases passed with CP={size}",
-                flush=True,
-            )
+        run_gdn_with_cp(**config)
     except BaseException:  # pylint: disable=broad-exception-caught
-        # A failed rank must exit before a peer waits forever for its next
-        # collective. NCCL's orderly shutdown can wait on that missing peer.
+        # Exit promptly so torchrun can stop peers blocked in a collective.
         traceback.print_exc()
         os._exit(1)
     else:
