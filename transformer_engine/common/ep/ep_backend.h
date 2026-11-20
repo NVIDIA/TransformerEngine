@@ -36,9 +36,6 @@ struct EpSignal {
   size_t granularity;
 };
 
-/*! \brief Free the current device's grouped GEMM scratch. A no-op without the EP GEMMs. */
-void release_gemm_scratch();
-
 /*! \brief EP backend per CUDA device; owns the NCCL EP group, borrows the comm. */
 class EPBackend {
  public:

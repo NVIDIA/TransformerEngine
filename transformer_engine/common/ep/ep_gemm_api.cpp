@@ -14,8 +14,6 @@
 
 #include <algorithm>
 #include <cstdlib>
-#include <map>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -42,45 +40,26 @@ size_t align_up(size_t value) {
   return (value + kWorkspaceAlign - 1) / kWorkspaceAlign * kWorkspaceAlign;
 }
 
-// Per-device scratch for the readiness flags and GEMM state, grown geometrically on demand. An
-// outgrown block stays allocated until EP shutdown: a captured CUDA graph may still use it.
-struct ScratchBlock {
-  void* ptr = nullptr;
-  size_t bytes = 0;
-  std::vector<void*> retired;
-
-  void release() {
-    retired.push_back(ptr);
-    for (void* p : retired) {
-      if (p != nullptr) {
-        cudaFree(p);
-      }
-    }
-    ptr = nullptr;
-    bytes = 0;
-    retired.clear();
-  }
+// Byte offsets of a call's scratch inside the caller-provided workspace: GEMM workspace, row ends
+// (one reserved word before them), unit alphas, optional unit probs, optional weight-gradient
+// workspace, and the total the caller must provide.
+struct ScratchLayout {
+  size_t row_ends;
+  size_t alpha;
+  size_t ones;
+  size_t wgrad;
+  size_t total;
 };
 
-std::mutex scratch_mutex;
-std::map<int, ScratchBlock>& scratch_blocks() {
-  // Leaked: no CUDA call at static teardown.
-  static auto* blocks = new std::map<int, ScratchBlock>();
-  return *blocks;
-}
-
-uint8_t* get_scratch(size_t bytes) {
-  std::lock_guard<std::mutex> lock(scratch_mutex);
-  ScratchBlock& block = scratch_blocks()[transformer_engine::cuda::current_device()];
-  if (block.bytes < bytes) {
-    void* ptr = nullptr;
-    const size_t grown = std::max(bytes, 2 * block.bytes);
-    NVTE_CHECK_CUDA(cudaMalloc(&ptr, grown));
-    block.retired.push_back(block.ptr);
-    block.ptr = ptr;
-    block.bytes = grown;
-  }
-  return static_cast<uint8_t*>(block.ptr);
+ScratchLayout scratch_layout(size_t gemm_bytes, size_t num_experts, size_t rows, bool unit_probs,
+                             size_t wgrad_bytes) {
+  ScratchLayout l;
+  l.row_ends = align_up(gemm_bytes + sizeof(int32_t));
+  l.alpha = l.row_ends + align_up(sizeof(int32_t) * num_experts);
+  l.ones = l.alpha + align_up(sizeof(float) * num_experts);
+  l.wgrad = l.ones + (unit_probs ? align_up(sizeof(float) * rows) : 0);
+  l.total = l.wgrad + align_up(wgrad_bytes);
+  return l;
 }
 
 using transformer_engine::tvm_ffi_bridge::DLTensorWrapper;
@@ -288,9 +267,9 @@ ep::EpCombineGemmConfig combine_fwd_config(const EpGemmContext& ctx, size_t rows
                                  ctx.all_clusters};
 }
 
-// Scratch of one call: GEMM workspace, row ends (one reserved word before them, which unset_row_ends
-// sets), unit alphas, optional unit probs, optional weight-gradient workspace, and the words the
-// call's launch resets.
+// Scratch of one call, sliced from the caller's workspace: GEMM workspace, row ends (one reserved
+// word before them, which unset_row_ends sets), unit alphas, optional unit probs, optional
+// weight-gradient workspace, and the words the call's launch resets.
 struct GemmScratch {
   uint8_t* base;
   uint8_t* wgrad = nullptr;
@@ -303,26 +282,35 @@ struct GemmScratch {
   ep::WorkspaceReset reset;
 };
 
-GemmScratch claim_scratch(size_t gemm_bytes, size_t num_experts, size_t rows, bool unit_probs,
-                          size_t wgrad_bytes) {
-  const size_t row_ends = align_up(gemm_bytes + sizeof(int32_t));
-  const size_t alpha = row_ends + align_up(sizeof(int32_t) * num_experts);
-  const size_t ones = alpha + align_up(sizeof(float) * num_experts);
-  const size_t wgrad = ones + (unit_probs ? align_up(sizeof(float) * rows) : 0);
-  const size_t end = wgrad + align_up(wgrad_bytes);
-  GemmScratch scratch{get_scratch(end)};
+GemmScratch claim_scratch(uint8_t* base, size_t workspace_bytes, size_t gemm_bytes,
+                          size_t num_experts, size_t rows, bool unit_probs, size_t wgrad_bytes) {
+  const ScratchLayout l = scratch_layout(gemm_bytes, num_experts, rows, unit_probs, wgrad_bytes);
+  NVTE_CHECK(l.total <= workspace_bytes, "the EP overlap workspace needs ", l.total, " bytes, got ",
+             workspace_bytes, "; size it with nvte_ep_overlap_workspace_size");
+  GemmScratch scratch{base};
   if (wgrad_bytes > 0) {
-    scratch.wgrad = scratch.base + wgrad;
+    scratch.wgrad = base + l.wgrad;
   }
-  scratch.row_ends = reinterpret_cast<int32_t*>(scratch.base + row_ends);
-  scratch.alpha = reinterpret_cast<float*>(scratch.base + alpha);
+  scratch.row_ends = reinterpret_cast<int32_t*>(base + l.row_ends);
+  scratch.alpha = reinterpret_cast<float*>(base + l.alpha);
   scratch.num_experts = static_cast<int>(num_experts);
   scratch.reset.fill(scratch.alpha, scratch.num_experts, ep::kFillOne);
   if (unit_probs) {
-    scratch.ones = reinterpret_cast<float*>(scratch.base + ones);
+    scratch.ones = reinterpret_cast<float*>(base + l.ones);
     scratch.reset.fill(scratch.ones, static_cast<int>(rows), ep::kFillOne);
   }
   return scratch;
+}
+
+// Base pointer and byte capacity of the caller's workspace tensor.
+std::pair<uint8_t*, size_t> workspace_span(const NVTETensor workspace) {
+  NVTE_CHECK(workspace != nullptr, "the EP overlap ops need a workspace tensor");
+  void* const ptr = nvte_tensor_data(workspace);
+  NVTE_CHECK(ptr != nullptr && nvte_tensor_type(workspace) == kNVTEByte,
+             "the EP overlap workspace must be a non-null uint8 tensor");
+  NVTE_CHECK(reinterpret_cast<uintptr_t>(ptr) % kWorkspaceAlign == 0,
+             "the EP overlap workspace must be ", kWorkspaceAlign, "-byte aligned");
+  return {static_cast<uint8_t*>(ptr), nvte_tensor_numel(workspace)};
 }
 
 // Words of a GEMM that waits on the dispatch tile flags: its tile counter, flags and scheduler
@@ -535,18 +523,36 @@ void launch_requant(NVTETensor t, const GemmScratch& scratch, size_t rows, size_
   (*kernel)(&codes, &row_scales, &col_codes, &col_scales, &row_ends, static_cast<void*>(stream));
 }
 
-}  // namespace
-
-namespace transformer_engine {
-namespace ep {
-
-void release_gemm_scratch() {
-  std::lock_guard<std::mutex> lock(scratch_mutex);
-  scratch_blocks()[cuda::current_device()].release();
+// Bytes of the chained weight-gradient workspace of a backward GEMM over num_experts slabs of
+// [m, n], as make_wgrad sizes it; the max over the output precisions, which the query does not know.
+size_t wgrad_workspace_bytes(const EpGemmContext& ctx, size_t rows, size_t m, size_t n,
+                             size_t num_experts, bool mxfp8) {
+  const size_t routed_rows =
+      static_cast<size_t>(ctx.group.max_tokens_per_rank) * ctx.layer_cfg.top_k;
+  size_t bytes = 0;
+  for (const bool fp32_out : {false, true}) {
+    const ep::EpWgradConfig config{rows,       m,     n, num_experts, 1,     fp32_out,
+                                   false,      false, 0, mxfp8,       false, ctx.alignment(),
+                                   routed_rows};
+    const auto layout = config.workspace_layout();
+    if (layout.has_value()) {
+      bytes = std::max(bytes, layout->total_bytes);
+    }
+  }
+  return bytes;
 }
 
-}  // namespace ep
-}  // namespace transformer_engine
+// total_bytes of a GEMM configuration, or a clear error when the kernel is unavailable.
+template <typename Config>
+size_t gemm_workspace_bytes(const Config& config) {
+  const auto layout = config.workspace_layout();
+  NVTE_CHECK(layout.has_value(),
+             "the EP grouped GEMM is not available: needs NVTE_ENABLE_CUTEDSL_BACKEND=1, "
+             "NVTE_MOE_OVERLAP and SM 10.0, 10.3 or 10.7");
+  return layout->total_bytes;
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -556,11 +562,12 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
                                NVTETensor recv_tokens, NVTETensor recv_topk_weights,
                                NVTETensor gemm_out, NVTETensor act_out,
                                NVTETensor recv_tokens_per_expert, NVTETensor expert_token_offsets,
-                               NVTETensor total_recv_tokens, const NVTEEpLayerConfig* layer_cfg,
-                               cudaStream_t stream) {
+                               NVTETensor total_recv_tokens, NVTETensor workspace,
+                               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
   using namespace transformer_engine;
   const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_fwd_num_sms);
   checkCuDriverContext(stream);
+  const auto [ws_base, ws_bytes] = workspace_span(workspace);
 
   const size_t rows = nvte_tensor_shape(recv_tokens).data[0];
   const size_t hidden = nvte_tensor_shape(tokens).data[1];
@@ -604,7 +611,8 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
   if (tail_clusters > 0) {
     gemms.push_back(get_tail_gemm(config, tail_clusters, layout, "the GEMM tail"));
   }
-  GemmScratch scratch = claim_scratch(layout.total_bytes, num_experts, rows, false, 0);
+  GemmScratch scratch =
+      claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows, false, 0);
   set_signal_words(scratch, layout, rows / ctx.rows_per_slot());
   // The GEMM reads the expert row ends from the caller's [num_experts + 1] int32
   // expert_token_offsets (expert 0's start, then the per-expert ends); the dispatch writes them in
@@ -676,11 +684,12 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
 void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
                               const NVTETensor recv_topk_weights,
                               const NVTETensor expert_token_offsets, const NVTETensor weight,
-                              NVTETensor expert_out, NVTETensor result,
+                              NVTETensor expert_out, NVTETensor result, NVTETensor workspace,
                               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
   using namespace transformer_engine;
   const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_fwd_num_sms);
   checkCuDriverContext(stream);
+  const auto [ws_base, ws_bytes] = workspace_span(workspace);
 
   const size_t rows = nvte_tensor_shape(gemm_in).data[0];
   const size_t k = nvte_tensor_shape(gemm_in).data[1];
@@ -712,7 +721,8 @@ void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
   const tvm::ffi::Function gemm = get_gemm(config, &layout);
   // Own workspace for the signal, scheduler and alpha words; the expert layout is the caller's
   // expert_token_offsets the dispatch wrote.
-  GemmScratch scratch = claim_scratch(layout.total_bytes, num_experts, rows, !weighted, 0);
+  GemmScratch scratch =
+      claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows, !weighted, 0);
   set_chunk_words(scratch, layout, n / n_chunk, layout.signal);
   ep::reset_workspace(scratch.reset, stream);
 
@@ -749,11 +759,12 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
                               const NVTETensor wgrad_input, NVTETensor grad_expert_out,
                               NVTETensor grad_gemm_out, NVTETensor grad_recv_topk_weights,
                               NVTETensor act_out, NVTETensor weight_grad,
-                              int accumulate_weight_grad, const NVTEEpLayerConfig* layer_cfg,
-                              cudaStream_t stream) {
+                              int accumulate_weight_grad, NVTETensor workspace,
+                              const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
   using namespace transformer_engine;
   const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_bwd_num_sms);
   checkCuDriverContext(stream);
+  const auto [ws_base, ws_bytes] = workspace_span(workspace);
 
   const size_t rows = nvte_tensor_shape(grad_expert_out).data[0];
   const size_t hidden = nvte_tensor_shape(grad_expert_out).data[1];
@@ -796,8 +807,8 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
   const ep::EpDispatchGemmConfig config{
       rows, hidden, ffn, num_experts, ctx.num_clusters, true, mxfp8, ctx.alignment()};
   const tvm::ffi::Function gemm = get_gemm(config, &layout);
-  GemmScratch scratch = claim_scratch(layout.total_bytes, num_experts, rows, false,
-                                      wgrad ? wgrad->layout.total_bytes : 0);
+  GemmScratch scratch = claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows,
+                                      false, wgrad ? wgrad->layout.total_bytes : 0);
   set_signal_words(scratch, layout, rows / ctx.rows_per_slot());
   if (wgrad) {
     scratch.reset.fill(scratch.wgrad + wgrad->layout.counter, 1, ep::kFillZero);
@@ -880,10 +891,12 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
                                const NVTETensor wgrad_input, NVTETensor grad_recv_tokens,
                                NVTETensor grad_tokens, NVTETensor grad_topk_weights,
                                NVTETensor weight_grad, int accumulate_weight_grad,
-                               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+                               NVTETensor workspace, const NVTEEpLayerConfig* layer_cfg,
+                               cudaStream_t stream) {
   using namespace transformer_engine;
   const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_bwd_num_sms);
   checkCuDriverContext(stream);
+  const auto [ws_base, ws_bytes] = workspace_span(workspace);
 
   const size_t rows = nvte_tensor_shape(grad_gemm_out).data[0];
   const size_t k = nvte_tensor_shape(grad_gemm_out).data[1];
@@ -932,8 +945,8 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
                                        mxfp8,
                                        ctx.alignment()};
   const tvm::ffi::Function gemm = get_gemm(config, &layout);
-  GemmScratch scratch = claim_scratch(layout.total_bytes, num_experts, rows, true,
-                                      wgrad ? wgrad->layout.total_bytes : 0);
+  GemmScratch scratch = claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows,
+                                      true, wgrad ? wgrad->layout.total_bytes : 0);
   set_chunk_words(scratch, layout, plain ? 0 : hidden / chunk,
                   plain ? layout.total_bytes : layout.signal);
   if (wgrad) {
@@ -984,6 +997,62 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
   }
 }
 
+size_t nvte_ep_overlap_workspace_size(size_t hidden_dim, size_t ffn_dim, size_t num_local_experts,
+                                      size_t recv_capacity, int with_weight_grad, int mxfp8,
+                                      const NVTEEpLayerConfig* layer_cfg) {
+  using namespace transformer_engine;
+  const size_t ne = num_local_experts;
+  const size_t rows = recv_capacity;
+  const bool mx = mxfp8 != 0;
+  const bool wg = with_weight_grad != 0;
+  size_t need = 0;
+
+  // Forward dispatch: FC1 + SwiGLU, no weight gradient.
+  {
+    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_fwd_num_sms);
+    const ep::EpDispatchGemmConfig config{rows, hidden_dim,       2 * ffn_dim,
+                                          ne,   ctx.num_clusters, false,
+                                          mx,   ctx.alignment(),  dispatch_writes_layout(ctx, ne)};
+    need = std::max(need, scratch_layout(gemm_workspace_bytes(config), ne, rows, false, 0).total);
+  }
+  // Forward combine: FC2. Size the unit-probs row buffer, which the MXFP8 path omits.
+  {
+    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_fwd_num_sms);
+    const ep::EpCombineGemmConfig config =
+        combine_fwd_config(ctx, rows, ffn_dim, hidden_dim, ne, mx);
+    need = std::max(need, scratch_layout(gemm_workspace_bytes(config), ne, rows, true, 0).total);
+  }
+  // Backward combine: FC2 dgrad + SwiGLU backward, with the FC2 weight gradient [hidden, ffn].
+  {
+    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_bwd_num_sms);
+    const ep::EpDispatchGemmConfig config{rows, hidden_dim, ffn_dim,        ne, ctx.num_clusters,
+                                          true, mx,         ctx.alignment()};
+    const size_t wgrad = wg ? wgrad_workspace_bytes(ctx, rows, hidden_dim, ffn_dim, ne, mx) : 0;
+    need =
+        std::max(need, scratch_layout(gemm_workspace_bytes(config), ne, rows, false, wgrad).total);
+  }
+  // Backward dispatch: FC1 dgrad, with the FC1 weight gradient [2 * ffn, hidden].
+  {
+    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_bwd_num_sms);
+    const bool plain = wg && ctx.num_clusters > 0;
+    const size_t n_chunk = plain ? 0 : combine_chunk(hidden_dim);
+    const ep::EpCombineGemmConfig config{rows,
+                                         2 * ffn_dim,
+                                         hidden_dim,
+                                         ne,
+                                         wg ? ctx.all_clusters : ctx.num_clusters,
+                                         n_chunk,
+                                         !plain && kCombineAtGemmEntry,
+                                         true,
+                                         mx,
+                                         ctx.alignment()};
+    const size_t wgrad = wg ? wgrad_workspace_bytes(ctx, rows, 2 * ffn_dim, hidden_dim, ne, mx) : 0;
+    need =
+        std::max(need, scratch_layout(gemm_workspace_bytes(config), ne, rows, true, wgrad).total);
+  }
+  return need;
+}
+
 }  // extern "C"
 
 #else  // !(NVTE_WITH_NCCL_EP && NVTE_WITH_CUTEDSL): throwing stubs.
@@ -996,36 +1065,36 @@ namespace {
 }
 }  // namespace
 
-namespace transformer_engine {
-namespace ep {
-void release_gemm_scratch() {}
-}  // namespace ep
-}  // namespace transformer_engine
-
 extern "C" {
 
 void nvte_ep_dispatch_gemm_fwd(NVTETensor, NVTETensor, NVTETensor, NVTECommWindow, NVTETensor,
                                NVTETensor, NVTETensor, NVTETensor, NVTETensor, NVTETensor,
-                               NVTETensor, NVTETensor, NVTETensor, const NVTEEpLayerConfig*,
-                               cudaStream_t) {
+                               NVTETensor, NVTETensor, NVTETensor, NVTETensor,
+                               const NVTEEpLayerConfig*, cudaStream_t) {
   ep_gemm_not_built();
 }
 
 void nvte_ep_combine_gemm_fwd(NVTETensor, NVTETensor, NVTETensor, NVTETensor, NVTETensor,
-                              NVTETensor, NVTETensor, const NVTEEpLayerConfig*, cudaStream_t) {
+                              NVTETensor, NVTETensor, NVTETensor, const NVTEEpLayerConfig*,
+                              cudaStream_t) {
   ep_gemm_not_built();
 }
 
 void nvte_ep_combine_gemm_bwd(NVTETensor, NVTETensor, NVTECommWindow, NVTETensor, NVTETensor,
                               NVTETensor, NVTETensor, NVTETensor, NVTETensor, NVTETensor,
-                              NVTETensor, NVTETensor, NVTETensor, int, const NVTEEpLayerConfig*,
-                              cudaStream_t) {
+                              NVTETensor, NVTETensor, NVTETensor, int, NVTETensor,
+                              const NVTEEpLayerConfig*, cudaStream_t) {
   ep_gemm_not_built();
 }
 
 void nvte_ep_dispatch_gemm_bwd(NVTETensor, NVTETensor, NVTETensor, NVTETensor, NVTETensor,
                                NVTETensor, NVTETensor, NVTETensor, NVTETensor, NVTETensor, int,
-                               const NVTEEpLayerConfig*, cudaStream_t) {
+                               NVTETensor, const NVTEEpLayerConfig*, cudaStream_t) {
+  ep_gemm_not_built();
+}
+
+size_t nvte_ep_overlap_workspace_size(size_t, size_t, size_t, size_t, int, int,
+                                      const NVTEEpLayerConfig*) {
   ep_gemm_not_built();
 }
 

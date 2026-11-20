@@ -316,7 +316,6 @@ void EPBackend::shutdown_locked() {
     nccl_ep::group_destroy(ep_group_);
     ep_group_ = nullptr;
   }
-  release_gemm_scratch();
   ep_comm_ = nullptr;  // borrowed; caller destroys
   initialized_ = false;
 }

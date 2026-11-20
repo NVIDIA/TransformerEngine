@@ -28,12 +28,17 @@
  *  default 1024 when it divides hidden_dim, else the whole row); smaller chunks let the combine
  *  start earlier but cost more flags.
  *
+ *  Each call takes a caller-owned uint8 workspace holding its readiness flags and GEMM state;
+ *  nvte_ep_overlap_workspace_size returns the bytes that fit every call of a group, so one buffer
+ *  can be reused across them. Allocate it once, keep it alive, and reuse it: it must not be freed
+ *  or reallocated between calls that a CUDA graph captures.
+ *
  *  Requirements: SM 10.0, 10.3 or 10.7, EP within one NVLink domain, num_comm_sms > 0, zero_copy
  *  off, dispatch_output_per_expert_alignment 256, 128 (not MXFP8 on SM 10.7) or (bfloat16 only)
  *  64, and NVTE_ENABLE_CUTEDSL_BACKEND=1 with NVTE_MOE_OVERLAP. MXFP8 needs hidden_dim a multiple
- *  of 512 and ffn_dim a multiple of 256. The first call per shape compiles the GEMM and allocates
- *  scratch, freed by nvte_ep_shutdown: make it at warmup, outside CUDA graph capture. Issue the calls of one EP group on one
- *  stream, in the same order on every rank. A call throws when a requirement does not hold.
+ *  of 512 and ffn_dim a multiple of 256. The first call per shape compiles the GEMM: make it at
+ *  warmup, outside CUDA graph capture. Issue the calls of one EP group on one stream, in the same
+ *  order on every rank. A call throws when a requirement does not hold.
  *
  *  An input with a symm-mem window (tokens_win, grad_result_win) is read in place by the peers:
  *  every rank passes a window, at the same data and scale offsets, or none, and the input is not
@@ -91,6 +96,7 @@ extern "C" {
  *                                        prepare writes it; null when the dispatch writes
  *                                        expert_token_offsets, where expert_token_offsets[-1] is
  *                                        the padded total of the kept rows.
+ *  \param[in,out] workspace              uint8 scratch, nvte_ep_overlap_workspace_size bytes.
  *  \param[in]     layer_cfg              Per-layer EP configuration.
  *  \param[in]     stream                 CUDA stream.
  */
@@ -100,8 +106,8 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
                                NVTETensor recv_tokens, NVTETensor recv_topk_weights,
                                NVTETensor gemm_out, NVTETensor act_out,
                                NVTETensor recv_tokens_per_expert, NVTETensor expert_token_offsets,
-                               NVTETensor total_recv_tokens, const NVTEEpLayerConfig* layer_cfg,
-                               cudaStream_t stream);
+                               NVTETensor total_recv_tokens, NVTETensor workspace,
+                               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
 /*! \brief Second grouped GEMM overlapped with the combine.
  *
@@ -121,13 +127,14 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
  *  \param[in]     weight                 [num_local_experts, hidden_dim, ffn_dim] weights.
  *  \param[out]    expert_out             [recv_capacity, hidden_dim] GEMM output.
  *  \param[out]    result                 [T, hidden_dim] combined output.
+ *  \param[in,out] workspace              uint8 scratch, nvte_ep_overlap_workspace_size bytes.
  *  \param[in]     layer_cfg              Per-layer EP configuration.
  *  \param[in]     stream                 CUDA stream.
  */
 void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
                               const NVTETensor recv_topk_weights,
                               const NVTETensor expert_token_offsets, const NVTETensor weight,
-                              NVTETensor expert_out, NVTETensor result,
+                              NVTETensor expert_out, NVTETensor result, NVTETensor workspace,
                               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
 /*! \brief Backward of nvte_ep_combine_gemm_fwd and of the SwiGLU: the combine backward
@@ -170,6 +177,7 @@ void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
  *  \param[in,out] weight_grad            [num_local_experts, hidden_dim, ffn_dim] bfloat16 or
  *                                        float32 gradient of weight, or null.
  *  \param[in]     accumulate_weight_grad Add to weight_grad instead of writing it.
+ *  \param[in,out] workspace              uint8 scratch, nvte_ep_overlap_workspace_size bytes.
  *  \param[in]     layer_cfg              Per-layer EP configuration.
  *  \param[in]     stream                 CUDA stream.
  */
@@ -180,8 +188,8 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
                               const NVTETensor wgrad_input, NVTETensor grad_expert_out,
                               NVTETensor grad_gemm_out, NVTETensor grad_recv_topk_weights,
                               NVTETensor act_out, NVTETensor weight_grad,
-                              int accumulate_weight_grad, const NVTEEpLayerConfig* layer_cfg,
-                              cudaStream_t stream);
+                              int accumulate_weight_grad, NVTETensor workspace,
+                              const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
 /*! \brief Backward of nvte_ep_dispatch_gemm_fwd: the first GEMM's data gradient overlapped with
  *         the dispatch backward.
@@ -205,6 +213,7 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
  *  \param[in,out] weight_grad            [num_local_experts, 2 * ffn_dim, hidden_dim] bfloat16 or
  *                                        float32 gradient of weight, or null.
  *  \param[in]     accumulate_weight_grad Add to weight_grad instead of writing it.
+ *  \param[in,out] workspace              uint8 scratch, nvte_ep_overlap_workspace_size bytes.
  *  \param[in]     layer_cfg              Per-layer EP configuration.
  *  \param[in]     stream                 CUDA stream.
  */
@@ -214,7 +223,25 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
                                const NVTETensor wgrad_input, NVTETensor grad_recv_tokens,
                                NVTETensor grad_tokens, NVTETensor grad_topk_weights,
                                NVTETensor weight_grad, int accumulate_weight_grad,
-                               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
+                               NVTETensor workspace, const NVTEEpLayerConfig* layer_cfg,
+                               cudaStream_t stream);
+
+/*! \brief Bytes of the workspace that fits every overlapped GEMM call of a group, so one buffer can
+ *         be reused across them. Queryable once the EP group is bootstrapped; call it at warmup, as
+ *         it compiles the group's GEMMs.
+ *
+ *  \param[in] hidden_dim        Hidden size.
+ *  \param[in] ffn_dim           Expert FFN size.
+ *  \param[in] num_local_experts Experts held by this rank.
+ *  \param[in] recv_capacity     Rows of the receive buffers (recv_capacity).
+ *  \param[in] with_weight_grad  Nonzero to fit the backward weight-gradient workspace.
+ *  \param[in] mxfp8             Nonzero for MXFP8 operands instead of bfloat16.
+ *  \param[in] layer_cfg         Per-layer EP configuration.
+ *  \return Required workspace size in bytes.
+ */
+size_t nvte_ep_overlap_workspace_size(size_t hidden_dim, size_t ffn_dim, size_t num_local_experts,
+                                      size_t recv_capacity, int with_weight_grad, int mxfp8,
+                                      const NVTEEpLayerConfig* layer_cfg);
 
 #ifdef __cplusplus
 }

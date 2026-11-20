@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -828,6 +830,29 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
                          grad_expert_out_win, &layer_cfg, stream);
 }
 
+// The caller's workspace, or a persistent per-device buffer sized for the group when the caller
+// omits it. Capacity-mode graph callers pass their own buffer; callers that cannot size one ahead
+// of the call (eager IO, where the recv rows are known only inside it) get this grown-on-demand
+// buffer, which stays alive across calls so its async GEMMs keep valid scratch.
+at::Tensor resolve_overlap_workspace(const std::optional<at::Tensor>& workspace, int64_t hidden_dim,
+                                     int64_t ffn_dim, int64_t num_local_experts, int64_t rows,
+                                     bool with_weight_grad, bool mxfp8,
+                                     const NVTEEpLayerConfig& layer_cfg, const at::Tensor& like) {
+  if (workspace.has_value()) {
+    return *workspace;
+  }
+  const int64_t bytes = static_cast<int64_t>(nvte_ep_overlap_workspace_size(
+      hidden_dim, ffn_dim, num_local_experts, rows, with_weight_grad, mxfp8, &layer_cfg));
+  static std::mutex mutex;
+  static std::map<int, at::Tensor> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  at::Tensor& slot = cache[like.device().index()];
+  if (!slot.defined() || slot.numel() < bytes) {
+    slot = at::empty({bytes}, like.options().dtype(at::kByte));
+  }
+  return slot;
+}
+
 std::vector<at::Tensor> ep_dispatch_gemm_fwd(
     at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens, at::Tensor topk_weights,
     at::Tensor weight, std::optional<at::Tensor> recv_tokens_opt,
@@ -836,7 +861,8 @@ std::vector<at::Tensor> ep_dispatch_gemm_fwd(
     int64_t dispatch_output_per_expert_alignment, std::optional<at::Tensor> total_recv_tokens,
     int64_t eager_row_bucket, std::optional<at::Tensor> tokens_scale_inv,
     std::optional<at::Tensor> recv_scale_inv, std::optional<at::Tensor> weight_scale_inv,
-    std::optional<at::Tensor> act_out_scale_inv, bool symm_input) {
+    std::optional<at::Tensor> act_out_scale_inv, bool symm_input,
+    std::optional<at::Tensor> workspace) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const bool eager = !recv_tokens_opt.has_value();
   NVTE_CHECK(recv_topk_weights_opt.has_value() != eager && gemm_out_opt.has_value() != eager &&
@@ -913,12 +939,17 @@ std::vector<at::Tensor> ep_dispatch_gemm_fwd(
       symm_input ? make_input_window(tokens, tokens_scale_inv) : kNoWindow;
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
                                   get_contiguous_topk_idx_te_dtype(topk_idx));
+  // Forward: no weight gradient. ffn is half the FC1 output rows (gate and up).
+  auto workspace_t =
+      resolve_overlap_workspace(workspace, tokens.size(1), weight.size(1) / 2, weight.size(0),
+                                recv_tokens.size(0), false, mxfp8, layer_cfg, tokens);
+  auto workspace_te = makeTransformerEngineTensor(workspace_t);
   nvte_ep_dispatch_gemm_fwd(handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(), tokens_win,
                             topk_weights_te.data(), weight_te.data(), recv_tokens_te.data(),
                             recv_topk_weights_te.data(), gemm_out_te.data(), act_out_te.data(),
                             tokens_per_expert_te.data(), expert_token_offsets_te.data(),
-                            report_total ? total_recv_tokens_te.data() : nullptr, &layer_cfg,
-                            stream);
+                            report_total ? total_recv_tokens_te.data() : nullptr,
+                            workspace_te.data(), &layer_cfg, stream);
   if (mxfp8) {
     return {recv_tokens,          recv_topk_weights, gemm_out,          act_out,
             expert_token_offsets, *recv_scale_inv,   *act_out_scale_inv};
@@ -931,7 +962,8 @@ void ep_combine_gemm_fwd(at::Tensor handle_mem, at::Tensor gemm_in, at::Tensor e
                          int64_t dispatch_output_per_expert_alignment,
                          at::ScalarType topk_idx_dtype, std::optional<at::Tensor> recv_topk_weights,
                          std::optional<at::Tensor> gemm_in_scale_inv,
-                         std::optional<at::Tensor> weight_scale_inv) {
+                         std::optional<at::Tensor> weight_scale_inv,
+                         std::optional<at::Tensor> workspace) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(gemm_in.is_contiguous() && weight.is_contiguous() && expert_out.is_contiguous() &&
                  result.is_contiguous(),
@@ -951,10 +983,16 @@ void ep_combine_gemm_fwd(at::Tensor handle_mem, at::Tensor gemm_in, at::Tensor e
   auto result_te = makeTransformerEngineTensor(result);
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
                                   get_topk_idx_te_dtype(topk_idx_dtype));
+  // FC2 weight is [experts, hidden, ffn]; the combine GEMM has no weight gradient.
+  const bool mxfp8 = gemm_in_scale_inv.has_value();
+  auto workspace_t =
+      resolve_overlap_workspace(workspace, weight.size(1), weight.size(2), weight.size(0),
+                                gemm_in.size(0), false, mxfp8, layer_cfg, gemm_in);
+  auto workspace_te = makeTransformerEngineTensor(workspace_t);
   nvte_ep_combine_gemm_fwd(handle_mem_te.data(), gemm_in_te.data(),
                            recv_topk_weights.has_value() ? recv_topk_weights_te.data() : nullptr,
                            expert_token_offsets_te.data(), weight_te.data(), expert_out_te.data(),
-                           result_te.data(), &layer_cfg, stream);
+                           result_te.data(), workspace_te.data(), &layer_cfg, stream);
 }
 
 void ep_combine_gemm_bwd(
@@ -971,7 +1009,8 @@ void ep_combine_gemm_bwd(
     std::optional<at::Tensor> weight_grad, bool accumulate_weight_grad,
     std::optional<at::Tensor> grad_expert_out_columnwise,
     std::optional<at::Tensor> grad_expert_out_columnwise_scale_inv,
-    std::optional<at::Tensor> wgrad_input_scale_inv, bool symm_input) {
+    std::optional<at::Tensor> wgrad_input_scale_inv, bool symm_input,
+    std::optional<at::Tensor> workspace) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(grad_result.is_contiguous() && gemm_out.is_contiguous() && weight.is_contiguous() &&
                  grad_expert_out.is_contiguous() && grad_gemm_out.is_contiguous(),
@@ -1021,12 +1060,17 @@ void ep_combine_gemm_bwd(
       symm_input ? make_input_window(grad_result, grad_result_scale_inv) : kNoWindow;
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
                                   get_topk_idx_te_dtype(topk_idx_dtype));
-  nvte_ep_combine_gemm_bwd(handle_mem_te.data(), grad_result_te.data(), grad_result_win,
-                           gemm_out_te.data(), recv_topk_weights_te.data(),
-                           tokens_per_expert_te.data(), weight_te.data(), wgrad.input(),
-                           grad_expert_out_te.data(), grad_gemm_out_te.data(),
-                           grad_recv_topk_weights_te.data(), mxfp8 ? act_out_te.data() : nullptr,
-                           wgrad.output(), accumulate_weight_grad, &layer_cfg, stream);
+  // FC2 weight is [experts, hidden, ffn]; size the wgrad region when a weight gradient is written.
+  auto workspace_t = resolve_overlap_workspace(
+      workspace, weight.size(1), weight.size(2), weight.size(0), grad_expert_out.size(0),
+      weight_grad.has_value(), mxfp8, layer_cfg, grad_result);
+  auto workspace_te = makeTransformerEngineTensor(workspace_t);
+  nvte_ep_combine_gemm_bwd(
+      handle_mem_te.data(), grad_result_te.data(), grad_result_win, gemm_out_te.data(),
+      recv_topk_weights_te.data(), tokens_per_expert_te.data(), weight_te.data(), wgrad.input(),
+      grad_expert_out_te.data(), grad_gemm_out_te.data(), grad_recv_topk_weights_te.data(),
+      mxfp8 ? act_out_te.data() : nullptr, wgrad.output(), accumulate_weight_grad,
+      workspace_te.data(), &layer_cfg, stream);
 }
 
 void ep_dispatch_gemm_bwd(
@@ -1040,7 +1084,7 @@ void ep_dispatch_gemm_bwd(
     std::optional<at::Tensor> wgrad_input, std::optional<at::Tensor> wgrad_input_scale_inv,
     std::optional<at::Tensor> weight_grad, bool accumulate_weight_grad,
     std::optional<at::Tensor> wgrad_input_rowwise,
-    std::optional<at::Tensor> wgrad_input_rowwise_scale_inv) {
+    std::optional<at::Tensor> wgrad_input_rowwise_scale_inv, std::optional<at::Tensor> workspace) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(
       grad_gemm_out.is_contiguous() && weight.is_contiguous() && grad_recv_tokens.is_contiguous(),
@@ -1072,11 +1116,27 @@ void ep_dispatch_gemm_bwd(
                           wgrad_input_rowwise_scale_inv);
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
                                   get_topk_idx_te_dtype(topk_idx_dtype));
+  // FC1 weight is [experts, 2 * ffn, hidden]; size the wgrad region when a weight gradient is
+  // written.
+  auto workspace_t = resolve_overlap_workspace(
+      workspace, weight.size(2), weight.size(1) / 2, weight.size(0), grad_gemm_out.size(0),
+      weight_grad.has_value(), mxfp8, layer_cfg, grad_gemm_out);
+  auto workspace_te = makeTransformerEngineTensor(workspace_t);
   nvte_ep_dispatch_gemm_bwd(handle_mem_te.data(), grad_gemm_out_te.data(),
                             grad_recv_topk_weights_te.data(), tokens_per_expert_te.data(),
                             weight_te.data(), wgrad.input(), grad_recv_tokens_te.data(),
                             grad_tokens_te.data(), grad_topk_weights_te.data(), wgrad.output(),
-                            accumulate_weight_grad, &layer_cfg, stream);
+                            accumulate_weight_grad, workspace_te.data(), &layer_cfg, stream);
+}
+
+int64_t ep_overlap_workspace_size(int64_t hidden_dim, int64_t ffn_dim, int64_t num_local_experts,
+                                  int64_t recv_capacity, bool with_weight_grad, bool mxfp8,
+                                  int64_t top_k, int64_t dispatch_output_per_expert_alignment,
+                                  at::ScalarType topk_idx_dtype) {
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
+                                  get_topk_idx_te_dtype(topk_idx_dtype));
+  return static_cast<int64_t>(nvte_ep_overlap_workspace_size(
+      hidden_dim, ffn_dim, num_local_experts, recv_capacity, with_weight_grad, mxfp8, &layer_cfg));
 }
 
 void register_ep_bindings(pybind11::module_& m) {
@@ -1126,13 +1186,15 @@ void register_ep_bindings(pybind11::module_& m) {
         py::arg("total_recv_tokens") = std::nullopt, py::arg("eager_row_bucket") = 0,
         py::arg("tokens_scale_inv") = std::nullopt, py::arg("recv_scale_inv") = std::nullopt,
         py::arg("weight_scale_inv") = std::nullopt, py::arg("act_out_scale_inv") = std::nullopt,
-        py::arg("symm_input") = false, py::call_guard<py::gil_scoped_release>());
+        py::arg("symm_input") = false, py::arg("workspace") = std::nullopt,
+        py::call_guard<py::gil_scoped_release>());
   m.def("ep_combine_gemm_fwd", &ep_combine_gemm_fwd, "EP second GEMM overlapped with the combine",
         py::arg("handle_mem"), py::arg("gemm_in"), py::arg("expert_token_offsets"),
         py::arg("weight"), py::arg("expert_out"), py::arg("result"), py::arg("top_k"),
         py::arg("dispatch_output_per_expert_alignment"), py::arg("topk_idx_dtype"),
         py::arg("recv_topk_weights") = std::nullopt, py::arg("gemm_in_scale_inv") = std::nullopt,
-        py::arg("weight_scale_inv") = std::nullopt, py::call_guard<py::gil_scoped_release>());
+        py::arg("weight_scale_inv") = std::nullopt, py::arg("workspace") = std::nullopt,
+        py::call_guard<py::gil_scoped_release>());
   m.def("ep_combine_gemm_bwd", &ep_combine_gemm_bwd,
         "Backward of the second GEMM and the combine, with the activation backward",
         py::arg("handle_mem"), py::arg("grad_result"), py::arg("gemm_out"),
@@ -1151,7 +1213,7 @@ void register_ep_bindings(pybind11::module_& m) {
         py::arg("grad_expert_out_columnwise") = std::nullopt,
         py::arg("grad_expert_out_columnwise_scale_inv") = std::nullopt,
         py::arg("wgrad_input_scale_inv") = std::nullopt, py::arg("symm_input") = false,
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("workspace") = std::nullopt, py::call_guard<py::gil_scoped_release>());
   m.def(
       "ep_dispatch_gemm_bwd", &ep_dispatch_gemm_bwd, "Backward of the first GEMM and the dispatch",
       py::arg("handle_mem"), py::arg("grad_gemm_out"), py::arg("grad_recv_topk_weights"),
@@ -1164,8 +1226,13 @@ void register_ep_bindings(pybind11::module_& m) {
       py::arg("wgrad_input") = std::nullopt, py::arg("wgrad_input_scale_inv") = std::nullopt,
       py::arg("weight_grad") = std::nullopt, py::arg("accumulate_weight_grad") = false,
       py::arg("wgrad_input_rowwise") = std::nullopt,
-      py::arg("wgrad_input_rowwise_scale_inv") = std::nullopt,
+      py::arg("wgrad_input_rowwise_scale_inv") = std::nullopt, py::arg("workspace") = std::nullopt,
       py::call_guard<py::gil_scoped_release>());
+  m.def("ep_overlap_workspace_size", &ep_overlap_workspace_size,
+        "Bytes of the workspace shared by the overlapped GEMM calls of a group",
+        py::arg("hidden_dim"), py::arg("ffn_dim"), py::arg("num_local_experts"),
+        py::arg("recv_capacity"), py::arg("with_weight_grad"), py::arg("mxfp8"), py::arg("top_k"),
+        py::arg("dispatch_output_per_expert_alignment"), py::arg("topk_idx_dtype"));
   m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward", py::arg("handle_mem"),
         py::arg("grad"), py::arg("g_recv_topk_weights"), py::arg("grad_tokens"),
         py::arg("grad_topk_weights"), py::arg("top_k"),
