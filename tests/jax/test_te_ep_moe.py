@@ -109,14 +109,20 @@ if not _MP_ACTIVE:
         allow_module_level=True,
     )
 
-from transformer_engine_jax import get_device_compute_capability
+from transformer_engine_jax import get_cublasLt_version, get_device_compute_capability
 
 # The TE EP NCCL primitives need SM>=90. Grouped GEMM in the MoE custom_vjp
-# supports BF16 on SM90+ and MXFP8 on SM100+, so the file as a whole gates on
-# sm_90+ and the MXFP8 cases skip where MXFP8 is unsupported.
+# supports BF16 on SM90+ (cuBLAS 13.4+ on Hopper) and MXFP8 on SM100+, so the
+# file as a whole gates on sm_90+ and the MXFP8 cases skip where MXFP8 is
+# unsupported.
 if get_device_compute_capability(0) < 90:
     pytest.skip(
         "MoE TE EP tests require Hopper (sm_90+) or newer",
+        allow_module_level=True,
+    )
+if get_device_compute_capability(0) < 100 and get_cublasLt_version() < 130400:
+    pytest.skip(
+        "MoE TE EP tests on Hopper require cuBLAS 13.4+ for grouped GEMM",
         allow_module_level=True,
     )
 
