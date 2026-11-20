@@ -134,7 +134,7 @@ def ep_bootstrap(
     cp, ...) are supported and replicated across EP tensors. Auto-selects
     between self-hosted NCCL and XLA's borrowed comm (see
     tex.ep.use_nccl_comm_from_xla).
-    Multiple local devices require the XLA borrowed communicator path.
+    At EP>1, multiple local devices require the XLA borrowed communicator path.
 
     Args:
         world_size: Total number of devices (product of all mesh axes).
@@ -161,12 +161,6 @@ def ep_bootstrap(
         raise NotImplementedError(
             "ep_bootstrap: only max_token_dtype=jnp.bfloat16 is supported today, got"
             f" {jnp.dtype(max_token_dtype)}."
-        )
-    if jax.local_device_count() != 1 and not tex.ep.use_nccl_comm_from_xla():
-        raise RuntimeError(
-            "ep_bootstrap: multiple local devices require the XLA-borrowed-comm EP path"
-            " (tex.ep.use_nccl_comm_from_xla), which is unavailable here -- rebuild TE with"
-            " XLA collectives FFI support, or launch one process per GPU instead."
         )
 
     gsr = global_mesh_resource()
@@ -215,6 +209,13 @@ def ep_bootstrap(
     if ep_size == 1:
         tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
         return
+
+    if jax.local_device_count() != 1 and not tex.ep.use_nccl_comm_from_xla():
+        raise RuntimeError(
+            "ep_bootstrap: multiple local devices require the XLA-borrowed-comm EP path"
+            " (tex.ep.use_nccl_comm_from_xla), which is unavailable here -- rebuild TE with"
+            " XLA collectives FFI support, or launch one process per GPU instead."
+        )
 
     # Borrowed-comm path (auto-selected by tex.ep.use_nccl_comm_from_xla): XLA
     # owns the EP communicator, so a one-shot bootstrap op fetches it and
