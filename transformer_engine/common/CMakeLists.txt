@@ -127,6 +127,14 @@ if(NOT arch_101_index EQUAL -1)
   list(APPEND NVTE_SPECIFIC_ARCHS "101a")
 endif()
 
+# Check for architecture 107
+list(FIND CMAKE_CUDA_ARCHITECTURES "107" arch_107_index)
+if(NOT arch_107_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "107")
+  list(APPEND NVTE_GENERIC_ARCHS "107")
+  list(APPEND NVTE_SPECIFIC_ARCHS "107a")
+endif()
+
 # Check for architecture 110 (if we see this we are in toolkit >= 13.0)
 list(FIND CMAKE_CUDA_ARCHITECTURES "110" arch_110_index)
 if(NOT arch_110_index EQUAL -1)
@@ -146,6 +154,9 @@ if(NOT arch_120_index EQUAL -1)
     list(APPEND NVTE_SPECIFIC_ARCHS "120a")
   endif()
 endif()
+
+# Explicit 107 and the 100 family target can both request 107a.
+list(REMOVE_DUPLICATES NVTE_SPECIFIC_ARCHS)
 
 # Move remaining standard (pre-Blackwell) architectures into NVTE_STANDARD_ARCHS.
 # These are applied to all CUDA sources (both generic and arch-specific).

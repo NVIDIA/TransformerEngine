@@ -130,7 +130,7 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
                "VARYING_FIRST_DIM requires a non-empty logical tensor.");
     config.grid = dim3(config.work_blocks_x, work_blocks_y);
   } else {
-    NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+    NVTE_CHECK(use_tma_descriptor_override() || num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
                "Number of tensors exceeds the grouped TMA descriptor limit (",
                MAX_SUPPORTED_TENSOR_DESCRIPTORS, ").");
     const size_t estimated_work_blocks = DIVUP(total_elements, chunk_dim_y * chunk_dim_x);
@@ -467,7 +467,7 @@ __device__ __forceinline__ void process_chunk(
     const size_t block_offset_y, const size_t block_offset_x, const size_t tma_offset_y,
     IType *const input_shared, void *const dequantized_shared, OType *const output_shared,
     uint64_t *const input_barriers, int *const input_barrier_parity, const bool leading_thread,
-    bf16 *const dequantized_out) {
+    bf16 *const dequantized_out, const IType *const override_input, OType *const override_output) {
   constexpr size_t tile_dim_x = Traits::TILE_DIM_X;
   constexpr size_t chunk_dim_y = Traits::CHUNK_DIM_Y;
   constexpr size_t chunk_dim_x = Traits::CHUNK_DIM_X;
@@ -498,9 +498,10 @@ __device__ __forceinline__ void process_chunk(
     const size_t global_y = tma_offset_y + stage_y * buff_dim_y;
     const size_t global_x = block_offset_x + stage_x * tile_dim_x;
     const size_t buffer_offset = stage * buff_dim;
-    prefetch_input_stage<IType, false>(input_shared, nullptr, tensor_map_input, tensor_map_input,
-                                       global_x, global_y, buffer_offset, input_buffer_bytes,
-                                       &input_barriers[stage], leading_thread);
+    prefetch_input_stage<IType, false, buff_dim_y, tile_dim_x>(
+        input_shared, nullptr, tensor_map_input, tensor_map_input, global_x, global_y,
+        buffer_offset, input_buffer_bytes, &input_barriers[stage], leading_thread, override_input,
+        nullptr, rows, cols);
   }
 
   int input_buffer = 0;
@@ -519,9 +520,10 @@ __device__ __forceinline__ void process_chunk(
       const size_t global_y = tma_offset_y + next_stage_y * buff_dim_y;
       const size_t global_x = block_offset_x + next_stage_x * tile_dim_x;
       const size_t buffer_offset = next_buffer * buff_dim;
-      prefetch_input_stage<IType, false>(input_shared, nullptr, tensor_map_input, tensor_map_input,
-                                         global_x, global_y, buffer_offset, input_buffer_bytes,
-                                         &input_barriers[next_buffer], leading_thread);
+      prefetch_input_stage<IType, false, buff_dim_y, tile_dim_x>(
+          input_shared, nullptr, tensor_map_input, tensor_map_input, global_x, global_y,
+          buffer_offset, input_buffer_bytes, &input_barriers[next_buffer], leading_thread,
+          override_input, nullptr, rows, cols);
     }
 
     ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&input_barriers[input_buffer],
@@ -545,9 +547,9 @@ __device__ __forceinline__ void process_chunk(
     const size_t global_y = tma_offset_y + stage_offset_y;
     const size_t global_x = block_offset_x + stage_offset_x;
     const size_t buffer_offset = input_buffer * buff_dim;
-    store_output_stage<OType, false, true>(nullptr, output_shared, tensor_map_output,
-                                           tensor_map_output, global_x, global_y, buffer_offset,
-                                           leading_thread);
+    store_output_stage<OType, false, true, buff_dim_y, tile_dim_x>(
+        nullptr, output_shared, tensor_map_output, tensor_map_output, global_x, global_y,
+        buffer_offset, leading_thread, nullptr, override_output, rows, cols);
 
     input_buffer = (input_buffer + 1) % buffs_num;
   }
@@ -563,8 +565,9 @@ template <typename Traits, typename IType, typename OType, bool OUTPUT_SCALES_SW
           bool RETURN_DEQUANTIZED>
 __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mxfp8_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input_static,
-    const __grid_constant__ CUtensorMap tensor_map_output_static, const size_t num_tensors,
-    const size_t first_logical_dim, const size_t last_logical_dim, const size_t same_both_rows,
+    const __grid_constant__ CUtensorMap tensor_map_output_static, const IType *const input_data,
+    OType *const output_data, const size_t num_tensors, const size_t first_logical_dim,
+    const size_t last_logical_dim, const size_t same_both_rows,
     const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, const e8m0_t *const __restrict__ input_scales,
     e8m0_t *const __restrict__ output_rowwise_scales, e8m0_t *const __restrict__ output_scales,
@@ -575,6 +578,7 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
   constexpr bool direct_varying_first = shape_rep == ShapeRepresentation::VARYING_FIRST_DIM;
   constexpr bool direct_mapper = direct_same || direct_varying_first;
   constexpr bool single_tma_tensor = direct_mapper;
+  constexpr bool use_tma_override = !single_tma_tensor && ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE;
   constexpr size_t buffs_num = Traits::BUFFS_NUM;
   constexpr size_t buff_dim = Traits::BUFF_DIM;
   constexpr size_t input_bytes =
@@ -652,11 +656,13 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
     }
   }
 
-  const CUtensorMap &tensor_map_input =
-      single_tma_tensor ? tensor_map_input_static : g_tensor_maps.input[tensor_id];
-  const CUtensorMap &tensor_map_output =
-      single_tma_tensor ? tensor_map_output_static : g_tensor_maps.output_colwise[tensor_id];
-  if constexpr (!single_tma_tensor) {
+  const CUtensorMap &tensor_map_input = (single_tma_tensor || use_tma_override)
+                                            ? tensor_map_input_static
+                                            : g_tensor_maps.input[tensor_id];
+  const CUtensorMap &tensor_map_output = (single_tma_tensor || use_tma_override)
+                                             ? tensor_map_output_static
+                                             : g_tensor_maps.output_colwise[tensor_id];
+  if constexpr (!single_tma_tensor && !use_tma_override) {
     if (leading_thread) {
       fence_acquire_tensormap(&tensor_map_input);
       fence_acquire_tensormap(&tensor_map_output);
@@ -689,12 +695,14 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
   initialize_barriers<buffs_num, 1>(input_barriers, leading_thread);
   int input_barrier_parity[buffs_num] = {0};
 
+  const IType *const override_input = use_tma_override ? input_data + tensor_base : nullptr;
+  OType *const override_output = use_tma_override ? output_data + tensor_base : nullptr;
   if constexpr (direct_mapper) {
     process_chunk<Traits, IType, OType, OUTPUT_SCALES_SWIZZLED, RETURN_DEQUANTIZED>(
         tensor_map_input, tensor_map_output, input_scales, output_scales, output_rowwise_scales,
         input_scale_base, output_scale_base, rows, cols, block_offset_y, block_offset_x,
         tma_offset_y, input_shared, dequantized_shared, output_shared, input_barriers,
-        input_barrier_parity, leading_thread, dequantized_group);
+        input_barrier_parity, leading_thread, dequantized_group, override_input, override_output);
   } else {
     const size_t blocks_x = DIVUP(cols, static_cast<size_t>(Traits::CHUNK_DIM_X));
     const size_t blocks_y = DIVUP(rows, static_cast<size_t>(Traits::CHUNK_DIM_Y));
@@ -707,7 +715,7 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
           input_scale_base, output_scale_base, rows, cols, block_y * Traits::CHUNK_DIM_Y,
           block_x * Traits::CHUNK_DIM_X, block_y * Traits::CHUNK_DIM_Y, input_shared,
           dequantized_shared, output_shared, input_barriers, input_barrier_parity, leading_thread,
-          dequantized_group);
+          dequantized_group, override_input, override_output);
     }
   }
 
@@ -749,17 +757,18 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output, 
 
   alignas(64) CUtensorMap tensor_map_input{};
   alignas(64) CUtensorMap tensor_map_output{};
-  create_2D_tensor_map(tensor_map_input, input.data, first_logical_dim, last_logical_dim,
-                       Traits::BUFF_DIM_Y, Traits::BUFF_DIM_X, last_logical_dim, 0,
-                       TypeInfo<IType>::size, tma_swizzle);
-  create_2D_tensor_map(tensor_map_output, output->columnwise_data, first_logical_dim,
-                       last_logical_dim, Traits::BUFF_DIM_Y, Traits::BUFF_DIM_X, last_logical_dim,
-                       0, TypeInfo<OType>::size, tma_swizzle);
-
   constexpr bool single_tma_tensor =
       Traits::SHAPE_REPRESENTATION == ShapeRepresentation::SAME_BOTH_DIMS ||
       Traits::SHAPE_REPRESENTATION == ShapeRepresentation::VARYING_FIRST_DIM;
-  if constexpr (!single_tma_tensor) {
+  const bool override_map = !single_tma_tensor && use_tma_descriptor_override();
+  create_grouped_tma_map(tensor_map_input, input.data, override_map, first_logical_dim,
+                         last_logical_dim, Traits::BUFF_DIM_Y, Traits::BUFF_DIM_X,
+                         TypeInfo<IType>::size, tma_swizzle);
+  create_grouped_tma_map(tensor_map_output, output->columnwise_data, override_map,
+                         first_logical_dim, last_logical_dim, Traits::BUFF_DIM_Y,
+                         Traits::BUFF_DIM_X, TypeInfo<OType>::size, tma_swizzle);
+
+  if (!single_tma_tensor && !use_tma_descriptor_override()) {
     alignas(64) CUtensorMap empty_tensor_map{};
     update_tma_descriptors<IType, OType><<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
         tensor_map_input, empty_tensor_map, empty_tensor_map, tensor_map_output,
@@ -774,8 +783,9 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output, 
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                        dynamic_shared_bytes));
   kernel<<<launch_config.grid, Traits::THREADS_PER_CHUNK, dynamic_shared_bytes, stream>>>(
-      tensor_map_input, tensor_map_output, num_tensors, first_logical_dim, last_logical_dim,
-      launch_config.same_both_rows, offsets_ptr, first_dims_ptr, last_dims_ptr,
+      tensor_map_input, tensor_map_output, reinterpret_cast<const IType *>(input.data.dptr),
+      reinterpret_cast<OType *>(output->columnwise_data.dptr), num_tensors, first_logical_dim,
+      last_logical_dim, launch_config.same_both_rows, offsets_ptr, first_dims_ptr, last_dims_ptr,
       reinterpret_cast<const e8m0_t *>(input.scale_inv.dptr),
       output->scale_inv.dptr == input.scale_inv.dptr
           ? nullptr

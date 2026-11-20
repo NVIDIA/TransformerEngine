@@ -520,6 +520,9 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   }
 
   const auto &test_case = std::get<0>(GetParam());
+  if (test_case.shapes.size() > 64 && test::getDeviceComputeCapability() != 107) {
+    GTEST_SKIP() << "More than 64 grouped TMA descriptors requires Rubin overrides.";
+  }
   const DType input_dtype = std::get<1>(GetParam());
   const bool return_dequantized = std::get<2>(GetParam());
   const bool output_swizzled = std::get<3>(GetParam());
@@ -662,25 +665,17 @@ const std::vector<GroupShapeCase> kGroupShapeCases = {
     {"CapacityTail", {{512, 8192}, {256, 8192}, {512, 8192}}, 2048},
     {"EmptyGroupsAndTail", {{0, 512}, {512, 512}, {0, 512}, {256, 512}}, 1024},
     {"UnsupportedCuTeStrideAndTail", {{0, 640}, {384, 640}, {128, 640}}, 1024},
-    {"SameBothDims_1024x4096",
-     {{1024, 4096}, {1024, 4096}, {1024, 4096}, {1024, 4096}}},
-    {"SameBothDims_2048x8192",
-     {{2048, 8192}, {2048, 8192}, {2048, 8192}, {2048, 8192}}},
-    {"SameBothDims_4096x16384",
-     {{4096, 16384}, {4096, 16384}, {4096, 16384}, {4096, 16384}}},
-    {"VaryingFirstDim_512to2048x4096",
-     {{512, 4096}, {512, 4096}, {1024, 4096}, {2048, 4096}}},
-    {"VaryingFirstDim_1024to4096x8192",
-     {{1024, 8192}, {1024, 8192}, {2048, 8192}, {4096, 8192}}},
+    {"SameBothDims_1024x4096", {{1024, 4096}, {1024, 4096}, {1024, 4096}, {1024, 4096}}},
+    {"SameBothDims_2048x8192", {{2048, 8192}, {2048, 8192}, {2048, 8192}, {2048, 8192}}},
+    {"SameBothDims_4096x16384", {{4096, 16384}, {4096, 16384}, {4096, 16384}, {4096, 16384}}},
+    {"VaryingFirstDim_512to2048x4096", {{512, 4096}, {512, 4096}, {1024, 4096}, {2048, 4096}}},
+    {"VaryingFirstDim_1024to4096x8192", {{1024, 8192}, {1024, 8192}, {2048, 8192}, {4096, 8192}}},
     {"VaryingFirstDim_2048to8192x16384",
      {{2048, 16384}, {2048, 16384}, {4096, 16384}, {8192, 16384}}},
     // An empty member in the middle must not terminate the persistent work loop.
-    {"VaryingFirstDimWithEmpty",
-     {{128, 256}, {0, 256}, {384, 256}, {512, 256}}},
-    {"VaryingLastDim",
-     {{256, 128}, {256, 384}, {256, 640}}},
-    {"VaryingBothDims",
-     {{128, 128}, {256, 384}, {512, 640}}},
+    {"VaryingFirstDimWithEmpty", {{128, 256}, {0, 256}, {384, 256}, {512, 256}}},
+    {"VaryingLastDim", {{256, 128}, {256, 384}, {256, 640}}},
+    {"VaryingBothDims", {{128, 128}, {256, 384}, {512, 640}}},
 };
 
 std::string make_test_name(
