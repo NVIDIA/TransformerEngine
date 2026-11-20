@@ -151,7 +151,9 @@ def ep_bootstrap(
         max_num_sms: SM budget for the dispatch/combine kernels; 0 = default (32).
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
-            total_recv_tokens, so callers can detect overflow from it.
+            total_recv_tokens, so callers can detect overflow from it. At
+            EP=1, which cannot trap, dispatch without it rejects a
+            recv_capacity_per_rank that routing could overflow.
     """
     if rank is None:
         rank = jax.process_index()
@@ -205,6 +207,7 @@ def ep_bootstrap(
         "max_tokens_per_rank": max_tokens_per_rank,
         "recv_capacity_per_rank": recv_capacity_per_rank,
         "hidden_dim": hidden_dim,
+        "drop_on_overflow": bool(drop_on_overflow),
     }
 
     # EP=1 is entirely local. Keep the same bootstrap contract and config so

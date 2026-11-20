@@ -125,6 +125,7 @@ class EpConfig:
     max_tokens_per_rank: int
     recv_capacity_per_rank: int
     hidden_dim: int
+    drop_on_overflow: bool = False
 
 
 _ep_config: EpConfig = None
@@ -1528,7 +1529,12 @@ class _EpLocalPermuteHandle(NamedTuple):
 def _ep1_local_dispatch(
     cfg, topk_idx, tokens, tokens_scale_inv, topk_weights, recv_capacity_per_rank
 ):
-    """Dispatch independently within every outer DP/FSDP shard for EP=1."""
+    """Dispatch independently within every outer DP/FSDP shard for EP=1.
+
+    Overflow follows NCCL EP's drop policy: assignments whose slot reaches
+    ``recv_capacity_per_rank`` are dropped, ``token_counts`` is clamped to the
+    capacity and ``total_recv_tokens`` is the pre-drop padded total.
+    """
     # Import lazily: permutation.py depends on cpp_extensions and importing it
     # at module initialization would create a cycle.
     from ..permutation import pure_jax_token_dispatch
@@ -1543,6 +1549,25 @@ def _ep1_local_dispatch(
     )
     grouped_experts = topk_idx.reshape(num_groups, -1, cfg.top_k)
     grouped_weights = topk_weights.reshape(num_groups, -1, cfg.top_k)
+    alignment = max(cfg.dispatch_output_per_expert_alignment, 1)
+    if not ep_cfg.drop_on_overflow:
+        # NCCL EP traps on overflow. A local permutation cannot, so reject any
+        # capacity that routing could overflow.
+        from ..moe import get_moe_recv_capacity_per_rank
+
+        required = get_moe_recv_capacity_per_rank(
+            num_experts=ep_cfg.num_experts,
+            num_experts_per_tok=cfg.top_k,
+            max_tokens_per_rank=grouped_tokens.shape[1],
+            ep_size=1,
+            alignment=alignment,
+        )
+        if recv_capacity_per_rank < required:
+            raise ValueError(
+                f"recv_capacity_per_rank={recv_capacity_per_rank} can overflow at EP=1, which"
+                f" needs up to {required} rows per group; raise it or bootstrap with"
+                " drop_on_overflow=True."
+            )
 
     def dispatch_one(local_tokens, local_scales, local_experts, local_weights):
         permuted, state, group_sizes = pure_jax_token_dispatch(
@@ -1552,7 +1577,6 @@ def _ep1_local_dispatch(
             num_experts_per_tok=cfg.top_k,
             align_size=0,
         )
-        alignment = max(cfg.dispatch_output_per_expert_alignment, 1)
         aligned_group_sizes = ((group_sizes + alignment - 1) // alignment) * alignment
         source_offsets = jnp.concatenate(
             [jnp.zeros((1,), dtype=group_sizes.dtype), jnp.cumsum(group_sizes)[:-1]]
@@ -1570,6 +1594,7 @@ def _ep1_local_dispatch(
             + jnp.arange(state.num_real_tokens, dtype=target_offsets.dtype)
             - source_offsets[sorted_experts]
         )
+        # Scatters skip rows at or past capacity, which drops those assignments.
         recv_tokens = (
             jnp.zeros(
                 (recv_capacity_per_rank, local_tokens.shape[-1]),
@@ -1591,11 +1616,16 @@ def _ep1_local_dispatch(
             .at[padded_positions]
             .set(permuted_weights)
         )
+        # Each expert reports only the rows that fit in the capacity left at its offset.
+        token_counts = jnp.minimum(
+            aligned_group_sizes, jnp.maximum(recv_capacity_per_rank - target_offsets, 0)
+        )
         return (
             recv_tokens,
             recv_scale_inv,
             recv_weights,
-            aligned_group_sizes,
+            token_counts,
+            jnp.sum(aligned_group_sizes, keepdims=True).astype(jnp.int32),
             state.sorted_indices,
             padded_positions,
         )
@@ -1605,12 +1635,10 @@ def _ep1_local_dispatch(
         recv_scale_inv,
         recv_weights,
         token_counts,
+        total_recv_tokens,
         sorted_indices,
         padded_positions,
     ) = jax.vmap(dispatch_one)(grouped_tokens, grouped_scales, grouped_experts, grouped_weights)
-    total_recv_tokens = jnp.full(
-        (num_groups, 1), grouped_experts.shape[1] * cfg.top_k, dtype=jnp.int32
-    )
     handle = _EpLocalPermuteHandle(sorted_indices, grouped_experts, padded_positions)
     return recv_tokens, recv_scale_inv, recv_weights, token_counts, total_recv_tokens, handle
 
@@ -1629,7 +1657,8 @@ def _ep1_local_combine(cfg, handle, expert_out, num_local_tokens):
     def combine_one(local_output, sorted_indices, padded_positions):
         state = PureJaxPermState(sorted_indices, num_real_tokens, 0)
         return pure_jax_token_combine(
-            local_output[padded_positions],
+            # Assignments dropped past capacity contribute zero.
+            local_output.at[padded_positions].get(mode="fill", fill_value=0),
             state,
             weights,
             num_experts_per_tok=cfg.top_k,
@@ -1660,6 +1689,7 @@ def _ep1_local_combine_bwd(cfg, handle, grad, recv_capacity_per_rank):
 
     compact = jax.vmap(dispatch_one)(grouped_grad, handle.selected_experts)
     output = jnp.zeros((num_groups, recv_capacity_per_rank, grad.shape[-1]), dtype=grad.dtype)
+    # The scatter skips assignments dropped past capacity, as dispatch does.
     return output.at[jnp.arange(num_groups)[:, None], handle.padded_positions].set(compact)
 
 
@@ -1677,8 +1707,9 @@ def _ep1_local_dispatch_bwd(cfg, handle, grad, grad_weights, num_local_tokens):
 
     def combine_one(local_grad, local_weight_grad, sorted_indices, padded_positions):
         state = PureJaxPermState(sorted_indices, num_real_tokens, 0)
+        # Assignments dropped past capacity get zero gradients.
         grad_tokens = pure_jax_token_combine(
-            local_grad[padded_positions],
+            local_grad.at[padded_positions].get(mode="fill", fill_value=0),
             state,
             weights,
             num_experts_per_tok=cfg.top_k,
@@ -1686,7 +1717,7 @@ def _ep1_local_dispatch_bwd(cfg, handle, grad, grad_weights, num_local_tokens):
             sequence_length=1,
         ).reshape(local_tokens, grad.shape[-1])
         inverse = jnp.argsort(sorted_indices)
-        grad_topk = local_weight_grad[padded_positions][inverse]
+        grad_topk = local_weight_grad.at[padded_positions].get(mode="fill", fill_value=0)[inverse]
         return grad_tokens, grad_topk.reshape(local_tokens, cfg.top_k)
 
     grad_tokens, grad_topk = jax.vmap(combine_one)(

@@ -153,6 +153,105 @@ def test_ep1_bootstrap_dispatch_combine_and_gradients():
             ep_finalize()
 
 
+@pytest.mark.parametrize("drop_on_overflow", [False, True])
+def test_ep1_overflow_follows_drop_on_overflow(drop_on_overflow):
+    """EP=1 overflow drops as NCCL EP does, or is rejected without drop_on_overflow."""
+    num_experts = 4
+    top_k = 2
+    batch = 2
+    sequence = 3
+    hidden = 8
+    alignment = 4
+    # Each expert receives 3 assignments, padded to 4 rows, so 16 rows are needed.
+    recv_capacity = 10
+    mesh = Mesh(np.asarray(jax.devices()).reshape(1), ("ep",))
+    resource = MeshResource(ep_resource="ep")
+
+    cfg = EpLayerConfig(
+        top_k=top_k,
+        dispatch_output_per_expert_alignment=alignment,
+        topk_idx_dtype=int(jax_dtype_to_te_dtype(jnp.int32)),
+    )
+    tokens = jnp.arange(batch * sequence * hidden, dtype=jnp.float32).reshape(
+        batch, sequence, hidden
+    )
+    topk_idx = jnp.asarray(
+        [
+            [[0, 1], [2, 3], [1, 2]],
+            [[3, 0], [2, 1], [0, 3]],
+        ],
+        dtype=jnp.int32,
+    )
+    topk_weights = jnp.asarray(
+        [
+            [[0.25, 0.75], [0.6, 0.4], [0.1, 0.9]],
+            [[0.8, 0.2], [0.3, 0.7], [0.55, 0.45]],
+        ],
+        dtype=jnp.float32,
+    )
+    # Experts 0 and 1 fit, expert 2 keeps the rows of tokens 1 and 2 (slots 8 and 9),
+    # and its token 4 and all of expert 3 fall at or past the capacity.
+    kept = jnp.asarray(
+        [
+            [[True, True], [True, False], [True, True]],
+            [[False, True], [False, True], [True, False]],
+        ]
+    )
+
+    def run(x, weights):
+        recv, recv_weights, handle, counts, total = ep_dispatch(
+            cfg, topk_idx, x, weights, recv_capacity
+        )
+        output = ep_combine(
+            cfg,
+            handle,
+            counts,
+            recv * recv_weights[..., None],
+            num_local_tokens=(batch, sequence),
+        )
+        return output, counts, total
+
+    with mesh, global_shard_guard(resource):
+        ep_bootstrap(
+            world_size=1,
+            rank=0,
+            num_experts=num_experts,
+            max_tokens_per_rank=batch * sequence,
+            recv_capacity_per_rank=recv_capacity,
+            hidden_dim=hidden,
+            drop_on_overflow=drop_on_overflow,
+        )
+        try:
+            if not drop_on_overflow:
+                with pytest.raises(ValueError, match="drop_on_overflow"):
+                    jax.jit(run)(tokens, topk_weights)
+                return
+
+            output, counts, total = jax.jit(run)(tokens, topk_weights)
+            kept_weights = jnp.sum(jnp.where(kept, topk_weights, 0), axis=-1, keepdims=True)
+            np.testing.assert_allclose(output, tokens * kept_weights, rtol=1e-6, atol=1e-6)
+            np.testing.assert_array_equal(counts, jnp.asarray([[4, 4, 2, 0]], jnp.int32))
+            np.testing.assert_array_equal(total, jnp.asarray([[16]], jnp.int32))
+
+            def loss(x, weights):
+                return jnp.sum(run(x, weights)[0])
+
+            grad_tokens, grad_weights = jax.jit(jax.grad(loss, argnums=(0, 1)))(
+                tokens, topk_weights
+            )
+            np.testing.assert_allclose(
+                grad_tokens, jnp.broadcast_to(kept_weights, tokens.shape), rtol=1e-6, atol=1e-6
+            )
+            np.testing.assert_allclose(
+                grad_weights,
+                jnp.where(kept, jnp.sum(tokens, axis=-1, keepdims=True), 0),
+                rtol=1e-6,
+                atol=1e-6,
+            )
+        finally:
+            ep_finalize()
+
+
 def test_ep1_dispatch_moves_mxfp8_scales_with_tokens():
     """EP=1 dispatch of MXFP8 tokens moves each compact scale row with its token row."""
     num_experts = 4
