@@ -299,6 +299,11 @@ struct Tensor {
    *  Only meaningful for MXFP8 and NVFP4.
    */
   bool with_gemm_swizzled_scales = false;
+  /*! \brief Whether column-wise data is stored transposed
+   *
+   *  Only meaningful for FP8 block scaling.
+   */
+  bool columnwise_transposed = true;
   /*! \brief Whether NVFP4 rowwise amax metadata is row-scaled.
    *
    *  Only meaningful for NVFP4 tensors.
@@ -325,7 +330,8 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
       sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
       sizeof(uint8_t),          // kNVTERowScaledNVFP4
-      sizeof(int)               // kNVTENVFP4E4M3Max
+      sizeof(int),              // kNVTENVFP4E4M3Max
+      sizeof(uint8_t)           // kNVTEColumnwiseTransposed
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -341,6 +347,7 @@ struct Tensor {
     columnwise_scale_inv.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
+    columnwise_transposed = true;
     row_scaled_nvfp4 = false;
     nvfp4_e4m3_max = 0;
   }
@@ -398,6 +405,10 @@ struct Tensor {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
+          // except FP8 block-scaling column-wise data that is not stored transposed
+          if (is_fp8_block_scaling(scaling_mode) && !columnwise_transposed) {
+            return columnwise_data.shape;
+          }
           Shape ret;
           if (!columnwise_data.shape.empty()) {
             for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
@@ -545,6 +556,9 @@ struct GroupedTensor {
    */
   bool with_gemm_swizzled_scales = false;
 
+  /*! \brief Whether FP8 block-scaling column-wise data is stored transposed */
+  bool columnwise_transposed = true;
+
   /*! \brief Whether NVFP4 data uses row scaling instead of tensor scaling */
   bool row_scaled_nvfp4 = false;
 
@@ -561,7 +575,8 @@ struct GroupedTensor {
       sizeof(NVTEBasicTensor),  // kNVTEGroupedLastDims
       sizeof(NVTEBasicTensor),  // kNVTEGroupedTensorOffsets
       sizeof(uint8_t),          // kNVTEGroupedWithGEMMSwizzledScales
-      sizeof(uint8_t)           // kNVTEGroupedRowScaledNVFP4
+      sizeof(uint8_t),          // kNVTEGroupedRowScaledNVFP4
+      sizeof(uint8_t)           // kNVTEGroupedColumnwiseTransposed
   };
 
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
@@ -580,6 +595,7 @@ struct GroupedTensor {
         logical_shape(nvte_make_shape(nullptr, 1)),
         nvte_tensor(0),
         with_gemm_swizzled_scales(false),
+        columnwise_transposed(true),
         row_scaled_nvfp4(false) {}
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
@@ -633,6 +649,7 @@ struct GroupedTensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
     with_gemm_swizzled_scales = false;
+    columnwise_transposed = true;
     row_scaled_nvfp4 = false;
   }
 };

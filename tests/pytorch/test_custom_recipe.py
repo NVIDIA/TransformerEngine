@@ -85,8 +85,19 @@ def test_custom_recipe_sanity_modules_nvfp4(module_type):
     assert inp.grad is not None
 
 
-@pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear", "LayerNormMLP"])
-def test_custom_recipe_sanity(module_type):
+@pytest.mark.parametrize(
+    "module_type, factory",
+    [
+        ("Linear", "current_scaling"),
+        ("LayerNormLinear", "current_scaling"),
+        ("OpsLinear", "current_scaling"),
+        ("LayerNormMLP", "current_scaling"),
+        ("Linear", "current_scaling_ref"),
+        ("LayerNormLinear", "current_scaling_ref"),
+        ("LayerNormMLP", "current_scaling_ref"),
+    ],
+)
+def test_custom_recipe_sanity(module_type, factory):
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
@@ -120,7 +131,12 @@ def test_custom_recipe_sanity(module_type):
             return Float8CurrentScalingQuantizer(te.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
 
-    custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
+    # The reference factory makes custom tensors, whose GEMMs go through custom_gemm
+    custom_recipe = recipe.CustomRecipe(
+        qfactory=(
+            current_scaling_ref_factory if factory == "current_scaling_ref" else quantizer_factory
+        )
+    )
 
     # Execute with custom recipe
     with autocast(enabled=True, recipe=custom_recipe):

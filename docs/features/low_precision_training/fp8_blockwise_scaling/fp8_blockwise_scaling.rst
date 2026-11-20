@@ -274,6 +274,10 @@ Tensors are transposed and padded as required by the GEMM kernel.
    * - columnwise scales
      - ``[A/128, pad4(B)]`` (padded)
 
+Where FP8 GEMMs support non-TN layouts (SM 10.x, SM 11.x, and SM 13.0 and later), 1D columnwise
+data is not transposed and has shape ``[A, B]``, and 2D-scaled tensors have no columnwise data or
+scales because the rowwise ones also serve columnwise usage.
+
 Swizzling converts from compact to GEMM-ready format. This can be fused with quantization 
 when no all-gather is needed, or performed separately after all-gather.
 

@@ -247,8 +247,8 @@ inline std::string grouped_gemm_skip_reason(const TestParams& params) {
   const int32_t cc = getDeviceComputeCapability();
   const std::string cc_suffix =
       "but device compute capability is " + std::to_string(cc) + ".";
-  if (cc < hopperComputeCapability) {
-    return "Grouped GEMM requires Hopper (SM90) or newer, " + cc_suffix;
+  if (cc < hopperComputeCapability || cc > 110) {
+    return "Grouped GEMM requires Hopper (SM90) or Blackwell (SM10x and SM110), " + cc_suffix;
   }
   if (cc < blackwellComputeCapability && cublas_ver < kCublasGroupedGemmHopperVersion) {
     return "Grouped GEMM on Hopper (SM90) requires cuBLAS 13.4+, but run-time cuBLAS "

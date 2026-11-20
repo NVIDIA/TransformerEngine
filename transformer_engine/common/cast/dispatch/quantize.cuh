@@ -198,6 +198,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for FWD NVTE_BLOCK_SCALING_2D");
       bool force_pow_2_scales = quant_config_cpp.force_pow_2_scales;
       float epsilon = quant_config_cpp.amax_epsilon;
+      NVTE_CHECK(output_tensor->columnwise_transposed || !output_tensor->has_columnwise_data(),
+                 "2D FP8 block scaling writes columnwise data only in the transposed layout");
       quantize_transpose_square_blockwise(
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
           output_tensor->data, output_tensor->columnwise_data, epsilon,
@@ -216,7 +218,9 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
         rowwise_option = FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        columnwise_option = FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+        columnwise_option = output_tensor->columnwise_transposed
+                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY
+                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
       }
       quantize_transpose_vector_blockwise(
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
@@ -388,6 +392,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                  "IS_DBIAS and IS_DACT are not implemented for BWD NVTE_BLOCK_SCALING_2D");
       bool force_pow_2_scales = quant_config_cpp.force_pow_2_scales;
       float epsilon = quant_config_cpp.amax_epsilon;
+      NVTE_CHECK(output_tensor->columnwise_transposed || !output_tensor->has_columnwise_data(),
+                 "2D FP8 block scaling writes columnwise data only in the transposed layout");
       quantize_transpose_square_blockwise(
           grad_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
           output_tensor->data, output_tensor->columnwise_data, epsilon,
@@ -407,7 +413,9 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
         rowwise_option = FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        columnwise_option = FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+        columnwise_option = output_tensor->columnwise_transposed
+                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY
+                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
       }
       quantize_transpose_vector_blockwise(
           grad_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
@@ -555,6 +563,8 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     }
     case NVTE_BLOCK_SCALING_2D: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_2D.");
+      NVTE_CHECK(output_tensor->columnwise_transposed || !output_tensor->has_columnwise_data(),
+                 "2D FP8 block scaling writes columnwise data only in the transposed layout");
       fp8_blockwise::group_quantize_blockwise_2d(input_tensor, output_tensor, noop_tensor,
                                                  quant_config_cpp.amax_epsilon,
                                                  quant_config_cpp.force_pow_2_scales, stream);
@@ -676,6 +686,8 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
             grad_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
             quant_config_cpp.force_pow_2_scales, stream, dbias_arg, workspace_arg);
       } else {
+        NVTE_CHECK(output_tensor->columnwise_transposed || !output_tensor->has_columnwise_data(),
+                   "2D FP8 block scaling writes columnwise data only in the transposed layout");
         fp8_blockwise::group_quantize_blockwise_2d(
             grad_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
             quant_config_cpp.force_pow_2_scales, stream, dbias_arg, workspace_arg);

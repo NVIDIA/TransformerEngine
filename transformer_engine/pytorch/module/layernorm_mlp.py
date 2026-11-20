@@ -1623,11 +1623,6 @@ def _layernorm_mlp_backward_impl(
                     args.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                     grad_output = args.fc2_grad_output_quantizer(grad_output)
 
-            # Whether to set grad arg in general_gemm
-            grad_arg = True
-            if args.fp8 and args.fp8_recipe.float8_block_scaling():
-                grad_arg = False
-
             # Arguments to include in wgrad GEMM closure
             fc2_wgrad_gemm_kwargs = {
                 "out_dtype": (
@@ -1645,7 +1640,7 @@ def _layernorm_mlp_backward_impl(
                 "out": fc2_weight_main_grad if args.fuse_wgrad_accumulation else None,
                 "bias": fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
                 "use_split_accumulator": wgrad_use_split_accumulator,
-                "grad": grad_arg,
+                "grad": True,
             }
 
             def fc2_wgrad_gemm(
@@ -1912,7 +1907,7 @@ def _layernorm_mlp_backward_impl(
                 "out": fc1_weight_main_grad if args.fuse_wgrad_accumulation else None,
                 "bias": fc1_bias if fuse_gemm_and_bias_fc1_wgrad else None,
                 "use_split_accumulator": wgrad_use_split_accumulator,
-                "grad": fuse_gemm_and_bias_fc1_wgrad,
+                "grad": True,
                 "ub": ub_obj_fc1_wgrad,
                 "ub_type": ub_type_fc1_wgrad,
                 "extra_output": reduce_scatter_out,

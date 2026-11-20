@@ -119,28 +119,27 @@ Step 3 (if columnwise transpose is True, GEMM_READY): Transpose, cast and store 
 | T7  | T15 | T23 | T31 |                       |                       |                       | T7  | T15 | T23 | T31 |                       |                       |                       |
 +-----------------------+-----------------------+-----------------------+-----------------------+-----------------------+-----------------------+-----------------------+-----------------------+
 
-Step 3 (if columnwise transpose is False, COMPACT format): Skip Transpose, cast and store to output_t
-* shard memory: 128x128 elements with type=InputType (below graph doesn't consider padding)
-* 8 warps
-* Loop 1 times
-* What each thread does in each loop:
-    * 16 elements (in a row) are read from the shared memory, for a total of 4 rows,
-    * it needs 8 reads in smem to get 16 elements in a row, thread tile shape is 16x4
-    * Every 32 consecutive threads in a warp do reduction and calculate the amax of each column,
-    * so each thread will do warp shuffle 16 times to get the amax of each column
-    * 16 elements are quantized and write to output_t at a time, for a total of 4 times
-+------16 elements-------+------16 elements-------+-----80 elements-----+------16 elements------+
-|           T0          |                       |                       |                       |
-|           T1          |                       |                       |                       |
-|           T2          |                       |                       |                       |
-|           T3          |                       |                       |                       |
-|           T4          |                       |                       |                       |
-|           T5          |                       |                       |                       |
-|           T6          |                       |                       |                       |
-|           T7          |                       |                       |                       |
-|           ...         |                       |                       |                       |
-|           T31         |                       |                       |                       |
-+-----------------------+-----------------------+-----------------------+-----------------------+
+Step 4 (kColumnwiseNotTransposed): Cast and store to output_t with the input layout
+* shared memory: 128x128 elements with type=InputType (below graph doesn't consider padding), then
+  8x128 per-warp column amaxes and 128 column scales with type=float
+* 8 warps, each one handles 16 rows
+* What each thread does:
+    * Reads 2 elements from the shared memory at a time, 2 times per row, for 16 rows, and writes the
+      amax of each of its 4 columns over these rows to the shared memory
+    * Thread i < 128 reduces the 8 warp amaxes of column i, writes scale_inv_t of column i and writes
+      the scale of column i to the shared memory
+    * Reads 2 elements from the shared memory at a time, quantizes them and writes them to output_t,
+      2 times per row, for 16 rows
++---------------64 elements---------------+---------------64 elements---------------+
+| T0 | T1 | T2 |          ...        | T31 | T0 | T1 | T2 |          ...        | T31 |
+|                                  Warp 0 (16 rows)                                 |
++-----------------------------------------+-----------------------------------------+
+|                                  Warp 1 (16 rows)                                 |
++-----------------------------------------+-----------------------------------------+
+|                                        ...                                        |
++-----------------------------------------+-----------------------------------------+
+|                                  Warp 7 (16 rows)                                 |
++-----------------------------------------+-----------------------------------------+
 
 */
 // clang-format on
@@ -150,7 +149,7 @@ constexpr size_t kThreadsPerWarp = 32;
 // Hyperparameters for performance tuning
 constexpr int kTileDim = 128;  // Fixed to 128 beacause we are using 1x128 and 128x1 quantization
 constexpr int kNVecIn = 8;     // The number of elements each LDG touches
-constexpr int kNVecOut = 16;   // The number of elements each STG touches
+constexpr int kNVecOut = 16;   // The number of elements each STG touches in Steps 2-3
 constexpr int kNVecSMem = 2;   // The number of elements each LDS/STS touches
 constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
 
@@ -165,8 +164,14 @@ constexpr int kNumThreadsStore = kTileDim / kNVecOut;
 static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kThreadsPerWarp");
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
 constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
+// Number of compute-type elements Step 4 keeps in shared memory after the input tile: per-warp
+// column amaxes and column scales
+constexpr int kStep4SMemSize = (kNumWarps + 1) * kTileDim;
 
-template <bool kAligned, typename CType, typename IType, typename OType>
+// kColumnwiseNotTransposed instantiates Step 4 for COLUMNWISE_COMPACT. Otherwise, the kernel
+// runs Step 3 for COLUMNWISE_GEMM_READY.
+template <bool kAligned, bool kColumnwiseNotTransposed, typename CType, typename IType,
+          typename OType>
 __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
     const IType* const input, OType* const output_c, OType* const output_t,
     CType* const tile_scales_inv_c, CType* const tile_scales_inv_t, const size_t row_length,
@@ -181,9 +186,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
   bool return_rowwise = rowwise_option != FP8BlockwiseRowwiseOption::NONE;
   bool return_columnwise_gemm_ready =
+      !kColumnwiseNotTransposed &&
       columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
-  bool return_columnwise_compact =
-      columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
 
   using SMemVec = Vec<IType, kNVecSMem>;
   using OVec = Vec<OType, kNVecOut>;
@@ -418,100 +422,109 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     }
   }
 
-  // Step 4 (return_columnwise_compact): cast in 128x1 style and store to output, skip transpose
-  if (return_columnwise_compact) {
-    // thread tile should be 4x16, 16 means 8 smem reads
-    constexpr int kThreadTileRow = kTileDim / kThreadsPerWarp;
-    constexpr int kThreadTileCol = kNVecOut;
-    using RegVec = Vec<IType, kThreadTileCol>;
-    using RegScaleVec = Vec<CType, kThreadTileCol>;
-    constexpr int num_smem_reads = kNVecOut / kNVecSMem;
-    // c_stride will not be used here because we only have one iteration
-    // constexpr int c_stride = kThreadTileCol * kNumWarps / kNVecSMem;
-    constexpr int num_iterations =
-        kTileDim / (kNumWarps * kThreadTileCol);  // should be only one iteration
-    static_assert(num_iterations == 1,
-                  "num_iterations should be 1 for columnwise non-transpose case");
-    const int thr_idx_in_warp = threadIdx.x % kThreadsPerWarp;
-    const int warp_idx = threadIdx.x / kThreadsPerWarp;
-    const int r_s = thr_idx_in_warp * kThreadTileRow;               // Row in shared memory
-    int c_s = warp_idx * num_smem_reads;                            // Column in shared memory
-    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;  // Row in global memory
-    const size_t c_g =
-        static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;  // Column in global memory
-    const size_t num_ele = c_g < row_length
-                               ? min(static_cast<size_t>(kThreadTileCol), row_length - c_g)
-                               : 0;  // For not aligned case
+  // Step 4 (kColumnwiseNotTransposed): Cast in 128x1 blocks and store to output_t with the
+  // input layout
+  if constexpr (kColumnwiseNotTransposed) {
+    // Warp w handles rows [w * kRowsPerWarp, (w + 1) * kRowsPerWarp) of the tile. In each row,
+    // lane l handles shared memory vectors l and l + kThreadsPerWarp, so the warp accesses
+    // contiguous shared and global memory.
+    constexpr int kRowsPerWarp = kTileDim / kNumWarps;
+    // Shared memory vectors per thread in each row
+    constexpr int kNumVecs = kTileDim / (kThreadsPerWarp * kNVecSMem);
+    using CVec = Vec<CType, kNVecSMem>;
+    using OSMemVec = Vec<OType, kNVecSMem>;
+    CType* const smem_amax = reinterpret_cast<CType*>(&smem_base[kSMemSize * sizeof(IType)]);
+    CType* const smem_scale = smem_amax + kNumWarps * kTileDim;
+    const int lane = threadIdx.x % kThreadsPerWarp;
+    const int warp = threadIdx.x / kThreadsPerWarp;
+    const int r_s = warp * kRowsPerWarp;  // First row in shared memory
+    int c_s[kNumVecs];                    // Columns in shared memory
 #pragma unroll
-    for (int iter = 0; iter < num_iterations; ++iter) {
-      RegVec reg_vec[kThreadTileRow];
-      RegScaleVec thr_scale;
+    for (int v = 0; v < kNumVecs; ++v) {
+      c_s[v] = lane + v * kThreadsPerWarp;
+    }
 
-      // Step 3.1: Load from shared memory to registers
+    // Step 4.1: Compute the amax of each column over the warp's rows
+    CVec amax[kNumVecs];
 #pragma unroll
-      for (int i = 0; i < kThreadTileRow; ++i) {
-        int r = r_s + i;
+    for (int v = 0; v < kNumVecs; ++v) {
+      amax[v].clear();
+    }
 #pragma unroll
-        for (int j = 0; j < num_smem_reads; ++j) {
-          int c = c_s + j;
-          SMemVec smem_vec = smem[r * kSMemCol + c];
-          // copy smem_vec to reg vec with its elements
+    for (int i = 0; i < kRowsPerWarp; ++i) {
 #pragma unroll
-          for (int k = 0; k < kNVecSMem; ++k) {
-            reg_vec[i].data.elt[j * kNVecSMem + k] = smem_vec.data.elt[k];
-          }
+      for (int v = 0; v < kNumVecs; ++v) {
+        const SMemVec smem_vec = smem[(r_s + i) * kSMemCol + c_s[v]];
+#pragma unroll
+        for (int j = 0; j < kNVecSMem; ++j) {
+          amax[v].data.elt[j] = fmaxf(amax[v].data.elt[j], fabsf(smem_vec.data.elt[j]));
         }
       }
+    }
 #pragma unroll
-      for (int reg_idx = 0; reg_idx < kThreadTileCol; ++reg_idx) {
-        // Step 3.2: Compute local amax
-        CType amax = 0;
+    for (int v = 0; v < kNumVecs; ++v) {
+      amax[v].store_to(&smem_amax[warp * kTileDim + c_s[v] * kNVecSMem]);
+    }
+    __syncthreads();
+
+    // Step 4.2: Reduce the column amaxes across warps, compute scales and write scale_inv_t
+    if (threadIdx.x < kTileDim) {
+      const int c = threadIdx.x;  // Column in the tile
+      CType col_amax = 0;
 #pragma unroll
-        for (int i = 0; i < kThreadTileRow; ++i) {
-          amax = fmaxf(amax, fabsf(reg_vec[i].data.elt[reg_idx]));
-        }
-        // Step 3.3: Reduce amax
-        const bool is_src_lane = thr_idx_in_warp == 0;
-        amax = warp_reduce_max<kThreadsPerWarp>(amax);
-        constexpr int lane_zero = 0;
-        amax = __shfl_sync(0xFFFFFFFF, amax, lane_zero);
-        // Step 3.4: Compute scale
-        CType scale;
-        scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
-        thr_scale.data.elt[reg_idx] = scale;
-        // Step 3.5: Write scale_inv_t
-        bool write_scale_inv = is_src_lane;
-        if constexpr (!kAligned) {
-          write_scale_inv &= (c_g + reg_idx < row_length);
-        }
-        if (write_scale_inv) {
-          CType scale_inv = 1.0 / scale;
-          size_t row_idx = static_cast<size_t>(blockIdx.y);
-          size_t col_idx = static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem + reg_idx;
-          tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
-        }
+      for (int w = 0; w < kNumWarps; ++w) {
+        col_amax = fmaxf(col_amax, smem_amax[w * kTileDim + c]);
       }
-      // Step 3.6: Quantize
-      for (int row_idx = 0; row_idx < kThreadTileRow; ++row_idx) {
-        OType* output_g =
-            &output_t[(r_g + row_idx) * row_length + c_g];  // Output address in global memory
-        OVec output_vec;
+      const CType col_scale =
+          compute_scale_from_types<IType, OType>(col_amax, epsilon, pow_2_scaling);
+      smem_scale[c] = col_scale;
+      // Column in global memory
+      const size_t col_g = static_cast<size_t>(blockIdx.x) * kTileDim + c;
+      bool write_scale_inv = true;
+      if constexpr (!kAligned) {
+        write_scale_inv = col_g < row_length;
+      }
+      if (write_scale_inv) {
+        CType scale_inv = 1.0 / col_scale;
+        size_t row_idx = static_cast<size_t>(blockIdx.y);
+        tile_scales_inv_t[row_idx * scale_t_stride_y + col_g * scale_t_stride_x] = scale_inv;
+      }
+    }
+    __syncthreads();
+
+    // Step 4.3: Quantize and store output_t
+    CVec scale[kNumVecs];
+    size_t c_g[kNumVecs];      // Columns in global memory
+    size_t num_ele[kNumVecs];  // For not aligned case
 #pragma unroll
-        for (int i = 0; i < kThreadTileCol; ++i) {
-          output_vec.data.elt[i] = static_cast<OType>(
-              static_cast<CType>(reg_vec[row_idx].data.elt[i]) * thr_scale.data.elt[i]);
+    for (int v = 0; v < kNumVecs; ++v) {
+      scale[v].load_from(&smem_scale[c_s[v] * kNVecSMem]);
+      c_g[v] = static_cast<size_t>(blockIdx.x) * kTileDim + c_s[v] * kNVecSMem;
+      num_ele[v] =
+          c_g[v] < row_length ? min(static_cast<size_t>(kNVecSMem), row_length - c_g[v]) : 0;
+    }
+    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;  // Row in global memory
+#pragma unroll
+    for (int i = 0; i < kRowsPerWarp; ++i) {
+#pragma unroll
+      for (int v = 0; v < kNumVecs; ++v) {
+        const SMemVec smem_vec = smem[(r_s + i) * kSMemCol + c_s[v]];
+        OSMemVec output_vec;
+#pragma unroll
+        for (int j = 0; j < kNVecSMem; ++j) {
+          output_vec.data.elt[j] =
+              static_cast<OType>(static_cast<CType>(smem_vec.data.elt[j]) * scale[v].data.elt[j]);
         }
-        // Step 3.7: Store output_t
+        OType* output_g = &output_t[r_g * row_length + c_g[v]];  // Output address in global memory
         if constexpr (kAligned) {
           output_vec.store_to(output_g);
         } else {
-          if (r_g + row_idx < num_rows) {
-            output_vec.store_to_elts(output_g, 0, num_ele);
+          if (r_g < num_rows) {
+            output_vec.store_to_elts(output_g, 0, num_ele[v]);
           }
         }
       }
-      // Step 3.8: Update output address, column index of shared memory
-      // this section shouldn't matter since we only have one iteration
+      ++r_g;
     }
   }
 }
@@ -613,28 +626,41 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
           dim3 grid(num_blocks_x, num_blocks_y, 1);
 
           const bool full_tile = row_length % kTileDim == 0 && num_rows % kTileDim == 0;
+          const bool columnwise_not_transposed =
+              columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
 
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               full_tile, kAligned,
 
-              size_t smem_bytes = kSMemSize * sizeof(InputType);
-              // shared memory must be requested up
-              if (smem_bytes >= 48 * 1024) {
-                cudaError_t err = cudaFuncSetAttribute(
-                    &block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-                NVTE_CHECK(err == cudaSuccess, "Failed to set dynamic shared memory size.");
-              } block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>
-              <<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
-                  reinterpret_cast<const InputType*>(input.dptr),
-                  reinterpret_cast<OutputType*>(output.dptr),
-                  reinterpret_cast<OutputType*>(output_t.dptr),
-                  reinterpret_cast<float*>(scale_inv.dptr),
-                  reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows, scale_stride_x,
-                  scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, rowwise_option,
-                  columnwise_option, pow2_scale, noop_ptr);)  // kAligned
-          )                                                   // OutputType
-      )                                                       // InputType
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  columnwise_not_transposed, kColumnwiseNotTransposed,
+
+                  using ComputeType = float;
+                  auto kernel =
+                      &block_scaled_1d_cast_transpose_kernel<kAligned, kColumnwiseNotTransposed,
+                                                             ComputeType, InputType, OutputType>;
+                  const size_t smem_bytes =
+                      kSMemSize * sizeof(InputType) +
+                      (kColumnwiseNotTransposed ? kStep4SMemSize * sizeof(ComputeType) : 0);
+                  // shared memory must be requested up
+                  if (smem_bytes >= 48 * 1024) {
+                    cudaError_t err = cudaFuncSetAttribute(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+                    NVTE_CHECK(err == cudaSuccess, "Failed to set dynamic shared memory size.");
+                  }
+
+                  kernel<<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
+                      reinterpret_cast<const InputType*>(input.dptr),
+                      reinterpret_cast<OutputType*>(output.dptr),
+                      reinterpret_cast<OutputType*>(output_t.dptr),
+                      reinterpret_cast<float*>(scale_inv.dptr),
+                      reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                      scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                      rowwise_option, columnwise_option, pow2_scale,
+                      noop_ptr);)  // kColumnwiseNotTransposed
+              )                    // kAligned
+          )                        // OutputType
+      )                            // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
