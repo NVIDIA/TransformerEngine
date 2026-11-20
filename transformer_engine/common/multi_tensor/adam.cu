@@ -388,10 +388,7 @@ struct AdamCapturableFunctor {
                                              const int bias_correction, const float epsilon,
                                              const float *lr_ptr, adamMode_t mode,
                                              const float decay, const float *inv_scale_ptr) {
-    // The step count lives in device memory so a captured graph sees the new value on
-    // replay, which means the bias corrections cannot be computed on the host. Compute them
-    // once per block and share them: every thread calling pow() twice costs about a quarter
-    // of this kernel. Done before the noop check so that all threads reach the barrier.
+    // Compute bias corrections on thread 0
     __shared__ float bias_corrections[2];
     if (threadIdx.x == 0) {
       bias_corrections[0] = 1.0f;
@@ -405,6 +402,8 @@ struct AdamCapturableFunctor {
     const float beta1_correction = bias_corrections[0];
     const float beta2_correction = bias_corrections[1];
 
+    // Exit early if noop flag is set
+    // Note: Check after __syncthreads to ensure all threads enter sync
     if (*noop_gmem == 1) return;
 
     const float lr = *lr_ptr;
@@ -505,10 +504,7 @@ struct AdamCapturableMasterFunctor {
                                              const int bias_correction, const float epsilon,
                                              const float *lr_ptr, adamMode_t mode,
                                              const float decay, const float *inv_scale_ptr) {
-    // The step count lives in device memory so a captured graph sees the new value on
-    // replay, which means the bias corrections cannot be computed on the host. Compute them
-    // once per block and share them: every thread calling pow() twice costs about a quarter
-    // of this kernel. Done before the noop check so that all threads reach the barrier.
+    // Compute bias corrections on thread 0
     __shared__ float bias_corrections[2];
     if (threadIdx.x == 0) {
       bias_corrections[0] = 1.0f;
@@ -522,6 +518,8 @@ struct AdamCapturableMasterFunctor {
     const float beta1_correction = bias_corrections[0];
     const float beta2_correction = bias_corrections[1];
 
+    // Exit early if noop flag is set
+    // Note: Check after __syncthreads to ensure all threads enter sync
     if (*noop_gmem == 1) return;
 
     const float lr = *lr_ptr;
