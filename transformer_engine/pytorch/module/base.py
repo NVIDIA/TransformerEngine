@@ -662,6 +662,15 @@ def get_ub(name: str, use_fp8: bool):
     return _ub_communicators[key]
 
 
+def check_ub_name_initialized(ub_name: str) -> None:
+    """Raise an error if initialize_ub created no communicators for a layer name."""
+    if not any(name.rsplit("_", 1)[0] == ub_name for name, _ in _ub_communicators):
+        raise RuntimeError(
+            f"initialize_ub() did not create comm+GEMM overlap communicators for '{ub_name}'. "
+            f"If `ub_names` was passed to initialize_ub(), it must include '{ub_name}'."
+        )
+
+
 @torch.compiler.assume_constant_result
 def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
     """Query is_fp8_ubuf for a named UB communicator; treated as compile-time constant."""
