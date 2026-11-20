@@ -44,6 +44,9 @@ else
 fi
 
 NVTE_GDN_TEST_REQUIRED=1 NVTE_GDN_CP_TEST_REQUIRED=1 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_gdn_attention_with_cp.xml $TE_PATH/tests/pytorch/attention/test_gdn_attention_with_cp.py || test_fail "test_gdn_attention_with_cp.py"
+for QKV_FORMAT in bshd thd; do
+    python3 -m torch.distributed.run --standalone --nproc-per-node=2 "$TE_PATH/docs/examples/attention/example_linear_attention.py" --cp --qkv-format "$QKV_FORMAT" || test_fail "example_linear_attention.py CP ($QKV_FORMAT)"
+done
 
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/distributed/test_sanity.py || test_fail "test_sanity.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_parallel_cross_entropy.xml $TE_PATH/tests/pytorch/distributed/test_parallel_cross_entropy.py || test_fail "test_parallel_cross_entropy.py"
