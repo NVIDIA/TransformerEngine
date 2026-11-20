@@ -49,11 +49,11 @@ NVTEShape padded_scale_shape_for_gemm(NVTEShape shape, NVTEScalingMode scaling_m
   if (shape.ndim != 2) return shape;
   const bool scales_are_row_major = rowwise || scaling_mode == NVTE_NVFP4_1D_SCALING;
   if (scales_are_row_major) {
-    shape.data[0] = ceildiv(shape.data[0], size_t{128}) * 128;
-    shape.data[1] = ceildiv(shape.data[1], size_t{4}) * 4;
+    shape.data[0] = DIVUP_TO_MULTIPLE(shape.data[0], 128);
+    shape.data[1] = DIVUP_TO_MULTIPLE(shape.data[1], 4);
   } else {
-    shape.data[0] = ceildiv(shape.data[0], size_t{4}) * 4;
-    shape.data[1] = ceildiv(shape.data[1], size_t{128}) * 128;
+    shape.data[0] = DIVUP_TO_MULTIPLE(shape.data[0], 4);
+    shape.data[1] = DIVUP_TO_MULTIPLE(shape.data[1], 128);
   }
   return shape;
 }
