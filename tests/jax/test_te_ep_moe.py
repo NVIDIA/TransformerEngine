@@ -130,7 +130,10 @@ from transformer_engine.jax.moe import (
 )
 from transformer_engine.jax.ep import ep_bootstrap, ep_finalize
 from transformer_engine.common.recipe import Format, MXFP8BlockScaling
+from transformer_engine.jax.quantize import ScalingMode, is_scaling_mode_supported
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
+
+is_mxfp8_supported, mxfp8_reason = is_scaling_mode_supported(ScalingMode.MXFP8_1D_SCALING)
 
 # -----------------------------------------------------------------------------
 # Mesh / shape config
@@ -613,10 +616,11 @@ _QUANTIZATION_CASES = [
     pytest.param("bf16", id="bf16"),
 ]
 
-if get_device_compute_capability(0) >= 100:
+if is_mxfp8_supported:
     _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
 
 
+@pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_reason)
 @pytest.mark.parametrize("native_weight_layout", [False, True])
 @pytest.mark.parametrize("fsdp_dimension", ["k", "gated", "expert"])
 def test_quantized_weight_gather_matches_full_precision_gather(
@@ -685,6 +689,7 @@ def test_quantized_weight_gather_matches_full_precision_gather(
     )
 
 
+@pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_reason)
 @pytest.mark.parametrize("quant_before_fsdp_ag", [False, True])
 def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, make_block):
     """Explicit and global resources give identical forward and backward results."""
@@ -1183,6 +1188,7 @@ def test_ep_checkpoint_names(mesh, monkeypatch, make_block):
         assert np.all(np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh)))
 
 
+@pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_reason)
 def test_explicitly_disabled_fusion_with_native_weights(
     mesh, monkeypatch, make_block, use_cudnn_fusion
 ):
@@ -1228,6 +1234,7 @@ def test_explicitly_disabled_fusion_with_native_weights(
         )
 
 
+@pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_reason)
 class TestTeEpMoeCudnnCutedslFusion:
     """End-to-end MXFP8 coverage for cuDNN's grouped GLU JAX APIs."""
 
