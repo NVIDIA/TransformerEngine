@@ -123,6 +123,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeV2Handler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedRequantizeHandler);
+
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
