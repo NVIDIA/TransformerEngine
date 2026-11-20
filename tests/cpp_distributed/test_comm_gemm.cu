@@ -247,6 +247,7 @@ struct Params {
   size_t n;
   size_t k;
   float tol;
+  bool use_split_accumulator = true;
 };
 
 class CommGemmFixure : public ::testing::TestWithParam<Params> {
@@ -293,11 +294,12 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
 
   virtual void CommGemm(int64_t m, int64_t n, int64_t k, const NVTETensor a, const NVTETensor b,
                         const NVTETensor d, const NVTETensor bias, const NVTETensor pre_act_out,
-                        bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
-                        cudaStream_t stream) = 0;
+                        bool transa, bool transb, bool grad, bool accumulate,
+                        bool use_split_accumulator, int comm_sm_count, cudaStream_t stream) = 0;
 
   template <typename AType, typename BType, typename DType, typename BiasType>
-  void Run(bool transa, bool transb, size_t m, size_t n, size_t k, float tol) {
+  void Run(bool transa, bool transb, size_t m, size_t n, size_t k, float tol,
+           bool use_split_accumulator) {
     if (!AllDTypesSupported<AType, BType, DType, BiasType>(rank_))
       GTEST_SKIP() << "FP8 is not supported on device " << rank_;
 
@@ -341,7 +343,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     bool grad = false;
     bool accumulate = false;
     CommGemm(m, n, k, a.data(), b.data(), d.data(), bias.data(), aux.data(), transa, transb, grad,
-             accumulate, 0 /*comm_sm_count*/, stream);
+             accumulate, use_split_accumulator, 0 /*comm_sm_count*/, stream);
     auto workspace = Make<uint8_t>(1, 32 << 20, 1.0);
 
     std::vector<float> out_golden{};
@@ -464,10 +466,11 @@ struct AgGemm : public CommGemmFixure {
 
   void CommGemm(int64_t m, int64_t n, int64_t k, const NVTETensor a, const NVTETensor b,
                 const NVTETensor d, const NVTETensor bias, const NVTETensor pre_act_out,
-                bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
-                cudaStream_t stream) override {
+                bool transa, bool transb, bool grad, bool accumulate, bool use_split_accumulator,
+                int comm_sm_count, cudaStream_t stream) override {
     nvte_all_gather_gemm(ctx_, m, n, k, a, b, d, bias, pre_act_out, transa, transb, grad,
-                         accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
+                         accumulate, use_split_accumulator, comm_sm_count, stream,
+                         kNVTECommGemmAlgoDefault);
   }
 };
 
@@ -501,10 +504,11 @@ struct GemmRs : public CommGemmFixure {
 
   void CommGemm(int64_t m, int64_t n, int64_t k, const NVTETensor a, const NVTETensor b,
                 const NVTETensor d, const NVTETensor bias, const NVTETensor pre_act_out,
-                bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
-                cudaStream_t stream) override {
+                bool transa, bool transb, bool grad, bool accumulate, bool use_split_accumulator,
+                int comm_sm_count, cudaStream_t stream) override {
     nvte_gemm_reduce_scatter(ctx_, m, n, k, a, b, d, bias, pre_act_out, transa, transb, grad,
-                             accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
+                             accumulate, use_split_accumulator, comm_sm_count, stream,
+                             kNVTECommGemmAlgoDefault);
   }
 };
 
@@ -536,52 +540,58 @@ struct GemmAr : public CommGemmFixure {
 
   void CommGemm(int64_t m, int64_t n, int64_t k, const NVTETensor a, const NVTETensor b,
                 const NVTETensor d, const NVTETensor bias, const NVTETensor pre_act_out,
-                bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
-                cudaStream_t stream) override {
+                bool transa, bool transb, bool grad, bool accumulate, bool use_split_accumulator,
+                int comm_sm_count, cudaStream_t stream) override {
     nvte_gemm_all_reduce(ctx_, m, n, k, a, b, d, bias, pre_act_out, transa, transb, grad,
-                         accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
+                         accumulate, use_split_accumulator, comm_sm_count, stream,
+                         kNVTECommGemmAlgoDefault);
   }
 };
 #endif  // CUBLASMP_VERSION >= 900
 
 TEST_P(AgGemm, Gemm) {
-  auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
+  auto [a_type, b_type, d_type, transa, transb, m, n, k, tol, use_split_accumulator] = GetParam();
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
       a_type, AType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           b_type, BType,
           TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-              d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
+              d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol,
+                                                             use_split_accumulator);)));
 }
 
 TEST_P(GemmRs, Gemm) {
-  auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
+  auto [a_type, b_type, d_type, transa, transb, m, n, k, tol, use_split_accumulator] = GetParam();
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
       a_type, AType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           b_type, BType,
           TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-              d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
+              d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol,
+                                                             use_split_accumulator);)));
 }
 
 #if CUBLASMP_VERSION >= 900
 TEST_P(GemmAr, Gemm) {
-  auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
+  auto [a_type, b_type, d_type, transa, transb, m, n, k, tol, use_split_accumulator] = GetParam();
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
       a_type, AType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           b_type, BType,
           TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-              d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
+              d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol,
+                                                             use_split_accumulator);)));
 }
 #endif  // CUBLASMP_VERSION >= 900
 
 std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
-  const auto [a_type, b_type, d_type, transa, transb, m, n, k, _tol] = info.param;
+  const auto [a_type, b_type, d_type, transa, transb, m, n, k, _tol, use_split_accumulator] =
+      info.param;
   std::ostringstream ss;
   ss << static_cast<int>(a_type) << "_" << static_cast<int>(b_type) << "_"
      << static_cast<int>(d_type) << "_" << (transa ? "T" : "N") << (transb ? "T" : "N") << "_" << m
-     << "x" << n << "x" << k;
+     << "x" << n << "x" << k
+     << (use_split_accumulator ? "" : "_fast_accum");
   return ss.str();
 }
 
@@ -603,7 +613,10 @@ INSTANTIATE_TEST_SUITE_P(AgGemm, AgGemm,
                                          Params{DType::kFloat8E4M3, DType::kFloat8E5M2,
                                                 DType::kFloat16, true, false, 256, 128, 64, 1e-3},
                                          Params{DType::kFloat8E5M2, DType::kFloat8E4M3,
-                                                DType::kFloat16, true, false, 256, 128, 64, 1e-3}),
+                                                DType::kFloat16, true, false, 256, 128, 64, 1e-3},
+                                         Params{DType::kFloat8E4M3, DType::kFloat8E4M3,
+                                                DType::kFloat16, true, false, 256, 128, 64, 1e-3,
+                                                false}),
                          &ParamSuffix);
 
 INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRs,
@@ -624,7 +637,10 @@ INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRs,
                                          Params{DType::kFloat8E4M3, DType::kFloat8E5M2,
                                                 DType::kFloat16, true, false, 64, 128, 256, 7e-2},
                                          Params{DType::kFloat8E5M2, DType::kFloat8E4M3,
-                                                DType::kFloat16, true, false, 64, 128, 256, 7e-2}),
+                                                DType::kFloat16, true, false, 64, 128, 256, 7e-2},
+                                         Params{DType::kFloat8E4M3, DType::kFloat8E4M3,
+                                                DType::kFloat16, true, false, 64, 128, 256, 1e-1,
+                                                false}),
                          &ParamSuffix);
 
 #if CUBLASMP_VERSION >= 900
@@ -639,6 +655,8 @@ INSTANTIATE_TEST_SUITE_P(
                     Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat16, true, false,
                            128, 128 * 4, 128 * 4, 1.5e-1},
                     Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat16, true, false,
-                           128, 128 * 4, 128 * 4, 1.5e-1}),
+                           128, 128 * 4, 128 * 4, 1.5e-1},
+                    Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat16, true, false,
+                           128, 128 * 4, 128 * 4, 1.5e-1, false}),
     &ParamSuffix);
 #endif  // CUBLASMP_VERSION >= 900
