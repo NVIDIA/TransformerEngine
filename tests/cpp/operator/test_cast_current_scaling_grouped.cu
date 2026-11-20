@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -57,10 +58,15 @@ void compute_amax_scale_ref(const InputType *data, const size_t size, float *ama
 
   float scale = 1.0f;
   float scale_inv = 1.0f;
-  if (std::isinf(clamp_amax) || clamp_amax == 0.0f || std::isnan(clamp_amax)) {
+  if (std::isinf(clamp_amax) || std::isnan(clamp_amax) || clamp_amax == 0.0f) {
     *scale_ptr = scale;
     *scale_inv_ptr = scale_inv;
     return;
+  }
+
+  const float amax_floor = max_fp8 * FLT_MIN;
+  if (clamp_amax < amax_floor) {
+    clamp_amax = amax_floor;
   }
 
   scale = max_fp8 / clamp_amax;

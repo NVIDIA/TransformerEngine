@@ -68,3 +68,7 @@ if("$ENV{NVTE_TEST_DEBUG_CPP_UT_IN_PARALLEL}" STREQUAL "1")
 else()
   add_test(NAME test_operator COMMAND test_operator)
 endif()
+
+add_executable(test_tiny_amax_scale_host test_tiny_amax_scale_host.cpp)
+target_compile_options(test_tiny_amax_scale_host PRIVATE -O2 -Wall -Wextra)
+add_test(NAME test_tiny_amax_scale_host COMMAND test_tiny_amax_scale_host)

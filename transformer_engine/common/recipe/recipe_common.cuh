@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_RECIPE_RECIPE_COMMON_CUH_
 #define TRANSFORMER_ENGINE_RECIPE_RECIPE_COMMON_CUH_
 
+#include <cfloat>
+
 #include "common/common.h"
 
 namespace transformer_engine {
@@ -21,8 +23,14 @@ __device__ __forceinline__ float compute_scale_from_amax(float amax, float max_f
 
   float scale = 1.f;
 
-  if (isinf(amax) || amax == 0.f || isnan(amax)) {
+  if (isinf(amax) || isnan(amax) || amax == 0.f) {
     return scale;
+  }
+
+  // Floor a positive amax at max_fp8 * FLT_MIN so scale_inv is at least FLT_MIN.
+  const float amax_floor = max_fp8 * FLT_MIN;
+  if (amax < amax_floor) {
+    amax = amax_floor;
   }
 
   // Here we don't use "scale = max_fp8 / amax" because it has different results with/without

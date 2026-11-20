@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cfloat>
+#include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -62,10 +64,15 @@ void compute_amax_scale_ref(const InputType *data,
   float scale = 1.f;
   float scale_inv = 1.f;
 
-  if (isinf(clamp_amax) || clamp_amax == 0.f) {
+  if (isinf(clamp_amax) || isnan(clamp_amax) || clamp_amax == 0.f) {
       *scale_ptr = scale;
       *scale_inv_ptr = scale_inv;
       return;
+  }
+
+  const float amax_floor = max_fp8 * FLT_MIN;
+  if (clamp_amax < amax_floor) {
+    clamp_amax = amax_floor;
   }
 
   // use ieee_div in CPU
