@@ -43,3 +43,4 @@ tensor_dumps/
 artifacts/
 .DS_Store
 .claude/
+transformer_engine/pytorch/_build_config.py
