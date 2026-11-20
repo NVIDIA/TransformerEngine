@@ -404,8 +404,9 @@ def rotary_bwd_kv_kernel(
             mask_i = head_offsets_i[:, None] < head_num
             x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
             x_right_off = x_left_off + emb_dim // 2
-            x_left_accum += tl.load(dK_ptr_i + x_left_off, mask=mask_i)
-            x_right_accum += tl.load(dK_ptr_i + x_right_off, mask=mask_i)
+            # Masked heads must contribute zero to the positional-key gradient.
+            x_left_accum += tl.load(dK_ptr_i + x_left_off, mask=mask_i, other=0)
+            x_right_accum += tl.load(dK_ptr_i + x_right_off, mask=mask_i, other=0)
         x_left_accum = tl.sum(x_left_accum, axis=0)
         x_right_accum = tl.sum(x_right_accum, axis=0)
         x_left_accum = x_left_accum.to(dEMB.dtype.element_ty)

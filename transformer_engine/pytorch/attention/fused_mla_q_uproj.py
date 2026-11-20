@@ -21,7 +21,7 @@ import transformer_engine_torch as tex
 
 try:
     import triton
-    from transformer_engine.common.triton.dsa_rope import (
+    from transformer_engine.common.triton.dsa_mla_rope import (
         rotary_bwd_q_kernel,
     )
 except ImportError:

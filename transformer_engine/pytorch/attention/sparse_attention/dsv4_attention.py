@@ -12,7 +12,7 @@ from transformer_engine.pytorch.module import Linear, RMSNorm
 
 from .compressor import Compressor
 from .dsa_cudnn import sparse_attention as _sparse_attention
-from .dsa_rope import DSv4RotaryEmbedding, apply_dsa_rope
+from ..rope import DSv4RotaryEmbedding, _validate_dsa_rope_width, apply_dsa_rope
 from .indexer import Indexer
 
 __all__ = ["DSv4Attention"]
@@ -75,7 +75,7 @@ class DSv4Attention(torch.nn.Module):
     head_dim : int
         Attention head width; currently 512, with 64 heads.
     rope_head_dim : int
-        Even number of trailing channels rotated by RoPE; at least 2, no greater
+        Number of trailing channels rotated by RoPE, a power of two >= 4 no greater
         than head_dim, and no greater than 128 for CSA's index queries/keys.
     sliding_window : int
         Local causal attention window size, including the current token.
@@ -140,8 +140,9 @@ class DSv4Attention(torch.nn.Module):
             raise ValueError("Only DSv4 CSA and HCA are supported.")
         if qkv_format not in ("sbhd", "bshd", "thd"):
             raise ValueError("qkv_format must be 'sbhd', 'bshd', or 'thd'.")
-        if head_dim != 512 or rope_head_dim < 2 or rope_head_dim % 2 or rope_head_dim > head_dim:
-            raise ValueError("head_dim must be 512; rope_head_dim must be even and fit.")
+        if head_dim != 512:
+            raise ValueError("head_dim must be 512.")
+        _validate_dsa_rope_width(rope_head_dim, head_dim)
         if any(
             v <= 0
             for v in (

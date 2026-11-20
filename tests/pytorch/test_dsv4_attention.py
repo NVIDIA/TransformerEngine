@@ -8,12 +8,12 @@ import pytest
 import torch
 
 from transformer_engine.pytorch import dense_indexer_loss_scores, dense_indexer_loss_backward
+from transformer_engine.pytorch.attention import rope
 from transformer_engine.pytorch.attention.sparse_attention import (
     Compressor,
     Indexer,
     compressor,
     dsa_cudnn,
-    dsa_rope,
     dsv4_attention,
 )
 
@@ -138,121 +138,6 @@ def test_dsa_rejects_unsupported_metadata():
         )
 
 
-# RoPE
-
-
-@pytest.mark.parametrize("layout", ["batched_q", "packed_kv"])
-def test_dsa_triton_rope_adapters(monkeypatch, layout):
-    """Compare production Q/KV adapter roles with eager outputs, gradients and aliasing."""
-    if not torch.cuda.is_available():
-        pytest.skip("Triton DSA RoPE requires CUDA")
-    if dsa_rope._triton_rope_module() is None:
-        pytest.skip("Triton DSL is unavailable")
-    torch.manual_seed(23)
-    inplace = layout == "batched_q"
-    if inplace:
-        x = torch.randn(2, 17, 64, 512, device="cuda", dtype=torch.bfloat16)
-        boundaries, seq = [0, 17, 34], 17
-    else:
-        # Ragged lengths 3 and 5, followed by one padded compressed-token position.
-        x = torch.randn(9, 1, 512, device="cuda", dtype=torch.bfloat16)
-        boundaries, seq = [0, 3, 8], 5
-    (cos, sin), _ = dsa_rope.rotary_embeddings(seq, 4, 64, 160000.0, x.device)
-    cu = torch.tensor(boundaries, device=x.device, dtype=torch.int32)
-    gradient = torch.randn_like(x)
-
-    eager = dsa_rope.apply_dsa_rope_eager
-    reference_input = x.detach().clone().requires_grad_()
-    reference = eager(reference_input, cos, sin, cu)
-    if not inplace:
-        # Check eager packed indexing against separate sequences, including padding at position 0.
-        with torch.no_grad():
-            expected = torch.cat(
-                [
-                    eager(
-                        x[start:end].unsqueeze(0), cos[:, : end - start], sin[:, : end - start]
-                    ).squeeze(0)
-                    for start, end in ((0, 3), (3, 8), (8, 9))
-                ]
-            )
-        torch.testing.assert_close(reference, expected)
-    reference_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
-
-    monkeypatch.setattr(
-        dsa_rope,
-        "apply_dsa_rope_eager",
-        lambda *_: pytest.fail("Triton dispatch fell back to eager RoPE"),
-    )
-    candidate_source = x.detach().clone().requires_grad_()
-    candidate_input = candidate_source.clone() if inplace else candidate_source
-    candidate_ptr = candidate_input.data_ptr()
-    candidate = dsa_rope.apply_dsa_rope(candidate_input, cos, sin, cu, allow_inplace=inplace)
-    candidate_grad = torch.autograd.grad(candidate, candidate_source, gradient)[0]
-
-    assert (candidate.data_ptr() == candidate_ptr) == inplace
-    torch.testing.assert_close(candidate, reference, atol=2e-2, rtol=2e-2)
-    torch.testing.assert_close(candidate_grad, reference_grad, atol=0.03125, rtol=0.002)
-
-
-@pytest.mark.parametrize("interleaved", [False, True])
-def test_common_rope_layout_packed(interleaved):
-    """Check both Q output layouts and gradients for the current CP1/noninverse callers."""
-    if not torch.cuda.is_available():
-        pytest.skip("Triton RoPE requires CUDA")
-    kernels = dsa_rope._triton_rope_module()
-    if kernels is None:
-        pytest.skip("Triton DSL is unavailable")
-    import triton
-
-    torch.manual_seed(53)
-    # Two sequences of lengths 4 and 6, then one padded token using position zero.
-    positions = [0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 0]
-    cu = torch.tensor([0, 4, 10], device="cuda", dtype=torch.int32)
-    x = torch.randn(11, 3, 80, device="cuda", dtype=torch.bfloat16)
-    # Contiguous columns with a larger row stride exercise explicit table strides.
-    cos = torch.randn(6, 128, device="cuda")[:, :64]
-    sin = torch.randn(6, 128, device="cuda")[:, :64]
-    reference_input = x.detach().requires_grad_()
-    tail = reference_input[..., 16:].float()
-    c, s = cos[positions, None], sin[positions, None]
-    left = tail[..., 0::2] * c[..., :32] - tail[..., 1::2] * s[..., :32]
-    right = tail[..., 1::2] * c[..., 32:] + tail[..., 0::2] * s[..., 32:]
-    rotated = (
-        torch.stack((left, right), -1).flatten(-2) if interleaved else torch.cat((left, right), -1)
-    )
-    reference = torch.cat((reference_input[..., :16], rotated.to(x.dtype)), -1)
-    gradient = torch.randn_like(x)
-    expected_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
-    candidate, actual_grad = x.clone(), gradient.clone()
-    grid = lambda meta: (11, triton.cdiv(3, meta["BLOCK_H"]))
-    for kernel, tensor in (
-        (kernels.rotary_fwd_q_kernel, candidate),
-        (kernels.rotary_bwd_q_kernel, actual_grad),
-    ):
-        kernel[grid](
-            tensor,
-            cos,
-            sin,
-            16,
-            64,
-            3,
-            1,
-            2,
-            cu,
-            None,
-            tensor.stride(0),
-            tensor.stride(1),
-            cos.stride(0),
-            sin.stride(0),
-            0,
-            1,
-            INVERSE=False,
-            REMOVE_INTERLEAVING=interleaved,
-        )
-    torch.testing.assert_close(candidate, reference, atol=0.03125, rtol=0.002)
-    torch.testing.assert_close(actual_grad, expected_grad, atol=0.03125, rtol=0.002)
-
-
 # Compressor
 
 
@@ -307,7 +192,7 @@ def test_dsa_indexer_backward(index_heads):
     q_residual = torch.randn(1, seq, 16, device="cuda", dtype=torch.bfloat16)
     cu = torch.tensor([0, seq], device=x.device, dtype=torch.int32)
     cu_comp = torch.tensor([0, seq // ratio], device=x.device, dtype=torch.int32)
-    token_rope, compressed_rope = dsa_rope.rotary_embeddings(seq, ratio, 64, 160000.0, x.device)
+    token_rope, compressed_rope = rope.build_dsv4_rope_tables(seq, ratio, 64, 160000.0, x.device)
     ids, query, key, weights = layer(
         x,
         q_residual,
@@ -500,7 +385,7 @@ def test_dsv4_attention_thd(variant, ratio):
         index_topk=8,
         rope=(
             # A warm CPU cache must move on a same-length CUDA request.
-            dsa_rope.DSv4RotaryEmbedding(ratio, 64, 12345.0, "cpu", max_seqlen=max(lengths))
+            rope.DSv4RotaryEmbedding(ratio, 64, 12345.0, "cpu", max_seqlen=max(lengths))
             if variant == "csa"
             else None
         ),

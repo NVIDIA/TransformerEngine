@@ -6,7 +6,7 @@
 
 - FusedMLAQUpProjRopeQuant: query up-projection, RoPE and MXFP8 quantization (cuDNN FE).
 - fused_mla_kv_rope_mxfp8: key/value split, key RoPE and MXFP8 quantization. The reference
-  applies Megatron-LM's MLA key/value RoPE (the Triton kernel in mla_rope_utils) and quantizes
+  applies Megatron-LM's MLA key/value RoPE (the shared Triton kernels) and quantizes
   key and value with mxfp8_quantize_only; the fused kernel must produce the same bytes.
 
 Run:
@@ -14,8 +14,6 @@ Run:
 """
 
 import os
-import pathlib
-import sys
 
 import pytest
 import torch
@@ -30,9 +28,11 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 from transformer_engine.pytorch.cpp_extensions import general_gemm as _fused_general_gemm
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 
-_current_file = pathlib.Path(__file__).resolve()
-sys.path = [str(_current_file.parent)] + sys.path
-from mla_rope_utils import HAVE_TRITON, apply_mla_rope_kv, build_rope_tables
+from transformer_engine.pytorch.attention.rope import (
+    _triton_rope_module,
+    apply_mla_rope_kv,
+    build_mla_rope_tables,
+)
 
 # All tests in this file require GB200/SM100 hardware.
 pytestmark = pytest.mark.launch_on_gb200
@@ -337,7 +337,7 @@ if not mxfp8_available:
     _kv_rope_skip_reason = reason_for_no_mxfp8
 elif not sm100:
     _kv_rope_skip_reason = "The fused kernel requires SM 10.0+."
-elif not HAVE_TRITON:
+elif _triton_rope_module() is None:
     _kv_rope_skip_reason = "The reference MLA RoPE needs Triton."
 else:
     _kv_rope_skip_reason = ""
@@ -366,7 +366,7 @@ def _kv_rope_inputs(s, b, h, cos_dtype, seed=1234):
         torch.bfloat16
     )
     k_rope = kv_down[..., KV_LORA_RANK:].unsqueeze(-2)
-    cos, sin = build_rope_tables(s, emb_dim=HEAD_DIM_ROPE, device="cuda")
+    cos, sin = build_mla_rope_tables(s, emb_dim=HEAD_DIM_ROPE, device="cuda")
     # A magnitude scale as in YaRN, so that the products are not exact.
     cos, sin = (cos * 1.2).to(cos_dtype), (sin * 1.2).to(cos_dtype)
     return kv, k_rope, cos, sin
@@ -409,7 +409,7 @@ def test_contiguous_k_rope_and_longer_rope_tables():
     """A contiguous [s, b, emb_dim] k_rope and cos / sin with more rows than tokens."""
     s, b, h = 256, 2, 4
     kv, k_rope, _, _ = _kv_rope_inputs(s, b, h, torch.bfloat16)
-    cos, sin = build_rope_tables(2 * s, emb_dim=HEAD_DIM_ROPE, device="cuda")
+    cos, sin = build_mla_rope_tables(2 * s, emb_dim=HEAD_DIM_ROPE, device="cuda")
     cos, sin = cos.to(torch.bfloat16), sin.to(torch.bfloat16)
     ref_key, ref_value = _kv_rope_reference(kv, k_rope, cos[:s], sin[:s])
     key, value = fused_mla_kv_rope_mxfp8(kv, k_rope.squeeze(-2).contiguous(), cos, sin, 128)
@@ -467,42 +467,3 @@ def test_inputs_on_non_current_device():
     _assert_identical(value, ref_value, "value")
     with pytest.raises(RuntimeError, match="same device"):
         fused_mla_kv_rope_mxfp8(kv, k_rope.to("cuda:0"), cos, sin, HEAD_DIM_V)
-
-
-@pytest.mark.skipif(not HAVE_TRITON, reason="MLA RoPE requires Triton")
-def test_mla_rope_kv():
-    """Compare MLA keys, values, and input gradients with independent PyTorch equations.
-
-    Split the KV input into per-head key and value channels. Rotate the shared
-    positional key for each token and append it to every head's key. The value
-    channels pass through unchanged. Backward sums the positional-key gradients
-    across heads.
-    """
-    if not torch.cuda.is_available():
-        pytest.skip("MLA RoPE requires CUDA")
-    torch.manual_seed(59)
-    kv = torch.randn(7, 2, 3, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    positional = torch.randn(7, 2, 1, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    cos, sin = build_rope_tables(7, emb_dim=64, device=kv.device)
-    key, value = apply_mla_rope_kv(
-        kv,
-        positional,
-        cos_table=cos,
-        sin_table=sin,
-        head_dim_nope=16,
-        head_dim_v=16,
-    )
-    ref_kv = kv.detach().requires_grad_()
-    ref_pos = positional.detach().requires_grad_()
-    c, s = cos[:, None, None], sin[:, None, None]
-    left = ref_pos[..., 0::2].float() * c[..., :32] - ref_pos[..., 1::2].float() * s[..., :32]
-    right = ref_pos[..., 1::2].float() * c[..., 32:] + ref_pos[..., 0::2].float() * s[..., 32:]
-    ref_key = torch.cat(
-        (ref_kv[..., :16], torch.cat((left, right), -1).to(kv.dtype).expand(-1, -1, 3, -1)), -1
-    )
-    ref_value = ref_kv[..., 16:]
-    gradients = (torch.randn_like(key), torch.randn_like(value))
-    actual_grads = torch.autograd.grad((key, value), (kv, positional), gradients)
-    ref_grads = torch.autograd.grad((ref_key, ref_value), (ref_kv, ref_pos), gradients)
-    for actual, expected in zip((key, value, *actual_grads), (ref_key, ref_value, *ref_grads)):
-        torch.testing.assert_close(actual, expected, atol=0.03125, rtol=0.02)

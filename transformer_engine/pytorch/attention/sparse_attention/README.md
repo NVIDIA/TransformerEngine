@@ -21,9 +21,9 @@ DSv4Attention
 ├── Indexer (CSA only)
 │   ├── TE index-query/head-weight projections
 │   ├── own Compressor (index keys)
-│   ├── dsa_rope.apply_dsa_rope (query + index keys)
+│   ├── rope.apply_dsa_rope (query + index keys)
 │   └── dsa_cudnn.select_indices -> cuDNN score + top-k
-├── dsa_rope embeddings + rotary application
+├── rope embeddings + rotary application
 ├── dsa_cudnn.sparse_attention -> cuDNN sparse attention
 └── TE grouped output projection
 ```
@@ -82,8 +82,9 @@ compressed tokens. `_prepare_sparse_kv_indices` documents a small example of the
 index spaces. Selection indices address only packed compressed KV before the
 local KV offset is applied.
 
-`dsa_rope.DSv4RotaryEmbedding` caches token/compressed-position embeddings.
-`dsa_rope.apply_dsa_rope` applies them.
+`transformer_engine.pytorch.attention.rope` provides the rotary utilities.
+`rope.DSv4RotaryEmbedding` caches token/compressed-position embeddings.
+`rope.apply_dsa_rope` applies them.
 A caller may override the default embeddings with a `rope` module returning
 token and compressed `(cos, sin)` pairs.
 

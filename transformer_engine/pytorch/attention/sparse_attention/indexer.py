@@ -10,7 +10,7 @@ from transformer_engine.pytorch.module import Linear
 
 from .compressor import Compressor
 from .dsa_cudnn import select_indices
-from .dsa_rope import apply_dsa_rope
+from ..rope import apply_dsa_rope
 
 
 class Indexer(torch.nn.Module):
