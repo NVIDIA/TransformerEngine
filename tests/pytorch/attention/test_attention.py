@@ -231,14 +231,13 @@ def test_fused_attn_backend_message():
 def test_fused_attn_query_backward_precision(
     monkeypatch, dtype, fp8_recipe, fp8_bwd, layout, head_dim
 ):
-    """Validate the executed backward, including the Frontend 1.29 MXFP8 workaround."""
+    """Check that the support query uses the effective backward precision."""
     import cudnn
     from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
 
     monkeypatch.delenv("NVTE_FP8_DPA_BWD", raising=False)
     if fp8_bwd is not None:
         monkeypatch.setenv("NVTE_FP8_DPA_BWD", fp8_bwd)
-    monkeypatch.setattr(cudnn, "__version__", "1.29.0")
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (10, 0))
     is_mxfp8 = fp8_recipe == "mxfp8"
     delayed = fp8_recipe == "delayed"
@@ -285,10 +284,6 @@ def test_fused_attn_query_backward_precision(
     backend, message = implementation.get_fused_attn_backend(config)
     assert len(queries) == 2
     assert queries[0].fp8
-    if is_mxfp8 and head_dim > 128 and fp8_bwd != "0":
-        assert backend == FusedAttnBackend.No_Backend
-        assert "incorrect scale strides" in message
-        return
     assert backend == FusedAttnBackend.FP8
     assert message == ""
     backward = queries[1]

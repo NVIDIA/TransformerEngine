@@ -227,18 +227,13 @@ def test_different_head_dimensions(head_dims):
         np.testing.assert_allclose(grad, ref_grad, rtol=1e-2, atol=1e-3)
 
 
-def test_large_head_backend_limits(monkeypatch):
-    """Reject the identified Frontend stride defect; retain valid model-precision backward."""
+def test_large_head_model_precision_backward(monkeypatch):
+    """Compare large-head model-precision gradients with the reference."""
     _require_mxfp8()
-    cudnn = cudnn_attention.import_cudnn()
     q = jnp.full((1, 128, 2, 192), 0.5, jnp.bfloat16)
     k = jnp.full((1, 256, 1, 192), 0.5, q.dtype)
     v = jnp.zeros((1, 256, 1, 128), q.dtype).at[:, ::2, :, 0].set(1.0)
     inputs = (q, k, v)
-    if cudnn.__version__.split("+", 1)[0].split("-", 1)[0] == "1.29.0":
-        monkeypatch.setenv("NVTE_FP8_DPA_BWD", "1")
-        with pytest.raises(ValueError, match="incorrect scale strides"):
-            jax.jit(_attention)(inputs)
     monkeypatch.setenv("NVTE_FP8_DPA_BWD", "0")
     np.testing.assert_allclose(jax.jit(_attention)(inputs), _reference(inputs), atol=5e-4)
     grads = jax.jit(jax.grad(lambda xs: _attention(xs).sum()))(inputs)

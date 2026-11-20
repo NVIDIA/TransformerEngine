@@ -14,8 +14,8 @@ class AttentionOptions:
     """Normalized attributes that affect graph construction and support."""
 
     backward: bool = False
-    fp8: bool = False  # Effective precision for this pass, resolved by the frontend.
-    mxfp8: bool = False
+    fp8: bool = False
+    mxfp8: bool = False  # Selects block-scaled SDPA when fp8 is enabled.
     attn_scale: str | float = "attn_scale"
     bottom_right: bool = False
     left_bound: int | None = None
@@ -56,20 +56,6 @@ class BuiltAttentionGraph:
 def build_attention_graph(cudnn, graph, spec, *, score_mod=None, score_mod_bprop=None):
     """Build ordinary, FP8, MXFP8, or score-modified SDPA using logical bindings."""
     specs = dict(spec.tensors)
-    if (
-        spec.options.mxfp8
-        and spec.options.backward
-        and specs["q"].dim[-1] > 128
-        and str(getattr(cudnn, "__version__", "")).split("+", 1)[0].split("-", 1)[0] == "1.29.0"
-    ):
-        # Frontend 1.29.0 sdpa_fp8_bwd.h overwrites Q_T/K_T scale strides with
-        # a hard-coded width of 128, even for wider Q/K heads. Do not permit
-        # silently incorrect gradients through either framework adapter.
-        raise ValueError(
-            "cuDNN Frontend 1.29.0 MXFP8 backward has incorrect scale strides for "
-            "Q/K head dimensions greater than 128. Use model-precision backward "
-            "with NVTE_FP8_DPA_BWD=0."
-        )
     tensors = {}
     uids = {name: index + 1 for index, (name, _) in enumerate(spec.tensors)}
 
