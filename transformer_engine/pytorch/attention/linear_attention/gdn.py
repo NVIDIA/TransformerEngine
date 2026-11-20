@@ -206,9 +206,9 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
                 **kernel_kwargs,
             )[0]
             (additive,) = torch.autograd.grad(output, initial_state, grad_output)
-        _, transition = self._cp_forward_summary(
+        transition = self._cp_forward_summary(
             q, k, values, {"g": g, "beta": beta}, cu_seqlens, **kernel_kwargs
-        )
+        )[1]
         return additive, transition.transpose(-1, -2).contiguous()
 
     def forward(

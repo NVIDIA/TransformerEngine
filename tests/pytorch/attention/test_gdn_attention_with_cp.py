@@ -20,6 +20,7 @@ import transformer_engine
 def test_gdn_with_cp():
     """Run genuine NCCL CP with all token and state gradients checked numerically."""
     available = torch.cuda.device_count()
+    # Test only the largest supported CP size available, rather than all sizes, to reduce test time.
     size = next((size for size in (8, 4, 2) if available >= size), None)
     if size is None:
         pytest.skip(f"GDN CP test requires at least 2 GPUs, but found {available}")
