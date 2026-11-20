@@ -1525,7 +1525,9 @@ class _EpLocalPermuteHandle(NamedTuple):
     padded_positions: jax.Array
 
 
-def _ep1_local_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
+def _ep1_local_dispatch(
+    cfg, topk_idx, tokens, tokens_scale_inv, topk_weights, recv_capacity_per_rank
+):
     """Dispatch independently within every outer DP/FSDP shard for EP=1."""
     # Import lazily: permutation.py depends on cpp_extensions and importing it
     # at module initialization would create a cycle.
@@ -1535,10 +1537,14 @@ def _ep1_local_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_r
     num_groups = ep_cfg.num_ep_groups
     hidden_size = tokens.shape[-1]
     grouped_tokens = tokens.reshape(num_groups, -1, hidden_size)
+    # Explicit shape: the non-MXFP8 placeholder has zero scale columns.
+    grouped_scales = tokens_scale_inv.reshape(
+        grouped_tokens.shape[:-1] + tokens_scale_inv.shape[-1:]
+    )
     grouped_experts = topk_idx.reshape(num_groups, -1, cfg.top_k)
     grouped_weights = topk_weights.reshape(num_groups, -1, cfg.top_k)
 
-    def dispatch_one(local_tokens, local_experts, local_weights):
+    def dispatch_one(local_tokens, local_scales, local_experts, local_weights):
         permuted, state, group_sizes = pure_jax_token_dispatch(
             local_tokens,
             local_experts,
@@ -1572,6 +1578,13 @@ def _ep1_local_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_r
             .at[padded_positions]
             .set(permuted)
         )
+        # Each scale row follows its token's top_k copies. E8M0 has no zero, so padding rows,
+        # whose data is zero, get a unit scale.
+        recv_scale_inv = (
+            jnp.ones((recv_capacity_per_rank, local_scales.shape[-1]), dtype=local_scales.dtype)
+            .at[padded_positions]
+            .set(local_scales[state.sorted_indices // cfg.top_k])
+        )
         permuted_weights = local_weights.reshape(-1)[state.sorted_indices]
         recv_weights = (
             jnp.zeros((recv_capacity_per_rank,), dtype=local_weights.dtype)
@@ -1580,20 +1593,26 @@ def _ep1_local_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_r
         )
         return (
             recv_tokens,
+            recv_scale_inv,
             recv_weights,
             aligned_group_sizes,
             state.sorted_indices,
             padded_positions,
         )
 
-    recv_tokens, recv_weights, token_counts, sorted_indices, padded_positions = jax.vmap(
-        dispatch_one
-    )(grouped_tokens, grouped_experts, grouped_weights)
+    (
+        recv_tokens,
+        recv_scale_inv,
+        recv_weights,
+        token_counts,
+        sorted_indices,
+        padded_positions,
+    ) = jax.vmap(dispatch_one)(grouped_tokens, grouped_scales, grouped_experts, grouped_weights)
     total_recv_tokens = jnp.full(
         (num_groups, 1), grouped_experts.shape[1] * cfg.top_k, dtype=jnp.int32
     )
     handle = _EpLocalPermuteHandle(sorted_indices, grouped_experts, padded_positions)
-    return recv_tokens, recv_weights, token_counts, total_recv_tokens, handle
+    return recv_tokens, recv_scale_inv, recv_weights, token_counts, total_recv_tokens, handle
 
 
 def _ep1_local_combine(cfg, handle, expert_out, num_local_tokens):
@@ -1765,7 +1784,9 @@ def _ep_prepare_and_dispatch_fwd(
     Fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH.
     """
     if get_ep_config().ep_size == 1:
-        return _ep1_local_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
+        return _ep1_local_dispatch(
+            cfg, topk_idx, tokens, tokens_scale_inv, topk_weights, recv_capacity_per_rank
+        )
     if _fused_prepare_dispatch_enabled():
         return _ep_fused_prepare_and_dispatch_fwd(
             cfg, topk_idx, tokens, tokens_scale_inv, topk_weights, recv_capacity_per_rank

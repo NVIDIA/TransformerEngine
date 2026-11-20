@@ -19,6 +19,7 @@ from transformer_engine.jax.ep import (
     ep_dispatch,
     ep_finalize,
 )
+from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensorFactory, ScalingMode
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 pytestmark = pytest.mark.skipif(jax.device_count() != 1, reason="run with exactly one visible GPU")
@@ -150,3 +151,82 @@ def test_ep1_bootstrap_dispatch_combine_and_gradients():
         finally:
             ep_finalize()
             ep_finalize()
+
+
+def test_ep1_dispatch_moves_mxfp8_scales_with_tokens():
+    """EP=1 dispatch of MXFP8 tokens moves each compact scale row with its token row."""
+    num_experts = 4
+    top_k = 2
+    batch = 2
+    sequence = 3
+    hidden = 64
+    alignment = 4
+    num_tokens = batch * sequence
+    recv_capacity = num_tokens * top_k + num_experts * (alignment - 1)
+    mesh = Mesh(np.asarray(jax.devices()).reshape(1), ("ep",))
+    resource = MeshResource(ep_resource="ep")
+
+    cfg = EpLayerConfig(
+        top_k=top_k,
+        dispatch_output_per_expert_alignment=alignment,
+        topk_idx_dtype=int(jax_dtype_to_te_dtype(jnp.int32)),
+    )
+    rng = np.random.default_rng(0)
+    data = jnp.asarray(rng.uniform(-4, 4, (batch, sequence, hidden)), jnp.float32)
+    data = data.astype(jnp.float8_e4m3fn)
+    scale_inv = 2.0 ** (jnp.arange(num_tokens * hidden // 32, dtype=jnp.float32) - 6)
+    scale_inv = scale_inv.reshape(batch, sequence, hidden // 32).astype(jnp.float8_e8m0fnu)
+    tokens = ScaledTensorFactory.create_1x(
+        data, scale_inv, scaling_mode=ScalingMode.MXFP8_1D_SCALING, dq_dtype=jnp.bfloat16
+    )
+    # 1-based token ids, dispatched the same way, name the source token of every received row.
+    token_ids = jnp.broadcast_to(
+        jnp.arange(1, num_tokens + 1, dtype=jnp.float32).reshape(batch, sequence, 1),
+        (batch, sequence, hidden),
+    )
+    topk_idx = jnp.asarray(
+        [
+            [[0, 1], [2, 3], [1, 2]],
+            [[3, 0], [2, 1], [0, 3]],
+        ],
+        dtype=jnp.int32,
+    )
+    topk_weights = jnp.ones((batch, sequence, top_k), dtype=jnp.float32)
+
+    with mesh, global_shard_guard(resource):
+        ep_bootstrap(
+            world_size=1,
+            rank=0,
+            num_experts=num_experts,
+            max_tokens_per_rank=num_tokens,
+            recv_capacity_per_rank=recv_capacity,
+            hidden_dim=hidden,
+        )
+        try:
+
+            def dispatch(x):
+                return ep_extensions.ep_prepare_and_dispatch_fwd(
+                    cfg, topk_idx, x, topk_weights, recv_capacity
+                )[0]
+
+            recv = jax.jit(dispatch)(tokens)
+            recv_ids = jax.jit(dispatch)(token_ids)
+        finally:
+            ep_finalize()
+
+    assert isinstance(recv, ScaledTensor1x)
+    source = np.asarray(recv_ids[..., 0]).reshape(-1).astype(np.int64) - 1
+    real = source >= 0
+    assert np.sum(real) == num_tokens * top_k
+    recv_data = np.asarray(recv.data.astype(jnp.float32)).reshape(-1, hidden)
+    recv_scale = np.asarray(recv.scale_inv.astype(jnp.float32)).reshape(-1, hidden // 32)
+    np.testing.assert_array_equal(
+        recv_data[real], np.asarray(data.astype(jnp.float32)).reshape(-1, hidden)[source[real]]
+    )
+    np.testing.assert_array_equal(
+        recv_scale[real],
+        np.asarray(scale_inv.astype(jnp.float32)).reshape(-1, hidden // 32)[source[real]],
+    )
+    # Padding rows hold zero data and a finite scale, so they dequantize to zero.
+    assert np.all(recv_data[~real] == 0)
+    assert np.all(np.isfinite(recv_scale))
