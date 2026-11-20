@@ -1896,21 +1896,27 @@ class TestGroupedMLPFusedOp:
             },
         ]
 
-    @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu", "scaled_tanh_srelu"))
     @pytest.mark.parametrize("disable_cudnn", (None, "1"), ids=("cutedsl", "cublas"))
     @pytest.mark.parametrize("group_size", (4, 1), ids=("grouped", "single_group"))
-    def test_grouped_mlp_nvfp4_gemm_backend(
+    @pytest.mark.parametrize(
+        "quantization,single_grouped_weight",
+        (("nvfp4_rht", False), ("mxfp8", False), ("mxfp8", True)),
+        ids=("nvfp4", "mxfp8", "mxfp8_single_grouped_weight"),
+    )
+    def test_grouped_mlp_unfused_gemm_backend(
         self,
         monkeypatch,
         activation: str,
         disable_cudnn: Optional[str],
         group_size: int,
+        quantization: str,
+        single_grouped_weight: bool,
     ) -> None:
         """FC2 fprop, FC1 dgrad and wgrad run on CuTe DSL unless the cuDNN unfused GEMMs are disabled.
 
-        FC2 fprop and FC1 dgrad also need a cuDNN frontend with canonical layouts, and
-        fall back to cuBLAS without one.
+        The NVFP4 FC2 fprop and FC1 dgrad also need a cuDNN frontend with canonical
+        layouts, and fall back to cuBLAS without one.
 
         A single group on the dense single-group path (every activation but the SReLU ones)
         keeps its dense GEMMs and calls no grouped GEMM at all, whatever the setting.
@@ -1965,10 +1971,11 @@ class TestGroupedMLPFusedOp:
             self.test_grouped_mlp(
                 enable_fusion=True,
                 group_size=group_size,
-                bias=False,
+                # The NVFP4 coverage of test_grouped_mlp is limited to no-bias.
+                bias=quantization == "mxfp8",
                 hidden_size=256,
-                quantization="nvfp4_rht",
-                single_grouped_weight=False,
+                quantization=quantization,
+                single_grouped_weight=single_grouped_weight,
                 activation=activation,
                 strict_fusion=True,
             )
@@ -1977,13 +1984,13 @@ class TestGroupedMLPFusedOp:
             _clear_caches()
 
         # FC2 fprop, FC2 wgrad, FC1 dgrad, FC1 wgrad
-        canonical = getattr(
+        cutedsl_fprop_dgrad = quantization == "mxfp8" or getattr(
             cudnn.grouped_gemm_quant_wrapper_sm100, "supports_canonical_layouts", False
         )
         expected_calls = {
             None: (
                 ["cutedsl", "cutedsl_wgrad", "cutedsl", "cutedsl_wgrad"]
-                if canonical
+                if cutedsl_fprop_dgrad
                 else ["TN", "cutedsl_wgrad", "NN", "cutedsl_wgrad"]
             ),
             "1": ["TN", "NT", "NN", "NT"],

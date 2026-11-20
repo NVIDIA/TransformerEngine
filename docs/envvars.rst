@@ -184,11 +184,11 @@ General
    :Default: ``0``
    :Description: When set to ``1``, the fused grouped MLP runs its unfused GEMMs, i.e. those
                  without a fused activation, on cuBLAS instead of the cuDNN frontend CuTe
-                 DSL kernels where both implement them: the weight-gradient GEMMs and, for
-                 NVFP4, the FC2 forward and FC1 input-gradient GEMMs. A single-group MLP
-                 on the dense single-group path keeps its dense GEMMs either way, and the
-                 two NVFP4 GEMMs always run on cuBLAS when the cuDNN frontend predates
-                 canonical data layouts (1.32.1).
+                 DSL kernels: the FC2 forward, FC1 input-gradient and weight-gradient
+                 GEMMs. A single-group MLP on the dense single-group path keeps its dense
+                 GEMMs either way, and the NVFP4 FC2 forward and FC1 input-gradient GEMMs
+                 always run on cuBLAS when the cuDNN frontend predates canonical data
+                 layouts (1.32.1).
                  ``NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP``
                  is a deprecated alias, honored when this variable is unset.
 
