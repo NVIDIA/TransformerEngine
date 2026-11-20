@@ -230,6 +230,9 @@ TEST(ActivationTableTest, OneTablePerDevice) {
 // and the replayed graph must read it. This runs in a fresh process (a death test), so that no
 // earlier test has built the table.
 TEST(ActivationTableDeathTest, FirstUseInsideGraphCapture) {
+  if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
+    GTEST_SKIP() << "MXFP8 quantization requires compute capability 10.0 or newer";
+  }
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   const auto body = [] {
     setenv("NVTE_ACTIVATION_TABLE", "1", 1);
