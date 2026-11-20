@@ -1429,16 +1429,19 @@ class TestTeEpMoeCudnnCutedslFusion:
             jnp.asarray(x_np),
         )
         for name in ("gate_kernel", "wi", "wo"):
+            grad_np = _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32)
+            grad_ref_np = np.asarray(jax.device_get(grads_ref[name])).astype(np.float32)
             np.testing.assert_allclose(
-                _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32),
-                np.asarray(jax.device_get(grads_ref[name])).astype(np.float32),
-                **(
-                    GRAD_GATE_TOLERANCE["mxfp8"]
-                    if name == "gate_kernel"
-                    else GRAD_FFN_TOLERANCE["mxfp8"]
-                ),
+                grad_np,
+                grad_ref_np,
+                atol=3e-6,
+                rtol=1.3e-6,
                 err_msg=f"{name} fused MXFP8 gradient parity breach",
             )
+            relative_error = np.linalg.norm(grad_np - grad_ref_np) / np.linalg.norm(grad_ref_np)
+            assert (
+                relative_error < 0.1
+            ), f"{name} MXFP8 relative L2 error {relative_error:.3%} >= 10%"
         grad_x_ref_np = np.asarray(jax.device_get(grad_x_ref)).astype(np.float32)
         np.testing.assert_allclose(
             grad_x_np,
