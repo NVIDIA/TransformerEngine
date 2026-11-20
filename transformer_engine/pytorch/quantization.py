@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import abc
-import dataclasses
 import warnings
 import os
 from dataclasses import dataclass, field
@@ -29,6 +28,19 @@ from transformer_engine.common.recipe import (
     CustomRecipe,
 )
 from .constants import dist_group_type, DType
+
+# Plain dataclasses shared with the tensor package. Re-exported here (and from
+# ``transformer_engine.pytorch``) for backward compatibility.
+from .quantizer_types import QuantizerRole, QuantizerRequest, DelayedScalingRequest
+
+# Keep the tensor-package imports ahead of ``.utils``. ``.utils`` (via the debug
+# tooling) imports ``quantized_tensor``, which in turn imports a helper from inside
+# the ``tensor`` package; that only works once ``transformer_engine.pytorch.tensor`` is
+# already in ``sys.modules`` (see ``tensor/__init__.py``).
+from .tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from .tensor.mxfp8_tensor import MXFP8Quantizer
+from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from .tensor.nvfp4_tensor import NVFP4Quantizer
 
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
@@ -55,99 +67,6 @@ _MXFP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _NVFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_BLOCK_SCALING_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_UE5M3_SUPPORT: Optional[Tuple[bool, str]] = None
-
-
-@dataclasses.dataclass(frozen=True)
-class QuantizerRole:
-    """Identity of a tensor slot requesting a quantizer.
-
-    TE modules populate all fields they know about.
-    User factories inspect only the fields they care about.
-
-    .. warning::
-        **EXPERIMENTAL**: QuantizerRole is experimental, still under active development,
-        and the API is subject to change without notice. Use at your own risk.
-
-    Fields
-    ------
-    module_type : str
-        Module type that emits this role, e.g. `"linear"`, `"grouped_linear"`, `"dpa"`.
-        Empty string when not provided.
-    tensor_type : str
-        What tensor is being quantized, in the module's own vocabulary.
-        Linear modules: `"input"`, `"weight"`, `"grad_output"`, etc.
-        DPA: `"qkv"`, `"s"`, etc.
-        Empty string when not provided.
-    name : str
-        Caller-provided module instance name (e.g. set by the training
-        framework), e.g.
-        `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`, `"linear_39"`.
-        Empty string when not provided.
-    """
-
-    module_type: str = ""
-    tensor_type: str = ""
-    name: str = ""
-
-    def __str__(self) -> str:
-        parts = []
-        if self.module_type:
-            parts.append(f"module_type={self.module_type}")
-        if self.tensor_type:
-            parts.append(f"tensor_type={self.tensor_type}")
-        if self.name:
-            parts.append(f"name={self.name}")
-        return "|".join(parts) if parts else "QuantizerRole()"
-
-
-@dataclasses.dataclass(frozen=True)
-class QuantizerRequest:
-    """Base class for stateful quantizer requests.
-
-    Custom recipe factories return ``QuantizerRequest`` subclasses (instead of
-    quantizer instances) when the quantizer requires TE-managed shared state.
-    TE detects these requests, allocates the required state, and replaces them
-    with real quantizer instances.
-
-    .. warning::
-        **EXPERIMENTAL**: QuantizerRequest is experimental, still under active
-        development, and the API is subject to change without notice.
-    """
-
-
-@dataclasses.dataclass(frozen=True)
-class DelayedScalingRequest(QuantizerRequest):
-    """Request a Float8Quantizer with TE-managed delayed scaling state.
-
-    .. warning::
-        **EXPERIMENTAL**: DelayedScalingRequest is experimental, still under active
-        development, and the API is subject to change without notice.
-
-    All ``DelayedScalingRequest`` instances within the same ``CustomRecipeState``
-    must share identical parameter values.
-
-    Parameters
-    ----------
-    fp8_format : Format, default = Format.HYBRID
-        Controls fwd/bwd dtype (HYBRID = E4M3 fwd, E5M2 bwd).
-    margin : int, default = 0
-        Margin for scaling factor computation.
-    amax_history_len : int, default = 1024
-        Length of the amax history window.
-    amax_compute_algo : str or Callable, default = "max"
-        Algorithm for choosing amax from history.
-    scaling_factor_compute_algo : Callable or None, default = None
-        Custom scaling factor computation.
-    reduce_amax : bool, default = True
-        Whether to all-reduce amax across the distributed group.
-    """
-
-    fp8_format: Format = Format.HYBRID
-    margin: int = 0
-    amax_history_len: int = 1024
-    amax_compute_algo: Union[str, Callable] = "max"
-    scaling_factor_compute_algo: Optional[Callable] = None
-    reduce_amax: bool = True
 
 
 def _compute_fp8_support() -> Tuple[bool, str]:
@@ -1500,9 +1419,6 @@ class DelayedScalingRecipeState(RecipeState):
         )
 
     def make_quantizers(self) -> list:
-        # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
-        from .tensor.float8_tensor import Float8Quantizer
-
         return [
             Float8Quantizer(self.scale[i], self.amax_history[0][i].reshape((1,)), self.dtype)
             for i in range(self.num_quantizers)
@@ -1543,8 +1459,6 @@ class Float8CurrentScalingRecipeState(RecipeState):
         self.device = device
 
     def make_quantizers(self) -> list:
-        from .tensor.float8_tensor import Float8CurrentScalingQuantizer
-
         return [
             Float8CurrentScalingQuantizer(
                 self.dtype, device=self.device, force_pow_2_scales=self.recipe.use_power_2_scales
@@ -1585,9 +1499,6 @@ class MXFP8BlockScalingRecipeState(RecipeState):
             device = torch.device(te_device_type())
 
     def make_quantizers(self) -> list:
-        # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
-        from .tensor.mxfp8_tensor import MXFP8Quantizer
-
         if self.mode not in ("forward", "backward"):
             raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
 
@@ -1663,8 +1574,6 @@ class Float8BlockScalingRecipeState(RecipeState):
         index-based convention, so behavior is unchanged for
         modules that haven't adopted roles yet.
         """
-        # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
-        from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
         def _make(tensor_type: str) -> Float8BlockQuantizer:
             if tensor_type == "weight":
@@ -1746,7 +1655,6 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         layout slot ``idx % 3 == 1`` is always weight and the rest fall into
         the input config, matching the legacy index-based behavior.
         """
-        from .tensor.nvfp4_tensor import NVFP4Quantizer
 
         def _qparams(tensor_type: str):
             if tensor_type in ("grad_output", "grad_input"):
