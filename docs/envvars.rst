@@ -186,7 +186,9 @@ General
                  without a fused activation, on cuBLAS instead of the cuDNN frontend CuTe
                  DSL kernels where both implement them: the weight-gradient GEMMs and, for
                  NVFP4, the FC2 forward and FC1 input-gradient GEMMs. A single-group MLP
-                 on the dense single-group path keeps its dense GEMMs either way.
+                 on the dense single-group path keeps its dense GEMMs either way, and the
+                 two NVFP4 GEMMs always run on cuBLAS when the cuDNN frontend predates
+                 canonical data layouts (1.32.1).
                  ``NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP``
                  is a deprecated alias, honored when this variable is unset.
 

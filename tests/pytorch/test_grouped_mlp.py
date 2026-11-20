@@ -1909,6 +1909,9 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """FC2 fprop, FC1 dgrad and wgrad run on CuTe DSL unless it is disabled for plain GEMMs.
 
+        FC2 fprop and FC1 dgrad also need a cuDNN frontend with canonical layouts, and
+        fall back to cuBLAS without one.
+
         A single group on the dense single-group path (every activation but the SReLU ones)
         keeps its dense GEMMs and calls no grouped GEMM at all, whatever the setting.
         """
@@ -1974,8 +1977,15 @@ class TestGroupedMLPFusedOp:
             _clear_caches()
 
         # FC2 fprop, FC2 wgrad, FC1 dgrad, FC1 wgrad
+        canonical = getattr(
+            cudnn.grouped_gemm_quant_wrapper_sm100, "supports_canonical_layouts", False
+        )
         expected_calls = {
-            None: ["cutedsl", "cutedsl_wgrad", "cutedsl", "cutedsl_wgrad"],
+            None: (
+                ["cutedsl", "cutedsl_wgrad", "cutedsl", "cutedsl_wgrad"]
+                if canonical
+                else ["TN", "cutedsl_wgrad", "NN", "cutedsl_wgrad"]
+            ),
             "1": ["TN", "NT", "NN", "NT"],
         }
         dense_single_group = group_size == 1 and activation == "scaled_swiglu"
