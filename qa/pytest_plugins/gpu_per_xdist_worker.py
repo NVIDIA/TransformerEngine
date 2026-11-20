@@ -16,5 +16,6 @@ if _worker is not None:
     if _visible:
         _gpus = _visible.split(",")
     else:
+        # All GPUs are visible and test.sh launches one worker per GPU, so worker count == GPU count.
         _gpus = [str(i) for i in range(int(os.environ["PYTEST_XDIST_WORKER_COUNT"]))]
     os.environ["CUDA_VISIBLE_DEVICES"] = _gpus[int(_worker[2:]) % len(_gpus)]
