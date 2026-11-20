@@ -147,7 +147,7 @@ def test_dsa_compressor_clears_unused_capacity(monkeypatch):
     torch.nn.Module.__init__(layer)
     layer.fused_proj = torch.nn.Identity()
     layer.kv_norm = torch.nn.RMSNorm(4)
-    layer.position_bias = torch.nn.Parameter(torch.zeros(4, 4))
+    layer.ape = torch.nn.Parameter(torch.zeros(4, 4))
     layer.projected, layer.ratio, layer.overlap, layer.weight_width = 4, 4, False, 0
     monkeypatch.setattr(
         compressor,

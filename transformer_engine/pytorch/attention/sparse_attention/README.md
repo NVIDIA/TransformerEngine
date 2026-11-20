@@ -15,7 +15,7 @@ discrete. The layer maps hidden states to hidden states with the same shape.
 DSv4Attention
 ├── TE query/local-KV projections + norms
 ├── Compressor (HCA or CSA)
-│   ├── TE KV/gate projections + learned position bias
+│   ├── TE KV/gate projections + learned additive position embedding (APE)
 │   ├── dsa_cudnn.compress -> cuDNN compressor
 │   └── TE RMSNorm
 ├── Indexer (CSA only)
@@ -31,13 +31,13 @@ DSv4Attention
 ## Inside DSv4Attention
 
 The following sketch expands the cuDNN calls underneath Compressor, Indexer, and attention.
-Query and local KV are already projected, normalized, and rotated; tensors are contiguous CUDA, with FP32 position bias/sink and CUDA INT32 sequence prefixes.
+Query and local KV are already projected, normalized, and rotated; tensors are contiguous CUDA, with FP32 APE/sink and CUDA INT32 sequence prefixes.
 
 ```python
 import transformer_engine.pytorch.attention.sparse_attention.dsa_cudnn as dsa_cudnn
 
 compressed_kv = dsa_cudnn.compress(
-    kv, gates, position_bias.float(), cu, cu_comp,
+    kv, gates, ape.float(), cu, cu_comp,
     ratio=ratio, overlap=is_csa, total_comp=total_comp,
 )
 compressed_kv = ...  # Apply RMSNorm and RoPE to compressed KV.
@@ -45,7 +45,7 @@ compressed_kv = ...  # Apply RMSNorm and RoPE to compressed KV.
 indices = None
 if is_csa:
     index_key = dsa_cudnn.compress(
-        index_kv, index_gates, index_position_bias.float(), cu, cu_comp,
+        index_kv, index_gates, index_ape.float(), cu, cu_comp,
         ratio=ratio, overlap=True, total_comp=total_comp,
     )
     index_key = ...  # Apply RMSNorm and RoPE to compressed index keys.

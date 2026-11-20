@@ -20,7 +20,8 @@ class Compressor(torch.nn.Module):
     separate learned KV/gate projections for the current and preceding blocks.
     Neighboring compressed KV entries therefore share an entire source block,
     but use different projections of its tokens.
-    Weights are computed per KV channel as ``softmax(gates + position_bias)``.
+    Weights are computed per KV channel as ``softmax(gates + ape)``, where
+    ``ape`` is the learned additive position embedding.
 
     For ``ratio=2`` and ``[a b c d e f g h i j k]``:
 
@@ -81,7 +82,7 @@ class Compressor(torch.nn.Module):
         # Fuse the KV, gate, and optional index-weight projections of hidden states.
         # Keep one contiguous weight for the shared projection call.
         self.fused_proj = Linear(hidden_size, 2 * projected + weight_width, **kw)
-        self.position_bias = torch.nn.Parameter(
+        self.ape = torch.nn.Parameter(
             torch.zeros(ratio, projected, device=device, dtype=params_dtype)
         )
         self.kv_norm = RMSNorm(width, eps=eps, device=device, dtype=params_dtype)
@@ -126,8 +127,8 @@ class Compressor(torch.nn.Module):
         compressed_kv = compress(
             kv.reshape(-1, self.projected).contiguous(),
             gate.reshape(-1, self.projected).contiguous(),
-            # cuDNN requires FP32 bias; the cast preserves gradients to the parameter.
-            self.position_bias.float(),
+            # cuDNN requires FP32 APE. The cast preserves gradients to the parameter.
+            self.ape.float(),
             cu_seqlens,
             cu_seqlens_comp,
             ratio=self.ratio,

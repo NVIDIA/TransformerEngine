@@ -136,8 +136,8 @@ def compress(
         Contiguous projected KV and gate scores of shape ``[T,coff*D]`` on the
         same device. ``coff`` is 2 when ``overlap=True``, otherwise 1.
     ape : torch.Tensor
-        FP32 learned position bias ``[ratio,coff*D]``, added to gate scores
-        before softmax over each compression block.
+        FP32 learned additive position embedding ``[ratio,coff*D]``,
+        added to gate scores before softmax over each compression block.
     cu_seqlens, cu_seqlens_comp : torch.Tensor
         Contiguous CUDA INT32 ``[B+1]`` cumulative input/compressed token counts.
         Start at zero; each increment is the corresponding sequence's token
