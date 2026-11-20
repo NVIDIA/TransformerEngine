@@ -308,7 +308,14 @@ def _pure_jax_moe_reference(
     x_2d = x.reshape(T, H)
 
     gate_kernel_cast = gate_kernel.astype(x.dtype)
-    logits = (x_2d @ gate_kernel_cast).astype(jnp.float32)  # [T, E]
+    # Round the logits to x.dtype as TE's gate GEMM does. XLA may otherwise keep
+    # them in fp32 (xla_allow_excess_precision), which can flip near-tied experts.
+    info = jnp.finfo(x.dtype)
+    logits = jax.lax.reduce_precision(
+        (x_2d @ gate_kernel_cast).astype(jnp.float32),
+        exponent_bits=info.nexp,
+        mantissa_bits=info.nmant,
+    )  # [T, E]
 
     if hash_input_ids is not None:
         if score_function != "sqrtsoftplus" or hash_tid2eid is None:
