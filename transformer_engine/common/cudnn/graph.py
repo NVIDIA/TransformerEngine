@@ -200,7 +200,7 @@ def attention_stride(dim, fmt):
     raise ValueError(f"Unsupported attention format: {fmt}")
 
 
-def attention_matrix_spec(
+def attention_tensor_spec(
     dim,
     fmt,
     dtype,

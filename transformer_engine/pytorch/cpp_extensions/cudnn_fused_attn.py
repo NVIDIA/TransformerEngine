@@ -25,7 +25,7 @@ from transformer_engine.common.cudnn.attention import (
 from transformer_engine.common.cudnn.graph import (
     TensorSpec as _TensorSpec,
     GraphCacheEntry,
-    attention_matrix_spec,
+    attention_tensor_spec,
     attention_stats_spec,
     mxfp8_scale_spec,
     check_graph_support,
@@ -205,7 +205,7 @@ class _AttentionGraph:
             order = {"bshd": (0, 2, 1, 3), "sbhd": (1, 2, 0, 3), "bhsd": (0, 1, 2, 3)}[fmt]
             dim = tuple(data.shape[index] for index in order)
         self.tensors[name] = data
-        self.specs[name] = attention_matrix_spec(
+        self.specs[name] = attention_tensor_spec(
             dim,
             fmt,
             _dtype(tensor),
@@ -528,7 +528,7 @@ def _query_graph(config, backward):
                 (attn.graph_b + 1, 1, 1, 1),
                 dtype="INT32" if attn.use_cu_seqlens else "INT64",
             )
-        attn.specs[n] = attention_matrix_spec(
+        attn.specs[n] = attention_tensor_spec(
             dim, fmt, dtype, packed=packed, output=output, ragged_offset=offset
         )
         if offset and attn.use_cu_seqlens:

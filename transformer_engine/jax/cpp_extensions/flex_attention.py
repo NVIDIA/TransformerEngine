@@ -21,7 +21,7 @@ from transformer_engine.common.cudnn.attention import (
 from transformer_engine.common.cudnn.graph import (
     TensorSpec,
     create_graph,
-    attention_matrix_spec,
+    attention_tensor_spec,
     row_major_stride as _row_major_stride,
 )
 
@@ -219,7 +219,7 @@ _SCORE_MOD_BPROP_SCALAR_UID_BASE = 4000
 def _matrix_spec(cudnn, aval, output=False):
     """Translate JAX's contiguous BSHD storage into a shared logical descriptor."""
     batch, seqlen, heads, dim = aval.shape
-    return attention_matrix_spec(
+    return attention_tensor_spec(
         (batch, heads, seqlen, dim),
         "bshd",
         _cudnn_data_type(cudnn, aval.dtype).name,
