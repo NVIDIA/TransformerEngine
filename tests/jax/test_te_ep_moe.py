@@ -136,7 +136,13 @@ from transformer_engine.jax.moe import (
     record_ep_bootstrap_signature_for_moe,
 )
 from transformer_engine.jax.cpp_extensions.ep import get_ep_config
-from transformer_engine.jax.ep import ep_bootstrap, ep_finalize
+from transformer_engine.jax.ep import (
+    EpLayerConfig,
+    ep_bootstrap,
+    ep_combine,
+    ep_dispatch,
+    ep_finalize,
+)
 from transformer_engine.common.recipe import Format, MXFP8BlockScaling
 from transformer_engine.jax.quantize import ScalingMode, is_scaling_mode_supported
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
@@ -747,6 +753,39 @@ def test_ep_bootstrap_matches_mesh_resource():
     cfg = get_ep_config()
     assert cfg.ep_size == COMBINED_EP_SIZE
     assert cfg.num_ep_groups == NUM_DEVICES_REQUIRED // COMBINED_EP_SIZE
+
+
+def test_standalone_dispatch_combine_default_layout(mesh):
+    """ep_dispatch and ep_combine with their default layouts round-trip tokens and gradients."""
+    num_tokens = 2 * NUM_DEVICES_REQUIRED
+    tokens = jax.random.normal(jax.random.PRNGKey(61), (num_tokens, HIDDEN), DTYPE)
+    # Distinct experts per token and weights summing to one make the round trip the identity.
+    topk_idx = (
+        jnp.arange(num_tokens * TOPK, dtype=jnp.int32).reshape(num_tokens, TOPK) % NUM_EXPERTS
+    )
+    topk_weights = jnp.full((num_tokens, TOPK), 1.0 / TOPK, jnp.float32)
+    cfg = EpLayerConfig(top_k=TOPK, dispatch_output_per_expert_alignment=128)
+    recv_capacity_per_rank = get_ep_config().recv_capacity_per_rank
+
+    def loss_fn(x, idx, w):
+        recv_x, recv_w, handle_mem, token_counts, _ = ep_dispatch(
+            cfg, idx, x, w, recv_capacity_per_rank
+        )
+        recv_x, recv_w = (_shard_inputs(a, mesh) for a in (recv_x, recv_w))
+        expert_out = recv_x * recv_w[..., None].astype(recv_x.dtype)
+        out = ep_combine(cfg, handle_mem, token_counts, expert_out, num_tokens)
+        return 0.5 * jnp.sum(out.astype(jnp.float32) ** 2), out
+
+    resource = MeshResource(dp_resource=DP_RESOURCE, ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+    with mesh, global_shard_guard(resource):
+        args = [_shard_inputs(a, mesh) for a in (tokens, topk_idx, topk_weights)]
+        (_, out), grad = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(*args)
+    # The loss is half the squared norm of the tokens, so its gradient is the tokens too.
+    expected = np.asarray(tokens, np.float32)
+    for actual in (out, grad):
+        np.testing.assert_allclose(
+            _to_global_numpy(actual, mesh).astype(np.float32), expected, **FWD_TOLERANCE["bf16"]
+        )
 
 
 @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_reason)

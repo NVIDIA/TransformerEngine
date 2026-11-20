@@ -14,7 +14,7 @@ import numpy as np
 
 import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
-from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis, _normalize_ep_axes
+from transformer_engine.jax.cpp_extensions.ep import _normalize_ep_axes
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.sharding import (
     MeshResource,
@@ -309,9 +309,8 @@ def ep_finalize():
 
 
 def _default_out_partition_spec():
-    """Leading-axis default: ``(("dp","ep"),)`` if DP/FSDP is set, else ``("ep",)``."""
-    outer = _ep_outer_axis()
-    outer_axes = (outer,) if isinstance(outer, str) else outer or ()
+    """Leading-axis default: every DP/FSDP outer axis, then EP, as counted by ``ep_bootstrap``."""
+    _, outer_axes = tex.ep._capture_ep_resource_axes()
     leading_axes = (*outer_axes, *tex.ep._resolve_ep_axes())
     leading = leading_axes[0] if len(leading_axes) == 1 else leading_axes
     return (leading,)
