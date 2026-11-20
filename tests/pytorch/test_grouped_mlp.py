@@ -3213,28 +3213,31 @@ class TestGroupedMLPFusedOp:
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_grouped_mlp_cuda_graph_safe_mxfp8(
+    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
+    def test_grouped_mlp_cuda_graph_safe(
         self,
         *,
         dtype: torch.dtype = torch.bfloat16,
         single_grouped_weight: bool,
         accumulate_into_main_grad: bool,
         activation: str,
+        quantization: str,
         device: torch.device = "cuda",
         group_size: int = 4,
         hidden_size: int = 256,
         split_alignment: int = 256,
         glu_interleave_size: int = 32,
         token_padding: int = 2048,
-        quantization: str = "mxfp8",
     ) -> None:
-        """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
+        """Grouped MLP forward+backward should be CUDA graph capturable."""
 
+        maybe_skip_quantization(quantization, device=device, dtype=dtype)
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("Fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Fused grouped MLP is only supported with BF16/FP16")
+        if single_grouped_weight and quantization != "mxfp8":
+            pytest.skip("single_grouped_weight is only supported for MXFP8")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -3490,33 +3493,6 @@ class TestGroupedMLPFusedOp:
         else:
             for graph_grad, param in zip(graph_param_grads, reference_module.parameters()):
                 assert_close(graph_grad, param.grad, **tols)
-
-    @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
-    @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
-    def test_grouped_mlp_cuda_graph_safe_nvfp4(
-        self,
-        monkeypatch,
-        accumulate_into_main_grad: bool,
-    ) -> None:
-        """Grouped MLP forward+backward should be CUDA graph capturable (NVFP4).
-
-        With NVFP4 every GEMM of the fused op runs on a CuTe DSL kernel by default,
-        including the FC2 forward and FC1 input-gradient GEMMs, which re-swizzle or
-        re-pack the weight scales on each call.
-        """
-        monkeypatch.delenv("NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP", raising=False)
-        monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", raising=False)
-        grouped_mlp_module._cudnn_unfused_gemm_disabled.cache_clear()
-        try:
-            # NVFP4 supports discrete weights only.
-            self.test_grouped_mlp_cuda_graph_safe_mxfp8(
-                single_grouped_weight=False,
-                accumulate_into_main_grad=accumulate_into_main_grad,
-                activation="scaled_swiglu",
-                quantization="nvfp4_rht",
-            )
-        finally:
-            grouped_mlp_module._cudnn_unfused_gemm_disabled.cache_clear()
 
     @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
     def test_grouped_mlp_nvfp4_rejects_single_grouped_weight(
