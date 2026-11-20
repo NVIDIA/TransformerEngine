@@ -25,6 +25,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common import _get_shared_object_file
 from transformer_engine.common.CuTeDSL.utils import device_compute_capability
 from transformer_engine.pytorch import MXFP8Quantizer
+from mxfp8_utils import swizzle_mxfp8_scale
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
@@ -57,6 +58,9 @@ MATRIX_SIZES = [
     # M is 32- but not 64-divisible, so the last CTA's block hangs past M and num_tiles
     # clamps it. Covers the clamp that makes TILE_ROWS (not TILE_ROWS*NUM_TILES) the bound.
     (96, 128),
+    # Whole 32x256 tiles but an odd row-tile count: the register-resident kernel's last 64-row
+    # dbias chunk has a single tile.
+    (96, 2048),
 ]
 # (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
 ROW, COL, BOTH = (1, 32), (32, 1), (32, 32)
@@ -236,7 +240,7 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled, us
     # with_amax is hardcoded to False for now because currently MXFP8 quantizers never allocate an amax
     flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act, use_2d_quant)
     major, minor = device_compute_capability()
-    return (
+    key = (
         f"cutedsl_mxfp8_sm{major * 10 + minor}_"
         + DTYPE_TO_STR[in_dtype]
         + "_"
@@ -246,6 +250,15 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled, us
         + "_"
         + desc
     )
+    # Kernels that read a BF16 activation table carry its layout in the name.
+    if (
+        in_dtype == torch.bfloat16
+        and desc in ("gelu", "silu", "dgelu", "dsilu")
+        and int(os.getenv("NVTE_ACTIVATION_TABLE") or 0)
+    ):
+        exact = desc == "dsilu" and int(os.getenv("NVTE_ACTIVATION_TABLE_EXACT_DSILU") or 0)
+        key += "_table_exact" if exact else "_table_default"
+    return key
 
 
 def extract_quantized_output(out, rowwise, columnwise, swizzled):
@@ -284,15 +297,18 @@ def run_test_case(
     swizzled=False,
     input_offset=0,
     use_2d_quant=False,
+    x=None,
 ):
     """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the
     same input and config. input_offset (in elements) shifts x's data pointer past the
-    start of its allocation, to test misaligned inputs.
+    start of its allocation, to test misaligned inputs. x, if given, replaces the generated input.
     """
     M, N = shape
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
-    x, act_input = generate_inputs(M, N, in_dtype)
+    generated_x, act_input = generate_inputs(M, N, in_dtype)
+    if x is None:
+        x = generated_x
     if input_offset:
         buf = torch.empty(input_offset + M * N, dtype=in_dtype, device="cuda")
         x = buf[input_offset:].view(M, N).copy_(x)
@@ -459,6 +475,27 @@ def test_specialized_kernels(shape, block_size, in_dtype, swizzled, input_offset
     )
 
 
+@pytest.mark.parametrize("shape", [(512, 1024), (512, 768)], ids=get_shape_id)
+@pytest.mark.parametrize("block_size", [BOTH, COL], ids=get_block_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_silu_fast_reciprocal_rows(monkeypatch, swizzled, block_size, shape):
+    """SiLU forward without a table on the register-resident kernel: a thread row takes the
+    sigmoid's fast reciprocal only if all its values are at least -80, and -100 changes the result
+    on that path. Each 16 columns of a row hold one -100, at another position in each of 16
+    consecutive rows, so the row check must read every value. N = 1024 runs 512-column tiles,
+    N = 768 256-column tiles."""
+    monkeypatch.setenv("NVTE_ACTIVATION_TABLE", "0")
+    M, N = shape
+    x, _ = generate_inputs(M, N, torch.bfloat16)
+    rows = torch.arange(M, device="cuda").unsqueeze(1)
+    cols = torch.arange(N, device="cuda")
+    x = x.masked_fill(cols % 16 == rows % 16, -100.0)
+    silu = next(a for a in ACTIVATIONS if a["name"] == "SiLU")
+    run_test_case(
+        "CAST_ACT", silu, shape, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled, x=x
+    )
+
+
 # Gated activations (gated_mxfp8.cuh). Input is [M, 2N] = [act | gate]; the forward writes
 # [M, N] and the backward, given grad [M, N], writes [M, 2N]. "desc" is the name the activation
 # goes by in the config key (GatedActivation in common/util/cutedsl_utils.h). The parameters of
@@ -527,14 +564,38 @@ def get_gated_cfg_key(act, in_dtype, fp8_dtype, rowwise, colwise, swizzled, is_b
     )
 
 
-def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swizzled=False):
+def fold_nan_block_scales(output, fp8_dtype, swizzled):
+    """Fold the E8M0 NaN scale (0xFF) of a rowwise block whose FP8 data is all NaN into 0. The
+    block dequantizes to NaN under either scale: the CUDA backend writes 0 and the CuTeDSL gated
+    G2S kernel writes NaN.
+    """
+    data = output["rowwise data"]
+    fp8 = torch.float8_e4m3fn if fp8_dtype == tex.DType.kFloat8E4M3 else torch.float8_e5m2
+    M, N = data.shape
+    nan_blocks = data.view(fp8).float().isnan().view(M, N // 32, 32).all(dim=2)
+    scales = output["rowwise scales"]
+    if swizzled:
+        mask = torch.zeros_like(scales, dtype=torch.bool)
+        mask[:M, : N // 32] = nan_blocks
+        nan_blocks = swizzle_mxfp8_scale(mask.shape[0], 32 * mask.shape[1], mask, columnwise=False)
+    output["rowwise scales"] = scales.masked_fill(nan_blocks & (scales == 0xFF), 0)
+
+
+def run_gated_test_case(
+    act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swizzled=False, all_bf16_act=False
+):
     """Assert the CuTeDSL and CUDA backends produce bit-identical gated activation outputs.
-    shape is (M, N): the gated input is [M, 2N].
+    shape is (M, N): the gated input is [M, 2N]. all_bf16_act fills the act half with every BF16
+    bit pattern in turn, specials included; a rowwise block whose data is then all NaN may have a
+    scale of 0 or NaN (fold_nan_block_scales).
     """
     M, N = shape
     rowwise = block_size[1] != 1
     columnwise = block_size[0] != 1
     x, _ = generate_inputs(M, 2 * N, in_dtype)
+    if all_bf16_act:
+        bits = torch.arange(M * N, dtype=torch.int32, device="cuda") % 65536 - 32768
+        x[:, :N] = bits.to(torch.int16).view(torch.bfloat16).view(M, N)
     grad, _ = generate_inputs(M, N, in_dtype, seed=1)
 
     def run():
@@ -550,6 +611,10 @@ def run_gated_test_case(act, is_bwd, shape, block_size, in_dtype, fp8_dtype, swi
     assert_cutedsl_kernel_registered(
         get_gated_cfg_key(act, in_dtype, fp8_dtype, rowwise, columnwise, swizzled, is_bwd)
     )
+    # The NaN act values form runs of 127, so some rowwise blocks hold no finite value.
+    if all_bf16_act and rowwise:
+        for output in (cuda_output, cutedsl_output):
+            fold_nan_block_scales(output, fp8_dtype, swizzled)
 
     layout = "swizzled" if swizzled else "linear"
     tag = (
@@ -580,6 +645,36 @@ def test_gated_sizes(swizzled, is_bwd, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_gated_dtypes(swizzled, is_bwd, act, fp8_dtype, in_dtype):
     run_gated_test_case(act, is_bwd, (256, 384), BOTH, in_dtype, fp8_dtype, swizzled)
+
+
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
+@pytest.mark.parametrize("act", GATED_ACTIVATIONS, ids=get_gated_id)
+def test_gated_swizzled_bwd_tails(act, block_size, in_dtype):
+    """Backward with GEMM-swizzled scales for every input dtype and output direction, on a row tail
+    and a 128-column tail."""
+    run_gated_test_case(act, True, (264, 384), block_size, in_dtype, tex.DType.kFloat8E4M3, True)
+
+
+# 264x288 has a row tail and a 32-column tail, and act values below the sigmoid's fast-reciprocal
+# bound in the tail columns.
+@pytest.mark.parametrize("shape", [(256, 256), (264, 288)], ids=get_shape_id)
+@pytest.mark.parametrize("is_bwd", GATED_DIRECTIONS, ids=get_direction_id)
+@pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
+def test_gated_swiglu_all_bf16_act_values(swizzled, is_bwd, shape):
+    """SwiGLU of every BF16 act value, including those (below the sigmoid's fast-reciprocal
+    bound, -inf, NaN) whose sigmoid needs the precise reciprocal."""
+    swiglu = next(a for a in GATED_ACTIVATIONS if a["name"] == "SwiGLU")
+    run_gated_test_case(
+        swiglu,
+        is_bwd,
+        shape,
+        BOTH,
+        torch.bfloat16,
+        tex.DType.kFloat8E4M3,
+        swizzled,
+        all_bf16_act=True,
+    )
 
 
 OUT_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
