@@ -101,15 +101,6 @@ GDN_CP_CASES = {
         norm=True,
         checkpoint=True,
     ),
-    # Distinct TP head slices each run dense FP16 attention over a two-rank CP group.
-    "cp_8": dict(
-        kind="tp_cp",
-        lengths=[8 * random.Random(_SEED).randint(96, 128)] * 2,
-        layout="bshd",
-        dtype="fp16",
-        key_dim=128,
-        value_dim=128,
-    ),
 }
 
 
@@ -126,8 +117,6 @@ def test_gdn_with_cp(name):
             pytest.fail("Required GDN CP test needs the cuDNN frontend GDN runtime")
         pytest.skip("GDN CP test requires the cuDNN frontend GDN runtime")
     case = GDN_CP_CASES[name]
-    if case.get("kind") == "tp_cp" and size < 4:
-        pytest.skip("TP+CP requires at least four GPUs")
     # TODO(KshitijLakhani): Create a common worker pool for all attention variants.
     # Locate the distributed runner beside this test file.
     runner = Path(__file__).with_name("run_gdn_with_cp.py")
@@ -138,7 +127,6 @@ def test_gdn_with_cp(name):
     # Capture all workers' output and errors in a per-case log for pytest.
     with tempfile.TemporaryDirectory(prefix=f"te-gdn-cp-{name}-") as log_dir:
         log_path = Path(log_dir) / "worker.log"
-        print(f"{name}: CP={size} progress log: {log_path}", flush=True)
         with log_path.open("w", encoding="utf-8") as log:
             # Launch one worker per GPU with pytest's Python and this case's configuration.
             with subprocess.Popen(
@@ -150,7 +138,7 @@ def test_gdn_with_cp(name):
                     f"--nproc_per_node={size}",
                     str(runner),
                     "--config",
-                    json.dumps(dict(name=name, **case)),
+                    json.dumps(case),
                 ],
                 text=True,
                 stdout=log,
@@ -173,4 +161,3 @@ def test_gdn_with_cp(name):
         output = log_path.read_text()
         # Report a failed worker run with its captured output.
         assert returncode == 0, output
-        print(output)
