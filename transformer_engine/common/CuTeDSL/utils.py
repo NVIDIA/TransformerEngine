@@ -209,6 +209,13 @@ def pack_f32x2(lo: Float32, hi: Float32) -> Int64:
 
 
 @cute.jit
+def zero_b32_reg() -> Int32:
+    """A zero held in a register, for packed ops such as max.xorsign.abs.bf16x2 that take no
+    immediate operands: CuTeDSL would emit Int32(0) as an immediate."""
+    return cute.arch.inline_ptx("mov.b32 {$w0}, 0;", write_only_types=[Int32], read_only_args=[])
+
+
+@cute.jit
 def unpack_i64_to_i32x2(v: Int64):
     """Split a 64-bit value into (lo, hi) 32-bit halves.
 
@@ -326,16 +333,6 @@ def cvt_f32x2_to_bf16x2(lo: Float32, hi: Float32) -> Int32:
     """Round two FP32 values to BF16 (round-to-nearest-even) and pack them, lo in the low half."""
     return cute.arch.inline_ptx(
         "cvt.rn.bf16x2.f32 {$w0}, {$r0}, {$r1};",
-        write_only_types=[Int32],
-        read_only_args=[hi, lo],
-    )
-
-
-@cute.jit
-def cvt_f32x2_to_f16x2(lo: Float32, hi: Float32) -> Int32:
-    """Round two FP32 values to FP16 (round-to-nearest-even) and pack them, lo in the low half."""
-    return cute.arch.inline_ptx(
-        "cvt.rn.f16x2.f32 {$w0}, {$r0}, {$r1};",
         write_only_types=[Int32],
         read_only_args=[hi, lo],
     )

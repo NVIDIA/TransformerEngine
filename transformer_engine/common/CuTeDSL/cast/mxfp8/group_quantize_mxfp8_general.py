@@ -453,7 +453,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
     @cute.jit
     def _make_shared_storage(
         self,
-        smem: cutlass.Constexpr[cutlass.utils.SmemAllocator],
+        smem: cutlass.Constexpr[cutlass.memory.SmemAllocator],
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
     ) -> tuple[
         cute.Pointer,
@@ -678,7 +678,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
                             tidx,
                         )
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         # Layouts for sX, sO_row, sO_col, sActInput:
         # ((TILE_ROWS, TILE_COLS), PIPELINE_DEPTH):((TILE_COLS, 1), TILE_ROWS * TILE_COLS)
         # Layout for sDbias:
@@ -1022,7 +1022,7 @@ class MXFP8GroupQuantizeKernel(MXFP8GroupQuantizeKernelBase):
         sDbias: Optional[
             cute.Tensor
         ],  # SMEM buffer for the rowwise dbias reduction (rowwise-only dbias)
-        smem: cutlass.Constexpr[cutlass.utils.SmemAllocator],  # 2D tile scratch
+        smem: cutlass.Constexpr[cutlass.memory.SmemAllocator],  # 2D tile scratch
         descs: tuple[
             Optional[cute.Pointer], ...
         ],  # Per-tensor descriptors (x, act, out_row, out_col), None if single-tensor

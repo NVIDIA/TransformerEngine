@@ -8,10 +8,11 @@ A CuTeDSL port of the CUDA C++ implementation in common/util/math.h."""
 # Each function is a 1:1 port of its math.h counterpart (see module docstring).
 # pylint: disable=missing-function-docstring
 import os
-from typing import Optional
+from typing import Callable, Optional
 
+import cutlass
 from cutlass import cute
-from cutlass import Float32
+from cutlass import Float32, Int32, Int64
 
 from transformer_engine.common.CuTeDSL.utils import fma_f32
 
@@ -108,32 +109,67 @@ def act_clamped_silu(x: Float32, limit: Float32, alpha: Float32) -> Float32:
     return c * sigmoid(alpha * c)
 
 
-@cute.jit
-def tanh_approx(x: Float32) -> Float32:
-    return cute.arch.inline_ptx(
-        "tanh.approx.f32 {$w0}, {$r0};", write_only_types=[Float32], read_only_args=[x]
+def scaled_swiglu_approx_x2_pair(dtype, clamped: bool) -> Callable:
+    """Return (silu_approx_x2(act) * gate) * scale of two adjacent elements, rounded to dtype.
+
+    group_scaled_swiglu_mxfp8.cuh's activation, in f32x2 math. silu_approx_x2 returns twice the
+    SiLU, so callers pass half the scale they want. Clamped SwiGLU clamps act from above and
+    gate on both sides, then offsets gate. A pair is one packed register for 16-bit dtype and an
+    Int64 of two FP32 values for FP32. The op takes (act, gate, half_scale, limit, half_alpha,
+    glu_linear_offset); plain SwiGLU ignores the last three.
+    """
+    if dtype is Float32:
+        unpack = "mov.b64 vx, {$r0};\n\tmov.b64 vg, {$r1};\n\t"
+        pack = "mov.b64 {$w0}, vy;\n\t"
+        pair_type = Int64
+    else:
+        if dtype is cutlass.BFloat16:
+            # A BF16 value is the upper half of its FP32 value.
+            widen = (
+                "prmt.b32 x0, 0x0, {$r0}, 0x5410;\n\tprmt.b32 x1, 0x0, {$r0}, 0x7632;\n\t"
+                "prmt.b32 g0, 0x0, {$r1}, 0x5410;\n\tprmt.b32 g1, 0x0, {$r1}, 0x7632;\n\t"
+            )
+        else:
+            widen = (
+                "mov.b32 {h0, h1}, {$r0};\n\tcvt.f32.f16 x0, h0;\n\tcvt.f32.f16 x1, h1;\n\t"
+                "mov.b32 {h0, h1}, {$r1};\n\tcvt.f32.f16 g0, h0;\n\tcvt.f32.f16 g1, h1;\n\t"
+            )
+        fmt = "bf16x2" if dtype is cutlass.BFloat16 else "f16x2"
+        unpack = widen + "mov.b64 vx, {x0, x1};\n\tmov.b64 vg, {g0, g1};\n\t"
+        pack = f"mov.b64 {{y0, y1}}, vy;\n\tcvt.rn.{fmt}.f32 {{$w0}}, y1, y0;\n\t"
+        pair_type = Int32
+    if clamped:
+        # $r3: limit, $r4: alpha / 2, $r5: glu_linear_offset
+        activation = (
+            "mov.b64 {g0, g1}, vg;\n\t"
+            "min.xorsign.abs.f32 g0, g0, {$r3};\n\tmin.xorsign.abs.f32 g1, g1, {$r3};\n\t"
+            "mov.b64 vg, {g0, g1};\n\tmov.b64 vc, {{$r5}, {$r5}};\n\tadd.rn.f32x2 vg, vg, vc;\n\t"
+            "mov.b64 {x0, x1}, vx;\n\tmin.f32 x0, {$r3}, x0;\n\tmin.f32 x1, {$r3}, x1;\n\t"
+            "mov.b64 vx, {x0, x1};\n\tmov.b64 vc, {{$r4}, {$r4}};\n\tmul.rn.f32x2 vt, vc, vx;\n\t"
+        )
+    else:
+        activation = "mov.b64 vc, 0x3F0000003F000000;\n\tmul.rn.f32x2 vt, vc, vx;\n\t"  # x / 2
+    asm = (
+        "{\n\t"
+        ".reg.b64 vx, vg, vt, vc, vy;\n\t.reg.b32 x0, x1, g0, g1, t0, t1, y0, y1;\n\t"
+        ".reg.b16 h0, h1;\n\t"
+        + unpack
+        + activation
+        + "mov.b64 {t0, t1}, vt;\n\ttanh.approx.f32 t0, t0;\n\ttanh.approx.f32 t1, t1;\n\t"
+        "mov.b64 vt, {t0, t1};\n\t"
+        "fma.rn.f32x2 vt, vx, vt, vx;\n\t"  # 2 * silu(x) = x * tanh(x / 2) + x
+        "mul.rn.f32x2 vy, vt, vg;\n\t"
+        "mov.b64 vc, {{$r2}, {$r2}};\n\tmul.rn.f32x2 vy, vy, vc;\n\t" + pack + "}"
     )
 
+    @cute.jit
+    def fn(act, gate, half_scale, limit, half_alpha, glu_linear_offset):
+        args = [act, gate, half_scale]
+        if cutlass.const_expr(clamped):
+            args += [limit, half_alpha, glu_linear_offset]
+        return cute.arch.inline_ptx(asm, write_only_types=[pair_type], read_only_args=args)
 
-def act_silu_approx_x2(x: Float32) -> Float32:
-    """Twice silu(x), as x * (1 + tanh(x / 2)): one MUFU op instead of exp and rcp."""
-    return fma_f32(x, tanh_approx(Float32(0.5) * x), x)
-
-
-def act_clamped_silu_approx_x2(x: Float32, limit: Float32, alpha: Float32) -> Float32:
-    """Twice act_clamped_silu(x), computed as act_silu_approx_x2."""
-    c = cute.arch.fmin(limit, x)
-    return fma_f32(c, tanh_approx((Float32(0.5) * alpha) * c), c)
-
-
-@cute.jit
-def clamp_symmetric(x: Float32, limit: Float32) -> Float32:
-    """clamp(x, -limit, limit) for limit > 0."""
-    return cute.arch.inline_ptx(
-        "min.xorsign.abs.f32 {$w0}, {$r0}, {$r1};",
-        write_only_types=[Float32],
-        read_only_args=[x, limit],
-    )
+    return fn
 
 
 def act_situ_gate(x: Float32, beta1: Float32) -> Float32:
