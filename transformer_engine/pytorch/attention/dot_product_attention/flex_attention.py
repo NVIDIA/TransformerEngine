@@ -24,8 +24,6 @@ from transformer_engine.common.cudnn.graph import (
 
 from transformer_engine.common.cudnn.score_mod import (
     callback_cache_key,
-    explicit_cache_key,
-    freeze_cache_key,
     wrap_score_mod as _wrap_score_mod,
 )
 
@@ -68,17 +66,6 @@ def _graph_tensor_spec(tensor, tensor_format=None, output=False):
         tensor.dtype
     ]
     return TensorSpec(dim, stride, dtype, output=output)
-
-
-# score_mod graph cache helpers.
-def _freeze_score_mod_cache_key(value: Any) -> Any:
-    """Freeze a structural callback key using this framework's tensor predicate."""
-    return freeze_cache_key(value, lambda value: isinstance(value, torch.Tensor))
-
-
-def _score_mod_explicit_cache_key(callback_owner: Any) -> Optional[Any]:
-    """Read a callback owner's optional structural key."""
-    return explicit_cache_key(callback_owner, lambda value: isinstance(value, torch.Tensor))
 
 
 def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:

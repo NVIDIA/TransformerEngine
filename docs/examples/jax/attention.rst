@@ -10,30 +10,14 @@ Transformer Engine's JAX attention APIs support self-attention and
 cross-attention with MHA, GQA, and MQA. Inputs can use standard BSHD or packed
 THD layouts, with Q/K/V supplied separately or in packed forms.
 
-Common options include causal and padding masks, bias, dropout, sliding-window
-attention (SWA), attention sinks, and experimental ``score_mod`` callbacks for
-FlexAttention-style customization. The API also supports different Q/K and V
-head dimensions, as used by the attention operation after the projection
-stages in DeepSeek-style MLA.
+Common options include causal and padding masks, bias (including ALiBi),
+dropout, sliding-window attention (SWA), attention sinks, and experimental
+``score_mod`` callbacks for FlexAttention-style customization. The API also
+supports different Q/K and V head dimensions, as used by the attention
+operation after the projection stages in DeepSeek-style MLA.
 
-FP8 attention
---------------
-
-Set ``fp8="mxfp8"`` on the Flax ``DotProductAttention``, ``MultiHeadAttention``
-or ``TransformerLayer`` module to enable block-scaled MXFP8 attention, or leave
-``fp8=False`` to use FP16/BF16 attention. Current and delayed tensor scaling
-are not supported for JAX attention; ``fp8=True`` is invalid. The attention
-setting is independent of the GEMM quantization recipe. Inputs, outputs and
-input gradients retain their FP16/BF16 dtype.
-
-:envvar:`NVTE_FP8_DPA_BWD` controls whether the backward pass also uses FP8.
-Availability depends on the GPU, installed cuDNN version, and attention
-configuration.
-
-``AttnBiasType.ALIBI`` (``attn_bias_type="alibi"`` in Flax) enables cuDNN's
-ALiBi mask without an explicit bias tensor. Explicit dropout keys have JAX's
-usual replay semantics: using the same key repeats the mask, including when
-recomputing a forward pass for its backward pass.
+Reusing the same dropout key repeats the mask, including during forward
+recomputation.
 
 For long contexts, selected BSHD and THD configurations support context
 parallelism with Ring or AllGather collectives. Exact fused-kernel availability
@@ -42,6 +26,21 @@ see the `JAX DotProductAttention API reference
 <../../api/jax.html#transformer_engine.jax.flax.DotProductAttention>`_ for the
 full interface. Choose the tutorial that matches how the sequence dimension is
 distributed in your model.
+
+FP8 attention
+--------------
+
+The Flax ``DotProductAttention``, ``MultiHeadAttention``, and
+``TransformerLayer`` modules support two ``fp8`` settings. Use ``fp8=False``
+for FP16/BF16 attention or ``fp8="mxfp8"`` for block-scaled MXFP8 attention.
+
+With MXFP8, ``fused_attn`` and Flax ``DotProductAttention`` can also take
+prequantized MXFP8 operands through ``quantized_qkv`` alongside the original
+FP16/BF16 Q/K/V. The output and Q/K/V gradients retain the model dtype.
+
+:envvar:`NVTE_FP8_DPA_BWD` controls whether the backward pass also uses FP8.
+Availability depends on the GPU, installed cuDNN version, and attention
+configuration.
 
 `← Back to the JAX integration overview <../te_jax_integration.html>`_
 

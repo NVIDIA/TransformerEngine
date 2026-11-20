@@ -14,7 +14,4 @@ fused_attn.h
    :class:`transformer_engine.pytorch.DotProductAttention` or
    :func:`transformer_engine.jax.attention.fused_attn` instead.
 
-   Layout enums and helpers, RNG utilities, KV-cache operations, and
-   context-parallel tensor utilities are not deprecated by this change.
-
 .. doxygenfile:: fused_attn.h
