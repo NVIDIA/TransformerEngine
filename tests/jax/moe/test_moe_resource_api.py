@@ -187,32 +187,38 @@ def test_fused_ep_partitioning_retains_bind_time_resources(monkeypatch):
     "fsdp_resource,outer_axis",
     [("fsdp", "fsdp"), (("fsdp", "ep"), "fsdp"), (("ep", "fsdp"), "fsdp"), (("ep",), None)],
 )
-def test_ep_outer_axis_excludes_ep_from_fsdp_tuple(monkeypatch, fsdp_resource, outer_axis):
-    from types import SimpleNamespace
-    from transformer_engine.jax import sharding
-    from transformer_engine.jax.cpp_extensions import ep
+def test_default_ep_out_spec_excludes_ep_from_fsdp_tuple(fsdp_resource, outer_axis):
     from transformer_engine.jax.ep import _default_out_partition_spec
 
-    monkeypatch.setattr(sharding, "_get_mesh", lambda: SimpleNamespace(shape={"fsdp": 2, "ep": 4}))
     with global_shard_guard(MeshResource(fsdp_resource=fsdp_resource, ep_resource="ep")):
-        assert ep._ep_outer_axis() == outer_axis
         leading = (outer_axis, "ep") if outer_axis is not None else "ep"
         assert _default_out_partition_spec() == (leading,)
 
 
-def test_default_ep_out_spec_flattens_two_outer_fsdp_axes(monkeypatch):
+def test_default_ep_out_spec_flattens_two_outer_fsdp_axes():
     from types import SimpleNamespace
-    from transformer_engine.jax import sharding
     from transformer_engine.jax.cpp_extensions import ep
     from transformer_engine.jax.ep import _default_out_partition_spec
 
     mesh = SimpleNamespace(shape={"fsdp1": 2, "fsdp2": 2, "ep": 2})
-    monkeypatch.setattr(sharding, "_get_mesh", lambda: mesh)
     resource = MeshResource(fsdp_resource=("fsdp1", "fsdp2", "ep"), ep_resource="ep")
     with global_shard_guard(resource):
-        assert ep._ep_outer_axis() == ("fsdp1", "fsdp2")
         spec = _default_out_partition_spec()
     assert spec == (("fsdp1", "fsdp2", "ep"),)
+    assert ep._leading_per_shard((16, 4), spec[0], mesh) == (2, 4)
+
+
+def test_default_ep_out_spec_uses_dp_and_fsdp():
+    """The default EP out spec shards over dp and fsdp, as ep_bootstrap counts EP groups."""
+    from types import SimpleNamespace
+    from transformer_engine.jax.cpp_extensions import ep
+    from transformer_engine.jax.ep import _default_out_partition_spec
+
+    mesh = SimpleNamespace(shape={"dp": 2, "fsdp": 2, "ep": 2})
+    resource = MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")
+    with global_shard_guard(resource):
+        spec = _default_out_partition_spec()
+    assert spec == (("dp", "fsdp", "ep"),)
     assert ep._leading_per_shard((16, 4), spec[0], mesh) == (2, 4)
 
 

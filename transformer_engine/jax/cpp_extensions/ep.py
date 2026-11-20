@@ -30,7 +30,7 @@ import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 from .misc import TEDType, jax_dtype_to_te_dtype
 from ..quantize.tensor import ScaledTensor1x, ScaledTensorFactory
-from ..sharding import global_mesh_resource, get_mesh_axis_size
+from ..sharding import global_mesh_resource
 from ..version_utils import is_collective_stream_supported, is_xla_ffi_collectives_supported
 
 
@@ -306,20 +306,6 @@ def _leading_axis_ok(spec, resource_axes=None, mesh=None):
         return False, ep_axis, outer_axes
     allowed = set(outer_axes) | set(_normalize_ep_axes(ep_axis))
     return all(a in allowed for a in elts), ep_axis, outer_axes
-
-
-def _ep_outer_axis():
-    """Legacy single outer axis used by the standalone EP custom VJP wrapper."""
-    resource = global_mesh_resource()
-    ep_axes = _resolve_ep_axes(resource)
-    dp_resource = None if resource.dp_resource in ep_axes else resource.dp_resource
-    fsdp_axes = _fsdp_outer_axes(resource)
-    fsdp_resource = fsdp_axes[0] if len(fsdp_axes) == 1 else fsdp_axes or None
-    if dp_resource is not None and get_mesh_axis_size(dp_resource) > 1:
-        return dp_resource
-    if fsdp_resource is not None and get_mesh_axis_size(fsdp_resource) > 1:
-        return fsdp_resource
-    return dp_resource or fsdp_resource
 
 
 def _ep_leading_dims(is_outer):
