@@ -90,6 +90,76 @@ NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(dsrelu, kDSReLU)
 
 #undef NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM
 
+// Encodes the gated activation selected by the gated dispatcher (gated_mxfp8.cuh), identified by
+// its forward ActOP and, for backward, its DActOP.
+enum class GatedActivation {
+  kGeGLU,
+  kQGeGLU,
+  kReGLU,
+  kSReGLU,
+  kSwiGLU,
+  kGLU,
+  kSiTUGLU,
+  kClampedSwiGLU,
+  kUnsupported,
+  kNumTypes
+};
+
+inline const char *gated_activation_to_str(GatedActivation act) {
+  switch (act) {
+    case GatedActivation::kGeGLU:
+      return "geglu";
+    case GatedActivation::kQGeGLU:
+      return "qgeglu";
+    case GatedActivation::kReGLU:
+      return "reglu";
+    case GatedActivation::kSReGLU:
+      return "sreglu";
+    case GatedActivation::kSwiGLU:
+      return "swiglu";
+    case GatedActivation::kGLU:
+      return "glu";
+    case GatedActivation::kSiTUGLU:
+      return "situglu";
+    case GatedActivation::kClampedSwiGLU:
+      return "clamped_swiglu";
+    case GatedActivation::kUnsupported:
+    case GatedActivation::kNumTypes:
+      return "unsupported";
+  }
+  return "unsupported";
+}
+
+// DActOP is nullptr for the forward.
+template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &)>
+constexpr GatedActivation gated_activation_func_to_enum() {
+  return GatedActivation::kUnsupported;
+}
+
+#define NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM(PARAM, ACT, DACT, ACTIVATION)      \
+  template <>                                                                                    \
+  constexpr GatedActivation gated_activation_func_to_enum<PARAM, ACT<float, float>, nullptr>() { \
+    return GatedActivation::ACTIVATION;                                                          \
+  }                                                                                              \
+  template <>                                                                                    \
+  constexpr GatedActivation                                                                      \
+  gated_activation_func_to_enum<PARAM, ACT<float, float>, DACT<float, float>>() {                \
+    return GatedActivation::ACTIVATION;                                                          \
+  }
+
+NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM(Empty, gelu, dgelu, kGeGLU)
+NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM(Empty, qgelu, dqgelu, kQGeGLU)
+NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM(Empty, relu, drelu, kReGLU)
+NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM(Empty, srelu, dsrelu, kSReGLU)
+NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM(Empty, silu, dsilu, kSwiGLU)
+NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM(Empty, sigmoid, dsigmoid, kGLU)
+NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM(SiTUGLUParam, situ_gate, dsitu_gate, kSiTUGLU)
+NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM(ClampedSwiGLUParam, clamped_silu,
+                                                      clamped_dsilu, kClampedSwiGLU)
+
+#undef NVTE_SPECIALIZE_CUTEDSL_GATED_ACTIVATION_FUNC_TO_ENUM
+
 }  // namespace cutedsl_backend
 }  // namespace transformer_engine
 
