@@ -533,39 +533,39 @@ def _use_tmem_post_rht_amax() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
-def _use_cutedsl_plain_gemm() -> bool:
-    """Whether the plain GEMMs run on the CuTe DSL kernels instead of cuBLAS.
+def _cudnn_unfused_gemm_disabled() -> bool:
+    """Whether the unfused GEMMs run on cuBLAS instead of the cuDNN CuTe DSL kernels.
 
-    Applies to the GEMMs without a fused activation that both backends implement:
-    wgrad, and the NVFP4 FC2 fprop and FC1 dgrad. They use cuBLAS when the environment
-    variable ``NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM`` is set to ``1``.
+    Applies to the GEMMs without a fused activation that both backends implement: wgrad,
+    and the NVFP4 FC2 fprop and FC1 dgrad. Set by the environment variable
+    ``NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP``.
 
     ``NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP``, which used to cover wgrad only, is
     still honored as a deprecated alias when the new variable is unset.
     """
-    value = os.environ.get("NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM")
+    value = os.environ.get("NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP")
     if value is None:
         value = os.environ.get("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP")
         if value is not None:
             warnings.warn(
                 "NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP is deprecated, use "
-                "NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM instead. Note that it also moves "
+                "NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP instead. Note that it also moves "
                 "the NVFP4 FC2 forward and FC1 input-gradient GEMMs to cuBLAS.",
                 DeprecationWarning,
                 stacklevel=2,
             )
-    return int(value or "0") < 1
+    return int(value or "0") >= 1
 
 
-def _use_cutedsl_nvfp4_plain_gemm(kernel: Callable, grouped_input: GroupedTensorStorage) -> bool:
+def _use_cutedsl_nvfp4_gemm(kernel: Callable, grouped_input: GroupedTensorStorage) -> bool:
     """Whether an NVFP4 FC2 fprop or FC1 dgrad GEMM runs on its CuTe DSL kernel.
 
     The operands are passed in cuDNN's canonical layouts, so the kernel has to accept
     them and the input scales must be swizzled for GEMM. Otherwise the GEMM runs on
-    cuBLAS, whatever the plain-GEMM backend setting.
+    cuBLAS, even when the cuDNN unfused GEMMs are not disabled.
     """
     return (
-        _use_cutedsl_plain_gemm()
+        not _cudnn_unfused_gemm_disabled()
         and getattr(kernel, "supports_canonical_layouts", False)
         and grouped_input._with_gemm_swizzled_scales
     )
@@ -2001,7 +2001,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         use_cutedsl_fc2_gemm = (
             use_nvfp4
             and not use_dense_single_group
-            and _use_cutedsl_nvfp4_plain_gemm(self.grouped_gemm_quant_kernel(), grouped_fc2_x)
+            and _use_cutedsl_nvfp4_gemm(self.grouped_gemm_quant_kernel(), grouped_fc2_x)
         )
         if use_nvfp4 and not use_cutedsl_fc2_gemm:
             fc2_bias_for_gemm = None
@@ -2870,7 +2870,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
 
         # FC2 wgrad GEMM
-        wgrad_kernel_fn = self.grouped_gemm_wgrad_kernel() if _use_cutedsl_plain_gemm() else None
+        wgrad_kernel_fn = (
+            None if _cudnn_unfused_gemm_disabled() else self.grouped_gemm_wgrad_kernel()
+        )
         fc2_grad_params = _compute_grad_params(
             fc_op=fc2_op,
             ctx=fc2_ctx,
@@ -2932,7 +2934,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     single_grouped_weight=fc1_op.single_grouped_weight,
                     dtype=dtype,
                 )
-            elif use_nvfp4 and not _use_cutedsl_nvfp4_plain_gemm(
+            elif use_nvfp4 and not _use_cutedsl_nvfp4_gemm(
                 self.grouped_gemm_quant_kernel(), grouped_fc1_dy
             ):
                 grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)

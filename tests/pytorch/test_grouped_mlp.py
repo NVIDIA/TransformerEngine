@@ -1898,16 +1898,16 @@ class TestGroupedMLPFusedOp:
 
     @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu", "scaled_tanh_srelu"))
-    @pytest.mark.parametrize("disable_cutedsl", (None, "1"), ids=("cutedsl", "cublas"))
+    @pytest.mark.parametrize("disable_cudnn", (None, "1"), ids=("cutedsl", "cublas"))
     @pytest.mark.parametrize("group_size", (4, 1), ids=("grouped", "single_group"))
     def test_grouped_mlp_nvfp4_gemm_backend(
         self,
         monkeypatch,
         activation: str,
-        disable_cutedsl: Optional[str],
+        disable_cudnn: Optional[str],
         group_size: int,
     ) -> None:
-        """FC2 fprop, FC1 dgrad and wgrad run on CuTe DSL unless it is disabled for plain GEMMs.
+        """FC2 fprop, FC1 dgrad and wgrad run on CuTe DSL unless the cuDNN unfused GEMMs are disabled.
 
         FC2 fprop and FC1 dgrad also need a cuDNN frontend with canonical layouts, and
         fall back to cuBLAS without one.
@@ -1950,15 +1950,15 @@ class TestGroupedMLPFusedOp:
             "general_grouped_gemm_for_grouped_tensor",
             _traced(grouped_mlp_module.general_grouped_gemm_for_grouped_tensor, None),
         )
-        if disable_cutedsl is None:
-            monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM", raising=False)
+        if disable_cudnn is None:
+            monkeypatch.delenv("NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP", raising=False)
         else:
-            monkeypatch.setenv("NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM", disable_cutedsl)
+            monkeypatch.setenv("NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP", disable_cudnn)
 
         def _clear_caches():
             fused_cls.grouped_gemm_quant_kernel.cache_clear()
             fused_cls.grouped_gemm_wgrad_kernel.cache_clear()
-            grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+            grouped_mlp_module._cudnn_unfused_gemm_disabled.cache_clear()
 
         _clear_caches()
         try:
@@ -1989,29 +1989,29 @@ class TestGroupedMLPFusedOp:
             "1": ["TN", "NT", "NN", "NT"],
         }
         dense_single_group = group_size == 1 and activation == "scaled_swiglu"
-        assert gemm_calls == ([] if dense_single_group else expected_calls[disable_cutedsl])
+        assert gemm_calls == ([] if dense_single_group else expected_calls[disable_cudnn])
 
     @pytest.mark.parametrize(
         "env,expected,warns",
         (
-            ({}, True, False),
-            ({"NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM": "1"}, False, False),
-            ({"NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM": "0"}, True, False),
+            ({}, False, False),
+            ({"NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP": "1"}, True, False),
+            ({"NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP": "0"}, False, False),
             # Deprecated alias: honored only while the new variable is unset
-            ({"NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP": "1"}, False, True),
-            ({"NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP": "0"}, True, True),
+            ({"NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP": "1"}, True, True),
+            ({"NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP": "0"}, False, True),
             (
                 {
-                    "NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM": "0",
+                    "NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP": "0",
                     "NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP": "1",
                 },
-                True,
+                False,
                 False,
             ),
         ),
         ids=("unset", "disabled", "enabled", "alias_disabled", "alias_enabled", "new_wins"),
     )
-    def test_cutedsl_plain_gemm_env_var(
+    def test_cudnn_unfused_gemm_disabled_env_var(
         self,
         monkeypatch,
         recwarn,
@@ -2019,20 +2019,20 @@ class TestGroupedMLPFusedOp:
         expected: bool,
         warns: bool,
     ) -> None:
-        """The plain-GEMM backend switch, including its deprecated wgrad-only alias."""
+        """The cuDNN unfused GEMM switch, including its deprecated wgrad-only alias."""
         for name in (
-            "NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM",
+            "NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP",
             "NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP",
         ):
             monkeypatch.delenv(name, raising=False)
         for name, value in env.items():
             monkeypatch.setenv(name, value)
 
-        grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+        grouped_mlp_module._cudnn_unfused_gemm_disabled.cache_clear()
         try:
-            assert grouped_mlp_module._use_cutedsl_plain_gemm() is expected
+            assert grouped_mlp_module._cudnn_unfused_gemm_disabled() is expected
         finally:
-            grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+            grouped_mlp_module._cudnn_unfused_gemm_disabled.cache_clear()
         deprecations = [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
         assert bool(deprecations) is warns
 
@@ -3497,9 +3497,9 @@ class TestGroupedMLPFusedOp:
         including the FC2 forward and FC1 input-gradient GEMMs, which re-swizzle or
         re-pack the weight scales on each call.
         """
-        monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM", raising=False)
+        monkeypatch.delenv("NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP", raising=False)
         monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", raising=False)
-        grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+        grouped_mlp_module._cudnn_unfused_gemm_disabled.cache_clear()
         try:
             # NVFP4 supports discrete weights only.
             self.test_grouped_mlp_cuda_graph_safe_mxfp8(
@@ -3509,7 +3509,7 @@ class TestGroupedMLPFusedOp:
                 quantization="nvfp4_rht",
             )
         finally:
-            grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+            grouped_mlp_module._cudnn_unfused_gemm_disabled.cache_clear()
 
     @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
     def test_grouped_mlp_nvfp4_rejects_single_grouped_weight(
@@ -3525,9 +3525,9 @@ class TestGroupedMLPFusedOp:
         """NVFP4 with a single grouped weight fails with a clear error, not inside a kernel."""
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("Fused grouped MLP is not supported on this system")
-        monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_PLAIN_GROUPED_MLP_GEMM", raising=False)
+        monkeypatch.delenv("NVTE_DISABLE_CUDNN_UNFUSED_GEMM_IN_GROUPED_MLP", raising=False)
         monkeypatch.delenv("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", raising=False)
-        grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+        grouped_mlp_module._cudnn_unfused_gemm_disabled.cache_clear()
 
         split_sizes = torch.full((group_size,), split_alignment, dtype=torch.int64, device=device)
         in_shape = (group_size * split_alignment, hidden_size)
@@ -3552,7 +3552,7 @@ class TestGroupedMLPFusedOp:
                 with te.autocast(enabled=True, recipe=recipe):
                     module(x, split_sizes, probs, split_sizes)
         finally:
-            grouped_mlp_module._use_cutedsl_plain_gemm.cache_clear()
+            grouped_mlp_module._cudnn_unfused_gemm_disabled.cache_clear()
 
     # (group_size, tokens_per_group): token counts chosen so the quantized inputs' byte sizes
     # never coincide with a weight's, which the saved-tensor counting below relies on.
