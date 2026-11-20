@@ -10,13 +10,14 @@ import subprocess
 
 from packaging.version import Version
 
-# The subset of SemVer whose PEP 440 equivalent has the same precedence. PEP 440 orders dev
-# releases before alpha and beta releases, so only dev and rc prereleases are supported.
+# The subset of SemVer with a PEP 440 equivalent. Precedence follows PEP 440, which orders
+# dev releases before alpha and beta releases, unlike SemVer.
 _SEMVER_PATTERN = re.compile(
     r"(?P<release>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
-    r"(?:-(?P<label>dev|rc)\.(?P<number>0|[1-9][0-9]*))?"
+    r"(?:-(?P<label>dev|alpha|beta|rc)\.(?P<number>0|[1-9][0-9]*))?"
     r"(?:\+(?P<build>[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?"
 )
+_PEP440_PRERELEASE_SEGMENTS = {"dev": ".dev", "alpha": "a", "beta": "b", "rc": "rc"}
 
 
 def te_raw_version() -> str:
@@ -46,9 +47,9 @@ def te_version() -> str:
     """Transformer Engine version string, normalized to PEP 440
 
     VERSION.txt must contain MAJOR.MINOR.PATCH, optionally followed by
-    a -dev.N or -rc.N prerelease and +BUILD metadata. For example,
-    1.2.3-rc.1 becomes 1.2.3rc1 and 4.5.6-dev.123+abc123 becomes
-    4.5.6.dev123+abc123.
+    a -dev.N, -alpha.N, -beta.N, or -rc.N prerelease and +BUILD
+    metadata. For example, 1.2.3-rc.1 becomes 1.2.3rc1 and
+    4.5.6-dev.123+abc123 becomes 4.5.6.dev123+abc123.
 
     Includes Git commit as local version, unless suppressed with
     NVTE_NO_LOCAL_VERSION environment variable.
@@ -59,14 +60,12 @@ def te_version() -> str:
     if match is None:
         raise ValueError(
             f"Transformer Engine version {raw_version!r} is not a supported SemVer version."
-            " Expected MAJOR.MINOR.PATCH, optionally followed by -dev.N or -rc.N and +BUILD"
-            " metadata, e.g. 1.2.3, 1.2.3-rc.1, or 1.2.3-dev.4+abc123."
+            " Expected MAJOR.MINOR.PATCH, optionally followed by -dev.N, -alpha.N, -beta.N, or"
+            " -rc.N and +BUILD metadata, e.g. 1.2.3, 1.2.3-rc.1, or 1.2.3-dev.4+abc123."
         )
     version = match["release"]
-    if match["label"] == "rc":
-        version += f"rc{match['number']}"
-    elif match["label"] == "dev":
-        version += f".dev{match['number']}"
+    if match["label"] is not None:
+        version += f"{_PEP440_PRERELEASE_SEGMENTS[match['label']]}{match['number']}"
     if match["build"] is not None:
         version += f"+{match['build']}"
     version = str(Version(version))

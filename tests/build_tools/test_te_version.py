@@ -32,6 +32,8 @@ def raw_version(monkeypatch):
         ("3.0.0", "3.0.0"),
         ("10.20.30", "10.20.30"),
         ("3.0.0-dev.0", "3.0.0.dev0"),
+        ("1.2.3-alpha.1", "1.2.3a1"),
+        ("1.2.3-beta.2", "1.2.3b2"),
         ("1.2.3-rc.1", "1.2.3rc1"),
         ("4.5.6-dev.123", "4.5.6.dev123"),
         ("4.5.6-dev.123+abc123", "4.5.6.dev123+abc123"),
@@ -58,8 +60,8 @@ def test_normalizes_semver(raw_version, raw, expected):
         "1.2.3rc1",
         "1.2.3.post1",
         # Unsupported prereleases
-        "1.2.3-alpha.1",
-        "1.2.3-beta.1",
+        "1.2.3-a.1",
+        "1.2.3-alpha",
         "1.2.3-nightly.5",
         "1.2.3-1",
         "1.2.3-rc",
@@ -81,10 +83,13 @@ def test_rejects_unsupported_versions(raw_version, raw):
         te_version()
 
 
-def test_preserves_semver_precedence(raw_version):
-    semver_order = [
+def test_pep440_precedence(raw_version):
+    """Package installers order prereleases by PEP 440, with dev releases first."""
+    expected_order = [
         "3.0.0-dev.0",
         "3.0.0-dev.10",
+        "3.0.0-alpha.1",
+        "3.0.0-beta.1",
         "3.0.0-rc.1",
         "3.0.0-rc.2",
         "3.0.0",
@@ -92,7 +97,7 @@ def test_preserves_semver_precedence(raw_version):
         "3.1.0",
     ]
     pep440_versions = []
-    for raw in semver_order:
+    for raw in expected_order:
         raw_version(raw)
         pep440_versions.append(Version(te_version()))
     assert pep440_versions == sorted(pep440_versions)
