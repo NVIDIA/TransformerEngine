@@ -753,20 +753,27 @@ def test_standalone_dispatch_combine_default_layout(mesh):
     cfg = EpLayerConfig(top_k=TOPK, dispatch_output_per_expert_alignment=128)
     recv_capacity_per_rank = get_ep_config().recv_capacity_per_rank
 
-    def loss_fn(x, idx, w):
+    def round_trip(x, idx, w):
         recv_x, recv_w, handle_mem, token_counts, _ = ep_dispatch(
             cfg, idx, x, w, recv_capacity_per_rank
         )
         recv_x, recv_w = (_shard_inputs(a, mesh) for a in (recv_x, recv_w))
         expert_out = recv_x * recv_w[..., None].astype(recv_x.dtype)
-        out = ep_combine(cfg, handle_mem, token_counts, expert_out, num_tokens)
-        return 0.5 * jnp.sum(out.astype(jnp.float32) ** 2), out
+        return ep_combine(cfg, handle_mem, token_counts, expert_out, num_tokens)
+
+    def fwd_bwd(x, idx, w):
+        # Pull the output back as its own cotangent (the gradient of half its squared
+        # norm) with no loss reduction, and pin both results to the token layout, so
+        # the EP ops are the only collectives.
+        out, vjp_fn = jax.vjp(lambda t: round_trip(t, idx, w), x)
+        (grad,) = vjp_fn(out)
+        return _shard_inputs(out, mesh), _shard_inputs(grad, mesh)
 
     resource = MeshResource(dp_resource=DP_RESOURCE, ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
     with mesh, global_shard_guard(resource):
         args = [_shard_inputs(a, mesh) for a in (tokens, topk_idx, topk_weights)]
-        (_, out), grad = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(*args)
-    # The loss is half the squared norm of the tokens, so its gradient is the tokens too.
+        out, grad = jax.jit(fwd_bwd)(*args)
+    # The round trip is the identity, so the output and its pulled-back cotangent are the tokens.
     expected = np.asarray(tokens, np.float32)
     for actual in (out, grad):
         np.testing.assert_allclose(
