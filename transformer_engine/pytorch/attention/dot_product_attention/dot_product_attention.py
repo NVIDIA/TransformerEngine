@@ -1983,6 +1983,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_interleave_dim: int = -3,
         thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
         thd_attention_policy_dispatch: str = "auto",
+        cp_external_exchange=None,
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -2388,7 +2389,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 f"Values have head_dim = {head_dim_v}, but expected head_dim ="
                 f" {self.hidden_size_per_attention_head_v}!"
             )
-            assert num_gqa_groups == self.num_gqa_groups_per_partition, (
+            expected_groups = self.num_gqa_groups_per_partition
+            if cp_external_exchange is not None:
+                assert self.cp_comm_type == "a2a" and isinstance(self.cp_group, dist_group_type)
+                expected_groups //= get_distributed_world_size(self.cp_group)
+            assert num_gqa_groups == expected_groups, (
                 "Keys and values must have num_gqa_group ="
                 f" {self.num_gqa_groups_per_partition} heads! Found {num_gqa_groups}."
             )
@@ -2655,7 +2660,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             if thd_mask_policies is not None and context_parallel:
                 raise ValueError("Mixed THD policies do not support context parallelism.")
             if q_format in ["sbhd", "bshd"]:
-                max_seqlen_q *= cp_size
+                max_seqlen_q *= 1 if cp_external_exchange is not None else cp_size
                 if cu_seqlens_q is None:
                     if "padding" in attn_mask_type:
                         assert (
@@ -2672,7 +2677,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                             query_layer.device,
                         )
             if kv_format in ["sbhd", "bshd"]:
-                max_seqlen_kv *= cp_size
+                max_seqlen_kv *= 1 if cp_external_exchange is not None else cp_size
                 if cu_seqlens_kv is None:
                     if "padding" in attn_mask_type:
                         assert (
@@ -2802,7 +2807,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "attention_dropout": self.attention_dropout,
                 "context_parallel": context_parallel,
                 "cp_comm_type": self.cp_comm_type,
-                "cp_size": cp_size,
+                # Selector geometry is already global-sequence/local-head. The real
+                # CP group still dispatches the existing CP attention Function.
+                "cp_size": 1 if cp_external_exchange is not None else cp_size,
                 "cp_size_a2a": cp_size_a2a,
                 "deterministic": self.deterministic,
                 "is_training": self.training,
@@ -2988,6 +2995,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_stream=self.cp_stream,
                     cp_comm_type=self.cp_comm_type,
                     load_balancing_strategy=self.load_balancing_strategy,
+                    cp_external_exchange=cp_external_exchange,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
@@ -3045,6 +3053,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cp_stream=self.cp_stream,
                         cp_comm_type=self.cp_comm_type,
                         load_balancing_strategy=self.load_balancing_strategy,
+                        cp_external_exchange=cp_external_exchange,
                         fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                         fp8_meta=self.fp8_meta,
                         quantizers=self.quantizers,
@@ -3080,6 +3089,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_stream=self.cp_stream,
                     cp_comm_type=self.cp_comm_type,
                     load_balancing_strategy=self.load_balancing_strategy,
+                    cp_external_exchange=cp_external_exchange,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,

@@ -4567,6 +4567,19 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         )
 
 
+def _external_a2a_reorder(x, qkv_format, cp_size, cu_seqlens, rows, global_shape, to_sequence):
+    """Adapt already-exchanged rank-major rows without launching a collective."""
+    if qkv_format == "thd":
+        reorder = (
+            thd_cp_rank_order_to_sequence_order
+            if to_sequence
+            else thd_sequence_order_to_cp_rank_order
+        )
+        return reorder(x.view(-1, *global_shape[-2:]), cu_seqlens, cp_size)
+    out = x.reshape(-1, *global_shape[-2:]).index_select(0, rows)
+    return out.view(global_shape) if to_sequence else out
+
+
 class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
     """
     Attention implementation with context parallelism. Like Ulysses, applying A2A to QKVO.
@@ -4608,11 +4621,26 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         softmax_type,
         softmax_offset,
         fp8_output,
+        cp_external_exchange,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
 
         cp_size = get_distributed_world_size(cp_group)
+        external = cp_external_exchange is not None
+        if external:
+            assert not fp8 and q.dtype == torch.bfloat16 and cp_size > 1
+            assert dropout_p == 0 and softmax_type == "vanilla" and not return_max_logit
+            assert not pad_between_seqs and len(cp_external_exchange) == 2
+            if qkv_format == "thd":
+                assert cp_external_exchange == (None, None)
+            else:
+                assert qkv_format in ("bshd", "sbhd")
+                for rows in cp_external_exchange:
+                    assert rows.dtype == torch.int64 and rows.device == q.device
+                    assert rows.ndim == 1 and rows.numel() == q.numel() // (
+                        q.shape[-2] * q.shape[-1]
+                    )
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
         original_qkv_layout = qkv_layout
         orig_q_shape, orig_k_shape, orig_v_shape = q.shape, k.shape, v.shape
@@ -4647,7 +4675,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             "cp_comm_type='a2a' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="
             f" {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}, cp_size = {cp_size}."
         )
-        assert q.shape[-2] % cp_size == 0 and k.shape[-2] % cp_size == 0, (
+        assert external or (q.shape[-2] % cp_size == 0 and k.shape[-2] % cp_size == 0), (
             "cp_comm_type='a2a' requires num_heads % cp_size == 0 for Q, K, V. Found num_heads_q ="
             f" {q.shape[-2]}, num_heads_kv = {k.shape[-2]}, cp_size = {cp_size}."
         )
@@ -4748,20 +4776,21 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [b, s//cp, h, d] -> [b, s, h//cp, d]
         # [s//cp, b, h, d] -> [s, b, h//cp, d]
         # [t//cp, h, d] -> [t, h//cp, d]
-        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, q.device)
-        q, k, v = flash_attn_a2a_communicate(
-            [q, k, v],
-            chunk_ids_for_a2a,
-            seq_dim_qkv,
-            cp_size,
-            cp_group,
-            cp_stream,
-            before_attn=True,
-            qkv_format=qkv_format,
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            a2a_input_names=["q", "k", "v"],
-        )
+        if not external:
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, q.device)
+            q, k, v = flash_attn_a2a_communicate(
+                [q, k, v],
+                chunk_ids_for_a2a,
+                seq_dim_qkv,
+                cp_size,
+                cp_group,
+                cp_stream,
+                before_attn=True,
+                qkv_format=qkv_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                a2a_input_names=["q", "k", "v"],
+            )
 
         # softmax_offset: split h
         # [1, h, 1, 1] -> [1, h//cp, 1, 1]
@@ -4922,23 +4951,38 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [t, h//cp, d] -> [t//cp, h, d]
         if isinstance(out_, Float8TensorStorage):
             out_ = out_._data
-        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, out_.device)
-        out_ = flash_attn_a2a_communicate(
-            out_,
-            chunk_ids_for_a2a,
-            seq_dim_o,
-            cp_size,
-            cp_group,
-            cp_stream,
-            before_attn=False,
-            qkv_format=o_format,
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            a2a_input_names=["out"],
-        )
-        # [b*s//cp, h, d] -> [b, s//cp, h, d]
-        # [s//cp*b, h, d] -> [s//cp, b, h, d]
-        # [t//cp, h, d] -> [t//cp, h, d]
-        out_ = out_.view(orig_o_shape)
+        if not external:
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, out_.device)
+            out_ = flash_attn_a2a_communicate(
+                out_,
+                chunk_ids_for_a2a,
+                seq_dim_o,
+                cp_size,
+                cp_group,
+                cp_stream,
+                before_attn=False,
+                qkv_format=o_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                a2a_input_names=["out"],
+            )
+            # [b*s//cp, h, d] -> [b, s//cp, h, d]
+            # [s//cp*b, h, d] -> [s//cp, b, h, d]
+            # [t//cp, h, d] -> [t//cp, h, d]
+            out_ = out_.view(orig_o_shape)
+
+        else:
+            # MegaUP receives [rank,batch,half,token,head,dim], whereas the
+            # native send buffer orders [rank,half,batch,token,head,dim].
+            # The cached row map combines that adaptation with chunk reorder.
+            out_ = _external_a2a_reorder(
+                out_,
+                o_format,
+                cp_size,
+                cu_seqlens_q_padded,
+                cp_external_exchange[1],
+                orig_o_shape,
+                False,
+            )
 
         # out_ret: output tensor for forward pass
         # out_fp8 and out_f16 are reused here to store the FP8 or F16 tensor for forward returns
@@ -5013,7 +5057,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cu_seqlens_q_padded,
             cu_seqlens_kv_padded,
             *aux_ctx_tensors,
+            *(cp_external_exchange if external else ()),
         )
+        if external:
+            assert all(obj is None for obj in tensor_objects)
+        ctx.cp_exchanges_external = external
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
 
@@ -5065,6 +5113,12 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
         cp_size = get_distributed_world_size(ctx.cp_group)
 
+        # Plain external tensors remain owned by autograd, including retained
+        # graphs; do not consume restoration metadata on the first backward.
+        saved = ctx.saved_tensors if ctx.cp_exchanges_external else restore_from_func_ctx(ctx)
+        if ctx.cp_exchanges_external:
+            to_sequence, _to_rank = saved[-2:]
+            saved = saved[:-2]
         (
             q_fp8,
             k_fp8,
@@ -5079,7 +5133,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cu_seqlens_q_padded,
             cu_seqlens_kv_padded,
             *aux_ctx_tensors,
-        ) = restore_from_func_ctx(ctx)
+        ) = saved
 
         _, seq_dim_dqkv, _ = get_bsh_dims(ctx.dqkv_format)
         _, seq_dim_do, _ = get_bsh_dims(ctx.o_format)
@@ -5107,7 +5161,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 dout = dout.dequantize(dtype=bwd_nominal_dtype)
             if ctx.use_fused_attention:
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
-        dout = dout.view(*ctx.orig_o_shape)
+        if not ctx.cp_exchanges_external:
+            dout = dout.view(*ctx.orig_o_shape)
 
         # dout:
         # FP8DS/CS: torch.uint8
@@ -5116,19 +5171,31 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [b, s//cp, h, d] -> [b, s, h//cp, d]
         # [s//cp, b, h, d] -> [s, b, h//cp, d]
         # [t//cp, h, d] -> [t, h//cp, d]
-        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, dout.device)
-        dout = flash_attn_a2a_communicate(
-            dout,
-            chunk_ids_for_a2a,
-            seq_dim_do,
-            cp_size,
-            ctx.cp_group,
-            ctx.cp_stream,
-            before_attn=True,
-            qkv_format=ctx.o_format,
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            a2a_input_names=["dout"],
-        )
+        if not ctx.cp_exchanges_external:
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, dout.device)
+            dout = flash_attn_a2a_communicate(
+                dout,
+                chunk_ids_for_a2a,
+                seq_dim_do,
+                cp_size,
+                ctx.cp_group,
+                ctx.cp_stream,
+                before_attn=True,
+                qkv_format=ctx.o_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                a2a_input_names=["dout"],
+            )
+
+        else:
+            dout = _external_a2a_reorder(
+                dout,
+                ctx.o_format,
+                cp_size,
+                cu_seqlens_q_padded,
+                to_sequence,
+                ctx.orig_o_shape,
+                True,
+            )
 
         flash_attn_bwd = None
         if not ctx.use_fused_attention:
@@ -5326,20 +5393,21 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [b, s//cp, h, d] -> [b, s, h//cp, d]
         # [s//cp, b, h, d] -> [s, b, h//cp, d]
         # [t//cp, h, d] -> [t, h//cp, d]
-        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, dq.device)
-        dq, dk, dv = flash_attn_a2a_communicate(
-            [dq, dk, dv],
-            chunk_ids_for_a2a,
-            seq_dim_dqkv,
-            cp_size,
-            ctx.cp_group,
-            ctx.cp_stream,
-            before_attn=False,
-            qkv_format=ctx.dqkv_format,
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            a2a_input_names=["dq", "dk", "dv"],
-        )
+        if not ctx.cp_exchanges_external:
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, dq.device)
+            dq, dk, dv = flash_attn_a2a_communicate(
+                [dq, dk, dv],
+                chunk_ids_for_a2a,
+                seq_dim_dqkv,
+                cp_size,
+                ctx.cp_group,
+                ctx.cp_stream,
+                before_attn=False,
+                qkv_format=ctx.dqkv_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                a2a_input_names=["dq", "dk", "dv"],
+            )
         dq, dk, dv = [
             x.view(y)
             for x, y in zip([dq, dk, dv], [ctx.orig_q_shape, ctx.orig_k_shape, ctx.orig_v_shape])
@@ -5413,6 +5481,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             d_softmax_offset,
             None,
+            None,  # cp_external_exchange metadata
         )
 
 
@@ -5566,6 +5635,7 @@ def attn_forward_func_with_cp(
     layer_number=1,
     return_max_logit=False,
     load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+    cp_external_exchange=None,
 ) -> torch.Tensor:
     """
     Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
@@ -5743,6 +5813,12 @@ def attn_forward_func_with_cp(
         softcap,
     ]
 
+    if cp_external_exchange is not None:
+        assert (
+            cp_comm_type == "a2a"
+            and load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
+        )
+
     if cp_comm_type in ["p2p", "a2a+p2p"]:
         args += [
             fp8,
@@ -5787,6 +5863,7 @@ def attn_forward_func_with_cp(
             softmax_type,
             softmax_offset,
             fp8_output,
+            cp_external_exchange,
         ]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:

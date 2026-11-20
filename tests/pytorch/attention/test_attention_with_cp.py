@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import json
+import importlib.util
 import os
 import select
 import signal
@@ -44,6 +45,37 @@ _deterministic = (
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
+
+
+@pytest.mark.parametrize(
+    "world_size,gqa", [(2, False), (4, False), (8, False), (2, True), (8, True)]
+)
+@pytest.mark.parametrize("trusted", [False, True])
+def test_mha_with_megaup(world_size, trusted, gqa):
+    """Validate packed rectangular projection fusion with the real optional kernels."""
+    if importlib.util.find_spec("mega_up") is None:
+        pytest.skip("Optional mega_up package is not installed")
+    if torch.cuda.device_count() < world_size or torch.cuda.get_device_capability()[0] != 10:
+        pytest.skip("MegaUP validation requires multiple mutually accessible SM100 GPUs")
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        f"--nproc-per-node={world_size}",
+        str(_current_file.with_name("run_attention_with_cp.py")),
+        "megaup-gqa" if gqa else "megaup",
+    ]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+        env={**os.environ, "NVTE_MHA_MEGAUP_TRUSTED": str(int(trusted))},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
 
 test_essential = bool(int(os.getenv("NVTE_TEST_ESSENTIAL", "1")))
 # An installed FA4 package must not select tests when the backend is explicitly disabled.

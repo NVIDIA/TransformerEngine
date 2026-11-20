@@ -902,6 +902,48 @@ class MultiheadAttention(torch.nn.Module):
             core_attention_bias_type in AttnBiasTypes
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
 
+        cp_plan = None
+        if os.getenv("NVTE_MHA_MEGAUP", "0") == "1":
+            from ._megaup import prepare_megaup
+
+            # Keep the ordinary MHA flow; only projection boundaries and local
+            # attention dimensions change for the supported CP contract.
+            cp_plan = prepare_megaup(
+                self,
+                hidden_states,
+                eligible_call=(
+                    not checkpoint_core_attention
+                    and not pad_between_seqs
+                    and softcap == 0.0
+                    and core_attention_bias_type == "no_bias"
+                    # The fused path uses the mask's default window. A different
+                    # explicit window must retain the native attention path.
+                    and window_size in (None, (-1, 0) if "causal" in attn_mask_type else (-1, -1))
+                    and all(
+                        value is None
+                        for value in (
+                            attention_mask,
+                            encoder_output,
+                            inference_params,
+                            core_attention_bias,
+                            alibi_slopes,
+                            thd_attention_policies,
+                        )
+                    )
+                ),
+                rotary_pos_emb=rotary_pos_emb,
+                attn_mask_type=attn_mask_type,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+            )
+            if cp_plan is not None:
+                max_seqlen_q, max_seqlen_kv = cp_plan.maxima
+                pad_between_seqs = False
+
         # =================================================
         # Pre-allocate memory for key-value cache for inference
         # =================================================
@@ -1004,18 +1046,26 @@ class MultiheadAttention(torch.nn.Module):
                     mixed_x_layer = layernorm_qkv_outputs
             else:
                 mixed_x_layer = self.qkv(
-                    hidden_states,
+                    cp_plan.local_rows(hidden_states) if cp_plan is not None else hidden_states,
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=qkv_fp8_output,
+                    _cp_projection=cp_plan.peer if cp_plan is not None else None,
                 )
+                if cp_plan is not None:
+                    mixed_x_layer = cp_plan.global_order(mixed_x_layer)
 
+            # MegaUP emits complete KV groups (queries, K, V) for this rank.
+            local_gqa_groups = self.num_gqa_groups_per_partition // (
+                cp_plan.cp if cp_plan is not None else 1
+            )
+            effective_interleaved = cp_plan is not None or self.qkv_weight_interleaved
             num_queries_per_key_value = (
                 self.num_attention_heads_per_partition // self.num_gqa_groups_per_partition
             )
-            if self.qkv_weight_interleaved:
+            if effective_interleaved:
                 # [sq, b, ng * (np/ng + 2) * hn] --> [sq, b, ng, (np/ng + 2), hn]
                 new_tensor_shape = mixed_x_layer.size()[:-1] + (
-                    self.num_gqa_groups_per_partition,
+                    local_gqa_groups,
                     (num_queries_per_key_value + 2),
                     self.hidden_size_per_attention_head,
                 )
@@ -1025,7 +1075,7 @@ class MultiheadAttention(torch.nn.Module):
                 # [sq, b, ng * (np/ng + 2) * hn] --> [sq, b, (np/ng + 2), ng, hn]
                 new_tensor_shape = mixed_x_layer.size()[:-1] + (
                     (num_queries_per_key_value + 2),
-                    self.num_gqa_groups_per_partition,
+                    local_gqa_groups,
                     self.hidden_size_per_attention_head,
                 )
                 # split along third last dimension
@@ -1213,8 +1263,8 @@ class MultiheadAttention(torch.nn.Module):
                 self.qkv_format,
                 fused=True,
                 cu_seqlens=rotary_pos_cu_seq_lens_q,
-                cp_size=self.cp_size,
-                cp_rank=self.cp_rank,
+                cp_size=1 if cp_plan is not None else self.cp_size,
+                cp_rank=0 if cp_plan is not None else self.cp_rank,
                 start_positions=sequence_start_positions,
                 interleaved=self.rotary_pos_interleaved,
             )
@@ -1224,8 +1274,8 @@ class MultiheadAttention(torch.nn.Module):
                 self.qkv_format,
                 fused=True,
                 cu_seqlens=rotary_pos_cu_seq_lens_kv,
-                cp_size=self.cp_size,
-                cp_rank=self.cp_rank,
+                cp_size=1 if cp_plan is not None else self.cp_size,
+                cp_rank=0 if cp_plan is not None else self.cp_rank,
                 start_positions=sequence_start_positions,
                 interleaved=self.rotary_pos_interleaved,
             )
@@ -1272,6 +1322,9 @@ class MultiheadAttention(torch.nn.Module):
             qkv_layer=packed_qkv_layer,
             kv_layer=packed_kv_layer,
             qkv_interleave_dim=packed_interleave_dim,
+            cp_external_exchange=(
+                (cp_plan.to_sequence, cp_plan.to_rank) if cp_plan is not None else None
+            ),
         )
 
         # ===================
@@ -1281,6 +1334,7 @@ class MultiheadAttention(torch.nn.Module):
             context_layer,
             is_first_microbatch=is_first_microbatch,
             fp8_grad=proj_fp8_grad,
+            _cp_projection=cp_plan.pull if cp_plan is not None else None,
         )
 
         if self.return_bias:
@@ -1288,6 +1342,8 @@ class MultiheadAttention(torch.nn.Module):
         else:
             attention_output, attention_bias = projection_output, None
 
+        if cp_plan is not None:
+            attention_output = cp_plan.restore_output(attention_output)
         outputs = (attention_output,)
         if self.return_bias:
             outputs += (attention_bias,)

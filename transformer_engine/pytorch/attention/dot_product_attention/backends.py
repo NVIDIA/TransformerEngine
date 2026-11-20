@@ -1044,6 +1044,7 @@ class FlashAttention(torch.nn.Module):
         cu_seqlens_q_padded: Optional[torch.Tensor] = None,
         cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
         load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+        cp_external_exchange=None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -1121,8 +1122,8 @@ class FlashAttention(torch.nn.Module):
             if qkv_format in ["sbhd", "bshd"]:
                 batch_size = query_layer.shape[0]
                 max_seqlen_q, max_seqlen_kv = query_layer.shape[1], key_layer.shape[1]
-                max_seqlen_q *= cp_size
-                max_seqlen_kv *= cp_size
+                max_seqlen_q *= 1 if cp_external_exchange is not None else cp_size
+                max_seqlen_kv *= 1 if cp_external_exchange is not None else cp_size
 
                 if "padding" in attn_mask_type:
                     assert (
@@ -1264,6 +1265,21 @@ class FlashAttention(torch.nn.Module):
                     "softcap is not supported by the FlashAttention 3 backend in context "
                     "parallel. Please use FlashAttention 2 (>= 2.6.0) for softcap support."
                 )
+            if cp_external_exchange is not None and qkv_format == "sbhd":
+                # Flash converted QKV to BSHD above; convert only the cached row
+                # metadata so the activation reorder still needs one index_select.
+                before, after = cp_external_exchange
+                cached = getattr(self, "_cp_external_bshd_rows", None)
+                if (
+                    cached is None
+                    or cached[0] is not before
+                    or cached[1] is not after
+                    or cached[2:4] != (batch_size, max_seqlen_q)
+                ):
+                    rows = before.view(max_seqlen_q, batch_size).transpose(0, 1).flatten()
+                    cached = (before, after, batch_size, max_seqlen_q, (rows, rows.argsort()))
+                    self._cp_external_bshd_rows = cached
+                cp_external_exchange = cached[4]
             with self.attention_dropout_ctx():
                 output = attn_forward_func_with_cp(
                     self.training,
@@ -1301,6 +1317,7 @@ class FlashAttention(torch.nn.Module):
                     use_flash_attn_4=use_flash_attn_4,
                     fp8_output=fp8_output,
                     load_balancing_strategy=load_balancing_strategy,
+                    cp_external_exchange=cp_external_exchange,
                 )
         else:
             if is_cpu_offload_enabled():
@@ -1534,6 +1551,9 @@ class FlashAttention(torch.nn.Module):
                     batch_size,
                     context_len,
                 )
+
+        if cp_external_exchange is not None:
+            return output.reshape(-1, output.shape[-2] * output.shape[-1])
 
         if q_format == "sbhd":
             # (bs)hd -> bs(hd) -> sb(hd)
@@ -2722,6 +2742,7 @@ class FusedAttention(torch.nn.Module):
         packed_kv: Optional[torch.Tensor] = None,
         bf16_backward: bool = False,
         load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+        cp_external_exchange=None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -2770,8 +2791,8 @@ class FusedAttention(torch.nn.Module):
                     batch_size = query_layer.shape[0]
                     max_seqlen_q = query_layer.shape[1]
                     max_seqlen_kv = key_layer.shape[1]
-                max_seqlen_q *= cp_size
-                max_seqlen_kv *= cp_size
+                max_seqlen_q *= 1 if cp_external_exchange is not None else cp_size
+                max_seqlen_kv *= 1 if cp_external_exchange is not None else cp_size
                 if "padding" in attn_mask_type:
                     assert (
                         not context_parallel
@@ -2889,6 +2910,7 @@ class FusedAttention(torch.nn.Module):
                     layer_number=self.layer_number,
                     return_max_logit=self.return_max_logit,
                     load_balancing_strategy=load_balancing_strategy,
+                    cp_external_exchange=cp_external_exchange,
                 )
         elif score_mod is not None:
             output = FusedAttentionWithScoreModFunc.apply(

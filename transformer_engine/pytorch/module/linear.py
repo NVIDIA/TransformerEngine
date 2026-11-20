@@ -179,6 +179,7 @@ class LinearFwdArgs:
     # --- Misc ---
     cpu_offloading: bool
     is_grad_enabled: bool
+    cp_projection: Optional[Any] = None
 
     def compile_unsupported_reason(self) -> Optional[str]:
         """Reason this config can't use the torch.compile custom-op path (else None)."""
@@ -298,6 +299,7 @@ class LinearBwdArgs:
     # --- Misc ---
     cpu_offloading: bool = False
     owns_input: bool = False
+    cp_projection: Optional[Any] = None
 
     # --- Per-backward scratch state (populated inside _linear_backward_impl) ---
     ub_obj_gradout: Optional[Any] = None
@@ -423,7 +425,12 @@ def _linear_forward_impl(
 
     # Make sure input dimensions are compatible
     out_features, in_features = weight.shape
-    assert inp.shape[-1] == in_features, "GEMM not possible"
+    expected_features = (
+        in_features // args.cp_projection.runtime.up
+        if args.cp_projection is not None and not args.cp_projection.peer
+        else in_features
+    )
+    assert inp.shape[-1] == expected_features, "GEMM not possible"
 
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
@@ -614,17 +621,20 @@ def _linear_forward_impl(
     # Note: y = x * w^T
     # ------------------------------------------------------
     nvtx_range_push(f"{nvtx_label}.gemm")
-    gemm_out, *_, reduce_scatter_out = general_gemm(
-        weightmat,
-        inputmat_total,
-        quantization_params=output_quantizer,
-        out_dtype=activation_dtype,
-        bias=bias,
-        use_split_accumulator=use_split_accumulator,
-        ub=ub_obj,
-        ub_type=ub_type,
-        extra_output=reduce_scatter_out,
-    )
+    if args.cp_projection is not None:
+        gemm_out, inputmat, weightmat = args.cp_projection.forward(weightmat, inputmat_total)
+    else:
+        gemm_out, *_, reduce_scatter_out = general_gemm(
+            weightmat,
+            inputmat_total,
+            quantization_params=output_quantizer,
+            out_dtype=activation_dtype,
+            bias=bias,
+            use_split_accumulator=use_split_accumulator,
+            ub=ub_obj,
+            ub_type=ub_type,
+            extra_output=reduce_scatter_out,
+        )
     nvtx_range_pop(f"{nvtx_label}.gemm")
     # ------------------------------------------------------
     # Finished forward GEMM...
@@ -669,7 +679,7 @@ def _linear_forward_impl(
     ctx_attrs = None
 
     if is_grad_enabled:
-        if save_original_input:
+        if save_original_input and args.cp_projection is None:
             inputmat = inp
 
         # Discard unneeded data in input tensor
@@ -1020,7 +1030,8 @@ def _linear_setup_ctx(
     # Don't store inp_shape in the value bundle: under torch.compile(dynamic=True)
     # inp.shape contains SymInt dims which are not hashable in OpaqueValueBundle.
     # The backward reconstructs inp_shape from grad_output + weight + SP config.
-    bwd_args.inp_shape = None
+    bwd_args.cp_projection = fwd_args.cp_projection
+    bwd_args.inp_shape = inp.shape if fwd_args.cp_projection is not None else None
 
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
@@ -1340,6 +1351,14 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         if is_dist_weight:
             weight_fp8 = materialize_weight_for_backward(saved_weight)[0]
 
+        cp_projection = bwd_args.cp_projection
+        if (
+            cp_projection is not None
+            and cp_projection.peer
+            and bwd_args.requires_wgrad
+            and not bwd_args.requires_dgrad
+        ):
+            _, grad_output = cp_projection.dgrad(weight_fp8, grad_output, False)
         if bwd_args.requires_dgrad:
 
             # FSDP2: Re-create workspace from all-gathered weight when
@@ -1410,20 +1429,23 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 weight_for_dgrad = saved_weight
                 if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                     weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
-            gemm_out, *_, reduce_scatter_out = general_gemm(
-                weight_for_dgrad,
-                grad_output,
-                layout="NN",
-                grad=True,
-                quantization_params=grad_input_quantizer,
-                out=gemm_out,
-                out_dtype=bwd_args.activation_dtype,
-                use_split_accumulator=use_split_accumulator,
-                ub=ub_obj_dgrad,
-                ub_type=ub_type_dgrad,
-                extra_output=reduce_scatter_out,
-                bulk_overlap=bwd_args.ub_bulk_dgrad,
-            )
+            if cp_projection is not None:
+                gemm_out, grad_output = cp_projection.dgrad(weight_for_dgrad, grad_output, True)
+            else:
+                gemm_out, *_, reduce_scatter_out = general_gemm(
+                    weight_for_dgrad,
+                    grad_output,
+                    layout="NN",
+                    grad=True,
+                    quantization_params=grad_input_quantizer,
+                    out=gemm_out,
+                    out_dtype=bwd_args.activation_dtype,
+                    use_split_accumulator=use_split_accumulator,
+                    ub=ub_obj_dgrad,
+                    ub_type=ub_type_dgrad,
+                    extra_output=reduce_scatter_out,
+                    bulk_overlap=bwd_args.ub_bulk_dgrad,
+                )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
             # FSDP2 only handles deallocation all-gathered weights that it allocates.
@@ -1734,6 +1756,8 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
     # Scatter fp8 weight buffers
     if bwd_args.fp8 and not bwd_args.is_weight_param_quantized:
         _fsdp_scatter_tensors(bwd_args.fsdp_group, weight_fp8)
+    if bwd_args.cp_projection is not None:
+        wgrad = bwd_args.cp_projection.restore_weight_rows(wgrad)
     return (
         wgrad,
         dgrad if bwd_args.requires_dgrad else None,
@@ -1866,6 +1890,10 @@ class _Linear(torch.autograd.Function):
             tensors_to_save, tensor_objects = prepare_for_saving(*tensors_to_save_from_setup)
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
+            if fwd_args.cp_projection is not None:
+                assert all(
+                    obj is None for obj in tensor_objects
+                ), "CP hooks require plain saved tensors"
             ctx.backward_objects = bwd_args
             if fwd_args.fp8 and (
                 fwd_args.input_requires_grad
@@ -1886,8 +1914,18 @@ class _Linear(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Backward pass: compute gradients and reduce FP8 scaling factors."""
         bwd_args: LinearBwdArgs = ctx.backward_objects
+        cp_projection = bwd_args.cp_projection
+        if cp_projection is not None:
+            # Keep the retained template tensor-free; each backward owns temporary aliases.
+            bwd_args = dataclass_replace(bwd_args)
+            bwd_args.inputmat, bwd_args.weight_fp8, bwd_args.saved_weight, bwd_args.bias = (
+                ctx.saved_tensors
+            )
+            if bwd_args.inputmat is not None:
+                bwd_args.inputmat = bwd_args.inputmat.detach()
+        else:
+            bwd_args.setup_saved_tensors(ctx)
         bwd_args.grad_output = grad_output
-        bwd_args.setup_saved_tensors(ctx)
         nvtx_label = "transformer_engine._Linear.backward"
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
@@ -1895,7 +1933,8 @@ class _Linear(torch.autograd.Function):
         reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
         # main_grad closure) so they don't outlive backward via ctx under retain_graph.
-        ctx.backward_objects = None
+        if cp_projection is None:
+            ctx.backward_objects = None
         del bwd_args
         if reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
@@ -2354,6 +2393,8 @@ class Linear(TransformerEngineBaseModule):
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
         fp8_grad: Optional[bool] = False,
+        *,
+        _cp_projection=None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -2383,6 +2424,8 @@ class Linear(TransformerEngineBaseModule):
                              ``torch.compiler.cudagraph_mark_step_begin()`` once before
                              each minibatch to keep the cache live across its microbatches.
         """
+        if _cp_projection is not None:
+            _cp_projection.validate(self, inp, fp8_output, fp8_grad)
         is_grad_enabled = torch.is_grad_enabled()
 
         if is_in_onnx_export_mode():
@@ -2555,6 +2598,7 @@ class Linear(TransformerEngineBaseModule):
                 # misc
                 cpu_offloading=is_cpu_offload_enabled(),
                 is_grad_enabled=is_grad_enabled,
+                cp_projection=_cp_projection,
             )
 
             if use_compiled_op:
