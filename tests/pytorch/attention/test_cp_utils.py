@@ -1175,6 +1175,126 @@ class TestTHDKernels(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(grad[first_half_rows]).item(), 0)
         self.assertTrue(torch.equal(grad[second_half_rows], grad_per_step))
 
+    def test_thd_read_half_tensor_initializes_trailing_padding(self):
+        # Deterministically poison the at::empty output, including allocator-fresh memory.
+        deterministic = torch.are_deterministic_algorithms_enabled()
+        warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        fill_uninitialized = torch.utils.deterministic.fill_uninitialized_memory
+        try:
+            torch.use_deterministic_algorithms(True)
+            torch.utils.deterministic.fill_uninitialized_memory = True
+            boundaries = [0, 8, 8, 24]
+            cu_seqlens = torch.tensor(boundaries, dtype=torch.int32, device="cuda")
+            for dtype, tail, planes, half_idx in itertools.product(
+                [torch.float16, torch.bfloat16, torch.float32], [0, 1, 2, 96], [1, 2], [0, 1]
+            ):
+                with self.subTest(dtype=dtype, tail=tail, planes=planes, half_idx=half_idx):
+                    shape = (planes, 24 + tail, 2, 8)
+                    tensor = (
+                        torch.arange(planes * (24 + tail) * 16, device="cuda", dtype=torch.float32)
+                        .reshape(shape)
+                        .to(dtype)
+                    )
+                    tensor[:, 24:] = float("nan")
+                    original_bits = tensor.view(torch.uint8).clone()
+                    pieces = []
+                    for start, end in zip(boundaries[:-1], boundaries[1:]):
+                        length = (end - start) // 2
+                        start += half_idx * length
+                        pieces.append(tensor[:, start : start + length])
+                    expected = torch.cat(pieces, dim=1)
+                    expected = torch.cat(
+                        [expected, tensor.new_zeros(planes, tail // 2, 2, 8)], dim=1
+                    )
+                    inp = tensor[0] if planes == 1 else tensor
+                    result = tex.thd_read_half_tensor(inp, cu_seqlens, half_idx)
+                    expected = expected[0] if planes == 1 else expected
+                    self.assertTrue(
+                        torch.equal(result.view(torch.uint8), expected.view(torch.uint8))
+                    )
+                    self.assertTrue(torch.equal(tensor.view(torch.uint8), original_bits))
+        finally:
+            torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+            torch.utils.deterministic.fill_uninitialized_memory = fill_uninitialized
+
+    def test_thd_half_v_padding_keeps_fa4_output_finite(self):
+        """Reuse finite FP32 memory without letting unused BF16 V rows contaminate FA4."""
+        from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+            FlashAttentionUtils,
+        )
+
+        if not FlashAttentionUtils.v4_is_installed or torch.cuda.get_device_capability() not in (
+            (10, 0),
+            (10, 3),
+        ):
+            self.skipTest("FA4 head_dim=256 requires SM100/103")
+        if torch.cuda.memory.get_allocator_backend() != "native":
+            self.skipTest("Buffer reuse requires the native CUDA caching allocator")
+        from flash_attn.cute.interface import flash_attn_varlen_func
+
+        # Captured failing layout: 672 valid KV rows in a 720-row half-buffer.
+        cu_q = torch.tensor([0, 256, 384, 896, 960, 1344], device="cuda", dtype=torch.int32)
+        cu_k = cu_q // 2
+        q = torch.zeros(1440, 16, 256, device="cuda", dtype=torch.bfloat16)
+        k = torch.zeros(720, 1, 256, device="cuda", dtype=torch.bfloat16)
+        source_v = torch.ones(1440, 1, 256, device="cuda", dtype=torch.bfloat16)
+        deterministic = torch.are_deterministic_algorithms_enabled()
+        warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        fill_uninitialized = torch.utils.deterministic.fill_uninitialized_memory
+        try:
+            torch.use_deterministic_algorithms(False)
+            torch.utils.deterministic.fill_uninitialized_memory = False
+            generator = torch.Generator(device="cuda").manual_seed(1234)
+            # A separate pool makes reuse independent of allocations in earlier tests.
+            # Finite FP32 values can contain NaN bit patterns when reused as BF16.
+            pool = torch.cuda.MemPool()
+            with torch.cuda.use_mem_pool(pool):
+                previous = torch.randn(
+                    720, 1, 128, device="cuda", dtype=torch.float32, generator=generator
+                )
+                previous_values = previous.cpu()
+                previous_ptr = previous.data_ptr()
+                self.assertTrue(torch.isfinite(previous_values).all())
+                self.assertTrue(torch.isnan(previous_values.view(torch.bfloat16)[672:]).any())
+                del previous
+                v = tex.thd_read_half_tensor(source_v, cu_q, 0)
+            self.assertEqual(
+                v.data_ptr(), previous_ptr, "The half-buffer did not reuse FP32 memory"
+            )
+
+            self.assertTrue(torch.isfinite(source_v).all())
+            self.assertTrue(torch.equal(v[:672], torch.ones_like(v[:672])))
+            unused_v_nans = torch.isnan(v[672:]).sum().item()
+            control_v = v.clone()
+            control_v[672:] = 0  # Change only unused V rows; shapes and metadata stay identical.
+            outputs = []
+            for values in (control_v, v):
+                out, lse = flash_attn_varlen_func(
+                    q,
+                    k,
+                    values,
+                    cu_seqlens_q=cu_q,
+                    cu_seqlens_k=cu_k,
+                    max_seqlen_q=512,
+                    max_seqlen_k=256,
+                    causal=False,
+                    return_lse=True,
+                )
+                self.assertTrue(torch.isfinite(lse[:, :1344]).all())
+                outputs.append(out[:1344])
+            # All valid V values are one: their attention-weighted average must be one.
+            self.assertTrue(torch.equal(outputs[0], torch.ones_like(outputs[0])))
+            self.assertTrue(
+                torch.isfinite(outputs[1]).all(),
+                f"V half-buffer padding contained {unused_v_nans} NaNs and contaminated valid FA4"
+                " output",
+            )
+            self.assertTrue(torch.equal(outputs[0].view(torch.uint8), outputs[1].view(torch.uint8)))
+            self.assertEqual(torch.count_nonzero(v[672:]).item(), 0)
+        finally:
+            torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+            torch.utils.deterministic.fill_uninitialized_memory = fill_uninitialized
+
     def test_thd_read_second_half_lse_handles_packed_and_batch_major_lse(self):
         cu_seqlens = torch.tensor([0, 8, 16], dtype=torch.int32, device="cuda")
         lse = torch.arange(2 * 2 * 8, dtype=torch.float32, device="cuda").view(2, 2, 8)
