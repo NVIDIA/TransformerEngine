@@ -107,7 +107,7 @@ Published recipes to start from:
 
 Name the file `te_` plus the model family and keep the names of the published recipes. A dense
 recipe has four parts: a context manager that swaps the HF layer class, the TE layer, the model
-class with a checkpoint loader, and `replace_params` (step 4).
+class with a checkpoint loader, and `replace_params` with `check_params` (step 4).
 
 ```python
 @contextmanager
@@ -163,10 +163,15 @@ class TELlamaForCausalLM:
         finally:
             torch.set_default_dtype(previous)
         te_state_dict = model.state_dict()
-        for shard in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):
+        shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
+        if not shards:
+            raise FileNotFoundError(f"No .safetensors files in {model_dir}")
+        for shard in shards:
             state_dict = safetensors.torch.load_file(shard)
             replace_params(state_dict, te_state_dict, config)  # the replaced layers
             model.load_state_dict(state_dict, strict=False)  # embeddings, final norm, LM head
+        for shard in shards:  # once every weight is written, verify the mapping
+            check_params(safetensors.torch.load_file(shard), te_state_dict, config)
         return model
 ```
 
@@ -215,8 +220,8 @@ Every HF parameter of a replaced layer needs a destination and every TE paramete
 Keys are relative to `model.layers.N.`:
 
 ```python
-def replace_params(hf_state_dict, te_state_dict, config):
-    """Copy the replaced layers' weights from an HF state dict (or one shard of it)."""
+def _layer_weights(hf_state_dict, te_state_dict, config):
+    """Yield (HF key, HF tensor, its destination in the TE model) for the replaced layers."""
     ffn = config.intermediate_size
     mapping = {  # HF name: (TE name, rows)
         "input_layernorm.weight": ("self_attention.layernorm_qkv.layer_norm_weight", slice(None)),
@@ -231,11 +236,23 @@ def replace_params(hf_state_dict, te_state_dict, config):
     }
     for hf_key, value in hf_state_dict.items():
         match = re.match(r"(model\.layers\.\d+\.)(.+)", hf_key)
-        if match and match.group(2) in mapping:
-            te_name, rows = mapping[match.group(2)]
-            target = te_state_dict[match.group(1) + te_name]
-            with torch.no_grad():
-                target[rows].copy_(value.to(device=target.device, dtype=target.dtype))
+        if match:
+            te_name, rows = mapping[match.group(2)]  # KeyError: an HF weight with no destination
+            yield hf_key, value, te_state_dict[match.group(1) + te_name][rows]
+
+
+def replace_params(hf_state_dict, te_state_dict, config):
+    """Copy the replaced layers' weights from an HF state dict (or one shard of it)."""
+    with torch.no_grad():
+        for _, value, target in _layer_weights(hf_state_dict, te_state_dict, config):
+            target.copy_(value.to(device=target.device, dtype=target.dtype))
+
+
+def check_params(hf_state_dict, te_state_dict, config):
+    """Rebuild every HF tensor from the converted weights and require an exact match."""
+    for hf_key, value, rebuilt in _layer_weights(hf_state_dict, te_state_dict, config):
+        if not torch.equal(rebuilt.cpu(), value.to(rebuilt.dtype)):
+            raise ValueError(f"Not converted exactly: {hf_key}")
 ```
 
 - **Fused QKV.** With `fuse_qkv_params=True` the three weights become one,
@@ -245,8 +262,10 @@ def replace_params(hf_state_dict, te_state_dict, config):
 - **MoE.** The router gate copies to `mlp.gate.weight`. Each expert has two weights: gate and up
   are the two halves of `experts_gate_up.weight{i}` and down is `experts_down.weight{i}`. Older
   Mixtral checkpoints name them `w1` (gate), `w3` (up) and `w2` (down).
-- **Coverage.** `strict=False` hides a wrong key. Fill the TE layer parameters with NaN before
-  loading and fail if any NaN is left afterwards.
+- **Mapping check.** `check_params` rebuilds each HF tensor from the converted weights and
+  compares it exactly, so a missing or unmapped weight, or two weights written to the same
+  rows, fails at load time. A layout that is wrong in both directions still passes; the logits
+  comparison in step 6 catches that.
 
 ### 5. Add the precision hook (fine-tuning requests only)
 
@@ -271,12 +290,13 @@ Keep the MoE router and the LM head in high precision.
 
 ### 6. Check and report
 
-Before reporting, confirm that the recipe uses a fused block, that `replace_params` covers every
-parameter of the replaced layers, and that the constructor arguments match the config.
+Before reporting, confirm that the recipe uses a fused block, that every weight of the replaced
+layers is in the mapping, and that the constructor arguments match the config.
 
-With a GPU, load the same checkpoint into the HF model and the TE model and compare logits in
-BF16 under `te.autocast(enabled=False)`. Expect a small relative error and near-total top-1
-agreement; an error near 1.0 means a wrong weight layout or constructor argument.
+With a GPU, the loader runs `check_params`. Then load the same checkpoint into the HF and TE
+models and compare logits in BF16 under `te.autocast(enabled=False)`. Expect a small relative
+error and near-total top-1 agreement; an error near 1.0 means a wrong layout or constructor
+argument.
 
 Tell the user which techniques were applied, what stayed native and why, which checks ran, and
 which could not. A recipe that was never executed must be described that way.
@@ -309,7 +329,7 @@ which could not. A recipe that was never executed must be described that way.
 | Error / Symptom | Cause | Solution |
 |---|---|---|
 | Logits differ widely, or fluent but wrong text | Wrong weight layout or constructor argument | Check the QKV layout, gate/up order, RoPE base, `zero_centered_gamma` and `kv_channels`, one layer at a time |
-| NaN parameters left after loading | `replace_params` missed a key | Compare the HF `state_dict()` keys of one layer with the mapping |
+| `check_params` or the mapping raises | A weight is unmapped, never written or overwritten | Compare the HF `state_dict()` keys of one layer with the mapping |
 | Shape error copying Q/K/V | The config sets `head_dim` | Pass it as `kv_channels` |
 | HF model loop fails on the layer output | Tuple versus tensor | Return what the installed loop expects |
 | FP8 or MXFP8 unavailable | GPU or TE build lacks it | Report the reason from `te.is_fp8_available(return_reason=True)` |
