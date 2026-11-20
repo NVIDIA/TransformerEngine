@@ -76,11 +76,10 @@ __device__ __forceinline__ TmaDescriptorOverride2D make_tma_descriptor_override_
   if ((stride >> 36) != 0) {
     NVTE_DEVICE_ERROR("TMA override stride exceeds 36 bits.");
   }
-  const TmaDescriptorOverride2D descriptor{address,
-                                           static_cast<uint16_t>(min(TILE_DIM_X, cols - x)),
-                                           static_cast<uint16_t>(min(TILE_DIM_Y, rows - y)),
-                                           static_cast<uint32_t>(stride),
-                                           static_cast<uint16_t>(stride >> 32)};
+  const TmaDescriptorOverride2D descriptor{
+      address, static_cast<uint16_t>(min(TILE_DIM_X, cols - x)),
+      static_cast<uint16_t>(min(TILE_DIM_Y, rows - y)), static_cast<uint32_t>(stride),
+      static_cast<uint16_t>(stride >> 32)};
   return descriptor;
 }
 
