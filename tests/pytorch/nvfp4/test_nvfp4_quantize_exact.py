@@ -14,6 +14,7 @@ from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
+from transformer_engine.pytorch.module import _split_quantization
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -942,3 +943,140 @@ def test_nvfp4_columnwise_only_matches_both_directions(
 
     # Sanity: column-only path must not allocate a rowwise output.
     assert out_col_only._rowwise_data is None
+
+
+def _batch_rowwise_quantizers(count, *, scale_dtype=tex.DType.kFloat8E4M3, optimize=True):
+    quantizers = []
+    for _ in range(count):
+        quantizer = NVFP4Quantizer(
+            rowwise=True, columnwise=False, row_scaled_nvfp4=True, scale_dtype=scale_dtype
+        )
+        quantizer.internal = True
+        quantizer.optimize_for_gemm = optimize
+        quantizers.append(quantizer)
+    return quantizers
+
+
+def _assert_batch_rowwise_equal(actual, expected, rows, columns):
+    assert type(actual) is type(expected)
+    assert actual.get_metadata()["fake_dtype"] == expected.get_metadata()["fake_dtype"]
+    assert actual._row_scaled_nvfp4 == expected._row_scaled_nvfp4
+    assert actual._with_gemm_swizzled_scales == expected._with_gemm_swizzled_scales
+    assert actual._rowwise_scale_inv.shape == expected._rowwise_scale_inv.shape
+    assert actual._columnwise_data is expected._columnwise_data is None
+    torch.testing.assert_close(actual._rowwise_data, expected._rowwise_data, atol=0, rtol=0)
+    torch.testing.assert_close(actual._amax_rowwise, expected._amax_rowwise, atol=0, rtol=0)
+
+    def live_scales(output):
+        scales = output._rowwise_scale_inv
+        if rows and output._with_gemm_swizzled_scales:
+            m, k = scales.shape
+            scales = scales.view(m // 128, k // 4, 32, 4, 4).permute(0, 3, 2, 1, 4).reshape(m, k)
+        return scales[:rows, : columns // 16]
+
+    # Compare every live scale byte in logical order, excluding undefined padding.
+    torch.testing.assert_close(
+        live_scales(actual),
+        live_scales(expected),
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        actual.dequantize(dtype=torch.bfloat16),
+        expected.dequantize(dtype=torch.bfloat16),
+        atol=0,
+        rtol=0,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "splits,columns,scale_dtype,optimize",
+    [
+        ((128, 256), 64, tex.DType.kFloat8E4M3, False),
+        ((32, 0, 96, 160), 192, tex.DType.kFloat8E4M3, False),
+        ((32, 0, 96, 160), 192, tex.DType.kFloat8E4M3, True),
+        ((32, 0, 96, 160), 192, tex.DType.kFloat8E4M3, "mixed"),
+        ((32, 0, 96, 160), 192, tex.DType.kFloat8UE5M3, True),
+    ],
+)
+def test_batch_rowwise_matches_per_expert(splits, columns, scale_dtype, optimize):
+    """Batching must preserve payload, live scales, amax, and dequantized values."""
+    if scale_dtype == tex.DType.kFloat8UE5M3 and not ue5m3_available:
+        pytest.skip(reason_for_no_ue5m3)
+    torch.manual_seed(307)
+    quantizers = _batch_rowwise_quantizers(
+        len(splits), scale_dtype=scale_dtype, optimize=optimize is not False
+    )
+    if optimize == "mixed":
+        for i, quantizer in enumerate(quantizers):
+            quantizer.optimize_for_gemm = i % 2 == 0
+    x = torch.randn(sum(splits), columns, device="cuda", dtype=torch.bfloat16)
+    x[0].zero_()
+    x[1].fill_(2.0**-20)
+    x[-1].mul_(1024)
+    for factor in (1.0, 0.25, 8.0):
+        x.mul_(factor)
+        actual, _ = _split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+        expected = tex.split_quantize(x, splits, quantizers)
+        for rows, output, reference in zip(splits, actual, expected):
+            _assert_batch_rowwise_equal(output, reference, rows, columns)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("optimize", [False, True])
+def test_batch_rowwise_requantize_expert(optimize):
+    """Requantizing one expert must preserve its layout and every neighbor's data."""
+    splits = (32, 0, 96, 160)
+    torch.manual_seed(319)
+    quantizers = _batch_rowwise_quantizers(len(splits), optimize=optimize)
+    x = torch.randn(sum(splits), 192, device="cuda", dtype=torch.bfloat16)
+    actual, _ = _split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+    expected = tex.split_quantize(x, splits, quantizers)
+    for index, rows in enumerate(splits):
+        if not rows:
+            continue
+        replacement = 8 * torch.randn(rows, x.shape[1], device=x.device, dtype=x.dtype)
+        snapshots = [
+            (
+                result._rowwise_data.clone(),
+                result._rowwise_scale_inv.clone(),
+                result._amax_rowwise.clone(),
+            )
+            for result in actual
+        ]
+        tex.quantize(replacement, quantizers[index], actual[index])
+        tex.quantize(replacement, quantizers[index], expected[index])
+        for other, (output, reference) in enumerate(zip(actual, expected)):
+            _assert_batch_rowwise_equal(output, reference, splits[other], x.shape[1])
+            if other != index:
+                for tensor, snapshot in zip(
+                    (output._rowwise_data, output._rowwise_scale_inv, output._amax_rowwise),
+                    snapshots[other],
+                ):
+                    torch.testing.assert_close(tensor, snapshot, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_batch_rowwise_graph_replay():
+    """Captured quantization must consume fresh inputs and refresh every expert's scales."""
+    splits = (32, 0, 96)
+    quantizers = _batch_rowwise_quantizers(len(splits))
+    x = torch.randn(sum(splits), 128, device="cuda", dtype=torch.bfloat16)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            tex.split_quantize(x, splits, quantizers)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        actual, _ = _split_quantization._split_quantize(x, splits, quantizers, x.dtype)
+    for factor in (1.0, 0.25, 8.0):
+        with torch.cuda.stream(stream):
+            x.copy_(factor * torch.randn_like(x))
+            graph.replay()
+            expected = tex.split_quantize(x, splits, quantizers)
+        stream.synchronize()
+        for rows, output, reference in zip(splits, actual, expected):
+            _assert_batch_rowwise_equal(output, reference, rows, x.shape[1])
