@@ -653,7 +653,7 @@ def _snapshot_blockwise_outputs(outputs, shapes, block_dim):
                 snapshots.append(None)
                 continue
             # Consume on the caller stream immediately, before synchronizing.
-            snapshots.append(data.clone())
+            snapshots.append(data.view(torch.uint8).clone())
             if block_dim == 2:
                 rows, cols = (m + 127) // 128, (k + 127) // 128
                 if direction == "columnwise":
@@ -683,7 +683,8 @@ def _assert_blockwise_snapshots_equal(actual, expected):
 @pytest.mark.parametrize("k", [256, 257])
 @pytest.mark.parametrize("bulk", [True, False])
 @pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3, DType.kFloat8E5M2])
-def test_split_quantize_grouped(monkeypatch, splits, k, bulk, fp8_dtype):
+@pytest.mark.parametrize("pow2_scale", [False, True])
+def test_split_quantize_grouped(monkeypatch, splits, k, bulk, fp8_dtype, pow2_scale):
     """Variable M, empty/partial tiles, chunk boundaries, and caller ordering."""
     if get_device_compute_capability()[0] != 9:
         pytest.skip("Grouped BF16 blockwise path targets Hopper")
@@ -694,7 +695,7 @@ def test_split_quantize_grouped(monkeypatch, splits, k, bulk, fp8_dtype):
             rowwise=True,
             columnwise=True,
             block_scaling_dim=1,
-            force_pow_2_scales=(k == 256),
+            force_pow_2_scales=pow2_scale,
             amax_epsilon=0.01,
         )
         for _ in splits
@@ -712,6 +713,62 @@ def test_split_quantize_grouped(monkeypatch, splits, k, bulk, fp8_dtype):
             assert torch.cuda.current_stream() == caller
             caller.synchronize()
             _assert_blockwise_snapshots_equal(actual, expected)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("shape", [(128, 384), (129, 385)])
+@pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3, DType.kFloat8E5M2])
+@pytest.mark.parametrize("pow2_scale", [False, True])
+@pytest.mark.parametrize("case", ["nan", "inf", "zero", "tiny", "scaling_boundary"])
+def test_split_quantize_grouped_special_values(monkeypatch, shape, fp8_dtype, pow2_scale, case):
+    """Match scalar amax for special values in both aligned and partial tiles."""
+    if get_device_compute_capability()[0] != 9:
+        pytest.skip("Grouped BF16 blockwise path targets Hopper")
+    m, k = shape
+    if case == "nan":
+        values = [float("nan")]
+    elif case == "inf":
+        values = [float("inf"), -float("inf"), 1.0, -1.0]
+    elif case == "zero":
+        values = [0.0, -0.0]
+    elif case == "tiny":
+        # Smallest/largest BF16 subnormals and smallest normal, with both signs.
+        values = [sign * n * 2.0**-133 for n in (1, 127, 128) for sign in (1.0, -1.0)]
+    else:
+        fp8_max = 448.0 if fp8_dtype == DType.kFloat8E4M3 else 57344.0
+        boundary = fp8_max / 128.0
+        ulp = math.ldexp(1.0, math.frexp(boundary)[1] - 8)
+        values = [sign * (boundary + delta * ulp) for sign in (1.0, -1.0) for delta in (-1, 0, 1)]
+    x = torch.empty(2 * m, k, dtype=torch.bfloat16, device="cuda")
+    tile = 0
+    for expert in x.split(m):
+        for row in range(0, m, 128):
+            for col in range(0, k, 128):
+                # Uniform tiles keep each candidate visible as a block amax.
+                expert[row : row + 128, col : col + 128].fill_(values[tile % len(values)])
+                tile += 1
+    if case == "nan":
+        # Mix finite values with NaNs, retaining all-NaN rows and columns.
+        x[1::2, 1::2] = 1.0
+    quantizers = [
+        Float8BlockQuantizer(
+            fp8_dtype=fp8_dtype,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=1,
+            force_pow_2_scales=pow2_scale,
+            amax_epsilon=0.0,
+        )
+        for _ in range(2)
+    ]
+    monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "0")
+    reference = tex.split_quantize(x, [m, m], quantizers)
+    expected = _snapshot_blockwise_outputs(reference, [shape, shape], 1)
+    monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "1")
+    outputs = tex.split_quantize(x, [m, m], quantizers)
+    actual = _snapshot_blockwise_outputs(outputs, [shape, shape], 1)
+    torch.cuda.synchronize()
+    _assert_blockwise_snapshots_equal(actual, expected)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -808,7 +865,7 @@ def test_split_quantize_grouped_dispatch(monkeypatch):
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 def test_split_quantize_grouped_cuda_graph(monkeypatch):
-    """By-value metadata remains valid through capture and changed-input replays."""
+    """Replay with fixed shapes and buffer addresses, changing only input values."""
     if get_device_compute_capability()[0] != 9:
         pytest.skip("Grouped BF16 blockwise path targets Hopper")
     splits, k = [0, 129, 256, 511], 256

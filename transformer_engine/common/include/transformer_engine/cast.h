@@ -459,6 +459,9 @@ void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
  * On Hopper, compatible BF16 matrices with common K and both GEMM-ready 1D
  * block-scaled FP8 outputs use grouped quantization. M may vary per tensor.
  * Other configurations retain their existing quantization path.
+ * With CUDA Graph capture, shapes and buffer addresses are fixed for replay;
+ * input values may change in place. Different M values between API calls do not
+ * imply support for changing M between replays of the same captured graph.
  *
  *  \param[in]      inputs          List of input tensors to be cast.
  *  \param[in,out]  outputs         List of output quantized tensors.

@@ -557,7 +557,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 }
 
 // By-value descriptors avoid device allocation/copies and host-buffer lifetime
-// hazards during CUDA graph capture. Split larger lists into bounded launches.
+// hazards during CUDA graph capture. Captured descriptors fix shapes and buffer
+// addresses for replay; input values may change in place. Split larger lists into
+// bounded launches.
 constexpr int kMaxGroupedBlockwiseTensors = 32;
 constexpr size_t kMaxGroupedGridSize = std::numeric_limits<int>::max();
 struct GroupedBlockwiseTensor {
@@ -581,10 +583,11 @@ struct GroupedBlockwiseParams {
 static_assert(sizeof(GroupedBlockwiseParams) < 4096,
               "Grouped descriptors must fit the portable kernel argument budget");
 
+// Compile the full body for lower PTX targets that may be JIT-compiled on Hopper.
+// The host dispatcher restricts execution to SM90.
 template <bool kAligned, typename OType>
 __global__ void __launch_bounds__(kThreadsPerBlock) grouped_block_scaled_1d_cast_transpose_kernel(
     const __grid_constant__ GroupedBlockwiseParams params) {
-#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
   const size_t tile = blockIdx.x;
   int lo = 0, hi = params.count;
   while (lo < hi) {
@@ -605,9 +608,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) grouped_block_scaled_1d_cast
       tensor.col_scale_stride, 1, params.epsilon, FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY,
       FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY, params.pow2_scale, nullptr,
       local_tile % tiles_k, local_tile / tiles_k);
-#else
-  asm volatile("trap;");
-#endif
 }
 
 }  // namespace
@@ -791,8 +791,8 @@ bool try_grouped_quantize_transpose_vector_blockwise(const NVTETensor* inputs, N
                        tiles_m * tiles_k});
   }
 
-  // Every pointer is passed by value: works for bulk and separate allocations,
-  // caller-stream producer/consumer ordering, and repeated CUDA graph replay.
+  // By-value descriptors support bulk and separate allocations on the caller
+  // stream. Graph replays reuse captured shapes and pointers with new input values.
   size_t begin = 0;
   while (begin < tensors.size()) {
     GroupedBlockwiseParams params{};

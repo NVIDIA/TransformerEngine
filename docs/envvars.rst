@@ -284,6 +284,11 @@ FP8 Configuration
                  automatically. Other configurations retain their existing path.
                  Set to ``0`` to disable the optimization for comparison.
 
+                 M may vary across tensors and between API calls. CUDA Graph replay
+                 uses the shapes and buffer addresses recorded during capture;
+                 input values may change in place between replays. Changing M
+                 between replays requires updating or recapturing the graph.
+
 .. envvar:: NVTE_UNFUSED_FP8_UPDATE
 
    :Type: ``int`` (0 or 1)
