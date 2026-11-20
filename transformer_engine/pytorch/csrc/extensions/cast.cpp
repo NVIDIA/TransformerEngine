@@ -1196,6 +1196,51 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
 
 namespace {
 
+bool try_grouped_blockwise_quantize(const std::vector<TensorWrapper> &inputs,
+                                    const std::vector<py::handle> &quantizer_py_list,
+                                    std::vector<std::unique_ptr<Quantizer>> &quantizers,
+                                    std::vector<TensorWrapper> &outputs) {
+  if (inputs.size() < 2 ||
+      transformer_engine::getenv<int>("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", 1) == 0 ||
+      transformer_engine::cuda::sm_arch() != 90 ||
+      !std::all_of(quantizer_py_list.begin(), quantizer_py_list.end(), [](const py::handle &q) {
+        return detail::IsFloat8BlockwiseQuantizers(q.ptr());
+      })) {
+    return false;
+  }
+  const auto *reference = static_cast<Float8BlockQuantizer *>(quantizers[0].get());
+  if (reference->dtype != DType::kFloat8E4M3 && reference->dtype != DType::kFloat8E5M2) {
+    return false;
+  }
+  size_t k = 0;
+  std::vector<NVTETensor> input_tensors, output_tensors;
+  input_tensors.reserve(inputs.size());
+  output_tensors.reserve(outputs.size());
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    const auto *quantizer = static_cast<Float8BlockQuantizer *>(quantizers[i].get());
+    const auto shape = inputs[i].shape();
+    if (inputs[i].dtype() != DType::kBFloat16 || shape.ndim != 2 || shape.data[1] == 0 ||
+        (i != 0 && shape.data[1] != k) || !quantizer->rowwise_usage ||
+        !quantizer->columnwise_usage || quantizer->get_scaling_mode() != NVTE_BLOCK_SCALING_1D ||
+        quantizer->dtype != reference->dtype ||
+        quantizer->force_pow_2_scales != reference->force_pow_2_scales ||
+        quantizer->amax_epsilon != reference->amax_epsilon) {
+      return false;
+    }
+    k = shape.data[1];
+    input_tensors.push_back(inputs[i].data());
+    output_tensors.push_back(outputs[i].data());
+  }
+  QuantizationConfigWrapper config;
+  config.set_force_pow_2_scales(reference->force_pow_2_scales);
+  config.set_amax_epsilon(reference->amax_epsilon);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_multi_tensor_quantize(input_tensors.data(), output_tensors.data(), config,
+                               input_tensors.size(), at::cuda::getCurrentCUDAStream());
+  });
+  return true;
+}
+
 void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
                                 std::vector<py::handle> &quantizer_py_list,
                                 std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
@@ -1208,6 +1253,11 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
              " C++ quantizers, but got ", quantizer_cpp_list.size());
   NVTE_CHECK(output_list.size() == num_tensors, "Expected ", num_tensors,
              " output tensors, but got ", output_list.size());
+
+  if (try_grouped_blockwise_quantize(input_list, quantizer_py_list, quantizer_cpp_list,
+                                     output_list)) {
+    return;
+  }
 
   // Choose implementation
   // Note: Currently only have fused kernel for FP8 delayed scaling

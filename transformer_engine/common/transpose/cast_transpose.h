@@ -54,6 +54,14 @@ enum class FP8BlockwiseColumnwiseOption {
   COLUMNWISE_COMPACT
 };
 
+// Try grouped BF16-to-FP8 quantization with both GEMM-ready orientations.
+// All inputs must have the same K; M may vary. Returns false before launching
+// work if any tensor/configuration needs the existing per-tensor path.
+bool try_grouped_quantize_transpose_vector_blockwise(const NVTETensor *inputs, NVTETensor *outputs,
+                                                     size_t num_tensors,
+                                                     const QuantizationConfig &config,
+                                                     cudaStream_t stream);
+
 void quantize_transpose_vector_blockwise(const SimpleTensor &input, SimpleTensor &scale_inv,
                                          SimpleTensor &scale_inv_t, SimpleTensor &output,
                                          SimpleTensor &output_t, const float epsilon,

@@ -60,6 +60,15 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
   NVTE_API_CALL(nvte_multi_tensor_quantize);
   using namespace transformer_engine;
 
+  QuantizationConfig config;
+  if (quant_configs != nullptr) {
+    config = *reinterpret_cast<QuantizationConfig *>(quant_configs);
+  }
+  if (detail::try_grouped_quantize_transpose_vector_blockwise(inputs, outputs, num_tensors, config,
+                                                              stream)) {
+    return;
+  }
+
   constexpr bool IS_ACT = false;
 
   const size_t num_streams = nvte_get_num_compute_streams();

@@ -456,6 +456,10 @@ void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
 
 /*! \brief Casts multiple input tensors to quantized output tensors.
  *
+ * On Hopper, compatible BF16 matrices with common K and both GEMM-ready 1D
+ * block-scaled FP8 outputs use grouped quantization. M may vary per tensor.
+ * Other configurations retain their existing quantization path.
+ *
  *  \param[in]      inputs          List of input tensors to be cast.
  *  \param[in,out]  outputs         List of output quantized tensors.
  *  \param[in]      quant_config    (Optional) Quantization configurations.

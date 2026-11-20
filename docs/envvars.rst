@@ -272,6 +272,18 @@ Context Parallelism
 FP8 Configuration
 ^^^^^^^^^^^^^^^^^
 
+.. envvar:: NVTE_FP8_BLOCK_QUANTIZATION_GROUPED
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Enable grouped 1D blockwise FP8 quantization on Hopper for compatible
+                 lists of at least two BF16 matrices. Inputs must share K, but M may differ, and
+                 all quantizers must request both rowwise and columnwise outputs
+                 with matching FP8 dtype, epsilon, and power-of-two scaling options.
+                 The existing split and multi-tensor APIs select this path
+                 automatically. Other configurations retain their existing path.
+                 Set to ``0`` to disable the optimization for comparison.
+
 .. envvar:: NVTE_UNFUSED_FP8_UPDATE
 
    :Type: ``int`` (0 or 1)

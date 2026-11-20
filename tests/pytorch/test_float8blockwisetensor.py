@@ -641,3 +641,203 @@ class TestFloat8BlockwiseTensor:
         # Make sure we are not trivially passing tests
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_clone.dequantize(), -x_hp, **_tols[fp8_dtype])
+
+
+def _snapshot_blockwise_outputs(outputs, shapes, block_dim):
+    snapshots = []
+    for out, (m, k) in zip(outputs, shapes):
+        for direction in ("rowwise", "columnwise"):
+            data = getattr(out, f"_{direction}_data")
+            scale = getattr(out, f"_{direction}_scale_inv")
+            if data is None:
+                snapshots.append(None)
+                continue
+            # Consume on the caller stream immediately, before synchronizing.
+            snapshots.append(data.clone())
+            if block_dim == 2:
+                rows, cols = (m + 127) // 128, (k + 127) // 128
+                if direction == "columnwise":
+                    rows, cols = cols, rows
+            elif direction == "rowwise":
+                rows, cols = (k + 127) // 128, m
+            else:
+                rows, cols = (m + 127) // 128, k
+            # Scale storage includes unspecified GEMM-alignment padding.
+            snapshots.append(scale[:rows, :cols].clone())
+    return snapshots
+
+
+def _assert_blockwise_snapshots_equal(actual, expected):
+    assert len(actual) == len(expected)
+    for a, b in zip(actual, expected):
+        if a is None or b is None:
+            assert a is None and b is None
+        else:
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "splits", [[128, 0, 256, 384] * 4, [0, 1, 127, 129, 255], [129] * 33, [0, 0], [129]]
+)
+@pytest.mark.parametrize("k", [256, 257])
+@pytest.mark.parametrize("bulk", [True, False])
+@pytest.mark.parametrize("fp8_dtype", [DType.kFloat8E4M3, DType.kFloat8E5M2])
+def test_split_quantize_grouped(monkeypatch, splits, k, bulk, fp8_dtype):
+    """Variable M, empty/partial tiles, chunk boundaries, and caller ordering."""
+    if get_device_compute_capability()[0] != 9:
+        pytest.skip("Grouped BF16 blockwise path targets Hopper")
+    shapes = [(m, k) for m in splits]
+    quantizers = [
+        Float8BlockQuantizer(
+            fp8_dtype=fp8_dtype,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=1,
+            force_pow_2_scales=(k == 256),
+            amax_epsilon=0.01,
+        )
+        for _ in splits
+    ]
+    caller = torch.cuda.Stream()
+    with torch.cuda.stream(caller):
+        for _ in range(2):
+            x = torch.randn(sum(splits), k, dtype=torch.bfloat16, device="cuda")
+            monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "0")
+            reference = tex.split_quantize(x, splits, quantizers, disable_bulk_allocation=not bulk)
+            expected = _snapshot_blockwise_outputs(reference, shapes, 1)
+            monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "1")
+            outputs = tex.split_quantize(x, splits, quantizers, disable_bulk_allocation=not bulk)
+            actual = _snapshot_blockwise_outputs(outputs, shapes, 1)
+            assert torch.cuda.current_stream() == caller
+            caller.synchronize()
+            _assert_blockwise_snapshots_equal(actual, expected)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "usage,block_dim,dtype,mixed_options",
+    [
+        ((True, False), 1, torch.bfloat16, False),
+        ((False, True), 1, torch.bfloat16, False),
+        ((True, True), 2, torch.bfloat16, False),
+        ((True, True), 1, torch.float16, False),
+        ((True, True), 1, torch.bfloat16, True),
+    ],
+)
+def test_split_quantize_grouped_fallback(monkeypatch, usage, block_dim, dtype, mixed_options):
+    """Keep single-direction, 2D scaling, other dtypes and per-expert options."""
+    splits, k = [128, 256, 0], 256
+    quantizers = [
+        Float8BlockQuantizer(
+            fp8_dtype=DType.kFloat8E4M3,
+            rowwise=usage[0],
+            columnwise=usage[1],
+            block_scaling_dim=block_dim,
+            amax_epsilon=(0.1 * i if mixed_options else 0.0),
+        )
+        for i in range(len(splits))
+    ]
+    x = torch.randn(sum(splits), k, dtype=dtype, device="cuda")
+    monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "0")
+    reference = tex.split_quantize(x, splits, quantizers)
+    expected = _snapshot_blockwise_outputs(reference, [(m, k) for m in splits], block_dim)
+    monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "1")
+    outputs = tex.split_quantize(x, splits, quantizers)
+    actual = _snapshot_blockwise_outputs(outputs, [(m, k) for m in splits], block_dim)
+    torch.cuda.synchronize()
+    _assert_blockwise_snapshots_equal(actual, expected)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("common_k", [True, False])
+def test_multi_tensor_quantize_grouped(monkeypatch, common_k):
+    """Support separate allocations; mixed K must retain the existing path."""
+    shapes = [(129, 256), (256, 256 if common_k else 384)]
+    inputs = [torch.randn(shape, dtype=torch.bfloat16, device="cuda") for shape in shapes]
+    quantizers = [
+        Float8BlockQuantizer(
+            fp8_dtype=DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=1,
+        )
+        for _ in inputs
+    ]
+    monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "0")
+    reference = tex.multi_tensor_quantize(inputs, quantizers)
+    expected = _snapshot_blockwise_outputs(reference, shapes, 1)
+    monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "1")
+    outputs = tex.multi_tensor_quantize(inputs, quantizers)
+    actual = _snapshot_blockwise_outputs(outputs, shapes, 1)
+    torch.cuda.synchronize()
+    _assert_blockwise_snapshots_equal(actual, expected)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_split_quantize_grouped_dispatch(monkeypatch):
+    """Ensure a qualifying call actually executes one grouped CUDA kernel."""
+    if get_device_compute_capability()[0] != 9:
+        pytest.skip("Grouped BF16 blockwise path targets Hopper")
+    splits, k = [128, 0, 256, 384], 256
+    quantizers = [
+        Float8BlockQuantizer(
+            fp8_dtype=DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=1,
+        )
+        for _ in splits
+    ]
+    x = torch.randn(sum(splits), k, dtype=torch.bfloat16, device="cuda")
+    monkeypatch.delenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", raising=False)
+    tex.split_quantize(x, splits, quantizers)
+    torch.cuda.synchronize()
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    ) as profile:
+        tex.split_quantize(x, splits, quantizers)
+        torch.cuda.synchronize()
+    kernels = [
+        event
+        for event in profile.events()
+        if "grouped_block_scaled_1d_cast_transpose_kernel" in event.name
+    ]
+    assert len(kernels) == 1, "Expected one grouped kernel; rebuild the TE core library as well"
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_split_quantize_grouped_cuda_graph(monkeypatch):
+    """By-value metadata remains valid through capture and changed-input replays."""
+    if get_device_compute_capability()[0] != 9:
+        pytest.skip("Grouped BF16 blockwise path targets Hopper")
+    splits, k = [0, 129, 256, 511], 256
+    quantizers = [
+        Float8BlockQuantizer(
+            fp8_dtype=DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=1,
+        )
+        for _ in splits
+    ]
+    x = torch.ones(sum(splits), k, dtype=torch.bfloat16, device="cuda")
+    monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "1")
+    warmup = torch.cuda.Stream()
+    warmup.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup):
+        for _ in range(3):
+            tex.split_quantize(x, splits, quantizers)
+    torch.cuda.current_stream().wait_stream(warmup)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        outputs = tex.split_quantize(x, splits, quantizers)
+    for value in (0.0, 0.5, 2.0, -3.0):
+        x.fill_(value)
+        graph.replay()
+        actual = _snapshot_blockwise_outputs(outputs, [(m, k) for m in splits], 1)
+        monkeypatch.setenv("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", "0")
+        reference = tex.split_quantize(x, splits, quantizers)
+        expected = _snapshot_blockwise_outputs(reference, [(m, k) for m in splits], 1)
+        torch.cuda.synchronize()
+        _assert_blockwise_snapshots_equal(actual, expected)

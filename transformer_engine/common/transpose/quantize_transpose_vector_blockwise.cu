@@ -11,13 +11,17 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cstdint>
 #include <cuda/barrier>
+#include <limits>
 #include <utility>
+#include <vector>
 
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
 #include "common/transpose/cast_transpose.h"
 #include "common/util/cuda_runtime.h"
+#include "common/util/system.h"
 #include "common/utils.cuh"
 
 namespace transformer_engine {
@@ -166,24 +170,39 @@ static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kT
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
 constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
 
-template <bool kAligned, typename CType, typename IType, typename OType>
-__global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
+// Packed BF16 local amax, used only by the grouped BF16 specialization.
+// The padded shared-memory layout and eight-lane shuffle reductions are kept.
+template <int Count>
+__device__ __forceinline__ __nv_bfloat162
+local_bf16_pair_amax(const Vec<bf16, 2> (&values)[Count]) {
+  __nv_bfloat162 amax = __floats2bfloat162_rn(0.f, 0.f);
+#pragma unroll
+  for (int i = 0; i < Count; ++i) {
+    const auto pair = __halves2bfloat162(values[i].data.elt[0], values[i].data.elt[1]);
+    amax = __hmax2(amax, __habs2(pair));
+  }
+  return amax;
+}
+
+template <bool kAligned, typename CType, typename IType, typename OType,
+          bool kBothGemmReady = false>
+__device__ __forceinline__ void block_scaled_1d_cast_transpose_tile(
     const IType* const input, OType* const output_c, OType* const output_t,
     CType* const tile_scales_inv_c, CType* const tile_scales_inv_t, const size_t row_length,
     const size_t num_rows, const size_t scale_stride_x, const size_t scale_stride_y,
     const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
     FP8BlockwiseRowwiseOption rowwise_option, FP8BlockwiseColumnwiseOption columnwise_option,
-    const bool pow_2_scaling, const float* noop_ptr) {
+    const bool pow_2_scaling, const float* noop_ptr, size_t tile_x, size_t tile_y) {
   // skip execution if noop
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
     return;
   }
 
-  bool return_rowwise = rowwise_option != FP8BlockwiseRowwiseOption::NONE;
+  const bool return_rowwise = kBothGemmReady || rowwise_option != FP8BlockwiseRowwiseOption::NONE;
   bool return_columnwise_gemm_ready =
-      columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+      kBothGemmReady || columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
   bool return_columnwise_compact =
-      columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
+      !kBothGemmReady && columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
 
   using SMemVec = Vec<IType, kNVecSMem>;
   using OVec = Vec<OType, kNVecOut>;
@@ -200,11 +219,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     constexpr int r_stride = kThreadsPerBlock / kNumThreadsLoad;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
     const int c_s =
-        (threadIdx.x % kNumThreadsLoad) * (kNVecIn / kNVecSMem);  // Column in shared memory
-    int r_s = threadIdx.x / kNumThreadsLoad;                      // Row in shared memory
-    const size_t c_g =
-        static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;    // Column in global memory
-    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;       // Row in global memory
+        (threadIdx.x % kNumThreadsLoad) * (kNVecIn / kNVecSMem);         // Column in shared memory
+    int r_s = threadIdx.x / kNumThreadsLoad;                             // Row in shared memory
+    const size_t c_g = tile_x * kTileDim + c_s * kNVecSMem;              // Column in global memory
+    size_t r_g = tile_y * kTileDim + r_s;                                // Row in global memory
     const size_t stride_g = static_cast<size_t>(r_stride) * row_length;  // Stride in global memory
     const size_t num_ele = c_g < row_length ? min(static_cast<size_t>(kNVecIn), row_length - c_g)
                                             : 0;            // For not aligned case
@@ -246,11 +264,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         kThreadsPerBlock / kNumThreadsStore;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
     const int c_s =
-        (threadIdx.x % kNumThreadsStore) * (kNVecOut / kNVecSMem);  // Column in shared memory
-    int r_s = threadIdx.x / kNumThreadsStore;                       // Row in shared memory
-    const size_t c_g =
-        static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;    // Column in global memory
-    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;       // Row in global memory
+        (threadIdx.x % kNumThreadsStore) * (kNVecOut / kNVecSMem);       // Column in shared memory
+    int r_s = threadIdx.x / kNumThreadsStore;                            // Row in shared memory
+    const size_t c_g = tile_x * kTileDim + c_s * kNVecSMem;              // Column in global memory
+    size_t r_g = tile_y * kTileDim + r_s;                                // Row in global memory
     const size_t stride_g = static_cast<size_t>(r_stride) * row_length;  // Stride in global memory
     const size_t num_ele = c_g < row_length ? min(static_cast<size_t>(kNVecOut), row_length - c_g)
                                             : 0;          // For not aligned case
@@ -273,12 +290,17 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       }
       // Step 2.2: Compute local amax
       CType amax = 0;
+      if constexpr (kBothGemmReady) {
+        const auto pair_amax = local_bf16_pair_amax(smem_vec);
+        amax = fmaxf(__low2float(pair_amax), __high2float(pair_amax));
+      } else {
 #pragma unroll
-      for (int i = 0; i < kNVecOut / kNVecSMem; ++i) {
+        for (int i = 0; i < kNVecOut / kNVecSMem; ++i) {
 #pragma unroll
-        for (int j = 0; j < kNVecSMem; ++j) {
-          __builtin_assume(amax >= 0);
-          amax = fmaxf(amax, fabsf(smem_vec[i].data.elt[j]));
+          for (int j = 0; j < kNVecSMem; ++j) {
+            __builtin_assume(amax >= 0);
+            amax = fmaxf(amax, fabsf(smem_vec[i].data.elt[j]));
+          }
         }
       }
       // Step 2.3: Reduce amax
@@ -300,8 +322,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       }
       if (write_scale_inv) {
         CType scale_inv = 1.0 / scale;
-        size_t row_idx = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;
-        size_t col_idx = static_cast<size_t>(blockIdx.x);
+        size_t row_idx = tile_y * kTileDim + r_s;
+        size_t col_idx = tile_x;
         tile_scales_inv_c[row_idx * scale_stride_y + col_idx * scale_stride_x] = scale_inv;
       }
       // Step 2.6: Quantize
@@ -338,9 +360,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     constexpr int num_iterations = kTileDim / (c_stride * kNVecSMem);
     const int r_s = (threadIdx.x % kNumThreadsStore) * kNVecOut;  // Row in shared memory
     int c_s = threadIdx.x / kNumThreadsStore;                     // Column in shared memory
-    size_t r_g =
-        static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;     // Row in global memory
-    const size_t c_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;  // Column in global memory
+    size_t r_g = tile_x * kTileDim + c_s * kNVecSMem;             // Row in global memory
+    const size_t c_g = tile_y * kTileDim + r_s;                   // Column in global memory
     const size_t stride_g =
         static_cast<size_t>(c_stride) * kNVecSMem * num_rows;  // Stride in global memory
     const size_t num_ele = c_g < num_rows ? min(static_cast<size_t>(kNVecOut), num_rows - c_g)
@@ -362,13 +383,19 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         int c = c_s;
         smem_vec[i] = smem[r * kSMemCol + c];
       }
+      __nv_bfloat162 pair_amax;
+      if constexpr (kBothGemmReady) pair_amax = local_bf16_pair_amax(smem_vec);
 #pragma unroll
       for (int smem_idx = 0; smem_idx < kNVecSMem; ++smem_idx) {
         // Step 3.2: Compute local amax
         CType amax = 0;
+        if constexpr (kBothGemmReady) {
+          amax = smem_idx == 0 ? __low2float(pair_amax) : __high2float(pair_amax);
+        } else {
 #pragma unroll
-        for (int i = 0; i < kNVecOut; ++i) {
-          amax = fmaxf(amax, fabsf(smem_vec[i].data.elt[smem_idx]));
+          for (int i = 0; i < kNVecOut; ++i) {
+            amax = fmaxf(amax, fabsf(smem_vec[i].data.elt[smem_idx]));
+          }
         }
         // Step 3.3: Reduce amax
 #pragma unroll
@@ -389,8 +416,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         }
         if (write_scale_inv) {
           CType scale_inv = 1.0 / scale;
-          size_t row_idx = static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem + smem_idx;
-          size_t col_idx = static_cast<size_t>(blockIdx.y);
+          size_t row_idx = tile_x * kTileDim + c_s * kNVecSMem + smem_idx;
+          size_t col_idx = tile_y;
           tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
         }
         // Step 3.6: Quantize
@@ -434,11 +461,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
                   "num_iterations should be 1 for columnwise non-transpose case");
     const int thr_idx_in_warp = threadIdx.x % kThreadsPerWarp;
     const int warp_idx = threadIdx.x / kThreadsPerWarp;
-    const int r_s = thr_idx_in_warp * kThreadTileRow;               // Row in shared memory
-    int c_s = warp_idx * num_smem_reads;                            // Column in shared memory
-    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;  // Row in global memory
-    const size_t c_g =
-        static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;  // Column in global memory
+    const int r_s = thr_idx_in_warp * kThreadTileRow;        // Row in shared memory
+    int c_s = warp_idx * num_smem_reads;                     // Column in shared memory
+    size_t r_g = tile_y * kTileDim + r_s;                    // Row in global memory
+    const size_t c_g = tile_x * kTileDim + c_s * kNVecSMem;  // Column in global memory
     const size_t num_ele = c_g < row_length
                                ? min(static_cast<size_t>(kThreadTileCol), row_length - c_g)
                                : 0;  // For not aligned case
@@ -486,8 +512,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         }
         if (write_scale_inv) {
           CType scale_inv = 1.0 / scale;
-          size_t row_idx = static_cast<size_t>(blockIdx.y);
-          size_t col_idx = static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem + reg_idx;
+          size_t row_idx = tile_y;
+          size_t col_idx = tile_x * kTileDim + c_s * kNVecSMem + reg_idx;
           tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
         }
       }
@@ -514,6 +540,74 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       // this section shouldn't matter since we only have one iteration
     }
   }
+}
+
+template <bool kAligned, typename CType, typename IType, typename OType>
+__global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
+    const IType* const input, OType* const output_c, OType* const output_t,
+    CType* const tile_scales_inv_c, CType* const tile_scales_inv_t, const size_t row_length,
+    const size_t num_rows, const size_t scale_stride_x, const size_t scale_stride_y,
+    const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
+    FP8BlockwiseRowwiseOption rowwise_option, FP8BlockwiseColumnwiseOption columnwise_option,
+    const bool pow_2_scaling, const float* noop_ptr) {
+  block_scaled_1d_cast_transpose_tile<kAligned, CType, IType, OType>(
+      input, output_c, output_t, tile_scales_inv_c, tile_scales_inv_t, row_length, num_rows,
+      scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, rowwise_option,
+      columnwise_option, pow_2_scaling, noop_ptr, blockIdx.x, blockIdx.y);
+}
+
+// By-value descriptors avoid device allocation/copies and host-buffer lifetime
+// hazards during CUDA graph capture. Split larger lists into bounded launches.
+constexpr int kMaxGroupedBlockwiseTensors = 32;
+constexpr size_t kMaxGroupedGridSize = std::numeric_limits<int>::max();
+struct GroupedBlockwiseTensor {
+  const bf16* input;
+  void* row;
+  void* col;
+  float* row_scale;
+  float* col_scale;
+  size_t m;
+  size_t row_scale_stride;
+  size_t col_scale_stride;
+  size_t tile_end;
+};
+struct GroupedBlockwiseParams {
+  GroupedBlockwiseTensor tensors[kMaxGroupedBlockwiseTensors];
+  size_t k;
+  int count;
+  float epsilon;
+  bool pow2_scale;
+};
+static_assert(sizeof(GroupedBlockwiseParams) < 4096,
+              "Grouped descriptors must fit the portable kernel argument budget");
+
+template <bool kAligned, typename OType>
+__global__ void __launch_bounds__(kThreadsPerBlock) grouped_block_scaled_1d_cast_transpose_kernel(
+    const __grid_constant__ GroupedBlockwiseParams params) {
+#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+  const size_t tile = blockIdx.x;
+  int lo = 0, hi = params.count;
+  while (lo < hi) {
+    const int mid = lo + (hi - lo) / 2;
+    if (tile < params.tensors[mid].tile_end) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  const auto tensor = params.tensors[lo];
+  const size_t begin = lo == 0 ? 0 : params.tensors[lo - 1].tile_end;
+  const size_t local_tile = tile - begin;
+  const size_t tiles_k = DIVUP(params.k, size_t{kTileDim});
+  block_scaled_1d_cast_transpose_tile<kAligned, float, bf16, OType, true>(
+      tensor.input, static_cast<OType*>(tensor.row), static_cast<OType*>(tensor.col),
+      tensor.row_scale, tensor.col_scale, params.k, tensor.m, tensor.row_scale_stride, 1,
+      tensor.col_scale_stride, 1, params.epsilon, FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY,
+      FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY, params.pow2_scale, nullptr,
+      local_tile % tiles_k, local_tile / tiles_k);
+#else
+  asm volatile("trap;");
+#endif
 }
 
 }  // namespace
@@ -636,6 +730,101 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
           )                                                   // OutputType
       )                                                       // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+// Return false before launching anything if any operand needs another path.
+bool try_grouped_quantize_transpose_vector_blockwise(const NVTETensor* inputs, NVTETensor* outputs,
+                                                     size_t num_tensors,
+                                                     const QuantizationConfig& config,
+                                                     cudaStream_t stream) {
+  if (num_tensors < 2 || transformer_engine::cuda::sm_arch() != 90 ||
+      getenv<int>("NVTE_FP8_BLOCK_QUANTIZATION_GROUPED", 1) == 0 || config.noop_tensor != nullptr ||
+      config.stochastic_rounding) {
+    return false;
+  }
+  std::vector<GroupedBlockwiseTensor> tensors;
+  tensors.reserve(num_tensors);
+  size_t common_k = 0;
+  DType output_dtype = DType::kFloat8E4M3;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    const auto* input = convertNVTETensorCheck(inputs[i]);
+    const auto* output = convertNVTETensorCheck(outputs[i]);
+    if (input->data.dtype != DType::kBFloat16 || input->data.shape.size() != 2 ||
+        output->scaling_mode != NVTE_BLOCK_SCALING_1D || output->with_gemm_swizzled_scales) {
+      return false;
+    }
+    const size_t m = input->data.shape[0], k = input->data.shape[1];
+    if (k == 0 || (i != 0 && k != common_k)) {
+      return false;
+    }
+    common_k = k;
+    // Empty tensors may have null data/scales and contribute no tiles.
+    if (m == 0) {
+      continue;
+    }
+    if (input->data.dptr == nullptr || output->data.dptr == nullptr ||
+        output->columnwise_data.dptr == nullptr || output->scale_inv.dptr == nullptr ||
+        output->columnwise_scale_inv.dptr == nullptr || output->data.shape != input->data.shape ||
+        output->columnwise_data.shape != std::vector<size_t>{k, m} ||
+        output->data.dtype != output->columnwise_data.dtype ||
+        (output->data.dtype != DType::kFloat8E4M3 && output->data.dtype != DType::kFloat8E5M2) ||
+        output->scale_inv.dtype != DType::kFloat32 ||
+        output->columnwise_scale_inv.dtype != DType::kFloat32 ||
+        output->scale_inv.shape.size() != 2 || output->columnwise_scale_inv.shape.size() != 2) {
+      return false;
+    }
+    if (!tensors.empty() && output->data.dtype != output_dtype) {
+      return false;
+    }
+    output_dtype = output->data.dtype;
+    const auto tiles_m = DIVUP(m, size_t{kTileDim});
+    const auto tiles_k = DIVUP(k, size_t{kTileDim});
+    if (tiles_m > kMaxGroupedGridSize / tiles_k || output->scale_inv.shape[0] < tiles_k ||
+        output->scale_inv.shape[1] < m || output->columnwise_scale_inv.shape[0] < tiles_m ||
+        output->columnwise_scale_inv.shape[1] < k) {
+      return false;
+    }
+    tensors.push_back({static_cast<const bf16*>(input->data.dptr), output->data.dptr,
+                       output->columnwise_data.dptr, static_cast<float*>(output->scale_inv.dptr),
+                       static_cast<float*>(output->columnwise_scale_inv.dptr), m,
+                       output->scale_inv.shape[1], output->columnwise_scale_inv.shape[1],
+                       tiles_m * tiles_k});
+  }
+
+  // Every pointer is passed by value: works for bulk and separate allocations,
+  // caller-stream producer/consumer ordering, and repeated CUDA graph replay.
+  size_t begin = 0;
+  while (begin < tensors.size()) {
+    GroupedBlockwiseParams params{};
+    params.k = common_k;
+    params.epsilon = config.amax_epsilon;
+    params.pow2_scale = config.force_pow_2_scales;
+    size_t tiles = 0;
+    bool aligned = common_k % kTileDim == 0;
+    while (begin < tensors.size() && params.count < kMaxGroupedBlockwiseTensors) {
+      const auto tensor_tiles = tensors[begin].tile_end;
+      if (tensor_tiles > kMaxGroupedGridSize - tiles) {
+        break;
+      }
+      auto tensor = tensors[begin++];
+      tiles += tensor_tiles;
+      tensor.tile_end = tiles;
+      params.tensors[params.count++] = tensor;
+      aligned &= tensor.m % kTileDim == 0 && reinterpret_cast<uintptr_t>(tensor.input) % 16 == 0 &&
+                 reinterpret_cast<uintptr_t>(tensor.row) % 16 == 0 &&
+                 reinterpret_cast<uintptr_t>(tensor.col) % 16 == 0;
+    }
+    // The validation pass ensures a nonempty chunk always fits the grid limit.
+    const dim3 grid(static_cast<unsigned>(tiles));
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+        output_dtype, OutputType,
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(
+            aligned, kAligned,
+            grouped_block_scaled_1d_cast_transpose_kernel<kAligned, OutputType>
+            <<<grid, kThreadsPerBlock, kSMemSize * sizeof(bf16), stream>>>(params);););
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+  return true;
 }
 
 }  // namespace transformer_engine::detail
