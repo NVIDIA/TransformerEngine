@@ -306,7 +306,8 @@ def _default_out_partition_spec():
             "ep_resource is not set on the active MeshResource; pass out_sharding=... explicitly."
         )
     outer = _ep_outer_axis()
-    leading = (outer, gsr.ep_resource) if outer is not None else gsr.ep_resource
+    outer_axes = (outer,) if isinstance(outer, str) else outer or ()
+    leading = (*outer_axes, gsr.ep_resource) if outer_axes else gsr.ep_resource
     return (leading,)
 
 
