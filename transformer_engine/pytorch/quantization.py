@@ -467,6 +467,10 @@ class FP8GlobalState:
     is_first_fp8_module: bool = False
     fp8_graph_capturing: bool = False
     autocast_depth: int = 0
+    # Bumped on every reset(). A module records the generation it registered
+    # under, so a marker left over from a discarded state cannot suppress
+    # registration into the replacement state.
+    buffer_generation: int = 0
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
     global_amax_history_buffer: Dict[str, list] = field(default_factory=dict)
     global_scale_buffer: Dict[str, list] = field(default_factory=dict)
@@ -481,6 +485,10 @@ class FP8GlobalStateManager:
     """Class to keep track of and manipulate the global
     FP8 state at different stages of execution.
     """
+
+    # `fp8_meta` carries these keys for bookkeeping, not as FP8 tensor state, so
+    # they are excluded from the pickled extra state of a module.
+    BOOKKEEPING_KEYS = ("buffer_index_and_autocast_key", "buffer_generation")
 
     quantization_state = FP8GlobalState()
 
@@ -501,7 +509,11 @@ class FP8GlobalStateManager:
     @classmethod
     def reset(cls) -> None:
         """Reset the global state"""
-        cls.quantization_state = FP8GlobalState()
+        # The generation is carried into the replacement state so that modules
+        # which still hold its predecessor's registration marker register again.
+        cls.quantization_state = FP8GlobalState(
+            buffer_generation=cls.quantization_state.buffer_generation + 1
+        )
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:
@@ -587,15 +599,20 @@ class FP8GlobalStateManager:
         if not _has_delayed_scaling_state(fp8_meta):
             return
 
-        # Every module must call this function exactly once since
+        # Every module must call this function exactly once per global state since
         # the amax tensors are static. Ensures that compatibility
         # with non-graphed modules is maintained.
         index_in_buffer = cls.get_buffer_info()  # Same index for fwd/bwd fp8 tensors.
-        if index_in_buffer in fp8_meta:
+        qstate = cls.quantization_state
+        if (
+            fp8_meta.get(index_in_buffer) is not None
+            and fp8_meta.get("buffer_generation") == qstate.buffer_generation
+        ):
             return
 
         fp8_meta[index_in_buffer] = []
-        qstate = cls.quantization_state
+        fp8_meta["buffer_generation"] = qstate.buffer_generation
+
         for forward in (True, False):
             fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
             if fp8_meta_tensor_key not in fp8_meta:

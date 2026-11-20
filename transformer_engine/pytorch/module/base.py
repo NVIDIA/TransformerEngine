@@ -1523,7 +1523,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Store other pickelable values
         extra = {}
         for k, v in self.fp8_meta.items():
-            if k != "buffer_index_and_autocast_key" and isinstance(
+            if k not in FP8GlobalStateManager.BOOKKEEPING_KEYS and isinstance(
                 v, (bool, int, float, str, tuple, list)
             ):
                 extra[k] = v

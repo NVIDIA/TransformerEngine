@@ -856,7 +856,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             # Store other picklable items
             extra = {}
             for key, val in fp8_meta.items():
-                if key == "buffer_index_and_autocast_key":
+                if key in FP8GlobalStateManager.BOOKKEEPING_KEYS:
                     continue
                 if not isinstance(val, (bool, int, float, str, tuple, list)):
                     continue
