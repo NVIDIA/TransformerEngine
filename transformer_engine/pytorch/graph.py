@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Functions for CUDA Graphs support in FP8"""
+
 from collections.abc import Iterable
 import contextlib
 import gc
@@ -576,11 +577,13 @@ def _make_graphed_callables(
         _run_capture_time_hooks(capture_time_hooks, callable_idx, "forward_pre_hooks", func)
 
         hooks = []
-        for module in func.modules():
-            hooks.append(module.register_forward_hook(hook_fn))
-        outputs = func(*args, **kwargs)
-        for hook in hooks:
-            hook.remove()
+        try:
+            for module in func.modules():
+                hooks.append(module.register_forward_hook(hook_fn))
+            outputs = func(*args, **kwargs)
+        finally:
+            for hook in hooks:
+                hook.remove()
 
         _run_capture_time_hooks(capture_time_hooks, callable_idx, "forward_hooks", func)
 
@@ -1479,6 +1482,10 @@ def make_graphed_callables(
     `original PyTorch implementation <https://pytorch.org/docs/stable/generated/torch.cuda.make_graphed_callables.html>`_
     for more documentation.
 
+    If a callable raises during warmup, temporary discovery hooks, saved RNG state,
+    module call wrappers, and the capture flag are restored before the exception is
+    re-raised. This cleanup does not make fatal CUDA errors recoverable.
+
     .. warning::
 
        Arguments 'fp8_enabled', 'fp8_calibrating', 'fp8_recipe', 'fp8_group', and 'fp8_weight_caching' are deprecated.
@@ -1717,34 +1724,30 @@ def make_graphed_callables(
     ]
     original_rng_states = [state.get_state() for state in generators]
 
-    graphed_callables = _make_graphed_callables(
-        forward_funcs,
-        sample_args,
-        num_warmup_iters=num_warmup_iters,
-        allow_unused_input=allow_unused_input,
-        cache_quantized_params=cache_quantized_params,
-        sample_kwargs=sample_kwargs,
-        _order=_order,
-        _num_layers_per_chunk=_num_layers_per_chunk,
-        pool=pool,
-        retain_graph_in_backward=retain_graph_in_backward,
-        _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
-        clone_param_grads_on_return=clone_param_grads_on_return,
-        pre_warmup_hook=pre_warmup_hook,
-        post_warmup_hook=post_warmup_hook,
-        capture_time_hooks=capture_time_hooks,
-    )
-
-    # Ensures warmup does not affect numerics for ops such as dropout.
-    for gen, state in zip(generators, original_rng_states):
-        gen.set_state(state)
-
-    # Remove FP8 wrapper.
-    for module_cls, old_call in old_call_funcs.items():
-        module_cls.__call__ = old_call
-
-    # Restore FP8 state.
-    restore_fp8_tensors(modules, saved_fp8_tensors)
-
-    set_capture_end()
+    try:
+        graphed_callables = _make_graphed_callables(
+            forward_funcs,
+            sample_args,
+            num_warmup_iters=num_warmup_iters,
+            allow_unused_input=allow_unused_input,
+            cache_quantized_params=cache_quantized_params,
+            sample_kwargs=sample_kwargs,
+            _order=_order,
+            _num_layers_per_chunk=_num_layers_per_chunk,
+            pool=pool,
+            retain_graph_in_backward=retain_graph_in_backward,
+            _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
+            clone_param_grads_on_return=clone_param_grads_on_return,
+            pre_warmup_hook=pre_warmup_hook,
+            post_warmup_hook=post_warmup_hook,
+            capture_time_hooks=capture_time_hooks,
+        )
+    finally:
+        # Restore capture-owned state even if warmup raises.
+        for gen, state in zip(generators, original_rng_states):
+            gen.set_state(state)
+        for module_cls, old_call in old_call_funcs.items():
+            module_cls.__call__ = old_call
+        restore_fp8_tensors(modules, saved_fp8_tensors)
+        set_capture_end()
     return graphed_callables
