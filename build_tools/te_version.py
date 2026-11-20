@@ -15,7 +15,9 @@ from packaging.version import Version
 _SEMVER_PATTERN = re.compile(
     r"(?P<release>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
     r"(?:-(?P<label>dev|alpha|beta|rc)\.(?P<number>0|[1-9][0-9]*))?"
-    r"(?:\+(?P<build>[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?"
+    # Build metadata is a Git commit with a "g" prefix, as in git describe. The prefix keeps
+    # PEP 440 from stripping leading zeros from an all-digit commit.
+    r"(?:\+(?P<build>g[0-9a-f]{7,64}))?"
 )
 _PEP440_PRERELEASE_SEGMENTS = {"dev": ".dev", "alpha": "a", "beta": "b", "rc": "rc"}
 
@@ -47,9 +49,9 @@ def te_version() -> str:
     """Transformer Engine version string, normalized to PEP 440
 
     VERSION.txt must contain MAJOR.MINOR.PATCH, optionally followed by
-    a -dev.N, -alpha.N, -beta.N, or -rc.N prerelease and +BUILD
+    a -dev.N, -alpha.N, -beta.N, or -rc.N prerelease and +gCOMMIT build
     metadata. For example, 1.2.3-rc.1 becomes 1.2.3rc1 and
-    4.5.6-dev.123+abc123 becomes 4.5.6.dev123+abc123.
+    4.5.6-dev.123+gabc1234 becomes 4.5.6.dev123+gabc1234.
 
     Includes Git commit as local version, unless suppressed with
     NVTE_NO_LOCAL_VERSION environment variable.
@@ -61,7 +63,8 @@ def te_version() -> str:
         raise ValueError(
             f"Transformer Engine version {raw_version!r} is not a supported SemVer version."
             " Expected MAJOR.MINOR.PATCH, optionally followed by -dev.N, -alpha.N, -beta.N, or"
-            " -rc.N and +BUILD metadata, e.g. 1.2.3, 1.2.3-rc.1, or 1.2.3-dev.4+abc123."
+            " -rc.N and +g<7 to 64 lowercase hex digit commit> build metadata, e.g. 1.2.3,"
+            " 1.2.3-rc.1, or 1.2.3-dev.4+gabc1234."
         )
     version = match["release"]
     if match["label"] is not None:
