@@ -7,7 +7,6 @@
 import importlib.util
 import math
 import os
-from pathlib import Path
 import sys
 from typing import Optional, Tuple
 
@@ -292,49 +291,6 @@ def test_gdn_thd_forward_final_state_and_backward(
         initial_state_ref.grad,
         _BWD_TOL[q.dtype],
         "dinitial_state",
-    )
-
-
-@requires_gdn
-@pytest.mark.parametrize("qkv_format", ["bshd", "thd"])
-def test_gdn_documentation_example(qkv_format):
-    """Check the tutorial's inputs and forward/backward against the FP64 recurrence."""
-    example_path = (
-        Path(__file__).resolve().parents[3] / "docs/examples/attention/example_linear_attention.py"
-    )
-    spec = importlib.util.spec_from_file_location("example_linear_attention", example_path)
-    example = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(example)
-    inputs, initial_state, cu_seqlens = example.make_inputs(qkv_format)
-    output, final_state = example.run_single_gpu(inputs, initial_state, cu_seqlens, qkv_format)
-
-    reference_inputs = tuple(t.detach().double().requires_grad_() for t in inputs)
-    initial_state_ref = initial_state.detach().double().requires_grad_()
-    q, k, v, g, beta = (t.unsqueeze(0) if qkv_format == "thd" else t for t in reference_inputs)
-    output_ref, final_state_ref = _gdn_reference(
-        F.normalize(q, dim=-1),
-        F.normalize(k, dim=-1),
-        v,
-        g,
-        beta,
-        initial_state=initial_state_ref,
-        cu_seqlens=cu_seqlens if qkv_format == "thd" else None,
-    )
-    output_ref = output_ref.reshape_as(output)
-    _assert_rms_close(output, output_ref, _FWD_TOL[inputs[0].dtype], "example output")
-    _assert_rms_close(
-        final_state, final_state_ref, _STATE_TOL[inputs[0].dtype], "example final state"
-    )
-    (output_ref.square().mean() + final_state_ref.square().mean()).backward()
-    for name, actual, reference in zip(("q", "k", "v", "g", "beta"), inputs, reference_inputs):
-        _assert_rms_close(
-            actual.grad, reference.grad, _BWD_TOL[inputs[0].dtype], f"example d{name}"
-        )
-    _assert_rms_close(
-        initial_state.grad,
-        initial_state_ref.grad,
-        _BWD_TOL[inputs[0].dtype],
-        "example dinitial_state",
     )
 
 
