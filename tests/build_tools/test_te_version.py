@@ -36,8 +36,9 @@ def raw_version(monkeypatch):
         ("1.2.3-beta.2", "1.2.3b2"),
         ("1.2.3-rc.1", "1.2.3rc1"),
         ("4.5.6-dev.123", "4.5.6.dev123"),
-        ("4.5.6-dev.123+abc123", "4.5.6.dev123+abc123"),
-        ("1.2.3+build-5.ABC", "1.2.3+build.5.abc"),
+        ("4.5.6-dev.123+gabc1234", "4.5.6.dev123+gabc1234"),
+        ("1.2.3+g0123456", "1.2.3+g0123456"),
+        ("1.2.3+g" + "0" * 64, "1.2.3+g" + "0" * 64),
     ],
 )
 def test_normalizes_semver(raw_version, raw, expected):
@@ -72,9 +73,14 @@ def test_normalizes_semver(raw_version, raw, expected):
         "1.2.3-rc.1.dev.2",
         # Invalid build metadata
         "1.2.3+",
-        "1.2.3+abc..def",
-        "1.2.3+abc_def",
-        "1.2.3+-abc",
+        "1.2.3+g",
+        "1.2.3+abc1234",
+        "1.2.3+gabc123",
+        "1.2.3+g" + "0" * 65,
+        "1.2.3+gABC1234",
+        "1.2.3+gabc123z",
+        "1.2.3+gabc1234.abc1234",
+        "1.2.3+build.5",
     ],
 )
 def test_rejects_unsupported_versions(raw_version, raw):
@@ -108,7 +114,7 @@ def test_pep440_precedence(raw_version):
     "raw,expected",
     [
         ("1.2.3-rc.1", "1.2.3rc1+abc1234"),
-        ("4.5.6-dev.123+abc123", "4.5.6.dev123+abc123.abc1234"),
+        ("4.5.6-dev.123+gdef5678", "4.5.6.dev123+gdef5678.abc1234"),
     ],
 )
 def test_appends_commit(raw_version, monkeypatch, raw, expected):
@@ -123,7 +129,7 @@ def test_appends_commit(raw_version, monkeypatch, raw, expected):
     assert te_version() == expected
 
 
-@pytest.mark.parametrize("raw", ["3.0.0", "3.0.0-dev.0", "1.2.3-rc.1", "4.5.6-dev.123+abc123"])
+@pytest.mark.parametrize("raw", ["3.0.0", "3.0.0-dev.0", "1.2.3-rc.1", "4.5.6-dev.123+gabc1234"])
 def test_framework_wheel_filename_is_valid(raw_version, raw):
     raw_version(raw)
     wheel_version = append_local_version(te_version(), "cu12torch2.9.1cxx11abiTRUE")
