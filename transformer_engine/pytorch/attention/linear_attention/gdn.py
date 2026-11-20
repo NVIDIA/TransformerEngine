@@ -406,31 +406,28 @@ class GatedDeltaNetAttention(LinearAttentionBase):
 
         Notes
         -----
-        With THD CP, rank ``r`` supplies tokens ``[r*T//P:(r+1)*T//P]`` from
-        the global packed buffer, where ``T = cu_seqlens[-1]`` and ``P`` is CP
-        size. Document lengths need not be divisible by CP size; pack tokens
-        without gaps.
+        CP requires contiguous rank slices. For THD, rank ``r`` supplies
+        ``[r*T//P:(r+1)*T//P]`` of the packed buffer, where
+        ``T = cu_seqlens[-1]`` and ``P`` is CP size. Pack tokens without gaps;
+        document lengths need not be divisible by ``P``.
 
-        For BSHD/SBHD CP, rank ``r`` supplies ``[r*S//P:(r+1)*S//P]`` of every
-        batch row. Here ``S`` is the full sequence length and ``B`` is batch size.
-        Supply ``cu_seqlens=[0, S, 2*S, ..., B*S]`` when ``S`` is not divisible
-        by ``P``; otherwise TE can infer ``S = local_sequence_length * P``.
-        Arbitrary rank splits are not supported.
+        For BSHD/SBHD, rank ``r`` supplies ``[r*S//P:(r+1)*S//P]`` of each
+        batch row, where ``S`` is the global sequence length. Supply
+        ``cu_seqlens=[0, S, 2*S, ..., B*S]`` (``B`` is batch size) for uneven
+        slices; otherwise TE infers ``S = local_sequence_length * P``.
+        Arbitrary rank splits are unsupported.
 
-        With CP, ``initial_state`` describes all global documents and must have
-        identical values on all ranks. Each document's initial-state gradient is
-        returned on its first owning rank, with zeros elsewhere; sum these
-        contributions over CP to inspect a replicated leaf state's full gradient.
-        This ownership also permits chaining final states into the next call.
-        Final states are replicated for all global documents. Their backward
-        sums gradients from every replica; divide a replicated final-state loss
-        by CP size to count it once. All ranks must call forward and backward with matching
-        options, even when their local loss or token count is zero. Only
-        first-order gradients are supported, matching the underlying FE path.
+        With CP, ``initial_state`` covers all global documents and must match on
+        all ranks. Each document's initial-state gradient is returned on its
+        first owning rank, with zeros elsewhere; sum over CP for a replicated
+        leaf state's full gradient. Final states are replicated for all global
+        documents and can be chained into the next call. Their backward sums
+        gradients across replicas; divide a replicated final-state loss by ``P``
+        to count it once.
+
+        All CP ranks must call forward and backward with matching options, even
+        with zero local loss or tokens. Only first-order gradients are supported.
         CP executes eagerly, including inside a ``torch.compile`` model.
-        Irregular feature sizes are internally extended with zeros and cropped
-        back, preserving the recurrence and original attention scale. No token
-        padding is introduced.
         """
         if g is None or beta is None:
             raise ValueError(
