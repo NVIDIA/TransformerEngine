@@ -64,6 +64,12 @@ def device_compute_capability(device_id: Optional[int] = None) -> tuple:
         return (0, 0)
 
 
+def tvm_ffi_function(compiled):
+    """The TVM-FFI function of a kernel compiled with ``--enable-tvm-ffi``, for registration."""
+    native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
+    return native if native is not None else compiled
+
+
 def str_to_cutlass_dtype(dtype_str: str):
     """Convert a string dtype to a cutlass dtype, or None if unknown."""
     return _CUTLASS_DTYPE_FROM_STR.get(dtype_str, None)

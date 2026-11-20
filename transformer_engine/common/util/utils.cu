@@ -9,8 +9,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 #include "../common.h"
+#include "../util/cuda_runtime.h"
 #include "../util/logging.h"
 
 namespace transformer_engine {
@@ -80,3 +83,51 @@ void nvte_convert_pointers_to_tensor(const uint64_t *host_ptrs, NVTETensor outpu
   nvte_copy_host_to_device_via_kernel(host_ptrs, out_tensor->data.dptr,
                                       static_cast<size_t>(count) * sizeof(uint64_t), stream);
 }
+
+namespace transformer_engine {
+
+namespace {
+
+// Occupancy probe for cuda::max_active_clusters: empty on purpose, only its launch bounds and
+// cluster dim matter.
+__global__ void cluster_probe_kernel() {}
+
+}  // namespace
+
+namespace cuda {
+
+int max_active_clusters(int cluster_size) {
+  static std::mutex mutex;
+  // Occupancy depends on the device and the cluster size, so the cache keys on both.
+  static std::unordered_map<int64_t, int> clusters_by_device_and_size;
+  const int device = current_device();
+  const int64_t key = (static_cast<int64_t>(device) << 32) | static_cast<uint32_t>(cluster_size);
+  std::lock_guard<std::mutex> lock(mutex);
+  auto it = clusters_by_device_and_size.find(key);
+  if (it == clusters_by_device_and_size.end()) {
+    // All the shared memory a CTA may take: one CTA per SM.
+    int smem = 0;
+    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(cluster_probe_kernel,
+                                         cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+    cudaLaunchAttribute attr{};
+    attr.id = cudaLaunchAttributeClusterDimension;
+    attr.val.clusterDim.x = cluster_size;
+    attr.val.clusterDim.y = 1;
+    attr.val.clusterDim.z = 1;
+    cudaLaunchConfig_t config{};
+    config.gridDim = dim3(cluster_size, 1, 1);
+    config.blockDim = dim3(128, 1, 1);
+    config.dynamicSmemBytes = smem;
+    config.attrs = &attr;
+    config.numAttrs = 1;
+    int clusters = 0;
+    NVTE_CHECK_CUDA(cudaOccupancyMaxActiveClusters(&clusters, cluster_probe_kernel, &config));
+    it = clusters_by_device_and_size.emplace(key, clusters).first;
+  }
+  return it->second;
+}
+
+}  // namespace cuda
+
+}  // namespace transformer_engine

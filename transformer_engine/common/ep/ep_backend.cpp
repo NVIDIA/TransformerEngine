@@ -102,6 +102,51 @@ inline ncclEpTensor_t make_nccl_ep_tensor(const NVTETensor t, NVTEShape& shape_o
   return desc;
 }
 
+// NCCL EP first published the overlap completion signal in 0.3.0. An older runtime loaded through
+// NCCL_EP_HOME ignores the signal output field and returns success without ever raising the flags,
+// leaving the overlapped GEMM waiting forever. Reject a signaled op on such a runtime up front.
+void require_signal_capable(const char* call) {
+  constexpr int kMinSignalVersion = 300;  // NCCL EP 0.3.0
+  const int version = nccl_ep::runtime_version();
+  NVTE_CHECK(version >= kMinSignalVersion, "The loaded NCCL EP runtime ", version / 10000, ".",
+             (version / 100) % 100, ".", version % 100,
+             " does not support the overlap completion signal required by the ", call,
+             "; it needs NCCL EP >= 0.3.0. Use a compatible runtime or disable the overlap.");
+}
+
+// Signal descriptor of a dispatch or combine call; attach() returns the NCCL EP signal to wire into
+// the call, or nullptr when no signal is given.
+struct SignalDesc {
+  NVTEShape shape;
+  ncclEpTensor_t desc = NCCL_EP_TENSOR_INIT;
+  ncclEpSignal_t sig = NCCL_EP_SIGNAL_INIT;
+
+  ncclEpSignal_t* attach(const EpSignal* signal, ncclEpSignalUnit_t unit, const char* call) {
+    if (signal == nullptr) {
+      return nullptr;
+    }
+    require_signal_capable(call);
+    NVTE_CHECK(
+        nvte_tensor_type(signal->ready) == kNVTEInt32 && nvte_tensor_shape(signal->ready).ndim == 1,
+        call, " signal must be a 1D int32 tensor");
+    NVTE_CHECK(signal->granularity > 0, call, " signal granularity must be positive");
+    desc = make_nccl_ep_tensor(signal->ready, shape);
+    sig.granularity = static_cast<int>(signal->granularity);
+    sig.unit = unit;
+    sig.signal = &desc;
+    return &sig;
+  }
+};
+
+// NCCL EP rejects a signaled call it cannot serve with ncclInvalidUsage, e.g. on a group of more
+// than one LSA team (NVLink domain).
+void check_signaled_call(ncclResult_t status, bool signaled, const char* call) {
+  NVTE_CHECK(!signaled || status != ncclInvalidUsage, "NCCL EP rejected the signaled ", call,
+             " (invalid usage): the overlapped EP ops need the EP group within one NVLink domain "
+             "(one LSA team); NCCL EP prints the cause to stderr");
+  NVTE_CHECK_NCCL(status);
+}
+
 int current_device() {
   int device = 0;
   NVTE_CHECK_CUDA(cudaGetDevice(&device));
@@ -188,6 +233,11 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
              ") must be divisible by ep_size (", config.ep_size, ")");
   NVTE_CHECK(config.num_comm_sms >= 0, "num_comm_sms must be >= 0 (0 = auto), got ",
              config.num_comm_sms);
+  NVTE_CHECK(config.dispatch_fwd_num_sms >= 0 && config.combine_fwd_num_sms >= 0 &&
+                 config.dispatch_bwd_num_sms >= 0 && config.combine_bwd_num_sms >= 0,
+             "dispatch/combine fwd/bwd num_sms must be >= 0 (0 = inherit), got ",
+             config.dispatch_fwd_num_sms, ", ", config.combine_fwd_num_sms, ", ",
+             config.dispatch_bwd_num_sms, ", ", config.combine_bwd_num_sms);
 
   const int sm = cuda::sm_arch();
   NVTE_CHECK(sm >= 90, "NCCL EP requires SM_90+ (Hopper or later), but current device is SM_", sm);
@@ -266,6 +316,7 @@ void EPBackend::shutdown_locked() {
     nccl_ep::group_destroy(ep_group_);
     ep_group_ = nullptr;
   }
+  release_gemm_scratch();
   ep_comm_ = nullptr;  // borrowed; caller destroys
   initialized_ = false;
 }
@@ -360,9 +411,43 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   // Default the dispatch/combine (comm) kernels to 32 SMs, clamped to the device SM count.
   constexpr int kDefaultCommSms = 32;
   const int device_sms = cuda::sm_count();
-  cfg.max_num_sms = group_config.num_comm_sms > 0
-                        ? static_cast<unsigned int>(group_config.num_comm_sms)
-                        : static_cast<unsigned int>(std::min(kDefaultCommSms, device_sms));
+  // Resolve the per-call counts here, so that the overlapped GEMMs (group_config()) and NCCL EP
+  // use the same ones: forward inherits num_comm_sms, backward the forward count of its kind. The
+  // per-call counts cover every communication kernel, so leave NCCL EP's shared budget on AUTO;
+  // setting it would also throttle the local permute kernels, which want the whole device.
+  const auto inherit = [](int num_sms, int fallback) { return num_sms > 0 ? num_sms : fallback; };
+  const int comm_sms = group_config.num_comm_sms > 0 ? group_config.num_comm_sms
+                                                     : std::min(kDefaultCommSms, device_sms);
+  const int dispatch_fwd = inherit(group_config.dispatch_fwd_num_sms, comm_sms);
+  const int combine_fwd = inherit(group_config.combine_fwd_num_sms, comm_sms);
+  const int dispatch_bwd = inherit(group_config.dispatch_bwd_num_sms, dispatch_fwd);
+  const int combine_bwd = inherit(group_config.combine_bwd_num_sms, combine_fwd);
+  NVTE_CHECK(comm_sms <= device_sms && dispatch_fwd <= device_sms && combine_fwd <= device_sms &&
+                 dispatch_bwd <= device_sms && combine_bwd <= device_sms,
+             "num_comm_sms and dispatch/combine fwd/bwd num_sms must be <= the device SM count (",
+             device_sms, "), got num_comm_sms ", comm_sms, ", dispatch fwd/bwd ", dispatch_fwd, "/",
+             dispatch_bwd, ", combine fwd/bwd ", combine_fwd, "/", combine_bwd);
+  group_config_.dispatch_fwd_num_sms = dispatch_fwd;
+  group_config_.combine_fwd_num_sms = combine_fwd;
+  group_config_.dispatch_bwd_num_sms = dispatch_bwd;
+  group_config_.combine_bwd_num_sms = combine_bwd;
+  cfg.dispatch_num_sms = static_cast<unsigned int>(dispatch_fwd);
+  cfg.combine_num_sms = static_cast<unsigned int>(combine_fwd);
+  // NCCL EP's backward counts default to its forward ones; set them only where they differ.
+#if NCCL_EP_GROUP_CONFIG_V5_SIZE >= 144u
+  if (dispatch_bwd != dispatch_fwd) {
+    cfg.dispatch_bwd_num_sms = static_cast<unsigned int>(dispatch_bwd);
+  }
+  if (combine_bwd != combine_fwd) {
+    cfg.combine_bwd_num_sms = static_cast<unsigned int>(combine_bwd);
+  }
+#else
+  NVTE_CHECK(dispatch_bwd == dispatch_fwd && combine_bwd == combine_fwd,
+             "backward dispatch/combine SM counts other than the forward ones need a Transformer "
+             "Engine built against an NCCL EP with dispatch_bwd_num_sms and combine_bwd_num_sms; "
+             "got dispatch fwd/bwd ",
+             dispatch_fwd, "/", dispatch_bwd, ", combine fwd/bwd ", combine_fwd, "/", combine_bwd);
+#endif
   // 0 = NCCL_EP_AUTO, which enables eager mode (recv buffers sized per routing).
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
   cfg.zero_copy = group_config.zero_copy ? NCCL_EP_ZERO_COPY_ON : NCCL_EP_ZERO_COPY_OFF;
@@ -534,15 +619,14 @@ void EPBackend::prepare(NVTETensor handle_mem, const NVTETensor topk_idx,
   NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, &layout_info, stream));
 }
 
-void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor topk_idx,
-                                      const NVTETensor tokens, const NVTECommWindow& tokens_win,
-                                      const NVTETensor topk_weights,
-                                      const NVTECommWindow& topk_weights_win,
-                                      NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
-                                      NVTETensor recv_topk_weights,
-                                      const NVTECommWindow& recv_topk_weights_win,
-                                      NVTETensor recv_tokens_per_expert,
-                                      NVTETensor total_recv_tokens_per_rank, cudaStream_t stream) {
+void EPBackend::issue_dispatch_locked(
+    ncclEpHandle_t handle, const NVTETensor topk_idx, const NVTETensor tokens,
+    const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
+    const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
+    const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
+    const NVTECommWindow& recv_topk_weights_win, NVTETensor recv_tokens_per_expert,
+    NVTETensor total_recv_tokens_per_rank, NVTETensor expert_token_offsets,
+    const EpSignal* dispatch_signal, cudaStream_t stream) {
   NVTE_CHECK(nvte_tensor_shape(tokens).ndim == 2, "tokens must be 2D [T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(recv_tokens).ndim == 2,
              "recv_tokens must be 2D [recv_T, hidden_dim]");
@@ -617,6 +701,10 @@ void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor to
   out_struct.topk_weights = is_forward ? &nccl_topk_weights_out : nullptr;
   out_struct.scales = is_scaled ? &nccl_scales_out : nullptr;
 
+  SignalDesc dispatch_signal_desc;
+  out_struct.dispatch_signal =
+      dispatch_signal_desc.attach(dispatch_signal, NCCL_EP_SIGNAL_UNIT_TILE_ROWS, "dispatch");
+
   ncclEpDispatchConfig_t dispatch_cfg = NCCL_EP_DISPATCH_CONFIG_INIT;
   dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
   // Block-scaled payloads forward the per-token scale-inverse; select the matching recipe.
@@ -626,8 +714,8 @@ void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor to
   // fused dispatch writes them (the count scan is fused into the dispatch). NULL leaves
   // layout_info unset (non-count callers).
   ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
-  NVTEShape recv_counts_shape, total_recv_shape;
-  ncclEpTensor_t recv_counts_desc, total_recv_desc;
+  NVTEShape recv_counts_shape, total_recv_shape, recv_offsets_shape;
+  ncclEpTensor_t recv_counts_desc, total_recv_desc, recv_offsets_desc;
   const ncclEpLayoutInfo_t* layout_info_ptr = nullptr;
   if (recv_tokens_per_expert != nullptr) {
     recv_counts_desc = make_nccl_ep_tensor(recv_tokens_per_expert, recv_counts_shape);
@@ -639,9 +727,15 @@ void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor to
     layout_info.recv_total_counter = &total_recv_desc;
     layout_info_ptr = &layout_info;
   }
+  if (expert_token_offsets != nullptr) {
+    recv_offsets_desc = make_nccl_ep_tensor(expert_token_offsets, recv_offsets_shape);
+    layout_info.expert_offsets = &recv_offsets_desc;
+    layout_info_ptr = &layout_info;
+  }
 
-  NVTE_CHECK_NCCL(
-      nccl_ep::dispatch(handle, &in_struct, &out_struct, layout_info_ptr, &dispatch_cfg, stream));
+  check_signaled_call(
+      nccl_ep::dispatch(handle, &in_struct, &out_struct, layout_info_ptr, &dispatch_cfg, stream),
+      out_struct.dispatch_signal != nullptr, "dispatch");
 }
 
 void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
@@ -649,7 +743,8 @@ void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const
                          const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                          const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                          const NVTECommWindow& recv_topk_weights_win,
-                         const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+                         const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
+                         const EpSignal* dispatch_signal) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   const int num_tokens = static_cast<int>(nvte_tensor_shape(tokens).data[0]);
   std::lock_guard<std::mutex> lock(mutex_);
@@ -661,7 +756,8 @@ void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const
   issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
                         recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
                         /*recv_tokens_per_expert=*/nullptr,
-                        /*total_recv_tokens_per_rank=*/nullptr, stream);
+                        /*total_recv_tokens_per_rank=*/nullptr,
+                        /*expert_token_offsets=*/nullptr, dispatch_signal, stream);
 }
 
 void EPBackend::prepare_and_dispatch(
@@ -670,7 +766,8 @@ void EPBackend::prepare_and_dispatch(
     const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
     const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
     const NVTECommWindow& recv_topk_weights_win, NVTETensor recv_tokens_per_expert,
-    NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
+    NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg, cudaStream_t stream,
+    NVTETensor expert_token_offsets, const EpSignal* dispatch_signal) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
   NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
@@ -692,19 +789,22 @@ void EPBackend::prepare_and_dispatch(
         nccl_ep::update_handle(guard.get(), &nccl_topk_idx, /*layout_info=*/nullptr, stream));
     issue_dispatch_locked(guard.get(), topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
                           recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
-                          recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
+                          recv_tokens_per_expert, total_recv_tokens_per_rank, expert_token_offsets,
+                          dispatch_signal, stream);
     return;
   }
   ncclEpHandle_t h = prepare_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg);
   NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, /*layout_info=*/nullptr, stream));
   issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
                         recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
-                        recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
+                        recv_tokens_per_expert, total_recv_tokens_per_rank, expert_token_offsets,
+                        dispatch_signal, stream);
 }
 
 void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
                         const NVTECommWindow& expert_out_win, NVTETensor result,
-                        const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+                        const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
+                        const EpSignal* combine_signal) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   NVTE_CHECK(nvte_tensor_shape(expert_out).ndim == 2, "expert_out must be 2D [recv_T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(result).ndim == 2, "result must be 2D [T, hidden_dim]");
@@ -717,6 +817,10 @@ void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
   ncclEpCombineInputs_t in_struct = NCCL_EP_COMBINE_INPUTS_INIT;
   in_struct.tokens = &nccl_expert_in;
 
+  SignalDesc combine_signal_desc;
+  in_struct.combine_signal =
+      combine_signal_desc.attach(combine_signal, NCCL_EP_SIGNAL_UNIT_CHUNK_ELEMS, "combine");
+
   ncclEpCombineOutputs_t out_struct = NCCL_EP_COMBINE_OUTPUTS_INIT;
   out_struct.tokens = &nccl_result_out;
 
@@ -726,14 +830,15 @@ void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
   ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
                                                 num_tokens, layer_cfg, &owned);
   ScopedHandle guard(h, owned);
-  NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
+  check_signaled_call(nccl_ep::combine(h, &in_struct, &out_struct, /*config=*/nullptr, stream),
+                      combine_signal != nullptr, "combine");
 }
 
 void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
                              const NVTECommWindow& grad_win, const NVTETensor g_recv_topk_weights,
                              const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
                              NVTETensor grad_topk_weights, const NVTEEpLayerConfig* layer_cfg,
-                             cudaStream_t stream) {
+                             cudaStream_t stream, const EpSignal* combine_signal) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   const int num_tokens = static_cast<int>(nvte_tensor_shape(grad_tokens).data[0]);
   NVTE_CHECK(nvte_tensor_shape(grad).ndim == 2, "grad must be 2D [recv_capacity, hidden_dim]");
@@ -756,6 +861,10 @@ void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
   in_struct.tokens = &nccl_tok_in;
   in_struct.topk_weights = &nccl_w_in;
 
+  SignalDesc combine_signal_desc;
+  in_struct.combine_signal =
+      combine_signal_desc.attach(combine_signal, NCCL_EP_SIGNAL_UNIT_CHUNK_ELEMS, "combine");
+
   ncclEpCombineOutputs_t out_struct = NCCL_EP_COMBINE_OUTPUTS_INIT;
   out_struct.tokens = &nccl_tok_out;
   out_struct.topk_weights = &nccl_w_out;
@@ -769,19 +878,21 @@ void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
   ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
                                                 num_tokens, layer_cfg, &owned);
   ScopedHandle guard(h, owned);
-  NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, &cfg, stream));
+  check_signaled_call(nccl_ep::combine(h, &in_struct, &out_struct, &cfg, stream),
+                      combine_signal != nullptr, "dispatch backward");
 }
 
 void EPBackend::combine_bwd(NVTETensor handle_mem, const NVTETensor grad,
                             const NVTECommWindow& grad_win, NVTETensor grad_expert_out,
                             const NVTECommWindow& grad_expert_out_win,
-                            const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+                            const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
+                            const EpSignal* dispatch_signal) {
   // Backward of combine = reverse-direction dispatch.
   dispatch(handle_mem, /*topk_idx=*/nullptr, grad, grad_win,
            /*topk_weights=*/nullptr, /*topk_weights_win=*/NVTECommWindow{}, grad_expert_out,
            grad_expert_out_win,
            /*recv_topk_weights=*/nullptr, /*recv_topk_weights_win=*/NVTECommWindow{}, layer_cfg,
-           stream);
+           stream, dispatch_signal);
 }
 
 }  // namespace ep

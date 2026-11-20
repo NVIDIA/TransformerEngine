@@ -49,12 +49,16 @@ run_pass() {
   local overflow="${4:-0}"
   local mxfp8="${5:-0}"
   local fused="${6:-0}"
+  local overlap="${7:-0}"
   local log="stdout_ep_${label}.txt"
-  echo "=== Running ${SCRIPT} [${label}] on ${NUM_RANKS} GPUs (timeout=${TEST_TIMEOUT_S}s) ==="
+  # The overlap passes compile CuTeDSL GEMMs on first use and need a longer timeout.
+  local timeout_s="${TEST_TIMEOUT_S}"
+  if [ "${overlap}" = "1" ] && [ "${timeout_s}" -lt 600 ]; then timeout_s=600; fi
+  echo "=== Running ${SCRIPT} [${label}] on ${NUM_RANKS} GPUs (timeout=${timeout_s}s) ==="
   # setsid + kill-after so SIGKILL takes down the whole process group, not just torchrun.
   NVTE_EP_ZERO_COPY="${zc}" NVTE_EP_EAGER="${eager}" NVTE_EP_OVERFLOW="${overflow}" \
-    NVTE_EP_MXFP8_PASS="${mxfp8}" NVTE_EP_FUSED_PREPARE_DISPATCH="${fused}" \
-    setsid timeout --foreground --kill-after=10 --signal=TERM "${TEST_TIMEOUT_S}" \
+    NVTE_EP_MXFP8_PASS="${mxfp8}" NVTE_EP_FUSED_PREPARE_DISPATCH="${fused}" NVTE_EP_OVERLAP="${overlap}" \
+    setsid timeout --foreground --kill-after=10 --signal=TERM "${timeout_s}" \
     torchrun --standalone --nnodes=1 --nproc-per-node="${NUM_RANKS}" \
     "${SCRIPT}" 2>&1 | tee "${log}"
   local rc=${PIPESTATUS[0]}
@@ -67,6 +71,20 @@ run_pass() {
   if ! grep -qE "Ran [0-9]+ test|^OK$" "${log}"; then
     echo "[${label}] ERROR: no test summary — likely hang or early crash"
     RET=1
+  fi
+  # An overlap pass in which a rank never ran the fused ops covers nothing: tests that skip, or
+  # that fall back to the unfused ops, do not report. Every rank reports from a numerical test.
+  if [ "${overlap}" = "1" ]; then
+    local executed
+    executed=$(grep -oE "OVERLAP_EXECUTED rank=[0-9]+" "${log}" | sort -u | wc -l)
+    if grep -q "NCCL EP has no backward SM budgets" "${log}"; then
+      executed="${NUM_RANKS}"
+    fi
+    if [ "${executed}" -lt "${NUM_RANKS}" ]; then
+      echo "[${label}] ERROR: the fused overlap ops ran on ${executed} of ${NUM_RANKS} ranks;" \
+        "set NVTE_ENABLE_CUTEDSL_BACKEND=1 and NVTE_MOE_OVERLAP"
+      RET=1
+    fi
   fi
   if [ -z "${KEEP_EP_LOGS:-}" ]; then rm -f "${log}"; fi
 }
@@ -97,5 +115,32 @@ run_pass "mxfp8_eager" 0 1 0 1
 run_pass "fused" 0 0 0 0 1
 run_pass "fused_overflow" 0 0 1 0 1
 run_pass "fused_mxfp8" 0 0 0 1 1
+
+# Overlapped MoE ops (ep_gemm.h, te.ops FusedMoE): alignment 256, capacity and eager IO. Run only
+# when the overlap is available (NVTE_ENABLE_CUTEDSL_BACKEND=1, NVTE_MOE_OVERLAP and SM 10.x).
+OVERLAP_AVAILABLE=$(python3 -c \
+  "import transformer_engine.pytorch.ep as ep; print(int(ep._moe_overlap_available()))" 2>/dev/null \
+  || echo 0)
+if [ "${OVERLAP_AVAILABLE}" != "1" ]; then
+  echo "Overlapped MoE ops unavailable (needs NVTE_ENABLE_CUTEDSL_BACKEND=1, NVTE_MOE_OVERLAP, SM 10.x); SKIPPING overlap passes."
+else
+  run_pass "overlap" 0 0 0 1 0 1
+  run_pass "overlap_eager" 0 1 0 1 0 1
+  run_pass "overlap_overflow" 0 0 1 1 0 1
+  # Per-direction SM counts (dispatch fwd, combine fwd, dispatch bwd, combine bwd). The backward
+  # split skips when Transformer Engine was built against an NCCL EP without backward SM budgets.
+  NVTE_EP_COMM_SMS=12,20,0,0 run_pass "overlap_split" 0 0 0 1 0 1
+  NVTE_EP_COMM_SMS=12,20,24,16 run_pass "overlap_split_bwd" 0 0 0 1 0 1
+  # A hidden size that 1024 does not divide: the combine waits on whole rows.
+  NVTE_EP_HIDDEN_DIM=1536 run_pass "overlap_h1536" 0 0 0 1 0 1
+  # Expert alignments below 256 (MXFP8 cases skip at 64): an expert's last GEMM tile holds fewer
+  # rows. With 288 tokens per rank each expert also fills a whole tile; only the fused op tests run.
+  for align in 128 64; do
+    NVTE_EP_OVERLAP_ALIGNMENT=${align} run_pass "overlap_a${align}" 0 0 0 1 0 1
+    NVTE_EP_OVERLAP_ALIGNMENT=${align} run_pass "overlap_a${align}_eager" 0 1 0 1 0 1
+    NVTE_EP_OVERLAP_ALIGNMENT=${align} NVTE_EP_TOKENS_PER_RANK=288 \
+      NVTE_EP_TEST_FILTER=test_moe_overlap run_pass "overlap_a${align}_t288" 0 0 0 1 0 1
+  done
+fi
 
 exit $RET

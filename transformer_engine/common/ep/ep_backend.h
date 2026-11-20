@@ -27,6 +27,18 @@
 namespace transformer_engine {
 namespace ep {
 
+/*! \brief Readiness flags of an overlapped op: 1D int32, one flag per `granularity` units of the
+ *         signaled tensor (rows of recv_tokens for a dispatch, hidden columns for a combine). */
+struct EpSignal {
+  // int32 readiness signal, one entry per granularity units; reset to -1, set to the slot index i
+  // when that unit is ready (consumer waits for signal[s] == s).
+  NVTETensor ready;
+  size_t granularity;
+};
+
+/*! \brief Free the current device's grouped GEMM scratch. A no-op without the EP GEMMs. */
+void release_gemm_scratch();
+
 /*! \brief EP backend per CUDA device; owns the NCCL EP group, borrows the comm. */
 class EPBackend {
  public:
@@ -54,16 +66,20 @@ class EPBackend {
 
   // Per-step ops below require a prior prepare(). A non-null layer_cfg binds the handle from
   // handle_mem; null uses the handle cache (NVTE_EP_HANDLE_CACHE_SIZE != 0).
+  // A non-null dispatch_signal publishes one flag per signal granularity rows of recv_tokens.
   void dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
                 const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
                 const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                 const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                 const NVTECommWindow& recv_topk_weights_win, const NVTEEpLayerConfig* layer_cfg,
-                cudaStream_t stream);
+                cudaStream_t stream, const EpSignal* dispatch_signal = nullptr);
 
   // Fused prepare + dispatch: seeds routing then dispatches in one call. Routing writes the
   // per-expert recv counts to recv_tokens_per_expert and the scalar pre-drop per-rank recv total
   // to total_recv_tokens_per_rank (nullable); the dispatch then reads the counts from the handle.
+  // expert_token_offsets (nullable): the padded per-expert token offsets; NCCL EP requires them,
+  // the counts and the total, when given, to share one integer type.
+  // dispatch_signal: as for dispatch().
   void prepare_and_dispatch(NVTETensor handle_mem, const NVTETensor topk_idx,
                             const NVTETensor tokens, const NVTECommWindow& tokens_win,
                             const NVTETensor topk_weights, const NVTECommWindow& topk_weights_win,
@@ -72,22 +88,31 @@ class EPBackend {
                             const NVTECommWindow& recv_topk_weights_win,
                             NVTETensor recv_tokens_per_expert,
                             NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
-                            cudaStream_t stream);
+                            cudaStream_t stream, NVTETensor expert_token_offsets = nullptr,
+                            const EpSignal* dispatch_signal = nullptr);
 
+  // A non-null combine_signal makes the combine start on column chunks as the producer of
+  // expert_out publishes them.
   void combine(NVTETensor handle_mem, const NVTETensor expert_out,
                const NVTECommWindow& expert_out_win, NVTETensor result,
-               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
+               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
+               const EpSignal* combine_signal = nullptr);
 
   // g_recv_topk_weights: 1D [recv_capacity] f32; grad_topk_weights: 2D [T, top_k] f32.
+  // combine_signal: as for combine().
   void dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
                     const NVTETensor g_recv_topk_weights,
                     const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
                     NVTETensor grad_topk_weights, const NVTEEpLayerConfig* layer_cfg,
-                    cudaStream_t stream);
+                    cudaStream_t stream, const EpSignal* combine_signal = nullptr);
 
+  // dispatch_signal: as for dispatch(), over the rows of grad_expert_out.
   void combine_bwd(NVTETensor handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
                    NVTETensor grad_expert_out, const NVTECommWindow& grad_expert_out_win,
-                   const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
+                   const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
+                   const EpSignal* dispatch_signal = nullptr);
+
+  const NVTEEpGroupConfig& group_config() const { return group_config_; }
 
   ~EPBackend();
 
@@ -148,7 +173,8 @@ class EPBackend {
 
   // Build the dispatch in/out structs and issue ncclEpDispatch on the resolved
   // handle. When recv_tokens_per_expert != nullptr (count mode), it is wired to
-  // layout_info.expert_counters so the dispatch writes per-expert recv counts.
+  // layout_info.expert_counters so the dispatch writes per-expert recv counts; likewise
+  // expert_token_offsets to layout_info.expert_offsets.
   // Caller must hold mutex_.
   void issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor topk_idx,
                              const NVTETensor tokens, const NVTECommWindow& tokens_win,
@@ -157,12 +183,16 @@ class EPBackend {
                              NVTETensor recv_topk_weights,
                              const NVTECommWindow& recv_topk_weights_win,
                              NVTETensor recv_tokens_per_expert,
-                             NVTETensor total_recv_tokens_per_rank, cudaStream_t stream);
+                             NVTETensor total_recv_tokens_per_rank, NVTETensor expert_token_offsets,
+                             const EpSignal* dispatch_signal, cudaStream_t stream);
 
   // devices_mutex_ protects the map; each backend's mutex_ protects its state.
   static std::mutex devices_mutex_;
   static std::unordered_map<int, std::unique_ptr<EPBackend>> devices_;
 };
+
+// A caller's versioned layer config copied into the current layout.
+NVTEEpLayerConfig normalize_layer_config(const NVTEEpLayerConfig* cfg);
 
 }  // namespace ep
 }  // namespace transformer_engine

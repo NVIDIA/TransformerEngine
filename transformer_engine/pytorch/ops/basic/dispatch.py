@@ -70,13 +70,25 @@ class MoeDispatch(BasicOperation):
 
     The quantization format of the communication is an EP backend detail, so it
     is configured by ``EpConfig`` rather than this operation's quantizers.
+
+    ``buffer`` is the ``EpBuffer`` of every call. For several concurrent in-flight calls
+    (e.g. pipeline microbatches), give each its own ``EpBuffer`` and op instance.
+
+    ``recv_tokens_peak``, an optional int64 tensor of shape ``[1]`` on the EP device, is raised
+    on every forward with a fixed receive capacity to the call's receive total before any
+    overflow drop. A peak above the capacity means tokens were dropped.
     """
 
     num_extra_inputs: int = 2
     # tokens-per-expert and received routing weights consumed by the expert MLP.
     num_extra_outputs: int = 2
 
-    def __init__(self, config: EpConfig, buffer: Optional[EpBuffer] = None) -> None:
+    def __init__(
+        self,
+        config: EpConfig,
+        buffer: Optional[EpBuffer] = None,
+        recv_tokens_peak: Optional[torch.Tensor] = None,
+    ) -> None:
         # EpBuffer is specific to NCCL EP. Fused implementations using another communication
         # backend, such as NVSHMEM, do not need it.
         super().__init__()
@@ -86,6 +98,17 @@ class MoeDispatch(BasicOperation):
             raise NotImplementedError("MoeDispatch does not support zero-copy EP.")
         self.config = config
         self.buffer = buffer
+        self.recv_tokens_peak = recv_tokens_peak
+
+    def update_recv_tokens_peak(
+        self, buffer: EpBuffer, total_recv_tokens: Optional[torch.Tensor] = None
+    ) -> None:
+        """Raise ``recv_tokens_peak`` to the receive total of the last prepare on ``buffer``, or to
+        ``total_recv_tokens`` when given."""
+        if self.recv_tokens_peak is not None and not buffer.eager:
+            if total_recv_tokens is None:
+                total_recv_tokens = buffer.total_recv_tokens
+            torch.maximum(self.recv_tokens_peak, total_recv_tokens, out=self.recv_tokens_peak)
 
     def op_forward(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("MoeDispatch uses fuser_forward")
@@ -122,6 +145,7 @@ class MoeDispatch(BasicOperation):
             None,
             None,
         )
+        self.update_recv_tokens_peak(buffer)
         tokens_per_expert = buffer.tokens_per_expert
         if ctx.requires_grad:
             ctx.dispatch_state = dispatch_state

@@ -161,6 +161,27 @@ General
                  ``WARN`` emits a warning explaining why CuTeDSL kernels are unavailable and falls back to CUDA kernels. ``ERROR`` raises an error and fails instead.
                  Only effective when the CuTeDSL backend is enabled (see :envvar:`NVTE_ENABLE_CUTEDSL_BACKEND`).
 
+.. envvar:: NVTE_MOE_OVERLAP
+
+   :Type: ``str`` (directory)
+   :Default: unset (overlap off)
+   :Description: Directory of the CuTeDSL grouped GEMMs that overlap the NCCL EP dispatch and
+                 combine with the expert GEMMs (``ep_gemm.h``, used by the fused
+                 :class:`transformer_engine.pytorch.ops.MoeDispatch` expert MLP). The overlap is
+                 off unless this is set together with ``NVTE_ENABLE_CUTEDSL_BACKEND=1``; then
+                 ``ep_bootstrap`` defaults to 24 communication SMs unless ``max_num_sms`` is
+                 given. Otherwise the unfused ops run. The directory is the ``gemm/`` tree of
+                 the EPCompOverlap kernel sources (with ``blackwell/``, ``rubin/`` and
+                 ``utils/``); its modules are imported by name and their version is not checked.
+
+.. envvar:: NVTE_EP_OVERLAP_COMBINE_CHUNK_COLS
+
+   :Type: ``int``
+   :Default: 1024 when it divides the hidden size, else the whole row
+   :Description: Hidden columns of the overlapped combine per readiness flag (see
+                 :envvar:`NVTE_MOE_OVERLAP`). The hidden size or a multiple of 1024 dividing it.
+                 Smaller values let the combine start earlier but cost more flags to set and poll.
+
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
    :Type: ``int`` (positive integer)

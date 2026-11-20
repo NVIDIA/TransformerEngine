@@ -53,6 +53,10 @@ Cfg normalize_ep_config(const Cfg* user, size_t min_size, const char* name) {
 }
 }  // namespace
 
+NVTEEpLayerConfig transformer_engine::ep::normalize_layer_config(const NVTEEpLayerConfig* cfg) {
+  return normalize_ep_config(cfg, kLayerConfigMinSize, "layer_cfg");
+}
+
 void nvte_ep_initialize(void* ep_comm, const NVTEEpGroupConfig* group_config) {
   NVTE_CHECK(ep_comm != nullptr, "ep_comm must not be null");
   NVTEEpGroupConfig cfg = normalize_ep_config(group_config, kGroupConfigMinSize, "group_config");

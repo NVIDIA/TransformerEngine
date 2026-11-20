@@ -18,3 +18,4 @@ from .linear import Linear
 from .op import BasicOperation, FusedOperation, FusibleOperation
 from .sequential import Sequential
 from . import fused
+from .fused import moe_overlap_supported, moe_overlap_unsupported_reason
