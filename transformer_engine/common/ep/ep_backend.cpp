@@ -60,6 +60,16 @@ ncclDataType_t te_dtype_to_nccl_dtype(NVTEDType dtype) {
   return ncclFloat32;  // unreachable
 }
 
+// Reject a payload tensor whose element size exceeds the group's max_token_dtype, since the NCCL
+// EP staging buffers are sized for it.
+void check_token_width(const NVTETensor t, const char* name, NVTEDType max_token_dtype) {
+  const NVTEDType dtype = nvte_tensor_type(t);
+  NVTE_CHECK(
+      typeToSize(static_cast<DType>(dtype)) <= typeToSize(static_cast<DType>(max_token_dtype)),
+      name, " dtype (", static_cast<int>(dtype), ") wider than group max_token_dtype (",
+      static_cast<int>(max_token_dtype), ")");
+}
+
 // Which part of a TE tensor an NCCL descriptor points at: the data payload, or
 // (for block-scaled tensors) the rowwise scale-inverse that rides alongside it.
 enum class DescSource { kData, kScaleInv };
@@ -722,6 +732,8 @@ void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
+  check_token_width(expert_out, "expert_out", group_config_.max_token_dtype);
+  check_token_width(result, "result", group_config_.max_token_dtype);
   bool owned = false;
   ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
                                                 num_tokens, layer_cfg, &owned);
@@ -765,6 +777,8 @@ void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
+  check_token_width(grad, "grad", group_config_.max_token_dtype);
+  check_token_width(grad_tokens, "grad_tokens", group_config_.max_token_dtype);
   bool owned = false;
   ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
                                                 num_tokens, layer_cfg, &owned);
