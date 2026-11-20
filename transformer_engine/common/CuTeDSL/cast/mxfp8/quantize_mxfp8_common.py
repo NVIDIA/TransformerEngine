@@ -30,6 +30,8 @@ from transformer_engine.common.CuTeDSL.activations import (
     dact_dsilu,
     dact_dqgelu,
     dact_dgelu,
+    act_sigmoid,
+    dact_dsigmoid,
 )
 
 CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
@@ -65,6 +67,17 @@ SUPPORTED_DACTIVATIONS = {
     "dsilu": dact_dsilu,
     "dqgelu": dact_dqgelu,
     "dsrelu": dact_dsrelu,
+}
+
+GATED_ACTIVATIONS = {
+    "geglu": (act_gelu, dact_dgelu),
+    "qgeglu": (act_qgelu, dact_dqgelu),
+    "reglu": (act_relu, dact_drelu),
+    "sreglu": (act_srelu, dact_dsrelu),
+    "glu": (act_sigmoid, dact_dsigmoid),
+    "swiglu": (act_silu, dact_dsilu),
+    "clamped_swiglu": (None, None),
+    "situglu": (None, None),
 }
 
 
@@ -139,8 +152,6 @@ class MXFP8QuantizeConfig:
         use_2d_quantization: bool = False,
         activation: Optional[str] = None,
     ):
-        if use_2d_quantization:
-            raise ValueError("2D block scaling is not implemented by the CuTeDSL MXFP8 kernels")
         if dtype is None or dtype not in ("Float32", "Float16", "BFloat16"):
             raise ValueError(f"unknown input dtype {dtype!r}; expected Float32|Float16|BFloat16")
         self.DTYPE = str_to_cutlass_dtype(dtype)
@@ -193,6 +204,11 @@ class MXFP8QuantizeConfig:
         # uses a cross-thread smem reduction over THREADS_Y. Both mirror the CUDA
         # kernel's COLWISE_SCALING / rowwise dbias branches.
         self.WITH_DBIAS = with_dbias
+        # The C APIs that fuse dbias or an activation pass no quantization config, so 2D block
+        # scaling only reaches plain casts and fusion is not supported.
+        if use_2d_quantization and (with_dbias or with_dact or with_act):
+            raise ValueError("2D block scaling is only implemented for a plain cast")
+        self.USE_2D_QUANTIZATION = use_2d_quantization
         self.MAX_NORM_RCP = (
             FP8E4M3_MAX_NORM_RCP if fp8_dtype == "Float8E4M3" else FP8E5M2_MAX_NORM_RCP
         )
@@ -203,7 +219,8 @@ class MXFP8QuantizeConfig:
             f"rowwise={self.ROWWISE}, colwise={self.COLWISE}, "
             f"swizzled={self.WITH_GEMM_SWIZZLED_SCALES}, with_amax={self.WITH_AMAX}, "
             f"with_dbias={self.WITH_DBIAS}, with_dact={self.WITH_DACT}, "
-            f"with_act={self.WITH_ACT}, activation={self.ACTIVATION})"
+            f"with_act={self.WITH_ACT}, use_2d_quantization={self.USE_2D_QUANTIZATION}, "
+            f"activation={self.ACTIVATION})"
         )
 
     __repr__ = __str__
@@ -211,6 +228,237 @@ class MXFP8QuantizeConfig:
     def is_plain_cast(self) -> bool:
         """Whether cfg is a plain cast: no amax, dbias or (d)activation fused in."""
         return not (self.WITH_AMAX or self.WITH_DBIAS or self.WITH_DACT or self.WITH_ACT)
+
+    def act_needs_masking(self) -> bool:
+        """Whether TMA's zero padding must be masked after the activation, i.e. act(0) != 0.
+
+        All activations supported by MXFP8 satisfy act(0) == 0, so this is a precaution for
+        activations added in the future.
+        """
+        return self.WITH_ACT and self.ACTIVATION not in ("relu", "gelu", "silu", "qgelu", "srelu")
+
+    def compile(self):
+        """
+        Return the compiled CuTeDSL function object for the given MXFP8 quantization config.
+        """
+
+        kernel_obj = MXFP8QuantizeEntry(self)
+        sym_M = cute.sym_int32()
+        sym_N = cute.sym_int32(divisibility=SYM_N_DIVISIBILITY)
+        in_shape = out_shape = (sym_M, sym_N)
+        # TE allocates scale tensors at a padded shape (see
+        # MXFP8Quantizer::get_scale_shape in transformer_engine/pytorch/csrc):
+        #   rowwise:    (roundup(M, 128),           roundup(ceildiv(N, 32), 4))
+        #   columnwise: (roundup(ceildiv(M, 32), 4), roundup(N, 128))
+        # These padded extents are NOT M/N (and SymInt has no `//`/`+`), so give the
+        # scales their own fresh syms carrying the divisibility the padding
+        # guarantees (rowwise: 128 x 4; colwise: 4 x 128).
+        scale_rowwise_shape = (cute.sym_int32(divisibility=128), cute.sym_int32(divisibility=4))
+        scale_colwise_shape = (cute.sym_int32(divisibility=4), cute.sym_int32(divisibility=128))
+        ws_shape = (cute.sym_int32(), sym_N)  # (blocks_Y, N); N ties to input N
+        # Native FP8/E8M0 dtypes at the FFI boundary (matches the DLPack dtype the C++
+        # bridge sends).
+        out_dtype = self.FP8_DTYPE
+        scale_dtype = cutlass.Float8E8M0FNU
+
+        in_fake = cute.runtime.make_fake_compact_tensor(
+            self.DTYPE,
+            in_shape,
+            stride_order=(1, 0),
+            memspace=cute.AddressSpace.gmem,
+            assumed_align=16,
+        )
+        out_row_fake = (
+            cute.runtime.make_fake_compact_tensor(
+                out_dtype,
+                out_shape,
+                stride_order=(1, 0),
+                memspace=cute.AddressSpace.gmem,
+                assumed_align=16,
+            )
+            if self.ROWWISE
+            else None
+        )
+        scale_row_fake = (
+            cute.runtime.make_fake_compact_tensor(
+                scale_dtype,
+                scale_rowwise_shape,
+                stride_order=(1, 0),
+                memspace=cute.AddressSpace.gmem,
+                assumed_align=4,
+            )
+            if self.ROWWISE
+            else None
+        )
+        out_col_fake = (
+            cute.runtime.make_fake_compact_tensor(
+                out_dtype,
+                out_shape,
+                stride_order=(1, 0),
+                memspace=cute.AddressSpace.gmem,
+                assumed_align=16,
+            )
+            if self.COLWISE
+            else None
+        )
+        scale_col_fake = (
+            cute.runtime.make_fake_compact_tensor(
+                scale_dtype,
+                scale_colwise_shape,
+                stride_order=(1, 0),
+                memspace=cute.AddressSpace.gmem,
+                assumed_align=4,
+            )
+            if self.COLWISE
+            else None
+        )
+        amax_fake = (
+            cute.runtime.make_fake_compact_tensor(
+                Float32, (1,), stride_order=(0,), memspace=cute.AddressSpace.gmem, assumed_align=4
+            )
+            if self.WITH_AMAX
+            else None
+        )
+        # The cast-noop flag is an always-present f32 pointer instead of an optional tensor, so that
+        # the same compiled kernel serves both an absent and a present flag (see noop_flag_is_set).
+        # The null address here is only a compile-time placeholder for the pointer the C++ dispatcher
+        # passes at launch.
+        noop_fake = cute.runtime.nullptr(Float32, mem_space=cute.AddressSpace.gmem, assumed_align=4)
+        act_input_fake = (
+            cute.runtime.make_fake_compact_tensor(
+                self.DTYPE,
+                in_shape,
+                stride_order=(1, 0),
+                memspace=cute.AddressSpace.gmem,
+                assumed_align=16,
+            )
+            if self.WITH_DACT
+            else None
+        )
+        workspace_fake = (
+            cute.runtime.make_fake_compact_tensor(
+                Float32,
+                ws_shape,
+                stride_order=(1, 0),
+                memspace=cute.AddressSpace.gmem,
+                assumed_align=4,
+            )
+            if self.WITH_DBIAS
+            else None
+        )
+
+        compiled = cute.compile(
+            kernel_obj,
+            in_fake,  # mX
+            out_row_fake,
+            scale_row_fake,  # mO_row, mS_row
+            out_col_fake,
+            scale_col_fake,  # mO_col, mS_col
+            amax_fake,  # mAmax
+            noop_fake,  # mNoop (pointer to the cast_noop flag, may be null at launch)
+            act_input_fake,  # mDActInput (activation input, dact only)
+            workspace_fake,  # mWorkspace(backward slot, unused)
+            cute.runtime.make_fake_stream(),  # stream (compiled as an explicit tvm-ffi
+            # "handle" arg; C++ passes the CUDA stream
+            # as void*)
+            options="--enable-tvm-ffi",
+        )
+        return compiled
+
+
+def _fake_gmem_tensor(dtype, shape, align):
+    """Row-major fake gmem tensor for cute.compile."""
+    return cute.runtime.make_fake_compact_tensor(
+        dtype,
+        shape,
+        stride_order=tuple(reversed(range(len(shape)))),
+        memspace=cute.AddressSpace.gmem,
+        assumed_align=align,
+    )
+
+
+class MXFP8GatedQuantizeConfig(MXFP8QuantizeConfig):
+    """Compile-time config of gated_mxfp8.cuh's port: a plain MXFP8 cast config plus the gated op."""
+
+    def __init__(
+        self,
+        dtype: str,
+        fp8_dtype: str,
+        rowwise: bool,
+        colwise: bool,
+        with_gemm_swizzled_scales: bool,
+        is_bwd: bool,
+        activation: str,
+    ):
+        super().__init__(
+            dtype=dtype,
+            fp8_dtype=fp8_dtype,
+            rowwise=rowwise,
+            colwise=colwise,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+            with_amax=False,
+            activation="none",
+        )
+        if activation not in GATED_ACTIVATIONS:
+            raise ValueError(
+                f"unknown gated activation {activation!r}; expected one of"
+                f" {sorted(GATED_ACTIVATIONS)}"
+            )
+        self.IS_BWD = is_bwd
+        self.GATED_ACTIVATION = activation
+
+    def __str__(self):
+        return (
+            f"MXFP8GatedQuantizeConfig(dtype={self.DTYPE_STR}, fp8_dtype={self.FP8_DTYPE_STR}, "
+            f"rowwise={self.ROWWISE}, colwise={self.COLWISE}, "
+            f"swizzled={self.WITH_GEMM_SWIZZLED_SCALES}, is_bwd={self.IS_BWD}, "
+            f"activation={self.GATED_ACTIVATION})"
+        )
+
+    __repr__ = __str__
+
+    def compile(self):
+        """Return the compiled CuTeDSL function object for this config."""
+        # The kernel module imports this one
+        # pylint: disable-next=import-outside-toplevel
+        from .quantize_mxfp8_gated_g2s import MXFP8GatedQuantizeEntry
+
+        sym_M = cute.sym_int32()
+        # The C++ dispatcher requires N % 32 == 0, like the CUDA kernel.
+        sym_N = cute.sym_int32(divisibility=32)
+        sym_2N = cute.sym_int32(divisibility=64)
+        out_cols = sym_2N if self.IS_BWD else sym_N
+        # Padded scale shapes, see MXFP8QuantizeConfig.compile
+        scale_rowwise_shape = (cute.sym_int32(divisibility=128), cute.sym_int32(divisibility=4))
+        scale_colwise_shape = (cute.sym_int32(divisibility=4), cute.sym_int32(divisibility=128))
+        # Only the activation's own params are runtime arguments; the others are compiled as None
+        # and the C++ launcher passes None for them.
+        clamped = self.GATED_ACTIVATION == "clamped_swiglu"
+        situ = self.GATED_ACTIVATION == "situglu"
+        params = [Float32(0.0) if clamped else None] * 3  # limit, alpha, glu_linear_offset
+        params += [Float32(0.0) if situ else None] * 2  # beta1, beta2
+        return cute.compile(
+            MXFP8GatedQuantizeEntry(self),
+            _fake_gmem_tensor(self.DTYPE, (sym_M, sym_2N), 16),  # mGatedInput
+            _fake_gmem_tensor(self.DTYPE, (sym_M, sym_N), 16) if self.IS_BWD else None,  # mYGrad
+            # mO_row, mS_row
+            _fake_gmem_tensor(self.FP8_DTYPE, (sym_M, out_cols), 16) if self.ROWWISE else None,
+            (
+                _fake_gmem_tensor(cutlass.Float8E8M0FNU, scale_rowwise_shape, 4)
+                if self.ROWWISE
+                else None
+            ),
+            # mO_col, mS_col
+            _fake_gmem_tensor(self.FP8_DTYPE, (sym_M, out_cols), 16) if self.COLWISE else None,
+            (
+                _fake_gmem_tensor(cutlass.Float8E8M0FNU, scale_colwise_shape, 4)
+                if self.COLWISE
+                else None
+            ),
+            *params,
+            cute.runtime.make_fake_stream(),
+            options="--enable-tvm-ffi",
+        )
 
 
 class MXFP8QuantizeKernelBase(abc.ABC):
@@ -268,34 +516,20 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         from .quantize_mxfp8_g2s_bidim import MXFP8QuantizeBidimensionalG2SKernel
         from .quantize_mxfp8_g2r_rowwise_2lane import MXFP8QuantizeRowwise2LaneG2RKernel
         from .quantize_mxfp8_g2r_bidim import MXFP8QuantizeBidimensionalG2RKernel
+        from .quantize_mxfp8_2d import MXFP8Quantize2DKernel
 
         # pylint: enable=import-outside-toplevel
 
         self.cfg = cfg
-        # These activation functions satisfy f(0) = 0 so we don't need to mask with OOB regions
-        # (zeros filled by TMA are still zeros without applying activation to them)
-        # Note that as the time of writing, all activations supported by MXFP8 satisfy this property, so !ACT_NEED_MASKING is never reachable.
-        # This is only a precaution for future use cases if someone wants to add a new activation function.
-        self.ACT_NEED_MASKING = cfg.WITH_ACT and cfg.ACTIVATION not in (
-            "relu",
-            "gelu",
-            "silu",
-            "qgelu",
-            "srelu",
+        # 2D block scaling only swaps the general kernel's per-tile math.
+        general_cls = (
+            MXFP8Quantize2DKernel if cfg.USE_2D_QUANTIZATION else MXFP8QuantizeGeneralG2SKernel
         )
-        # Instantiate all possible kernels at compile time,
-        # and we will pick the right one at runtime based on the input shape and config.
-        self.general_skip_input_masking_kernel = MXFP8QuantizeGeneralG2SKernel(
-            cfg, SKIP_INPUT_MASKING=True
-        )
-        self.general_skip_input_masking_and_scale_bounds_kernel = MXFP8QuantizeGeneralG2SKernel(
-            cfg, SKIP_INPUT_MASKING=True, SKIP_SCALE_BOUNDS=True
-        )
-        # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
-        self.general_kernel = MXFP8QuantizeGeneralG2SKernel(cfg) if self.ACT_NEED_MASKING else None
-
-        # Specialized kernels in a specific dispatch priority order so we prefer to dispatch to kernels that come first in the list.
-        self.specialized_kernels = [
+        # Candidate kernels in dispatch priority order; the first one whose runtime
+        # eligible_to_dispatch check passes is launched. The specialized kernels come first,
+        # then the general kernel without and with boundary handling. The last one is always
+        # eligible.
+        self.preferred_kernels = [
             kernel_cls(cfg)
             for kernel_cls in (
                 MXFP8QuantizeRowwise2LaneG2RKernel,
@@ -304,6 +538,9 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                 MXFP8QuantizeBidimensionalG2SKernel,
             )
             if kernel_cls.supports(cfg)
+        ] + [
+            general_cls(cfg, SKIP_INPUT_MASKING=True, SKIP_SCALE_BOUNDS=True),
+            general_cls(cfg, SKIP_INPUT_MASKING=not cfg.act_needs_masking()),
         ]
 
     @cute.jit
@@ -320,13 +557,13 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
     ):
-        dispatched_to_specialized = False
-        for kernel in self.specialized_kernels:
-            if not dispatched_to_specialized:
+        dispatched = False
+        for kernel in self.preferred_kernels:
+            if not dispatched:
                 if kernel.eligible_to_dispatch(
                     self.cfg, mX, mO_row, mS_row, mO_col, mS_col, mNoop, mDActInput
                 ):
-                    dispatched_to_specialized = True
+                    dispatched = True
                     kernel(
                         mX,
                         mO_row,
@@ -339,207 +576,10 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                         mWorkspace,
                         stream,
                     )
-        # If not using a specialized kernel, fall back to the general kernel
-        if not dispatched_to_specialized:
-            # With _USE_STATIC_NUM_TILES, each CTA always processes _NUM_TILES tiles, including OOB ones,
-            # so the scale-bounds check can only be dropped if M divides TILE_ROWS * _NUM_TILES.
-            num_tiles_per_cta = (
-                self.general_skip_input_masking_kernel._NUM_TILES
-                if self.general_skip_input_masking_kernel._USE_STATIC_NUM_TILES
-                else 1
-            )
-            # If the input shape can be perfectly tiled by the general kernel's tile size, we can skip some boundary check because
-            # we know we will not touch any out-of-bounds region.
-            shape_is_divisible = (
-                mX.shape[0]
-                % (self.general_skip_input_masking_kernel._TILE_ROWS * num_tiles_per_cta)
-                == 0
-                and mX.shape[1] % self.general_skip_input_masking_kernel._TILE_COLS == 0
-            )
-            # If shape is divisible, then we won't access OOB regions regardless whatever
-            if shape_is_divisible:
-                self.general_skip_input_masking_and_scale_bounds_kernel(
-                    mX,
-                    mO_row,
-                    mS_row,
-                    mO_col,
-                    mS_col,
-                    mAmax,
-                    mNoop,
-                    mDActInput,
-                    mWorkspace,
-                    stream,
-                )
-            else:
-                # Otherwise we can't skip scale bound check, but we may still skip masking activation inputs with zero
-                if cutlass.const_expr(self.ACT_NEED_MASKING):
-                    # Masking and the scale guards now share one condition, so this is a plain
-                    # two-way choice: either the shape tiles exactly (drop both) or it does not.
-                    self.general_kernel(
-                        mX,
-                        mO_row,
-                        mS_row,
-                        mO_col,
-                        mS_col,
-                        mAmax,
-                        mNoop,
-                        mDActInput,
-                        mWorkspace,
-                        stream,
-                    )
-                else:
-                    # We still need to check the scale bounds, but we can skip some activations masking because their output is 0
-                    # for OOB regions where TMA fills with zeros
-                    self.general_skip_input_masking_kernel(
-                        mX,
-                        mO_row,
-                        mS_row,
-                        mO_col,
-                        mS_col,
-                        mAmax,
-                        mNoop,
-                        mDActInput,
-                        mWorkspace,
-                        stream,
-                    )
 
 
-def compile_cutedsl_function_from_cfg(cfg):
-    """
-    Return the compiled CuTeDSL function object for the given MXFP8 quantization config.
-    """
-
-    kernel_obj = MXFP8QuantizeEntry(cfg)
-    sym_M = cute.sym_int32()
-    sym_N = cute.sym_int32(divisibility=SYM_N_DIVISIBILITY)
-    in_shape = out_shape = (sym_M, sym_N)
-    # TE allocates scale tensors at a padded shape (see
-    # MXFP8Quantizer::get_scale_shape in transformer_engine/pytorch/csrc):
-    #   rowwise:    (roundup(M, 128),           roundup(ceildiv(N, 32), 4))
-    #   columnwise: (roundup(ceildiv(M, 32), 4), roundup(N, 128))
-    # These padded extents are NOT M/N (and SymInt has no `//`/`+`), so give the
-    # scales their own fresh syms carrying the divisibility the padding
-    # guarantees (rowwise: 128 x 4; colwise: 4 x 128).
-    scale_rowwise_shape = (cute.sym_int32(divisibility=128), cute.sym_int32(divisibility=4))
-    scale_colwise_shape = (cute.sym_int32(divisibility=4), cute.sym_int32(divisibility=128))
-    ws_shape = (cute.sym_int32(), sym_N)  # (blocks_Y, N); N ties to input N
-    # Native FP8/E8M0 dtypes at the FFI boundary (matches the DLPack dtype the C++
-    # bridge sends).
-    out_dtype = cfg.FP8_DTYPE
-    scale_dtype = cutlass.Float8E8M0FNU
-
-    in_fake = cute.runtime.make_fake_compact_tensor(
-        cfg.DTYPE, in_shape, stride_order=(1, 0), memspace=cute.AddressSpace.gmem, assumed_align=16
-    )
-    out_row_fake = (
-        cute.runtime.make_fake_compact_tensor(
-            out_dtype,
-            out_shape,
-            stride_order=(1, 0),
-            memspace=cute.AddressSpace.gmem,
-            assumed_align=16,
-        )
-        if cfg.ROWWISE
-        else None
-    )
-    scale_row_fake = (
-        cute.runtime.make_fake_compact_tensor(
-            scale_dtype,
-            scale_rowwise_shape,
-            stride_order=(1, 0),
-            memspace=cute.AddressSpace.gmem,
-            assumed_align=4,
-        )
-        if cfg.ROWWISE
-        else None
-    )
-    out_col_fake = (
-        cute.runtime.make_fake_compact_tensor(
-            out_dtype,
-            out_shape,
-            stride_order=(1, 0),
-            memspace=cute.AddressSpace.gmem,
-            assumed_align=16,
-        )
-        if cfg.COLWISE
-        else None
-    )
-    scale_col_fake = (
-        cute.runtime.make_fake_compact_tensor(
-            scale_dtype,
-            scale_colwise_shape,
-            stride_order=(1, 0),
-            memspace=cute.AddressSpace.gmem,
-            assumed_align=4,
-        )
-        if cfg.COLWISE
-        else None
-    )
-    amax_fake = (
-        cute.runtime.make_fake_compact_tensor(
-            Float32, (1,), stride_order=(0,), memspace=cute.AddressSpace.gmem, assumed_align=4
-        )
-        if cfg.WITH_AMAX
-        else None
-    )
-    # The cast-noop flag is an always-present f32 pointer instead of an optional tensor, so that
-    # the same compiled kernel serves both an absent and a present flag (see noop_flag_is_set).
-    # The null address here is only a compile-time placeholder for the pointer the C++ dispatcher
-    # passes at launch.
-    noop_fake = cute.runtime.nullptr(Float32, mem_space=cute.AddressSpace.gmem, assumed_align=4)
-    act_input_fake = (
-        cute.runtime.make_fake_compact_tensor(
-            cfg.DTYPE,
-            in_shape,
-            stride_order=(1, 0),
-            memspace=cute.AddressSpace.gmem,
-            assumed_align=16,
-        )
-        if cfg.WITH_DACT
-        else None
-    )
-    workspace_fake = (
-        cute.runtime.make_fake_compact_tensor(
-            Float32, ws_shape, stride_order=(1, 0), memspace=cute.AddressSpace.gmem, assumed_align=4
-        )
-        if cfg.WITH_DBIAS
-        else None
-    )
-
-    compiled = cute.compile(
-        kernel_obj,
-        in_fake,  # mX
-        out_row_fake,
-        scale_row_fake,  # mO_row, mS_row
-        out_col_fake,
-        scale_col_fake,  # mO_col, mS_col
-        amax_fake,  # mAmax
-        noop_fake,  # mNoop (pointer to the cast_noop flag, may be null at launch)
-        act_input_fake,  # mDActInput (activation input, dact only)
-        workspace_fake,  # mWorkspace(backward slot, unused)
-        cute.runtime.make_fake_stream(),  # stream (compiled as an explicit tvm-ffi
-        # "handle" arg; C++ passes the CUDA stream
-        # as void*)
-        options="--enable-tvm-ffi",
-    )
-    return compiled
-
-
-def get_mxfp8_quantization_function(
-    fn_name: str,
-    dtype: str,
-    fp8_dtype: str,
-    rowwise: bool,
-    colwise: bool,
-    with_gemm_swizzled_scales: bool,
-    with_amax: bool,
-    with_dbias: bool,
-    with_dact: bool,
-    with_act: bool,
-    use_2d_quantization: bool,
-    activation: str,
-) -> bool:
-    """Compile the MXFP8 quantize kernel for this config and register it in the TVM-FFI global registry
+def compile_and_register_function(fn_name: str, cfg: MXFP8QuantizeConfig) -> bool:
+    """Compile the CuTeDSL kernel for this config and register it in the TVM-FFI global registry
     under EXACTLY `fn_name` (the key the C++ dispatcher built; Python treats it as an opaque name).
     Returns True if a kernel is successfully registered under `fn_name` (the C++ side then fetches it with GetGlobal(fn_name));
     False if the config is unsupported, so the caller caches the negative result and falls back to the CUDA C++ kernel.
@@ -559,33 +599,8 @@ def get_mxfp8_quantization_function(
             )
             return False
 
-        try:
-            cfg = MXFP8QuantizeConfig(
-                dtype=dtype,
-                fp8_dtype=fp8_dtype,
-                rowwise=rowwise,
-                colwise=colwise,
-                with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-                with_amax=with_amax,
-                with_dbias=with_dbias,
-                with_dact=with_dact,
-                with_act=with_act,
-                use_2d_quantization=use_2d_quantization,
-                activation=activation,
-            )
-        except ValueError as e:
-            # The exception message states exactly why the config is unsupported
-            # (unknown dtype/activation, dbias not implemented, ...). Surfacing it as a
-            # warning lets the C++ dispatcher's CUDA fallback be recognized as expected.
-            logger.warning(
-                "CuTeDSL MXFP8 backend does not support this config, "
-                "falling back to the CUDA C++ kernel: %s",
-                e,
-            )
-            return False
-
         logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
-        compiled = compile_cutedsl_function_from_cfg(cfg)
+        compiled = cfg.compile()
         # The returned compiled object is not neccessarily the compiled function itself. It could be a Python
         # wrapper that parses arguments and calls the underlying function. This is needed in the general case
         # as TVM-FFI is positional-only, however, for us this is unnecessary launch overhead as we pass the
@@ -607,3 +622,79 @@ def get_mxfp8_quantization_function(
         )
         # Unconditionally fallback to CUDA path because we can't tell if this exception is transient or permanent.
         return False
+
+
+def get_mxfp8_quantization_function(
+    fn_name: str,
+    dtype: str,
+    fp8_dtype: str,
+    rowwise: bool,
+    colwise: bool,
+    with_gemm_swizzled_scales: bool,
+    with_amax: bool,
+    with_dbias: bool,
+    with_dact: bool,
+    with_act: bool,
+    use_2d_quantization: bool,
+    activation: str,
+) -> bool:
+    """Compile and register the MXFP8 quantize kernel for this config under `fn_name`."""
+    try:
+        cfg = MXFP8QuantizeConfig(
+            dtype=dtype,
+            fp8_dtype=fp8_dtype,
+            rowwise=rowwise,
+            colwise=colwise,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+            with_amax=with_amax,
+            with_dbias=with_dbias,
+            with_dact=with_dact,
+            with_act=with_act,
+            use_2d_quantization=use_2d_quantization,
+            activation=activation,
+        )
+    except ValueError as e:
+        # The exception message states exactly why the config is unsupported
+        # (unknown dtype/activation, dbias not implemented, ...). Surfacing it as a
+        # warning lets the C++ dispatcher's CUDA fallback be recognized as expected.
+        logger.warning(
+            "CuTeDSL MXFP8 backend does not support this config, "
+            "falling back to the CUDA C++ kernel: %s",
+            e,
+        )
+        return False
+    return compile_and_register_function(fn_name, cfg)
+
+
+def get_mxfp8_gated_quantization_function(
+    fn_name: str,
+    dtype: str,
+    fp8_dtype: str,
+    rowwise: bool,
+    colwise: bool,
+    with_gemm_swizzled_scales: bool,
+    is_bwd: bool,
+    activation: str,
+) -> bool:
+    """Compile and register the gated MXFP8 quantize kernel for this config under `fn_name`."""
+    try:
+        cfg = MXFP8GatedQuantizeConfig(
+            dtype=dtype,
+            fp8_dtype=fp8_dtype,
+            rowwise=rowwise,
+            colwise=colwise,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+            is_bwd=is_bwd,
+            activation=activation,
+        )
+    except ValueError as e:
+        # The exception message states exactly why the config is unsupported
+        # (unknown dtype/activation, dbias not implemented, ...). Surfacing it as a
+        # warning lets the C++ dispatcher's CUDA fallback be recognized as expected.
+        logger.warning(
+            "CuTeDSL MXFP8 backend does not support this config, "
+            "falling back to the CUDA C++ kernel: %s",
+            e,
+        )
+        return False
+    return compile_and_register_function(fn_name, cfg)

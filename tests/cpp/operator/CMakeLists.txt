@@ -46,6 +46,7 @@ add_executable(test_operator
                test_multi_swizzle.cu
                test_swizzle_block_scaling.cu
                test_swap_first_dims.cu
+               test_gemm.cu
                test_grouped_gemm.cu
                ../test_common.cu)
 
