@@ -65,16 +65,23 @@ __device__ __forceinline__ TmaDescriptorOverride2D make_tma_descriptor_override_
   static_assert((TILE_DIM_X > 0) && (TILE_DIM_X < 256) && (TILE_DIM_Y > 0) && (TILE_DIM_Y < 256));
   const uint64_t stride_bytes = static_cast<uint64_t>(cols) * sizeof(T);
   const uint64_t address = reinterpret_cast<uint64_t>(data + y * cols + x);
-  if (stride_bytes % TMA_GMEM_ALIGNMENT != 0 || address % TMA_GMEM_ALIGNMENT != 0) {
-    NVTE_DEVICE_ERROR("TMA override address and stride must be 16B aligned.");
+
+  if (address % TMA_GMEM_ALIGNMENT != 0) {
+    NVTE_DEVICE_ERROR("TMA override address must be 16B aligned.");
+  }
+  if (stride_bytes % TMA_GMEM_ALIGNMENT != 0) {
+    NVTE_DEVICE_ERROR("TMA override stride must be 16B aligned.");
   }
   const uint64_t stride = stride_bytes >> 4;
   if ((stride >> 36) != 0) {
     NVTE_DEVICE_ERROR("TMA override stride exceeds 36 bits.");
   }
-  return {address, static_cast<uint16_t>(min(TILE_DIM_X, cols - x)),
-          static_cast<uint16_t>(min(TILE_DIM_Y, rows - y)), static_cast<uint32_t>(stride),
-          static_cast<uint16_t>(stride >> 32)};
+  const TmaDescriptorOverride2D descriptor{address,
+                                           static_cast<uint16_t>(min(TILE_DIM_X, cols - x)),
+                                           static_cast<uint16_t>(min(TILE_DIM_Y, rows - y)),
+                                           static_cast<uint32_t>(stride),
+                                           static_cast<uint16_t>(stride >> 32)};
+  return descriptor;
 }
 
 template <size_t TILE_DIM_Y, size_t TILE_DIM_X, typename T>
