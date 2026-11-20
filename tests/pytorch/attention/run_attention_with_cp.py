@@ -516,6 +516,9 @@ def run_dpa_with_cp(
         thd_seqlen_pattern,
     )
     input_shapes = [q_input_shape, k_input_shape, v_input_shape, attn_output_shape]
+    if qkv_format in ("bshd", "sbhd"):
+        # Dense inputs and bias use the same two chunks in both execution modes.
+        seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device="cuda")
     if cp_bench_only:
         if qkv_format in ("bshd", "sbhd"):
             seq_dim = qkv_format.index("s")
@@ -698,7 +701,6 @@ def run_dpa_with_cp(
                 )
                 for x in [q_, k_, v_, dout_]
             ]
-            seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
             q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
             q_, k_, v_, dout_ = [
                 x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :])
@@ -743,10 +745,6 @@ def run_dpa_with_cp(
     if bias_ is not None:
         ndim = bias_.ndim
         seq_q_dim = ndim - 2
-        if qkv_format == "thd":
-            bias_seq_idx = seq_idx_q
-        else:
-            bias_seq_idx = seq_idx
         shape_before_seq = bias_.shape[:seq_q_dim]
         seq_q_size = bias_.shape[seq_q_dim]
         seq_kv_size = bias_.shape[-1]
@@ -756,6 +754,7 @@ def run_dpa_with_cp(
             # Bias is broadcast, no need to partition along sequence dimension
             pass
         else:
+            bias_seq_idx = seq_idx_q if qkv_format == "thd" else seq_idx
             bias_ = bias_.view(
                 *shape_before_seq, 2 * world_size, seq_q_size // (2 * world_size), seq_kv_size
             )

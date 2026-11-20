@@ -18,6 +18,7 @@ import sys
 import pathlib
 import logging
 import copy
+import subprocess
 import tempfile
 import pytest
 import torch
@@ -325,6 +326,48 @@ def test_cp_benchmark_configs(model, qkv_format, cp_comm_type):
             **extra_kwargs,
         ),
     )
+
+
+@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
+@pytest.mark.parametrize("model,is_training", [("cp_1_2", True), ("cp_2_4", False)])
+def test_cp_benchmark_only_bias(model, is_training, qkv_format):
+    """Cover partitioned and broadcast bias without allocating full Q/K/V inputs."""
+    from test_attention_with_cp import model_configs_fused_attn as core_configs
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("Test requires 2 GPUs")
+    config = copy.deepcopy(core_configs[model])
+    config.context_parallel = True
+    config.cp_comm_type = "p2p"
+    available, *_ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="_".join([qkv_format] * 3),
+        is_training=is_training,
+        cp_size=2,
+    )
+    if not available[1]:
+        pytest.skip("FusedAttention not available for this bias configuration")
+
+    env = os.environ.copy()
+    env["NVTE_CP_BENCH_ONLY"] = "1"
+    result = run_distributed(
+        get_bash_arguments(
+            num_gpus_per_node=2,
+            dtype="bf16",
+            model=model,
+            qkv_format=qkv_format,
+            kernel_backend="FusedAttention",
+            cp_comm_type="p2p",
+            is_training=is_training,
+            benchmark=1,
+            log_level=pytest_logging_level,
+        ),
+        env=env,
+        stdout=subprocess.PIPE,
+    )
+    assert "CP_BENCH_ONLY correctness_paths=skipped inputs=rank_local" in result.stdout
+    assert "CP_BENCH_RESULT " in result.stdout
 
 
 # Cross-backend consistency configs: run the same input through p2p / all_gather / a2a
