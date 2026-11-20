@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import math
 import random
 import pytest
 import torch
@@ -526,31 +527,21 @@ def test_parallel_cross_entropy_return_argmax_nan():
 
 
 def test_parallel_cross_entropy_leading_neg_inf_block():
-    """A row whose first block is entirely -inf must not produce NaN (issue #3886).
+    """A masked prefix contributes zero mass, but a NaN in that prefix propagates."""
+    vocab = 32768 + 8
+    logits = torch.full((1, 2, vocab), float("-inf"), device="cuda", dtype=torch.float32)
+    logits[..., -8:] = 0.0
+    logits[0, 1, 0] = float("nan")
+    logits.requires_grad_()
+    target = torch.full((1, 2), vocab - 1, device="cuda", dtype=torch.long)
 
-    The online-softmax denominator is accumulated block by block; a block that holds only -inf
-    leaves the running maximum at -inf, and subtracting that from itself is NaN.
-    """
-    hidden_size = 32776
-    logits = torch.full(
-        (2, hidden_size),
-        float("-inf"),
-        device="cuda",
-        dtype=torch.float32,
-    )
-    logits.requires_grad_(True)
-    logits[:, -8:] = 0.0
-    target = torch.full((2,), hidden_size - 1, device="cuda", dtype=torch.long)
+    loss = parallel_cross_entropy(logits, target)
+    loss.backward(torch.ones_like(loss))
 
-    loss = parallel_cross_entropy(logits, target, reduce_loss=False)
-    reference = torch.nn.functional.cross_entropy(logits, target, reduction="none")
-
-    assert torch.isfinite(loss).all(), loss
-    torch.testing.assert_close(loss, reference, rtol=1e-5, atol=1e-5)
-
-    # The gradient path divides by the same denominator, so it was NaN as well.
-    ref_logits = logits.detach().clone().requires_grad_(True)
-    torch.nn.functional.cross_entropy(ref_logits, target, reduction="sum").backward()
-    loss.sum().backward()
-    assert torch.isfinite(logits.grad).all()
-    torch.testing.assert_close(logits.grad, ref_logits.grad, rtol=1e-4, atol=1e-6)
+    expected_loss = logits.new_tensor([[math.log(8), float("nan")]])
+    expected_grad = torch.zeros_like(logits)
+    expected_grad[0, 0, -8:] = 1 / 8
+    expected_grad[0, 0, -1] -= 1
+    expected_grad[0, 1] = float("nan")
+    torch.testing.assert_close(loss, expected_loss, equal_nan=True)
+    torch.testing.assert_close(logits.grad, expected_grad, equal_nan=True)
