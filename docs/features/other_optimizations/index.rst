@@ -8,5 +8,5 @@ Other optimizations
 
 .. toctree::
 
+   attention_backend_selection.rst
    cpu_offloading/cpu_offloading.rst
-
