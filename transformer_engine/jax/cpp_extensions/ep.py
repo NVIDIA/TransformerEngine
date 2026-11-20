@@ -1540,7 +1540,8 @@ def _ep1_local_dispatch(
     from ..permutation import pure_jax_token_dispatch
 
     ep_cfg = get_ep_config()
-    num_groups = ep_cfg.num_ep_groups
+    # One group per DP x FSDP shard; combine and the backward ops read the count from the handle.
+    num_groups = get_mesh_axis_size(_capture_ep_resource_axes()[1])
     hidden_size = tokens.shape[-1]
     grouped_tokens = tokens.reshape(num_groups, -1, hidden_size)
     # Explicit shape: the non-MXFP8 placeholder has zero scale columns.
@@ -1647,7 +1648,7 @@ def _ep1_local_combine(cfg, handle, expert_out, num_local_tokens):
     """Undo an EP=1 local dispatch and sum the already-weighted top-k rows."""
     from ..permutation import PureJaxPermState, pure_jax_token_combine
 
-    num_groups = get_ep_config().num_ep_groups
+    num_groups = handle.sorted_indices.shape[0]
     output_leading = _normalize_leading_shape(num_local_tokens)
     local_tokens = int(np.prod(output_leading)) // num_groups
     num_real_tokens = local_tokens * cfg.top_k
@@ -1674,7 +1675,7 @@ def _ep1_local_combine_bwd(cfg, handle, grad, recv_capacity_per_rank):
     """The combine transpose is the same local permutation as dispatch."""
     from ..permutation import pure_jax_token_dispatch
 
-    num_groups = get_ep_config().num_ep_groups
+    num_groups = handle.sorted_indices.shape[0]
     grouped_grad = grad.reshape(num_groups, -1, grad.shape[-1])
 
     def dispatch_one(local_grad, local_experts):
@@ -1697,7 +1698,7 @@ def _ep1_local_dispatch_bwd(cfg, handle, grad, grad_weights, num_local_tokens):
     """Undo the two local dispatch permutations."""
     from ..permutation import PureJaxPermState, pure_jax_token_combine
 
-    num_groups = get_ep_config().num_ep_groups
+    num_groups = handle.sorted_indices.shape[0]
     output_leading = _normalize_leading_shape(num_local_tokens)
     local_tokens = int(np.prod(output_leading)) // num_groups
     num_real_tokens = local_tokens * cfg.top_k
