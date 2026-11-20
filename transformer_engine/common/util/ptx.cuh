@@ -143,8 +143,6 @@ constexpr bool is_supported_arch() {
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
   NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>, ptx::ArchSpecific<107>)
 
-// Attribute override is a Rubin family feature, available starting with CUDA 13.4.
-// Do not enable it for earlier members of the SM10x family.
 #define ARCH_HAS_TMA_DESCRIPTOR_OVERRIDE                           \
   [&] {                                                            \
     __NVTE_CURRENT_ARCH__                                          \
