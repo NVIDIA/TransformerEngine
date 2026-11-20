@@ -94,6 +94,19 @@ _ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
 
+# Default overlap method for each comm+GEMM overlap, named "<ub_name>_<fprop|dgrad|wgrad>"
+_DEFAULT_UB_METHODS = {
+    "ring_exchange": ["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
+    "pipeline": ["proj_fprop", "fc2_fprop"],
+    "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
+    "external": ["proj_wgrad", "fc2_wgrad"],
+}
+_UB_NAMES = list(
+    dict.fromkeys(
+        name.rsplit("_", 1)[0] for names in _DEFAULT_UB_METHODS.values() for name in names
+    )
+)
+
 
 def _get_high_precision_init_val(parameter: torch.Tensor) -> Optional[torch.Tensor]:
     """Return temporary pre-quantization initialization stored on a parameter."""
@@ -281,13 +294,10 @@ def initialize_ub(
                whose ``ub_name`` is not listed cannot use comm+GEMM overlap.
 
     """
-    all_ub_names = ["qkv", "proj", "fc1", "fc2"]
     if ub_names is not None:
-        invalid_names = [name for name in ub_names if name not in all_ub_names]
+        invalid_names = [name for name in ub_names if name not in _UB_NAMES]
         if invalid_names:
-            raise ValueError(
-                f"Invalid ub_names {invalid_names}, must be a subset of {all_ub_names}"
-            )
+            raise ValueError(f"Invalid ub_names {invalid_names}, must be a subset of {_UB_NAMES}")
 
     # The cuBLASMp backend falls back to a non-multicast algorithm in C++ when multicast is
     # unsupported or disabled (via UB_SKIPMC), so only enforce the multicast requirement for
@@ -421,18 +431,8 @@ def initialize_ub(
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
 
-    # Default overlap methods for layers
-    methods = {
-        "ring_exchange": [
-            "qkv_fprop",
-            "fc1_fprop",
-            "proj_dgrad",
-            "fc2_dgrad",
-        ],
-        "pipeline": ["proj_fprop", "fc2_fprop"],
-        "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
-        "external": ["proj_wgrad", "fc2_wgrad"],
-    }
+    # Copied because user configs and the cuBLASMp backend change methods below
+    methods = {method: list(names) for method, names in _DEFAULT_UB_METHODS.items()}
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
