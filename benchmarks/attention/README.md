@@ -23,7 +23,8 @@ The [444 endpoint values](results/context_parallel/endpoints_20261116.csv)
 use TE `5d4673da00226be3772cdb135db4cdd0e7b8edeb`, CUDA 13.4, cuDNN 9.27/frontend
 1.30, NCCL 2.32.3, and PyTorch 2.15 development builds. Fused means cuDNN
 FusedAttention. Flash is FA3 on H100; B200 uses FA4 b11/DSL 4.4.2 for causal
-and b33/DSL 4.8 for SWA.
+and b33/DSL 4.8 for SWA. These results describe the listed versions;
+remeasure backend choices when the software changes.
 
 ## Start with the actual shape
 
@@ -79,54 +80,12 @@ B200's Fused joint wins occur at `256x2k`; its CP4/CP8 A2A differences are small
 A2A is a strong first candidate at causal CP4/CP8, especially for short
 shapes. At CP2, method ordering changes with shape, backend, and hardware.
 Use these patterns to prioritize the supported combinations to benchmark.
+If the fastest method is unavailable, Figure 3 shows the next supported option
+and its latency penalty at the same GPU/backend/shape/CP.
 
 The benchmarked pure-A2A path shards heads: CP size must divide both local
 query and key/value head counts (after any tensor parallelism), so our
 32-query/8-KV-head setup caps this path at CP8.
-
-## Scaling and system comparisons
-
-### CP-size returns
-
-At a fixed backend, the causal sweep gets roughly fourfold benefit from CP2
-to CP8 on long sequences and roughly threefold on the shortest, choosing the
-fastest communication method at each CP size. This shows how sequence length
-affects the latency benefit from additional ranks.
-
-![Best-method causal CP2 to CP8 scaling](results/context_parallel/images/cp_causal_scaling_clear_labels_review_v4.webp)
-
-*Figure 4. CP2 latency divided by CP8 latency at fixed GPU, backend, and shape,
-choosing the fastest method independently at each CP. The 4× line marks
-latency scaling proportional to the increase from two to eight GPUs.*
-
-Tune communication before judging the benefit of more ranks. For H100 FA3
-`256x2k`, the [endpoint values](results/context_parallel/endpoints_20261116.csv)
-are 40.8 ms for CP4 with A2A and 62.9 ms for CP8 with P2P.
-
-Figure 3's absolute baselines place tuned CP8 below CP2 and CP4 throughout
-the causal grid. For a deployment, evaluate feasible CP sizes against the
-full training workload and available GPU budget.
-
-### H100 and B200 comparisons
-
-B200 has lower latency in the matched causal comparisons. Figures 5–6
-show how the measured system-level gain varies with shape and communication,
-holding CP size fixed in each panel.
-
-![System-level Fused H100 to B200 endpoint ratio](results/context_parallel/images/cp_fused_hardware_ratio_color_only_review_v5.webp)
-
-*Figure 5. H100 latency divided by B200 latency at fixed Fused backend, shape,
-method, and CP. Larger ratios indicate a larger benefit on the measured B200
-system; 1× denotes equal latency.*
-
-![System-level Flash H100 FA3 to B200 FA4 endpoint ratio](results/context_parallel/images/cp_flash_hardware_ratio_color_only_review_v6.webp)
-
-*Figure 6. H100 FA3 latency divided by B200 FA4 b11 latency at fixed shape,
-method, and CP. This comparison combines the system and Flash-generation changes.*
-
-Use these ratios to characterize a system change, then use the target
-system's absolute latencies and method rankings in Figures 1–3 to select
-its configuration.
 
 ## Choose communication for sliding-window attention
 
@@ -138,7 +97,7 @@ methods within each hardware/backend panel to build the SWA shortlist.
 
 ![SWA endpoints for all four hardware and backend scopes](results/context_parallel/images/cp_swa_comm_clear_labels_review_v3.webp)
 
-*Figure 7. Orange/open markers denote all-gather; purple/filled markers denote
+*Figure 4. Orange/open markers denote all-gather; purple/filled markers denote
 A2A. Line styles and marker shapes identify CP size. Sequence length increases
 left to right. Each panel has its own logarithmic y scale; use its labeled
 milliseconds when reading latency.*
@@ -151,7 +110,7 @@ Fused instead favors A2A. At CP4/CP8, A2A is lower in all four scopes.
 1. Fix the workload and target environment: mask/window, shape, precision,
    layout, heads, GPU, and software versions.
 2. For each feasible CP size, compare supported **backend × communication**
-   combinations, using Figures 2–3 and 7 to prioritize candidates.
+   combinations, using Figures 2–3 and 4 to prioritize candidates.
 3. Choose by absolute forward-plus-backward latency. Then evaluate that
    configuration in the full training workload and resource budget.
 4. Verify outputs and gradients; repeat close comparisons. Benchmark additional
