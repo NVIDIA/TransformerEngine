@@ -2389,8 +2389,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
             ]
         ):
             assert is_ub_initialized(), "initialize_ub() must be called before layer construction."
-            check_ub_name_initialized("fc1")
-            check_ub_name_initialized("fc2")
+            if any(
+                [
+                    self.ub_overlap_ag,
+                    self.ub_overlap_rs_dgrad,
+                    self.ub_bulk_dgrad,
+                    self.ub_bulk_wgrad,
+                ]
+            ):
+                check_ub_name_initialized("fc1")
+            if self.ub_overlap_ag or self.ub_overlap_rs:
+                check_ub_name_initialized("fc2")
 
         if using_cublasmp_backend():
             if self.ub_bulk_dgrad:
