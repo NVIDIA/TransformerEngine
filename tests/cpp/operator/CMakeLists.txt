@@ -57,14 +57,21 @@ list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} C
 target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS} OpenMP::OpenMP_CXX)
 target_compile_options(test_operator PRIVATE -O2 -fopenmp)
 
-# Keep all operator tests in one process so CUDA initialization and, when enabled,
-# the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
-# TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
 # For debugging, configure with NVTE_TEST_DEBUG_CPP_UT_IN_PARALLEL=1 to register each GoogleTest case as
 # its own ctest test, so failures are reported per case and can be selected with `ctest -R`.
 if("$ENV{NVTE_TEST_DEBUG_CPP_UT_IN_PARALLEL}" STREQUAL "1")
   include(GoogleTest)
   gtest_discover_tests(test_operator DISCOVERY_TIMEOUT 600 DISCOVERY_MODE PRE_TEST)
-else()
+elseif(NOT NVTE_TEST_NUM_SHARDS OR NVTE_TEST_NUM_SHARDS LESS_EQUAL 1)
   add_test(NAME test_operator COMMAND test_operator)
+else()
+  # If NVTE_TEST_NUM_SHARDS is set, shard tests so they can run on different CPUs in parallel
+  message(STATUS "Sharding test_operator into ${NVTE_TEST_NUM_SHARDS} shards")
+  math(EXPR last_shard "${NVTE_TEST_NUM_SHARDS} - 1")
+  foreach(shard_index RANGE ${last_shard})
+    set(test_name test_operator_shard${shard_index})
+    add_test(NAME ${test_name} COMMAND test_operator)
+    set_tests_properties(${test_name} PROPERTIES ENVIRONMENT
+      "GTEST_TOTAL_SHARDS=${NVTE_TEST_NUM_SHARDS};GTEST_SHARD_INDEX=${shard_index}")
+  endforeach()
 endif()
