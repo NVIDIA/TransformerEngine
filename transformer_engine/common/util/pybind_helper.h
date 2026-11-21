@@ -100,6 +100,7 @@
       .value("NVTE_BLOCK_SCALING_1D", NVTEScalingMode::NVTE_BLOCK_SCALING_1D)                      \
       .value("NVTE_BLOCK_SCALING_2D", NVTEScalingMode::NVTE_BLOCK_SCALING_2D)                      \
       .value("NVTE_NVFP4_1D_SCALING", NVTEScalingMode::NVTE_NVFP4_1D_SCALING)                      \
+      .value("NVTE_MXFP4_1D_SCALING", NVTEScalingMode::NVTE_MXFP4_1D_SCALING)                      \
       .value("NVTE_INVALID_SCALING", NVTEScalingMode::NVTE_INVALID_SCALING);                       \
   pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \

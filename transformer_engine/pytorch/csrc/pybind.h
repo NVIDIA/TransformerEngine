@@ -43,6 +43,9 @@ extern PyTypeObject *Float8BlockwiseQuantizerClass;
 extern PyTypeObject *NVFP4TensorPythonClass;
 extern PyTypeObject *NVFP4TensorStoragePythonClass;
 extern PyTypeObject *NVFP4QuantizerClass;
+extern PyTypeObject *MXFP4TensorPythonClass;
+extern PyTypeObject *MXFP4TensorStoragePythonClass;
+extern PyTypeObject *MXFP4QuantizerClass;
 extern PyTypeObject *GroupedTensorPythonClass;
 extern PyTypeObject *GroupedTensorStoragePythonClass;
 
@@ -84,6 +87,13 @@ inline bool IsNVFP4Tensor(PyObject *obj) {
          PyObject_TypeCheck(obj, NVFP4TensorStoragePythonClass);
 }
 
+inline bool IsMXFP4Quantizers(PyObject *obj) { return Py_TYPE(obj) == MXFP4QuantizerClass; }
+
+inline bool IsMXFP4Tensor(PyObject *obj) {
+  return PyObject_TypeCheck(obj, MXFP4TensorPythonClass) ||
+         PyObject_TypeCheck(obj, MXFP4TensorStoragePythonClass);
+}
+
 TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer);
 
 template <typename T>
@@ -99,6 +109,8 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor,
                                                    Quantizer *quantization_params);
 
 TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer);
+
+TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer);
 
 GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor);
 
@@ -116,7 +128,9 @@ constexpr std::array custom_types_converters = {
     std::make_tuple(IsFloat8BlockwiseQTensor, IsFloat8BlockwiseQuantizers,
                     NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>),
     std::make_tuple(IsNVFP4Tensor, IsNVFP4Quantizers, NVTETensorFromNVFP4Tensor,
-                    CreateQuantizer<NVFP4Quantizer>)};
+                    CreateQuantizer<NVFP4Quantizer>),
+    std::make_tuple(IsMXFP4Tensor, IsMXFP4Quantizers, NVTETensorFromMXFP4Tensor,
+                    CreateQuantizer<MXFP4Quantizer>)};
 }  // namespace detail
 
 }  // namespace transformer_engine::pytorch

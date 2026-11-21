@@ -9,6 +9,7 @@ import datetime
 import os
 import sys
 from functools import wraps
+from typing import Optional
 
 import transformer_engine.pytorch as te
 import torch
@@ -24,6 +25,9 @@ from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.custom_recipes import reference_nvfp4
 from transformer_engine.pytorch.custom_recipes import reference_utils
+from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+    mxfp4_weight_mxfp8_activation_factory,
+)
 from run_layer_with_overlap import _compare_tensors
 
 
@@ -93,15 +97,66 @@ def get_nvfp4_quantizer_factory():
 def quantization_recipe() -> Recipe:
     if QUANTIZATION == "nvfp4":
         return nvfp4_rht_and_2d_quantization()
+    if QUANTIZATION == "mxfp4_mxfp8":
+        return CustomRecipe(qfactory=mxfp4_weight_mxfp8_activation_factory)
     raise ValueError(f"Unsupported quantization: {QUANTIZATION}")
 
 
-def quantization_reference_recipe() -> Recipe:
-    """Create reference recipe using CustomRecipe with NVFP4 quantizer factory."""
+def quantization_reference_recipe() -> Optional[Recipe]:
+    """Recipe for the reference run; ``None`` means unquantized BF16.
+
+    MXFP4 x MXFP8 runs on data that both formats represent exactly and whose
+    FP32 accumulation is exact, so it must match BF16 bitwise.
+    """
     if QUANTIZATION == "nvfp4":
         nvfp4_ref_factory = get_nvfp4_quantizer_factory()
         return CustomRecipe(qfactory=nvfp4_ref_factory)
+    if QUANTIZATION == "mxfp4_mxfp8":
+        return None
     raise ValueError(f"Unsupported quantization for reference: {QUANTIZATION}")
+
+
+E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _mx_exact_tensor(rows, cols, values, dtype):
+    """Random signed ``values`` with the largest one in every aligned 1x32 and 32x1 block,
+    so every MX block scale is exact and all values are exactly representable."""
+    values = torch.tensor(values, dtype=torch.float32, device="cuda")
+    out = values[torch.randint(len(values), (rows, cols), device="cuda")]
+    row_idx = torch.arange(rows, device="cuda").unsqueeze(1)
+    col_idx = torch.arange(cols, device="cuda").unsqueeze(0)
+    out = torch.where((col_idx - row_idx) % 32 == 0, values.max(), out)
+    sign = torch.randint(2, (rows, cols), device="cuda") * 2 - 1
+    return (out * sign).to(dtype)
+
+
+def _balanced_sign_tensor(rows, cols, dtype):
+    """Rows of +-1 with zero mean and unit variance, so LayerNorm with eps=0 is the identity."""
+    sign = torch.ones((rows, cols), device="cuda")
+    sign[:, cols // 2 :] = -1
+    perm = torch.argsort(torch.rand((rows, cols), device="cuda"), dim=1)
+    return torch.gather(sign, 1, perm).to(dtype)
+
+
+def prepare_mxfp4_mxfp8_exact_data(
+    batch_size, hidden_size, out_size, use_bias, seed, dtype, layernorm_input=False
+):
+    """Integer activations and gradients in [-14, 14], E2M1 weights, and integer bias.
+
+    With K <= 2048, every GEMM accumulates exactly in FP32.
+    """
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    activation_values = tuple(float(v) for v in range(15))
+    if layernorm_input:
+        x = _balanced_sign_tensor(batch_size, hidden_size, dtype)
+    else:
+        x = _mx_exact_tensor(batch_size, hidden_size, activation_values, dtype)
+    w = _mx_exact_tensor(out_size, hidden_size, E2M1_VALUES, dtype)
+    bias = torch.randint(-8, 9, (out_size,), device="cuda").to(dtype) if use_bias else None
+    gradient = _mx_exact_tensor(batch_size, out_size, activation_values, dtype)
+    return x, w, bias, gradient
 
 
 def main(argv=None, namespace=None):
@@ -186,8 +241,18 @@ def dist_print(msg, src=None, end="\n", error=False):
 class TestDistributedLinearBase:
     @staticmethod
     def _prepare_data(
-        batch_size, hidden_size, out_size, use_bias=True, seed=0, dtype=torch.float32
+        batch_size,
+        hidden_size,
+        out_size,
+        use_bias=True,
+        seed=0,
+        dtype=torch.float32,
+        layernorm_input=False,
     ):
+        if QUANTIZATION == "mxfp4_mxfp8":
+            return prepare_mxfp4_mxfp8_exact_data(
+                batch_size, hidden_size, out_size, use_bias, seed, dtype, layernorm_input
+            )
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
         x = torch.randn((batch_size, hidden_size), dtype=dtype, device="cuda")
@@ -516,7 +581,7 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
 
     # run the reference
     reference_recipe = quantization_reference_recipe()
-    with te.autocast(enabled=True, recipe=reference_recipe):
+    with te.autocast(enabled=reference_recipe is not None, recipe=reference_recipe):
         y_q_ref, dgrad_ref, wgrad_ref, bgrad_ref = TestDistributedLinearBase.run_linear(
             x,
             w,
@@ -546,6 +611,8 @@ def test_linear():
     kwargs_list = [
         {"bias": False},
     ]
+    if QUANTIZATION == "mxfp4_mxfp8":
+        kwargs_list.append({"bias": True})
 
     for kwargs in kwargs_list:
         if kwargs.get("save_original_input", False) and QUANTIZATION == "fp8":
@@ -607,6 +674,7 @@ class TestDistributedLayerNormLinearBase(TestDistributedLinearBase):
         enable_weight_cache=False,
         LayerNormLinearClass=te.LayerNormLinear,
         normalization="LayerNorm",
+        eps=1e-5,
     ):
         """
         If Model parallel, split inputs for a given rank and return the gathered output and gradients, so that they can be compared with
@@ -640,6 +708,7 @@ class TestDistributedLayerNormLinearBase(TestDistributedLinearBase):
             tp_group=tp_group,
             tp_size=tp_size,
             normalization=normalization,
+            eps=eps,
             return_layernorm_output=True,
         )
 
@@ -686,9 +755,16 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
 
     # run multiple steps currently not supported for LayerNormLinear
     run_num_steps = 1
+    eps = 0.0 if QUANTIZATION == "mxfp4_mxfp8" else 1e-5
 
     x, w, bias, gradient = TestDistributedLayerNormLinearBase._prepare_data(
-        BATCH_SIZE, HIDDEN_SIZE, OUT_SIZE, use_bias=use_bias, seed=seed, dtype=params_dtype
+        BATCH_SIZE,
+        HIDDEN_SIZE,
+        OUT_SIZE,
+        use_bias=use_bias,
+        seed=seed,
+        dtype=params_dtype,
+        layernorm_input=True,
     )
 
     # run the recipe under test
@@ -705,11 +781,12 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
             rank=WORLD_RANK,
             run_num_steps=run_num_steps,
             enable_weight_cache=False,
+            eps=eps,
         )
 
     # run the reference
     reference_recipe = quantization_reference_recipe()
-    with te.autocast(enabled=True, recipe=reference_recipe):
+    with te.autocast(enabled=reference_recipe is not None, recipe=reference_recipe):
         y_q_ref, ln_out_ref, dgrad_ref, wgrad_ref, bgrad_ref = (
             TestDistributedLayerNormLinearBase.run_layernorm_linear(
                 x,
@@ -723,6 +800,7 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
                 rank=WORLD_RANK,
                 run_num_steps=run_num_steps,
                 enable_weight_cache=False,
+                eps=eps,
             )
         )
 
@@ -740,6 +818,8 @@ def test_layernorm_linear():
     kwargs_list = [
         {"bias": False},
     ]
+    if QUANTIZATION == "mxfp4_mxfp8":
+        kwargs_list.append({"bias": True})
 
     for kwargs in kwargs_list:
         for parallel_mode in ["column"]:

@@ -814,6 +814,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         if func == aten.copy_.default:
             dst, src = args[0], args[1]
             if isinstance(src, NVFP4Tensor) and isinstance(dst, NVFP4Tensor):
+                if src._with_gemm_swizzled_scales != dst._with_gemm_swizzled_scales:
+                    # go through dequant + quant route in super().__torch_dispatch__
+                    return super().__torch_dispatch__(func, types, args, kwargs)
                 if dst._rowwise_data is not None and src._rowwise_data is not None:
                     dst._rowwise_data.copy_(src._rowwise_data.detach())
                     dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach())

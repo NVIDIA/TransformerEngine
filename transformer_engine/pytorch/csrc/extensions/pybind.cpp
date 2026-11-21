@@ -35,6 +35,9 @@ PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
 PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
+PyTypeObject *MXFP4TensorPythonClass = nullptr;
+PyTypeObject *MXFP4TensorStoragePythonClass = nullptr;
+PyTypeObject *MXFP4QuantizerClass = nullptr;
 PyTypeObject *GroupedTensorPythonClass = nullptr;
 PyTypeObject *GroupedTensorStoragePythonClass = nullptr;
 std::once_flag extension_init_flag;
@@ -103,6 +106,20 @@ void init_nvfp4_extensions() {
              "Internal error: could not initialize pyTorch NVFP4 extension.");
 }
 
+void init_mxfp4_extension() {
+  auto mxfp4_module = py::module_::import("transformer_engine.pytorch.tensor.mxfp4_tensor");
+  MXFP4QuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(mxfp4_module.ptr(), "MXFP4Quantizer"));
+  MXFP4TensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(mxfp4_module.ptr(), "MXFP4Tensor"));
+  auto mxfp4_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.mxfp4_tensor_storage");
+  MXFP4TensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(mxfp4_base_module.ptr(), "MXFP4TensorStorage"));
+  NVTE_CHECK(MXFP4TensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch MXFP4 extension.");
+}
+
 void init_grouped_tensor_extension() {
   if (GroupedTensorPythonClass && GroupedTensorStoragePythonClass) return;
   auto grouped_tensor_module =
@@ -126,6 +143,7 @@ void init_extension() {
     init_mxfp8_extension();
     init_float8blockwise_extension();
     init_nvfp4_extensions();
+    init_mxfp4_extension();
     init_grouped_tensor_extension();
   });
 }

@@ -93,7 +93,11 @@ inline bool is_nvfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_
 
 inline bool is_mxfp8_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
-inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
+inline bool is_mxfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP4_1D_SCALING; }
+
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
+  return is_mxfp8_scaling(mode) || is_mxfp4_scaling(mode);
+}
 
 inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
@@ -409,7 +413,8 @@ struct Tensor {
         }
         return data.shape;
       }
-      case NVTE_MXFP8_1D_SCALING: {
+      case NVTE_MXFP8_1D_SCALING:
+      case NVTE_MXFP4_1D_SCALING: {
         // Row-wise and column-wise data shapes both match tensor
         // logical shape
         if (!has_data() && has_columnwise_data()) {
