@@ -36,3 +36,4 @@ from .grouped_mlp import (  # pylint: disable=wrong-import-position
     GroupedMLP_CuTeGEMMUnary,
     GroupedMLP_CuTeGEMMGLUBf16,
 )
+from .moe_ep import FusedMoeEp  # pylint: disable=wrong-import-position
