@@ -6,8 +6,8 @@
 
 The shared Q RoPE forward and backward kernels come from Megatron-LM's
 megatron/core/fusions/fused_mla_yarn_rope_apply.py at
-c4129afff4867ca89b1fb7b4b911128424cdfbe8. The separate MLA KV kernels came
-from TE's mla_rope_utils.py. Framework adapters prepare tensors and handle autograd.
+c4129afff4867ca89b1fb7b4b911128424cdfbe8.
+Framework adapters prepare tensors and handle autograd.
 """
 
 import triton

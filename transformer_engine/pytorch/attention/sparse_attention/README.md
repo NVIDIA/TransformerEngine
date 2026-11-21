@@ -74,9 +74,9 @@ concatenate sequences, with cumulative token counts identifying their boundaries
 Standalone `Compressor` and `Indexer` accept only batched `[B,S,D]` or packed
 `thd` `[T,D]` input; callers must transpose sequence-major inputs first. Hidden
 states have no explicit head axis; prepared queries have shape `[T,H,D]`.
-Attention uses the original query
-`[T,64,D]` and concatenated local/compressed KV `[T+Tc,D]`; there is no
-compressed query. `T` is the total query/local KV token count.
+Attention uses the original query `[T,64,D]` and concatenated local/compressed
+KV `[T+Tc,D]`; there is no compressed query. `T` is the total query/local KV
+token count.
 `_prepare_sparse_kv_indices` creates a list of KV token indices for each query token,
 combining causal local KV token indices with compressed KV token indices offset
 by `T`; invalid entries are `-1`. CSA supplies global compressed KV token indices
@@ -144,8 +144,6 @@ The layer admits SM100, SM103, and SM107 GPUs for full-sequence
 forward/backward and requires BF16 activations. FP16 is unsupported by the
 compression and indexer training dependencies. The operations require cuDNN
 Frontend 1.29 or newer with its CSA/DSA APIs and are delivered as CuTe kernels.
-Hardware validation includes prior SM100 runs and SM103/SM107 runs with
-cuDNN Frontend 1.30.0, Cutlass DSL 4.8.0, CUDA 13.4, and cuDNN 9.27.
 
 The layer uses 64 heads of width 512 and requires at least one complete
 compression window per sequence. Sequences start at position zero;
@@ -196,8 +194,10 @@ projections and compressor; they do not reach the shared hidden/query
 projections or detached attention teacher. The dense-reference example in
 `tests/pytorch/test_dsv4_attention.py` shows full teacher-LSE construction.
 
-Shared-input projections in `DSv4Attention` are fused: `q_a_kv_proj.weight`
-stores query-down then local-KV rows; `compressor.fused_proj.weight` stores
-KV then gate rows; the CSA `indexer.compressor.fused_proj.weight` additionally
-stores head-weight rows last. These default checkpoint keys and shapes are
-preserved. Separate-weight model imports must concatenate those rows explicitly.
+`DSv4Attention` fuses projections that share an input. Each weight tensor stores output channels in the following order.
+
+- `q_a_kv_proj.weight` stores query-down channels followed by local KV channels.
+- `compressor.fused_proj.weight` stores KV channels followed by gate channels.
+- `indexer.compressor.fused_proj.weight` (CSA) stores KV, gate, then head-weight channels.
+
+To import separate projection weights, concatenate them in the listed order along dimension `0`, the output-channel dimension.

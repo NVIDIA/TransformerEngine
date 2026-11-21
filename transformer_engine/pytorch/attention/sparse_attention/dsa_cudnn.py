@@ -468,7 +468,12 @@ def _prepare_sparse_kv_indices(
     # window=ratio=3: cu_comp=[0,1,4,9]; local=[5,6,7]; compressed=[1].
     #   Combined KV indices: [5,6,7,33,-1,-1,-1,-1].
     # Ratio 3 illustrates only this helper's index arithmetic, not cuDNN compression support.
-    # Only compressed indices receive offset T; -1 marks invalid entries.
+    # Sliding-window attention still needs the original KV tokens after compression.
+    # The combined KV tensor contains all T original tokens, followed by Tc compressed entries,
+    # so compressed KV token indices receive offset T. Here T=32:
+    # ratio 2: [2,3] -> [32+2,32+3]=[34,35]; ratio 3: [1] -> [32+1]=[33].
+    # -1 marks a slot with no valid KV token for this query.
+    # CSA fills unused top-k slots with -1 when fewer than top_k entries are eligible.
     compressed = torch.where(valid, compressed + query.shape[0], -1)
     # cuDNN accepts an arbitrary logical width and pads its internal kernel
     # layout, so preserve only the model-visible local + compressed slots.

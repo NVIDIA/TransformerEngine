@@ -103,8 +103,8 @@ class Indexer(torch.nn.Module):
             token and compressed-window positions, respectively.
         total_comp : int
             Allocated compressed output length: exactly ``B * (S // ratio)`` for
-            ``[B,S,hidden_size]`` input; packed ``thd`` output may include padding after the valid
-            compressed KV tokens.
+            ``[B,S,hidden_size]`` input; packed ``thd`` output may include padding
+            after the valid compressed KV tokens.
         max_seqlen : int
             Maximum sequence length used to bound selection. For ``[B,S,hidden_size]``
             input this must equal S; for packed ``thd`` input use the longest sequence length.

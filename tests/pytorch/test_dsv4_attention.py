@@ -114,7 +114,7 @@ def test_dsa_sparse_attention(variant, head_dim):
 
 
 def test_dsa_rejects_unsupported_metadata():
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(ValueError, match="window_size and ratio must be positive"):
         dsa_cudnn.sparse_attention(
             torch.empty(1, 64, 512),
             torch.empty(1, 512),
@@ -125,7 +125,7 @@ def test_dsa_rejects_unsupported_metadata():
             window_size=0,
             ratio=4,
         )
-    with pytest.raises(ValueError, match="query"):
+    with pytest.raises(ValueError, match=r"query \[T,64,D\]"):
         dsa_cudnn.sparse_attention(
             torch.empty(1, 4, 512),
             None,
@@ -142,7 +142,7 @@ def test_dsa_rejects_unsupported_metadata():
 
 
 def test_dsa_compressor_clears_unused_capacity(monkeypatch):
-    """Unused cuDNN output must not contaminate normalization weight gradients."""
+    """Clear extra allocated compressed output before it affects normalization gradients."""
     layer = Compressor.__new__(Compressor)
     torch.nn.Module.__init__(layer)
     layer.fused_proj = torch.nn.Identity()
@@ -154,6 +154,7 @@ def test_dsa_compressor_clears_unused_capacity(monkeypatch):
         "compress",
         lambda *args, **kwargs: torch.cat((torch.ones(1, 4), torch.full((1, 4), float("nan")))),
     )
+    # Lengths 3 and 5 at ratio 4 produce one valid compressed entry, but T // ratio allocates two.
     cu = torch.tensor([0, 3, 8], dtype=torch.int32)
     cu_comp = torch.tensor([0, 0, 1], dtype=torch.int32)
     output = layer(torch.empty(8, 8), cu, cu_comp, total_comp=2)
@@ -392,19 +393,23 @@ def test_dsv4_thd_compressed_prefixes():
 
 
 @pytest.mark.parametrize(
-    "prefix,maximum",
+    "prefix,maximum,expected",
     [
-        ([0, 8], 8),
-        (torch.tensor([0, 8], dtype=torch.int64), 8),
-        (torch.tensor([[0, 8]], dtype=torch.int32), 8),
-        (torch.tensor([0], dtype=torch.int32), 8),
-        (torch.tensor([0, 0, 8, 8], dtype=torch.int32)[::2], 8),
-        (torch.tensor([0, 8], dtype=torch.int32), None),
-        (torch.tensor([0, 8], dtype=torch.int32), 0),
+        ([0, 8], 8, "contiguous INT32 cu_seqlens_q"),
+        (torch.tensor([0, 8], dtype=torch.int64), 8, "contiguous INT32 cu_seqlens_q"),
+        (torch.tensor([[0, 8]], dtype=torch.int32), 8, "contiguous INT32 cu_seqlens_q"),
+        (torch.tensor([0], dtype=torch.int32), 8, "contiguous INT32 cu_seqlens_q"),
+        (torch.tensor([0, 0, 8, 8], dtype=torch.int32)[::2], 8, "contiguous INT32 cu_seqlens_q"),
+        (
+            torch.tensor([0, 8], dtype=torch.int32),
+            None,
+            "integer max_seqlen_q >= compression_ratio",
+        ),
+        (torch.tensor([0, 8], dtype=torch.int32), 0, "integer max_seqlen_q >= compression_ratio"),
     ],
 )
-def test_dsv4_thd_rejects_malformed_metadata(prefix, maximum):
-    with pytest.raises(ValueError, match="THD requires"):
+def test_dsv4_thd_rejects_malformed_metadata(prefix, maximum, expected):
+    with pytest.raises(ValueError, match=expected):
         dsv4_attention._packed_prefixes(torch.empty(8, 4), prefix, maximum, 4)
 
 
@@ -416,7 +421,7 @@ def test_dsv4_thd_rejects_hidden_batch_axis_and_multi_sequence_context():
     layer.is_csa, layer.compression_ratio = True, 4
     with pytest.raises(ValueError, match="selected format"):
         layer(torch.empty(16, 1, 8))
-    with pytest.raises(ValueError, match="THD requires"):
+    with pytest.raises(ValueError, match="contiguous INT32 cu_seqlens_q"):
         layer(torch.empty(16, 8))
     with pytest.raises(ValueError, match="batch=1"):
         layer(
@@ -429,7 +434,7 @@ def test_dsv4_thd_rejects_hidden_batch_axis_and_multi_sequence_context():
 
 @pytest.mark.parametrize("variant,ratio", [("hca", 128), ("csa", 4)])
 def test_dsv4_attention_thd(variant, ratio):
-    """Packed full-layer output and gradients match independent dense sequences."""
+    """Packed full-layer output and gradients match separate batch-size-1 calls."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in (
         (10, 0),
         (10, 3),

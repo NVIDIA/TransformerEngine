@@ -37,8 +37,8 @@ class Compressor(torch.nn.Module):
     Accept batched ``[B,S,D]`` or packed ``thd`` hidden states ``[T,D]`` with
     cumulative sequence token counts. Standalone calls do not interpret
     sequence-major ``[S,B,D]`` input; DSv4Attention performs that conversion.
-    Return ``[total_comp,width]`` compressed KV representations
-    before RoPE, plus projected head weights when ``weight_width`` is nonzero.
+    Return ``[total_comp,width]`` compressed KV representations before RoPE,
+    plus projected head weights when ``weight_width`` is nonzero.
 
     See the sparse_attention README for support requirements.
 
@@ -104,8 +104,8 @@ class Compressor(torch.nn.Module):
         total_comp : int
             Allocated compressed output length. For ``[B,S,hidden_size]`` input, use
             exactly ``B * (S // ratio)``; DSv4Attention allocates ``T // ratio`` for ``thd``
-            input, which may include output padding after the
-            valid compressed tokens counted by ``cu_seqlens_comp[-1]``.
+            input, which may include output padding after the valid compressed
+            tokens counted by ``cu_seqlens_comp[-1]``.
 
         Returns
         -------
