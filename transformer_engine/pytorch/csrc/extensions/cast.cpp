@@ -10,8 +10,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <tuple>
 #include <utility>
@@ -2246,6 +2248,120 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   }
 }
 
+// Whether every split can share one grouped FP8 current-scaling quantization:
+// the splits cover a matrix whose rows start 32-byte aligned and whose last
+// dimension keeps each split's slice of the grouped buffers 16-byte aligned for
+// FP8 GEMMs, and every quantizer has the same configuration. Unequal splits pass
+// their sizes to the device with a host copy, which a CUDA graph would replay
+// from a stale host buffer, so a capture only takes equal splits. Amax reduction
+// stays per split: the choice depends on rank-local split sizes and alignment,
+// and ranks taking different paths would issue mismatched collectives.
+bool can_split_quantize_fp8_current_scaling(
+    const at::Tensor &input, const std::vector<size_t> &split_sections,
+    const std::vector<py::handle> &quantizer_list,
+    const std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list) {
+  if (input.dim() < 2 || input.size(-1) == 0 || input.size(-1) % 16 != 0 ||
+      reinterpret_cast<uintptr_t>(input.data_ptr()) % 32 != 0 ||
+      std::accumulate(split_sections.begin(), split_sections.end(), size_t{0}) !=
+          static_cast<size_t>(input.size(0))) {
+    return false;
+  }
+  const bool equal_splits = std::adjacent_find(split_sections.begin(), split_sections.end(),
+                                               std::not_equal_to<size_t>()) == split_sections.end();
+  if (!equal_splits &&
+      at::cuda::currentStreamCaptureStatusMayInitCtx() != at::cuda::CaptureStatus::None) {
+    return false;
+  }
+  if (!std::all_of(quantizer_list.begin(), quantizer_list.end(), [](const py::handle &quantizer) {
+        return detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr());
+      })) {
+    return false;
+  }
+  const auto &first = static_cast<const Float8CurrentScalingQuantizer &>(*quantizer_cpp_list[0]);
+  // Like the per-split cast, the grouped kernel needs row-wise data for a
+  // column-wise output wherever FP8 GEMMs only take the TN layout.
+  if (!first.rowwise_usage && (!first.columnwise_usage || !nvte_is_non_tn_fp8_gemm_supported())) {
+    return false;
+  }
+  return std::all_of(
+      quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
+      [&first](const std::unique_ptr<Quantizer> &quantizer_cpp) {
+        const auto &q = static_cast<const Float8CurrentScalingQuantizer &>(*quantizer_cpp);
+        return q.dtype == first.dtype && q.rowwise_usage == first.rowwise_usage &&
+               q.columnwise_usage == first.columnwise_usage && q.internal == first.internal &&
+               q.force_pow_2_scales == first.force_pow_2_scales &&
+               q.amax_epsilon == first.amax_epsilon && !q.with_amax_reduction;
+      });
+}
+
+// Quantizes all splits with one grouped amax, scale and cast(-transpose) launch
+// each. Every returned tensor views its rows of the grouped data, transpose and
+// scale-inverse buffers.
+std::vector<py::object> split_quantize_fp8_current_scaling(
+    const at::Tensor &input, const std::vector<std::vector<size_t>> &split_shapes,
+    const std::vector<py::handle> &quantizer_list,
+    const std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list) {
+  const size_t num_splits = split_shapes.size();
+  const int64_t cols = input.size(-1);
+  std::vector<int64_t> metadata(2 * num_splits + 1, 0);  // rows per split, then element offsets
+  for (size_t i = 0; i < num_splits; ++i) {
+    const int64_t numel = static_cast<int64_t>(product(split_shapes[i]));
+    metadata[i] = numel / cols;
+    metadata[num_splits + i + 1] = metadata[num_splits + i] + numel;
+  }
+  const int64_t *rows = metadata.data();
+  const int64_t *offsets = metadata.data() + num_splits;
+  const int64_t total_rows = offsets[num_splits] / cols;
+
+  std::optional<at::Tensor> first_dims, tensor_offsets;
+  if (!std::all_of(rows, rows + num_splits, [rows](int64_t r) { return r == rows[0]; })) {
+    // Pinned staging keeps the copy asynchronous; the caching host allocator holds
+    // the block until the copy completes.
+    auto host_metadata = at::empty({static_cast<int64_t>(metadata.size())},
+                                   at::TensorOptions().dtype(at::kLong).pinned_memory(true));
+    std::copy(metadata.begin(), metadata.end(), host_metadata.data_ptr<int64_t>());
+    auto device_metadata = host_metadata.to(at::TensorOptions().device(input.device()),
+                                            /*non_blocking=*/true);
+    first_dims = device_metadata.narrow(0, 0, num_splits);
+    tensor_offsets = device_metadata.narrow(0, num_splits, num_splits + 1);
+  }
+  py::object grouped =
+      group_quantize(input.view({total_rows, cols}), quantizer_list[0], num_splits, first_dims,
+                     std::nullopt, tensor_offsets, std::nullopt, py::none());
+
+  auto buffer = [&grouped](const char *name) {
+    py::object tensor = grouped.attr(name);
+    return tensor.is_none() ? at::Tensor() : tensor.cast<at::Tensor>();
+  };
+  const at::Tensor data = buffer("rowwise_data");
+  const at::Tensor transpose = buffer("columnwise_data");
+  const at::Tensor scale_inv = buffer("scale_inv");
+  const auto input_dtype = GetTransformerEngineDType(input.scalar_type());
+  std::vector<py::object> outputs;
+  outputs.reserve(num_splits);
+  for (size_t i = 0; i < num_splits; ++i) {
+    const int64_t numel = offsets[i + 1] - offsets[i];
+    const std::vector<int64_t> shape(split_shapes[i].begin(), split_shapes[i].end());
+    std::vector<int64_t> transpose_shape{shape.back()};
+    transpose_shape.insert(transpose_shape.end(), shape.begin(), shape.end() - 1);
+    const auto &quantizer =
+        static_cast<const Float8CurrentScalingQuantizer &>(*quantizer_cpp_list[i]);
+    auto rows_of = [&](const at::Tensor &buffer,
+                       const std::vector<int64_t> &view_shape) -> std::optional<at::Tensor> {
+      if (!buffer.defined()) {
+        return std::nullopt;
+      }
+      return buffer.narrow(0, offsets[i], numel).view(view_shape);
+    };
+    outputs.push_back(quantizer
+                          .create_tensor(split_shapes[i], input_dtype, rows_of(data, shape),
+                                         rows_of(transpose, transpose_shape),
+                                         scale_inv.narrow(0, i, 1), input.device())
+                          .second);
+  }
+  return outputs;
+}
+
 }  // namespace
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
@@ -2296,6 +2412,13 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   std::vector<std::unique_ptr<Quantizer>> quantizer_cpp_list;
   for (size_t i = 0; i < num_splits; i++) {
     quantizer_cpp_list.push_back(convert_quantizer(quantizer_list[i]));
+  }
+
+  if (!disable_bulk_allocation &&
+      can_split_quantize_fp8_current_scaling(input_py, split_sections, quantizer_list,
+                                             quantizer_cpp_list)) {
+    return split_quantize_fp8_current_scaling(input_py, split_shapes, quantizer_list,
+                                              quantizer_cpp_list);
   }
 
   // Choose implementation for allocating and populating tensors
