@@ -351,9 +351,10 @@ def _layernorm_linear_forward_impl(
     assert inp_shape[-1] == in_features, "GEMM not possible"
     inputmat = inp
 
-    # Cast for native AMP
+    # Preserve FP32 inputs through normalization and cast its output for GEMM.
     nvtx_range_push(f"{nvtx_label}.norm_input_cast")
-    inputmat = cast_if_needed(inputmat, activation_dtype)
+    if inputmat.dtype != torch.float32:
+        inputmat = cast_if_needed(inputmat, activation_dtype)
     ln_weight_cast = cast_if_needed(ln_weight, activation_dtype)
     if ln_bias is not None:
         ln_bias = cast_if_needed(ln_bias, activation_dtype)
@@ -402,6 +403,8 @@ def _layernorm_linear_forward_impl(
     with_quantized_norm = (
         fp8
         and not debug
+        # Quantize FP32 LayerNorm separately so native centered statistics can be used.
+        and not (args.normalization == "LayerNorm" and inputmat.dtype == torch.float32)
         and not return_layernorm_output
         and not return_layernorm_output_gathered
         and backward_override is None
@@ -419,7 +422,7 @@ def _layernorm_linear_forward_impl(
         ln_bias,
         args.eps,
         input_quantizer if with_quantized_norm else None,
-        inputmat.dtype,
+        activation_dtype,
         args.normalization,
         args.fwd_ln_sm_margin,
         args.zero_centered_gamma,
@@ -1640,7 +1643,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
     params_dtype : torch.dtype, default = torch.get_default_dtype()
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
-                  would not fit in GPU memory.
+                  would not fit in GPU memory. FP32 inputs are preserved through normalization
+                  when parameters are FP16 or BF16. The linear transformation and returned
+                  normalization output use the parameter dtype (or the autocast dtype), and
+                  input gradients are FP32.
     delay_wgrad_compute : bool, default = False
                          Whether or not to delay weight gradient computation. If set to ``True``,
                          it's the user's responsibility to call ``module.backward_dw`` to compute
@@ -1650,6 +1656,17 @@ class LayerNormLinear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    When set to ``None``, standard all-reduce is used.
     """
+
+    def set_activation_dtype(self, inp: torch.Tensor) -> None:
+        """Select the GEMM dtype independently of FP32 normalization inputs."""
+        if inp.dtype == torch.float32 and self.layer_norm_weight.dtype in (
+            torch.float16,
+            torch.bfloat16,
+        ):
+            # The base method validates parameter dtypes and gives autocast priority.
+            super().set_activation_dtype(self.layer_norm_weight)
+        else:
+            super().set_activation_dtype(inp)
 
     def __init__(
         self,
