@@ -27,6 +27,7 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+import transformer_engine.pytorch.cpp_extensions.gemm as gemm_module
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
@@ -587,6 +588,48 @@ def test_make_graphed_callables_grouped_linear_with_fp8_weight_caching(
     graph_outputs_individual = _test_cuda_graphs(graph_mode="individual", **kwargs)
     outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
 
+    assert_all_equal(outputs, graph_outputs_full)
+    assert_all_equal(outputs, graph_outputs_individual)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason="NVFP4 is not supported")
+@pytest.mark.parametrize("backward_override", (None, "dequantized"))
+def test_make_graphed_callables_grouped_linear_row_scaled_nvfp4(
+    *,
+    backward_override: str,
+    monkeypatch,
+    model_config: str = "small",
+    num_layers: int = 3,
+) -> None:
+    """Row-scaled NVFP4 grouped GEMM with host m_splits must be capturable in CUDA graphs."""
+    gemm_calls = []
+    row_scaled_grouped_gemm = gemm_module._general_grouped_gemm_row_scaled_nvfp4
+
+    def counting_row_scaled_grouped_gemm(*args, **kwargs):
+        gemm_calls.append(1)
+        return row_scaled_grouped_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(
+        gemm_module, "_general_grouped_gemm_row_scaled_nvfp4", counting_row_scaled_grouped_gemm
+    )
+
+    fp8_recipe = nvfp4_row_scaled()
+    fp8_recipe.backward_override = backward_override
+    kwargs = dict(
+        module="grouped_linear",
+        model_config=model_configs[model_config],
+        num_layers=num_layers,
+        dtype=torch.bfloat16,
+        fp8=True,
+        fp8_params=False,
+        fp8_weight_caching=False,
+        fp8_recipe=fp8_recipe,
+    )
+    graph_outputs_full = _test_cuda_graphs(graph_mode="full", **kwargs)
+    graph_outputs_individual = _test_cuda_graphs(graph_mode="individual", **kwargs)
+    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
+
+    assert gemm_calls
     assert_all_equal(outputs, graph_outputs_full)
     assert_all_equal(outputs, graph_outputs_individual)
 

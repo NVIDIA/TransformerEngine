@@ -76,6 +76,7 @@ from ..tensor import (
     HybridQuantizer,
     IdentityQuantizer,
     MXFP8Quantizer,
+    NVFP4Quantizer,
 )
 from ..quantized_tensor import (
     QuantizedTensorStorage,
@@ -115,9 +116,9 @@ def is_module_grouped_tensor_path_supported(
       13.5+ required for FP8 per-tensor current scaling on Hopper, and 13.6+
       required for FP8 block scaling on Hopper.
     * FP32 is unsupported by the cuBLASLt grouped GEMM.
-    * With MXFP8 or FP8 block scaling, every split size must be a multiple of
-      128. This is checked only on the device, so other split sizes can produce
-      incorrect results.
+    * With MXFP8, FP8 block scaling, or NVFP4, every split size must be a
+      multiple of 128. This is checked only on the device, so other split sizes
+      can produce incorrect results.
 
     Runtime-only restrictions such as debug mode, CPU offloading, calibration,
     output quantization, and backend selection are checked separately by
@@ -135,7 +136,9 @@ def is_module_grouped_tensor_path_supported(
         getattr(recipe, "backward_override", None),
         getattr(recipe, "disable_rht", None),
         getattr(recipe, "row_scaled_activation", None),
+        getattr(recipe, "row_scaled_weight", None),
         getattr(recipe, "fp8_format", None),
+        getattr(recipe, "nvfp4_4over6", None),
         dtype,
         device_index,
     )
@@ -147,7 +150,9 @@ def _is_module_grouped_tensor_path_supported(
     backward_override: Optional[str],
     disable_rht: Optional[bool],
     row_scaled_activation: Optional[bool],
+    row_scaled_weight: Optional[bool],
     fp8_format: Optional[RecipeFormat],
+    nvfp4_4over6: Optional[str],
     dtype: torch.dtype,
     device_index: int,
 ) -> bool:
@@ -183,13 +188,46 @@ def _is_module_grouped_tensor_path_supported(
     if recipe_type.mxfp8():
         return device_capability >= (10, 0)
     if recipe_type.nvfp4():
+        if row_scaled_activation:
+            return (
+                device_capability >= (10, 0)
+                and cublaslt_version >= 130400
+                and fp8_format == RecipeFormat.E4M3
+                and nvfp4_4over6 == "none"
+            )
         return (
             device_capability >= (10, 0)
             and not disable_rht
-            and not row_scaled_activation
             and fp8_format == RecipeFormat.E4M3
+            and (not row_scaled_weight or cublaslt_version >= 130400)
         )
     return False
+
+
+def _prefer_grouped_tensor_path_for_row_scaled_nvfp4(
+    recipe: Optional[Recipe],
+    inp: torch.Tensor,
+    m_splits: torch.Tensor,
+    in_features: int,
+    out_features: int,
+) -> bool:
+    """Whether to use the native GroupedTensor path when the caller did not choose a path.
+
+    The split-quantize path quantizes row-scaled NVFP4 inputs one split at a time, so these
+    recipes default to the native path when its 128 alignment can be confirmed without a
+    device synchronization. Host ``m_splits`` are not used during CUDA Graph capture since
+    copying them to the device would not be replayed with new values.
+    """
+    if recipe is None or not recipe.nvfp4() or not recipe.row_scaled_activation:
+        return False
+    num_tokens = inp.numel() // in_features
+    if in_features % 128 != 0 or out_features % 128 != 0 or num_tokens % 128 != 0:
+        return False
+    if m_splits.device.type == te_device_type():
+        return True
+    if torch.cuda.is_current_stream_capturing():
+        return False
+    return bool((m_splits % 128 == 0).all())
 
 
 @dataclass(slots=True)
@@ -1132,7 +1170,9 @@ def _grouped_linear_graph_safe_backward(
     if args.fp8 and needs_grouped_dy:
         grad_output_quantizer = args.grad_output_quantizers[0]
         grad_output_quantizer.set_usage(
-            rowwise=args.requires_dgrad,
+            rowwise=(
+                args.requires_dgrad or getattr(grad_output_quantizer, "row_scaled_nvfp4", False)
+            ),
             columnwise=args.weights_requires_grad,
         )
         grad_output_quantizer.optimize_for_gemm = True
@@ -1440,6 +1480,11 @@ class _GroupedLinear(torch.autograd.Function):
             weight_quantizer = weight_quantizers[0]
             if weight_quantizer is None:
                 raise RuntimeError("Quantized grouped compute requires a weight quantizer.")
+            if isinstance(weight_quantizer, NVFP4Quantizer) and not weight_quantizer.with_rht:
+                raise NotImplementedError(
+                    "single_grouped_weight is not supported for NVFP4 without RHT; "
+                    "use per-expert weights."
+                )
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             # forward() already applied _enable_weight_preswizzle(); preserve that decision
             # because not every quantizer and weight shape supports fused quantize-swizzle.
@@ -1748,7 +1793,11 @@ class GroupedLinear(TransformerEngineBaseModule):
                        The native path requires CUDA ``m_splits``. ``None`` preserves the deprecated
                        ``NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM`` environment-variable
                        selection for compatibility. New callers should pass a boolean explicitly.
-                       With MXFP8 or FP8 block scaling, the native path requires every
+                       When neither is set, row-scaled NVFP4 recipes use the native path if it is
+                       supported and the feature dimensions, token count, and host ``m_splits``
+                       entries are multiples of 128. Host ``m_splits`` are copied to the device,
+                       except during CUDA Graph capture, where the split-quantize path is used.
+                       With MXFP8, FP8 block scaling, or NVFP4, the native path requires every
                        ``m_splits`` entry to be a multiple of 128. This is checked only on the
                        device, so other split sizes can produce incorrect results.
 
@@ -1800,8 +1849,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
         self.save_original_input = save_original_input
+        self._use_grouped_tensor_unspecified = False
         if use_grouped_tensor is None:
             use_grouped_tensor_env = os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM")
+            self._use_grouped_tensor_unspecified = use_grouped_tensor_env is None
             if use_grouped_tensor_env is not None:
                 warnings.warn(
                     "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM is deprecated and will be "
@@ -2398,8 +2449,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                 )
 
             # Choose between grouped tensor path or split-quantize path
+            use_grouped_tensor = self.use_grouped_tensor or (
+                self._use_grouped_tensor_unspecified
+                and _prefer_grouped_tensor_path_for_row_scaled_nvfp4(
+                    _recipe, inp, m_splits, self.in_features, self.out_features
+                )
+            )
             use_grouped_tensor_path = False
-            if self.use_grouped_tensor and not (self.fp8_calibration or debug or cpu_offloading):
+            if use_grouped_tensor and not (self.fp8_calibration or debug or cpu_offloading):
                 use_grouped_tensor_path = is_module_grouped_tensor_path_supported(
                     _recipe,
                     self.activation_dtype,
@@ -2493,12 +2550,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                         )
                         save_original_input = False
 
-            if use_grouped_tensor_path:
-                if m_splits.device.type != te_device_type():
+            if use_grouped_tensor_path and m_splits.device.type != te_device_type():
+                if self.use_grouped_tensor:
                     raise ValueError(
                         "The native grouped_tensor path requires CUDA m_splits. Pass a CUDA int64 "
                         "tensor, or set use_grouped_tensor=False."
                     )
+                m_splits = m_splits.to(device=inp.device)
             fwd_args = GroupedLinearFwdArgs(
                 # tensors
                 inp=inp,

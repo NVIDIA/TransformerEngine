@@ -1292,23 +1292,20 @@ class NVFP4QuantizerRef(Quantizer):
             fp8_max_w = _nvfp4_effective_scale_max(qresult_w_scale_dtype, qresult_w_e4m3_max)
             factor = NVFP4_FP4_MAX * NVFP4_FP4_MAX * fp8_max_x * fp8_max_w
 
-            if gemm_type == gemm.GEMMType.WGRAD:
-                partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
-                # A row-scaled operand contributes a per-output-column (N) vector
-                # here, so broadcast along the last axis. Selecting the axis from
-                # gemm_type (rather than matching numel against M) avoids the
-                # square-matrix ambiguity where M == N.
-                if partial_alpha.numel() > 1:
-                    partial_alpha = partial_alpha.reshape(1, -1)
-                else:
-                    partial_alpha = partial_alpha.squeeze(-1)
+            amax_x = (
+                qresult_x.global_amax_col
+                if gemm_type == gemm.GEMMType.WGRAD
+                else qresult_x.global_amax_row
+            )
+            amax_w = (
+                qresult_w.global_amax_row
+                if gemm_type == gemm.GEMMType.FPROP
+                else qresult_w.global_amax_col
+            )
+            if amax_x.numel() > 1 or amax_w.numel() > 1:
+                partial_alpha = amax_x.reshape(-1, 1) * amax_w.reshape(1, -1)
             else:
-                partial_alpha = qresult_x.global_amax_row * qresult_w.global_amax_row
-                # A row-scaled operand contributes a per-output-row (M) vector.
-                if partial_alpha.numel() > 1:
-                    partial_alpha = partial_alpha.reshape(-1, 1)
-                else:
-                    partial_alpha = partial_alpha.squeeze(-1)
+                partial_alpha = (amax_x * amax_w).squeeze(-1)
             alpha = torch.div(partial_alpha, factor)
 
         M, K = high_precision_x.shape
