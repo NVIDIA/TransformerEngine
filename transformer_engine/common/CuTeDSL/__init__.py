@@ -17,6 +17,9 @@ from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8_common import (
     get_mxfp8_quantization_function,
     get_mxfp8_gated_quantization_function,
 )
+from transformer_engine.common.CuTeDSL.cast.mxfp8.group_quantize_mxfp8_common import (
+    get_mxfp8_group_quantization_function,
+)
 from transformer_engine.common.CuTeDSL.cast.mxfp8.requantize_mxfp8 import (
     get_mxfp8_requantization_function,
 )
@@ -29,6 +32,7 @@ def register_cutedsl_backends():
     for entrypoint in (
         get_mxfp8_quantization_function,
         get_mxfp8_gated_quantization_function,
+        get_mxfp8_group_quantization_function,
         get_mxfp8_dequantization_function,
         get_mxfp8_requantization_function,
     ):
