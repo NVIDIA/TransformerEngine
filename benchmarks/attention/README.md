@@ -35,7 +35,7 @@ for causal and FA4 4.0.0b33 / CuTe DSL 4.8.0 for SWA.
 3. [Choosing Backend](#choosing-backend)
 4. [Choosing Communication Type](#choosing-communication-type)
 5. [Sliding-window attention](#choose-communication-for-sliding-window-attention)
-6. [A small selection loop](#a-small-selection-loop)
+6. [Summary of CP attention backend and comm type selection](#summary-of-cp-attention-backend-and-comm-type-selection)
 7. [Run one benchmark](#run-one-benchmark)
 
 ## Workload size for benchmarks
@@ -162,16 +162,23 @@ Inferences:
 3. At CP4/CP8, A2A is lower in all four scopes.
 4. But since A2A isn't universally applicable, AllGather then remains the only valid option.
 
-## A small selection loop
+## Summary of CP attention backend and comm type selection
 
-1. Fix the workload and target environment: mask/window, shape, precision,
-   layout, heads, GPU, and software versions.
-2. For each feasible CP size, compare supported **backend × communication**
-   combinations, using Figures 2–3 and 4 to prioritize candidates.
-3. Choose by absolute forward-plus-backward latency. Then evaluate that
-   configuration in the full training workload and resource budget.
-4. Verify outputs and gradients; repeat close comparisons. Benchmark additional
-   configurations directly on the target environment.
+1. Check A2A eligibility: CP must divide both local query and key/value
+   head counts after tensor parallelism. The measured 32-query/8-KV-head
+   configuration caps this path at CP8.
+2. For causal attention, shortlist A2A with Flash Attention when eligible,
+   then compare backend and communication type jointly at the target GPU,
+   shape, and CP size (Figures 2–3). With P2P/AllGather, Fused Attention's crossover
+   moves toward longer sequences as CP increases and appears already at
+   CP2 on B200; use the communication-type-specific range in Figure 2.
+3. When A2A is unavailable, compare P2P and AllGather within each backend
+   (Figure 3). Within Fused at CP2, H100 favors P2P and B200 favors AllGather.
+   At CP4/CP8, AllGather is lower in the sampled Fused-winning ranges;
+   Flash's ordering depends on GPU, sequence length, and CP size.
+4. For the benchmarked SWA workloads, CP2 favors AllGather except for H100
+   Fused, which favors A2A. CP4/CP8 favor A2A for both backends on both GPUs;
+   when A2A is ineligible, AllGather remains the supported option (Figure 4).
 
 ## Run one benchmark
 
