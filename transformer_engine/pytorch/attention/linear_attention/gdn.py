@@ -10,6 +10,8 @@ This module is **experimental** and subject to change.
 from typing import Dict, Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
+import torch.nn.functional as F
 
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.jit import no_torch_dynamo
@@ -18,7 +20,14 @@ from .base import (
     AlignedTimelineKernelAdapter,
     LinearAttentionBase,
     _needs_eager_linear_attention,
+    _validate_cu_seqlens,
 )
+
+
+def _ensure_aligned(tensor):
+    """Return a contiguous tensor with a 16-byte-aligned address."""
+    tensor = tensor.contiguous()
+    return tensor.clone() if tensor.data_ptr() % 16 else tensor
 
 
 class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
@@ -49,6 +58,20 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
                 f"{expected_gate_shape}; got {tuple(g.shape)} and {tuple(beta.shape)}."
             )
 
+    def _resolve_cu_seqlens(self, query_layer, qkv_format, cu_seqlens):
+        """Accept full-document metadata for dense inputs as well as packed inputs."""
+        if qkv_format == "thd" or cu_seqlens is None:
+            return super()._resolve_cu_seqlens(query_layer, qkv_format, cu_seqlens)
+        _validate_cu_seqlens(cu_seqlens, device=query_layer.device, name="cu_seqlens")
+        batch, length = (
+            query_layer.shape[:2]
+            if qkv_format == "bshd"
+            else (query_layer.shape[1], query_layer.shape[0])
+        )
+        if cu_seqlens.numel() != batch + 1:
+            raise ValueError("Dense cu_seqlens must have shape [batch_size + 1].")
+        return cu_seqlens, length
+
     def _call_op(
         self,
         query_layer: torch.Tensor,
@@ -74,6 +97,122 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
+    def _prepare_cp_inputs(self, tensors, initial_state):
+        """Align CP inputs and pad features to work around cuDNN FE state-gradient errors."""
+        # TE workaround for incorrect recurrent-state gradients observed in cuDNN FE
+        # CP experiments with K=32, V=96. Conservatively pad K/V to powers of two
+        # (minimum 64), rather than restricting the workaround to the observed case.
+        # Zero extension preserves the recurrence and original attention scale.
+        q, k, v, g, beta = (_ensure_aligned(t) for t in tensors)
+        key_dim, value_dim = k.shape[-1], v.shape[-1]
+        key_pad = max(64, 1 << (key_dim - 1).bit_length()) - key_dim
+        value_pad = max(64, 1 << (value_dim - 1).bit_length()) - value_dim
+        if key_pad:
+            q, k = F.pad(q, (0, key_pad)), F.pad(k, (0, key_pad))
+        if value_pad:
+            v = F.pad(v, (0, value_pad))
+        if initial_state is not None and (key_pad or value_pad):
+            initial_state = F.pad(initial_state, (0, key_pad, 0, value_pad))
+        return (q, k, v, g, beta), initial_state
+
+    @staticmethod
+    def _summary_op(name):
+        """Resolve optional FE summary entry points without requiring them at import."""
+        try:
+            from cudnn.linear_attention import ops
+
+            return getattr(ops, name)
+        except (AttributeError, ImportError) as exc:
+            raise ImportError(f"cuDNN frontend does not provide {name}.") from exc
+
+    def _cp_forward_summary(self, query, key, value, gates, cu_seqlens, **kernel_kwargs):
+        """Return H,T; use ordinary state passes if no summary engine supports this shape."""
+        del query
+        k, v, g, beta = (_ensure_aligned(t) for t in (key, value, gates["g"], gates["beta"]))
+        try:
+            return self._summary_op("gated_delta_net_summary")(
+                k, v, g, beta, cu_seqlens, **kernel_kwargs
+            )
+        except ImportError:
+            pass
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            if type(exc).__name__ != "cudnnGraphNotSupportedError":
+                raise
+        # A zero initial state gives H; an identity initial state with zero values gives T.
+        additive = self._call_op(
+            k,
+            k,
+            v,
+            {"g": g, "beta": beta},
+            cu_seqlens,
+            initial_state=None,
+            output_final_state=True,
+            **kernel_kwargs,
+        )[1]
+        count, heads, _, key_dim = additive.shape
+        identity = torch.eye(key_dim, device=k.device, dtype=torch.float32)
+        identity = identity.expand(count, heads, key_dim, key_dim).contiguous()
+        transition = self._call_op(
+            k,
+            k,
+            torch.zeros_like(k),
+            {"g": g, "beta": beta},
+            cu_seqlens,
+            initial_state=identity,
+            output_final_state=True,
+            **kernel_kwargs,
+        )[1]
+        return additive, transition
+
+    def _cp_backward_summary(
+        self, query, key, value, gates, grad_output, cu_seqlens, **kernel_kwargs
+    ):
+        """Return the reverse state-gradient recipe, including local output losses."""
+        del value
+        q, k, g, beta, grad_output = (
+            _ensure_aligned(t) for t in (query, key, gates["g"], gates["beta"], grad_output)
+        )
+        try:
+            return self._summary_op("gated_delta_net_summary_bwd")(
+                q,
+                k,
+                g,
+                beta,
+                grad_output,
+                cu_seqlens,
+                scale=self.scale,
+                output_transition=True,
+                **kernel_kwargs,
+            )
+        except ImportError:
+            pass
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            if type(exc).__name__ != "cudnnGraphNotSupportedError":
+                raise
+        values = torch.zeros_like(grad_output)
+        with torch.enable_grad():
+            initial_state = torch.zeros(
+                (cu_seqlens.numel() - 1, q.shape[1], grad_output.shape[-1], k.shape[-1]),
+                device=q.device,
+                dtype=torch.float32,
+                requires_grad=True,
+            )
+            output = self._call_op(
+                q.detach(),
+                k.detach(),
+                values,
+                {"g": g.detach(), "beta": beta.detach()},
+                cu_seqlens,
+                initial_state=initial_state,
+                output_final_state=False,
+                **kernel_kwargs,
+            )[0]
+            (additive,) = torch.autograd.grad(output, initial_state, grad_output)
+        transition = self._cp_forward_summary(
+            q, k, values, {"g": g, "beta": beta}, cu_seqlens, **kernel_kwargs
+        )[1]
+        return additive, transition.transpose(-1, -2).contiguous()
+
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -87,8 +226,41 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
         cu_seqlens: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
+        cp_group: Optional[dist.ProcessGroup] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Run GDN and return a TE-layout output, optionally with the final state."""
+        if cp_group is not None and dist.get_world_size(cp_group) > 1:
+            from .context_parallel import context_parallel_attention
+
+            return context_parallel_attention(
+                self,
+                query_layer,
+                key_layer,
+                value_layer,
+                {"g": g, "beta": beta},
+                initial_state,
+                group=cp_group,
+                qkv_format=qkv_format,
+                cu_seqlens=cu_seqlens,
+                output_final_state=output_final_state,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            )
+        if cp_group is not None and cu_seqlens is not None:
+            if not isinstance(cu_seqlens, torch.Tensor):
+                raise TypeError("cu_seqlens must be a torch.Tensor.")
+            if cu_seqlens.dtype != torch.int32 or cu_seqlens.dim() != 1:
+                raise ValueError("cu_seqlens must be a one-dimensional int32 tensor.")
+            if qkv_format == "thd":
+                cu_seqlens = cu_seqlens.to(query_layer.device)
+            elif qkv_format in {"bshd", "sbhd"}:
+                batch, length = (
+                    query_layer.shape[:2]
+                    if qkv_format == "bshd"
+                    else (query_layer.shape[1], query_layer.shape[0])
+                )
+                if cu_seqlens.tolist() != [i * length for i in range(batch + 1)]:
+                    raise ValueError("Dense cu_seqlens does not match the size-one CP input.")
+                cu_seqlens = None
         return self._run(
             query_layer,
             key_layer,
@@ -121,9 +293,8 @@ class GatedDeltaNetAttention(LinearAttentionBase):
                `b` batch size, `h` the number of heads, `d` head size, and
                `t` the total number of tokens in a batch, with
                ``t = sum(s_i)`` for all sequences in the batch. Gated DeltaNet is
-               inherently causal; padded batches must use `qkv_format='thd'` with
-               `cu_seqlens` passed to `forward` to exclude padding tokens from the
-               recurrence.
+               inherently causal. Pack valid tokens from padded batches into
+               `qkv_format='thd'` and pass their `cu_seqlens` to `forward`.
     tp_size : int, default = 1
             tensor parallel world size.
     tp_group : ProcessGroup, default = `None`
@@ -135,6 +306,12 @@ class GatedDeltaNetAttention(LinearAttentionBase):
           scale for the Gated DeltaNet recurrence. Defaults to
           ``1.0 / sqrt(kv_channels)`` (or the query/key head size, if
           ``kv_channels`` is a tuple).
+    cp_group : ProcessGroup, default = `None`
+              Context parallel process group. ``None`` disables CP. Group rank
+              order must follow document token order. THD uses contiguous pieces
+              of the global packed buffer; BSHD/SBHD use contiguous pieces
+              of each sequence. Q/K/V and gates must already be local tensors.
+              Summary communication uses all-gather. No output gather is performed.
     """
 
     def __init__(
@@ -146,6 +323,8 @@ class GatedDeltaNetAttention(LinearAttentionBase):
         tp_group: Optional[dist_group_type] = None,
         layer_number: Optional[int] = None,
         scale: Optional[float] = None,
+        *,
+        cp_group: Optional[dist.ProcessGroup] = None,
     ) -> None:
         super().__init__(
             num_attention_heads,
@@ -163,6 +342,18 @@ class GatedDeltaNetAttention(LinearAttentionBase):
             self.qk_head_dim,
             self.v_head_dim,
         )
+        self.set_context_parallel_group(cp_group)
+
+    def set_context_parallel_group(self, cp_group: Optional[dist.ProcessGroup]) -> None:
+        """Set or disable CP before forward, including after distributed initialization.
+
+        A single process group is supported. CP uses the current CUDA stream
+        and contiguous token ordering.
+        """
+        if cp_group is not None and not isinstance(cp_group, dist.ProcessGroup):
+            raise TypeError("GDN cp_group must be one torch.distributed.ProcessGroup or None.")
+        self.cp_group = cp_group
+        self.gdn_attention._cp_metadata_cache = None
 
     @no_torch_dynamo(when=_needs_eager_linear_attention)
     def forward(
@@ -196,19 +387,49 @@ class GatedDeltaNetAttention(LinearAttentionBase):
         qkv_format : Optional[str], default = `None`
             Overrides the module's configured `qkv_format` for this call.
         cu_seqlens : Optional[torch.Tensor], default = `None`
-            Cumulative sequence lengths for packed (`thd`) inputs, of shape
-            `[batch_size + 1]` and dtype `torch.int32`.
+            Cumulative document lengths, of shape `[batch_size + 1]` and dtype
+            `torch.int32`. Required for THD. With CP, describe the complete
+            documents across the CP group, identically on all ranks; TE derives
+            the local fragment boundaries. For BSHD/SBHD CP, this metadata is
+            optional for equal slices and required for uneven slices; see Notes.
+            Without CP, dense metadata is optional and must describe the
+            full rows as `[0, S, 2*S, ..., B*S]`.
         checkpoint_core_attention : bool, default = `False`
             If true, forward activations for this module are recomputed
             during the backward pass instead of saved.
         initial_state : Optional[torch.Tensor], default = `None`
-            Recurrent state to seed the Gated DeltaNet recurrence with, of shape
+            Initial recurrent state for Gated DeltaNet, of shape
             `[batch_size, num_attention_heads // tp_size, v_head_dim, qk_head_dim]`
             and dtype `torch.float32`.
         output_final_state : bool, default = `False`
             If true, also return the final recurrent state.
         use_qk_l2norm_in_kernel : bool, default = `False`
             If true, L2-normalize Q and K inside the kernel before the recurrence.
+
+        Notes
+        -----
+        CP requires contiguous rank slices. For THD, rank ``r`` supplies
+        ``[r*T//P:(r+1)*T//P]`` of the packed buffer, where
+        ``T = cu_seqlens[-1]`` and ``P`` is CP size. Pack tokens without gaps;
+        document lengths need not be divisible by ``P``.
+
+        For BSHD/SBHD, rank ``r`` supplies ``[r*S//P:(r+1)*S//P]`` of each
+        batch row, where ``S`` is the global sequence length. Supply
+        ``cu_seqlens=[0, S, 2*S, ..., B*S]`` (``B`` is batch size) for uneven
+        slices; otherwise TE infers ``S = local_sequence_length * P``.
+        Arbitrary rank splits are unsupported.
+
+        With CP, ``initial_state`` covers all global documents and must match on
+        all ranks. Each document's initial-state gradient is returned on its
+        first owning rank, with zeros elsewhere; sum over CP for a replicated
+        leaf state's full gradient. Final states are replicated for all global
+        documents and can be chained into the next call. Their backward sums
+        gradients across replicas; divide a replicated final-state loss by ``P``
+        to count it once.
+
+        All CP ranks must call forward and backward with matching options, even
+        with zero local loss or tokens. Only first-order gradients are supported.
+        CP executes eagerly, including inside a ``torch.compile`` model.
         """
         if g is None or beta is None:
             raise ValueError(
@@ -222,6 +443,7 @@ class GatedDeltaNetAttention(LinearAttentionBase):
             "cu_seqlens": cu_seqlens,
             "output_final_state": output_final_state,
             "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
+            "cp_group": self.cp_group,
         }
         with self.prepare_forward_ctx(query_layer, allow_non_contiguous=True) as query_layer:
             return self._dispatch_attention(

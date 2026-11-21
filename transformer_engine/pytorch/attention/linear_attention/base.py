@@ -65,6 +65,8 @@ def _needs_eager_linear_attention(call: Dict[str, Any]) -> Optional[str]:
     `call` maps the module's `forward` parameter names to the arguments this
     call passed, including `self`.
     """
+    if getattr(call.get("self"), "cp_group", None) is not None:
+        return "linear-attention context parallelism"
     if call.get("checkpoint_core_attention", False):
         return "activation checkpointing of the attention"
     return None
@@ -269,20 +271,16 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
                 f"got {tuple(initial_state.shape)}."
             )
 
-    def _run(
+    def _validate_inputs(
         self,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
         gates: Dict[str, torch.Tensor],
-        initial_state: Optional[torch.Tensor] = None,
-        *,
+        initial_state: Optional[torch.Tensor],
         qkv_format: str,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        output_final_state: bool = False,
-        **kernel_kwargs: Any,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Validate the inputs, run the variant's op, and restore the TE layout."""
+    ) -> None:
+        """Validate tensor/layout contracts for local and context-parallel adapters."""
         if qkv_format not in {"thd", "bshd", "sbhd"}:
             raise ValueError(
                 f"{self.variant} attention only supports qkv_format={{'thd', 'bshd', 'sbhd'}}, "
@@ -317,6 +315,49 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
                 f"got {query_layer.dtype}."
             )
         self._validate_gates(gates, query_layer)
+
+    def _prepare_cp_inputs(self, tensors, initial_state):
+        """Normalize token-aligned CP inputs before state propagation.
+
+        Each tensor must retain a real-token leading axis for fragment selection;
+        additional axes, such as GDP's Householder axis, stay intact until FE dispatch.
+        """
+        return tensors, initial_state
+
+    def _cp_forward_summary(self, query, key, value, gates, cu_seqlens, **kernel_kwargs):
+        """Return FP32 (H, T) satisfying S_out = S_in @ T + H for each fragment.
+
+        H has shape [fragments, heads, V, K] and T [fragments, heads, K, K].
+        Summaries and local attention must use identical gate and normalization semantics.
+        """
+        raise NotImplementedError(f"{self.variant} does not implement CP forward summaries.")
+
+    def _cp_backward_summary(
+        self, query, key, value, gates, grad_output, cu_seqlens, **kernel_kwargs
+    ):
+        """Return FP32 reverse state-gradient maps, including local output losses.
+
+        H and T have the forward summary shapes, with T already oriented for backward.
+        Gate and normalization semantics must match local attention.
+        """
+        raise NotImplementedError(f"{self.variant} does not implement CP backward summaries.")
+
+    def _run(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        gates: Dict[str, torch.Tensor],
+        initial_state: Optional[torch.Tensor] = None,
+        *,
+        qkv_format: str,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        output_final_state: bool = False,
+        **kernel_kwargs: Any,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Validate the inputs, run the variant's op, and restore the TE layout."""
+        self._validate_inputs(query_layer, key_layer, value_layer, gates, initial_state, qkv_format)
+        device = query_layer.device
 
         cu_seqlens, sequence_length = self._resolve_cu_seqlens(query_layer, qkv_format, cu_seqlens)
         batch_size = cu_seqlens.shape[0] - 1

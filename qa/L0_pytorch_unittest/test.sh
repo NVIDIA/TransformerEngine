@@ -72,6 +72,9 @@ NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest --tb=auto --junitxml=$X
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_attention_backend_selection.xml $TE_PATH/tests/pytorch/attention/test_attention_backend_selection.py || test_fail "test_attention_backend_selection.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_flex_attention.xml $TE_PATH/tests/pytorch/attention/test_flex_attention.py || test_fail "test_flex_attention.py"
 NVTE_GDN_TEST_REQUIRED=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_gdn_attention.xml $TE_PATH/tests/pytorch/attention/test_gdn_attention.py || test_fail "test_gdn_attention.py"
+for QKV_FORMAT in bshd thd; do
+    python3 "$TE_PATH/docs/examples/attention/example_linear_attention.py" --qkv-format "$QKV_FORMAT" || test_fail "example_linear_attention.py ($QKV_FORMAT)"
+done
 NVTE_GDN2_TEST_REQUIRED=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_gdn2_attention.xml $TE_PATH/tests/pytorch/attention/test_gdn2_attention.py || test_fail "test_gdn2_attention.py"
 NVTE_GDP_TEST_REQUIRED=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_gdp_attention.xml $TE_PATH/tests/pytorch/attention/test_gdp_attention.py || test_fail "test_gdp_attention.py"
 NVTE_KDA_TEST_REQUIRED=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_kda_attention.xml $TE_PATH/tests/pytorch/attention/test_kda_attention.py || test_fail "test_kda_attention.py"
