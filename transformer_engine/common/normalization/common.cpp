@@ -379,7 +379,8 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
     _dz = _graph.tensor(fe::graph::Tensor_attributes()
                             .set_name("dz")
                             .set_dim({batch_dim, hidden_dim, 1, 1})
-                            .set_stride({hidden_dim, 1, hidden_dim, hidden_dim}));
+                            .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
+                            .set_data_type(get_cudnn_fe_dtype(otype)));
     _rsigma = _graph.tensor(fe::graph::Tensor_attributes()
                                 .set_name("inv_var")
                                 .set_dim({batch_dim, 1, 1, 1})
@@ -422,7 +423,9 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
       _dx->set_output(false).set_data_type(get_cudnn_fe_dtype(itype));
       _dx = _dx_with_add;
     }
-    _dx->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
+    // The input and its gradient can be FP32 even when dz and the norm
+    // parameters are FP16/BF16. Do not inherit the output-gradient dtype.
+    _dx->set_output(true).set_data_type(get_cudnn_fe_dtype(itype));
     _dgamma->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
   }
   // Build the graph
