@@ -23,6 +23,8 @@ from ..utils import device_compute_capability, tvm_ffi_function
 
 logger = logging.getLogger(__name__)
 
+# Points at an external CuTeDSL kernel tree the GEMMs are imported from.
+# TODO(phuonguyen): drop this kernel-root path once the kernels are upstreamed into cuDNN.
 GEMM_PATH_ENV = "NVTE_MOE_OVERLAP"
 MMA_TILER_MN = (256, 256)
 CLUSTER_MN = (2, 1)
