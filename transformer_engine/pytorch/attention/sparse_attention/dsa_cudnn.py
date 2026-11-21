@@ -410,15 +410,52 @@ def _prepare_sparse_kv_indices(
 ) -> torch.Tensor:
     """Build a list of KV token indices for each query token.
 
-    Query is already in packed thd format [T,H,D]; only its token count and device are used.
-    This helper does not flatten it. Return INT32 [T,window_size+compressed_slots]
-    indices into torch.cat((uncompressed_kv, compressed_kv), dim=0).
+    Query is already packed thd [T,H,D]; only its token count and device are used.
+    Return INT32 [T,window_size+compressed_slots] indices into
+    torch.cat((uncompressed_kv, compressed_kv), dim=0).
 
-    Uncompressed KV has T tokens. Compressed indices count from the start of the entire
-    packed compressed tensor, including preceding sequences. Add T to address
-    compressed KV after uncompressed KV in the concatenated tensor. Invalid entries are -1.
-    CSA supplies top-k indices from select_indices; HCA supplies indices=None and
-    this helper includes every eligible compressed token.
+    The combined KV tensor holds all T uncompressed entries for sliding-window
+    attention, followed by compressed KV. Only valid compressed indices receive
+    offset T. HCA uses indices=None to include all eligible compressed entries;
+    CSA supplies top-k compressed indices from select_indices. Both paths stay
+    within the query's sequence and require (j+1)*ratio <= p+1, where j is the
+    compressed block's position within that sequence and p is the query position.
+    -1 marks a slot with no valid KV token for this query. CSA fills unused top-k
+    slots with -1 when fewer than top_k entries are eligible.
+
+    For lengths=[4,11,17], T=32 and ratio=2, cu_comp=[0,2,7,15]. The combined
+    tensor has these valid entries (uppercase: uncompressed, lowercase: compressed)::
+
+        AAAA BBBBBBBBBBB CCCCCCCCCCCCCCCCC | aa bbbbb cccccccc
+        A: 0-3    B: 4-14    C: 15-31    | a: 32-33  b: 34-38  c: 39-46
+
+    With window_size=2, query 4 starts sequence B: its window is [-1,4], and B
+    has no complete compressed block yet. Query 5 has window [4,5] and can use
+    B's first compressed block at combined index 32+2=34. Neither query can
+    attend entries from A.
+
+    Query 7 is position 3 of B. HCA with window=ratio=2 and
+    max_compressed_seqlen=8 produces::
+
+        Sliding-window indices: [6,7].
+        Eligible compressed indices: [2,3] -> [32+2,32+3]=[34,35].
+        Combined KV indices: [6,7,34,35,-1,-1,-1,-1,-1,-1].
+
+    B has five compressed entries. Three are still in the future, and three
+    additional slots exceed B's compressed length, giving six -1 entries.
+    For CSA, if select_indices chooses compressed index 3, supplied indices=[3]
+    give [6,7,35]. Eligible compressed index 2 is omitted because it was not
+    selected. This one-entry list illustrates indexing, not cuDNN top-k size support.
+
+    For the same query with window=ratio=3, cu_comp=[0,1,4,9]. HCA with
+    max_compressed_seqlen=5 produces::
+
+        Sliding-window indices: [5,6,7].
+        Eligible compressed index: 1 -> 32+1=33.
+        Combined KV indices: [5,6,7,33,-1,-1,-1,-1].
+
+    The cuDNN Frontend compressor accepts only ratios 2, 4, and 128.
+    The ratio-3 example illustrates this helper's index arithmetic.
     """
     total_q = query.shape[0]
     device = query.device
@@ -461,19 +498,6 @@ def _prepare_sparse_kv_indices(
             & (compressed < comp_end[:, None])
             & ((comp_position + 1) * ratio <= position[:, None] + 1)
         )
-    # Example: lengths=[4,11,17], T=32; query 7 is position 3 of sequence two.
-    # With indices=None and max_compressed_seqlen=8 and 5, respectively:
-    # window=ratio=2: cu_comp=[0,2,7,15]; local=[6,7]; compressed=[2,3].
-    #   Combined KV indices: [6,7,34,35,-1,-1,-1,-1,-1,-1].
-    # window=ratio=3: cu_comp=[0,1,4,9]; local=[5,6,7]; compressed=[1].
-    #   Combined KV indices: [5,6,7,33,-1,-1,-1,-1].
-    # Ratio 3 illustrates only this helper's index arithmetic, not cuDNN compression support.
-    # Sliding-window attention still needs the original KV tokens after compression.
-    # The combined KV tensor contains all T original tokens, followed by Tc compressed entries,
-    # so compressed KV token indices receive offset T. Here T=32:
-    # ratio 2: [2,3] -> [32+2,32+3]=[34,35]; ratio 3: [1] -> [32+1]=[33].
-    # -1 marks a slot with no valid KV token for this query.
-    # CSA fills unused top-k slots with -1 when fewer than top_k entries are eligible.
     compressed = torch.where(valid, compressed + query.shape[0], -1)
     # cuDNN accepts an arbitrary logical width and pads its internal kernel
     # layout, so preserve only the model-visible sliding-window + compressed slots.
@@ -537,9 +561,8 @@ def sparse_attention(
 ) -> torch.Tensor:
     """Run joint sliding-window and compressed KV attention with autograd.
 
-    This full-sequence interface requires one uncompressed KV token for each query token.
-    The caller prepares projected, normalized and rotated Q/KV. DSv4Attention
-    converts batched inputs to packed token order before calling this function.
+    ``query`` and ``uncompressed_kv`` share the same packed token order and sequence boundaries.
+    DSv4Attention converts batched inputs to packed token order before calling this function.
     See the sparse_attention README for supported dtypes and devices.
 
     Parameters
