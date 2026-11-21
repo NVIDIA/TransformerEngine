@@ -441,8 +441,9 @@ def _prepare_sparse_kv_indices(
         Eligible compressed indices: [2,3] -> [32+2,32+3]=[34,35].
         Combined KV indices: [6,7,34,35,-1,-1,-1,-1,-1,-1].
 
-    B has five compressed entries. Three are still in the future, and three
-    additional slots exceed B's compressed length, giving six -1 entries.
+    C sets the batch-wide compressed slot count to 17//2=8. B has 11//2=5
+    compressed entries, so three slots are padding. At query 7, only (3+1)//2=2
+    blocks are complete, so three more slots are future, giving six -1 entries.
     For CSA, if select_indices chooses compressed index 3, supplied indices=[3]
     give [6,7,35]. Eligible compressed index 2 is omitted because it was not
     selected. This one-entry list illustrates indexing, not cuDNN top-k size support.
