@@ -165,6 +165,14 @@ def get_dummy_wgrad(
     return _dummy_wgrads[key].detach()
 
 
+def is_dummy_wgrad(grad: torch.Tensor) -> bool:
+    """Whether ``grad`` is a placeholder from :func:`get_dummy_wgrad` rather than a real wgrad."""
+    if grad._is_zerotensor():
+        return True
+    dummy = _dummy_wgrads.get((*grad.shape, grad.dtype, grad.device))
+    return dummy is not None and grad.data_ptr() == dummy.data_ptr()
+
+
 def initialize_ub(
     shape: list,
     tp_size: int,
