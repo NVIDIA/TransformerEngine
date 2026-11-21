@@ -23,6 +23,7 @@ from .._common import (
     validate_ep_buffer,
 )
 from ..op import BasicOperation, OperationContext
+from .moe_local import combine_backward, combine_forward, make_token_order, validate_local_config
 
 
 def _validate_combine_inputs(
@@ -68,8 +69,12 @@ class MoeCombine(BasicOperation):
     backend that holds no communication state reads the expert-major order back
     out of it.
 
-    The quantization format of the communication is an EP backend detail, so it
-    is configured by ``EpConfig`` rather than this operation's quantizers.
+    The communication backend is selected by the ``buffer`` passed to the
+    constructor: an ``EpBuffer`` combines with NCCL EP, and no buffer selects the
+    PyTorch backend, which requires every expert to be local (EP=1). The
+    quantization format of the communication is an EP backend detail, so the
+    backend configures it rather than this operation's quantizers.
+
     """
 
     num_extra_inputs: int = 1
@@ -82,6 +87,8 @@ class MoeCombine(BasicOperation):
             raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
         if config.zero_copy:
             raise NotImplementedError("MoeCombine does not support zero-copy EP.")
+        if buffer is None:
+            validate_local_config(config)
         self.config = config
         self.buffer = buffer
 
@@ -101,16 +108,25 @@ class MoeCombine(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
-        # NCCL EP reads the routing state from the EpBuffer, so topk_idx is unused.
         del (
-            basic_op_extra_inputs,
             prev_op_grad_output_quantizer,
             next_op_input_quantizer,
             basic_op_kwargs,
         )
+        (topk_idx,) = basic_op_extra_inputs[0]
         # Only BF16 combine forward is supported for now.
         input_ = maybe_dequantize(input_, torch.bfloat16)
         ctx = basic_op_ctxs[0]
+
+        if self.buffer is None:
+            # PyTorch backend: the expert outputs are already local, so combine
+            # only needs the expert-major order to sum them into their tokens.
+            token_index = make_token_order(topk_idx, self.config)
+            output = combine_forward(input_, token_index, topk_idx.shape[0])
+            if ctx.requires_grad:
+                ctx.token_index = token_index
+            return output, [()]
+
         buffer = validate_ep_buffer("MoeCombine", self.config, self.buffer)
         _validate_combine_inputs(input_, buffer)
         result, combine_state = _ep_combine_fwd(
@@ -140,5 +156,8 @@ class MoeCombine(BasicOperation):
         ctx = basic_op_ctxs[0]
         _validate_combine_grad_output(grad_output)
         grad_output = grad_output.contiguous()
-        grad_input = _ep_combine_bwd(ctx.combine_state, grad_output)
+        if self.buffer is None:
+            grad_input = combine_backward(ctx.token_index, grad_output)
+        else:
+            grad_input = _ep_combine_bwd(ctx.combine_state, grad_output)
         return grad_input, [()], [(None,)]

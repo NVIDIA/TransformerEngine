@@ -132,6 +132,14 @@ NCCL-based dispatch and combine for experts sharded across ranks. See
 an ``EpBuffer``; the guide shows how to connect the per-expert counts and
 routing weights through the sequence's extra-tensor channels.
 
+``MoeDispatch`` and ``MoeCombine`` use a local PyTorch backend when constructed
+without an ``EpBuffer``. Set ``ep_group=None`` in ``EpConfig`` for EP=1; an
+omitted ``alignment`` then defaults to 0, while distributed groups default to
+256 tokens per expert. All
+experts must be local; BF16 tokens and FP32 routing weights are supported.
+Quantized communication and receive-capacity overflow policies require a
+different backend.
+
 .. autoapiclass:: transformer_engine.pytorch.ops.MoeDispatch
 
 .. autoapiclass:: transformer_engine.pytorch.ops.MoeCombine
