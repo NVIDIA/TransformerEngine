@@ -14,6 +14,7 @@
 #include <nccl.h>
 #include <torch/extension.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -23,6 +24,7 @@
 #include <vector>
 
 #include "transformer_engine/comm_window.h"
+#include "transformer_engine/ep_gemm.h"
 
 // torch's NCCL symm-mem headers (zero-copy path) exist only since torch 2.11;
 // without them NCCL_HAS_SYMMEM_SUPPORT stays undefined and zero-copy is compiled out.
@@ -74,13 +76,10 @@ size_t symm_mem_window_offset(T* sm, ...) {
 }
 #endif
 
-// Resolve ``t`` to an NCCL symm-mem window for the zero-copy one-sided path.
-// Returns ``kNoWindow`` when symm-mem support isn't compiled in, zero-copy is
-// disabled, no group is set, or ``t`` isn't symm-mem-backed; callers pass the
-// resulting window unconditionally to the backend.
-NVTECommWindow maybe_make_window(const at::Tensor& t) {
+// Resolve ``t`` to its NCCL symm-mem window. Returns ``kNoWindow`` when symm-mem
+// support isn't compiled in, no group is set, or ``t`` isn't symm-mem-backed.
+NVTECommWindow make_window(const at::Tensor& t) {
 #ifdef NCCL_HAS_SYMMEM_SUPPORT
-  if (!g_zero_copy_enabled.load(std::memory_order_relaxed)) return kNoWindow;
   if (g_ep_group_name.empty()) return kNoWindow;
   c10::intrusive_ptr<c10d::symmetric_memory::SymmetricMemory> sm;
   try {
@@ -104,6 +103,29 @@ NVTECommWindow maybe_make_window(const at::Tensor& t) {
   (void)t;
   return kNoWindow;
 #endif
+}
+
+// Resolve ``t`` to an NCCL symm-mem window for the zero-copy one-sided path.
+// Returns ``kNoWindow`` when zero-copy is disabled or make_window finds none;
+// callers pass the resulting window unconditionally to the backend.
+NVTECommWindow maybe_make_window(const at::Tensor& t) {
+  if (!g_zero_copy_enabled.load(std::memory_order_relaxed)) return kNoWindow;
+  return make_window(t);
+}
+
+// Window of a symm-mem input and, for MXFP8, of its scales, whatever the
+// zero-copy setting. Throws when either is not symm-mem-backed on the EP group.
+NVTECommWindow make_input_window(const at::Tensor& t, const std::optional<at::Tensor>& scale_inv) {
+  NVTECommWindow win = make_window(t);
+  NVTE_CHECK(win.window != nullptr, "symm_input needs a symm-mem input on the EP group");
+  if (scale_inv.has_value()) {
+    const NVTECommWindow scale_win = make_window(*scale_inv);
+    NVTE_CHECK(scale_win.window != nullptr,
+               "symm_input needs symm-mem input scales on the EP group");
+    win.scale_window = scale_win.window;
+    win.scale_offset = scale_win.offset;
+  }
+  return win;
 }
 
 // When zero-copy is enabled, the named tensor must be symm-mem-backed on the
@@ -172,6 +194,89 @@ size_t check_mxfp8_scale_pair(const at::Tensor& send_scale, const at::Tensor& re
   return sc_cols;
 }
 
+// MXFP8 TE tensor of E4M3 rowwise and/or columnwise data (undefined: absent) and E8M0 scales.
+TensorWrapper make_mxfp8_tensor(const at::Tensor& rowwise, const at::Tensor& rowwise_scale_inv,
+                                const at::Tensor& columnwise,
+                                const at::Tensor& columnwise_scale_inv, bool swizzled) {
+  TensorWrapper t(NVTE_MXFP8_1D_SCALING);
+  for (const bool col : {false, true}) {
+    const at::Tensor& data = col ? columnwise : rowwise;
+    const at::Tensor& scale_inv = col ? columnwise_scale_inv : rowwise_scale_inv;
+    if (!data.defined()) {
+      continue;
+    }
+    NVTE_CHECK(data.scalar_type() == at::kFloat8_e4m3fn && data.is_contiguous() &&
+                   scale_inv.defined() && scale_inv.is_contiguous(),
+               "MXFP8 operands need contiguous E4M3 data and contiguous scales");
+    if (col) {
+      t.set_columnwise_data(data.data_ptr(), DType::kFloat8E4M3, getTensorShape(data));
+      t.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                 getTensorShape(scale_inv));
+    } else {
+      t.set_rowwise_data(data.data_ptr(), DType::kFloat8E4M3, getTensorShape(data));
+      t.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0, getTensorShape(scale_inv));
+    }
+  }
+  t.set_with_gemm_swizzled_scales(swizzled);
+  return t;
+}
+
+// Columnwise-only MXFP8 TE tensor with GEMM-swizzled scales.
+TensorWrapper make_columnwise_mxfp8_tensor(const at::Tensor& data, const at::Tensor& scale_inv) {
+  return make_mxfp8_tensor(at::Tensor(), at::Tensor(), data, scale_inv, true);
+}
+
+// Rowwise MXFP8 TE tensor when scale_inv is given, else the plain tensor.
+TensorWrapper make_maybe_mxfp8_tensor(const at::Tensor& data,
+                                      const std::optional<at::Tensor>& scale_inv, bool swizzled) {
+  if (!scale_inv.has_value()) {
+    return makeTransformerEngineTensor(data);
+  }
+  return make_mxfp8_tensor(data, *scale_inv, at::Tensor(), at::Tensor(), swizzled);
+}
+
+// Optional weight gradient of an overlapped backward GEMM and the activations it reads: plain, or
+// columnwise MXFP8 data with its GEMM-swizzled scales.
+class WeightGradTensors {
+ public:
+  // input_rowwise: the rowwise MXFP8 input the call requantizes into the columnwise input.
+  WeightGradTensors(const std::optional<at::Tensor>& input,
+                    const std::optional<at::Tensor>& weight_grad,
+                    const std::optional<at::Tensor>& input_scale_inv = std::nullopt,
+                    const std::optional<at::Tensor>& input_rowwise = std::nullopt,
+                    const std::optional<at::Tensor>& input_rowwise_scale_inv = std::nullopt)
+      : enabled_(weight_grad.has_value()) {
+    NVTE_CHECK(input.has_value() == enabled_, "wgrad_input and weight_grad must be given together");
+    NVTE_CHECK(enabled_ || !input_scale_inv.has_value(), "wgrad_input_scale_inv needs weight_grad");
+    NVTE_CHECK(input_rowwise.has_value() == input_rowwise_scale_inv.has_value() &&
+                   (input_scale_inv.has_value() || !input_rowwise.has_value()),
+               "the rowwise wgrad_input needs its scales and a columnwise MXFP8 wgrad_input");
+    if (enabled_) {
+      NVTE_CHECK(input->is_contiguous() && weight_grad->is_contiguous(),
+                 "wgrad_input and weight_grad must be contiguous");
+      input_ = input_scale_inv.has_value()
+                   ? make_mxfp8_tensor(input_rowwise.value_or(at::Tensor()),
+                                       input_rowwise_scale_inv.value_or(at::Tensor()), *input,
+                                       *input_scale_inv, true)
+                   : makeTransformerEngineTensor(*input);
+      output_ = makeTransformerEngineTensor(*weight_grad);
+    }
+  }
+  NVTETensor input() { return enabled_ ? input_.data() : nullptr; }
+  NVTETensor output() { return enabled_ ? output_.data() : nullptr; }
+
+ private:
+  bool enabled_;
+  TensorWrapper input_;
+  TensorWrapper output_;
+};
+
+// A tensor the native call reads or writes through a raw pointer: dense, on the current device.
+void check_dense_cuda(const at::Tensor& t, const char* name) {
+  NVTE_CHECK(t.is_cuda() && t.is_contiguous() && t.device().index() == c10::cuda::current_device(),
+             name, " must be a contiguous tensor on the current CUDA device");
+}
+
 }  // namespace
 
 bool ep_get_zero_copy() { return g_zero_copy_enabled.load(std::memory_order_relaxed); }
@@ -191,7 +296,9 @@ bool ep_zero_copy_supported() {
 void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t num_experts,
                    int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
                    int64_t hidden_dim, int64_t max_num_sms, pybind11::object max_token_dtype,
-                   bool zero_copy, int64_t num_topk, bool drop_on_overflow) {
+                   bool zero_copy, int64_t num_topk, bool drop_on_overflow,
+                   int64_t dispatch_fwd_num_sms, int64_t combine_fwd_num_sms,
+                   int64_t dispatch_bwd_num_sms, int64_t combine_bwd_num_sms) {
   NVTE_CHECK(!group_name.empty(), "group_name must be non-empty (used for symm-mem lookup)");
   NVTE_CHECK(comm_ptr != 0, "comm_ptr must be non-null (torch NCCL host comm pointer)");
   NVTE_CHECK(!g_ep_initialized, "ep_initialize called twice without ep_finalize");
@@ -212,6 +319,10 @@ void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t nu
       .zero_copy = zero_copy ? 1 : 0,
       .num_topk = static_cast<int>(num_topk),
       .drop_on_overflow = drop_on_overflow ? 1 : 0,
+      .dispatch_fwd_num_sms = static_cast<int>(dispatch_fwd_num_sms),
+      .combine_fwd_num_sms = static_cast<int>(combine_fwd_num_sms),
+      .dispatch_bwd_num_sms = static_cast<int>(dispatch_bwd_num_sms),
+      .combine_bwd_num_sms = static_cast<int>(combine_bwd_num_sms),
   };
   // Release the GIL only around the native init. It must stay held while pybind11 casts
   // the ``max_token_dtype`` object above and destroys the by-value ``pybind11::object``
@@ -262,9 +373,14 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
   auto idx_dtype = get_contiguous_topk_idx_te_dtype(topk_idx);
-  // NCCL EP requires all prepare int output counters to share a dtype.
-  NVTE_CHECK(tokens_per_expert.scalar_type() == at::kLong, "tokens_per_expert must be int64");
-  NVTE_CHECK(total_recv_tokens.scalar_type() == at::kLong, "total_recv_tokens must be int64");
+  // NCCL EP requires all prepare int output counters to share a dtype: int64, or int32 for the
+  // overlapped GEMMs.
+  NVTE_CHECK(
+      tokens_per_expert.scalar_type() == at::kLong || tokens_per_expert.scalar_type() == at::kInt,
+      "tokens_per_expert must be int64 or int32");
+  NVTE_CHECK(total_recv_tokens.scalar_type() == tokens_per_expert.scalar_type(),
+             "total_recv_tokens must have the dtype of tokens_per_expert");
+  const DType count_dtype = GetTransformerEngineDType(tokens_per_expert.scalar_type());
   const size_t T_flat = topk_idx.numel() / topk_idx.size(-1);
   const size_t topk_n = static_cast<size_t>(topk_idx.size(-1));
 
@@ -272,14 +388,14 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
       makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, idx_dtype);
   auto tokens_per_expert_te = makeTransformerEngineTensor(
       tokens_per_expert.data_ptr(), Shape{static_cast<size_t>(tokens_per_expert.numel())},
-      DType::kInt64);
+      count_dtype);
   auto handle_mem_te = makeTransformerEngineTensor(
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
-  // [1] int64 scalar recv-slot total; lets the caller size dispatch outputs
+  // [1] scalar recv-slot total; lets the caller size dispatch outputs
   // (eager) or detect overflow past recv_capacity_per_rank (graph mode).
   auto total_recv_tokens_te = makeTransformerEngineTensor(
       total_recv_tokens.data_ptr(), Shape{static_cast<size_t>(total_recv_tokens.numel())},
-      DType::kInt64);
+      count_dtype);
 
   auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment, idx_dtype);
   nvte_ep_prepare(handle_mem_te.data(), topk_idx_te.data(), tokens_per_expert_te.data(),
@@ -712,6 +828,289 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
                          grad_expert_out_win, &layer_cfg, stream);
 }
 
+// Fresh per-call scratch for the overlapped GEMMs, sized for the group by
+// nvte_ep_overlap_workspace_size. Allocated per call like the op's other IO tensors and kept alive
+// by the stream until the async GEMM completes; under graph capture it is served from the graph
+// pool, as those IO tensors are.
+at::Tensor overlap_workspace(int64_t hidden_dim, int64_t ffn_dim, int64_t num_local_experts,
+                             int64_t rows, bool with_weight_grad, bool mxfp8,
+                             const NVTEEpLayerConfig& layer_cfg, const at::Tensor& like) {
+  const int64_t bytes = static_cast<int64_t>(nvte_ep_overlap_workspace_size(
+      hidden_dim, ffn_dim, num_local_experts, rows, with_weight_grad, mxfp8, &layer_cfg));
+  return at::empty({bytes}, like.options().dtype(at::kByte));
+}
+
+std::vector<at::Tensor> ep_dispatch_gemm_fwd(
+    at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens, at::Tensor topk_weights,
+    at::Tensor weight, std::optional<at::Tensor> recv_tokens_opt,
+    std::optional<at::Tensor> recv_topk_weights_opt, at::Tensor tokens_per_expert,
+    std::optional<at::Tensor> gemm_out_opt, std::optional<at::Tensor> act_out_opt, int64_t top_k,
+    int64_t dispatch_output_per_expert_alignment, std::optional<at::Tensor> total_recv_tokens,
+    int64_t eager_row_bucket, std::optional<at::Tensor> tokens_scale_inv,
+    std::optional<at::Tensor> recv_scale_inv, std::optional<at::Tensor> weight_scale_inv,
+    std::optional<at::Tensor> act_out_scale_inv, bool symm_input) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const bool eager = !recv_tokens_opt.has_value();
+  NVTE_CHECK(recv_topk_weights_opt.has_value() != eager && gemm_out_opt.has_value() != eager &&
+                 act_out_opt.has_value() != eager,
+             "pass all of the recv and GEMM outputs, or none (eager)");
+  const bool mxfp8 = tokens_scale_inv.has_value();
+  NVTE_CHECK(weight_scale_inv.has_value() == mxfp8 &&
+                 recv_scale_inv.has_value() == (mxfp8 && !eager) &&
+                 act_out_scale_inv.has_value() == (mxfp8 && !eager),
+             "pass all of the MXFP8 scales, or none; eager allocates the output scales");
+  NVTE_CHECK(!total_recv_tokens.has_value() || total_recv_tokens->scalar_type() == at::kInt,
+             "total_recv_tokens must be int32");
+  at::Tensor recv_tokens, recv_topk_weights, gemm_out, act_out;
+  if (eager) {
+    // Prepare, read the recv total on the host and size the outputs to whole row buckets, all
+    // in this call; the fused entry then skips the prepare.
+    NVTE_CHECK(total_recv_tokens.has_value() && total_recv_tokens->is_pinned(),
+               "eager needs total_recv_tokens in pinned host memory");
+    NVTE_CHECK(eager_row_bucket > 0, "eager needs eager_row_bucket > 0");
+    ep_prepare(handle_mem, topk_idx, tokens_per_expert, top_k, dispatch_output_per_expert_alignment,
+               *total_recv_tokens);
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    const int64_t total = *total_recv_tokens->data_ptr<int32_t>();
+    const int64_t buckets = std::max<int64_t>((total + eager_row_bucket - 1) / eager_row_bucket, 1);
+    const int64_t rows = buckets * eager_row_bucket;
+    const int64_t hidden = tokens.size(1);
+    const int64_t ffn = weight.size(1) / 2;
+    recv_tokens = at::empty({rows, hidden}, tokens.options());
+    recv_topk_weights = at::empty({rows}, topk_weights.options());
+    gemm_out = at::empty({rows, 2 * ffn}, tokens.options().dtype(at::kBFloat16));
+    act_out = at::empty({rows, ffn}, tokens.options());
+    if (mxfp8) {
+      const int64_t scale_cols = tokens_scale_inv->size(-1);
+      NVTE_CHECK(scale_cols > 0 && hidden % scale_cols == 0, "eager MXFP8 tokens_scale_inv cols (",
+                 scale_cols, ") must be a non-zero divisor of hidden (", hidden, ")");
+      const int64_t block = hidden / scale_cols;
+      recv_scale_inv = at::empty({rows, scale_cols}, tokens_scale_inv->options());
+      act_out_scale_inv = at::empty({rows * ffn / block}, tokens_scale_inv->options());
+    }
+  } else {
+    recv_tokens = *recv_tokens_opt;
+    recv_topk_weights = *recv_topk_weights_opt;
+    gemm_out = *gemm_out_opt;
+    act_out = *act_out_opt;
+  }
+  NVTE_CHECK(tokens.is_contiguous() && recv_tokens.is_contiguous() && weight.is_contiguous() &&
+                 gemm_out.is_contiguous() && act_out.is_contiguous(),
+             "operands must be contiguous");
+  check_dense_cuda(tokens_per_expert, "tokens_per_expert");
+  check_dense_cuda(recv_topk_weights, "recv_topk_weights");
+  // The expert layout the GEMMs read: expert 0's start (0), then each expert's padded row end.
+  // Front-pad by 3 so the row ends (expert_token_offsets[1:]) start 16-byte aligned, as the GEMM
+  // needs.
+  auto expert_token_offsets =
+      at::empty({weight.size(0) + 4}, tokens.options().dtype(at::kInt)).slice(0, 3);
+  auto handle_mem_te = makeTransformerEngineTensor(handle_mem);
+  auto topk_idx_te = makeTransformerEngineTensor(topk_idx);
+  auto tokens_te = make_maybe_mxfp8_tensor(tokens, tokens_scale_inv, false);
+  auto topk_weights_te = makeTransformerEngineTensor(topk_weights);
+  auto weight_te = make_maybe_mxfp8_tensor(weight, weight_scale_inv, true);
+  auto recv_tokens_te = make_maybe_mxfp8_tensor(recv_tokens, recv_scale_inv, false);
+  auto recv_topk_weights_te = makeTransformerEngineTensor(recv_topk_weights);
+  auto tokens_per_expert_te = makeTransformerEngineTensor(tokens_per_expert);
+  auto gemm_out_te = makeTransformerEngineTensor(gemm_out);
+  auto act_out_te = make_maybe_mxfp8_tensor(act_out, act_out_scale_inv, true);
+  auto expert_token_offsets_te = makeTransformerEngineTensor(expert_token_offsets);
+  // In eager mode the prepare above wrote the total.
+  const bool report_total = total_recv_tokens.has_value() && !eager;
+  TensorWrapper total_recv_tokens_te;
+  if (report_total) {
+    total_recv_tokens_te = makeTransformerEngineTensor(*total_recv_tokens);
+  }
+  const NVTECommWindow tokens_win =
+      symm_input ? make_input_window(tokens, tokens_scale_inv) : kNoWindow;
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
+                                  get_contiguous_topk_idx_te_dtype(topk_idx));
+  // Forward: no weight gradient. ffn is half the FC1 output rows (gate and up).
+  auto workspace_t = overlap_workspace(tokens.size(1), weight.size(1) / 2, weight.size(0),
+                                       recv_tokens.size(0), false, mxfp8, layer_cfg, tokens);
+  auto workspace_te = makeTransformerEngineTensor(workspace_t);
+  nvte_ep_dispatch_gemm_fwd(handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(), tokens_win,
+                            topk_weights_te.data(), weight_te.data(), recv_tokens_te.data(),
+                            recv_topk_weights_te.data(), gemm_out_te.data(), act_out_te.data(),
+                            tokens_per_expert_te.data(), expert_token_offsets_te.data(),
+                            report_total ? total_recv_tokens_te.data() : nullptr,
+                            workspace_te.data(), &layer_cfg, stream);
+  if (mxfp8) {
+    return {recv_tokens,          recv_topk_weights, gemm_out,          act_out,
+            expert_token_offsets, *recv_scale_inv,   *act_out_scale_inv};
+  }
+  return {recv_tokens, recv_topk_weights, gemm_out, act_out, expert_token_offsets};
+}
+
+void ep_combine_gemm_fwd(at::Tensor handle_mem, at::Tensor gemm_in, at::Tensor expert_token_offsets,
+                         at::Tensor weight, at::Tensor expert_out, at::Tensor result, int64_t top_k,
+                         int64_t dispatch_output_per_expert_alignment,
+                         at::ScalarType topk_idx_dtype, std::optional<at::Tensor> recv_topk_weights,
+                         std::optional<at::Tensor> gemm_in_scale_inv,
+                         std::optional<at::Tensor> weight_scale_inv) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  NVTE_CHECK(gemm_in.is_contiguous() && weight.is_contiguous() && expert_out.is_contiguous() &&
+                 result.is_contiguous(),
+             "operands must be contiguous");
+  check_dense_cuda(expert_token_offsets, "expert_token_offsets");
+  NVTE_CHECK(gemm_in_scale_inv.has_value() == weight_scale_inv.has_value(),
+             "pass both MXFP8 scales, or none");
+  auto handle_mem_te = makeTransformerEngineTensor(handle_mem);
+  auto gemm_in_te = make_maybe_mxfp8_tensor(gemm_in, gemm_in_scale_inv, true);
+  TensorWrapper recv_topk_weights_te;
+  if (recv_topk_weights.has_value()) {
+    recv_topk_weights_te = makeTransformerEngineTensor(*recv_topk_weights);
+  }
+  auto expert_token_offsets_te = makeTransformerEngineTensor(expert_token_offsets);
+  auto weight_te = make_maybe_mxfp8_tensor(weight, weight_scale_inv, true);
+  auto expert_out_te = makeTransformerEngineTensor(expert_out);
+  auto result_te = makeTransformerEngineTensor(result);
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
+                                  get_topk_idx_te_dtype(topk_idx_dtype));
+  // FC2 weight is [experts, hidden, ffn]; the combine GEMM has no weight gradient.
+  const bool mxfp8 = gemm_in_scale_inv.has_value();
+  auto workspace_t = overlap_workspace(weight.size(1), weight.size(2), weight.size(0),
+                                       gemm_in.size(0), false, mxfp8, layer_cfg, gemm_in);
+  auto workspace_te = makeTransformerEngineTensor(workspace_t);
+  nvte_ep_combine_gemm_fwd(handle_mem_te.data(), gemm_in_te.data(),
+                           recv_topk_weights.has_value() ? recv_topk_weights_te.data() : nullptr,
+                           expert_token_offsets_te.data(), weight_te.data(), expert_out_te.data(),
+                           result_te.data(), workspace_te.data(), &layer_cfg, stream);
+}
+
+void ep_combine_gemm_bwd(
+    at::Tensor handle_mem, at::Tensor grad_result, at::Tensor gemm_out,
+    at::Tensor recv_topk_weights, at::Tensor tokens_per_expert, at::Tensor weight,
+    at::Tensor grad_expert_out, at::Tensor grad_gemm_out, at::Tensor grad_recv_topk_weights,
+    int64_t top_k, int64_t dispatch_output_per_expert_alignment, at::ScalarType topk_idx_dtype,
+    std::optional<at::Tensor> grad_result_scale_inv,
+    std::optional<at::Tensor> grad_expert_out_scale_inv, std::optional<at::Tensor> weight_scale_inv,
+    std::optional<at::Tensor> grad_gemm_out_scale_inv,
+    std::optional<at::Tensor> grad_gemm_out_columnwise,
+    std::optional<at::Tensor> grad_gemm_out_columnwise_scale_inv, std::optional<at::Tensor> act_out,
+    std::optional<at::Tensor> act_out_scale_inv, std::optional<at::Tensor> wgrad_input,
+    std::optional<at::Tensor> weight_grad, bool accumulate_weight_grad,
+    std::optional<at::Tensor> grad_expert_out_columnwise,
+    std::optional<at::Tensor> grad_expert_out_columnwise_scale_inv,
+    std::optional<at::Tensor> wgrad_input_scale_inv, bool symm_input) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  NVTE_CHECK(grad_result.is_contiguous() && gemm_out.is_contiguous() && weight.is_contiguous() &&
+                 grad_expert_out.is_contiguous() && grad_gemm_out.is_contiguous(),
+             "operands must be contiguous");
+  check_dense_cuda(tokens_per_expert, "tokens_per_expert");
+  check_dense_cuda(grad_recv_topk_weights, "grad_recv_topk_weights");
+  const bool mxfp8 = grad_result_scale_inv.has_value();
+  NVTE_CHECK(grad_expert_out_scale_inv.has_value() == mxfp8 &&
+                 weight_scale_inv.has_value() == mxfp8 &&
+                 grad_gemm_out_scale_inv.has_value() == mxfp8 &&
+                 grad_gemm_out_columnwise.has_value() == mxfp8 &&
+                 grad_gemm_out_columnwise_scale_inv.has_value() == mxfp8 &&
+                 act_out.has_value() == mxfp8 && act_out_scale_inv.has_value() == mxfp8,
+             "pass all of the MXFP8 operands, or none");
+  // The columnwise grad_expert_out of the MXFP8 weight gradient, written by the call.
+  const bool grad_expert_out_columns = grad_expert_out_columnwise.has_value();
+  NVTE_CHECK(grad_expert_out_columnwise_scale_inv.has_value() == grad_expert_out_columns &&
+                 (mxfp8 || !grad_expert_out_columns),
+             "pass the MXFP8 columnwise grad_expert_out with its scales, or neither");
+  auto handle_mem_te = makeTransformerEngineTensor(handle_mem);
+  auto grad_result_te = make_maybe_mxfp8_tensor(grad_result, grad_result_scale_inv, false);
+  auto gemm_out_te = makeTransformerEngineTensor(gemm_out);
+  auto recv_topk_weights_te = makeTransformerEngineTensor(recv_topk_weights);
+  auto tokens_per_expert_te = makeTransformerEngineTensor(tokens_per_expert);
+  // MXFP8 reads the forward weight columnwise.
+  auto weight_te = mxfp8 ? make_columnwise_mxfp8_tensor(weight, *weight_scale_inv)
+                         : makeTransformerEngineTensor(weight);
+  auto grad_expert_out_te =
+      grad_expert_out_columns
+          ? make_mxfp8_tensor(grad_expert_out, *grad_expert_out_scale_inv,
+                              *grad_expert_out_columnwise, *grad_expert_out_columnwise_scale_inv,
+                              false)
+          : make_maybe_mxfp8_tensor(grad_expert_out, grad_expert_out_scale_inv, false);
+  auto grad_gemm_out_te =
+      mxfp8 ? make_mxfp8_tensor(grad_gemm_out, *grad_gemm_out_scale_inv, *grad_gemm_out_columnwise,
+                                *grad_gemm_out_columnwise_scale_inv, true)
+            : makeTransformerEngineTensor(grad_gemm_out);
+  auto grad_recv_topk_weights_te = makeTransformerEngineTensor(grad_recv_topk_weights);
+  TensorWrapper act_out_te;
+  if (mxfp8) {
+    act_out_te = make_columnwise_mxfp8_tensor(*act_out, *act_out_scale_inv);
+  }
+  NVTE_CHECK(mxfp8 || !wgrad_input_scale_inv.has_value(),
+             "wgrad_input_scale_inv is for MXFP8 only");
+  WeightGradTensors wgrad(wgrad_input, weight_grad, wgrad_input_scale_inv);
+  const NVTECommWindow grad_result_win =
+      symm_input ? make_input_window(grad_result, grad_result_scale_inv) : kNoWindow;
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
+                                  get_topk_idx_te_dtype(topk_idx_dtype));
+  // FC2 weight is [experts, hidden, ffn]; size the wgrad region when a weight gradient is written.
+  auto workspace_t =
+      overlap_workspace(weight.size(1), weight.size(2), weight.size(0), grad_expert_out.size(0),
+                        weight_grad.has_value(), mxfp8, layer_cfg, grad_result);
+  auto workspace_te = makeTransformerEngineTensor(workspace_t);
+  nvte_ep_combine_gemm_bwd(
+      handle_mem_te.data(), grad_result_te.data(), grad_result_win, gemm_out_te.data(),
+      recv_topk_weights_te.data(), tokens_per_expert_te.data(), weight_te.data(), wgrad.input(),
+      grad_expert_out_te.data(), grad_gemm_out_te.data(), grad_recv_topk_weights_te.data(),
+      mxfp8 ? act_out_te.data() : nullptr, wgrad.output(), accumulate_weight_grad,
+      workspace_te.data(), &layer_cfg, stream);
+}
+
+void ep_dispatch_gemm_bwd(
+    at::Tensor handle_mem, at::Tensor grad_gemm_out, at::Tensor grad_recv_topk_weights,
+    at::Tensor tokens_per_expert, at::Tensor weight, at::Tensor grad_recv_tokens,
+    at::Tensor grad_tokens, at::Tensor grad_topk_weights, int64_t top_k,
+    int64_t dispatch_output_per_expert_alignment, at::ScalarType topk_idx_dtype,
+    std::optional<at::Tensor> grad_gemm_out_scale_inv, std::optional<at::Tensor> weight_scale_inv,
+    std::optional<at::Tensor> grad_gemm_out_columnwise,
+    std::optional<at::Tensor> grad_gemm_out_columnwise_scale_inv,
+    std::optional<at::Tensor> wgrad_input, std::optional<at::Tensor> wgrad_input_scale_inv,
+    std::optional<at::Tensor> weight_grad, bool accumulate_weight_grad,
+    std::optional<at::Tensor> wgrad_input_rowwise,
+    std::optional<at::Tensor> wgrad_input_rowwise_scale_inv) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  NVTE_CHECK(
+      grad_gemm_out.is_contiguous() && weight.is_contiguous() && grad_recv_tokens.is_contiguous(),
+      "operands must be contiguous");
+  check_dense_cuda(tokens_per_expert, "tokens_per_expert");
+  check_dense_cuda(grad_recv_topk_weights, "grad_recv_topk_weights");
+  const bool mxfp8 = grad_gemm_out_scale_inv.has_value();
+  NVTE_CHECK(weight_scale_inv.has_value() == mxfp8, "pass both MXFP8 scales, or none");
+  // The MXFP8 weight gradient reads grad_gemm_out and wgrad_input columnwise.
+  const bool columnwise = grad_gemm_out_columnwise.has_value();
+  NVTE_CHECK(grad_gemm_out_columnwise_scale_inv.has_value() == columnwise &&
+                 wgrad_input_scale_inv.has_value() == columnwise && (mxfp8 || !columnwise),
+             "pass the MXFP8 columnwise operands of the weight gradient together, or none");
+  auto handle_mem_te = makeTransformerEngineTensor(handle_mem);
+  auto grad_gemm_out_te =
+      columnwise
+          ? make_mxfp8_tensor(grad_gemm_out, *grad_gemm_out_scale_inv, *grad_gemm_out_columnwise,
+                              *grad_gemm_out_columnwise_scale_inv, true)
+          : make_maybe_mxfp8_tensor(grad_gemm_out, grad_gemm_out_scale_inv, true);
+  auto grad_recv_topk_weights_te = makeTransformerEngineTensor(grad_recv_topk_weights);
+  auto tokens_per_expert_te = makeTransformerEngineTensor(tokens_per_expert);
+  // MXFP8 reads the forward weight columnwise.
+  auto weight_te = mxfp8 ? make_columnwise_mxfp8_tensor(weight, *weight_scale_inv)
+                         : makeTransformerEngineTensor(weight);
+  auto grad_recv_tokens_te = makeTransformerEngineTensor(grad_recv_tokens);
+  auto grad_tokens_te = makeTransformerEngineTensor(grad_tokens);
+  auto grad_topk_weights_te = makeTransformerEngineTensor(grad_topk_weights);
+  WeightGradTensors wgrad(wgrad_input, weight_grad, wgrad_input_scale_inv, wgrad_input_rowwise,
+                          wgrad_input_rowwise_scale_inv);
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment,
+                                  get_topk_idx_te_dtype(topk_idx_dtype));
+  // FC1 weight is [experts, 2 * ffn, hidden]; size the wgrad region when a weight gradient is
+  // written.
+  auto workspace_t =
+      overlap_workspace(weight.size(2), weight.size(1) / 2, weight.size(0), grad_gemm_out.size(0),
+                        weight_grad.has_value(), mxfp8, layer_cfg, grad_gemm_out);
+  auto workspace_te = makeTransformerEngineTensor(workspace_t);
+  nvte_ep_dispatch_gemm_bwd(handle_mem_te.data(), grad_gemm_out_te.data(),
+                            grad_recv_topk_weights_te.data(), tokens_per_expert_te.data(),
+                            weight_te.data(), wgrad.input(), grad_recv_tokens_te.data(),
+                            grad_tokens_te.data(), grad_topk_weights_te.data(), wgrad.output(),
+                            accumulate_weight_grad, workspace_te.data(), &layer_cfg, stream);
+}
+
 void register_ep_bindings(pybind11::module_& m) {
   namespace py = pybind11;
   m.def("ep_initialize", &ep_initialize,
@@ -719,7 +1118,9 @@ void register_ep_bindings(pybind11::module_& m) {
         py::arg("comm_ptr"), py::arg("group_name"), py::arg("num_experts"),
         py::arg("max_tokens_per_rank"), py::arg("max_recv_tokens_per_rank"), py::arg("hidden_dim"),
         py::arg("max_num_sms") = 0, py::arg("max_token_dtype"), py::arg("zero_copy") = false,
-        py::arg("num_topk") = 0, py::arg("drop_on_overflow") = false);
+        py::arg("num_topk") = 0, py::arg("drop_on_overflow") = false,
+        py::arg("dispatch_fwd_num_sms") = 0, py::arg("combine_fwd_num_sms") = 0,
+        py::arg("dispatch_bwd_num_sms") = 0, py::arg("combine_bwd_num_sms") = 0);
   m.def("ep_finalize", &ep_finalize, "Tear down the EP backend. Idempotent.",
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_get_zero_copy", &ep_get_zero_copy, "Return the current EP zero-copy toggle state.");
@@ -746,6 +1147,57 @@ void register_ep_bindings(pybind11::module_& m) {
   m.def("ep_combine", &ep_combine, "EP combine", py::arg("handle_mem"), py::arg("expert_out"),
         py::arg("result"), py::arg("top_k"), py::arg("dispatch_output_per_expert_alignment"),
         py::arg("topk_idx_dtype"), py::call_guard<py::gil_scoped_release>());
+  m.def("ep_dispatch_gemm_fwd", &ep_dispatch_gemm_fwd,
+        "EP dispatch overlapped with the first GEMM. Returns recv_tokens, recv_topk_weights, "
+        "gemm_out, act_out and expert_token_offsets, then the recv and act_out scales when "
+        "MXFP8; in eager mode omit them and they are sized and allocated here",
+        py::arg("handle_mem"), py::arg("topk_idx"), py::arg("tokens"), py::arg("topk_weights"),
+        py::arg("weight"), py::arg("recv_tokens"), py::arg("recv_topk_weights"),
+        py::arg("tokens_per_expert"), py::arg("gemm_out"), py::arg("act_out"), py::arg("top_k"),
+        py::arg("dispatch_output_per_expert_alignment"),
+        py::arg("total_recv_tokens") = std::nullopt, py::arg("eager_row_bucket") = 0,
+        py::arg("tokens_scale_inv") = std::nullopt, py::arg("recv_scale_inv") = std::nullopt,
+        py::arg("weight_scale_inv") = std::nullopt, py::arg("act_out_scale_inv") = std::nullopt,
+        py::arg("symm_input") = false, py::call_guard<py::gil_scoped_release>());
+  m.def("ep_combine_gemm_fwd", &ep_combine_gemm_fwd, "EP second GEMM overlapped with the combine",
+        py::arg("handle_mem"), py::arg("gemm_in"), py::arg("expert_token_offsets"),
+        py::arg("weight"), py::arg("expert_out"), py::arg("result"), py::arg("top_k"),
+        py::arg("dispatch_output_per_expert_alignment"), py::arg("topk_idx_dtype"),
+        py::arg("recv_topk_weights") = std::nullopt, py::arg("gemm_in_scale_inv") = std::nullopt,
+        py::arg("weight_scale_inv") = std::nullopt, py::call_guard<py::gil_scoped_release>());
+  m.def("ep_combine_gemm_bwd", &ep_combine_gemm_bwd,
+        "Backward of the second GEMM and the combine, with the activation backward",
+        py::arg("handle_mem"), py::arg("grad_result"), py::arg("gemm_out"),
+        py::arg("recv_topk_weights"), py::arg("tokens_per_expert"), py::arg("weight"),
+        py::arg("grad_expert_out"), py::arg("grad_gemm_out"), py::arg("grad_recv_topk_weights"),
+        py::arg("top_k"), py::arg("dispatch_output_per_expert_alignment"),
+        py::arg("topk_idx_dtype"), py::arg("grad_result_scale_inv") = std::nullopt,
+        py::arg("grad_expert_out_scale_inv") = std::nullopt,
+        py::arg("weight_scale_inv") = std::nullopt,
+        py::arg("grad_gemm_out_scale_inv") = std::nullopt,
+        py::arg("grad_gemm_out_columnwise") = std::nullopt,
+        py::arg("grad_gemm_out_columnwise_scale_inv") = std::nullopt,
+        py::arg("act_out") = std::nullopt, py::arg("act_out_scale_inv") = std::nullopt,
+        py::arg("wgrad_input") = std::nullopt, py::arg("weight_grad") = std::nullopt,
+        py::arg("accumulate_weight_grad") = false,
+        py::arg("grad_expert_out_columnwise") = std::nullopt,
+        py::arg("grad_expert_out_columnwise_scale_inv") = std::nullopt,
+        py::arg("wgrad_input_scale_inv") = std::nullopt, py::arg("symm_input") = false,
+        py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "ep_dispatch_gemm_bwd", &ep_dispatch_gemm_bwd, "Backward of the first GEMM and the dispatch",
+      py::arg("handle_mem"), py::arg("grad_gemm_out"), py::arg("grad_recv_topk_weights"),
+      py::arg("tokens_per_expert"), py::arg("weight"), py::arg("grad_recv_tokens"),
+      py::arg("grad_tokens"), py::arg("grad_topk_weights"), py::arg("top_k"),
+      py::arg("dispatch_output_per_expert_alignment"), py::arg("topk_idx_dtype"),
+      py::arg("grad_gemm_out_scale_inv") = std::nullopt, py::arg("weight_scale_inv") = std::nullopt,
+      py::arg("grad_gemm_out_columnwise") = std::nullopt,
+      py::arg("grad_gemm_out_columnwise_scale_inv") = std::nullopt,
+      py::arg("wgrad_input") = std::nullopt, py::arg("wgrad_input_scale_inv") = std::nullopt,
+      py::arg("weight_grad") = std::nullopt, py::arg("accumulate_weight_grad") = false,
+      py::arg("wgrad_input_rowwise") = std::nullopt,
+      py::arg("wgrad_input_rowwise_scale_inv") = std::nullopt,
+      py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward", py::arg("handle_mem"),
         py::arg("grad"), py::arg("g_recv_topk_weights"), py::arg("grad_tokens"),
         py::arg("grad_topk_weights"), py::arg("top_k"),

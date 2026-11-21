@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import atexit
+import functools
+import math
+import os
 import warnings
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
@@ -15,11 +18,13 @@ import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
+from ..common import _get_shared_object_file
 from .constants import DType
 from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
 from .quantized_tensor import QuantizedTensor, QuantizedTensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from .utils import round_up_to_nearest_multiple
 
 # Type-hint-only import; keeps the ``Recipe`` annotation without a runtime import of
 # common.recipe (the concrete recipe classes are imported lazily where used).
@@ -84,11 +89,15 @@ _BOOTSTRAPPED = False
 _ATEXIT_REGISTERED = False
 # EP group captured at bootstrap; used by the zero-copy symm-mem pool allocator.
 _EP_GROUP: Optional[dist.ProcessGroup] = None
+# Communication SMs of the overlapped MoE ops when ep_bootstrap picks them.
+_OVERLAP_COMM_SMS = 24
 # Eager-mode toggle captured at bootstrap (set when recv_capacity_per_rank is
 # omitted); ep_dispatch reads it to size the recv outputs from the per-step
 # recv-token total instead of a fixed recv_capacity_per_rank.
 _EAGER = False
 _BOOTSTRAP_SETTINGS: Optional[dict[str, object]] = None
+# Symm-mem data and scale buffers the overlapped MoE ops quantize their MXFP8 dispatch inputs into.
+_DISPATCH_WINDOW: Optional[tuple[torch.Tensor, torch.Tensor]] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,9 +134,10 @@ class EpConfig:
 
 def _atexit_finalize() -> None:
     """Best-effort teardown at interpreter shutdown; swallows errors."""
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS, _DISPATCH_WINDOW
     if _BOOTSTRAPPED:
         try:
+            _DISPATCH_WINDOW = None
             tex.ep_finalize()
         except Exception:  # pylint: disable=broad-exception-caught
             import traceback
@@ -151,6 +161,10 @@ def ep_bootstrap(
     zero_copy: bool = False,
     drop_on_overflow: bool = False,
     max_token_dtype: torch.dtype = torch.bfloat16,
+    dispatch_fwd_num_sms: int = 0,
+    combine_fwd_num_sms: int = 0,
+    dispatch_bwd_num_sms: int = 0,
+    combine_bwd_num_sms: int = 0,
 ) -> None:
     """Initialize EP by borrowing ep_group's NCCL comm. Call once per process.
 
@@ -172,9 +186,22 @@ def ep_bootstrap(
 
     ``drop_on_overflow`` drops tokens exceeding ``recv_capacity_per_rank`` instead
     of trapping. Requires ``recv_capacity_per_rank``.
+
+    ``max_num_sms`` defaults to 24 when the ``te.ops`` MoE overlap is available
+    (``NVTE_ENABLE_CUTEDSL_BACKEND=1``, ``NVTE_MOE_OVERLAP`` set) and ``zero_copy`` is off.
+
+    ``dispatch_fwd_num_sms``, ``combine_fwd_num_sms``, ``dispatch_bwd_num_sms`` and
+    ``combine_bwd_num_sms`` set the SMs of the NCCL EP kernels of the dispatch and combine of the
+    layer forward and backward, overlapped or not. The backward of MoeCombine is a dispatch and the
+    backward of MoeDispatch a combine. 0 inherits: a forward budget takes ``max_num_sms``, a
+    backward budget the forward one. ``FusedMoE`` runs the GEMMs on the remaining SMs. A backward
+    budget other than the forward one needs NCCL EP with backward SM budgets. ``NCCL_EP_COMM_SMS``
+    and NCCL EP's per-call SM variables override these counts, and ``FusedMoE`` rejects them.
     """
     global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
     eager = recv_capacity_per_rank is None
+    if max_num_sms == 0 and _moe_overlap_available() and not zero_copy:
+        max_num_sms = _OVERLAP_COMM_SMS
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")
     if ep_group.size() < 2:
@@ -216,6 +243,10 @@ def ep_bootstrap(
         bool(zero_copy),
         int(num_topk),
         bool(drop_on_overflow),
+        int(dispatch_fwd_num_sms),
+        int(combine_fwd_num_sms),
+        int(dispatch_bwd_num_sms),
+        int(combine_bwd_num_sms),
     )
     _BOOTSTRAPPED = True
     _EP_GROUP = ep_group
@@ -254,6 +285,30 @@ def get_ep_drop_on_overflow() -> Optional[bool]:
     return bool(_BOOTSTRAP_SETTINGS["drop_on_overflow"])
 
 
+@functools.lru_cache(maxsize=None)
+def _cutedsl_backend_built() -> bool:
+    """Whether the core library was built with the CuTeDSL backend."""
+    import ctypes
+
+    core = ctypes.CDLL(str(_get_shared_object_file("core")))
+    return hasattr(core, "nvte_is_cutedsl_backend_built") and bool(
+        core.nvte_is_cutedsl_backend_built()
+    )
+
+
+def _moe_overlap_available() -> bool:
+    """Whether the overlapped MoE GEMMs can run: SM 10.0, 10.3 or 10.7 (tcgen05 kernels), the
+    CuTeDSL backend built and on, and the GEMM path set."""
+    if not torch.cuda.is_available():
+        return False
+    return (
+        torch.cuda.get_device_capability() in ((10, 0), (10, 3), (10, 7))
+        and os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0"
+        and bool(os.environ.get("NVTE_MOE_OVERLAP"))
+        and _cutedsl_backend_built()
+    )
+
+
 def _ep_is_eager() -> bool:
     """Return whether the bootstrapped EP group uses variable-size eager buffers."""
     return _EAGER
@@ -269,10 +324,11 @@ def ep_finalize() -> None:
     a caller that used ``symm_mem_alloc(use_pool=True)`` does not need a separate
     ``release_symm_mem_pool()`` before destroying the PG.
     """
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS, _DISPATCH_WINDOW
     if not _BOOTSTRAPPED:
         return
     try:
+        _DISPATCH_WINDOW = None
         # Deregister pooled symm-mem windows while the group's comm is still valid.
         release_symm_mem_pool()
         tex.ep_finalize()
@@ -330,6 +386,8 @@ class EpBuffer:
         "zero_copy",
         "eager",
         "total_recv_tokens",
+        "tokens_per_expert_i32",
+        "total_recv_tokens_i32",
         "dispatch_fwd_quant_recipe",
         "combine_bwd_quant_recipe",
     )
@@ -394,6 +452,17 @@ class EpBuffer:
         else:
             self.total_recv_tokens = torch.empty(1, dtype=torch.int64, device=device)
             mark_not_offload(self.total_recv_tokens)
+        # Int32 per-expert counts and recv total for the fused MoE overlap, placed as above.
+        # TODO(phuonguyen): drop these int32 mirrors of tokens_per_expert and total_recv_tokens,
+        # and write those directly, once the CuTeDSL signal GEMMs accept int64 counts/offsets.
+        self.tokens_per_expert_i32 = torch.empty(
+            self.num_local_experts, dtype=torch.int32, device=device
+        )
+        if self.eager:
+            self.total_recv_tokens_i32 = torch.empty(1, dtype=torch.int32, pin_memory=True)
+        else:
+            self.total_recv_tokens_i32 = torch.empty(1, dtype=torch.int32, device=device)
+            mark_not_offload(self.total_recv_tokens_i32)
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
@@ -1084,17 +1153,68 @@ def _alloc_io(shape, dtype: torch.dtype, device, zero_copy: bool) -> torch.Tenso
     return torch.empty(*shape, dtype=dtype, device=device)
 
 
+def _dispatch_window(device) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+    """Symm-mem data and scale buffers of one MXFP8 dispatch input, or None without symm-mem
+    support. Allocated collectively on first use and shared by every layer and direction, so the
+    EP calls of the group must share one stream."""
+    global _DISPATCH_WINDOW
+    if _DISPATCH_WINDOW is None:
+        if not tex.ep_zero_copy_supported():
+            return None
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "The EP dispatch window is allocated on first use; run a warmup step before "
+                "CUDA graph capture."
+            )
+        from .tensor.mxfp8_tensor import MXFP8Quantizer
+
+        shape = (_BOOTSTRAP_SETTINGS["max_tokens_per_rank"], _BOOTSTRAP_SETTINGS["hidden_dim"])
+        data_bytes = round_up_to_nearest_multiple(math.prod(shape), 256)
+        scale_shape = MXFP8Quantizer(DType.kFloat8E4M3).get_scale_shape(shape, False)
+        window = symm_mem_alloc(
+            (data_bytes + math.prod(scale_shape),), torch.uint8, _EP_GROUP, device=device
+        )
+        mark_not_offload(window)
+        _DISPATCH_WINDOW = (window[:data_bytes], window[data_bytes:])
+    return _DISPATCH_WINDOW
+
+
+def _mxfp8_storage(out, shape, quantizer: "MXFP8Quantizer", fake_dtype=None) -> MXFP8TensorStorage:
+    """Rowwise MXFP8 storage of ``shape`` at the start of the uint8 data and scale buffers ``out``."""
+    data, scales = out
+    scale_shape = quantizer.get_scale_shape(shape, False)
+    if data.numel() < math.prod(shape) or scales.numel() < math.prod(scale_shape):
+        raise ValueError(f"MXFP8 output buffers too small for {tuple(shape)}.")
+    return MXFP8TensorStorage(
+        data[: math.prod(shape)].view(shape),
+        scales[: math.prod(scale_shape)].view(scale_shape),
+        None,
+        None,
+        quantizer.dtype,
+        quantizer,
+        False,
+        fake_dtype=fake_dtype,
+    )
+
+
 def quantize_for_ep(
     input_: torch.Tensor | QuantizedTensorStorage,
     quantizer: Optional["Quantizer"],
+    out: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> tuple[MXFP8TensorStorage, torch.Tensor]:
-    """Quantize an EP input with a supported quantizer."""
+    """Quantize an EP input with a supported quantizer.
+
+    ``out`` is a pair of contiguous uint8 tensors on the input's device, the data and the scales.
+    The data holds ``input_.numel()`` bytes and the scales the rowwise scale shape of the quantizer
+    (``get_scale_shape(shape, False)``, rows padded to 128). When given, the returned storage and
+    the compact scales it returns are views of them, so they alias ``out``.
+    """
     from .tensor.mxfp8_tensor import MXFP8Quantizer
 
     if quantizer is None:
         raise ValueError("EP quantization requires a quantizer.")
     if isinstance(quantizer, MXFP8Quantizer):
-        return _quantize_mxfp8(input_, quantizer)
+        return _quantize_mxfp8(input_, quantizer, out)
     raise NotImplementedError(
         "EP dispatch/combine quantization currently supports only MXFP8; "
         f"got {type(quantizer).__name__}."
@@ -1104,6 +1224,7 @@ def quantize_for_ep(
 def _quantize_mxfp8(
     input_: torch.Tensor | QuantizedTensorStorage,
     quantizer: "MXFP8Quantizer",
+    out: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> tuple[MXFP8TensorStorage, torch.Tensor]:
     """Return E4M3 MXFP8 storage and compact rowwise scales for EP."""
     from .constants import MXFP8_BLOCK_SCALING_SIZE
@@ -1118,7 +1239,11 @@ def _quantize_mxfp8(
         if not quantizer.internal:
             quantizer = quantizer.copy()
             quantizer.internal = True
-        quantized = quantizer(input_)
+        if out is None:
+            quantized = quantizer(input_)
+        else:
+            quantized = _mxfp8_storage(out, input_.shape, quantizer, input_.dtype)
+            tex.quantize(input_, quantizer, quantized, None)
 
     if quantized._fp8_dtype != DType.kFloat8E4M3:
         raise NotImplementedError("EP supports only E4M3 MXFP8 data.")
@@ -1145,6 +1270,12 @@ def _quantize_mxfp8(
     scale_inv = scale_inv[:t_flat, :scale_cols]
     if not scale_inv.is_contiguous():
         raise ValueError("EP requires compact contiguous MXFP8 scales.")
+    if out is not None and quantized is input_:
+        # An MXFP8 input is copied into out, so the result is there whatever the input.
+        quantized = _mxfp8_storage(out, input_.shape, quantizer)
+        quantized._rowwise_data.copy_(data)
+        quantized._rowwise_scale_inv[:t_flat, :scale_cols].copy_(scale_inv)
+        scale_inv = quantized._rowwise_scale_inv[:t_flat, :scale_cols]
     return quantized, scale_inv
 
 

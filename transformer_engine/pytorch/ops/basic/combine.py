@@ -70,6 +70,8 @@ class MoeCombine(BasicOperation):
 
     The quantization format of the communication is an EP backend detail, so it
     is configured by ``EpConfig`` rather than this operation's quantizers.
+
+    ``buffer`` is the same ``EpBuffer`` the ``MoeDispatch`` was given.
     """
 
     num_extra_inputs: int = 1

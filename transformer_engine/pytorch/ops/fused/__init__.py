@@ -36,3 +36,8 @@ from .grouped_mlp import (  # pylint: disable=wrong-import-position
     GroupedMLP_CuTeGEMMUnary,
     GroupedMLP_CuTeGEMMGLUBf16,
 )
+from .moe_overlap import (  # pylint: disable=wrong-import-position
+    FusedMoE,
+    moe_overlap_supported,
+    moe_overlap_unsupported_reason,
+)

@@ -507,4 +507,10 @@ extern "C" inline void TVMFFIErrorMoveFromRaised(TVMFFIObjectHandle *result) {
   transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().move_error(result);
 }
 
+// TVM-FFI error construction (e.g. in try_cast) references this symbol; backtraces stay empty.
+extern "C" inline const TVMFFIByteArray *TVMFFIBacktrace(const char *, int, const char *, int) {
+  static const TVMFFIByteArray empty{"", 0};
+  return &empty;
+}
+
 #endif  // TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_

@@ -38,6 +38,9 @@ int sm_arch(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+/* \brief Clusters of cluster_size CTAs, one CTA per SM, the current device runs at once */
+int max_active_clusters(int cluster_size);
+
 /* \brief Maximum shared memory per block available with opt-in
  *
  * This is the upper bound for the static plus dynamic shared memory

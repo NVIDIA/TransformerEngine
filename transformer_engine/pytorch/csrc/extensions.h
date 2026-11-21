@@ -770,7 +770,9 @@ int64_t get_nccl_comm_ptr(c10d::ProcessGroup *process_group);
 void ep_initialize(uintptr_t comm_ptr, const std::string &group_name, int64_t num_experts,
                    int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
                    int64_t hidden_dim, int64_t max_num_sms, pybind11::object max_token_dtype,
-                   bool zero_copy, int64_t num_topk, bool drop_on_overflow);
+                   bool zero_copy, int64_t num_topk, bool drop_on_overflow,
+                   int64_t dispatch_fwd_num_sms, int64_t combine_fwd_num_sms,
+                   int64_t dispatch_bwd_num_sms, int64_t combine_bwd_num_sms);
 
 void ep_finalize();
 
