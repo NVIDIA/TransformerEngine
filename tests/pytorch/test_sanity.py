@@ -1651,3 +1651,53 @@ def test_inference_mode(
         with autocast(enabled=with_quantization, recipe=quantization_recipe):
             y = module(x, **kwargs)
     check_weights()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_delayed_scaling_adapts_after_global_state_reset():
+    """A module that outlives ``FP8GlobalStateManager.reset()`` keeps adapting.
+
+    The registration marker is a module-local key, so it used to survive a
+    ``reset()`` and suppress registration into the replacement global buffers.
+    The module then recorded amax locally while the global buffer stayed empty,
+    and its delayed-scaling scale never updated again: with weights of 1/16 and
+    16 inputs of 128 the output stayed at 1.0 instead of 128.0. Reusing a module
+    after a reset is the sequential-runs-in-one-process case that ``reset()``
+    exists for.
+    """
+    ds_recipe = recipe.DelayedScaling(amax_history_len=4, amax_compute_algo="most_recent")
+
+    def registered_entries():
+        qstate = FP8GlobalStateManager.quantization_state
+        return sum(len(entries) for entries in qstate.global_amax_buffer.values())
+
+    def step(amplitude):
+        model.zero_grad(set_to_none=True)
+        x = torch.full((16, 16), amplitude, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        with autocast(enabled=True, recipe=ds_recipe):
+            y = model(x)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        return y.float().mean().item(), model.fp8_meta["scaling_fwd"].scale[0].item()
+
+    FP8GlobalStateManager.reset()
+    model = Linear(16, 16, bias=False, params_dtype=torch.bfloat16, device="cuda")
+    with torch.no_grad():
+        model.weight.fill_(1.0 / 16.0)
+
+    # Warm up so the module has registered forward and backward amax tensors.
+    step(1.0)
+    assert registered_entries() == 2, "warm-up should register forward and backward amax"
+
+    # Discard the state the module registered into and reuse the same module.
+    FP8GlobalStateManager.reset()
+    assert registered_entries() == 0
+    step(1.0)
+    assert registered_entries() == 2, "reused module did not register with the new global state"
+
+    # Delayed scaling costs one step of lag, then the output must follow the
+    # reference mean of 16 * 128 / 16 = 128.
+    out_mean_lagged, _ = step(128.0)
+    out_mean, _ = step(128.0)
+    assert out_mean_lagged < 2.0, "first step after the jump is expected to use the stale scale"
+    assert out_mean > 0.9 * 128.0, f"reused module did not adapt to the larger input: {out_mean}"
