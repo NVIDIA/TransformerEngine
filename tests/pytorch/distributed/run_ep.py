@@ -21,7 +21,7 @@ import torch.distributed as dist
 from ep_reference import BlockScaledTensor, MoeEpReference, MoeFormat, quantize_blockwise
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import ops as te_ops
-from transformer_engine.common.recipe import MXFP8BlockScaling
+from transformer_engine.common.recipe import DelayedScaling, MXFP8BlockScaling
 from transformer_engine.pytorch.ep import (
     EpBuffer,
     EpConfig,
@@ -708,8 +708,8 @@ class TestEP(_EpTestCase):
         """Under MXFP8 with MXFP8 EP transport the fused op matches the unfused ops, with weight
         scales that differ across blocks in both directions, and its GEMM-swizzled weight scales
         equal TE's per-tensor swizzle of each expert, rowwise and columnwise. The fused op
-        dispatches x and dY in place from the EP dispatch window. With BF16 EP transport it falls
-        back to the unfused ops."""
+        dispatches x and dY in place from the EP dispatch window. An unset config transport runs
+        MXFP8, and a non-MXFP8 config transport recipe is rejected."""
         self._require_mxfp8_shapes()
         recipe = MXFP8BlockScaling()
         with mock.patch.object(
@@ -720,14 +720,21 @@ class TestEP(_EpTestCase):
             self._check_moe_overlap_op(recipe, recipe)
         for call in fwd.call_args_list + bwd.call_args_list:
             self.assertEqual(call.kwargs["symm_input"], tex.ep_zero_copy_supported())
+        # MXFP8 FusedMoE quantizes the EP transport itself, so an unset config transport fuses.
         config = self._overlap_config()
         model = te_ops.Sequential(*self._moe_ops(config, self._make_buffer_from_config(config)))
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        with self.assertWarnsRegex(UserWarning, "MXFP8 needs MXFP8 EP transport"), te.autocast(
-            recipe=recipe
-        ):
+        with te.autocast(recipe=recipe):
             model(tokens, topk_idx, w, topk_idx)
-        self.assertFalse(self._moe_overlap_selected(model))
+        self.assertTrue(self._moe_overlap_selected(model))
+        # A non-MXFP8 config transport recipe is rejected by the support query.
+        bad = self._overlap_config(DelayedScaling())
+        self.assertIn(
+            "must be MXFP8BlockScaling or unset",
+            te_ops.moe_overlap_unsupported_reason(
+                bad, HIDDEN_DIM, params_dtype=torch.bfloat16, recipe=recipe
+            ),
+        )
 
     @_eager_test_include
     @_overflow_test_include
@@ -954,83 +961,16 @@ class TestEP(_EpTestCase):
 
     @_mxfp8_align_test
     @_overlap_test
-    def test_moe_overlap_weight_cache(self):
-        """The MXFP8 weights, and the FC1 rows reordered for glu_interleave_size=None, are
-        prepared once with is_first_microbatch=True and reused with False; an in-place weight
-        update prepares them again, and None prepares them at each call."""
-        from transformer_engine.pytorch.ops.fused import moe_overlap
-
-        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        # recipe, quantized weights, glu_interleave_size, prepare function, calls per forward
-        cases = [(None, False, None, "_interleave_glu_rows", 1)]
-        if _mxfp8_overlap():
-            cases += [
-                (MXFP8BlockScaling(), quantized, glu, "_mxfp8_weight", 2)
-                for quantized, glu in ((False, 32), (True, 32), (False, None), (True, None))
-            ]
-        for recipe, quantized_weights, glu, prepare, per_call in cases:
-            with self.subTest(recipe=recipe, quantized_weights=quantized_weights, glu=glu):
-                config = self._overlap_config(recipe)
-                with te.quantized_model_init(enabled=quantized_weights, recipe=recipe):
-                    ops = self._moe_ops(config, self._make_buffer_from_config(config), glu)
-                model = te_ops.Sequential(*ops)
-                fc1, fc2 = ops[1], ops[3]
-
-                def run(first):
-                    kwargs = {"is_first_microbatch": first}
-                    with mock.patch.object(
-                        moe_overlap, prepare, wraps=getattr(moe_overlap, prepare)
-                    ) as prep, te.autocast(enabled=recipe is not None, recipe=recipe):
-                        x = tokens.clone().requires_grad_(True)
-                        y = model(
-                            x, topk_idx, w.clone().requires_grad_(True), topk_idx,
-                            op_kwargs={fc1: kwargs, fc2: kwargs},
-                        )  # fmt: skip
-                        y.sum().backward()
-                    torch.cuda.synchronize()
-                    return y.detach(), prep.call_count
-
-                y_first, calls = run(True)
-                if not self._moe_overlap_selected(model):
-                    self.skipTest("FusedMoE is not supported here")
-                self.assertEqual(calls, per_call)
-                y_next, calls = run(False)
-                self.assertEqual(calls, 0, "a later microbatch reuses the prepared weights")
-                # Equal weights; the EP layer itself is not bitwise reproducible across calls.
-                torch.testing.assert_close(y_next, y_first, rtol=2e-2, atol=2e-2)
-                with torch.no_grad():
-                    for fc in (fc1, fc2):
-                        fc.weight.copy_(fc.weight * 2)
-                y_updated, calls = run(False)
-                self.assertEqual(calls, per_call, "an in-place weight update invalidates the cache")
-                y_fresh, calls = run(None)
-                self.assertEqual(calls, per_call)
-                torch.testing.assert_close(y_updated, y_fresh, rtol=2e-2, atol=2e-2)
-                self.assertFalse(torch.allclose(y_updated, y_first, rtol=2e-2, atol=2e-2))
-                # An update of the stored data, which leaves the weight's own counter alone.
-                run(True)
-                with torch.no_grad():
-                    for fc in (fc1, fc2):
-                        fc.weight.rowwise_data.zero_()
-                y_zeroed, calls = run(False)
-                self.assertEqual(calls, per_call, "an update of the stored data invalidates it")
-                y_fresh, _ = run(None)
-                torch.testing.assert_close(y_zeroed, y_fresh, rtol=2e-2, atol=2e-2)
-
-    @_mxfp8_align_test
-    @_overlap_test
     def test_moe_overlap_inference_mode(self):
         """Weights created in inference mode, which have no version counter, run in the fused op
-        for every is_first_microbatch, with the FC1 rows reordered at each call."""
+        with the FC1 rows reordered at each call."""
         self._require_overlap_kernels()
         config = self._overlap_config()
         with torch.inference_mode():
             ops = self._moe_ops(config, self._make_buffer_from_config(config), None)
             model = te_ops.Sequential(*ops)
             topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-            for first in (True, False, None):
-                kwargs = {"is_first_microbatch": first}
-                model(tokens, topk_idx, w, topk_idx, op_kwargs={ops[1]: kwargs, ops[3]: kwargs})
+            model(tokens, topk_idx, w, topk_idx)
             torch.cuda.synchronize()
             self.assertTrue(self._moe_overlap_selected(model))
 

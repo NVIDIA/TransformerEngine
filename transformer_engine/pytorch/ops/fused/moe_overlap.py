@@ -91,14 +91,11 @@ class FusedMoE(FusedOperation):
         with eager receive sizing (no ``recv_capacity_per_rank``) the host is synchronized and it
         cannot be captured.
       - Without a recipe the routing weights are applied in the activation; under
-        ``MXFP8BlockScaling`` the GEMMs and the EP transport run in MXFP8 (the ``EpConfig`` sets
-        MXFP8 ``dispatch_fwd_quant_recipe`` and ``combine_bwd_quant_recipe``) and the routing
-        weights are applied to the second GEMM's output. Either way their gradient goes to the
-        dispatch's ``topk_weights``.
+        ``MXFP8BlockScaling`` the GEMMs and the EP transport run in MXFP8 and the routing weights
+        are applied to the second GEMM's output. Either way their gradient goes to the dispatch's
+        ``topk_weights``.
       - The weights are prepared for the GEMMs (quantized to MXFP8, or their FC1 rows reordered) at
-        each forward, unless the GroupedLinear's ``op_kwargs`` set ``is_first_microbatch``: True
-        keeps the prepared weights, False reuses them for the next microbatches of the same
-        weights.
+        each forward.
       - The GEMMs take the FC1 gate and up rows in alternating blocks of 32
         (``glu_interleave_size=32``). With ``glu_interleave_size=None`` the FC1 weight rows are
         reordered when the weights are prepared and the FC1 weight gradient is returned in the
@@ -138,8 +135,6 @@ class FusedMoE(FusedOperation):
         self._mxfp8 = recipe is not None
         # The GEMMs take FC1 gate and up rows in alternating blocks of _GLU_BLOCK.
         self._reorder_glu = activation.glu_interleave_size is None
-        # MXFP8 weight operands kept across microbatches, per GroupedLinear index.
-        self._weight_cache: dict[int, _PreparedWeight] = {}
         # The dispatch and combine share one EpBuffer (see _unsupported_reason); FusedMoE reads it
         # from self.basic_ops[0].buffer at each forward.
 
@@ -153,7 +148,7 @@ class FusedMoE(FusedOperation):
         next_op_input_quantizer,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
-        del prev_op_grad_output_quantizer, next_op_input_quantizer
+        del prev_op_grad_output_quantizer, next_op_input_quantizer, basic_op_kwargs
         _, fc1_op, _, fc2_op, _ = self.basic_ops
         topk_idx, topk_weights = basic_op_extra_inputs[0]
         # Splits and scales come from the dispatch inside this op.
@@ -180,14 +175,12 @@ class FusedMoE(FusedOperation):
         buffer.topk_idx_dtype = topk_idx.dtype
 
         if self._mxfp8:
-            return self._forward_mxfp8(
-                basic_op_ctxs, buffer, input_, topk_idx, topk_weights, basic_op_kwargs
-            )
+            return self._forward_mxfp8(basic_op_ctxs, buffer, input_, topk_idx, topk_weights)
         device = buffer.device
         num_groups = fc1_op.num_groups
         hidden = buffer.hidden_dim
         ffn = fc2_op.in_features
-        w1 = self._weight_operands(1, False, basic_op_kwargs[1].get("is_first_microbatch"))
+        w1 = self._weight_operands(1, False)
         w2 = _bf16_weight(fc2_op, num_groups)
         tokens = _require_contiguous(input_, "input")
         topk_idx = _require_contiguous(topk_idx, "topk_idx")
@@ -255,8 +248,7 @@ class FusedMoE(FusedOperation):
             for tensor in row_tensors:
                 tensor.grouped_tensor_num_tokens = num_tokens
             # CPU offload takes the activations, as the unfused ops do, not the routing weights.
-            # The weight copies stay on the GPU, as in TE modules, since they may be kept for
-            # the next microbatches.
+            # The weight copies saved for backward stay on the GPU, as in TE modules.
             if is_cpu_offload_enabled():
                 start_offload(*row_tensors[:3])
                 mark_activation_offload(*row_tensors[:3])
@@ -265,19 +257,14 @@ class FusedMoE(FusedOperation):
             fc1_ctx.buffer = buffer
             fc1_ctx.topk_weights_shape = topk_weights.shape
 
-    def _forward_mxfp8(
-        self, basic_op_ctxs, buffer, input_, topk_idx, topk_weights, basic_op_kwargs
-    ):
+    def _forward_mxfp8(self, basic_op_ctxs, buffer, input_, topk_idx, topk_weights):
         """Forward with MXFP8 GEMMs and EP transport."""
         fc2_op = self.basic_ops[3]
         device = buffer.device
         hidden = buffer.hidden_dim
         ffn = fc2_op.in_features
         backward = any(ctx.requires_grad for ctx in basic_op_ctxs)
-        w1, w2 = (
-            self._weight_operands(idx, backward, basic_op_kwargs[idx].get("is_first_microbatch"))
-            for idx in (1, 3)
-        )
+        w1, w2 = (self._weight_operands(idx, backward) for idx in (1, 3))
         tokens, tokens_scale, symm_input = _quantize_for_dispatch(
             _require_contiguous(input_, "input"), device
         )
@@ -331,33 +318,16 @@ class FusedMoE(FusedOperation):
         )  # fmt: skip
         return result, [(tokens_per_expert, recv_weights), (), (), (), ()]
 
-    def _weight_operands(self, idx, columnwise, is_first_microbatch):
+    def _weight_operands(self, idx, columnwise):
         """GEMM operands of the weight of the GroupedLinear at ``idx``: its ``_MxFp8Weight``, or
-        the BF16 weight. As in TE modules, ``is_first_microbatch`` True prepares and keeps them,
-        False reuses the kept ones unless the weight changed in place, and None prepares them
-        without keeping them."""
+        the BF16 weight. Prepared fresh at each forward."""
         fc_op = self.basic_ops[idx]
         reorder = self._reorder_glu and idx == 1
         if not (self._mxfp8 or reorder):
             return _bf16_weight(fc_op, fc_op.num_groups)
-        key = None if is_first_microbatch is None else _weight_key(fc_op.weight)
-        kept = self._weight_cache.get(idx)
-        if is_first_microbatch is False and key is not None and kept is not None:
-            operands = kept.operands
-            has_columnwise = not isinstance(operands, _MxFp8Weight) or (
-                operands.columnwise_data is not None
-            )
-            if kept.key == key and (has_columnwise or not columnwise):
-                return operands
         if self._mxfp8:
-            operands = _mxfp8_weight(fc_op, fc_op.num_groups, columnwise, reorder_glu=reorder)
-        else:
-            operands = _interleave_glu_rows(_bf16_weight(fc_op, fc_op.num_groups))
-        if key is None:
-            self._weight_cache.pop(idx, None)
-        else:
-            self._weight_cache[idx] = _PreparedWeight(key, operands)
-        return operands
+            return _mxfp8_weight(fc_op, fc_op.num_groups, columnwise, reorder_glu=reorder)
+        return _interleave_glu_rows(_bf16_weight(fc_op, fc_op.num_groups))
 
     def fuser_backward(
         self,
@@ -682,13 +652,6 @@ class _MxFp8Weight(NamedTuple):
     columnwise_scale_inv: Optional[torch.Tensor] = None
 
 
-class _PreparedWeight(NamedTuple):
-    """Operands kept for ``is_first_microbatch=False`` and the ``_weight_key`` they were made at."""
-
-    key: tuple
-    operands: torch.Tensor | _MxFp8Weight
-
-
 def _gemm_interface_reason(mxfp8: bool = False) -> Optional[str]:
     """Why the EP grouped GEMM kernel tree does not match Transformer Engine, or ``None``."""
     try:
@@ -698,20 +661,6 @@ def _gemm_interface_reason(mxfp8: bool = False) -> Optional[str]:
     except ImportError as err:
         return f"the CuTeDSL EP grouped GEMMs cannot be imported: {err}"
     return gemm_interface_reason(mxfp8)
-
-
-def _weight_key(weight) -> Optional[tuple]:
-    """Identity and in-place update counters of the tensors that store ``weight``, or ``None``
-    when one has no counter (inference tensors)."""
-    try:
-        key = [weight._version]
-        for name in ("rowwise_data", "columnwise_data", "scale_inv", "columnwise_scale_inv"):
-            tensor = getattr(weight, name, None)
-            if tensor is not None:
-                key += [tensor.data_ptr(), tensor._version]
-    except RuntimeError:
-        return None
-    return tuple(key)
 
 
 def _ep_quantizer() -> MXFP8Quantizer:
@@ -894,8 +843,8 @@ def moe_overlap_unsupported_reason(
     single_grouped_weight : bool, default = ``False``
         ``single_grouped_weight`` of the GroupedLinear ops.
     recipe : Recipe, optional
-        Quantization recipe the ops run under, ``None`` for BF16. ``MXFP8BlockScaling`` needs
-        MXFP8 EP transport in ``config``.
+        Quantization recipe the ops run under, ``None`` for BF16. Under ``MXFP8BlockScaling`` the
+        EP transport is MXFP8; ``config``'s transport recipes must be MXFP8BlockScaling or unset.
     primary_weights_in_fp8 : bool, default = ``False``
         Whether the GroupedLinear weights are quantized parameters (``quantized_model_init``).
         They must be MXFP8 and need the ``MXFP8BlockScaling`` recipe.
@@ -907,6 +856,8 @@ def moe_overlap_unsupported_reason(
         )
         mismatch = _gemm_interface_reason() if _moe_overlap_available() else None
         return f"{reason}: {mismatch}" if mismatch else reason
+    # TODO(phuonguyen): drop this gate once the routing-weight gradient is reworked to avoid the
+    # atomic reduction, which makes it reproducible under deterministic execution.
     if _deterministic_algorithms_required():
         return (
             "deterministic execution was requested, and the routing-weight gradient is reduced"
@@ -934,13 +885,15 @@ def moe_overlap_unsupported_reason(
             return mismatch
         if recipe.fp8_format != Format.E4M3 or recipe.backward_override is not None:
             return "MXFP8 needs fp8_format E4M3 and no backward_override"
-        if not all(
-            isinstance(r, MXFP8BlockScaling)
+        # MXFP8 FusedMoE quantizes the EP transport itself, so the transport recipes need not be
+        # set; if set they must be MXFP8, not a different recipe.
+        if any(
+            r is not None and not isinstance(r, MXFP8BlockScaling)
             for r in (config.dispatch_fwd_quant_recipe, config.combine_bwd_quant_recipe)
         ):
             return (
-                "MXFP8 needs MXFP8 EP transport (dispatch_fwd_quant_recipe and"
-                " combine_bwd_quant_recipe)"
+                "MXFP8 FusedMoE uses MXFP8 EP transport; dispatch_fwd_quant_recipe and"
+                " combine_bwd_quant_recipe must be MXFP8BlockScaling or unset"
             )
         if config.hidden_dim % 512 != 0 or ffn_hidden_size % _TILE != 0:
             return f"MXFP8 needs hidden_dim a multiple of 512 and ffn_hidden_size of {_TILE}"
@@ -1068,7 +1021,8 @@ def _unsupported_reason(dispatch, fc1, activation, fc2, combine, recipe=None) ->
         for fc in (fc1, fc2):
             cfg = wgrad_gemm.WgradConfig(
                 _TILE, fc.out_features, fc.in_features, config.num_local_experts, 1,
-                accumulate=fc._accumulate_into_main_grad, mxfp8=True,
+                accumulate=fc._accumulate_into_main_grad,
+                scaling_mode=wgrad_gemm.MXFP8_1D_SCALING,
                 rows_alignment=config.alignment,
                 routed_rows=config.max_tokens_per_rank * config.top_k,
             )  # fmt: skip
