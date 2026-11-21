@@ -50,7 +50,7 @@ from transformer_engine.pytorch.constants import (
     META_O,
     META_QKV,
 )
-from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import (
+from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     fused_attn_bwd,
 )
@@ -2623,7 +2623,7 @@ class FusedAttention(torch.nn.Module):
     FusedAttnBackend["FP8"]
        cuDNN attention for FP8 with any sequence length. It supports the following recipes, where
        "Inputs", "Intermediates" and "Outputs" are in the format of "tensor: quantizer". The recipes
-       are implemented in transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn.
+       are implemented in transformer_engine.pytorch.cpp_extensions.fused_attn.
 
                                     Direction   Inputs                                       Intermediates  Outputs
        DelayedScaling (DS)          forward     Q/K/V: DS                                    S: DS          O: DS

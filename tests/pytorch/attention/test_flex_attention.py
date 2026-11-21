@@ -23,8 +23,8 @@ from transformer_engine.common.cudnn.graph import GraphCache, GraphCacheEntry
 from transformer_engine.pytorch import DotProductAttention, is_bf16_available
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 import transformer_engine.pytorch.attention.dot_product_attention.flex_attention as flex_attention
-from transformer_engine.pytorch.cpp_extensions import cudnn as cudnn_graph
-from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn
+from transformer_engine.pytorch.cpp_extensions import cudnn_wrappers as cudnn_graph
+from transformer_engine.pytorch.cpp_extensions import fused_attn
 from transformer_engine.pytorch.utils import get_device_compute_capability
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -475,7 +475,7 @@ def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
 def test_score_mod_cache_diagnostics(monkeypatch, capsys, level, cacheable):
     """Report real forward/backward builds and executions without caching unsafe callbacks."""
     diagnostics = cudnn_graph._diagnostics
-    assert diagnostics is flex_attention._diagnostics is cudnn_fused_attn._diagnostics
+    assert diagnostics is flex_attention._diagnostics is fused_attn._diagnostics
     monkeypatch.setattr(diagnostics, "_level", level)
     monkeypatch.setattr(diagnostics, "events", Counter())
     monkeypatch.setattr(diagnostics, "times", Counter())

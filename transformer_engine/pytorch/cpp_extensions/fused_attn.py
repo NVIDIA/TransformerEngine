@@ -35,7 +35,7 @@ from transformer_engine.common.cudnn.graph import (
 )
 from transformer_engine.common.cudnn.mxfp8_utils import support_error as mxfp8_support_error
 
-from .cudnn import (
+from .cudnn_wrappers import (
     _import_cudnn_frontend,
     _build_cudnn_pygraph,
     _execute_cudnn_graph,

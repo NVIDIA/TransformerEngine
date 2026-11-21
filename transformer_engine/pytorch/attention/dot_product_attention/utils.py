@@ -41,7 +41,7 @@ from transformer_engine.pytorch.constants import (
     MXFP8_BLOCK_SCALING_SIZE,
 )
 from transformer_engine.common.cudnn.mxfp8_utils import (
-    quantization_layouts as mxfp8_quantization_layouts,
+    quantization_direction as mxfp8_quantization_direction,
     scale_reordering as mxfp8_scale_reordering,
     shape_error as mxfp8_shape_error,
     support_error as mxfp8_support_error,
@@ -481,7 +481,7 @@ def _get_fused_attn_backend(**fused_attn_kwargs):
     graph break because it is baked into the graph as a literal, while an enum
     member comes out of the reconstruction corrupted (see the cast at the call
     site, which restores the enum)."""
-    from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import get_fused_attn_backend
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import get_fused_attn_backend
 
     fused_attention_backend, reject_message = get_fused_attn_backend(
         FusedAttentionParams(**fused_attn_kwargs)
@@ -3589,7 +3589,7 @@ def combine_and_quantize(
             if used_in_forward != used_in_backward:
                 for quantizer, (rowwise, columnwise) in zip(
                     (q_quantizer, k_quantizer, v_quantizer),
-                    mxfp8_quantization_layouts(backward=used_in_backward),
+                    mxfp8_quantization_direction(backward=used_in_backward),
                 ):
                     quantizer.rowwise_usage = rowwise
                     quantizer.columnwise_usage = columnwise
@@ -3618,7 +3618,7 @@ def combine_and_quantize(
         if used_in_forward != used_in_backward:
             for quantizer, (rowwise, columnwise) in zip(
                 (q_quantizer, k_quantizer, v_quantizer),
-                mxfp8_quantization_layouts(backward=used_in_backward),
+                mxfp8_quantization_direction(backward=used_in_backward),
             ):
                 quantizer.rowwise_usage = rowwise
                 quantizer.columnwise_usage = columnwise

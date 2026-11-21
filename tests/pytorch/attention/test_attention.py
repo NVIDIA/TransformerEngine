@@ -54,7 +54,7 @@ from transformer_engine.pytorch.constants import (
     QKVLayout,
     SoftmaxType,
 )
-from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import (
+from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     fused_attn_bwd,
     get_fused_attn_backend,
@@ -233,7 +233,7 @@ def test_fused_attn_query_backward_precision(
 ):
     """Check that the support query uses the effective backward precision."""
     import cudnn
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+    from transformer_engine.pytorch.cpp_extensions import fused_attn as implementation
 
     monkeypatch.delenv("NVTE_FP8_DPA_BWD", raising=False)
     if fp8_bwd is not None:
@@ -351,7 +351,9 @@ def test_fused_attn_inference_ignores_dropout(dtype, qkv_format):
 def test_cudnn_attention_handle_streams():
     """Cached handles follow the target device's stream without changing the caller's device."""
     import cudnn
-    from transformer_engine.pytorch.cpp_extensions.cudnn import _get_cudnn_current_stream_handle
+    from transformer_engine.pytorch.cpp_extensions.cudnn_wrappers import (
+        _get_cudnn_current_stream_handle,
+    )
 
     current_device = torch.cuda.current_device()
     device = torch.device("cuda", (current_device + 1) % torch.cuda.device_count())
@@ -371,7 +373,7 @@ def test_cudnn_attention_handle_streams():
 @pytest.mark.parametrize("dropout", (0.0, 0.125))
 def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
     """Packed storage, optional outputs, and scalars preserve query/runtime graph identity."""
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+    from transformer_engine.pytorch.cpp_extensions import fused_attn as implementation
 
     batch, seqlen, heads, dim = 2, 128, 4, 64
     fmt = implementation._formats(layout)[0]
@@ -453,7 +455,7 @@ def test_fused_attn_query_matches_runtime_graph(layout, backward, dropout):
 )
 def test_fused_attn_bias_graph_cache(dtype, qkv_format, bias_layout, monkeypatch):
     """Bias layouts reuse queried plans and preserve forward/backward numerics."""
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+    from transformer_engine.pytorch.cpp_extensions import fused_attn as implementation
 
     monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
     monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
@@ -553,7 +555,7 @@ def test_fused_attn_ragged_batch_capacity(
 ):
     """Match common forward/backward batch capacities and cumulative-length inputs."""
     import cudnn
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+    from transformer_engine.pytorch.cpp_extensions import fused_attn as implementation
 
     monkeypatch.setattr(cudnn, "backend_version", lambda: version)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: capability)
@@ -745,7 +747,7 @@ def test_fused_attn_ragged_dropout(dtype, batch):
 @pytest.mark.parametrize("error", (RuntimeError("device failure"), ImportError("frontend missing")))
 def test_fused_attn_query_propagates_setup_errors(error, monkeypatch):
     """A failed setup must surface as an error instead of selecting a fallback backend."""
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+    from transformer_engine.pytorch.cpp_extensions import fused_attn as implementation
 
     def fail(_self):
         raise error
@@ -839,7 +841,7 @@ def test_fused_attn_query_propagates_setup_errors(error, monkeypatch):
 def test_fused_attn_python_capability_exclusions(monkeypatch, changes, version, capability, reason):
     """Preserve capability and tracked-defect exclusions before asking cuDNN to build."""
     import cudnn
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+    from transformer_engine.pytorch.cpp_extensions import fused_attn as implementation
 
     monkeypatch.setattr(cudnn, "backend_version", lambda: version)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: capability)
@@ -876,7 +878,7 @@ def test_fused_attn_python_capability_exclusions(monkeypatch, changes, version, 
 def test_fused_attn_python_mxfp8_exclusions(monkeypatch, capability, version, layout, reason):
     """Apply the shared MXFP8 policy before constructing any descriptors."""
     import cudnn
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+    from transformer_engine.pytorch.cpp_extensions import fused_attn as implementation
 
     monkeypatch.setattr(cudnn, "backend_version", lambda: version)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: capability)
@@ -902,7 +904,7 @@ def test_fused_attn_python_mxfp8_exclusions(monkeypatch, capability, version, la
 @pytest.mark.parametrize("requires_backward", (False, True, None))
 def test_fused_attn_python_backward_selection(monkeypatch, is_training, requires_backward):
     """Backward support and dropout must follow independent flags."""
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+    from transformer_engine.pytorch.cpp_extensions import fused_attn as implementation
 
     queried = []
 
@@ -998,7 +1000,7 @@ def test_fused_attn_python_thd_learnable_support(
 ):
     """Only generic THD learnable-softmax backward kernels need cuDNN 9.26."""
     import cudnn
-    from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import _AttentionGraph
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import _AttentionGraph
 
     monkeypatch.setattr(cudnn, "backend_version", lambda: version)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (10, 0))
@@ -1034,7 +1036,7 @@ def test_fused_attn_python_thd_learnable_support(
 def test_fused_attn_python_eval_backward_precision(monkeypatch, fp8_bwd):
     """FP8 THD backward exclusions must allow a model-precision backward on SM90."""
     import cudnn
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+    from transformer_engine.pytorch.cpp_extensions import fused_attn as implementation
 
     monkeypatch.setenv("NVTE_FP8_DPA_BWD", fp8_bwd)
     monkeypatch.setattr(cudnn, "backend_version", lambda: 92500)
@@ -1079,7 +1081,7 @@ def test_fused_attn_python_fp8_thd_sink_support(
 ):
     """Every FP8 THD sink-token backward kernel needs cuDNN 9.26, even at D=64."""
     import cudnn
-    from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import _AttentionGraph
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import _AttentionGraph
 
     monkeypatch.setattr(cudnn, "backend_version", lambda: version)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (10, 0))

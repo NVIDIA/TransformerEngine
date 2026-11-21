@@ -12,7 +12,7 @@ from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 from jax.custom_batching import sequential_vmap
 
-from transformer_engine.common.cudnn.mxfp8_utils import quantization_layouts, scale_reordering
+from transformer_engine.common.cudnn.mxfp8_utils import quantization_direction, scale_reordering
 from ..quantize import QuantizerFactory, QuantizeLayout, ScalingMode, ScaledTensor2x
 from ..quantize.tensor import ScaledTensorFactory
 from .quantization import quantize
@@ -51,7 +51,7 @@ def prepare_qkv(qkv, backward=False):
     """Return data and reordered scales named by the common graph builder."""
     values = {}
     for name, value, (rowwise, columnwise) in zip(
-        ("q", "k", "v"), qkv, quantization_layouts(backward)
+        ("q", "k", "v"), qkv, quantization_direction(backward)
     ):
         value = value.reshape(-1, *value.shape[-3:]).transpose(0, 2, 1, 3)
         row, col = quantize_operand(value, rowwise, columnwise)

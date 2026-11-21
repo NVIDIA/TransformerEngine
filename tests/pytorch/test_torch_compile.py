@@ -1326,7 +1326,7 @@ def test_get_attention_backend_traceable(monkeypatch):
     attention params change, and the baked Python get_fused_attn_backend result
     must drive the selection."""
     from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
-    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn
+    from transformer_engine.pytorch.cpp_extensions import fused_attn
 
     def fn(x, params):
         (
@@ -1404,7 +1404,7 @@ def test_get_attention_backend_traceable(monkeypatch):
     # guard on the wrapped function).
     monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
     monkeypatch.setattr(
-        cudnn_fused_attn,
+        fused_attn,
         "get_fused_attn_backend",
         lambda _config: (dpa_utils.FusedAttnBackend.No_Backend, "disabled by test"),
     )

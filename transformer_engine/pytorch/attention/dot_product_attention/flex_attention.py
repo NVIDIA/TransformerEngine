@@ -27,7 +27,7 @@ from transformer_engine.common.cudnn.score_mod import (
     wrap_score_mod as _wrap_score_mod,
 )
 
-from transformer_engine.pytorch.cpp_extensions.cudnn import (
+from transformer_engine.pytorch.cpp_extensions.cudnn_wrappers import (
     _import_cudnn_frontend,
     _build_cudnn_pygraph,
     _graph_cache,

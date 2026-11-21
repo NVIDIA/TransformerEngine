@@ -17,7 +17,7 @@ from transformer_engine.pytorch.utils import (
     nvtx_range_push,
     get_device_compute_capability,
 )
-from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import (
+from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     fused_attn_bwd,
 )

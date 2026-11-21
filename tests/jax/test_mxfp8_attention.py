@@ -47,8 +47,8 @@ def test_scale_reordering_matches_graph(dim, columnwise):
 
 def test_quantization_directions():
     """Forward V contracts over sequence; backward Q/K need both directions."""
-    assert mxfp8.quantization_layouts() == ((True, False), (True, False), (False, True))
-    assert mxfp8.quantization_layouts(True) == ((True, True), (True, True), (True, False))
+    assert mxfp8.quantization_direction() == ((True, False), (True, False), (False, True))
+    assert mxfp8.quantization_direction(True) == ((True, True), (True, True), (True, False))
     assert not mxfp8.shape_error(128, 256, 64, 96)
     assert mxfp8.shape_error(129, 256, 64, 96)
     assert mxfp8.shape_error(128, 256, 64, 80)

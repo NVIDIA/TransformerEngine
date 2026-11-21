@@ -7,7 +7,7 @@
 from .graph import round_up
 
 
-def quantization_layouts(backward=False):
+def quantization_direction(backward=False):
     """Return (rowwise, columnwise) requirements for Q, K, and V.
 
     Rowwise quantization groups 32 values along the head dimension; columnwise

@@ -32,7 +32,7 @@ from transformer_engine.pytorch.constants import (
     QKVFormat,
     AttnMaskType,
 )
-from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import (
+from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     get_fused_attn_backend,
 )
