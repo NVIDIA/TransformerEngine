@@ -84,6 +84,16 @@ bool is_mxfp8(NVTETensor t) {
   return transformer_engine::is_mxfp8_scaling(nvte_tensor_scaling_mode(t));
 }
 
+// The operand scaling of a MoE overlap op: BF16 (the delayed default) or MXFP8; any other mode is
+// unsupported for now.
+NVTEScalingMode overlap_scaling_mode(NVTETensor t) {
+  const NVTEScalingMode mode = nvte_tensor_scaling_mode(t);
+  NVTE_CHECK(mode == NVTE_DELAYED_TENSOR_SCALING || mode == NVTE_MXFP8_1D_SCALING,
+             "the MoE overlap ops support BF16 or MXFP8 operands only, got scaling mode ",
+             static_cast<int>(mode));
+  return mode;
+}
+
 // An MXFP8 operand: E4M3 data with compact or GEMM-swizzled scales.
 void check_mxfp8(NVTETensor t, bool swizzled, const char* name) {
   NVTE_CHECK(t != nullptr && is_mxfp8(t) && nvte_tensor_type(t) == kNVTEFloat8E4M3, name,
@@ -223,7 +233,8 @@ bool dispatch_writes_layout(const EpGemmContext& ctx, size_t num_local_experts) 
 
 // The forward combine_gemm GEMM of [rows, k] inputs and n output columns.
 ep::EpCombineGemmConfig combine_fwd_config(const EpGemmContext& ctx, size_t rows, size_t k,
-                                           size_t n, size_t num_experts, bool mxfp8) {
+                                           size_t n, size_t num_experts,
+                                           NVTEScalingMode scaling_mode) {
   return ep::EpCombineGemmConfig{rows,
                                  k,
                                  n,
@@ -232,7 +243,7 @@ ep::EpCombineGemmConfig combine_fwd_config(const EpGemmContext& ctx, size_t rows
                                  combine_chunk(n),
                                  kCombineAtGemmEntry,
                                  false,
-                                 mxfp8,
+                                 scaling_mode,
                                  ctx.alignment(),
                                  ctx.all_clusters};
 }
@@ -384,7 +395,8 @@ struct Wgrad {
 // reads both operands columnwise.
 std::optional<Wgrad> make_wgrad(const EpGemmContext& ctx, NVTETensor grad, NVTETensor x,
                                 NVTETensor weight_grad, bool accumulate, size_t rows,
-                                size_t num_experts, bool mxfp8) {
+                                size_t num_experts, NVTEScalingMode scaling_mode) {
+  const bool mxfp8 = transformer_engine::is_mxfp8_scaling(scaling_mode);
   if (weight_grad == nullptr) {
     NVTE_CHECK(x == nullptr, "wgrad_input needs weight_grad");
     return std::nullopt;
@@ -434,8 +446,8 @@ std::optional<Wgrad> make_wgrad(const EpGemmContext& ctx, NVTETensor grad, NVTET
   Wgrad wgrad{grad,
               x,
               weight_grad,
-              {rows, m, n, num_experts, 1, out_type == kNVTEFloat32, accumulate, false, 0, mxfp8,
-               false, ctx.alignment(), routed_rows},
+              {rows, m, n, num_experts, 1, out_type == kNVTEFloat32, accumulate, false, 0,
+               scaling_mode, false, ctx.alignment(), routed_rows},
               {}};
   const auto layout = wgrad.config.workspace_layout();
   NVTE_CHECK(layout.has_value(), "cannot query the weight-gradient workspace layout");
@@ -447,7 +459,7 @@ std::optional<Wgrad> make_wgrad(const EpGemmContext& ctx, NVTETensor grad, NVTET
 // writes: an added or FP32 one, and on SM 10.7 a written BF16 one with long experts. The others
 // read global descriptors.
 bool needs_descriptors(const Wgrad& wgrad) {
-  return wgrad.config.mxfp8 && wgrad.config.reads_descriptors();
+  return wgrad.config.is_mxfp8() && wgrad.config.reads_descriptors();
 }
 
 // One launch of a weight gradient on num_clusters clusters (none: no launch), a programmatic
@@ -475,7 +487,7 @@ void launch_wgrad(const Wgrad& wgrad, const GemmScratch& scratch, int num_cluste
   auto out = wrap_rowwise(wgrad.weight_grad, false);
   auto row_ends = wrap_raw(scratch.row_ends, kNVTEInt32, config.num_experts);
   auto ws = wrap_raw(scratch.wgrad, kNVTEByte, layout.total_bytes);
-  if (config.mxfp8) {
+  if (config.is_mxfp8()) {
     auto grad = wrap_columnwise(wgrad.grad, true);
     auto x = wrap_columnwise(wgrad.x, true);
     auto grad_scales = wrap_scales(wgrad.grad, true, config.rows, config.m);
@@ -520,13 +532,13 @@ void launch_requant(NVTETensor t, const GemmScratch& scratch, size_t rows, size_
 // Bytes of the chained weight-gradient workspace of a backward GEMM over num_experts slabs of
 // [m, n], as make_wgrad sizes it; the max over the output precisions, which the query does not know.
 size_t wgrad_workspace_bytes(const EpGemmContext& ctx, size_t rows, size_t m, size_t n,
-                             size_t num_experts, bool mxfp8) {
+                             size_t num_experts, NVTEScalingMode scaling_mode) {
   const size_t routed_rows =
       static_cast<size_t>(ctx.group.max_tokens_per_rank) * ctx.layer_cfg.top_k;
   size_t bytes = 0;
   for (const bool fp32_out : {false, true}) {
-    const ep::EpWgradConfig config{rows,       m,     n, num_experts, 1,     fp32_out,
-                                   false,      false, 0, mxfp8,       false, ctx.alignment(),
+    const ep::EpWgradConfig config{rows,       m,     n, num_experts,  1,     fp32_out,
+                                   false,      false, 0, scaling_mode, false, ctx.alignment(),
                                    routed_rows};
     const auto layout = config.workspace_layout();
     if (layout.has_value()) {
@@ -559,7 +571,7 @@ size_t nvte_ep_overlap_workspace_size(size_t hidden_dim, size_t ffn_dim, size_t 
   using namespace transformer_engine;
   const size_t ne = num_local_experts;
   const size_t rows = recv_capacity;
-  const bool mx = mxfp8 != 0;
+  const NVTEScalingMode mx = mxfp8 != 0 ? NVTE_MXFP8_1D_SCALING : NVTE_DELAYED_TENSOR_SCALING;
   const bool wg = with_weight_grad != 0;
   size_t need = 0;
   // Largest scratch of a call whose GEMM uses `config`; unit_probs sizes the per-row ones buffer and
@@ -632,7 +644,8 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
   NVTE_CHECK(total_recv_tokens == nullptr || (nvte_tensor_numel(total_recv_tokens) == 1 &&
                                               nvte_tensor_type(total_recv_tokens) == kNVTEInt32),
              "total_recv_tokens must be an int32 tensor of 1 element");
-  const bool mxfp8 = is_mxfp8(tokens);
+  const NVTEScalingMode scaling_mode = overlap_scaling_mode(tokens);
+  const bool mxfp8 = scaling_mode == NVTE_MXFP8_1D_SCALING;
   if (mxfp8) {
     check_mxfp8(tokens, false, "tokens");
     check_mxfp8(recv_tokens, false, "recv_tokens");
@@ -652,8 +665,9 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
   // The GEMM runs beside the dispatch, and its tail on the SMs the dispatch frees. Both launches
   // claim tiles from one workspace.
   ep::WorkspaceLayout layout;
-  const ep::EpDispatchGemmConfig config{
-      rows, hidden, n, num_experts, ctx.num_clusters, false, mxfp8, ctx.alignment(), device_layout};
+  const ep::EpDispatchGemmConfig config{rows,         hidden,           n,
+                                        num_experts,  ctx.num_clusters, false,
+                                        scaling_mode, ctx.alignment(),  device_layout};
   std::vector<tvm::ffi::Function> gemms{get_gemm(config, &layout)};
   const int tail_clusters = ctx.all_clusters - ctx.num_clusters;
   if (tail_clusters > 0) {
@@ -746,7 +760,8 @@ void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
   const size_t n = nvte_tensor_shape(weight).data[1];
   check_rows(ctx, rows, "gemm_in");
   NVTE_CHECK(nvte_tensor_shape(weight).data[2] == k, "weight columns must equal gemm_in columns");
-  const bool mxfp8 = is_mxfp8(gemm_in);
+  const NVTEScalingMode scaling_mode = overlap_scaling_mode(gemm_in);
+  const bool mxfp8 = scaling_mode == NVTE_MXFP8_1D_SCALING;
   if (mxfp8) {
     check_mxfp8(gemm_in, true, "gemm_in");
     check_mxfp8(weight, true, "weight");
@@ -765,7 +780,8 @@ void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
   // The GEMM launches on every SM; the clusters past those beside the combine stop after the
   // first chunk and leave their SMs to the combine.
   ep::WorkspaceLayout layout;
-  const ep::EpCombineGemmConfig config = combine_fwd_config(ctx, rows, k, n, num_experts, mxfp8);
+  const ep::EpCombineGemmConfig config =
+      combine_fwd_config(ctx, rows, k, n, num_experts, scaling_mode);
   const size_t n_chunk = config.n_chunk;
   const tvm::ffi::Function gemm = get_gemm(config, &layout);
   // Own workspace for the signal, scheduler and alpha words; the expert layout is the caller's
@@ -826,7 +842,8 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
                  nvte_tensor_shape(grad_gemm_out).data[1] == 2 * ffn,
              "weight must be [experts, hidden, ffn] with 2 * ffn the gemm_out columns: SwiGLU");
   NVTE_CHECK(nvte_tensor_type(gemm_out) == kNVTEBFloat16, "gemm_out must be bfloat16");
-  const bool mxfp8 = is_mxfp8(grad_result);
+  const NVTEScalingMode scaling_mode = overlap_scaling_mode(grad_result);
+  const bool mxfp8 = scaling_mode == NVTE_MXFP8_1D_SCALING;
   if (mxfp8) {
     check_mxfp8(grad_result, false, "grad_result");
     check_mxfp8(grad_expert_out, false, "grad_expert_out");
@@ -850,12 +867,13 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
       mxfp8 && nvte_get_tensor_param(grad_expert_out, kNVTEColumnwiseData).data_ptr != nullptr;
   NVTE_CHECK(!mxfp8 || weight_grad == nullptr || requant,
              "the MXFP8 weight gradient needs the columnwise grad_expert_out");
-  const std::optional<Wgrad> wgrad = make_wgrad(ctx, grad_expert_out, wgrad_input, weight_grad,
-                                                accumulate_weight_grad, rows, num_experts, mxfp8);
+  const std::optional<Wgrad> wgrad =
+      make_wgrad(ctx, grad_expert_out, wgrad_input, weight_grad, accumulate_weight_grad, rows,
+                 num_experts, scaling_mode);
 
   ep::WorkspaceLayout layout;
   const ep::EpDispatchGemmConfig config{
-      rows, hidden, ffn, num_experts, ctx.num_clusters, true, mxfp8, ctx.alignment()};
+      rows, hidden, ffn, num_experts, ctx.num_clusters, true, scaling_mode, ctx.alignment()};
   const tvm::ffi::Function gemm = get_gemm(config, &layout);
   GemmScratch scratch = claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows,
                                       false, wgrad ? wgrad->layout.total_bytes : 0);
@@ -958,7 +976,8 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
              "weight must be [experts, 2 * ffn, hidden]");
   check_counts(recv_tokens_per_expert, num_experts, "recv_tokens_per_expert");
   check_row_floats(grad_recv_topk_weights, rows, "grad_recv_topk_weights");
-  const bool mxfp8 = is_mxfp8(grad_gemm_out);
+  const NVTEScalingMode scaling_mode = overlap_scaling_mode(grad_gemm_out);
+  const bool mxfp8 = scaling_mode == NVTE_MXFP8_1D_SCALING;
   if (mxfp8) {
     check_mxfp8(grad_gemm_out, true, "grad_gemm_out");
     check_mxfp8(weight, true, "weight");
@@ -970,8 +989,9 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
                    nvte_tensor_type(weight) == kNVTEBFloat16,
                "grad_gemm_out and weight must be bfloat16 or MXFP8");
   }
-  const std::optional<Wgrad> wgrad = make_wgrad(ctx, grad_gemm_out, wgrad_input, weight_grad,
-                                                accumulate_weight_grad, rows, num_experts, mxfp8);
+  const std::optional<Wgrad> wgrad =
+      make_wgrad(ctx, grad_gemm_out, wgrad_input, weight_grad, accumulate_weight_grad, rows,
+                 num_experts, scaling_mode);
   // MXFP8: the call writes the columnwise wgrad_input from its rowwise data when that is set.
   const bool requant =
       wgrad && mxfp8 && nvte_get_tensor_param(wgrad_input, kNVTERowwiseData).data_ptr != nullptr;
@@ -993,7 +1013,7 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
                                        n_chunk,
                                        !plain && kCombineAtGemmEntry,
                                        true,
-                                       mxfp8,
+                                       scaling_mode,
                                        ctx.alignment()};
   const tvm::ffi::Function gemm = get_gemm(config, &layout);
   GemmScratch scratch = claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows,

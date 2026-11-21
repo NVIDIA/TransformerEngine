@@ -28,7 +28,9 @@ from ._loader import (
     compile_launch,
     device_compute_capability,
     CLUSTER_MN,
+    DELAYED_TENSOR_SCALING,
     MMA_TILER_MN,
+    MXFP8_1D_SCALING,
     SF_VEC_SIZE,
     fake_tensor,
     fp8_fake,
@@ -52,12 +54,17 @@ class WgradConfig:
     accumulate: bool = False  # add to the weight gradient instead of writing it
     wait_primary_at_start: bool = False  # wait for the kernel before it ahead of any load
     ready_slot_rows: int = 0  # wait until signal[] is set for every slot of these rows
-    mxfp8: bool = False  # MXFP8 operands
+    scaling_mode: int = DELAYED_TENSOR_SCALING  # operand scaling (NVTEScalingMode)
     descriptors_only: bool = False  # MXFP8: write the per-expert descriptors, no GEMM
     rows_alignment: int = 0  # rows per expert slab are a multiple of it
     routed_rows: int = 0  # rows a rank receives on average
     # Kernels, workspace layouts and compiled functions are specific to the device architecture.
     capability: tuple = field(default_factory=device_compute_capability)
+
+    @property
+    def mxfp8(self) -> bool:
+        """Whether the operands are MXFP8 rather than BF16."""
+        return self.scaling_mode == MXFP8_1D_SCALING
 
 
 def _mxfp8_kernels():
@@ -284,47 +291,47 @@ def _compile(cfg: WgradConfig):
 
 def _config(
     rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
-    ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+    ready_slot_rows, scaling_mode, descriptors_only, rows_alignment, routed_rows,
 ):  # fmt: skip
     """Build a WgradConfig from the entry-point arguments."""
     return WgradConfig(
         rows, m, n, num_experts, num_clusters, bool(fp32_out), bool(accumulate),
-        bool(wait_primary_at_start), ready_slot_rows, bool(mxfp8), bool(descriptors_only),
+        bool(wait_primary_at_start), ready_slot_rows, int(scaling_mode), bool(descriptors_only),
         rows_alignment, routed_rows,
     )  # fmt: skip
 
 
 def get_ep_wgrad_workspace_layout(
     rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
-    ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+    ready_slot_rows, scaling_mode, descriptors_only, rows_alignment, routed_rows,
 ):  # fmt: skip
     """[total bytes, counter offset] of the workspace of this configuration."""
     return list(workspace_layout(_config(
         rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
-        ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+        ready_slot_rows, scaling_mode, descriptors_only, rows_alignment, routed_rows,
     )))  # fmt: skip
 
 
 def get_ep_wgrad_reads_descriptors(
     rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
-    ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+    ready_slot_rows, scaling_mode, descriptors_only, rows_alignment, routed_rows,
 ) -> bool:  # fmt: skip
     """Whether the launches of this configuration read the per-expert descriptors of a
     ``descriptors_only`` launch."""
     return reads_descriptors(_config(
         rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
-        ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+        ready_slot_rows, scaling_mode, descriptors_only, rows_alignment, routed_rows,
     ))  # fmt: skip
 
 
 def get_ep_wgrad_function(
     fn_name, rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
-    ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+    ready_slot_rows, scaling_mode, descriptors_only, rows_alignment, routed_rows,
 ) -> bool:  # fmt: skip
     """Compile and register the weight gradient of this configuration as ``fn_name``; return
     whether it is."""
     cfg = _config(
         rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
-        ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+        ready_slot_rows, scaling_mode, descriptors_only, rows_alignment, routed_rows,
     )  # fmt: skip
     return register_function(fn_name, lambda: _compile(cfg), "EP weight-gradient grouped GEMM")

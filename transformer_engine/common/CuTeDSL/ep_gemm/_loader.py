@@ -30,6 +30,9 @@ CLUSTER_MN = (2, 1)
 ROWS_PER_TILE = MMA_TILER_MN[0] // 2 * CLUSTER_MN[0]
 # Values per MXFP8 E8M0 scale.
 SF_VEC_SIZE = 32
+# Operand scaling modes (NVTEScalingMode): BF16 operands carry the delayed default, MXFP8 the 1D.
+DELAYED_TENSOR_SCALING = 0
+MXFP8_1D_SCALING = 1
 
 
 @dataclass(frozen=True)

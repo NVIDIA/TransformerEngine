@@ -7,6 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_EP_EP_GEMM_CONFIG_H_
 #define TRANSFORMER_ENGINE_COMMON_EP_EP_GEMM_CONFIG_H_
 
+#include <transformer_engine/transformer_engine.h>
 #include <tvm/ffi/any.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/function.h>
@@ -156,17 +157,20 @@ struct EpDispatchGemmConfig {
   size_t num_experts;
   int num_clusters;  // persistent clusters beside its NCCL EP call's SMs
   bool backward;  // the second GEMM's data gradient and SwiGLU backward instead of the first GEMM
-  bool mxfp8;     // MXFP8 operands instead of BF16
-  size_t rows_alignment;  // rows per expert slab are a multiple of it
+  NVTEScalingMode scaling_mode;  // operand scaling: delayed for BF16, MXFP8 1D for MXFP8
+  size_t rows_alignment;         // rows per expert slab are a multiple of it
   // Forward: the dispatch writes the expert offsets and the row total, the word before the row
   // ends and the row ends, after the caller set them to -1.
   bool device_layout = false;
+
+  bool is_mxfp8() const { return scaling_mode == NVTE_MXFP8_1D_SCALING; }
 
   // In the parameter order of the get_ep_* function of CuTeDSL/ep_gemm/dispatch_gemm.py.
   auto args() const {
     return std::make_tuple(static_cast<int64_t>(rows), static_cast<int64_t>(k),
                            static_cast<int64_t>(n), static_cast<int64_t>(num_experts), num_clusters,
-                           backward, mxfp8, static_cast<int64_t>(rows_alignment), device_layout);
+                           backward, static_cast<int64_t>(scaling_mode),
+                           static_cast<int64_t>(rows_alignment), device_layout);
   }
 
   std::string to_key() const { return config_key("ep_dispatch_gemm", args()); }
@@ -192,18 +196,21 @@ struct EpCombineGemmConfig {
   int num_clusters;  // persistent clusters beside the combine's SMs
   size_t n_chunk;    // columns per readiness flag
   bool dependents_at_entry;
-  bool backward;          // the data gradient of the first GEMM instead of the second GEMM
-  bool mxfp8;             // MXFP8 operands instead of BF16
-  size_t rows_alignment;  // rows per expert slab are a multiple of it
+  bool backward;                 // the data gradient of the first GEMM instead of the second GEMM
+  NVTEScalingMode scaling_mode;  // operand scaling: delayed for BF16, MXFP8 1D for MXFP8
+  size_t rows_alignment;         // rows per expert slab are a multiple of it
   // Clusters launched, 0: num_clusters. Those past num_clusters stop after the first chunk.
   int grid_clusters = 0;
+
+  bool is_mxfp8() const { return scaling_mode == NVTE_MXFP8_1D_SCALING; }
 
   // In the parameter order of the get_ep_* function of CuTeDSL/ep_gemm/combine_gemm.py.
   auto args() const {
     return std::make_tuple(static_cast<int64_t>(rows), static_cast<int64_t>(k),
                            static_cast<int64_t>(n), static_cast<int64_t>(num_experts), num_clusters,
-                           static_cast<int64_t>(n_chunk), dependents_at_entry, backward, mxfp8,
-                           static_cast<int64_t>(rows_alignment), grid_clusters);
+                           static_cast<int64_t>(n_chunk), dependents_at_entry, backward,
+                           static_cast<int64_t>(scaling_mode), static_cast<int64_t>(rows_alignment),
+                           grid_clusters);
   }
 
   std::string to_key() const { return config_key("ep_combine_gemm", args()); }
@@ -234,19 +241,23 @@ struct EpWgradConfig {
   bool accumulate;             // add to the weight gradient instead of writing it
   bool wait_primary_at_start;  // wait for the kernel before it ahead of any load
   size_t ready_slot_rows;      // wait for every dispatch flag of this many rows, 0: none
-  // MXFP8 operands: the GEMM launches of some weight gradients (reads_descriptors) read the
-  // per-expert descriptors that one launch with descriptors_only writes into the workspace first.
-  bool mxfp8;
+  // Operand scaling: delayed for BF16, MXFP8 1D for MXFP8. With MXFP8 the GEMM launches of some
+  // weight gradients (reads_descriptors) read the per-expert descriptors that one launch with
+  // descriptors_only writes into the workspace first.
+  NVTEScalingMode scaling_mode;
   bool descriptors_only;
   size_t rows_alignment;  // rows per expert slab are a multiple of it
   size_t routed_rows;     // rows a rank receives at capacity under uniform routing, unpadded
+
+  bool is_mxfp8() const { return scaling_mode == NVTE_MXFP8_1D_SCALING; }
 
   // In the parameter order of the get_ep_* function of CuTeDSL/ep_gemm/wgrad_gemm.py.
   auto args() const {
     return std::make_tuple(static_cast<int64_t>(rows), static_cast<int64_t>(m),
                            static_cast<int64_t>(n), static_cast<int64_t>(num_experts), num_clusters,
                            fp32_out, accumulate, wait_primary_at_start,
-                           static_cast<int64_t>(ready_slot_rows), mxfp8, descriptors_only,
+                           static_cast<int64_t>(ready_slot_rows),
+                           static_cast<int64_t>(scaling_mode), descriptors_only,
                            static_cast<int64_t>(rows_alignment), static_cast<int64_t>(routed_rows));
   }
 
@@ -271,7 +282,7 @@ struct EpWgradConfig {
                auto result = call_entry(kDescriptorsName, *this);
                return result.has_value() ? result->template try_cast<bool>() : std::nullopt;
              })
-        .value_or(mxfp8 && (accumulate || fp32_out));
+        .value_or(is_mxfp8() && (accumulate || fp32_out));
   }
 };
 

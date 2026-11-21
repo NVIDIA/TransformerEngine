@@ -27,7 +27,9 @@ from cutlass.cute.nvgpu import OperandMajorMode
 from ._loader import (
     device_compute_capability,
     CLUSTER_MN,
+    DELAYED_TENSOR_SCALING,
     MMA_TILER_MN,
+    MXFP8_1D_SCALING,
     ROWS_PER_TILE,
     blockscaled_kwargs,
     compile_launch,
@@ -59,11 +61,16 @@ class CombineGemmConfig:
     n_chunk: int  # columns per readiness flag, 0: no flags
     dependents_at_entry: bool  # the combine may start at the GEMM's entry (signaled combine only)
     backward: bool = False
-    mxfp8: bool = False
+    scaling_mode: int = DELAYED_TENSOR_SCALING  # operand scaling (NVTEScalingMode)
     rows_alignment: int = ROWS_PER_TILE  # rows per expert slab are a multiple of it
     grid_clusters: int = 0  # clusters launched (0: num_clusters), extras stop after the first chunk
     # Kernels, workspace layouts and compiled functions are specific to the device architecture.
     capability: tuple = field(default_factory=device_compute_capability)
+
+    @property
+    def mxfp8(self) -> bool:
+        """Whether the operands are MXFP8 rather than BF16."""
+        return self.scaling_mode == MXFP8_1D_SCALING
 
 
 def build_kernel(cfg: CombineGemmConfig):
@@ -191,34 +198,34 @@ def _compile_mxfp8(cfg: CombineGemmConfig):
 
 
 def _config(
-    rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, mxfp8,
+    rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, scaling_mode,
     rows_alignment, grid_clusters,
 ):  # fmt: skip
     """Build a CombineGemmConfig from the entry-point arguments."""
     return CombineGemmConfig(
         rows, k, n, num_experts, num_clusters, n_chunk, bool(dependents_at_entry), bool(backward),
-        bool(mxfp8), rows_alignment, grid_clusters,
+        int(scaling_mode), rows_alignment, grid_clusters,
     )  # fmt: skip
 
 
 def get_ep_combine_gemm_workspace_layout(
-    rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, mxfp8=False,
-    rows_alignment=ROWS_PER_TILE, grid_clusters=0,
+    rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward,
+    scaling_mode=DELAYED_TENSOR_SCALING, rows_alignment=ROWS_PER_TILE, grid_clusters=0,
 ):  # fmt: skip
     """[total bytes, signal offset, signal entries] of the workspace of this configuration."""
     return list(workspace_layout(_config(
-        rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, mxfp8,
+        rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, scaling_mode,
         rows_alignment, grid_clusters,
     )))  # fmt: skip
 
 
 def get_ep_combine_gemm_function(
     fn_name, rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward,
-    mxfp8=False, rows_alignment=ROWS_PER_TILE, grid_clusters=0,
+    scaling_mode=DELAYED_TENSOR_SCALING, rows_alignment=ROWS_PER_TILE, grid_clusters=0,
 ) -> bool:  # fmt: skip
     """Compile and register the GEMM of this configuration as ``fn_name``; return whether it is."""
     cfg = _config(
-        rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, mxfp8,
+        rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, scaling_mode,
         rows_alignment, grid_clusters,
     )  # fmt: skip
     compile_fn = _compile_mxfp8 if cfg.mxfp8 else _compile

@@ -34,7 +34,9 @@ from cutlass.cute.nvgpu import OperandMajorMode
 from ._loader import (
     device_compute_capability,
     CLUSTER_MN,
+    DELAYED_TENSOR_SCALING,
     MMA_TILER_MN,
+    MXFP8_1D_SCALING,
     ROWS_PER_TILE,
     blockscaled_kwargs,
     compile_launch,
@@ -70,7 +72,7 @@ class DispatchGemmConfig:
     num_experts: int  # local experts
     num_clusters: int  # persistent clusters beside the dispatch's SMs
     backward: bool = False
-    mxfp8: bool = False
+    scaling_mode: int = DELAYED_TENSOR_SCALING  # operand scaling (NVTEScalingMode)
     rows_alignment: int = ROWS_PER_TILE  # rows per expert slab are a multiple of it
     device_layout: bool = False  # forward: the dispatch writes the expert row ends
     activation: str = "swiglu"
@@ -83,6 +85,11 @@ class DispatchGemmConfig:
                 f"Activation {self.activation!r} is not supported by the dispatch grouped GEMMs;"
                 f" supported: {sorted(_BACKWARD_ACTIVATIONS)}."
             )
+
+    @property
+    def mxfp8(self) -> bool:
+        """Whether the operands are MXFP8 rather than BF16."""
+        return self.scaling_mode == MXFP8_1D_SCALING
 
     @property
     def slot_rows(self) -> int:
@@ -363,31 +370,32 @@ _COMPILERS = {
 }
 
 
-def _config(rows, k, n, num_experts, num_clusters, backward, mxfp8, rows_alignment, device_layout):
+def _config(rows, k, n, num_experts, num_clusters, backward, scaling_mode, rows_alignment,
+            device_layout):  # fmt: skip
     """Build a DispatchGemmConfig from the entry-point arguments."""
     return DispatchGemmConfig(
-        rows, k, n, num_experts, num_clusters, bool(backward), bool(mxfp8), rows_alignment,
+        rows, k, n, num_experts, num_clusters, bool(backward), int(scaling_mode), rows_alignment,
         bool(device_layout),
     )  # fmt: skip
 
 
 def get_ep_dispatch_gemm_workspace_layout(
-    rows, k, n, num_experts, num_clusters, backward, mxfp8=False, rows_alignment=ROWS_PER_TILE,
-    device_layout=False,
+    rows, k, n, num_experts, num_clusters, backward, scaling_mode=DELAYED_TENSOR_SCALING,
+    rows_alignment=ROWS_PER_TILE, device_layout=False,
 ):  # fmt: skip
     """[total bytes, counter, signal, state] byte offsets of the workspace of this configuration."""
     return list(workspace_layout(_config(
-        rows, k, n, num_experts, num_clusters, backward, mxfp8, rows_alignment, device_layout,
+        rows, k, n, num_experts, num_clusters, backward, scaling_mode, rows_alignment, device_layout,
     )))  # fmt: skip
 
 
 def get_ep_dispatch_gemm_function(
-    fn_name, rows, k, n, num_experts, num_clusters, backward, mxfp8=False,
+    fn_name, rows, k, n, num_experts, num_clusters, backward, scaling_mode=DELAYED_TENSOR_SCALING,
     rows_alignment=ROWS_PER_TILE, device_layout=False,
 ) -> bool:  # fmt: skip
     """Compile and register the GEMM of this configuration as ``fn_name``; return whether it is."""
     cfg = _config(
-        rows, k, n, num_experts, num_clusters, backward, mxfp8, rows_alignment, device_layout,
+        rows, k, n, num_experts, num_clusters, backward, scaling_mode, rows_alignment, device_layout,
     )  # fmt: skip
     compile_fn = _COMPILERS[cfg.backward, cfg.mxfp8]
     return register_function(fn_name, lambda: compile_fn(cfg), "EP dispatch grouped GEMM")
