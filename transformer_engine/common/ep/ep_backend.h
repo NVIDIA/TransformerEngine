@@ -68,8 +68,8 @@ class EPBackend {
                 const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
                 const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                 const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
-                const NVTECommWindow& recv_topk_weights_win, const NVTEEpLayerConfig* layer_cfg,
-                cudaStream_t stream, const EpSignal* dispatch_signal = nullptr);
+                const NVTECommWindow& recv_topk_weights_win, const EpSignal* dispatch_signal,
+                const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
   // Fused prepare + dispatch: seeds routing then dispatches in one call. Routing writes the
   // per-expert recv counts to recv_tokens_per_expert and the scalar pre-drop per-rank recv total
@@ -84,30 +84,30 @@ class EPBackend {
                             NVTETensor recv_topk_weights,
                             const NVTECommWindow& recv_topk_weights_win,
                             NVTETensor recv_tokens_per_expert,
-                            NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
-                            cudaStream_t stream, NVTETensor expert_token_offsets = nullptr,
-                            const EpSignal* dispatch_signal = nullptr);
+                            NVTETensor total_recv_tokens_per_rank, NVTETensor expert_token_offsets,
+                            const EpSignal* dispatch_signal, NVTEEpLayerConfig layer_cfg,
+                            cudaStream_t stream);
 
   // A non-null combine_signal makes the combine start on column chunks as the producer of
   // expert_out publishes them.
   void combine(NVTETensor handle_mem, const NVTETensor expert_out,
                const NVTECommWindow& expert_out_win, NVTETensor result,
-               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
-               const EpSignal* combine_signal = nullptr);
+               const EpSignal* combine_signal, const NVTEEpLayerConfig* layer_cfg,
+               cudaStream_t stream);
 
   // g_recv_topk_weights: 1D [recv_capacity] f32; grad_topk_weights: 2D [T, top_k] f32.
   // combine_signal: as for combine().
   void dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
                     const NVTETensor g_recv_topk_weights,
                     const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
-                    NVTETensor grad_topk_weights, const NVTEEpLayerConfig* layer_cfg,
-                    cudaStream_t stream, const EpSignal* combine_signal = nullptr);
+                    NVTETensor grad_topk_weights, const EpSignal* combine_signal,
+                    const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
   // dispatch_signal: as for dispatch(), over the rows of grad_expert_out.
   void combine_bwd(NVTETensor handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
                    NVTETensor grad_expert_out, const NVTECommWindow& grad_expert_out_win,
-                   const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
-                   const EpSignal* dispatch_signal = nullptr);
+                   const EpSignal* dispatch_signal, const NVTEEpLayerConfig* layer_cfg,
+                   cudaStream_t stream);
 
   const NVTEEpGroupConfig& group_config() const { return group_config_; }
 

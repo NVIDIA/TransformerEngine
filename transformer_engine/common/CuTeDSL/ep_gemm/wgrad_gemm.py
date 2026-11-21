@@ -282,17 +282,27 @@ def _compile(cfg: WgradConfig):
     return compile_launch(launch, *fakes)
 
 
+def _config(
+    rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
+    ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+):  # fmt: skip
+    """Build a WgradConfig from the entry-point arguments."""
+    return WgradConfig(
+        rows, m, n, num_experts, num_clusters, bool(fp32_out), bool(accumulate),
+        bool(wait_primary_at_start), ready_slot_rows, bool(mxfp8), bool(descriptors_only),
+        rows_alignment, routed_rows,
+    )  # fmt: skip
+
+
 def get_ep_wgrad_workspace_layout(
     rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
     ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
 ):  # fmt: skip
     """[total bytes, counter offset] of the workspace of this configuration."""
-    cfg = WgradConfig(
-        rows, m, n, num_experts, num_clusters, bool(fp32_out), bool(accumulate),
-        bool(wait_primary_at_start), ready_slot_rows, bool(mxfp8), bool(descriptors_only),
-        rows_alignment, routed_rows,
-    )  # fmt: skip
-    return list(workspace_layout(cfg))
+    return list(workspace_layout(_config(
+        rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
+        ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+    )))  # fmt: skip
 
 
 def get_ep_wgrad_reads_descriptors(
@@ -301,12 +311,10 @@ def get_ep_wgrad_reads_descriptors(
 ) -> bool:  # fmt: skip
     """Whether the launches of this configuration read the per-expert descriptors of a
     ``descriptors_only`` launch."""
-    cfg = WgradConfig(
-        rows, m, n, num_experts, num_clusters, bool(fp32_out), bool(accumulate),
-        bool(wait_primary_at_start), ready_slot_rows, bool(mxfp8), bool(descriptors_only),
-        rows_alignment, routed_rows,
-    )  # fmt: skip
-    return reads_descriptors(cfg)
+    return reads_descriptors(_config(
+        rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
+        ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
+    ))  # fmt: skip
 
 
 def get_ep_wgrad_function(
@@ -315,9 +323,8 @@ def get_ep_wgrad_function(
 ) -> bool:  # fmt: skip
     """Compile and register the weight gradient of this configuration as ``fn_name``; return
     whether it is."""
-    cfg = WgradConfig(
-        rows, m, n, num_experts, num_clusters, bool(fp32_out), bool(accumulate),
-        bool(wait_primary_at_start), ready_slot_rows, bool(mxfp8), bool(descriptors_only),
-        rows_alignment, routed_rows,
+    cfg = _config(
+        rows, m, n, num_experts, num_clusters, fp32_out, accumulate, wait_primary_at_start,
+        ready_slot_rows, mxfp8, descriptors_only, rows_alignment, routed_rows,
     )  # fmt: skip
     return register_function(fn_name, lambda: _compile(cfg), "EP weight-gradient grouped GEMM")

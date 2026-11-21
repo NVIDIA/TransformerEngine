@@ -388,7 +388,6 @@ class EpBuffer:
         "total_recv_tokens",
         "overlap_tokens_per_expert",
         "overlap_total_recv_tokens",
-        "overlap_workspaces",
         "dispatch_fwd_quant_recipe",
         "combine_bwd_quant_recipe",
     )
@@ -462,8 +461,6 @@ class EpBuffer:
         else:
             self.overlap_total_recv_tokens = torch.empty(1, dtype=torch.int32, device=device)
             mark_not_offload(self.overlap_total_recv_tokens)
-        # Persistent uint8 GEMM scratch for the overlapped MoE ops, keyed by call shape.
-        self.overlap_workspaces = {}
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)

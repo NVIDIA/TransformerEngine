@@ -28,10 +28,9 @@
  *  default 1024 when it divides hidden_dim, else the whole row); smaller chunks let the combine
  *  start earlier but cost more flags.
  *
- *  Each call takes a caller-owned uint8 workspace holding its readiness flags and GEMM state;
- *  nvte_ep_overlap_workspace_size returns the bytes that fit every call of a group, so one buffer
- *  can be reused across them. Allocate it once, keep it alive, and reuse it: it must not be freed
- *  or reallocated between calls that a CUDA graph captures.
+ *  Each call takes a caller-owned uint8 workspace of nvte_ep_overlap_workspace_size bytes for its
+ *  readiness flags and GEMM state; it is read only during the call, so the caller may allocate it
+ *  per call or reuse one buffer across the calls of a group.
  *
  *  Requirements: SM 10.0, 10.3 or 10.7, EP within one NVLink domain, num_comm_sms > 0, zero_copy
  *  off, dispatch_output_per_expert_alignment 256, 128 (not MXFP8 on SM 10.7) or (bfloat16 only)
@@ -226,9 +225,8 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
                                NVTETensor workspace, const NVTEEpLayerConfig* layer_cfg,
                                cudaStream_t stream);
 
-/*! \brief Bytes of the workspace that fits every overlapped GEMM call of a group, so one buffer can
- *         be reused across them. Queryable once the EP group is bootstrapped; call it at warmup, as
- *         it compiles the group's GEMMs.
+/*! \brief Bytes of a workspace that fits every overlapped GEMM call of a group. Queryable once the
+ *         EP group is bootstrapped; call it at warmup, as it compiles the group's GEMMs.
  *
  *  \param[in] hidden_dim        Hidden size.
  *  \param[in] ffn_dim           Expert FFN size.

@@ -742,8 +742,8 @@ void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const
                          const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                          const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                          const NVTECommWindow& recv_topk_weights_win,
-                         const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
-                         const EpSignal* dispatch_signal) {
+                         const EpSignal* dispatch_signal, const NVTEEpLayerConfig* layer_cfg,
+                         cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   const int num_tokens = static_cast<int>(nvte_tensor_shape(tokens).data[0]);
   std::lock_guard<std::mutex> lock(mutex_);
@@ -765,8 +765,8 @@ void EPBackend::prepare_and_dispatch(
     const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
     const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
     const NVTECommWindow& recv_topk_weights_win, NVTETensor recv_tokens_per_expert,
-    NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg, cudaStream_t stream,
-    NVTETensor expert_token_offsets, const EpSignal* dispatch_signal) {
+    NVTETensor total_recv_tokens_per_rank, NVTETensor expert_token_offsets,
+    const EpSignal* dispatch_signal, NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
   NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
@@ -802,8 +802,8 @@ void EPBackend::prepare_and_dispatch(
 
 void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
                         const NVTECommWindow& expert_out_win, NVTETensor result,
-                        const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
-                        const EpSignal* combine_signal) {
+                        const EpSignal* combine_signal, const NVTEEpLayerConfig* layer_cfg,
+                        cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   NVTE_CHECK(nvte_tensor_shape(expert_out).ndim == 2, "expert_out must be 2D [recv_T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(result).ndim == 2, "result must be 2D [T, hidden_dim]");
@@ -836,8 +836,8 @@ void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
 void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
                              const NVTECommWindow& grad_win, const NVTETensor g_recv_topk_weights,
                              const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
-                             NVTETensor grad_topk_weights, const NVTEEpLayerConfig* layer_cfg,
-                             cudaStream_t stream, const EpSignal* combine_signal) {
+                             NVTETensor grad_topk_weights, const EpSignal* combine_signal,
+                             const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   const int num_tokens = static_cast<int>(nvte_tensor_shape(grad_tokens).data[0]);
   NVTE_CHECK(nvte_tensor_shape(grad).ndim == 2, "grad must be 2D [recv_capacity, hidden_dim]");
@@ -884,14 +884,14 @@ void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
 void EPBackend::combine_bwd(NVTETensor handle_mem, const NVTETensor grad,
                             const NVTECommWindow& grad_win, NVTETensor grad_expert_out,
                             const NVTECommWindow& grad_expert_out_win,
-                            const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream,
-                            const EpSignal* dispatch_signal) {
+                            const EpSignal* dispatch_signal, const NVTEEpLayerConfig* layer_cfg,
+                            cudaStream_t stream) {
   // Backward of combine = reverse-direction dispatch.
   dispatch(handle_mem, /*topk_idx=*/nullptr, grad, grad_win,
            /*topk_weights=*/nullptr, /*topk_weights_win=*/NVTECommWindow{}, grad_expert_out,
            grad_expert_out_win,
-           /*recv_topk_weights=*/nullptr, /*recv_topk_weights_win=*/NVTECommWindow{}, layer_cfg,
-           stream, dispatch_signal);
+           /*recv_topk_weights=*/nullptr, /*recv_topk_weights_win=*/NVTECommWindow{},
+           dispatch_signal, layer_cfg, stream);
 }
 
 }  // namespace ep

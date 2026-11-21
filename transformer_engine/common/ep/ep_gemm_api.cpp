@@ -21,6 +21,7 @@
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
+#include "../util/system.h"
 #include "ep_backend.h"
 #include "ep_gemm_config.h"
 #include "ep_overlap_workspace.h"
@@ -40,28 +41,6 @@ size_t align_up(size_t value) {
   return (value + kWorkspaceAlign - 1) / kWorkspaceAlign * kWorkspaceAlign;
 }
 
-// Byte offsets of a call's scratch inside the caller-provided workspace: GEMM workspace, row ends
-// (one reserved word before them), unit alphas, optional unit probs, optional weight-gradient
-// workspace, and the total the caller must provide.
-struct ScratchLayout {
-  size_t row_ends;
-  size_t alpha;
-  size_t ones;
-  size_t wgrad;
-  size_t total;
-};
-
-ScratchLayout scratch_layout(size_t gemm_bytes, size_t num_experts, size_t rows, bool unit_probs,
-                             size_t wgrad_bytes) {
-  ScratchLayout l;
-  l.row_ends = align_up(gemm_bytes + sizeof(int32_t));
-  l.alpha = l.row_ends + align_up(sizeof(int32_t) * num_experts);
-  l.ones = l.alpha + align_up(sizeof(float) * num_experts);
-  l.wgrad = l.ones + (unit_probs ? align_up(sizeof(float) * rows) : 0);
-  l.total = l.wgrad + align_up(wgrad_bytes);
-  return l;
-}
-
 using transformer_engine::tvm_ffi_bridge::DLTensorWrapper;
 
 // Operands live on the current device.
@@ -79,28 +58,6 @@ DLTensorWrapper wrap_raw(void* ptr, NVTEDType dtype, size_t count) {
   shape.ndim = 1;
   shape.data[0] = count;
   return wrap_data(NVTEBasicTensor{ptr, dtype, shape}, false);
-}
-
-bool is_mxfp8(NVTETensor t) { return nvte_tensor_scaling_mode(t) == NVTE_MXFP8_1D_SCALING; }
-
-// An MXFP8 operand: E4M3 data with compact or GEMM-swizzled scales.
-void check_mxfp8(NVTETensor t, bool swizzled, const char* name) {
-  NVTE_CHECK(t != nullptr && is_mxfp8(t) && nvte_tensor_type(t) == kNVTEFloat8E4M3, name,
-             " must be MXFP8 E4M3");
-  uint8_t with_swizzled = 0;
-  nvte_get_tensor_param_v2(t, kNVTEWithGEMMSwizzledScales, &with_swizzled, sizeof(with_swizzled),
-                           nullptr);
-  NVTE_CHECK((with_swizzled != 0) == swizzled, name,
-             swizzled ? " needs GEMM-swizzled scales" : " needs compact scales");
-}
-
-// Shapes the MXFP8 GEMMs take: compact scale rows of whole 16-byte TMA boxes, SwiGLU tiles and
-// expert slabs of whole 128-row scale tiles.
-void check_mxfp8_dims(size_t hidden, size_t ffn, size_t alignment) {
-  NVTE_CHECK(hidden % 512 == 0 && ffn % 256 == 0, "MXFP8 needs hidden_dim (", hidden,
-             ") a multiple of 512 and ffn_dim (", ffn, ") a multiple of 256");
-  NVTE_CHECK(alignment >= 128, "MXFP8 needs dispatch_output_per_expert_alignment 128 or ",
-             kRowsPerTile);
 }
 
 // Columnwise data of an MXFP8 operand.
@@ -123,16 +80,28 @@ DLTensorWrapper wrap_scales(NVTETensor t, bool columnwise, size_t rows, size_t c
   return wrap_raw(scales.data_ptr, kNVTEFloat8E8M0, count);
 }
 
-// Value of a positive integer environment variable, 0 when unset.
-size_t env_size(const char* name) {
-  const char* value = std::getenv(name);
-  if (value == nullptr || value[0] == '\0') {
-    return 0;
-  }
-  char* end = nullptr;
-  const int64_t parsed = std::strtoll(value, &end, 10);
-  NVTE_CHECK(*end == '\0' && parsed > 0, name, " must be a positive integer, got '", value, "'");
-  return static_cast<size_t>(parsed);
+bool is_mxfp8(NVTETensor t) {
+  return transformer_engine::is_mxfp8_scaling(nvte_tensor_scaling_mode(t));
+}
+
+// An MXFP8 operand: E4M3 data with compact or GEMM-swizzled scales.
+void check_mxfp8(NVTETensor t, bool swizzled, const char* name) {
+  NVTE_CHECK(t != nullptr && is_mxfp8(t) && nvte_tensor_type(t) == kNVTEFloat8E4M3, name,
+             " must be MXFP8 E4M3");
+  uint8_t with_swizzled = 0;
+  nvte_get_tensor_param_v2(t, kNVTEWithGEMMSwizzledScales, &with_swizzled, sizeof(with_swizzled),
+                           nullptr);
+  NVTE_CHECK((with_swizzled != 0) == swizzled, name,
+             swizzled ? " needs GEMM-swizzled scales" : " needs compact scales");
+}
+
+// Shapes the MXFP8 GEMMs take: compact scale rows of whole 16-byte TMA boxes, SwiGLU tiles and
+// expert slabs of whole 128-row scale tiles.
+void check_mxfp8_dims(size_t hidden, size_t ffn, size_t alignment) {
+  NVTE_CHECK(hidden % 512 == 0 && ffn % 256 == 0, "MXFP8 needs hidden_dim (", hidden,
+             ") a multiple of 512 and ffn_dim (", ffn, ") a multiple of 256");
+  NVTE_CHECK(alignment >= 128, "MXFP8 needs dispatch_output_per_expert_alignment 128 or ",
+             kRowsPerTile);
 }
 
 // Columns per combine flag: the whole row or a multiple of 1024 dividing it, the chunks NCCL EP
@@ -140,7 +109,7 @@ size_t env_size(const char* name) {
 // the whole row.
 size_t combine_chunk(size_t n) {
   NVTE_CHECK(n % kTileN == 0, "output columns (", n, ") must be a multiple of ", kTileN);
-  const size_t requested = env_size("NVTE_EP_OVERLAP_COMBINE_CHUNK_COLS");
+  const size_t requested = transformer_engine::getenv<size_t>("NVTE_EP_OVERLAP_COMBINE_CHUNK_COLS");
   if (requested == 0) {
     return n % 1024 == 0 ? 1024 : n;
   }
@@ -164,8 +133,9 @@ struct EpGemmContext {
   bool eager;
 
   size_t alignment() const { return layer_cfg.dispatch_output_per_expert_alignment; }
-  // Rows per dispatch readiness flag: the alignment, at most one M tile.
-  size_t rows_per_slot() const { return std::min(alignment(), kRowsPerTile); }
+  // Rows per dispatch readiness flag: the alignment. A GEMM M tile (kRowsPerTile rows) is a whole
+  // multiple of every allowed alignment, so each tile spans a whole number of readiness slots.
+  size_t ready_slot_rows() const { return alignment(); }
 };
 
 // comm_sms: the group's SM count of the NCCL EP call that the entry point overlaps; the GEMM runs
@@ -236,8 +206,8 @@ void check_expert_token_offsets(const NVTETensor expert_token_offsets, size_t nu
 
 // Rows: the group capacity, or any multiple of the flag rows in eager mode.
 void check_rows(const EpGemmContext& ctx, size_t rows, const char* name) {
-  NVTE_CHECK(rows % ctx.rows_per_slot() == 0, name, " rows (", rows, ") must be a multiple of ",
-             ctx.rows_per_slot());
+  NVTE_CHECK(rows % ctx.ready_slot_rows() == 0, name, " rows (", rows, ") must be a multiple of ",
+             ctx.ready_slot_rows());
   NVTE_CHECK(ctx.eager || rows == static_cast<size_t>(ctx.group.max_recv_tokens_per_rank), name,
              " has ", rows, " rows, max_recv_tokens_per_rank is ",
              ctx.group.max_recv_tokens_per_rank);
@@ -267,9 +237,30 @@ ep::EpCombineGemmConfig combine_fwd_config(const EpGemmContext& ctx, size_t rows
                                  ctx.all_clusters};
 }
 
-// Scratch of one call, sliced from the caller's workspace: GEMM workspace, row ends (one reserved
-// word before them, which unset_row_ends sets), unit alphas, optional unit probs, optional
-// weight-gradient workspace, and the words the call's launch resets.
+// Per-call scratch for the GEMM's readiness flags and state, sliced from the caller's workspace.
+// ScratchLayout is the byte layout; nvte_ep_overlap_workspace_size uses it to size the workspace
+// without a buffer, and claim_scratch uses it to resolve the pointers in GemmScratch.
+struct ScratchLayout {
+  size_t row_ends;  // [num_experts] int32 per-expert row ends, the grouped GEMM layout operand
+  size_t alpha;  // [num_experts] float32 per-expert output scale, set to 1 (reused as norm_const)
+  size_t ones;   // [rows] float32 of 1, the probability operand when the GEMM is unweighted
+  size_t wgrad;  // backward weight-gradient accumulation workspace, empty when no weight gradient
+  size_t total;  // end offset: the bytes the caller must provide
+};
+
+ScratchLayout scratch_layout(size_t gemm_bytes, size_t num_experts, size_t rows, bool unit_probs,
+                             size_t wgrad_bytes) {
+  ScratchLayout l;
+  l.row_ends = align_up(gemm_bytes + sizeof(int32_t));
+  l.alpha = l.row_ends + align_up(sizeof(int32_t) * num_experts);
+  l.ones = l.alpha + align_up(sizeof(float) * num_experts);
+  l.wgrad = l.ones + (unit_probs ? align_up(sizeof(float) * rows) : 0);
+  l.total = l.wgrad + align_up(wgrad_bytes);
+  return l;
+}
+
+// Resolved pointers into the workspace slices, plus the words each launch resets. row_ends usually
+// addresses the layout slice, but dispatch_fwd re-points it to the caller's expert_token_offsets.
 struct GemmScratch {
   uint8_t* base;
   uint8_t* wgrad = nullptr;
@@ -312,6 +303,9 @@ std::pair<uint8_t*, size_t> workspace_span(const NVTETensor workspace) {
              "the EP overlap workspace must be ", kWorkspaceAlign, "-byte aligned");
   return {static_cast<uint8_t*>(ptr), nvte_tensor_numel(workspace)};
 }
+
+// Stage a GemmScratch's reset words once the GEMM's WorkspaceLayout is known: the readiness flags,
+// scheduler state and row ends each launch reinitializes.
 
 // Words of a GEMM that waits on the dispatch tile flags: its tile counter, flags and scheduler
 // state.
@@ -556,6 +550,59 @@ size_t gemm_workspace_bytes(const Config& config) {
 
 extern "C" {
 
+// Returns the max scratch over every op of the group, not per op: the scratch is small, so one
+// size that fits any call lets a caller size one workspace instead of querying each op.
+size_t nvte_ep_overlap_workspace_size(size_t hidden_dim, size_t ffn_dim, size_t num_local_experts,
+                                      size_t recv_capacity, int with_weight_grad, int mxfp8,
+                                      const NVTEEpLayerConfig* layer_cfg) {
+  NVTE_API_CALL(nvte_ep_overlap_workspace_size);
+  using namespace transformer_engine;
+  const size_t ne = num_local_experts;
+  const size_t rows = recv_capacity;
+  const bool mx = mxfp8 != 0;
+  const bool wg = with_weight_grad != 0;
+  size_t need = 0;
+  // Largest scratch of a call whose GEMM uses `config`; unit_probs sizes the per-row ones buffer and
+  // wgrad the weight-gradient workspace.
+  const auto consider = [&](const auto& config, bool unit_probs, size_t wgrad) {
+    need = std::max(
+        need, scratch_layout(gemm_workspace_bytes(config), ne, rows, unit_probs, wgrad).total);
+  };
+
+  // Forward dispatch: FC1 + SwiGLU, no weight gradient.
+  {
+    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_fwd_num_sms);
+    consider(ep::EpDispatchGemmConfig{rows, hidden_dim, 2 * ffn_dim, ne, ctx.num_clusters, false,
+                                      mx, ctx.alignment(), dispatch_writes_layout(ctx, ne)},
+             false, 0);
+  }
+  // Forward combine: FC2. Size the unit-probs row buffer, which the MXFP8 path omits.
+  {
+    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_fwd_num_sms);
+    consider(combine_fwd_config(ctx, rows, ffn_dim, hidden_dim, ne, mx), true, 0);
+  }
+  // Backward combine: FC2 dgrad + SwiGLU backward, with the FC2 weight gradient [hidden, ffn].
+  {
+    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_bwd_num_sms);
+    const size_t wgrad = wg ? wgrad_workspace_bytes(ctx, rows, hidden_dim, ffn_dim, ne, mx) : 0;
+    consider(ep::EpDispatchGemmConfig{rows, hidden_dim, ffn_dim, ne, ctx.num_clusters, true, mx,
+                                      ctx.alignment()},
+             false, wgrad);
+  }
+  // Backward dispatch: FC1 dgrad, with the FC1 weight gradient [2 * ffn, hidden].
+  {
+    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_bwd_num_sms);
+    const bool plain = wg && ctx.num_clusters > 0;
+    const size_t n_chunk = plain ? 0 : combine_chunk(hidden_dim);
+    const size_t wgrad = wg ? wgrad_workspace_bytes(ctx, rows, 2 * ffn_dim, hidden_dim, ne, mx) : 0;
+    consider(ep::EpCombineGemmConfig{rows, 2 * ffn_dim, hidden_dim, ne,
+                                     wg ? ctx.all_clusters : ctx.num_clusters, n_chunk,
+                                     !plain && kCombineAtGemmEntry, true, mx, ctx.alignment()},
+             true, wgrad);
+  }
+  return need;
+}
+
 void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
                                const NVTETensor tokens, NVTECommWindow tokens_win,
                                const NVTETensor topk_weights, const NVTETensor weight,
@@ -564,6 +611,7 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
                                NVTETensor recv_tokens_per_expert, NVTETensor expert_token_offsets,
                                NVTETensor total_recv_tokens, NVTETensor workspace,
                                const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_ep_dispatch_gemm_fwd);
   using namespace transformer_engine;
   const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_fwd_num_sms);
   checkCuDriverContext(stream);
@@ -613,7 +661,7 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
   }
   GemmScratch scratch =
       claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows, false, 0);
-  set_signal_words(scratch, layout, rows / ctx.rows_per_slot());
+  set_signal_words(scratch, layout, rows / ctx.ready_slot_rows());
   // The GEMM reads the expert row ends from the caller's [num_experts + 1] int32
   // expert_token_offsets (expert 0's start, then the per-expert ends); the dispatch writes them in
   // capacity mode.
@@ -624,21 +672,21 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
   TensorWrapper signal(scratch.signal,
                        std::vector<size_t>{static_cast<size_t>(scratch.signal_capacity)},
                        DType::kInt32);
-  const ep::EpSignal dispatch_signal{signal.data(), ctx.rows_per_slot()};
+  const ep::EpSignal dispatch_signal{signal.data(), ctx.ready_slot_rows()};
   NVTECommWindow no_window{};
-  // Expert offsets, then the row total: the expert row ends sit one word in.
-  int32_t* const expert_layout = scratch.row_ends - 1;
   if (device_layout) {
     // Flags, scheduler state and unset layout words, before the dispatch that sets them. The fused
     // dispatch writes the GEMM's expert layout and the padded counts in one scan.
     unset_row_ends(scratch);
     ep::reset_workspace(scratch.reset, stream);
+    // Expert offsets, then the row total: the expert row ends sit one word in.
+    int32_t* const expert_layout = scratch.row_ends - 1;
     TensorWrapper offsets(expert_layout, std::vector<size_t>{num_experts}, DType::kInt32);
     TensorWrapper total(expert_layout + num_experts, std::vector<size_t>{1}, DType::kInt32);
     ctx.backend.prepare_and_dispatch(handle_mem, topk_idx, tokens, tokens_win, topk_weights,
                                      no_window, recv_tokens, no_window, recv_topk_weights,
-                                     no_window, recv_tokens_per_expert, total.data(), ctx.layer_cfg,
-                                     stream, offsets.data(), &dispatch_signal);
+                                     no_window, recv_tokens_per_expert, total.data(),
+                                     offsets.data(), &dispatch_signal, ctx.layer_cfg, stream);
   } else {
     // Capacity mode runs the routing prepare; eager mode ran nvte_ep_prepare already.
     if (!ctx.eager) {
@@ -651,8 +699,8 @@ void nvte_ep_dispatch_gemm_fwd(NVTETensor handle_mem, const NVTETensor topk_idx,
     set_row_ends(scratch, recv_tokens_per_expert, /*write_layout_base=*/true);
     ep::reset_workspace(scratch.reset, stream);
     ctx.backend.dispatch(handle_mem, topk_idx, tokens, tokens_win, topk_weights, no_window,
-                         recv_tokens, no_window, recv_topk_weights, no_window, &ctx.layer_cfg,
-                         stream, &dispatch_signal);
+                         recv_tokens, no_window, recv_topk_weights, no_window, &dispatch_signal,
+                         &ctx.layer_cfg, stream);
   }
 
   // The GEMM is a programmatic dependent of the dispatch: tiles start as their flags are set. The
@@ -686,6 +734,7 @@ void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
                               const NVTETensor expert_token_offsets, const NVTETensor weight,
                               NVTETensor expert_out, NVTETensor result, NVTETensor workspace,
                               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_ep_combine_gemm_fwd);
   using namespace transformer_engine;
   const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_fwd_num_sms);
   checkCuDriverContext(stream);
@@ -748,8 +797,8 @@ void nvte_ep_combine_gemm_fwd(NVTETensor handle_mem, const NVTETensor gemm_in,
   TensorWrapper signal(scratch.base + layout.signal, std::vector<size_t>{n / n_chunk},
                        DType::kInt32);
   const ep::EpSignal combine_signal{signal.data(), n_chunk};
-  ctx.backend.combine(handle_mem, expert_out, no_window, result, &ctx.layer_cfg, stream,
-                      &combine_signal);
+  ctx.backend.combine(handle_mem, expert_out, no_window, result, &combine_signal, &ctx.layer_cfg,
+                      stream);
 }
 
 void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_result,
@@ -761,6 +810,7 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
                               NVTETensor act_out, NVTETensor weight_grad,
                               int accumulate_weight_grad, NVTETensor workspace,
                               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_ep_combine_gemm_bwd);
   using namespace transformer_engine;
   const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_bwd_num_sms);
   checkCuDriverContext(stream);
@@ -809,7 +859,7 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
   const tvm::ffi::Function gemm = get_gemm(config, &layout);
   GemmScratch scratch = claim_scratch(ws_base, ws_bytes, layout.total_bytes, num_experts, rows,
                                       false, wgrad ? wgrad->layout.total_bytes : 0);
-  set_signal_words(scratch, layout, rows / ctx.rows_per_slot());
+  set_signal_words(scratch, layout, rows / ctx.ready_slot_rows());
   if (wgrad) {
     scratch.reset.fill(scratch.wgrad + wgrad->layout.counter, 1, ep::kFillZero);
   }
@@ -826,10 +876,10 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
   TensorWrapper signal(scratch.signal,
                        std::vector<size_t>{static_cast<size_t>(scratch.signal_capacity)},
                        DType::kInt32);
-  const ep::EpSignal dispatch_signal{signal.data(), ctx.rows_per_slot()};
+  const ep::EpSignal dispatch_signal{signal.data(), ctx.ready_slot_rows()};
   NVTECommWindow no_window{};
   ctx.backend.combine_bwd(handle_mem, grad_result, grad_result_win, grad_expert_out, no_window,
-                          &ctx.layer_cfg, stream, &dispatch_signal);
+                          &dispatch_signal, &ctx.layer_cfg, stream);
 
   // FC2 data gradient with the SwiGLU backward in its epilogue.
   auto a = wrap_rowwise(grad_expert_out, true);
@@ -856,7 +906,7 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
     // The columnwise grad_expert_out, a dependent of the GEMM, which starts it at entry: each
     // tile waits for the reverse dispatch's flags of its rows.
     if (requant) {
-      launch_requant(grad_expert_out, scratch, rows, hidden, num_experts, ctx.rows_per_slot(),
+      launch_requant(grad_expert_out, scratch, rows, hidden, num_experts, ctx.ready_slot_rows(),
                      stream);
     }
     // Its tail on the SMs the reverse dispatch frees takes the tiles the GEMM has not claimed.
@@ -879,9 +929,9 @@ void nvte_ep_combine_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_resul
   // The weight gradient once every row is received: its tail on the SMs the reverse dispatch
   // frees, its base on those the GEMM frees.
   if (wgrad) {
-    launch_wgrad(*wgrad, scratch, ctx.all_clusters - ctx.num_clusters, false, ctx.rows_per_slot(),
+    launch_wgrad(*wgrad, scratch, ctx.all_clusters - ctx.num_clusters, false, ctx.ready_slot_rows(),
                  stream, false);
-    launch_wgrad(*wgrad, scratch, ctx.num_clusters, false, ctx.rows_per_slot(), stream, false);
+    launch_wgrad(*wgrad, scratch, ctx.num_clusters, false, ctx.ready_slot_rows(), stream, false);
   }
 }
 
@@ -893,6 +943,7 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
                                NVTETensor weight_grad, int accumulate_weight_grad,
                                NVTETensor workspace, const NVTEEpLayerConfig* layer_cfg,
                                cudaStream_t stream) {
+  NVTE_API_CALL(nvte_ep_dispatch_gemm_bwd);
   using namespace transformer_engine;
   const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_bwd_num_sms);
   checkCuDriverContext(stream);
@@ -989,68 +1040,12 @@ void nvte_ep_dispatch_gemm_bwd(NVTETensor handle_mem, const NVTETensor grad_gemm
                        DType::kInt32);
   const ep::EpSignal combine_signal{signal.data(), chunk};
   ctx.backend.dispatch_bwd(handle_mem, grad_recv_tokens, no_window, grad_recv_topk_weights,
-                           no_window, grad_tokens, grad_topk_weights, &ctx.layer_cfg, stream,
-                           &combine_signal);
+                           no_window, grad_tokens, grad_topk_weights, &combine_signal,
+                           &ctx.layer_cfg, stream);
   // Its tail takes the tiles left on the communication SMs.
   if (wgrad) {
     launch_wgrad(*wgrad, scratch, ctx.all_clusters - ctx.num_clusters, false, 0, stream, false);
   }
-}
-
-size_t nvte_ep_overlap_workspace_size(size_t hidden_dim, size_t ffn_dim, size_t num_local_experts,
-                                      size_t recv_capacity, int with_weight_grad, int mxfp8,
-                                      const NVTEEpLayerConfig* layer_cfg) {
-  using namespace transformer_engine;
-  const size_t ne = num_local_experts;
-  const size_t rows = recv_capacity;
-  const bool mx = mxfp8 != 0;
-  const bool wg = with_weight_grad != 0;
-  size_t need = 0;
-
-  // Forward dispatch: FC1 + SwiGLU, no weight gradient.
-  {
-    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_fwd_num_sms);
-    const ep::EpDispatchGemmConfig config{rows, hidden_dim,       2 * ffn_dim,
-                                          ne,   ctx.num_clusters, false,
-                                          mx,   ctx.alignment(),  dispatch_writes_layout(ctx, ne)};
-    need = std::max(need, scratch_layout(gemm_workspace_bytes(config), ne, rows, false, 0).total);
-  }
-  // Forward combine: FC2. Size the unit-probs row buffer, which the MXFP8 path omits.
-  {
-    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_fwd_num_sms);
-    const ep::EpCombineGemmConfig config =
-        combine_fwd_config(ctx, rows, ffn_dim, hidden_dim, ne, mx);
-    need = std::max(need, scratch_layout(gemm_workspace_bytes(config), ne, rows, true, 0).total);
-  }
-  // Backward combine: FC2 dgrad + SwiGLU backward, with the FC2 weight gradient [hidden, ffn].
-  {
-    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::dispatch_bwd_num_sms);
-    const ep::EpDispatchGemmConfig config{rows, hidden_dim, ffn_dim,        ne, ctx.num_clusters,
-                                          true, mx,         ctx.alignment()};
-    const size_t wgrad = wg ? wgrad_workspace_bytes(ctx, rows, hidden_dim, ffn_dim, ne, mx) : 0;
-    need =
-        std::max(need, scratch_layout(gemm_workspace_bytes(config), ne, rows, false, wgrad).total);
-  }
-  // Backward dispatch: FC1 dgrad, with the FC1 weight gradient [2 * ffn, hidden].
-  {
-    const EpGemmContext ctx = make_context(layer_cfg, &NVTEEpGroupConfig::combine_bwd_num_sms);
-    const bool plain = wg && ctx.num_clusters > 0;
-    const size_t n_chunk = plain ? 0 : combine_chunk(hidden_dim);
-    const ep::EpCombineGemmConfig config{rows,
-                                         2 * ffn_dim,
-                                         hidden_dim,
-                                         ne,
-                                         wg ? ctx.all_clusters : ctx.num_clusters,
-                                         n_chunk,
-                                         !plain && kCombineAtGemmEntry,
-                                         true,
-                                         mx,
-                                         ctx.alignment()};
-    const size_t wgrad = wg ? wgrad_workspace_bytes(ctx, rows, 2 * ffn_dim, hidden_dim, ne, mx) : 0;
-    need =
-        std::max(need, scratch_layout(gemm_workspace_bytes(config), ne, rows, true, wgrad).total);
-  }
-  return need;
 }
 
 }  // extern "C"
@@ -1066,6 +1061,11 @@ namespace {
 }  // namespace
 
 extern "C" {
+
+size_t nvte_ep_overlap_workspace_size(size_t, size_t, size_t, size_t, int, int,
+                                      const NVTEEpLayerConfig*) {
+  ep_gemm_not_built();
+}
 
 void nvte_ep_dispatch_gemm_fwd(NVTETensor, NVTETensor, NVTETensor, NVTECommWindow, NVTETensor,
                                NVTETensor, NVTETensor, NVTETensor, NVTETensor, NVTETensor,
@@ -1090,11 +1090,6 @@ void nvte_ep_combine_gemm_bwd(NVTETensor, NVTETensor, NVTECommWindow, NVTETensor
 void nvte_ep_dispatch_gemm_bwd(NVTETensor, NVTETensor, NVTETensor, NVTETensor, NVTETensor,
                                NVTETensor, NVTETensor, NVTETensor, NVTETensor, NVTETensor, int,
                                NVTETensor, const NVTEEpLayerConfig*, cudaStream_t) {
-  ep_gemm_not_built();
-}
-
-size_t nvte_ep_overlap_workspace_size(size_t, size_t, size_t, size_t, int, int,
-                                      const NVTEEpLayerConfig*) {
   ep_gemm_not_built();
 }
 

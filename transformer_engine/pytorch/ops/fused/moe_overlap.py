@@ -68,27 +68,6 @@ _SF_VEC = MXFP8_BLOCK_SCALING_SIZE
 _GLU_BLOCK = 32
 
 
-def _overlap_workspace(buffer, *, ffn, mxfp8, with_wgrad, rows):
-    """Persistent uint8 scratch shared by a group's overlapped GEMM calls. Sized once per
-    (ffn, mxfp8, with_wgrad, rows) and kept on the buffer, so a captured graph reuses the same
-    buffer. Returns None in eager mode, where the recv rows are known only inside the call and the
-    binding sizes and allocates the scratch there."""
-    if buffer.eager:
-        return None
-    cache = buffer.overlap_workspaces
-    key = (int(ffn), bool(mxfp8), bool(with_wgrad), int(rows))
-    workspace = cache.get(key)
-    if workspace is None:
-        nbytes = tex.ep_overlap_workspace_size(
-            buffer.hidden_dim, int(ffn), buffer.num_local_experts, int(rows),
-            bool(with_wgrad), bool(mxfp8), buffer.top_k, buffer.alignment, buffer.topk_idx_dtype,
-        )  # fmt: skip
-        workspace = torch.empty(nbytes, dtype=torch.uint8, device=buffer.device)
-        mark_not_offload(workspace)
-        cache[key] = workspace
-    return workspace
-
-
 class FusedMoE(FusedOperation):
     """MoeDispatch, GroupedLinear, ScaledSwiGLU, GroupedLinear and MoeCombine as one op.
 
@@ -106,8 +85,8 @@ class FusedMoE(FusedOperation):
       - Recipe of none or ``MXFP8BlockScaling``.
 
     Notes:
-      - The GEMMs take a uint8 workspace for their flags and state, sized once per buffer and
-        reused across calls; every FusedMoE sharing it must run on one CUDA stream.
+      - Each GEMM allocates a small uint8 workspace for its flags and state in the binding, freed
+        after the call; the calls of an EP group must run on one CUDA stream.
       - With a fixed receive capacity the op can be captured in a CUDA graph after a warmup call;
         with eager receive sizing (no ``recv_capacity_per_rank``) the host is synchronized and it
         cannot be captured.
@@ -214,11 +193,7 @@ class FusedMoE(FusedOperation):
         topk_idx = _require_contiguous(topk_idx, "topk_idx")
         topk_weights = _require_contiguous(topk_weights, "topk_weights")
 
-        with_wgrad = any(ctx.requires_grad for ctx in basic_op_ctxs) and (
-            fc1_op.weight.requires_grad or fc2_op.weight.requires_grad
-        )
         tokens_per_expert = buffer.overlap_tokens_per_expert
-        ws = None
         if buffer.eager:
             # The binding runs the prepare, reads the recv total on the host and allocates the
             # recv rows in whole buckets, so the number of compiled GEMMs stays bounded.
@@ -232,7 +207,6 @@ class FusedMoE(FusedOperation):
             rows = recv_tokens.shape[0]
         else:
             rows = buffer.recv_capacity_per_rank
-            ws = _overlap_workspace(buffer, ffn=ffn, mxfp8=False, with_wgrad=with_wgrad, rows=rows)
             recv_tokens = torch.empty(rows, hidden, dtype=torch.bfloat16, device=device)
             recv_weights = torch.empty(rows, dtype=torch.float32, device=device)
             gemm_out = torch.empty(rows, 2 * ffn, dtype=torch.bfloat16, device=device)
@@ -241,13 +215,13 @@ class FusedMoE(FusedOperation):
             expert_token_offsets = tex.ep_dispatch_gemm_fwd(
                 buffer.handle_mem, topk_idx, tokens, topk_weights, w1, recv_tokens, recv_weights,
                 tokens_per_expert, gemm_out, act_out, buffer.top_k, buffer.alignment,
-                buffer.overlap_total_recv_tokens, workspace=ws,
+                buffer.overlap_total_recv_tokens,
             )[4]  # fmt: skip
         expert_out = torch.empty(rows, hidden, dtype=torch.bfloat16, device=device)
         result = torch.empty(buffer.num_local_tokens, hidden, dtype=torch.bfloat16, device=device)
         tex.ep_combine_gemm_fwd(
             buffer.handle_mem, act_out, expert_token_offsets, w2, expert_out, result,
-            buffer.top_k, buffer.alignment, buffer.topk_idx_dtype, workspace=ws,
+            buffer.top_k, buffer.alignment, buffer.topk_idx_dtype,
         )  # fmt: skip
         recv_total = _recv_total_from_offsets(buffer, expert_token_offsets)
         self.basic_ops[0].update_recv_tokens_peak(buffer, recv_total)
@@ -295,12 +269,11 @@ class FusedMoE(FusedOperation):
         self, basic_op_ctxs, buffer, input_, topk_idx, topk_weights, basic_op_kwargs
     ):
         """Forward with MXFP8 GEMMs and EP transport."""
-        fc1_op, fc2_op = self.basic_ops[1], self.basic_ops[3]
+        fc2_op = self.basic_ops[3]
         device = buffer.device
         hidden = buffer.hidden_dim
         ffn = fc2_op.in_features
         backward = any(ctx.requires_grad for ctx in basic_op_ctxs)
-        with_wgrad = backward and (fc1_op.weight.requires_grad or fc2_op.weight.requires_grad)
         w1, w2 = (
             self._weight_operands(idx, backward, basic_op_kwargs[idx].get("is_first_microbatch"))
             for idx in (1, 3)
@@ -311,7 +284,6 @@ class FusedMoE(FusedOperation):
         topk_idx = _require_contiguous(topk_idx, "topk_idx")
         topk_weights = _require_contiguous(topk_weights, "topk_weights")
         tokens_per_expert = buffer.overlap_tokens_per_expert
-        ws = None
         if buffer.eager:
             (
                 recv_tokens, recv_weights, gemm_out, act_out, expert_token_offsets, recv_scale,
@@ -327,7 +299,6 @@ class FusedMoE(FusedOperation):
             rows = recv_tokens.shape[0]
         else:
             rows = buffer.recv_capacity_per_rank
-            ws = _overlap_workspace(buffer, ffn=ffn, mxfp8=True, with_wgrad=with_wgrad, rows=rows)
             fp8 = torch.float8_e4m3fn
             recv_tokens = torch.empty(rows, hidden, dtype=fp8, device=device)
             recv_scale = torch.empty(rows, hidden // _SF_VEC, dtype=torch.uint8, device=device)
@@ -340,7 +311,7 @@ class FusedMoE(FusedOperation):
                 recv_weights, tokens_per_expert, gemm_out, act_out, buffer.top_k,
                 buffer.alignment, buffer.overlap_total_recv_tokens, tokens_scale_inv=tokens_scale,
                 recv_scale_inv=recv_scale, weight_scale_inv=w1.scale_inv, act_out_scale_inv=act_scale,
-                symm_input=symm_input, workspace=ws,
+                symm_input=symm_input,
             )[4]  # fmt: skip
         expert_out = torch.empty(rows, hidden, dtype=torch.bfloat16, device=device)
         result = torch.empty(buffer.num_local_tokens, hidden, dtype=torch.bfloat16, device=device)
@@ -348,7 +319,7 @@ class FusedMoE(FusedOperation):
         tex.ep_combine_gemm_fwd(
             buffer.handle_mem, act_out, expert_token_offsets, w2.data, expert_out, result,
             buffer.top_k, buffer.alignment, buffer.topk_idx_dtype, recv_topk_weights=recv_weights,
-            gemm_in_scale_inv=act_scale, weight_scale_inv=w2.scale_inv, workspace=ws,
+            gemm_in_scale_inv=act_scale, weight_scale_inv=w2.scale_inv,
         )  # fmt: skip
         recv_total = _recv_total_from_offsets(buffer, expert_token_offsets)
         self.basic_ops[0].update_recv_tokens_peak(buffer, recv_total)
@@ -410,8 +381,6 @@ class FusedMoE(FusedOperation):
         hidden = buffer.hidden_dim
         ffn = fc2_op.in_features
         rows = gemm_out.shape[0]
-        with_wgrad = fc1_ctx.weight_requires_grad or fc2_ctx.weight_requires_grad
-        ws = _overlap_workspace(buffer, ffn=ffn, mxfp8=False, with_wgrad=with_wgrad, rows=rows)
         tokens_per_expert = buffer.overlap_tokens_per_expert
         w1 = w1[0] if w1 else _bf16_weight(fc1_op, num_groups)
         w2 = _bf16_weight(fc2_op, num_groups)
@@ -457,7 +426,7 @@ class FusedMoE(FusedOperation):
         tex.ep_combine_gemm_bwd(
             buffer.handle_mem, grad_result, gemm_out, recv_weights, tokens_per_expert, w2,
             grad_expert_out, grad_gemm, grad_recv_weights, buffer.top_k, buffer.alignment,
-            buffer.topk_idx_dtype, workspace=ws, **fc2_wgrad,
+            buffer.topk_idx_dtype, **fc2_wgrad,
         )  # fmt: skip
         if fc2_grads is None:
             fc2_grads = grad_params(fc2_op, fc2_ctx, fc2_shape, act_out, grad_expert_out, "FC2")
@@ -479,7 +448,7 @@ class FusedMoE(FusedOperation):
             tex.ep_dispatch_gemm_bwd(
                 buffer.handle_mem, grad_gemm, grad_recv_weights, tokens_per_expert, w1,
                 grad_recv, grad_tokens, grad_topk, buffer.top_k, buffer.alignment,
-                buffer.topk_idx_dtype, workspace=ws, **fc1_wgrad,
+                buffer.topk_idx_dtype, **fc1_wgrad,
             )  # fmt: skip
 
         if fc1_grads is None:
@@ -519,8 +488,6 @@ class FusedMoE(FusedOperation):
         hidden = buffer.hidden_dim
         ffn = fc2_op.in_features
         rows = gemm_out.shape[0]
-        with_wgrad = fc1_ctx.weight_requires_grad or fc2_ctx.weight_requires_grad
-        ws = _overlap_workspace(buffer, ffn=ffn, mxfp8=True, with_wgrad=with_wgrad, rows=rows)
         tokens_per_expert = buffer.overlap_tokens_per_expert
         # GroupedTensor group sizes are int64.
         first_dims = tokens_per_expert.long()
@@ -617,7 +584,7 @@ class FusedMoE(FusedOperation):
             grad_gemm_out_columnwise_scale_inv=grad_gemm_col_scale, act_out=act_col,
             act_out_scale_inv=act_col_scale, grad_expert_out_columnwise=grad_expert_out_col,
             grad_expert_out_columnwise_scale_inv=grad_expert_out_col_scale, **fc2_wgrad,
-            symm_input=symm_input, workspace=ws,
+            symm_input=symm_input,
         )  # fmt: skip
 
         grad_tokens = grad_topk = fc1_grads = None
@@ -639,7 +606,7 @@ class FusedMoE(FusedOperation):
                 buffer.handle_mem, grad_gemm, grad_recv_weights, tokens_per_expert, w1_col,
                 grad_recv, grad_tokens, grad_topk, buffer.top_k, buffer.alignment,
                 buffer.topk_idx_dtype, grad_gemm_out_scale_inv=grad_gemm_scale,
-                weight_scale_inv=w1_col_scale, workspace=ws, **fc1_wgrad,
+                weight_scale_inv=w1_col_scale, **fc1_wgrad,
             )  # fmt: skip
 
         if fc1_grads is None:

@@ -190,16 +190,26 @@ def _compile_mxfp8(cfg: CombineGemmConfig):
     )
 
 
+def _config(
+    rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, mxfp8,
+    rows_alignment, grid_clusters,
+):  # fmt: skip
+    """Build a CombineGemmConfig from the entry-point arguments."""
+    return CombineGemmConfig(
+        rows, k, n, num_experts, num_clusters, n_chunk, bool(dependents_at_entry), bool(backward),
+        bool(mxfp8), rows_alignment, grid_clusters,
+    )  # fmt: skip
+
+
 def get_ep_combine_gemm_workspace_layout(
     rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, mxfp8=False,
     rows_alignment=ROWS_PER_TILE, grid_clusters=0,
 ):  # fmt: skip
     """[total bytes, signal offset, signal entries] of the workspace of this configuration."""
-    cfg = CombineGemmConfig(
-        rows, k, n, num_experts, num_clusters, n_chunk, bool(dependents_at_entry), bool(backward),
-        bool(mxfp8), rows_alignment, grid_clusters,
-    )  # fmt: skip
-    return list(workspace_layout(cfg))
+    return list(workspace_layout(_config(
+        rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, mxfp8,
+        rows_alignment, grid_clusters,
+    )))  # fmt: skip
 
 
 def get_ep_combine_gemm_function(
@@ -207,9 +217,9 @@ def get_ep_combine_gemm_function(
     mxfp8=False, rows_alignment=ROWS_PER_TILE, grid_clusters=0,
 ) -> bool:  # fmt: skip
     """Compile and register the GEMM of this configuration as ``fn_name``; return whether it is."""
-    cfg = CombineGemmConfig(
-        rows, k, n, num_experts, num_clusters, n_chunk, bool(dependents_at_entry), bool(backward),
-        bool(mxfp8), rows_alignment, grid_clusters,
+    cfg = _config(
+        rows, k, n, num_experts, num_clusters, n_chunk, dependents_at_entry, backward, mxfp8,
+        rows_alignment, grid_clusters,
     )  # fmt: skip
     compile_fn = _compile_mxfp8 if cfg.mxfp8 else _compile
     return register_function(fn_name, lambda: compile_fn(cfg), "EP grouped GEMM combine")

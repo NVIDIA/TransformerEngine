@@ -363,16 +363,22 @@ _COMPILERS = {
 }
 
 
+def _config(rows, k, n, num_experts, num_clusters, backward, mxfp8, rows_alignment, device_layout):
+    """Build a DispatchGemmConfig from the entry-point arguments."""
+    return DispatchGemmConfig(
+        rows, k, n, num_experts, num_clusters, bool(backward), bool(mxfp8), rows_alignment,
+        bool(device_layout),
+    )  # fmt: skip
+
+
 def get_ep_dispatch_gemm_workspace_layout(
     rows, k, n, num_experts, num_clusters, backward, mxfp8=False, rows_alignment=ROWS_PER_TILE,
     device_layout=False,
 ):  # fmt: skip
     """[total bytes, counter, signal, state] byte offsets of the workspace of this configuration."""
-    cfg = DispatchGemmConfig(
-        rows, k, n, num_experts, num_clusters, bool(backward), bool(mxfp8), rows_alignment,
-        bool(device_layout),
-    )  # fmt: skip
-    return list(workspace_layout(cfg))
+    return list(workspace_layout(_config(
+        rows, k, n, num_experts, num_clusters, backward, mxfp8, rows_alignment, device_layout,
+    )))  # fmt: skip
 
 
 def get_ep_dispatch_gemm_function(
@@ -380,9 +386,8 @@ def get_ep_dispatch_gemm_function(
     rows_alignment=ROWS_PER_TILE, device_layout=False,
 ) -> bool:  # fmt: skip
     """Compile and register the GEMM of this configuration as ``fn_name``; return whether it is."""
-    cfg = DispatchGemmConfig(
-        rows, k, n, num_experts, num_clusters, bool(backward), bool(mxfp8), rows_alignment,
-        bool(device_layout),
+    cfg = _config(
+        rows, k, n, num_experts, num_clusters, backward, mxfp8, rows_alignment, device_layout,
     )  # fmt: skip
     compile_fn = _COMPILERS[cfg.backward, cfg.mxfp8]
     return register_function(fn_name, lambda: compile_fn(cfg), "EP dispatch grouped GEMM")
