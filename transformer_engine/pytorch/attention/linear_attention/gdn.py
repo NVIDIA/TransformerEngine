@@ -24,8 +24,8 @@ from .base import (
 )
 
 
-def _aligned(tensor):
-    """Clone offset views when FE needs a 16-byte-aligned address."""
+def _ensure_aligned(tensor):
+    """Return a contiguous tensor with a 16-byte-aligned address."""
     tensor = tensor.contiguous()
     return tensor.clone() if tensor.data_ptr() % 16 else tensor
 
@@ -98,10 +98,12 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
         )
 
     def _prepare_cp_inputs(self, tensors, initial_state):
-        """Pad partial feature tiles to keep FE's state gradients correct."""
-        # Some FE engines mishandle irregular tiles, such as K=32, V=96.
-        # Zero extension preserves the recurrence and the original scale.
-        q, k, v, g, beta = (_aligned(t) for t in tensors)
+        """Align CP inputs and pad features to work around cuDNN FE state-gradient errors."""
+        # TE workaround for incorrect recurrent-state gradients observed in cuDNN FE
+        # CP experiments with K=32, V=96. Conservatively pad K/V to powers of two
+        # (minimum 64), rather than restricting the workaround to the observed case.
+        # Zero extension preserves the recurrence and original attention scale.
+        q, k, v, g, beta = (_ensure_aligned(t) for t in tensors)
         key_dim, value_dim = k.shape[-1], v.shape[-1]
         key_pad = max(64, 1 << (key_dim - 1).bit_length()) - key_dim
         value_pad = max(64, 1 << (value_dim - 1).bit_length()) - value_dim
@@ -126,7 +128,7 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
     def _cp_forward_summary(self, query, key, value, gates, cu_seqlens, **kernel_kwargs):
         """Return H,T; use ordinary state passes if no summary engine supports this shape."""
         del query
-        k, v, g, beta = (_aligned(t) for t in (key, value, gates["g"], gates["beta"]))
+        k, v, g, beta = (_ensure_aligned(t) for t in (key, value, gates["g"], gates["beta"]))
         try:
             return self._summary_op("gated_delta_net_summary")(
                 k, v, g, beta, cu_seqlens, **kernel_kwargs
@@ -168,7 +170,7 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
         """Return the reverse state-gradient recipe, including local output losses."""
         del value
         q, k, g, beta, grad_output = (
-            _aligned(t) for t in (query, key, gates["g"], gates["beta"], grad_output)
+            _ensure_aligned(t) for t in (query, key, gates["g"], gates["beta"], grad_output)
         )
         try:
             return self._summary_op("gated_delta_net_summary_bwd")(
