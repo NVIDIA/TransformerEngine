@@ -23,7 +23,7 @@ from test_gdn_attention import _GDN_AVAILABLE
 _SEED = 2026
 
 
-def _random_lengths(count, lower_bound, upper_bound, *, total=None):
+def _generate_random_lengths(count, lower_bound, upper_bound, *, total=None):
     """Sample reproducible lengths in [lower_bound, upper_bound], optionally fixing the sum."""
     generator = random.Random(_SEED)
     if total is None:
@@ -41,11 +41,11 @@ def _random_lengths(count, lower_bound, upper_bound, *, total=None):
     return lengths
 
 
-_GEOMETRY_LENGTHS = _random_lengths(3, 65, 192)
+_GEOMETRY_LENGTHS = _generate_random_lengths(3, 65, 192)
 
 GDN_CP_CASES = {
     # One long shared document exercises many internal chunks on every rank.
-    "cp_0": dict(lengths=_random_lengths(1, 7168, 8192), norm=True),
+    "cp_0": dict(lengths=_generate_random_lengths(1, 7168, 8192), norm=True),
     # Dense FP16 training uses a multiple of 8 for equal CP=2/4/8 slices, with checkpointing.
     "cp_1": dict(
         # Pick a deterministic multiple of 8 in [768, 1024].
@@ -70,7 +70,7 @@ GDN_CP_CASES = {
     ),
     # Keep 4096 tokens so the 2049-token document spans three CP=4 ranks; vary the short tail.
     "cp_3": dict(
-        lengths=[2049, 1023] + _random_lengths(14, 32, 128, total=1024),
+        lengths=[2049, 1023] + _generate_random_lengths(14, 32, 128, total=1024),
         dtype="fp16",
         key_dim=128,
         value_dim=128,
@@ -94,7 +94,7 @@ GDN_CP_CASES = {
     # Keep 1024 tokens and a shared first document; chain states after inference-cache warmup.
     "cp_7": dict(
         kind="state_chaining",
-        lengths=[513] + _random_lengths(3, 64, 256, total=511),
+        lengths=[513] + _generate_random_lengths(3, 64, 256, total=511),
         heads=2,
         key_dim=128,
         value_dim=64,
