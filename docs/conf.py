@@ -8,6 +8,8 @@ import pathlib
 import subprocess
 from builtins import str
 
+from packaging.version import Version
+
 # Basic project info
 project_name = "Transformer Engine"
 author = "NVIDIA CORPORATION & AFFILIATES"
@@ -41,7 +43,7 @@ git_sha = git_sha[:7] if len(git_sha) > 7 else git_sha
 # Version
 with open(root_path / "build_tools" / "VERSION.txt", "r") as f:
     _raw_version = f.readline().strip()
-if "dev" in _raw_version:
+if Version(_raw_version).is_devrelease:
     version = str(_raw_version + "-" + git_sha)
 else:
     version = str(_raw_version)
