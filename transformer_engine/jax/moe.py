@@ -2214,6 +2214,8 @@ def moe(
         (default) reserves the dropless aligned worst case. The value must match
         the capacity used by ``ep_bootstrap``. Overflow is reported through
         ``total_recv_tokens`` when bootstrap used ``drop_on_overflow=True``.
+        At EP=1, without ``drop_on_overflow``, a capacity below the dropless
+        bound is rejected when traced, since the local path cannot trap.
     collect_expert_counts : bool
         Whether to compute global per-expert assignment counts. Disable this
         when the returned counts are unused to avoid an extra all-reduce.

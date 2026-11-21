@@ -134,7 +134,7 @@ def ep_bootstrap(
     cp, ...) are supported and replicated across EP tensors. Auto-selects
     between self-hosted NCCL and XLA's borrowed comm (see
     tex.ep.use_nccl_comm_from_xla).
-    Multiple local devices require the XLA borrowed communicator path.
+    At EP>1, multiple local devices require the XLA borrowed communicator path.
 
     Args:
         world_size: Total number of devices (product of all mesh axes).
@@ -151,7 +151,9 @@ def ep_bootstrap(
         max_num_sms: SM budget for the dispatch/combine kernels; 0 = default (32).
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
-            total_recv_tokens, so callers can detect overflow from it.
+            total_recv_tokens, so callers can detect overflow from it. At
+            EP=1, which cannot trap, dispatch without it rejects a
+            recv_capacity_per_rank that routing could overflow.
     """
     if rank is None:
         rank = jax.process_index()
@@ -159,12 +161,6 @@ def ep_bootstrap(
         raise NotImplementedError(
             "ep_bootstrap: only max_token_dtype=jnp.bfloat16 is supported today, got"
             f" {jnp.dtype(max_token_dtype)}."
-        )
-    if jax.local_device_count() != 1 and not tex.ep.use_nccl_comm_from_xla():
-        raise RuntimeError(
-            "ep_bootstrap: multiple local devices require the XLA-borrowed-comm EP path"
-            " (tex.ep.use_nccl_comm_from_xla), which is unavailable here -- rebuild TE with"
-            " XLA collectives FFI support, or launch one process per GPU instead."
         )
 
     gsr = global_mesh_resource()
@@ -182,11 +178,6 @@ def ep_bootstrap(
         )
     if world_size is None:
         world_size = get_num_devices_in_mesh(mesh)
-    if world_size < 2:
-        raise ValueError(
-            f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
-            " at least 2 ranks to form a group."
-        )
     if get_num_devices_in_mesh(mesh) != world_size:
         raise ValueError(
             f"ep_bootstrap: mesh device count ({get_num_devices_in_mesh(mesh)}) must equal"
@@ -210,7 +201,21 @@ def ep_bootstrap(
         "max_tokens_per_rank": max_tokens_per_rank,
         "recv_capacity_per_rank": recv_capacity_per_rank,
         "hidden_dim": hidden_dim,
+        "drop_on_overflow": bool(drop_on_overflow),
     }
+
+    # EP=1 is entirely local. Keep the same bootstrap contract and config so
+    # callers can use the EP APIs unchanged, but do not initialize NCCL EP.
+    if ep_size == 1:
+        tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
+        return
+
+    if jax.local_device_count() != 1 and not tex.ep.use_nccl_comm_from_xla():
+        raise RuntimeError(
+            "ep_bootstrap: multiple local devices require the XLA-borrowed-comm EP path"
+            " (tex.ep.use_nccl_comm_from_xla), which is unavailable here -- rebuild TE with"
+            " XLA collectives FFI support, or launch one process per GPU instead."
+        )
 
     # Borrowed-comm path (auto-selected by tex.ep.use_nccl_comm_from_xla): XLA
     # owns the EP communicator, so a one-shot bootstrap op fetches it and
@@ -292,9 +297,18 @@ def ep_finalize():
 
     Reinitialization must use the same communicator mode; switching modes
     requires a process restart.
+
+    Calling this before bootstrap or after an earlier finalize is a no-op.
     """
+    try:
+        ep_size = tex.ep.get_ep_config().ep_size
+    except RuntimeError:
+        # No configuration means there is no initialized EP state to finalize.
+        return
     jax.clear_caches()
-    transformer_engine_jax.release_ep_resources()
+    # EP=1 never initialized the C++/NCCL backend.
+    if ep_size > 1:
+        transformer_engine_jax.release_ep_resources()
     tex.ep.reset_ep_config()
 
 
@@ -343,7 +357,13 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
         tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
     )
     out_leading = tuple(tokens.shape[:-1])
-    primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)
+    primal = (
+        recv_tokens,
+        recv_topk_weights,
+        handle_mem,
+        token_counts,
+        total_recv_tokens,
+    )
     return primal, (handle_mem, out_leading)
 
 

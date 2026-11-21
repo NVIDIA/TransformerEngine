@@ -1478,13 +1478,21 @@ class TestEpCommSelection(unittest.TestCase):
 
 
 class TestEpBootstrapMultiDeviceGuard(unittest.TestCase):
-    """Require borrowed XLA communicators for multiple local devices."""
+    """Require borrowed XLA communicators for multiple local devices at EP>1."""
 
     def test_raises_when_borrowed_comm_unavailable(self):
+        from types import SimpleNamespace
+        from transformer_engine.jax import sharding
         import transformer_engine.jax.ep as ep_mod
 
+        # An EP=2 mesh without devices: bootstrap reaches the guard before any NCCL setup.
+        mesh = SimpleNamespace(empty=False, shape={"ep": 2})
         with mock.patch.object(ep_mod.jax, "local_device_count", return_value=2), mock.patch.object(
             ep_mod.tex.ep, "use_nccl_comm_from_xla", return_value=False
+        ), mock.patch.object(ep_mod, "_get_mesh", return_value=mesh), mock.patch.object(
+            sharding, "_get_mesh", return_value=mesh
+        ), global_shard_guard(
+            MeshResource(ep_resource="ep")
         ):
             with self.assertRaisesRegex(RuntimeError, "XLA-borrowed-comm"):
                 ep_mod.ep_bootstrap(
@@ -1495,6 +1503,29 @@ class TestEpBootstrapMultiDeviceGuard(unittest.TestCase):
                     recv_capacity_per_rank=8,
                     hidden_dim=HIDDEN_DIM,
                 )
+
+    def test_ep1_does_not_require_borrowed_comm(self):
+        import transformer_engine.jax.ep as ep_mod
+
+        # EP=1 is local, so a mesh of several local devices needs no EP communicator.
+        devices = np.asarray(jax.local_devices()).reshape(-1, 1)
+        with mock.patch.object(ep_mod.jax, "local_device_count", return_value=2), mock.patch.object(
+            ep_mod.tex.ep, "use_nccl_comm_from_xla", return_value=False
+        ), Mesh(devices, ("fsdp", "ep")), global_shard_guard(
+            MeshResource(fsdp_resource="fsdp", ep_resource="ep")
+        ):
+            try:
+                ep_mod.ep_bootstrap(
+                    world_size=devices.size,
+                    rank=0,
+                    num_experts=2,
+                    max_tokens_per_rank=4,
+                    recv_capacity_per_rank=8,
+                    hidden_dim=HIDDEN_DIM,
+                )
+                self.assertEqual(get_ep_config().ep_size, 1)
+            finally:
+                ep_mod.ep_finalize()
 
 
 @unittest.skipUnless(

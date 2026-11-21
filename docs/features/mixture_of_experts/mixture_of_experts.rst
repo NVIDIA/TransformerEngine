@@ -590,7 +590,9 @@ the cumulative per-expert counts; any remaining capacity forms an unused tail.
   * On overflow the dispatch fails with a device-side error. With
     ``drop_on_overflow=True`` it instead drops the tokens that do not fit; they
     are not sent, so their experts contribute nothing to the output, like
-    token dropping in capacity-limited MoE.
+    token dropping in capacity-limited MoE. At EP=1 the dispatch is local and
+    cannot trap, so without ``drop_on_overflow`` a capacity below the dropless
+    bound is rejected when the step is traced.
   * ``total_recv_tokens`` reports the required receive rows before dropping,
     including alignment padding; compare it with capacity after the step to
     detect an overflow.
