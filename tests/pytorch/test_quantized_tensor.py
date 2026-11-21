@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 import io
+import math
 from typing import Any, Dict, List, Tuple, Union, Optional
 
 import pytest
@@ -188,6 +189,29 @@ def make_reference_and_test_tensors(
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
     return ref, test
+
+
+def _swizzle_mxfp8_rowwise_scale_inv(scale_inv: torch.Tensor) -> torch.Tensor:
+    """Reorder padded MXFP8 row-wise scales into the 128x4 tile layout of cuBLAS"""
+    rows, cols = scale_inv.shape
+    row = torch.arange(rows, device=scale_inv.device).view(-1, 1)
+    col = torch.arange(cols, device=scale_inv.device).view(1, -1)
+    offsets = (
+        ((row // 128) * (cols // 4) + col // 4) * 512
+        + (row % 32) * 16
+        + ((row % 128) // 32) * 4
+        + col % 4
+    )
+    out = torch.empty_like(scale_inv).view(-1)
+    out[offsets.view(-1)] = scale_inv.view(-1)
+    return out.view(rows, cols)
+
+
+def _decode_mxfp8_components(data: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
+    """Dequantize exported MXFP8 values and E8M0 scales with plain PyTorch"""
+    scales = torch.exp2(scale_inv.to(torch.float32) - 127)
+    scales = scales.repeat_interleave(32, dim=-1)[..., : data.shape[-1]]
+    return data.to(torch.float32) * scales
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -836,6 +860,109 @@ class TestQuantizedTensor:
         assert extracted_scale_inv.shape == (2, 128)
         torch.testing.assert_close(extracted_scale_inv, columnwise_scale_inv[:2], rtol=0, atol=0)
 
+    @pytest.mark.parametrize("with_gemm_swizzled_scales", [False, True])
+    @pytest.mark.parametrize("shape", [(128, 128), (96, 160), (2, 64, 128), (100, 48)])
+    def test_mxfp8_export_components_layout(
+        self,
+        shape: Tuple[int, ...],
+        with_gemm_swizzled_scales: bool,
+    ) -> None:
+        """MXFP8 export gives FP8 views of the data and compact, unswizzled scales"""
+        rows = math.prod(shape[:-1])
+        scale_cols = math.ceil(shape[-1] / 32)
+        padded_shape = (math.ceil(rows / 128) * 128, math.ceil(scale_cols / 4) * 4)
+        compact_scale_inv = torch.randint(0, 255, padded_shape, dtype=torch.uint8)
+        stored_scale_inv = compact_scale_inv
+        if with_gemm_swizzled_scales:
+            stored_scale_inv = _swizzle_mxfp8_rowwise_scale_inv(compact_scale_inv)
+        data = torch.randint(0, 256, shape, dtype=torch.uint8)
+        storage = MXFP8TensorStorage(
+            rowwise_data=data,
+            rowwise_scale_inv=stored_scale_inv,
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            fp8_dtype=te.DType.kFloat8E4M3,
+            quantizer=None,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+            fake_dtype=torch.bfloat16,
+        )
+
+        exported = storage.export_components()
+
+        assert exported.data.dtype == torch.float8_e4m3fn
+        assert exported.data.shape == shape
+        assert exported.data.data_ptr() == data.data_ptr()
+        assert exported.scale_inv.dtype == torch.uint8
+        assert exported.scale_inv.shape == (*shape[:-1], scale_cols)
+        assert exported.scale_inv.is_contiguous()
+        torch.testing.assert_close(
+            exported.scale_inv.view(rows, scale_cols),
+            compact_scale_inv[:rows, :scale_cols],
+            rtol=0,
+            atol=0,
+        )
+
+        # Scales are copied only when their layout has to change
+        is_view = exported.scale_inv.data_ptr() == stored_scale_inv.data_ptr()
+        assert is_view == (not with_gemm_swizzled_scales and scale_cols % 4 == 0)
+
+    def test_mxfp8_export_components_views(self) -> None:
+        """Exported MXFP8 views follow in-place updates of the tensor"""
+        data = torch.randint(0, 256, (128, 128), dtype=torch.uint8)
+        scale_inv = torch.randint(0, 255, (128, 4), dtype=torch.uint8)
+        storage = MXFP8TensorStorage(
+            rowwise_data=data,
+            rowwise_scale_inv=scale_inv,
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            fp8_dtype=te.DType.kFloat8E5M2,
+            quantizer=None,
+            with_gemm_swizzled_scales=False,
+            fake_dtype=torch.bfloat16,
+        )
+
+        exported = storage.export_components()
+        data.add_(1)
+        scale_inv.add_(1)
+
+        assert exported.data.dtype == torch.float8_e5m2
+        torch.testing.assert_close(exported.data.view(torch.uint8), data, rtol=0, atol=0)
+        torch.testing.assert_close(exported.scale_inv, scale_inv, rtol=0, atol=0)
+
+    def test_mxfp8_export_components_empty(self) -> None:
+        """MXFP8 export of an empty tensor gives empty values and scales"""
+        storage = MXFP8TensorStorage(
+            rowwise_data=torch.empty((0, 64), dtype=torch.uint8),
+            rowwise_scale_inv=torch.empty((0, 4), dtype=torch.uint8),
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            fp8_dtype=te.DType.kFloat8E4M3,
+            quantizer=None,
+            with_gemm_swizzled_scales=False,
+            fake_dtype=torch.bfloat16,
+        )
+
+        exported = storage.export_components()
+
+        assert exported.data.shape == (0, 64)
+        assert exported.scale_inv.shape == (0, 2)
+
+    def test_mxfp8_export_components_requires_rowwise_data(self) -> None:
+        """MXFP8 export needs the row-scaled data"""
+        storage = MXFP8TensorStorage(
+            rowwise_data=None,
+            rowwise_scale_inv=None,
+            columnwise_data=torch.zeros((64, 64), dtype=torch.uint8),
+            columnwise_scale_inv=torch.zeros((4, 128), dtype=torch.uint8),
+            fp8_dtype=te.DType.kFloat8E4M3,
+            quantizer=None,
+            with_gemm_swizzled_scales=False,
+            fake_dtype=torch.bfloat16,
+        )
+
+        with pytest.raises(ValueError, match="row-scaled data"):
+            storage.export_components()
+
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("dim", [0, 1])
     def test_chunk(
@@ -1189,6 +1316,125 @@ class TestMXFP8Tensor:
         # Make sure we are not trivially passing the test
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_deq, -x_ref, **_tols[fp8_dtype])
+
+    @pytest.mark.parametrize(
+        "fp8_dtype, with_2d_quantization",
+        [
+            (te.DType.kFloat8E4M3, False),
+            (te.DType.kFloat8E5M2, False),
+            (te.DType.kFloat8E4M3, True),
+        ],
+    )
+    @pytest.mark.parametrize("dims", [[128, 256], [96, 160], [4, 64, 128]])
+    def test_mxfp8_export_components_matches_dequantize(
+        self,
+        fp8_dtype: te.DType,
+        with_2d_quantization: bool,
+        dims: DimsType,
+    ) -> None:
+        """Exported MXFP8 values and scales decode to the dequantized tensor"""
+        x = torch.randn(_to_list(dims), dtype=torch.bfloat16, device="cuda")
+        quantizer = MXFP8Quantizer(
+            fp8_dtype=fp8_dtype,
+            rowwise=True,
+            columnwise=False,
+            with_2d_quantization=with_2d_quantization,
+        )
+        x_mxfp8 = quantizer(x)
+
+        data, scale_inv = x_mxfp8.export_components()
+
+        torch.testing.assert_close(
+            _decode_mxfp8_components(data, scale_inv),
+            x_mxfp8.dequantize(dtype=torch.float32),
+            rtol=0,
+            atol=0,
+        )
+
+    @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
+    @pytest.mark.parametrize("dims", [[100, 48], [32, 16]])
+    def test_mxfp8_export_components_partial_block(
+        self,
+        fp8_dtype: te.DType,
+        dims: DimsType,
+    ) -> None:
+        """A last block shorter than 32 values keeps its own exported scale"""
+        x = torch.randn(_to_list(dims), dtype=torch.bfloat16, device="cuda")
+        quantizer = MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=False)
+        x_mxfp8 = quantizer(x)
+
+        data, scale_inv = x_mxfp8.export_components()
+
+        assert scale_inv.shape == (*dims[:-1], math.ceil(dims[-1] / 32))
+        torch.testing.assert_close(
+            _decode_mxfp8_components(data, scale_inv),
+            x_mxfp8.dequantize(dtype=torch.float32),
+            rtol=0,
+            atol=0,
+        )
+
+    @pytest.mark.parametrize("dims", [[128, 256], [96, 160], [4, 64, 128], [100, 48]])
+    def test_mxfp8_export_components_unswizzles_gemm_scales(self, dims: DimsType) -> None:
+        """MXFP8 export gives the same scales whether or not they are swizzled for GEMM"""
+        x = torch.randn(_to_list(dims), dtype=torch.bfloat16, device="cuda")
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+        gemm_quantizer = quantizer.copy()
+        gemm_quantizer.optimize_for_gemm = True
+        x_mxfp8 = quantizer(x)
+        x_mxfp8_gemm = gemm_quantizer(x)
+        assert not x_mxfp8._with_gemm_swizzled_scales
+        assert x_mxfp8_gemm._with_gemm_swizzled_scales
+
+        expected = x_mxfp8.export_components()
+        exported = x_mxfp8_gemm.export_components()
+
+        torch.testing.assert_close(
+            exported.data.view(torch.uint8), expected.data.view(torch.uint8), rtol=0, atol=0
+        )
+        torch.testing.assert_close(exported.scale_inv, expected.scale_inv, rtol=0, atol=0)
+
+    def test_mxfp8_export_components_of_quantized_weight(self) -> None:
+        """MXFP8 export of a quantized parameter follows its optimizer updates"""
+        recipe = transformer_engine.common.recipe.MXFP8BlockScaling()
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            linear = te.Linear(128, 256, params_dtype=torch.bfloat16, device="cuda")
+        x = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            y = linear(x)
+        y.sum().backward()
+        weight = linear.weight
+        assert isinstance(weight, MXFP8Tensor)
+
+        data, scale_inv = weight.export_components()
+
+        assert data.data_ptr() == weight._rowwise_data.data_ptr()
+        decoded_before_step = _decode_mxfp8_components(data, scale_inv)
+        torch.testing.assert_close(
+            decoded_before_step, weight.dequantize(dtype=torch.float32), rtol=0, atol=0
+        )
+
+        # FusedAdam writes the updated master weights back into the parameter's
+        # buffers, so the exported views must now hold the new values and scales
+        optimizer = te.optimizers.FusedAdam(
+            [weight],
+            lr=0.1,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+            use_decoupled_grad=True,
+        )
+        weight.decoupled_grad = torch.randn(weight.shape, dtype=torch.float32, device="cuda")
+        optimizer.step()
+        quantizer = weight._quantizer.copy()
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        expected = quantizer(
+            optimizer.get_unscaled_state(weight, "master_param")
+        ).export_components()
+
+        torch.testing.assert_close(
+            data.view(torch.uint8), expected.data.view(torch.uint8), rtol=0, atol=0
+        )
+        torch.testing.assert_close(scale_inv, expected.scale_inv, rtol=0, atol=0)
+        assert not torch.equal(_decode_mxfp8_components(data, scale_inv), decoded_before_step)
 
 
 @pytest.mark.parametrize(

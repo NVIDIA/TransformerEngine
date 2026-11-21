@@ -5,7 +5,7 @@
 """Mixin class holding data specific for MXFP8Tensor"""
 
 from __future__ import annotations
-from typing import Annotated, Optional, Dict, Any, Tuple, Union
+from typing import Annotated, NamedTuple, Optional, Dict, Any, Tuple, Union
 from collections.abc import Iterable
 import math
 import torch
@@ -18,11 +18,12 @@ from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import (
     TE_DType as torch_to_transformer_engine_dtype,
+    TE_DType_To_Torch,
     MXFP8_BLOCK_SCALING_SIZE,
     DType,
 )
 
-from ...utils import _empty_tensor
+from ...utils import _empty_tensor, ceil_div, round_up_to_nearest_multiple
 
 
 class _FromMXFP8Func(torch.autograd.Function):
@@ -59,6 +60,24 @@ class _FromMXFP8Func(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision
         return grad, None
+
+
+class MXFP8Components(NamedTuple):
+    """FP8 values and E8M0 scales of an MXFP8 tensor
+
+    Each block of 32 consecutive values along the last dimension
+    shares one scale (the last block may be shorter), so the
+    dequantized value at ``[..., j]`` is
+    ``data[..., j] * 2 ** (scale_inv[..., j // 32] - 127)``.
+
+    """
+
+    # FP8 values (torch.float8_e4m3fn or torch.float8_e5m2) with the
+    # tensor's shape
+    data: torch.Tensor
+    # E8M0 scales as biased exponents (torch.uint8) with shape
+    # (*shape[:-1], ceil(shape[-1] / 32))
+    scale_inv: torch.Tensor
 
 
 class MXFP8TensorStorage(QuantizedTensorStorage):
@@ -197,6 +216,36 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         if self._rowwise_data is not None and self._rowwise_data.numel() == 0:
             return torch.empty(self.size(), dtype=dtype, device=self.device)
         return _FromMXFP8Func.forward(None, self, dtype)
+
+    def export_components(self) -> MXFP8Components:
+        """Get the FP8 values and E8M0 scales for use outside Transformer Engine
+
+        The row-scaled data is exported, with compact scales: no
+        padding and no swizzling for GEMMs. The values are a view of
+        this tensor's data, and so are the scales unless removing
+        their padding or GEMM swizzling needs a copy. Views follow
+        in-place updates of this tensor, e.g. optimizer steps, so
+        clone them to keep a snapshot.
+
+        """
+        if self._rowwise_data is None:
+            raise ValueError(
+                "MXFP8 export requires row-scaled data, which this tensor does not have"
+            )
+        shape = self._rowwise_data.shape
+        rows = math.prod(shape[:-1])
+        scale_cols = ceil_div(shape[-1], MXFP8_BLOCK_SCALING_SIZE)
+
+        data = self._rowwise_data.view(TE_DType_To_Torch[self._fp8_dtype])
+        scale_inv = self._rowwise_scale_inv
+        if self._with_gemm_swizzled_scales:
+            # Undo the 128x4 tile layout that cuBLAS expects for block scales
+            padded_rows = round_up_to_nearest_multiple(rows, 128)
+            padded_cols = round_up_to_nearest_multiple(scale_cols, 4)
+            scale_inv = scale_inv.reshape(padded_rows // 128, padded_cols // 4, 32, 4, 4)
+            scale_inv = scale_inv.permute(0, 3, 2, 1, 4).reshape(padded_rows, padded_cols)
+        scale_inv = scale_inv[:rows, :scale_cols].contiguous()
+        return MXFP8Components(data=data, scale_inv=scale_inv.view(*shape[:-1], scale_cols))
 
     def size(self, *args, **kwargs):
         # pylint: disable=missing-function-docstring
