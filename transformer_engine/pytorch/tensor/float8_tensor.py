@@ -527,22 +527,13 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     def clone(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
-        # ``_data`` may be None for columnwise-only sub-storages of a
-        # HybridQuantizedTensor on architectures without native non-TN FP8
-        # GEMM (Hopper / L40), where columnwise-only Float8 allocates
-        # ``_transpose`` instead of ``_data``. On Blackwell+ the C++
-        # override keeps ``_data`` populated even in columnwise-only mode.
-        data = self._data.detach().clone() if self._data is not None else None
-        data_transpose = None
-        if self._transpose is not None:
-            data_transpose = self._transpose.detach().clone()
-        return _IdentityFunc.apply(
-            self,
-            {
-                "data": data,
-                "data_transpose": data_transpose,
-            },
-        )
+        init_kwargs = {
+            name: value.detach().clone()
+            for name, value in self.get_metadata().items()
+            if isinstance(value, torch.Tensor)
+        }
+        init_kwargs["transpose_invalid"] = self._transpose_invalid
+        return _IdentityFunc.apply(self, init_kwargs)
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
         # pylint: disable=missing-function-docstring

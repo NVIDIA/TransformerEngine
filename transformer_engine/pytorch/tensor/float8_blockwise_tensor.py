@@ -364,19 +364,12 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
 
     def clone(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
-        rowwise_data = None
-        if self._rowwise_data is not None:
-            rowwise_data = self._rowwise_data.detach().clone()
-        columnwise_data = None
-        if self._columnwise_data is not None:
-            columnwise_data = self._columnwise_data.detach().clone()
-        return _IdentityFunc.apply(
-            self,
-            {
-                "rowwise_data": rowwise_data,
-                "columnwise_data": columnwise_data,
-            },
-        )
+        init_kwargs = {
+            name: value.detach().clone()
+            for name, value in self.get_metadata().items()
+            if isinstance(value, torch.Tensor)
+        }
+        return _IdentityFunc.apply(self, init_kwargs)
 
     def view(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
@@ -446,6 +439,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 if t is not None and t.device.type == te_device_type():
                     t.record_stream(stream)
             return None
+
+        if func == torch.ops.aten.clone.default:
+            return cls.clone(args[0])
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
