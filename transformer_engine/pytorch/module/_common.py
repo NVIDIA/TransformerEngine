@@ -6,17 +6,31 @@
 
 import dataclasses
 import queue
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..distributed import in_fp8_activation_recompute_phase
+from ..dynamo import TensorSpec, is_value_opaque_quantizer
 from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
+from ..quantized_tensor import Quantizer
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
+
+
+def compile_unsupported_quantizer_reason(
+    quantizers: Sequence[Optional[Quantizer]],
+) -> Optional[str]:
+    """Return a fallback reason if a quantizer cannot cross the custom-op boundary."""
+    for quantizer in quantizers:
+        # Delayed-scaling and unregistered custom-recipe quantizers are not value-opaque.
+        if quantizer is not None and not is_value_opaque_quantizer(quantizer):
+            return "a quantizer not registered as a torch.compile value-opaque type"
+    return None
 
 
 def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:
@@ -343,3 +357,70 @@ def check_fp8_reduce_and_update(restore_first_module: bool = False) -> bool:
     if restore_first_module or in_fp8_activation_recompute_phase():
         qstate.is_first_fp8_module = first_fp8_module
     return result
+
+
+def get_output_first_dim_size(input_first_dim_size: int, args: Any) -> int:
+    """Compute the output's first dimension size from the input's.
+
+    Sequence parallelism gathers this dimension in column-parallel mode and
+    scatters it in row-parallel mode. ``args`` provides ``sequence_parallel``,
+    ``parallel_mode``, and ``tp_size``.
+    """
+    if not args.sequence_parallel:
+        return input_first_dim_size
+    if args.parallel_mode == "column":
+        return input_first_dim_size * args.tp_size
+    if args.parallel_mode == "row":
+        return input_first_dim_size // args.tp_size
+    return input_first_dim_size
+
+
+def fake_workspace_valid(workspace: TensorSpec, quantizer: Optional[Quantizer]) -> bool:
+    """Spec-level mirror of ``_is_weight_workspace_valid``."""
+    if quantizer is None:
+        return True
+    if (
+        isinstance(workspace.quantizer, Float8BlockQuantizer)
+        and workspace.quantizer.block_scaling_dim == 2
+        and workspace.quantizer.rowwise_usage
+    ):
+        # 2D block scaling can reconstruct columnwise buffers from rowwise data.
+        return True
+    required = TensorSpec(
+        shape=workspace.shape, dtype=workspace.dtype, quantizer=quantizer, device=workspace.device
+    ).inner_names()
+    return set(required) <= set(workspace.inner_names())
+
+
+def fake_quantized_weight(
+    weight: TensorSpec,
+    quantizer: Optional[Quantizer],
+    workspace: Optional[TensorSpec],
+    *,
+    activation_dtype: torch.dtype,
+    cache_weight: bool,
+) -> Tuple[TensorSpec, Optional[TensorSpec], Optional[str]]:
+    """Spec-level mirror of ``quantize_weight``: ``(weightmat, new_workspace,
+    save_alias)`` where ``save_alias`` names the forward input / output the
+    saved weight aliases (``None`` when it is a fresh tensor)."""
+    if weight.is_quantized:
+        return weight, None, "weight"
+    if workspace is not None and not fake_workspace_valid(workspace, quantizer):
+        workspace = None
+    if workspace is not None:
+        weightmat = dataclasses.replace(workspace)
+        weightmat.update_usage(rowwise_usage=True)
+        return weightmat, None, "weight_workspace"
+    weightmat = TensorSpec(
+        shape=tuple(weight.shape),
+        dtype=activation_dtype,
+        quantizer=quantizer,
+        device=weight.device,
+    )
+    new_workspace = None
+    if cache_weight:
+        if weightmat.quantizer is not None:
+            weightmat.quantizer.internal = False
+        new_workspace = weightmat
+    weightmat.update_usage(rowwise_usage=True)
+    return weightmat, new_workspace, "new_weight_workspace" if cache_weight else None
