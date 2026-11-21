@@ -22,6 +22,7 @@
 
 #ifdef NVTE_WITH_CUTEDSL
 #include "../mxfp8/dequantize_mxfp8_cutedsl.cuh"
+#include "../mxfp8/group_dequantize_mxfp8_cutedsl.cuh"
 #endif
 
 namespace transformer_engine {
@@ -74,7 +75,14 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
   switch (input.scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
       if (is_supported_by_CC_100()) {
-        mxfp8::group_dequantize(&input, output, stream);
+        bool dequantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+        dequantized_with_cutedsl =
+            cutedsl_backend::mxfp8_group_dequantize_cutedsl(input, output, stream);
+#endif
+        if (!dequantized_with_cutedsl) {
+          mxfp8::group_dequantize(&input, output, stream);
+        }
       } else {
         NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");
       }
