@@ -31,7 +31,7 @@ from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
-from ..custom_recipes.gemm import custom_gemm
+from ..custom_recipes.gemm import custom_gemm, GEMMType, MMParams
 from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
 
 __all__ = [
@@ -499,6 +499,162 @@ def strided_batched_gemm(
     )
 
 
+# Custom-recipe dispatch for the LIST-based grouped GEMM. The operand roles are taken from
+# GroupedLinear's fprop call site:
+#
+#     out = _validate_or_alloc_output(out, sum(m_splits), weights_fp8[0].size(0), ...)
+#     general_grouped_gemm(weights_fp8, inputmats, [out], ..., single_output=True, m_splits=m_splits)
+#
+#   A    = list of weights   (one per expert)
+#   B    = list of inputs    (per-expert activation buffers, padded)
+#   out  = [single tensor]   of shape [sum(m_splits), A[0].size(0)]
+#   m_splits[i] = VALID activation rows for expert i
+#
+# So for each expert: activation rows are B[i][0:m_splits[i]], the weight is A[i], and the result
+# is written to out[0][offset : offset+m_splits[i]].
+
+
+def _custom_grouped_gemm(
+    A,
+    B,
+    out,
+    quantization_params,
+    out_dtype,
+    layout="TN",
+    m_splits=None,
+    gelu=False,
+    grad=False,
+    accumulate=False,
+    bias=None,
+    use_bias=False,
+    use_split_accumulator=False,
+    D_dtype=None,
+    single_output=False,
+):
+    """Grouped GEMM over per-expert weight/activation lists using a custom quantizer's qgemm."""
+    if gelu:
+        raise NotImplementedError("custom grouped GEMM does not define GELU outputs")
+    # dgrad/wgrad use different operand roles and a transposed weight; only TN fprop is
+    # implemented here, so they are refused instead of computing the wrong product.
+    if grad:
+        raise NotImplementedError("custom grouped GEMM implements fprop only")
+    if layout != "TN":
+        raise NotImplementedError(
+            f"custom grouped GEMM supports the TN layout only, got {layout!r}"
+        )
+    if D_dtype is not None:
+        raise NotImplementedError("custom grouped GEMM does not define D_dtype")
+    if quantization_params is not None and any(q is not None for q in quantization_params):
+        raise NotImplementedError("custom grouped GEMM does not define output quantization")
+    if not A or not B:
+        raise ValueError("A and B must both be non-empty")
+    if not all(is_custom(x) for x in (*A, *B)):
+        raise TypeError("custom grouped GEMM cannot mix custom and ordinary tensors")
+    if m_splits is None:
+        raise ValueError("m_splits is required for the per-expert layout")
+    # Two output layouts occur: a single concatenated buffer (`single_output=True`) or one tensor
+    # per group. Both are supported; the earlier version refused the list form, which is the one
+    # TEGroupedLinear actually uses.
+    if single_output and len(out) != 1:
+        raise ValueError("single_output=True requires exactly one output tensor")
+    if not single_output and len(out) != len(m_splits):
+        raise ValueError(f"expected {len(m_splits)} outputs, got {len(out)}")
+
+    n = len(m_splits)
+    if len(A) != n or len(B) != n:
+        raise ValueError(f"expected {n} weights and {n} inputs, got {len(A)} and {len(B)}")
+    total_rows = sum(m_splits)
+
+    quantizer = None
+    for candidate in (*A, *B):
+        q = getattr(candidate, "_quantizer", None)
+        if q is not None and callable(getattr(q, "qgemm", None)):
+            quantizer = q
+            break
+    if quantizer is None:
+        raise TypeError("no quantizer with a callable qgemm on the grouped operands")
+
+    m_params = MMParams(out_dtype=out_dtype, use_split_accumulator=use_split_accumulator)
+
+    dst_full = out[0] if single_output else None
+    if single_output:
+        if dst_full.shape[0] < total_rows:
+            raise ValueError(f"output has {dst_full.shape[0]} rows but sum(m_splits)={total_rows}")
+        width = dst_full.shape[-1]
+    else:
+        width = out[0].shape[-1]
+        for i, o in enumerate(out):
+            if o.shape[-1] != width:
+                raise ValueError(f"out[{i}] width {o.shape[-1]} != {width}")
+
+    if use_bias and bias is None:
+        raise ValueError("use_bias=True requires a per-group bias list")
+    if use_bias and len(bias) != n:
+        raise ValueError(f"expected {n} biases, got {len(bias)}")
+
+    # NOTE (known cost, not a correctness gap): this issues one single-group GEMM per expert group, so a
+    # step pays ~40x more kernel launches than it has GEMMs of work (~40,000 launches for ~1,000 GEMMs,
+    # measured on a real training step 2026-11). Per-launch cost is small (~0.05 ms of device time), which
+    # is why it never shows up in a per-phase average, but the sum is now the largest identified item in
+    # the custom-recipe path. Replacing this loop with a grouped GEMM kernel (one launch for all groups)
+    # is the intended fix and is what the surviving difference to the native FP4 path is made of.
+    offset = 0
+    for i in range(n):
+        rows = m_splits[i]
+        if rows == 0:
+            continue
+        w, act = A[i], B[i]
+        if w.data is None or act.data is None:
+            raise ValueError(f"group {i}: missing quantized data (weight or activation)")
+        if w.scale is None or act.scale is None:
+            raise ValueError(f"group {i}: missing scale_inv (weight or activation)")
+
+        qw = w.data
+        sw = w.scale
+        qx = act.data[:rows]
+        sx = act.scale
+        # Activation scales are per-row, so slice the same prefix as the data.
+        if hasattr(sx, "shape") and sx.ndim >= 1 and sx.shape[0] >= rows:
+            sx = sx[:rows]
+
+        # The quantized tensors themselves carry the global scales that a non-pow-2 (NVFP4)
+        # recipe turns into the GEMM alpha, so they go along with the packed data.
+        result = quantizer.qgemm(
+            qx,
+            qw,
+            m_params,
+            out_dtype,
+            sx,
+            sw,
+            bias[i] if use_bias else None,
+            gemm_type=GEMMType.FPROP,
+            qresult_x=act,
+            qresult_w=w,
+        )
+        if tuple(result.shape) != (rows, width):
+            raise ValueError(
+                f"group {i}: qgemm returned {tuple(result.shape)}, expected {(rows, width)} "
+                f"(qx={tuple(qx.shape)} qw={tuple(qw.shape)} sx={tuple(sx.shape)} "
+                f"sw={tuple(sw.shape)} widths={width})"
+            )
+        dst = dst_full[offset : offset + rows] if single_output else out[i]
+        if tuple(dst.shape) != (rows, width):
+            raise ValueError(
+                f"group {i}: output segment is {tuple(dst.shape)}, expected {(rows, width)}"
+            )
+        with torch.no_grad():
+            if accumulate:
+                dst.add_(result)
+            else:
+                dst.copy_(result)
+        offset += rows
+
+    ref = dst_full if single_output else out[0]
+    bias_output = [torch.empty(0, dtype=ref.dtype, device=ref.device)]
+    gelu_input = [torch.empty(0, dtype=ref.dtype, device=ref.device)]
+    return out, bias_output, gelu_input
+
+
 def general_grouped_gemm(
     A: List[torch.Tensor],
     B: List[torch.Tensor],
@@ -519,6 +675,25 @@ def general_grouped_gemm(
     """
     TN layout Grouped GEMM with fp8 inputs.
     """
+    if any(is_custom(a) for a in A) or any(is_custom(b) for b in B):
+        return _custom_grouped_gemm(
+            A,
+            B,
+            out,
+            quantization_params,
+            out_dtype,
+            layout,
+            m_splits,
+            gelu,
+            grad,
+            accumulate,
+            bias,
+            use_bias,
+            use_split_accumulator,
+            D_dtype,
+            single_output,
+        )
+
     num_gemms = len(A)
 
     transa = layout[0] == "T"
@@ -659,6 +834,31 @@ def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
     return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
 
 
+# Custom quantizers are not dispatched here: this entry point receives grouped storages, whose
+# `offsets` count elements rather than rows and which carry no per-group QuantizedTensorStorage
+# to hand a quantizer as `qresult_x`/`qresult_w`. Both admission predicates
+# (`is_module_grouped_tensor_path_supported`, `is_op_fuser_grouped_tensor_path_supported`)
+# return False for custom recipes, so GroupedLinear runs the split-quantize path instead and
+# reaches the custom dispatch through `general_grouped_gemm`. Refuse rather than fall through
+# to the native kernel with custom operands.
+
+
+def _grouped_operand_is_custom(x) -> bool:
+    """Whether a grouped-GEMM operand is routed to a custom quantizer.
+
+    Operands of `general_grouped_gemm_for_grouped_tensor` are `GroupedTensorStorage`
+    containers or discrete lists of tensors, and `is_custom` raises on any type that is
+    neither a `Quantizer`/`QuantizedTensorStorage` nor a `torch.Tensor`. Handing it a
+    container therefore turned every grouped-tensor GEMM, native ones included, into an
+    `AssertionError`; the quantizer (or the list members) have to be inspected instead.
+    """
+    if isinstance(x, (list, tuple)):
+        return any(_grouped_operand_is_custom(item) for item in x)
+    if isinstance(x, (Quantizer, QuantizedTensorStorage)):
+        return is_custom(x)
+    return is_custom(getattr(x, "quantizer", None))
+
+
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -681,6 +881,13 @@ def general_grouped_gemm_for_grouped_tensor(
     The caller must ensure that GroupedTensor metadata is already compatible with the
     underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
     """
+    if any(_grouped_operand_is_custom(x) for x in (A, B, out)):
+        raise NotImplementedError(
+            "custom quantizers are not supported by the grouped-tensor GEMM entry point; a custom "
+            "recipe runs the split-quantize path, which dispatches per expert through "
+            "general_grouped_gemm"
+        )
+
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     if grad:
         raise NotImplementedError("grad is not supported for grouped_tensor GEMM yet.")

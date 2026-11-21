@@ -963,6 +963,15 @@ def quantize_weight(
         return tensor, None
 
     # Validate workspace
+    # A custom (reference) quantizer cannot be cached safely. The cached entry is a
+    # TensorSpec whose storage is driven by `update_usage`, and a gradient-checkpoint
+    # replay can reach the GEMM after that storage has been released, which surfaces as
+    # "FPROP GEMM: quantized weight data (B.data) is None" in a model that trains fine
+    # for a single un-replayed forward. Re-quantising per call is cheap next to a wrong
+    # result, so the workspace path is skipped for custom quantizers.
+    if quantizer is not None and getattr(quantizer, "custom", False):
+        workspace = None
+
     if workspace is not None and quantizer is not None:
         if not _is_weight_workspace_valid(workspace, quantizer):
             workspace = None
