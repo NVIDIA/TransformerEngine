@@ -4567,6 +4567,7 @@ class TestCheckpointing:
 
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantized_weight", (False, True))
+    @pytest.mark.parametrize("bias", (False, True))
     def test_linear(
         self,
         *,
@@ -4578,6 +4579,7 @@ class TestCheckpointing:
         device: torch.device = "cuda",
         quantization: Optional[str],
         quantized_weight: bool,
+        bias: bool,
     ) -> None:
         """Check checkpointing with linear op"""
 
@@ -4595,7 +4597,7 @@ class TestCheckpointing:
         recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model_save = te_ops.Sequential(
-                te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
+                te_ops.Linear(in_features, out_features, bias=bias, device=device, dtype=dtype)
             )
         optim_save = torch.optim.SGD(model_save.parameters(), lr=0.25)
 
@@ -4642,7 +4644,7 @@ class TestCheckpointing:
         # Load checkpoint
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model_load = te_ops.Sequential(
-                te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
+                te_ops.Linear(in_features, out_features, bias=bias, device=device, dtype=dtype)
             )
         optim_load = torch.optim.SGD(model_load.parameters(), lr=0.25)
         state_dict = torch.load(io.BytesIO(checkpoint_bytes), weights_only=False)
