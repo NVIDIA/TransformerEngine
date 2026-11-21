@@ -52,13 +52,14 @@ def _run_gemm(rows_per_expert, rows_alignment, mxfp8, tail_clusters, device_layo
     device = torch.device("cuda")
     hidden, n, experts = 1024, 1024, len(rows_per_expert)
     rows = sum(rows_per_expert) + TILE  # spare tile: the capacity exceeds the rows in use
+    scaling_mode = dispatch_gemm.MXFP8_1D_SCALING if mxfp8 else dispatch_gemm.DELAYED_TENSOR_SCALING
     cfg = dispatch_gemm.DispatchGemmConfig(
         rows,
         hidden,
         n,
         experts,
         num_clusters=8,
-        mxfp8=mxfp8,
+        scaling_mode=scaling_mode,
         rows_alignment=rows_alignment,
         device_layout=device_layout,
     )
@@ -330,7 +331,15 @@ def test_wgrad_gemm_matches_reference(mxfp8, fp32_out, accumulate, rows_per_expe
 def test_wgrad_gemm_rejects_one_tile_capacity():
     """SM 10.7 refuses an added or FP32 MXFP8 weight gradient over 256 receive rows or fewer."""
     cfg = wgrad_gemm.WgradConfig(
-        TILE, 256, 512, 2, 8, fp32_out=True, mxfp8=True, rows_alignment=TILE, routed_rows=TILE
+        TILE,
+        256,
+        512,
+        2,
+        8,
+        fp32_out=True,
+        scaling_mode=wgrad_gemm.MXFP8_1D_SCALING,
+        rows_alignment=TILE,
+        routed_rows=TILE,
     )
     with pytest.raises(ValueError, match="above 256 rows"):
         wgrad_gemm.build_kernel(cfg)
