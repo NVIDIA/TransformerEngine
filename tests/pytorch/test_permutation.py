@@ -1707,6 +1707,29 @@ def test_permutation_index_map(
     )
 
 
+def test_unpermute_mask_map_infers_restore_shape_with_dropped_token():
+    """Omitting restore_shape must still return one row per token.
+
+    Top-1 routing selects at most one expert per token, so a token whose row in the routing map is
+    all zeros is dropped and does not appear in the permuted buffer. The row map still has an entry
+    for every token, which is what the unpermute output shape has to be derived from.
+    """
+    device = "cuda"
+    hidden_size = 3
+    routing_map = torch.tensor([[1, 0], [0, 1], [0, 0], [1, 0]], dtype=torch.int32, device=device)
+    x = torch.arange(4 * hidden_size, dtype=torch.float32, device=device).reshape(4, hidden_size)
+
+    permuted, row_id_map = te_permute(x, routing_map, 3, map_type="mask")
+    observed = te_unpermute(permuted, row_id_map, map_type="mask")
+    control = te_unpermute(permuted, row_id_map, restore_shape=x.shape, map_type="mask")
+
+    expected = x.clone()
+    expected[2] = 0
+    assert observed.shape == expected.shape, f"{observed.shape} != {expected.shape}"
+    torch.testing.assert_close(observed, expected)
+    torch.testing.assert_close(observed, control)
+
+
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("use_torch_compile", [False, True])
 def test_permutation_index_map_empty_input(te_dtype, use_torch_compile):
