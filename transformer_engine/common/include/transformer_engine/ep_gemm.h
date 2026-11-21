@@ -39,14 +39,14 @@
  *  warmup, outside CUDA graph capture. Issue the calls of one EP group on one stream, in the same
  *  order on every rank. A call throws when a requirement does not hold.
  *
- *  An input with a symm-mem window (tokens_win, grad_result_win) is read in place by the peers:
- *  every rank passes a window, at the same data and scale offsets, or none, and the input is not
- *  written before the call's dispatch completes, then only by a launch without programmatic
+ *  A symm-mem window (tokens_win, grad_result_win) lets peers read the input in place. Either every
+ *  rank passes a window, at the same data and scale offsets, or none does. The input must not be
+ *  written until the call's dispatch completes, and then only from a launch with no programmatic
  *  dependency on the stream.
  *
- *  Row-sized tensors have recv_capacity rows, a multiple of the alignment. Under MXFP8, tokens and
- *  received rows travel with compact rowwise scales, weights and GEMM inputs carry GEMM-swizzled
- *  scales and the backward reads the weights and wgrad operands columnwise.
+ *  Row-sized tensors have recv_capacity rows, a multiple of the alignment. Under MXFP8: tokens and
+ *  received rows carry compact rowwise scales; weights and GEMM inputs carry GEMM-swizzled scales;
+ *  the backward reads the weights and wgrad operands columnwise.
  */
 
 #ifndef TRANSFORMER_ENGINE_EP_GEMM_H_

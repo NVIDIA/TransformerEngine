@@ -238,7 +238,7 @@ void nvte_ep_dispatch_v2(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor 
  *  \param[out]    recv_topk_weights      [recv_T] float32 per-slot weights.
  *  \param[in]     recv_topk_weights_win  Optional symmem window for recv_topk_weights.
  *  \param[out]    recv_tokens_per_expert [num_local_experts] int32/int64 counts.
- *  \param[out]    total_recv_tokens_per_rank Optional [1] int32/int64 scalar recv total. May be null.
+ *  \param[out]    total_recv_tokens_per_rank [1] int32/int64 scalar recv total, or null.
  *  \param[in]     layer_cfg              Per-call layer configuration (struct_size set).
  *  \param[in]     stream                 CUDA stream.
  */
