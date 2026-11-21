@@ -245,9 +245,9 @@ class FusedMoE(FusedOperation):
                 num_tokens = recv_total
             for tensor in row_tensors:
                 tensor.grouped_tensor_num_tokens = num_tokens
-            # Publish the kept recv total to the buffer's shared counter, as the unfused dispatch
-            # does, so paged stashing reads the right row count under FusedMoE.
-            buffer.total_recv_tokens.copy_(num_tokens.reshape(1))
+            # Publish the kept recv total to the buffer counter paged stashing reads; only needed
+            # when saving for backward, as stashing is.
+            buffer.total_recv_tokens.copy_(num_tokens)
             # CPU offload takes the activations, as the unfused ops do, not the routing weights.
             # The weight copies saved for backward stay on the GPU, as in TE modules.
             if is_cpu_offload_enabled():
@@ -901,7 +901,7 @@ def moe_overlap_unsupported_reason(
     elif (
         config.dispatch_fwd_quant_recipe is not None or config.combine_bwd_quant_recipe is not None
     ):
-        return "quantized EP transport is not supported"
+        return "BF16 FusedMoE cannot use a quantized EP transport recipe"
     if config.hidden_dim % _TILE != 0:
         return f"hidden_dim must be a multiple of {_TILE}"
     capacity = config.recv_capacity_per_rank
