@@ -3751,12 +3751,8 @@ def fused_attn_fwd(
             - `(query, key, value)`: For separate query, key, and value tensors.
         bias (Optional[jnp.ndarray]): An optional bias tensor to be added to the attention scores.
         softmax_offset (Optional[jnp.ndarray]): An optional softmax offset tensor.
-        q_seqlen (jnp.ndarray): Sequence lengths for the query, with shape [batch,].
-        kv_seqlen (jnp.ndarray): Sequence lengths for the key and value, with shape [batch,].
-        q_seq_offsets (jnp.ndarray):
-            The offsets in the sequence dim for the query, with shape [batch + 1,].
-        kv_seq_offsets (jnp.ndarray):
-            The offsets in the sequence dim for the query, with shape [batch + 1,].
+        sequence_descriptor (SequenceDescriptor): Sequence lengths and offsets for the query,
+            key and value, and optionally segment ids and positions.
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
         attn_bias_type (AttnBiasType): Type of attention bias.
         attn_mask_type (AttnMaskType): Type of attention mask.
@@ -3920,12 +3916,9 @@ def fused_attn_bwd(
         rng_state (jnp.ndarray): Auxiliary tensors to save the random state in the forward pass.
         output (jnp.ndarray): The output tensor from the forward pass.
         doutput (jnp.ndarray): The gradient with respect to the output.
-        q_seqlen (jnp.ndarray): Sequence lengths for the query, with shape [batch,].
-        kv_seqlen (jnp.ndarray): Sequence lengths for the key and value, with shape [batch,].
-        q_seq_offsets (jnp.ndarray):
-            The offsets in the sequence dim for the query, with shape [batch + 1,].
-        kv_seq_offsets (jnp.ndarray):
-            The offsets in the sequence dim for the query, with shape [batch + 1,].
+        sequence_descriptor (SequenceDescriptor): Sequence lengths and offsets for the query,
+            key and value, and optionally segment ids and positions. Replaces the separate
+            q_seqlen / kv_seqlen / q_seq_offsets / kv_seq_offsets arguments.
         attn_bias_type (AttnBiasType): Type of attention bias.
         attn_mask_type (AttnMaskType): Type of attention mask.
         softmax_type (AttnSoftmaxType): Type of softmax.
