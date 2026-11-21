@@ -196,5 +196,4 @@ torchrun --standalone --nproc-per-node=8 \
 `CP_BENCH_RESULT` reports per-iteration rank maxima and their mean. Input
 construction, synchronization before timing, and result reduction are excluded.
 Aliases are in `tests/pytorch/attention/benchmark_cp.py`; benchmark mode here
-supports FP16/BF16. See
-[Transformer Engine PR #3582](https://github.com/NVIDIA/TransformerEngine/pull/3582).
+supports FP16/BF16.
