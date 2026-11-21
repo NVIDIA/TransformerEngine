@@ -12,6 +12,13 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 
+#include <cstdio>
+#include <cstdlib>
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <vector>
+
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
@@ -33,6 +40,109 @@ namespace ptx = transformer_engine::ptx;
 
 constexpr int kTileDim = 128; // Fixed to 128 beacause we are using 1x128 quantization
 constexpr int kThreadsPerBlock = 256; // Thread block size, 8 warps in total
+constexpr int kThreadsPerWarp = 32;
+
+struct RequantizeDebugTrace {
+  uint64_t tma_issue;
+  uint64_t tma_ready;
+  uint64_t compute_done;
+  uint64_t drain_done;
+};
+
+// Decode four adjacent FP8 values with two packed conversion instructions.
+// Rowwise scales are different for the four rows, so the final multiply stays
+// in FP32; packing still halves the FP8-to-half conversion count compared with
+// four scalar casts.
+template <typename IType>
+__device__ __forceinline__ ptx::bf16x4 dequantize_fp8x4(const IType x0, const IType x1,
+                                                        const IType x2, const IType x3,
+                                                        const float s0, const float s1,
+                                                        const float s2, const float s3) {
+  static_assert(sizeof(IType) == 1, "FP8 input is one byte.");
+  const uint16_t pair01 = static_cast<uint16_t>(reinterpret_cast<const uint8_t&>(x0)) |
+                          (static_cast<uint16_t>(reinterpret_cast<const uint8_t&>(x1)) << 8);
+  const uint16_t pair23 = static_cast<uint16_t>(reinterpret_cast<const uint8_t&>(x2)) |
+                          (static_cast<uint16_t>(reinterpret_cast<const uint8_t&>(x3)) << 8);
+  uint32_t half01;
+  uint32_t half23;
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
+  if constexpr (std::is_same_v<IType, fp8e4m3>) {
+    asm volatile("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(half01) : "h"(pair01));
+    asm volatile("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(half23) : "h"(pair23));
+  } else {
+    static_assert(std::is_same_v<IType, fp8e5m2>);
+    asm volatile("cvt.rn.f16x2.e5m2x2 %0, %1;" : "=r"(half01) : "h"(pair01));
+    asm volatile("cvt.rn.f16x2.e5m2x2 %0, %1;" : "=r"(half23) : "h"(pair23));
+  }
+#else
+  half01 = 0;
+  half23 = 0;
+#endif
+  const auto half_to_float = [](const uint32_t bits) {
+    const uint16_t raw = static_cast<uint16_t>(bits);
+    float value;
+    asm volatile("cvt.f32.f16 %0, %1;" : "=f"(value) : "h"(raw));
+    return value;
+  };
+  ptx::bf16x4 result;
+  result.x1 = static_cast<bf16>(half_to_float(half01) * s0);
+  result.x2 = static_cast<bf16>(half_to_float(half01 >> 16) * s1);
+  result.x3 = static_cast<bf16>(half_to_float(half23) * s2);
+  result.x4 = static_cast<bf16>(half_to_float(half23 >> 16) * s3);
+  return result;
+}
+
+// The column path already owns four reconstructed BF16 values in registers.
+// Convert and store them directly; staging a transposed tile in shared memory
+// would only add a write/read round trip before the same strided global stores.
+template <typename OType, int kRows>
+__device__ __forceinline__ void store_columnwise_bf16(
+    OType* __restrict__ output, const ptx::bf16x4* __restrict__ values, const float scale,
+    const size_t tensor_base, const size_t column, const size_t group_rows,
+    const size_t row) {
+  static_assert(kRows % 4 == 0);
+  Vec<OType, kRows> packed;
+#pragma unroll
+  for (int i = 0; i < kRows; ++i) {
+    const ptx::bf16x4& value = values[i / 4];
+    const bf16 element = (i % 4 == 0) ? value.x1
+                         : (i % 4 == 1) ? value.x2
+                         : (i % 4 == 2) ? value.x3
+                                        : value.x4;
+    packed.data.elt[i] = static_cast<OType>(static_cast<float>(element) * scale);
+  }
+  packed.store_to(output + tensor_base + column * group_rows + row);
+}
+
+template <typename OType>
+__device__ __forceinline__ void drain_columnwise_output(
+    OType (&smem_t)[kTileDim][kTileDim + 4], OType* __restrict__ output,
+    const size_t global_col_base, const size_t local_row_base, const size_t tensor_base,
+    const size_t group_rows, const size_t hidden, const int tid) {
+  constexpr int kStoreRows = 16;
+  constexpr int kChunksPerColumn = kTileDim / kStoreRows;
+  constexpr int kColumnsPerIteration = kThreadsPerBlock / kChunksPerColumn;
+  constexpr int kIterations = kTileDim / kColumnsPerIteration;
+  const int warp_id = tid / kThreadsPerWarp;
+  const int lane = tid % kThreadsPerWarp;
+  const int column_in_warp = lane / kChunksPerColumn;
+  const int row_chunk = lane % kChunksPerColumn;
+  const int row_offset = row_chunk * kStoreRows;
+
+#pragma unroll
+  for (int iteration = 0; iteration < kIterations; ++iteration) {
+    const int column_local = iteration * kColumnsPerIteration + warp_id * 4 + column_in_warp;
+    const size_t column = global_col_base + column_local;
+    if (column < hidden) {
+      Vec<OType, kStoreRows> values;
+#pragma unroll
+      for (int e = 0; e < kStoreRows; ++e) {
+        values.data.elt[e] = smem_t[column_local][row_offset + e];
+      }
+      values.store_to(output + tensor_base + column * group_rows + local_row_base + row_offset);
+    }
+  }
+}
 
 template <ShapeRepresentation ShapeRep>
 struct RequantizeTraits {
@@ -79,8 +189,8 @@ __device__ void validate_group_offsets(const int64_t* tensor_offsets, size_t num
  *
  *  Input supports E4M3/E5M2; columnwise output uses E4M3.
  */
-template <typename Traits, typename IType, typename OType, bool kReturnDequantized, bool kReturnColumnwise,
-          bool kReturnRowwiseScale>
+template <typename Traits, typename IType, typename OType, bool kReturnDequantized,
+          bool kReturnColumnwise, bool kReturnRowwiseScale, bool kDebugTrace>
 __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const IType* __restrict__ rowwise_data, const float* __restrict__ rowwise_scale,
@@ -90,12 +200,19 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
     const size_t row_scale_cols, const bool compact_scale_layout,
     const size_t col_scale_rows,
     const int64_t* tensor_offsets, const int64_t* first_dims_ptr, const size_t num_groups,
-    const float epsilon, const bool power_of_two) {
+    const float epsilon, const bool power_of_two, RequantizeDebugTrace* debug_trace) {
   const bool leading_thread = threadIdx.x == 0;
   constexpr ShapeRepresentation shape_rep = Traits::SHAPE_REPRESENTATION;
   const size_t tile_x = blockIdx.x;  // hidden block index
   const size_t tile_y = blockIdx.y;  // row block index
   const size_t global_col_base = tile_x * kTileDim;
+  const size_t trace_index = (static_cast<size_t>(blockIdx.z) * gridDim.y + blockIdx.y) *
+                             gridDim.x + blockIdx.x;
+  RequantizeDebugTrace* trace = nullptr;
+  if constexpr (kDebugTrace) {
+    trace = debug_trace + trace_index;
+    if (threadIdx.x == 0) trace->tma_issue = trace->tma_ready = trace->compute_done = 0;
+  }
   size_t tensor_base = 0;
   size_t group_rows = first_logical_dim;
   size_t local_row_base = 0;
@@ -105,7 +222,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
     local_row_base = tile_y * kTileDim;
   } else if constexpr (Traits::SHAPE_REPRESENTATION == ShapeRepresentation::VARYING_FIRST_DIM) {
     const size_t global_element_offset = tile_y * kTileDim * last_logical_dim;
-    __shared__ size_t varying_first_metadata[3];
+    // [active elements, expert id, expert rows, expert element offset].
+    __shared__ size_t varying_first_metadata[4];
     if (leading_thread && blockIdx.x == 0 && blockIdx.y == 0) {
       validate_group_offsets(tensor_offsets, num_groups, last_logical_dim, first_logical_dim);
     }
@@ -115,17 +233,18 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
       if (global_element_offset < active_elements) {
         const size_t mapped_tensor = dispatch::common::find_tensor_from_offsets(
             tensor_offsets, num_groups, global_element_offset);
-        varying_first_metadata[1] = dispatch::common::get_tensor_rows_num<shape_rep>(
+        varying_first_metadata[1] = mapped_tensor;
+        varying_first_metadata[2] = dispatch::common::get_tensor_rows_num<shape_rep>(
             mapped_tensor, first_logical_dim, first_dims_ptr, num_groups);
         // The helper's assert is disabled in release builds.
-        if (varying_first_metadata[1] % kTileDim != 0) __trap();
-        varying_first_metadata[2] = static_cast<size_t>(tensor_offsets[mapped_tensor]);
+        if (varying_first_metadata[2] % kTileDim != 0) __trap();
+        varying_first_metadata[3] = static_cast<size_t>(tensor_offsets[mapped_tensor]);
       }
     }
     __syncthreads();
     if (global_element_offset >= varying_first_metadata[0]) return;
-    group_rows = varying_first_metadata[1];
-    tensor_base = varying_first_metadata[2];
+    group_rows = varying_first_metadata[2];
+    tensor_base = varying_first_metadata[3];
     local_row_base = tile_y * kTileDim - tensor_base / last_logical_dim;
   }
   const size_t group_start = tensor_base / last_logical_dim;
@@ -138,18 +257,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
   __shared__ float row_scales[kTileDim];
   if (threadIdx.x < kTileDim) {
     const size_t row = global_row_base + threadIdx.x;
-    float value = 0.f;
-    if (row < live_end) {
-      const size_t index = compact_scale_layout
-                               ? row * row_scale_cols + tile_x
-                               : group_start * (last_logical_dim / kTileDim) +
-                                     tile_x * group_rows + (row - group_start);
-      value = rowwise_scale[index];
-      if constexpr (kReturnRowwiseScale) {
-        const size_t destination = group_start * (last_logical_dim / kTileDim) +
+    const size_t index = compact_scale_layout
+                             ? row * row_scale_cols + tile_x
+                             : group_start * (last_logical_dim / kTileDim) +
                                    tile_x * group_rows + (row - group_start);
-        gemm_rowwise_scale[destination] = value;
-      }
+    const float value = rowwise_scale[index];
+    if constexpr (kReturnRowwiseScale) {
+      const size_t destination = group_start * (last_logical_dim / kTileDim) +
+                                 tile_x * group_rows + (row - group_start);
+      gemm_rowwise_scale[destination] = value;
     }
     row_scales[threadIdx.x] = value;
   }
@@ -157,13 +273,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
   // Scale-only specialization does not load or reconstruct activation data.
   if constexpr (!kReturnColumnwise && !kReturnDequantized) return;
 
-  // Dynamic smem: rowwise FP8 tile [128][128], 128B aligned for TMA.
-  // smem_T stages the transposed quantized tile: [128][128+4] for bank
-  // conflict-free column reads followed by coalesced row writes.
+  // The rowwise input is loaded into a linear 128x128 shared tile. The
+  // columnwise path does not use the swizzled row/column access pattern for
+  // which TMA swizzling is useful; the four threads for one column already
+  // access fixed-stride rows. Keep the input path identical to the direct
+  // grouped quantizer and reserve swizzled shared memory only for output
+  // layouts that actually need it.
   extern __shared__ char smem_raw[];
   char* smem_base = align_up(smem_raw, TMA_SHMEM_ALIGNMENT);
-  IType(*smem)[kTileDim] = reinterpret_cast<IType(*)[kTileDim]>(smem_base);
-
+  IType* input_smem = reinterpret_cast<IType*>(smem_base);
   __shared__ uint64_t tma_mbar;
   const int tid = threadIdx.x;
 
@@ -173,7 +291,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
   }
   __syncthreads();
   if (leading_thread) {
-    constexpr uint32_t tx_bytes = kTileDim * kTileDim * (TypeInfo<IType>::size / 8);
+    constexpr uint32_t tx_bytes = kTileDim * kTileDim * sizeof(IType);
+    if constexpr (kDebugTrace) trace->tma_issue = clock64();
     ptx::mbarrier_arrive_expect_tx(&tma_mbar, tx_bytes);
     ptx::cp_async_bulk_tensor_2d_global_to_shared_cta(
         reinterpret_cast<uint64_t*>(smem_base),
@@ -182,113 +301,182 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block128_group_requantize_ke
   }
   ptx::mbarrier_wait_parity(&tma_mbar, 0);
   __syncthreads();
+  if constexpr (kDebugTrace) {
+    if (leading_thread) trace->tma_ready = clock64();
+  }
   if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
 
-  // Static smem for the transposed output tile (bank-conflict-free pad).
-  constexpr int kSMemTRowStride = kTileDim + 4;
-  __shared__ OType smem_T[kTileDim][kSMemTRowStride];
-
-  // Column passes bound the per-thread FP32 staging footprint.
-  constexpr int kThreadsPerCol = 4;
-  static_assert(kThreadsPerBlock % kThreadsPerCol == 0);
-  constexpr int kColsPerPass = kThreadsPerBlock / kThreadsPerCol;
-  static_assert(kTileDim % kColsPerPass == 0);
-  constexpr int kColumnPasses = kTileDim / kColsPerPass;
-  constexpr int kRowsPerThread = kTileDim / kThreadsPerCol;  // 32
-  const int col_in_pass = tid / kThreadsPerCol;
-  const int thr_row = tid % kThreadsPerCol;                  // 0..3
-  const int row_start = thr_row;
-
+  if constexpr (kReturnColumnwise) {
+    // Keep the reconstructed values in registers across the amax reduction.
+    // This avoids rereading and re-decoding the TMA tile for the
+    // output pass; the four-thread mapping bounds the register footprint to
+    // one 32-row column slice per thread.
+    // Requantization already receives the rowwise FP8 tile, so it does not
+    // need the separate rowwise quantization pass used by the direct BF16
+    // quantizer.  Two producers per column cover the whole 128-row tile in
+    // one pass and avoid a second subwarp reduction/scale computation.
+    constexpr int kThreadsPerCol = 2;
+    constexpr int kRowsPerThread = kTileDim / kThreadsPerCol;
+    constexpr int kColsPerPass = kThreadsPerBlock / kThreadsPerCol;
+    constexpr int kColumnPasses = kTileDim / kColsPerPass;
+    const int col_in_pass = tid / kThreadsPerCol;
+    const int sub = tid % kThreadsPerCol;
+    const int row_start = sub * kRowsPerThread;
+    const auto* input_tile = reinterpret_cast<const IType*>(input_smem);
+    if constexpr (Traits::SHAPE_REPRESENTATION == ShapeRepresentation::VARYING_FIRST_DIM) {
+      // Varying expert row counts make the column-major destination stride
+      // jagged. Stage this path so the final drain remains coalesced; SAME
+      // shapes use the lower-overhead direct register stores below.
+      constexpr int kSMemTRowStride = kTileDim + 4;
+      __shared__ OType output_smem[kTileDim][kSMemTRowStride];
 #pragma unroll
-  for (int pass = 0; pass < kColumnPasses; ++pass) {
-    const int thr_col = pass * kColsPerPass + col_in_pass;
-    const size_t col = global_col_base + thr_col;
-    const bool col_valid = (col < last_logical_dim);
-
-    // Dequantize this column's 32 rows and track the column amax.
-    float reg_data[kRowsPerThread];
-    float amax = 0.f;
+      for (int pass = 0; pass < kColumnPasses; ++pass) {
+        const int col_local = pass * kColsPerPass + col_in_pass;
+        const size_t col = global_col_base + col_local;
+        float amax = 0.f;
+        ptx::bf16x4 reg_data[kRowsPerThread / 4];
 #pragma unroll
-    for (int r = 0; r < kRowsPerThread; ++r) {
-      const int row_local = row_start + r * kThreadsPerCol;
-      const size_t row = global_row_base + row_local;
-      if (row < live_end && col_valid) {
-        const float row_scale = row_scales[row_local];
-        // Match direct grouped quantization of the reconstructed BF16 input.
-        const float v = static_cast<float>(
-            static_cast<bf16>(static_cast<float>(smem[row_local][thr_col]) * row_scale));
-        reg_data[r] = v;
-        if constexpr (kReturnColumnwise) {
-          amax = fmaxf(amax, fabsf(v));
+        for (int r = 0; r < kRowsPerThread; r += 4) {
+          reg_data[r / 4] = dequantize_fp8x4(
+              input_tile[(row_start + r + 0) * kTileDim + col_local],
+              input_tile[(row_start + r + 1) * kTileDim + col_local],
+              input_tile[(row_start + r + 2) * kTileDim + col_local],
+              input_tile[(row_start + r + 3) * kTileDim + col_local], row_scales[row_start + r + 0],
+              row_scales[row_start + r + 1], row_scales[row_start + r + 2],
+              row_scales[row_start + r + 3]);
+          const ptx::bf16x4& values = reg_data[r / 4];
+          amax = fmaxf(amax, fabsf(static_cast<float>(values.x1)));
+          amax = fmaxf(amax, fabsf(static_cast<float>(values.x2)));
+          amax = fmaxf(amax, fabsf(static_cast<float>(values.x3)));
+          amax = fmaxf(amax, fabsf(static_cast<float>(values.x4)));
         }
-        if constexpr (kReturnDequantized) {
-          dequantized[tensor_base + (local_row_base + row_local) * last_logical_dim + col] =
-              static_cast<bf16>(v);
+        amax = subwarp_reduce_max_broadcast<kThreadsPerCol>(amax);
+        const float scale = compute_scale_from_types<float, OType>(amax, epsilon, power_of_two);
+        if (sub == 0) {
+          const size_t scale_stride = DIVUP_TO_MULTIPLE(last_logical_dim, 4);
+          const size_t group_scale_base = (group_start / kTileDim) * scale_stride;
+          colwise_scale[group_scale_base + local_tile_y * scale_stride + col] = __frcp_rn(scale);
         }
-      } else {
-        reg_data[r] = 0.f;
+#pragma unroll
+        for (int r = 0; r < kRowsPerThread; r += 4) {
+          const ptx::bf16x4& values = reg_data[r / 4];
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            const bf16 value = e == 0 ? values.x1 : e == 1 ? values.x2 : e == 2 ? values.x3 : values.x4;
+            const int row = row_start + r + e;
+            if constexpr (kReturnDequantized) {
+              dequantized[tensor_base + (local_row_base + row) * last_logical_dim + col] = value;
+            }
+            output_smem[col_local][row] = static_cast<OType>(static_cast<float>(value) * scale);
+          }
+        }
       }
-    }
-    if constexpr (kReturnColumnwise) {
+      __syncthreads();
+      drain_columnwise_output(output_smem, colwise_data, global_col_base, local_row_base,
+                              tensor_base, group_rows, last_logical_dim, tid);
+      if constexpr (kDebugTrace) {
+        if (leading_thread) trace->compute_done = clock64();
+      }
+    } else {
+#pragma unroll
+      for (int pass = 0; pass < kColumnPasses; ++pass) {
+      const int col_local = pass * kColsPerPass + col_in_pass;
+      const size_t col = global_col_base + col_local;
+      float amax = 0.f;
+      // Keep the reconstructed values packed as BF16 pairs.  The previous
+      // float[64] staging consumed one 32-bit register per value even though
+      // the dequantized result is rounded to BF16 before both output paths.
+      // Packing four values cuts the staging footprint in half and leaves
+      // more room for resident CTAs on Hopper.
+      ptx::bf16x4 reg_data[kRowsPerThread / 4];
+#pragma unroll
+      for (int r = 0; r < kRowsPerThread; r += 4) {
+        reg_data[r / 4] = dequantize_fp8x4(
+            input_tile[(row_start + r + 0) * kTileDim + col_local],
+            input_tile[(row_start + r + 1) * kTileDim + col_local],
+            input_tile[(row_start + r + 2) * kTileDim + col_local],
+            input_tile[(row_start + r + 3) * kTileDim + col_local], row_scales[row_start + r + 0],
+            row_scales[row_start + r + 1], row_scales[row_start + r + 2],
+            row_scales[row_start + r + 3]);
+        const ptx::bf16x4 &values = reg_data[r / 4];
+        amax = fmaxf(amax, fabsf(static_cast<float>(values.x1)));
+        amax = fmaxf(amax, fabsf(static_cast<float>(values.x2)));
+        amax = fmaxf(amax, fabsf(static_cast<float>(values.x3)));
+        amax = fmaxf(amax, fabsf(static_cast<float>(values.x4)));
+      }
       amax = subwarp_reduce_max_broadcast<kThreadsPerCol>(amax);
-
-      // The direct grouped quantizer uses the reconstructed input type to select
-      // overflow handling, not the FP8 carrier type.
       const float scale = compute_scale_from_types<float, OType>(amax, epsilon, power_of_two);
-      if (thr_row == 0 && col_valid) {
+      if (sub == 0) {
         const size_t scale_stride = DIVUP_TO_MULTIPLE(last_logical_dim, 4);
         const size_t group_scale_base = (group_start / kTileDim) * scale_stride;
         colwise_scale[group_scale_base + local_tile_y * scale_stride + col] = __frcp_rn(scale);
       }
-
-      // Requantize and stage into the transposed smem tile.
-      if (col_valid) {
 #pragma unroll
-        for (int r = 0; r < kRowsPerThread; ++r) {
-          smem_T[thr_col][row_start + r * kThreadsPerCol] = static_cast<OType>(reg_data[r] * scale);
+      for (int r = 0; r < kRowsPerThread; r += 16) {
+        if constexpr (kReturnDequantized) {
+#pragma unroll
+          for (int e = 0; e < 16; ++e) {
+            const ptx::bf16x4& value = reg_data[(r + e) / 4];
+            dequantized[tensor_base + (local_row_base + row_start + r + e) * last_logical_dim + col] =
+                (e % 4 == 0) ? value.x1
+                : (e % 4 == 1) ? value.x2
+                : (e % 4 == 2) ? value.x3
+                               : value.x4;
+          }
+        }
+        store_columnwise_bf16<OType, 16>(
+            colwise_data, &reg_data[r / 4], scale, tensor_base, col, group_rows,
+            local_row_base + row_start + r);
+      }
+      }
+      if constexpr (kDebugTrace) {
+        __syncthreads();
+        if (leading_thread) trace->compute_done = clock64();
+      }
+    }
+  } else if constexpr (kReturnDequantized) {
+    // Dequantized-only output does not need a column transpose. Keep the
+    // compact four-thread column mapping to avoid changing its established
+    // CUDA-graph and numerical behavior.
+    constexpr int kThreadsPerCol = 4;
+    constexpr int kColsPerPass = kThreadsPerBlock / kThreadsPerCol;
+    constexpr int kColumnPasses = kTileDim / kColsPerPass;
+    constexpr int kRowsPerThread = kTileDim / kThreadsPerCol;
+    const int col_in_pass = tid / kThreadsPerCol;
+    const int thr_row = tid % kThreadsPerCol;
+    const int row_start = thr_row;
+    const auto* input_tile = reinterpret_cast<const IType*>(input_smem);
+#pragma unroll
+    for (int pass = 0; pass < kColumnPasses; ++pass) {
+      const int thr_col = pass * kColsPerPass + col_in_pass;
+      const size_t col = global_col_base + thr_col;
+      const bool col_valid = col < last_logical_dim;
+#pragma unroll
+      for (int r = 0; r < kRowsPerThread; ++r) {
+        const int row_local = row_start + r * kThreadsPerCol;
+        const size_t global_row = global_row_base + row_local;
+        if (global_row < live_end && col_valid) {
+          const float value = static_cast<float>(static_cast<bf16>(
+              static_cast<float>(input_tile[row_local * kTileDim + thr_col]) *
+              row_scales[row_local]));
+          dequantized[tensor_base + (local_row_base + row_local) * last_logical_dim + col] =
+              static_cast<bf16>(value);
         }
       }
+    }
+    if constexpr (kDebugTrace) {
+      __syncthreads();
+      if (leading_thread) trace->compute_done = clock64();
     }
   }
-  if constexpr (kReturnColumnwise) {
+  if constexpr (kDebugTrace) {
     __syncthreads();
-
-    // Drain smem_T to global memory: vectorized coalesced writes.
-    // Each thread writes one 16-element chunk of one output column.
-    constexpr int kStorePerChunk = 16;
-    constexpr int kRowChunksPerCol = kTileDim / kStorePerChunk;  // 8
-    constexpr int kColsPerIter = kThreadsPerBlock / kRowChunksPerCol;    // 32
-    constexpr int kColIters = kTileDim / kColsPerIter;           // 4
-    const int warp_id = tid / 32;
-    const int lane = tid % 32;
-    const int col_in_warp = lane / kRowChunksPerCol;  // 0..7
-    const int row_chunk = lane % kRowChunksPerCol;    // 0..7
-    const int out_row_off = row_chunk * kStorePerChunk;
-
-#pragma unroll
-    for (int it = 0; it < kColIters; ++it) {
-      const int out_col_local = it * kColsPerIter + warp_id * 4 + col_in_warp;
-      const size_t out_col = global_col_base + out_col_local;
-      if (out_col < last_logical_dim) {
-        const size_t out_row = global_row_base + out_row_off;
-        if (out_row >= live_end) continue;
-        OType* out_ptr = colwise_data + tensor_base + out_col * group_rows +
-                          local_row_base + out_row_off;
-        const size_t remaining = live_end - out_row;
-        const size_t count = remaining < kStorePerChunk ? remaining : kStorePerChunk;
-        Vec<OType, kStorePerChunk> v;
-#pragma unroll
-        for (int e = 0; e < kStorePerChunk; ++e) {
-          v.data.elt[e] = smem_T[out_col_local][out_row_off + e];
-        }
-        v.store_to_elts(out_ptr, 0, count);
-      }
-    }
+    if (leading_thread) trace->drain_done = clock64();
   }
 }
 
 template <typename Traits, typename IType, bool kReturnDequantized, bool kReturnColumnwise,
-          bool kReturnRowwiseScale>
+          bool kReturnRowwiseScale, bool kDebugTrace>
 void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor* output,
                                      Tensor* dequantized, size_t first_logical_dim,
                                      size_t last_logical_dim, size_t row_scale_cols,
@@ -307,13 +495,13 @@ void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor*
                "Rowwise scale conversion requires output storage.");
   }
   const size_t smem_bytes = kReturnColumnwise || kReturnDequantized
-                               ? kTileDim * kTileDim * (TypeInfo<IType>::size / 8) +
-                                     TMA_SHMEM_ALIGNMENT - 1
+                               ? kTileDim * kTileDim * sizeof(IType) + TMA_SHMEM_ALIGNMENT - 1
                                : 0;
 
   CUtensorMap tensor_map_input{};
   create_2D_tensor_map(tensor_map_input, input->data, first_logical_dim, last_logical_dim, kTileDim, kTileDim,
                        last_logical_dim, 0, TypeInfo<IType>::size);
+
 
   const unsigned int grid_x = static_cast<unsigned int>(last_logical_dim / kTileDim);
   dim3 grid(grid_x, (first_logical_dim + kTileDim - 1) / kTileDim);
@@ -323,8 +511,18 @@ void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor*
     grid.z = input->num_tensors;
   }
 
+  RequantizeDebugTrace* debug_trace = nullptr;
+  const size_t trace_count = static_cast<size_t>(grid.x) * grid.y * grid.z;
+  if constexpr (kDebugTrace) {
+    NVTE_CHECK_CUDA(cudaMallocAsync(reinterpret_cast<void**>(&debug_trace),
+                                    trace_count * sizeof(RequantizeDebugTrace), stream));
+    NVTE_CHECK_CUDA(cudaMemsetAsync(debug_trace, 0,
+                                    trace_count * sizeof(RequantizeDebugTrace), stream));
+  }
+
   auto* kernel = block128_group_requantize_kernel<Traits, IType, OType, kReturnDequantized,
-                                                 kReturnColumnwise, kReturnRowwiseScale>;
+                                                 kReturnColumnwise, kReturnRowwiseScale,
+                                                 kDebugTrace>;
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                        static_cast<int>(smem_bytes)));
   kernel<<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
@@ -337,8 +535,57 @@ void launch_block128_group_requantize(const GroupedTensor* input, GroupedTensor*
       first_logical_dim, last_logical_dim, row_scale_cols, compact_scale_layout, col_scale_rows,
       reinterpret_cast<const int64_t*>(input->tensor_offsets.dptr),
       reinterpret_cast<const int64_t*>(input->first_dims.dptr),
-      input->num_tensors, epsilon, power_of_two);
+      input->num_tensors, epsilon, power_of_two, debug_trace);
   NVTE_CHECK_CUDA(cudaGetLastError());
+
+  if constexpr (kDebugTrace) {
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    std::vector<RequantizeDebugTrace> traces(trace_count);
+    NVTE_CHECK_CUDA(cudaMemcpy(traces.data(), debug_trace,
+                               trace_count * sizeof(RequantizeDebugTrace),
+                               cudaMemcpyDeviceToHost));
+    int device = 0;
+    int clock_khz = 0;
+    NVTE_CHECK_CUDA(cudaGetDevice(&device));
+    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device));
+    uint64_t tma_wait_min = UINT64_MAX, compute_min = UINT64_MAX, drain_min = UINT64_MAX;
+    uint64_t tma_wait_max = 0, compute_max = 0, drain_max = 0;
+    uint64_t tma_wait_sum = 0, compute_sum = 0, drain_sum = 0;
+    size_t valid = 0;
+    for (const auto& item : traces) {
+      if (item.tma_issue == 0 || item.tma_ready < item.tma_issue ||
+          item.compute_done < item.tma_ready || item.drain_done < item.compute_done) {
+        continue;
+      }
+      const uint64_t tma_wait = item.tma_ready - item.tma_issue;
+      const uint64_t compute = item.compute_done - item.tma_ready;
+      const uint64_t drain = item.drain_done - item.compute_done;
+      tma_wait_min = std::min(tma_wait_min, tma_wait);
+      compute_min = std::min(compute_min, compute);
+      drain_min = std::min(drain_min, drain);
+      tma_wait_max = std::max(tma_wait_max, tma_wait);
+      compute_max = std::max(compute_max, compute);
+      drain_max = std::max(drain_max, drain);
+      tma_wait_sum += tma_wait;
+      compute_sum += compute;
+      drain_sum += drain;
+      ++valid;
+    }
+    if (valid != 0) {
+      const auto us = [clock_khz](uint64_t cycles) {
+        return static_cast<double>(cycles) * 1000.0 / static_cast<double>(clock_khz);
+      };
+      std::fprintf(stderr,
+                   "[block128_requant_trace] tiles=%zu clock_khz=%d "
+                   "tma_wait_us(avg/min/max)=%.3f/%.3f/%.3f "
+                   "compute_us(avg/min/max)=%.3f/%.3f/%.3f "
+                   "drain_us(avg/min/max)=%.3f/%.3f/%.3f\n",
+                   valid, clock_khz, us(tma_wait_sum / valid), us(tma_wait_min), us(tma_wait_max),
+                   us(compute_sum / valid), us(compute_min), us(compute_max),
+                   us(drain_sum / valid), us(drain_min), us(drain_max));
+    }
+    NVTE_CHECK_CUDA(cudaFreeAsync(debug_trace, stream));
+  }
 }
 
 }  // namespace
@@ -456,6 +703,7 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
   const size_t col_scale_rows = (first_logical_dim + kTileDim - 1) / kTileDim;
   const float epsilon = quant_config == nullptr ? 0.0f : quant_config->amax_epsilon;
   const bool power_of_two = quant_config == nullptr ? true : quant_config->force_pow_2_scales;
+  const bool debug_trace = std::getenv("NVTE_REQUANT_DEBUG_TRACE") != nullptr;
 
   TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(shape_rep, SHAPE_REP, {
     if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
@@ -464,16 +712,19 @@ void group_requantize_block_scaling(const GroupedTensor& input, GroupedTensor* o
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           input.data.dtype, IType,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              dequantized != nullptr, RETURN_DEQUANTIZED,
+              compact_scale_layout, RETURN_ROWWISE_SCALE,
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  output->columnwise_data.dptr != nullptr, RETURN_COLUMNWISE,
+                  dequantized != nullptr, RETURN_DEQUANTIZED,
                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                      compact_scale_layout, RETURN_ROWWISE_SCALE,
-                      launch_block128_group_requantize<ActiveTraits, IType, RETURN_DEQUANTIZED,
-                                                      RETURN_COLUMNWISE, RETURN_ROWWISE_SCALE>(
-                          &input, output, dequantized, first_logical_dim, last_logical_dim,
-                          row_scale_cols, compact_scale_layout, col_scale_rows,
-                          epsilon, power_of_two, stream);););););  // NOLINT(*)
+                      output->columnwise_data.dptr != nullptr, RETURN_COLUMNWISE,
+                      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                          debug_trace, DEBUG_TRACE,
+                          launch_block128_group_requantize<
+                              ActiveTraits, IType, RETURN_DEQUANTIZED, RETURN_COLUMNWISE,
+                              RETURN_ROWWISE_SCALE, DEBUG_TRACE>(
+                              &input, output, dequantized, first_logical_dim, last_logical_dim,
+                              row_scale_cols, compact_scale_layout, col_scale_rows, epsilon,
+                              power_of_two, stream););););););  // NOLINT(*)
     } else {
       NVTE_ERROR("Block scaling requant supports only SAME_BOTH_DIMS and VARYING_FIRST_DIM.");
     }
